@@ -40,9 +40,17 @@ from fisheye.visualization.chaser_visit_trajectories import (
     write_gif,
 )
 from tests.unit.fisheye.test_chaser_bout_response import CX, CY, _bouts_every, _build_archive, _orbit
+from tests.unit.fisheye.test_chaser_response_regimes import (
+    _install_verified_track_reader,
+)
 
 
 PNG_MAGIC = b"\x89PNG"
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_verified_track_reader(monkeypatch)
 
 
 def _add_object_roles(zarr_path: Path, *, aggressive_chaser_index: int) -> None:

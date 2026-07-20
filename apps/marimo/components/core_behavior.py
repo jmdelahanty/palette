@@ -17,6 +17,10 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import polars as pl
 
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     discover_swim_bout_candidates,
@@ -30,7 +34,6 @@ from fisheye.analysis.tail_kinematics_io import (
     load_tail_kinematics_window,
 )
 from fisheye.analytics_exports.baseline import is_baseline_label
-from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 from fisheye.visualization.eye_angle_timeseries import (
@@ -1280,53 +1283,26 @@ class CoreBehaviorSource:
         )
 
     def baseline_interval(self) -> BaselineInterval | None:
-        """Resolve a canonical pre period from chaser window metadata only."""
+        """Resolve a pre period only from the sealed logical epoch table."""
 
-        root = self._root()
-        parent = root.get("analysis/chaser_distance_runs")
-        if parent is None:
+        try:
+            distance = load_chaser_distance_run(self._root(), run_name="latest")
+        except ChaserDistanceReadError:
             return None
-        latest = str(parent.attrs.get("latest_complete") or parent.attrs.get("latest") or "")
-        run_names = list(parent.group_keys())
-        if latest in run_names:
-            run_names = [latest, *[name for name in run_names if name != latest]]
-        for run_name in run_names:
-            visualizations = parent[run_name].get("visualizations")
-            if visualizations is None:
-                continue
-            for artifact_name in visualizations.group_keys():
-                artifact = visualizations[artifact_name]
-                if "spec_json" not in artifact:
-                    continue
-                try:
-                    import json
-
-                    spec = json.loads(np.asarray(artifact["spec_json"][:], dtype=np.uint8).tobytes())
-                except Exception:
-                    continue
-                paths = spec.get("source_paths") if isinstance(spec, Mapping) else None
-                if not isinstance(paths, Mapping):
-                    continue
-                label_path = paths.get("epoch_label_bytes") or paths.get("detection_occupancy_windows_label_bytes")
-                start_path = paths.get("epoch_start_frame") or paths.get("detection_occupancy_windows_start_frame")
-                end_path = paths.get("epoch_end_frame") or paths.get("detection_occupancy_windows_end_frame")
-                if not label_path or not start_path or not end_path:
-                    continue
-                try:
-                    labels_raw = np.asarray(root[_normal_path(label_path)][:])
-                    starts = np.asarray(root[_normal_path(start_path)][:], dtype=np.int64).reshape(-1)
-                    ends = np.asarray(root[_normal_path(end_path)][:], dtype=np.int64).reshape(-1)
-                except Exception:
-                    continue
-                labels = [decode_null_terminated_text(value) for value in labels_raw]
-                fps = float(spec.get("fps") or 1.0)
-                for index, label in enumerate(labels[: min(len(starts), len(ends))]):
-                    if is_baseline_label(label):
-                        return BaselineInterval(
-                            label=label,
-                            start_s=float(starts[index]) / fps,
-                            stop_s=float(ends[index] + 1) / fps,
-                        )
+        count = min(
+            len(distance.epoch_labels),
+            int(distance.epoch_start_frame.size),
+            int(distance.epoch_end_frame.size),
+        )
+        for index, label in enumerate(distance.epoch_labels[:count]):
+            if is_baseline_label(label):
+                return BaselineInterval(
+                    label=label,
+                    start_s=float(distance.epoch_start_frame[index]) / distance.fps,
+                    stop_s=(
+                        float(distance.epoch_end_frame[index] + 1) / distance.fps
+                    ),
+                )
         return None
 
 

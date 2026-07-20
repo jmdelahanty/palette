@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis import chaser_egocentric_bearing as bearing_module
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_egocentric_bearing import (
     PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME,
@@ -38,7 +41,21 @@ def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
     group.create_array(name, data=values, chunks=chunks, overwrite=True)
 
 
-def _add_track_kinematics_run(zarr_path: Path, *, sample_valid: np.ndarray | None = None) -> None:
+def _add_track_kinematics_run(
+    zarr_path: Path,
+    *,
+    sample_valid: np.ndarray | None = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+) -> None:
+    """Install a minimal storage fixture and, when requested, a typed read stub.
+
+    The downstream egocentric tests exercise heading densification and derived
+    presentation, not the track-motion publication boundary.  That boundary is
+    covered by the dedicated hostile track-motion suites, so these tests patch
+    the already-verified logical reader instead of fabricating a legacy archive
+    that the future-normal reader must (correctly) reject.
+    """
+
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     analysis = root.require_group("analysis")
     parent = analysis.require_group("track_kinematics_runs")
@@ -53,11 +70,102 @@ def _add_track_kinematics_run(zarr_path: Path, *, sample_valid: np.ndarray | Non
     _write_array(track, "frame_indices", frames)
     _write_array(track, "heading_degrees", headings)
     _write_array(track, "smoothed_heading_degrees", headings)
+    valid = (
+        np.ones(frames.shape[0], dtype=bool)
+        if sample_valid is None
+        else np.asarray(sample_valid, dtype=bool)
+    )
     _write_array(
         track,
         "sample_valid",
-        np.ones(frames.shape[0], dtype=bool) if sample_valid is None else np.asarray(sample_valid, dtype=bool),
+        valid,
     )
+    if monkeypatch is not None:
+        track_path = "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"
+
+        def load_verified_fixture(
+            fixture_root,
+            *,
+            run_name: str,
+            scope: str,
+            track_id: int,
+            required_speed_levels=(),
+        ):
+            requested_levels = tuple(required_speed_levels)
+            if (
+                run_name not in {"tk_1", "latest"}
+                or scope != "offline"
+                or int(track_id) != 0
+                or any(
+                    level not in {"raw", "filtered", "smoothed", "averaged"}
+                    for level in requested_levels
+                )
+            ):
+                raise ValueError("Requested track differs from the sealed test fixture.")
+            fixture_run = fixture_root[
+                "analysis/track_kinematics_runs/offline/tk_1"
+            ]
+            fixture_track = fixture_run["tracks/id_0"]
+            fixture_frames = np.asarray(
+                fixture_track["frame_indices"][:],
+                dtype=np.int64,
+            )
+            fixture_valid = np.asarray(
+                fixture_track["sample_valid"][:],
+                dtype=bool,
+            )
+            fixture_headings = np.asarray(
+                fixture_track["heading_degrees"][:],
+                dtype=np.float32,
+            )
+            fps = float(fixture_run.attrs.get("fps", 10.0))
+            speed_by_level: dict[str, np.ndarray] = {}
+            path_by_level: dict[str, np.ndarray] = {}
+            if "speed_filtered_mm" in fixture_track:
+                filtered = np.asarray(
+                    fixture_track["speed_filtered_mm"][:],
+                    dtype=np.float32,
+                )
+                speed_by_level["filtered"] = filtered
+                path_by_level["filtered"] = filtered / fps
+            if any(level not in speed_by_level for level in requested_levels):
+                raise ValueError(
+                    "Requested speed level is absent from the sealed test fixture."
+                )
+            return SimpleNamespace(
+                run_name="tk_1",
+                scope="offline",
+                run_path="analysis/track_kinematics_runs/offline/tk_1",
+                track_path=track_path,
+                run_attrs=dict(fixture_run.attrs),
+                frame_indices=fixture_frames,
+                source_acquisition_frame_index=fixture_frames.copy(),
+                time_seconds=fixture_frames.astype(np.float64) / fps,
+                heading_degrees=fixture_headings,
+                smoothed_heading_degrees=fixture_headings.copy(),
+                sample_valid=fixture_valid,
+                speed_mm_by_level=speed_by_level,
+                speed_px_by_level={},
+                frame_path_distance_mm_by_level=path_by_level,
+                frame_path_distance_px_by_level={},
+            )
+
+        reader_modules = [bearing_module]
+        for module_name in (
+            "fisheye.utils.export_cross_recording_analytics",
+            "fisheye.analysis.goodcopbadcop_common",
+            "fisheye.analysis.chaser_epoch_behavior_summary",
+            "apps.marimo.components.goodcopbadcop_chaser",
+        ):
+            reader_module = sys.modules.get(module_name)
+            if reader_module is not None:
+                reader_modules.append(reader_module)
+        for reader_module in reader_modules:
+            monkeypatch.setattr(
+                reader_module,
+                "load_track_kinematics_track",
+                load_verified_fixture,
+            )
 
 
 def test_compute_egocentric_chaser_bearing_uses_image_y_down_to_math_y_up() -> None:
@@ -115,7 +223,12 @@ def test_compute_egocentric_chaser_bearing_gates_validity_inputs() -> None:
 
 def test_build_chaser_egocentric_bearing_requires_offline_track_kinematics(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
 
     with pytest.raises(ValueError, match="requires an offline track-kinematics run"):
         build_chaser_egocentric_bearing_result(zarr_path)
@@ -123,12 +236,18 @@ def test_build_chaser_egocentric_bearing_requires_offline_track_kinematics(tmp_p
 
 def test_build_chaser_egocentric_bearing_falls_back_to_protocol_behavior_labels(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     del root["analysis/chaser_distance_runs/chaser_distance_1/chasers/behavior_class_label_bytes"]
-    _add_track_kinematics_run(zarr_path)
+    _add_track_kinematics_run(zarr_path, monkeypatch=monkeypatch)
 
     result = build_chaser_egocentric_bearing_result(
         zarr_path,
@@ -139,12 +258,24 @@ def test_build_chaser_egocentric_bearing_falls_back_to_protocol_behavior_labels(
     assert result.chaser_behavior_labels == ("aggressive", "inert")
 
 
-def test_build_chaser_egocentric_bearing_densifies_sparse_track_validity(tmp_path: Path) -> None:
+def test_build_chaser_egocentric_bearing_densifies_sparse_track_validity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     sample_valid = np.ones(8, dtype=bool)
     sample_valid[3] = False
-    _add_track_kinematics_run(zarr_path, sample_valid=sample_valid)
+    _add_track_kinematics_run(
+        zarr_path,
+        sample_valid=sample_valid,
+        monkeypatch=monkeypatch,
+    )
 
     result = build_chaser_egocentric_bearing_result(
         zarr_path,
@@ -160,10 +291,18 @@ def test_build_chaser_egocentric_bearing_densifies_sparse_track_validity(tmp_pat
     np.testing.assert_array_equal(result.valid[5], np.asarray([True, True]))
 
 
-def test_chaser_egocentric_bearing_writer_refreshes_interactive_spec(tmp_path: Path) -> None:
+def test_chaser_egocentric_bearing_writer_refreshes_interactive_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
-    _add_track_kinematics_run(zarr_path)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
+    _add_track_kinematics_run(zarr_path, monkeypatch=monkeypatch)
 
     result = build_chaser_egocentric_bearing_result(
         zarr_path,

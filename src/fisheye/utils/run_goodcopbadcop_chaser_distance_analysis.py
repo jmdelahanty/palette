@@ -131,7 +131,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold-mm", type=float, default=20.0)
     parser.add_argument("--distribution-bin-width-mm", type=float, default=2.0)
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Deprecated compatibility option. This canonical batch command "
+            "rejects replacement; use a new --run-name."
+        ),
+    )
     parser.add_argument("--no-png", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser

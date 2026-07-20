@@ -17,7 +17,10 @@ from rich.console import Console
 
 from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.finalize_subject_masks import finalize_subject_masks
-from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
+from fisheye.refinement.refine_keypoints import (
+    create_refined_keypoint_run,
+    require_future_normal_refined_keypoint_publication,
+)
 from fisheye.segmentation import infer_unet_subject_masks
 
 
@@ -44,13 +47,14 @@ def bootstrap_training_review_surfaces(
     zarr_path: Path,
     crop_run: str,
     pose_model: Path,
+    model_pose_schema_binding: Optional[Path] = None,
     registry: Path,
     run_id: str,
     keypoints_run: Optional[str] = None,
     refined_keypoints_run: Optional[str] = None,
     subject_masks_run: Optional[str] = None,
     refined_subject_masks_run: Optional[str] = None,
-    pose_schema: str = "traditional_v2",
+    pose_schema: Optional[str] = None,
     keypoint_batch_size: int = 256,
     keypoint_imgsz: int = 512,
     keypoint_device: str = "0",
@@ -72,6 +76,7 @@ def bootstrap_training_review_surfaces(
     overwrite_refined_subject_masks: bool = True,
     console: Optional[Console] = None,
 ) -> BootstrapReviewSurfaceResult:
+    require_future_normal_refined_keypoint_publication()
     console = console or Console()
     zarr_path = zarr_path.expanduser().resolve()
     pose_model = pose_model.expanduser().resolve()
@@ -93,6 +98,7 @@ def bootstrap_training_review_surfaces(
     created_keypoints_run = detect_keypoints_yolo(
         zarr_path=str(zarr_path),
         model_path=str(pose_model),
+        model_pose_schema_binding=model_pose_schema_binding,
         run_name=keypoints_run,
         crop_run=crop_run,
         pose_schema=pose_schema,
@@ -207,7 +213,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--refined-keypoints-run")
     parser.add_argument("--subject-masks-run")
     parser.add_argument("--refined-subject-masks-run")
-    parser.add_argument("--pose-schema", default="traditional_v2")
+    parser.add_argument(
+        "--pose-schema",
+        default=None,
+        help="Optional package-schema consistency assertion.",
+    )
+    parser.add_argument(
+        "--model-pose-schema-binding",
+        type=Path,
+        required=False,
+        help=(
+            "Digest-bound JSON mapping from --pose-model to its ordered pose "
+            "schema; required for canonical keypoint publication."
+        ),
+    )
     parser.add_argument("--keypoint-batch-size", type=int, default=256)
     parser.add_argument("--keypoint-imgsz", type=int, default=512)
     parser.add_argument("--keypoint-device", default="0")
@@ -238,6 +257,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         zarr_path=args.zarr_path,
         crop_run=args.crop_run,
         pose_model=args.pose_model,
+        model_pose_schema_binding=args.model_pose_schema_binding,
         registry=args.registry,
         run_id=args.run_id,
         keypoints_run=args.keypoints_run,

@@ -331,6 +331,15 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
         return [best]
 
     monkeypatch.setattr(mod, "load_candidates", _fake_load_candidates)
+    model_pose_schema_binding = {
+        "schema_id": "palette.pose_model_schema_binding",
+        "binding_sha256": "f" * 64,
+    }
+    monkeypatch.setattr(
+        mod,
+        "resolve_registered_pose_model_schema_binding",
+        lambda *_args, **_kwargs: model_pose_schema_binding,
+    )
 
     def _fake_detect_keypoints_yolo(**kwargs: object) -> str:
         calls["detect_kwargs"] = kwargs
@@ -395,6 +404,10 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert detect_kwargs.get("zarr_path") == str(output_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/pose_model.pt"
     assert detect_kwargs.get("model_sha256") == "e" * 64
+    assert (
+        detect_kwargs.get("model_pose_schema_binding")
+        == model_pose_schema_binding
+    )
     assert detect_kwargs.get("output_parent") == "keypoint_shard_runs"
     assert detect_kwargs.get("pose_schema") == "traditional_v2"
     assert detect_kwargs.get("keypoint_roi_shard_rows") == 262144
@@ -432,6 +445,9 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     selected = payload.get("selected")
     assert isinstance(selected, dict)
     assert selected.get("model_sha256") == "e" * 64
+    assert payload["artifacts"]["model_pose_schema_binding"] == (
+        model_pose_schema_binding
+    )
     parameters = payload.get("parameters")
     assert isinstance(parameters, dict)
     assert parameters.get("pose_schema") == "traditional_v2"

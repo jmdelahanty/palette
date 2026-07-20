@@ -14,6 +14,9 @@ import zarr
 from fisheye.shared.detect_reason_codec import write_reason_columns
 from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.row_lineage import direct_source_crop_row_ids
+from fisheye.shared.refined_subject_mask_mutation import (
+    resolve_mutable_refined_subject_mask_run,
+)
 from fisheye.shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -186,7 +189,12 @@ def _compute_mask_geometry_chunk(masks: np.ndarray) -> dict[str, np.ndarray]:
             centroid_xy[row_idx, channel_idx] = np.asarray([xs.mean(), ys.mean()], dtype=np.float32)
             centroid_valid[row_idx, channel_idx] = True
             bbox_xyxy[row_idx, channel_idx] = np.asarray(
-                [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())],
+                [
+                    float(xs.min()),
+                    float(ys.min()),
+                    float(xs.max() + 1),
+                    float(ys.max() + 1),
+                ],
                 dtype=np.float32,
             )
             bbox_valid[row_idx, channel_idx] = True
@@ -507,6 +515,11 @@ def _backfill_run_metrics(run: zarr.Group, labels: Sequence[str], summary: dict[
         computed = _compute_mask_geometry_chunk(mask_store.read_dense(rows=slice(start, stop)))
         for name, arr in arrays.items():
             arr[start:stop] = computed[name]
+    if "bbox_xyxy" in missing:
+        run.attrs["bbox_xyxy_convention"] = "pixel_edge_half_open"
+        run.attrs["bbox_xyxy_derivation"] = (
+            "foreground_half_open_pixel_edges_xyxy_v1"
+        )
     summary.setdefault("backfilled", []).extend(f"metrics/{name}" for name in missing)
     return True
 
@@ -584,7 +597,8 @@ def backfill_refined_subject_mask_contract(
     run_name: str = "latest",
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
-    resolved_run, run = _resolve_refined_run(root, run_name)
+    resolved_run, _cached_run = _resolve_refined_run(root, run_name)
+    run = resolve_mutable_refined_subject_mask_run(root, resolved_run)
     summary: dict[str, object] = {"run_name": resolved_run, "backfilled": []}
     labels = _normalize_labels(run.attrs.get("mask_labels"))
     if not labels:

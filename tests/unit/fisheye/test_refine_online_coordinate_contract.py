@@ -65,6 +65,25 @@ def _replace_descriptor(node: zarr.Array, payload: dict[str, object]) -> None:
     )
 
 
+def _one_failed_tombstone(
+    parent: zarr.Group,
+    *,
+    exclude: tuple[str, ...] = (),
+) -> zarr.Group:
+    names = [name for name in parent.keys() if name not in exclude]
+    assert len(names) == 1
+    failed = parent[names[0]]
+    assert failed.attrs[mod.RUN_COMPLETION_STATUS_ATTR] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    tombstone = failed.attrs[mod.REFINED_ONLINE_PUBLICATION_TOMBSTONE_ATTR]
+    assert tombstone["public_path_retained"] is True
+    assert tombstone["retry_policy"] == "new_immutable_run_name_required"
+    assert tombstone["publication_owner_uuid"] == failed.attrs[
+        mod.REFINED_ONLINE_PUBLICATION_OWNER_ATTR
+    ]
+    return failed
+
+
 def test_load_uses_exact_child_surface_and_stimulus_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -226,9 +245,11 @@ def test_refinement_publishes_stimulus_identity_temporal_authority_and_v2_surfac
 
     run_name, run = _run_refinement(root)
 
-    assert observed_latest == ["prior", "prior", "prior"]
-    assert observed_status == ["staging", "complete", "complete"]
-    assert observed_eligibility == [False, False, False]
+    assert observed_latest[:-1] == ["prior"] * (len(observed_latest) - 1)
+    assert observed_latest[-1] == run_name
+    assert observed_status[0] == "staging"
+    assert observed_status[1:] == ["complete"] * (len(observed_status) - 1)
+    assert observed_eligibility == [False] * len(observed_eligibility)
     assert root[mod.REFINED_ONLINE_GROUP].attrs["latest"] == run_name
     assert root[mod.REFINED_ONLINE_GROUP].attrs[mod.RUN_LATEST_COMPLETE_ATTR] == run_name
     assert mod.RUN_LATEST_PENDING_ATTR not in root[mod.REFINED_ONLINE_GROUP].attrs
@@ -237,6 +258,15 @@ def test_refinement_publishes_stimulus_identity_temporal_authority_and_v2_surfac
     assert run.attrs[mod.RUN_NAME_ATTR] == run_name
     assert run.attrs[mod.RUN_STAGE_ATTR] == "refine_online_detect"
     assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs[mod.REFINED_ONLINE_PUBLICATION_OWNER_ATTR]
+    assert (
+        parent.attrs[mod.REFINED_ONLINE_PUBLICATION_POLICY_ATTR]
+        == mod.REFINED_ONLINE_PUBLICATION_POLICY
+    )
+    assert parent.attrs[mod.REFINED_ONLINE_PUBLICATION_GENERATION_ATTR] == 1
+    assert parent.attrs[mod.REFINED_ONLINE_PARENT_PUBLICATION_LEASE_ATTR][
+        "run_path"
+    ] == f"{mod.REFINED_ONLINE_GROUP}/{run_name}"
     assert "run_provenance" in run.attrs
     assert run.attrs["coordinate_contract_epoch"] == mod.COORDINATE_CONTRACT_EPOCH
     assert "instance_key" not in run
@@ -372,7 +402,7 @@ def test_completion_rejects_missing_lineage_or_unsupported_space(
         mod.load_bound_refined_online_coordinate_evidence(root, run)
 
 
-def test_failed_staging_is_deleted_and_prior_latest_is_restored(
+def test_occupied_pending_is_refused_before_candidate_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, _ = _canonical_fixture(monkeypatch)
@@ -382,12 +412,10 @@ def test_failed_staging_is_deleted_and_prior_latest_is_restored(
     parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior-complete"
     parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "prior-pending"
 
-    def fail_validation(*args, **kwargs):
-        raise RuntimeError("injected completion validation failure")
-
-    monkeypatch.setattr(mod, "_validate_refined_online_run", fail_validation)
-
-    with pytest.raises(RuntimeError, match="injected completion validation failure"):
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="occupied latest_pending",
+    ):
         _run_refinement(root)
 
     assert list(parent.keys()) == ["prior"]
@@ -404,7 +432,6 @@ def test_failed_fresh_complete_load_rolls_back_run_and_all_selectors(
     parent.create_group("prior")
     parent.attrs["latest"] = "prior"
     parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior"
-    parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "older-pending"
     original_private_loader = mod._load_bound_refined_online_coordinate_evidence
 
     def fail_complete_load(*args, **kwargs):
@@ -421,10 +448,10 @@ def test_failed_fresh_complete_load_rolls_back_run_and_all_selectors(
     with pytest.raises(RuntimeError, match="injected fresh complete-load failure"):
         _run_refinement(root)
 
-    assert list(parent.keys()) == ["prior"]
+    _one_failed_tombstone(parent, exclude=("prior",))
     assert parent.attrs["latest"] == "prior"
     assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior"
-    assert parent.attrs[mod.RUN_LATEST_PENDING_ATTR] == "older-pending"
+    assert mod.RUN_LATEST_PENDING_ATTR not in parent.attrs
 
 
 def test_public_coordinate_loaders_cannot_read_staging_evidence(
@@ -455,7 +482,6 @@ def test_keyboard_interrupt_during_fresh_load_rolls_back_run_and_all_selectors(
     parent.create_group("prior")
     parent.attrs["latest"] = "prior"
     parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior-complete"
-    parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "prior-pending"
 
     original_private_loader = mod._load_bound_refined_online_coordinate_evidence
 
@@ -476,10 +502,10 @@ def test_keyboard_interrupt_during_fresh_load_rolls_back_run_and_all_selectors(
     ):
         _run_refinement(root)
 
-    assert list(parent.keys()) == ["prior"]
+    _one_failed_tombstone(parent, exclude=("prior",))
     assert parent.attrs["latest"] == "prior"
     assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior-complete"
-    assert parent.attrs[mod.RUN_LATEST_PENDING_ATTR] == "prior-pending"
+    assert mod.RUN_LATEST_PENDING_ATTR not in parent.attrs
 
 
 def test_interrupt_between_selector_updates_and_eligibility_restores_prior_state(
@@ -490,27 +516,62 @@ def test_interrupt_between_selector_updates_and_eligibility_restores_prior_state
     parent.create_group("prior")
     parent.attrs["latest"] = "prior"
     parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior-complete"
-    parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "prior-pending"
 
-    def interrupt_activation(refined_runs, refined_group, *, run_name):
-        assert refined_group.attrs["stage_selector_eligible"] is False
-        refined_runs.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = run_name
-        refined_runs.attrs["latest"] = run_name
-        raise SystemExit("injected pre-eligibility interruption")
+    original_write = mod._write_refined_online_activation_attr
+
+    def interrupt_activation(attrs, name, value):
+        original_write(attrs, name, value)
+        if name == mod.RUN_LATEST_COMPLETE_ATTR:
+            raise SystemExit("injected pre-eligibility interruption")
 
     monkeypatch.setattr(
         mod,
-        "_activate_refined_online_run",
+        "_write_refined_online_activation_attr",
         interrupt_activation,
     )
 
     with pytest.raises(SystemExit, match="injected pre-eligibility interruption"):
         _run_refinement(root)
 
-    assert list(parent.keys()) == ["prior"]
+    _one_failed_tombstone(parent, exclude=("prior",))
     assert parent.attrs["latest"] == "prior"
     assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior-complete"
-    assert parent.attrs[mod.RUN_LATEST_PENDING_ATTR] == "prior-pending"
+    assert mod.RUN_LATEST_PENDING_ATTR not in parent.attrs
+
+
+def test_concurrent_selector_takeover_is_preserved_and_candidate_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    parent = root.create_group(mod.REFINED_ONLINE_GROUP)
+    parent.create_group("prior")
+    parent.attrs["latest"] = "prior"
+    parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior"
+    original_write = mod._write_refined_online_activation_attr
+    takeover_injected = False
+
+    def hostile_write(attrs, name, value):
+        nonlocal takeover_injected
+        original_write(attrs, name, value)
+        if name == mod.RUN_LATEST_COMPLETE_ATTR and not takeover_injected:
+            takeover_injected = True
+            parent.attrs["latest"] = "alien-concurrent-run"
+
+    monkeypatch.setattr(
+        mod,
+        "_write_refined_online_activation_attr",
+        hostile_write,
+    )
+
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="lost exact ownership|Concurrent parent mutation",
+    ):
+        _run_refinement(root)
+
+    assert parent.attrs["latest"] == "alien-concurrent-run"
+    assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior"
+    _one_failed_tombstone(parent, exclude=("prior",))
 
 
 def test_run_name_collision_never_deletes_a_preexisting_run(
@@ -537,6 +598,55 @@ def test_run_name_collision_never_deletes_a_preexisting_run(
     preserved = root[mod.REFINED_ONLINE_GROUP][colliding_name]
     assert preserved.attrs["sentinel"] == "preserve"
     assert parent.attrs["latest"] == colliding_name
+
+
+def test_failure_immediately_after_public_creation_retains_owned_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+
+    def fail_started(*_args, **_kwargs):
+        raise RuntimeError("injected lifecycle-start failure")
+
+    monkeypatch.setattr(mod, "mark_run_started", fail_started)
+
+    with pytest.raises(RuntimeError, match="injected lifecycle-start failure"):
+        _run_refinement(root)
+
+    parent = root[mod.REFINED_ONLINE_GROUP]
+    failed = _one_failed_tombstone(parent)
+    assert failed.attrs[mod.REFINED_ONLINE_PUBLICATION_OWNER_ATTR]
+    assert failed.attrs["publication_status"] == "failed"
+
+
+def test_postcommit_console_failures_do_not_fail_refinement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+
+    class HostileConsole:
+        def rule(self, *_args, **_kwargs) -> None:
+            return
+
+        def print(self, message, *_args, **_kwargs) -> None:
+            if "Refined run saved" in str(message) or "Processing completed" in str(
+                message
+            ):
+                raise RuntimeError("injected postcommit console failure")
+
+    run_name = mod.refine_online_positions(
+        "ignored.zarr",
+        window_length=3,
+        polyorder=1,
+        displacement_threshold=10_000.0,
+        max_gap=2,
+        console=HostileConsole(),
+        created_at_utc="2026-07-19T12:00:00+00:00",
+    )
+
+    run = root[mod.REFINED_ONLINE_GROUP][run_name]
+    assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs[mod.RUN_COMPLETION_STATUS_ATTR] == mod.RUN_STATUS_COMPLETE
 
 
 def test_source_authority_tamper_fails_before_output_creation(

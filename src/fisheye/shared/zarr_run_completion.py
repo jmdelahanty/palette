@@ -388,7 +388,44 @@ def resolve_latest_complete_run_name(
     latest_attr: str = "latest",
     legacy_default: bool | None = None,
 ) -> Optional[str]:
-    """Resolve the newest run that is complete under the run-completion contract."""
+    """Resolve a selected complete run without guessing for canonical parents.
+
+    A reverse-lexical child scan is a compatibility rule for unstamped legacy
+    parents only.  Canonical callers (``legacy_default=False``) and parents
+    stamped with a strict completion epoch must resolve through an explicit,
+    matching ``latest``/``latest_complete`` selector pair.  This matters during
+    selector activation: the pair is written one attr at a time before the
+    selected child's final eligibility commit.  Trusting either half
+    independently can temporarily resurrect an older run during that handoff.
+
+    Callers may opt an archive into the historical scan by explicitly enabling
+    ``legacy_default`` while performing a controlled legacy read.
+    """
+
+    allow_legacy_group_scan = (
+        effective_legacy_default(parent_group)
+        if legacy_default is None
+        else bool(legacy_default)
+    )
+    if not allow_legacy_group_scan:
+        latest = _normalize_name(parent_group.attrs.get(latest_attr))
+        latest_complete = _normalize_name(
+            parent_group.attrs.get(RUN_LATEST_COMPLETE_ATTR)
+        )
+        if latest is None or latest_complete is None or latest != latest_complete:
+            return None
+        child = _get_child(parent_group, latest)
+        if (
+            child is None
+            or not is_run_selector_eligible(child)
+            or not is_run_complete_in_parent(
+                parent_group,
+                child,
+                legacy_default=False,
+            )
+        ):
+            return None
+        return latest
 
     for attr in (latest_attr, RUN_LATEST_COMPLETE_ATTR):
         candidate = parent_group.attrs.get(attr)

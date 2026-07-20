@@ -224,7 +224,12 @@ def test_quadrant_code_for_xy_uses_right_bottom_midline_ownership() -> None:
 
 def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
 
     result = build_cra_primary_endpoint_result(
         zarr_path,
@@ -304,7 +309,12 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
 
 def test_cra_primary_endpoint_rejects_noncanonical_chaser_distance_frame(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     root = zarr.open_group(str(zarr_path), mode="a")
     root["analysis/chaser_distance_runs/chaser_distance_1"].attrs["coordinate_frame"] = "source_image_px"
 
@@ -314,7 +324,12 @@ def test_cra_primary_endpoint_rejects_noncanonical_chaser_distance_frame(tmp_pat
 
 def test_cra_primary_endpoint_rejects_noncanonical_chaser_distance_origin(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     root = zarr.open_group(str(zarr_path), mode="a")
     root["analysis/chaser_distance_runs/chaser_distance_1"].attrs["coordinate_origin"] = "camera_top_left"
 
@@ -335,7 +350,12 @@ def test_cra_primary_endpoint_uses_single_nondefault_stimulus_arena_bounds(tmp_p
             "texture_origin": "top_left",
         }
     )
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
 
     result = build_cra_primary_endpoint_result(
         zarr_path,
@@ -359,6 +379,7 @@ def test_cra_primary_endpoint_dropout_warning_is_report_only_by_default(tmp_path
         zarr_path,
         replace(chaser_result, fish_valid=fish_valid),
         overwrite=True,
+        legacy_compatibility=True,
     )
 
     result = build_cra_primary_endpoint_result(

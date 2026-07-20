@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from scipy.ndimage import binary_fill_holes
 import zarr
 
@@ -134,3 +135,15 @@ def test_write_subject_body_mask_qc_group_reads_compact_mask_store() -> None:
     assert reasons[0] == "ok"
     assert "branched_body_mask" in str(reasons[1])
     assert "fragmented_subject_body_mask" in str(reasons[2])
+
+
+def test_write_subject_body_mask_qc_rejects_sealed_canonical_publication() -> None:
+    root = _build_refined_root()
+    run = root["refined_subject_masks_runs/refined_001"]
+    run.attrs["coordinate_contract"] = "canonical_v2"
+    run.attrs["refined_subject_mask_publication_owner"] = "b" * 32
+
+    with pytest.raises(RuntimeError, match="immutable canonical publication"):
+        mod.write_subject_body_mask_qc_group(root, refined_run="refined_001")
+
+    assert "components" not in run

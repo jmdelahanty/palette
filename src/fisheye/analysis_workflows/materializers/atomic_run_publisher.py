@@ -3,12 +3,14 @@
 Analysis-specific materializers own computation, scientific validation, run
 completion, and pointer semantics.  This module owns the mechanical transaction:
 serialize publication, copy to a hidden sibling, verify the physical copy,
-atomically rename it, snapshot parent attributes, and roll back both the new run
-and every parent snapshot after any post-rename failure.
+atomically rename it, snapshot parent attributes, and leave an immutable failed
+public tombstone while conditionally restoring owned parent mutations after any
+post-rename failure.
 """
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import os
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import uuid
 
 import zarr
 
@@ -31,10 +34,14 @@ from ...shared.zarr_io import open_zarr_root
 ATOMIC_RUN_PUBLISHER_SCHEMA_ID = "palette.atomic_run_group_publisher"
 ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION = 1
 SERIALIZATION_POLICY = "per_recording_advisory_file_lock"
+ATOMIC_PUBLICATION_OWNER_ATTR = "atomic_publication_owner_uuid"
+ATOMIC_PUBLICATION_TOMBSTONE_ATTR = "atomic_publication_tombstone"
 
 RunValidator = Callable[[Path], Mapping[str, Any]]
 PrepareParents = Callable[[zarr.Group], Sequence[zarr.Group]]
 CompleteRun = Callable[[zarr.Group, zarr.Group, zarr.Group], None]
+ActivateRun = Callable[[zarr.Group, zarr.Group, zarr.Group], None]
+RollbackActivation = Callable[[], None]
 VerifyPointers = Callable[[zarr.Group], None]
 AfterRename = Callable[[zarr.Group, zarr.Group], Mapping[str, Any] | None]
 
@@ -75,6 +82,10 @@ class AtomicRunPublishSpec:
     policy: str
     rollback_policy: str
     content_checksum: bool = False
+    publication_owner_attr: str | None = None
+    selector_owner_attr: str | None = None
+    selector_generation_attr: str | None = None
+    owned_parent_attr_names: tuple[tuple[str, ...], ...] = ()
 
     @property
     def lock_path(self) -> Path:
@@ -87,6 +98,30 @@ class AtomicRunPublishSpec:
         return self.target_run_path.parent / (
             f".{self.run_name}.publish_tmp.{os.getpid()}"
         )
+
+
+@dataclass(frozen=True)
+class _AttrState:
+    present: bool
+    value: Any
+
+
+@dataclass(frozen=True)
+class _OwnedParentMutation:
+    parent_path: str
+    attr_name: str
+    previous: _AttrState
+    attempted: _AttrState
+
+
+@dataclass(frozen=True)
+class _OwnedParentRollbackReceipt:
+    lease_parent_path: str
+    lease_attr: str
+    lease: _AttrState
+    generation_attr: str | None
+    generation: _AttrState | None
+    mutations: tuple[_OwnedParentMutation, ...]
 
 
 def _utc_now() -> str:
@@ -234,14 +269,308 @@ def _resolve_group(root: zarr.Group, path: str) -> zarr.Group:
     return group
 
 
-def _restore_parent_attrs(
+def _attr_state(attrs: Any, name: str) -> _AttrState:
+    return _AttrState(
+        present=name in attrs,
+        value=copy.deepcopy(attrs.get(name)),
+    )
+
+
+def _states_equal(left: _AttrState, right: _AttrState) -> bool:
+    return left.present is right.present and (
+        not left.present or left.value == right.value
+    )
+
+
+def _restore_attr_state(attrs: Any, name: str, state: _AttrState) -> None:
+    if state.present:
+        attrs[name] = copy.deepcopy(state.value)
+    elif name in attrs:
+        del attrs[name]
+
+
+def _capture_owned_parent_rollback_receipt(
     root: zarr.Group,
     snapshots: Sequence[tuple[str, Mapping[str, Any]]],
+    owned_names: Sequence[Sequence[str]],
+    *,
+    lease_parent_path: str,
+    lease_attr: str,
+    generation_attr: str | None,
+    publication_owner: str,
+) -> _OwnedParentRollbackReceipt | None:
+    """Capture exact values only while this attempt still owns its lease epoch."""
+
+    if len(snapshots) != len(owned_names):
+        raise ValueError(
+            "Owned parent rollback names must align with parent snapshots."
+        )
+    lease_parent = _resolve_group(root, lease_parent_path)
+    lease = _attr_state(lease_parent.attrs, lease_attr)
+    if (
+        not lease.present
+        or not isinstance(lease.value, Mapping)
+        or lease.value.get("owner_uuid") != publication_owner
+    ):
+        return None
+
+    generation: _AttrState | None = None
+    if generation_attr is not None:
+        generation = _attr_state(lease_parent.attrs, generation_attr)
+        if not generation.present or type(generation.value) is not int:
+            return None
+        leased_generation = lease.value.get("next_generation")
+        if leased_generation is not None and generation.value != leased_generation:
+            return None
+
+    mutations: list[_OwnedParentMutation] = []
+    for (path, snapshot), names in zip(snapshots, owned_names, strict=True):
+        attrs = _resolve_group(root, path).attrs
+        for name in names:
+            previous = _AttrState(
+                present=name in snapshot,
+                value=copy.deepcopy(snapshot.get(name)),
+            )
+            attempted = _attr_state(attrs, name)
+            if _states_equal(previous, attempted):
+                continue
+            mutations.append(
+                _OwnedParentMutation(
+                    parent_path=path,
+                    attr_name=name,
+                    previous=previous,
+                    attempted=attempted,
+                )
+            )
+
+    # Keep ownership metadata alive until all selector/guard values are restored.
+    # Generation is restored immediately before the lease; the lease itself is
+    # always the final mutation.
+    mutations.sort(
+        key=lambda mutation: (
+            2
+            if mutation.parent_path == lease_parent_path
+            and mutation.attr_name == lease_attr
+            else 1
+            if generation_attr is not None
+            and mutation.parent_path == lease_parent_path
+            and mutation.attr_name == generation_attr
+            else 0
+        )
+    )
+    return _OwnedParentRollbackReceipt(
+        lease_parent_path=lease_parent_path,
+        lease_attr=lease_attr,
+        lease=lease,
+        generation_attr=generation_attr,
+        generation=generation,
+        mutations=tuple(mutations),
+    )
+
+
+def _restore_owned_parent_attrs(
+    root: zarr.Group,
+    receipt: _OwnedParentRollbackReceipt,
 ) -> None:
-    for path, attrs in snapshots:
-        group = _resolve_group(root, path)
-        group.attrs.clear()
-        group.attrs.update(dict(attrs))
+    """Restore an exact mutation log, stopping immediately on ownership loss."""
+
+    errors: list[str] = []
+    expected_generation = receipt.generation
+    for mutation in receipt.mutations:
+        try:
+            lease_parent = _resolve_group(root, receipt.lease_parent_path)
+            if not _states_equal(
+                _attr_state(lease_parent.attrs, receipt.lease_attr),
+                receipt.lease,
+            ):
+                break
+            if receipt.generation_attr is not None:
+                assert expected_generation is not None
+                if not _states_equal(
+                    _attr_state(lease_parent.attrs, receipt.generation_attr),
+                    expected_generation,
+                ):
+                    break
+
+            attrs = _resolve_group(root, mutation.parent_path).attrs
+            current = _attr_state(attrs, mutation.attr_name)
+            if _states_equal(current, mutation.previous):
+                if (
+                    receipt.generation_attr is not None
+                    and mutation.parent_path == receipt.lease_parent_path
+                    and mutation.attr_name == receipt.generation_attr
+                ):
+                    expected_generation = mutation.previous
+                continue
+            if not _states_equal(current, mutation.attempted):
+                break
+
+            _restore_attr_state(attrs, mutation.attr_name, mutation.previous)
+            if not _states_equal(
+                _attr_state(attrs, mutation.attr_name),
+                mutation.previous,
+            ):
+                errors.append(
+                    f"verify /{mutation.parent_path}@{mutation.attr_name}: "
+                    "persisted value differs"
+                )
+                break
+            if (
+                receipt.generation_attr is not None
+                and mutation.parent_path == receipt.lease_parent_path
+                and mutation.attr_name == receipt.generation_attr
+            ):
+                expected_generation = mutation.previous
+        except BaseException as exc:  # pragma: no cover - hostile store
+            errors.append(
+                f"restore /{mutation.parent_path}@{mutation.attr_name}: {exc}"
+            )
+            break
+    if errors:
+        raise RuntimeError(
+            f"Owned parent selector rollback was incomplete: {errors!r}."
+        )
+
+
+def _persist_failed_public_tombstone(
+    spec: AtomicRunPublishSpec,
+    *,
+    owner_attr: str,
+    publication_owner: str,
+    failure: BaseException,
+    rollback_errors: list[str],
+) -> None:
+    """Leave one immutable, owner-bound failed child at its public run path."""
+
+    tombstone = {
+        "schema_id": "palette.atomic_publication_tombstone",
+        "schema_version": 1,
+        "failed_at_utc": _utc_now(),
+        "publication_owner_attr": owner_attr,
+        "publication_owner_uuid": publication_owner,
+        "run_name": spec.run_name,
+        "run_path": str(spec.target_run_path),
+        "public_path_retained": True,
+        "selector_eligible": False,
+        "retry_policy": "new_immutable_run_name_required",
+        "failure_type": type(failure).__name__,
+        "failure": str(failure),
+    }
+    try:
+        run = _fresh_owned_public_target(
+            spec,
+            owner_attr=owner_attr,
+            publication_owner=publication_owner,
+            mode="a",
+        )
+        if run is None:
+            return
+        run.attrs["stage_selector_eligible"] = False
+
+        run = _fresh_owned_public_target(
+            spec,
+            owner_attr=owner_attr,
+            publication_owner=publication_owner,
+            mode="a",
+        )
+        if run is None:
+            return
+        if "palette_run_completed_at_utc" in run.attrs:
+            del run.attrs["palette_run_completed_at_utc"]
+
+        run = _fresh_owned_public_target(
+            spec,
+            owner_attr=owner_attr,
+            publication_owner=publication_owner,
+            mode="a",
+        )
+        if run is None:
+            return
+        run.attrs["palette_run_completion_status"] = "failed"
+
+        run = _fresh_owned_public_target(
+            spec,
+            owner_attr=owner_attr,
+            publication_owner=publication_owner,
+            mode="a",
+        )
+        if run is None:
+            return
+        if "publication_status" in run.attrs:
+            run.attrs["publication_status"] = "failed"
+
+        run = _fresh_owned_public_target(
+            spec,
+            owner_attr=owner_attr,
+            publication_owner=publication_owner,
+            mode="a",
+        )
+        if run is None:
+            return
+        run.attrs["palette_run_error"] = str(failure)
+
+        run = _fresh_owned_public_target(
+            spec,
+            owner_attr=owner_attr,
+            publication_owner=publication_owner,
+            mode="a",
+        )
+        if run is None:
+            return
+        run.attrs[ATOMIC_PUBLICATION_TOMBSTONE_ATTR] = json_attr_safe(tombstone)
+
+        check = _fresh_owned_public_target(
+            spec,
+            owner_attr=owner_attr,
+            publication_owner=publication_owner,
+            mode="r",
+        )
+        if check is None:
+            return
+        if (
+            check.attrs.get("stage_selector_eligible") is not False
+            or check.attrs.get("palette_run_completion_status") != "failed"
+            or "palette_run_completed_at_utc" in check.attrs
+            or check.attrs.get(ATOMIC_PUBLICATION_TOMBSTONE_ATTR)
+            != json_attr_safe(tombstone)
+        ):
+            raise RuntimeError("failed public tombstone did not persist exactly")
+    except BaseException as exc:  # pragma: no cover - hostile store
+        rollback_errors.append(f"persist failed public tombstone: {exc}")
+
+
+def _persisted_publication_owner(path: Path, attr_name: str) -> Any:
+    group = open_zarr_root(path, mode="r")
+    return group.attrs.get(attr_name)
+
+
+def _target_group_path(spec: AtomicRunPublishSpec) -> str:
+    return spec.target_run_path.resolve().relative_to(
+        spec.source_zarr.resolve()
+    ).as_posix()
+
+
+def _fresh_owned_public_target(
+    spec: AtomicRunPublishSpec,
+    *,
+    owner_attr: str,
+    publication_owner: str,
+    mode: str,
+) -> zarr.Group | None:
+    """Fresh-resolve one exact public child and prove its original owner."""
+
+    root = open_zarr_root(spec.source_zarr, mode=mode)
+    expected_path = _target_group_path(spec)
+    try:
+        run = _resolve_group(root, expected_path)
+    except (KeyError, FileNotFoundError):
+        return None
+    if (
+        _group_path(run) != expected_path
+        or run.attrs.get(owner_attr) != publication_owner
+    ):
+        return None
+    return run
 
 
 def _require_valid(validation: Mapping[str, Any], *, label: str) -> dict[str, Any]:
@@ -261,9 +590,21 @@ def atomic_publish_run_group(
     verify_pointers: VerifyPointers,
     payload_metadata: Mapping[str, Any] | None = None,
     after_rename: AfterRename | None = None,
+    activate_run: ActivateRun | None = None,
+    rollback_activation: RollbackActivation | None = None,
 ) -> dict[str, Any]:
     """Publish one completed local run as a fail-closed transaction."""
 
+    if rollback_activation is not None and (
+        spec.selector_owner_attr is not None
+        or spec.selector_generation_attr is not None
+        or bool(spec.owned_parent_attr_names)
+    ):
+        raise ValueError(
+            "A stage-specific rollback_activation receipt and generic pre-copy "
+            "parent rollback are mutually exclusive; choose one exact selector "
+            "rollback authority."
+        )
     if not spec.source_zarr.is_dir():
         raise FileNotFoundError(f"Authoritative source Zarr not found: {spec.source_zarr}")
     if spec.target_run_path.name != spec.run_name:
@@ -299,6 +640,8 @@ def atomic_publish_run_group(
                 verify_pointers=verify_pointers,
                 payload_metadata=payload_metadata,
                 after_rename=after_rename,
+                activate_run=activate_run,
+                rollback_activation=rollback_activation,
                 local_validation=local_validation,
             )
         finally:
@@ -315,13 +658,59 @@ def _atomic_publish_locked(
     verify_pointers: VerifyPointers,
     payload_metadata: Mapping[str, Any] | None,
     after_rename: AfterRename | None,
+    activate_run: ActivateRun | None,
+    rollback_activation: RollbackActivation | None,
     local_validation: Mapping[str, Any],
 ) -> dict[str, Any]:
+    publication_owner_attr = (
+        spec.publication_owner_attr or ATOMIC_PUBLICATION_OWNER_ATTR
+    )
+    expected_publication_owner: str
+    if spec.publication_owner_attr is not None:
+        expected_publication_owner = _persisted_publication_owner(
+            spec.local_run_path,
+            spec.publication_owner_attr,
+        )
+        if not isinstance(expected_publication_owner, str) or not expected_publication_owner:
+            raise RuntimeError(
+                "Atomic publication source lacks its required publication owner."
+            )
+    else:
+        expected_publication_owner = str(uuid.uuid4())
     root = open_zarr_root(spec.source_zarr, mode="a")
     parents = tuple(prepare_parents(root))
     if not parents:
         raise ValueError("prepare_parents must return at least the target parent group.")
     parent_paths = _parent_paths(parents)
+    if spec.owned_parent_attr_names and len(spec.owned_parent_attr_names) != len(
+        parents
+    ):
+        raise ValueError(
+            "owned_parent_attr_names must align exactly with prepare_parents."
+        )
+    if spec.selector_owner_attr is None:
+        if spec.selector_generation_attr is not None or spec.owned_parent_attr_names:
+            raise ValueError(
+                "Owned parent rollback declarations require selector_owner_attr."
+            )
+    else:
+        if not spec.owned_parent_attr_names:
+            raise ValueError(
+                "selector_owner_attr requires an explicit owned parent mutation surface."
+            )
+        first_owned = spec.owned_parent_attr_names[0]
+        if spec.selector_owner_attr not in first_owned:
+            raise ValueError(
+                "The selector lease attribute must belong to the first parent mutation surface."
+            )
+        if (
+            spec.selector_generation_attr is not None
+            and spec.selector_generation_attr not in first_owned
+        ):
+            raise ValueError(
+                "The selector generation attribute must belong to the first parent "
+                "mutation surface."
+            )
     target_parent = parents[-1]
     if spec.run_name in target_parent or spec.target_run_path.exists():
         raise FileExistsError(
@@ -342,7 +731,8 @@ def _atomic_publish_locked(
             f"Refusing existing publish temporary path: {temporary}"
         )
 
-    published = False
+    final_activation_attempted = False
+    result: dict[str, Any] = {}
     try:
         copy_started = time.perf_counter()
         physical_copy = _copy_and_verify(
@@ -351,12 +741,41 @@ def _atomic_publish_locked(
             backend=copy_backend,
             content_checksum=bool(spec.content_checksum),
         )
+        # Before a tree can appear at a public canonical child path, persist one
+        # exact attempt owner and fail-closed selector eligibility in the hidden
+        # sibling. This also owner-binds older materializers that do not yet
+        # carry a stage-specific publication-owner attribute.
+        temporary_group = open_zarr_root(temporary, mode="a")
+        temporary_group.attrs[publication_owner_attr] = expected_publication_owner
+        temporary_group.attrs["stage_selector_eligible"] = False
+        temporary_check = open_zarr_root(temporary, mode="r")
+        if (
+            temporary_check.attrs.get(publication_owner_attr)
+            != expected_publication_owner
+            or temporary_check.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Hidden publication target did not persist its exact owner and "
+                "selector-ineligible state."
+            )
         temporary_validation = _require_valid(
             validate_run(temporary),
             label="Temporary run",
         )
         os.replace(temporary, spec.target_run_path)
-        published = True
+
+        # The owner is selected from the local source before copying.  Prove
+        # the renamed tree still carries that exact owner before invoking any
+        # callback or mutating authoritative metadata.
+        renamed_owner = _persisted_publication_owner(
+            spec.target_run_path,
+            publication_owner_attr,
+        )
+        if renamed_owner != expected_publication_owner:
+            raise RuntimeError(
+                "Renamed atomic-publication target changed publication "
+                "owner before authoritative callbacks."
+            )
 
         root = open_zarr_root(spec.source_zarr, mode="a")
         parents = tuple(prepare_parents(root))
@@ -388,6 +807,11 @@ def _atomic_publish_locked(
             "source_zarr": str(spec.source_zarr),
             "publication_source_run_path": str(spec.local_run_path),
             "target_run_path": str(spec.target_run_path),
+            "publication_owner_attr": publication_owner_attr,
+            "publication_owner_uuid": expected_publication_owner,
+            "failed_public_child_policy": (
+                "retain_owner_bound_selector_ineligible_tombstone"
+            ),
             "hidden_temporary_policy": "same_parent_hidden_sibling_then_os_replace",
             "copy_duration_seconds": float(time.perf_counter() - copy_started),
             "physical_copy": physical_copy,
@@ -422,19 +846,146 @@ def _atomic_publish_locked(
         }
         final_run = final_parents[-1][spec.run_name]
         final_run.attrs["cluster_output_staging"] = json_attr_safe(payload)
-        return json_attr_safe(payload)
-    except BaseException:
-        if published and spec.target_run_path.exists():
-            shutil.rmtree(spec.target_run_path)
-        rollback_root = open_zarr_root(spec.source_zarr, mode="a")
-        _restore_parent_attrs(rollback_root, parent_snapshots)
-        raise
-    finally:
+        result = json_attr_safe(payload)
+        if activate_run is not None:
+            # Reopen after the final publisher-owned metadata write. A stale
+            # handle or same-name replacement is never activation authority.
+            activation_root = open_zarr_root(spec.source_zarr, mode="a")
+            activation_parents = tuple(prepare_parents(activation_root))
+            _require_parent_paths(activation_parents, expected=parent_paths)
+            activation_run = activation_parents[-1][spec.run_name]
+            expected_run_path = _target_group_path(spec)
+            if (
+                not isinstance(activation_run, zarr.Group)
+                or _group_path(activation_run) != expected_run_path
+                or activation_run.attrs.get(publication_owner_attr)
+                != expected_publication_owner
+                or activation_run.attrs.get("palette_run_completion_status")
+                != "complete"
+                or activation_run.attrs.get("stage_selector_eligible") is not False
+            ):
+                raise RuntimeError(
+                    "Final atomic-publication activation lost its exact owned, "
+                    "selector-ineligible canonical child."
+                )
+            # This callback owns the literal selector-eligibility commit. All
+            # fallible publisher validation and metadata writes are complete.
+            final_activation_attempted = True
+            activate_run(
+                activation_root,
+                activation_parents[-1],
+                activation_run,
+            )
+        return result
+    except BaseException as exc:
+        if final_activation_attempted:
+            try:
+                committed = _fresh_owned_public_target(
+                    spec,
+                    owner_attr=publication_owner_attr,
+                    publication_owner=expected_publication_owner,
+                    mode="r",
+                )
+                if (
+                    committed is not None
+                    and committed.attrs.get("stage_selector_eligible") is True
+                    and committed.attrs.get("palette_run_completion_status")
+                    == "complete"
+                ):
+                    # The callback's literal final write persisted before its
+                    # acknowledgement failed. This fresh exact-owner proof is
+                    # the terminal success path; perform no further work.
+                    return result
+            except BaseException:
+                pass
+        rollback_errors: list[str] = []
+        if rollback_activation is not None:
+            try:
+                rollback_activation()
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(
+                    f"cancel deferred selector activation: {rollback_exc}"
+                )
+        # ``os.replace`` can complete the rename and still raise. Inspect any
+        # public target that appeared, but never delete, rename, or reuse it.
+        # Exact ownership authorizes only an in-place failed/ineligible
+        # tombstone; a foreign replacement is left completely untouched.
+        if spec.target_run_path.exists():
+            try:
+                target_owned = (
+                    _persisted_publication_owner(
+                        spec.target_run_path,
+                        publication_owner_attr,
+                    )
+                    == expected_publication_owner
+                )
+            except BaseException as owner_exc:
+                target_owned = False
+                rollback_errors.append(
+                    f"resolve failed target publication owner: {owner_exc}"
+                )
+            if target_owned:
+                _persist_failed_public_tombstone(
+                    spec,
+                    owner_attr=publication_owner_attr,
+                    publication_owner=expected_publication_owner,
+                    failure=exc,
+                    rollback_errors=rollback_errors,
+                )
+
+        if spec.selector_owner_attr is not None and spec.owned_parent_attr_names:
+            # Only an exact persisted selector lease plus an explicit mutation
+            # surface authorizes parent rollback.
+            try:
+                rollback_root = open_zarr_root(spec.source_zarr, mode="a")
+                try:
+                    receipt = _capture_owned_parent_rollback_receipt(
+                        rollback_root,
+                        parent_snapshots,
+                        spec.owned_parent_attr_names,
+                        lease_parent_path=parent_paths[0],
+                        lease_attr=spec.selector_owner_attr,
+                        generation_attr=spec.selector_generation_attr,
+                        publication_owner=expected_publication_owner,
+                    )
+                except BaseException as receipt_exc:  # pragma: no cover - hostile store
+                    receipt = None
+                    rollback_errors.append(
+                        f"capture selector rollback receipt: {receipt_exc}"
+                    )
+                if receipt is not None:
+                    try:
+                        _restore_owned_parent_attrs(
+                            rollback_root,
+                            receipt,
+                        )
+                    except BaseException as restore_exc:  # pragma: no cover - hostile store
+                        rollback_errors.append(str(restore_exc))
+            except BaseException as root_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(f"open rollback root: {root_exc}")
+        # Without both declarations, parent state has no rollback authority.
+        # Leave it untouched: the retained child is selector-ineligible, so a
+        # stale pointer fails closed instead of risking successor clobber.
+
         if temporary.exists():
-            shutil.rmtree(temporary)
+            try:
+                shutil.rmtree(temporary)
+            except BaseException as temporary_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(
+                    f"delete publication temporary: {temporary_exc}"
+                )
+
+        if rollback_errors:
+            raise RuntimeError(
+                "Atomic publication failed and rollback was incomplete: "
+                f"{rollback_errors!r}."
+            ) from exc
+        raise
 
 
 __all__ = [
+    "ATOMIC_PUBLICATION_OWNER_ATTR",
+    "ATOMIC_PUBLICATION_TOMBSTONE_ATTR",
     "ATOMIC_RUN_PUBLISHER_SCHEMA_ID",
     "ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION",
     "AtomicRunPublishSpec",

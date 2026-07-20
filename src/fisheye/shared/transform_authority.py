@@ -33,6 +33,9 @@ from fisheye.shared.pixel_frame_authority import (
     SOURCE_CAMERA_NORMALIZED_SPACE_ID,
     STIMULUS_CANVAS_SPACE_ID,
     TRANSLATION_XY_DIRECT_V1,
+    CROP_PLACEMENT_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     BoundPixelFrameAuthority,
     PixelFrameAuthorityError,
     PixelFrameEndpoint,
@@ -55,6 +58,41 @@ TRANSFORM_AUTHORITY_SCHEMA_ID = "palette.transform_authority"
 TRANSFORM_AUTHORITY_SCHEMA_VERSION = 2
 TRANSFORM_AUTHORITY_ATTR = "transform_authority"
 TRANSFORM_AUTHORITY_DIGEST_ATTR = "transform_authority_sha256"
+TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR = "transform_authority_pixel_center"
+TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR = "transform_authority_pixel_edge_half_open"
+TRANSFORM_AUTHORITY_ATTRS = frozenset(
+    {
+        TRANSFORM_AUTHORITY_ATTR,
+        TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR,
+        TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+    }
+)
+
+
+def _require_crop_ownership_attr_pair(
+    record: "TransformAuthorityRecord",
+    source_frame: BoundPixelFrameAuthority,
+    *,
+    attr_name: str,
+) -> None:
+    if record.kind != CROP_PLACEMENT_AUTHORITY_KIND:
+        return
+    source = require_roi_pixel_frame_authority(source_frame)
+    ownership = require_bound_crop_placement_ownership(
+        source._context.get("crop_placement_ownership")
+    )
+    expected = {
+        TRANSFORM_AUTHORITY_ATTR: CROP_PLACEMENT_OWNERSHIP_ATTR,
+        TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR: (
+            CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR
+        ),
+        TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR: CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    }[attr_name]
+    if ownership.attr_name != expected:
+        raise TransformAuthorityError(
+            "Crop-placement transform authority is cross-wired to the wrong "
+            "closed ownership attr."
+        )
 TRANSFORM_AUTHORITY_CANONICALIZATION = "canonical_json_sort_keys_v1"
 
 SELECTED_CALIBRATION_AUTHORITY_KIND = "selected_calibration"
@@ -784,6 +822,7 @@ class BoundTransformAuthority:
     authority_path: str
     record_ref: str
     record_sha256: str
+    attr_name: str
     source_frame: BoundPixelFrameAuthority = field(repr=False, compare=False)
     target_frame: BoundPixelFrameAuthority = field(repr=False, compare=False)
     row_identity: BoundRowIdentityContract | None = field(repr=False, compare=False)
@@ -804,6 +843,7 @@ class BoundTransformAuthority:
         archive: ArchiveIdentity,
         authority_node: Any,
         payload_node: Any,
+        attr_name: str,
         selected_calibration_snapshot: Any = None,
         _verification_seal: object | None = None,
     ) -> None:
@@ -813,8 +853,9 @@ class BoundTransformAuthority:
             )
         object.__setattr__(self, "record", record)
         object.__setattr__(self, "authority_path", authority_path)
-        object.__setattr__(self, "record_ref", f"/{authority_path}@{TRANSFORM_AUTHORITY_ATTR}")
+        object.__setattr__(self, "record_ref", f"/{authority_path}@{attr_name}")
         object.__setattr__(self, "record_sha256", record.digest())
+        object.__setattr__(self, "attr_name", attr_name)
         object.__setattr__(self, "source_frame", source_frame)
         object.__setattr__(self, "target_frame", target_frame)
         object.__setattr__(self, "row_identity", row_identity)
@@ -842,6 +883,7 @@ class BoundTransformAuthority:
             target_frame=self.target_frame,
             row_identity=self.row_identity,
             selected_calibration_snapshot=self._selected_calibration_snapshot,
+            attr_name=self.attr_name,
         )
         if (
             current.record != self.record
@@ -860,7 +902,12 @@ def load_bound_transform_authority(
     target_frame: BoundPixelFrameAuthority,
     row_identity: BoundRowIdentityContract | None = None,
     selected_calibration_snapshot: Any = None,
+    attr_name: str = TRANSFORM_AUTHORITY_ATTR,
 ) -> BoundTransformAuthority:
+    if attr_name not in TRANSFORM_AUTHORITY_ATTRS:
+        raise TransformAuthorityError(
+            f"Unsupported transform-authority attr {attr_name!r}."
+        )
     archive = _require_archive(
         authority_node,
         payload_node,
@@ -871,15 +918,34 @@ def load_bound_transform_authority(
     attrs = getattr(authority_node, "attrs", None)
     if not isinstance(attrs, Mapping):
         raise TransformAuthorityError("Authority node must expose persisted attrs.")
-    raw = attrs.get(TRANSFORM_AUTHORITY_ATTR)
+    digest_attr = f"{attr_name}_sha256"
+    raw = attrs.get(attr_name)
     record = parse_transform_authority(raw)
+    specialized_convention = {
+        TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR: "pixel_center",
+        TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR: "pixel_edge_half_open",
+    }.get(attr_name)
+    if specialized_convention is not None and (
+        record.kind != CROP_PLACEMENT_AUTHORITY_KIND
+        or source_frame.pixel_convention != specialized_convention
+    ):
+        convention_label = specialized_convention.replace("_", "-")
+        raise TransformAuthorityError(
+            f"The {convention_label} transform-authority attr is reserved "
+            f"for a {convention_label} crop-placement transform."
+        )
+    _require_crop_ownership_attr_pair(
+        record,
+        source_frame,
+        attr_name=attr_name,
+    )
     if not isinstance(raw, Mapping) or not _exact_json_equal(raw, record.to_dict()):
         raise TransformAuthorityError(
             "Raw persisted authority mapping is not its parsed canonical form."
         )
     stored = _sha256(
-        attrs.get(TRANSFORM_AUTHORITY_DIGEST_ATTR),
-        field_name=TRANSFORM_AUTHORITY_DIGEST_ATTR,
+        attrs.get(digest_attr),
+        field_name=digest_attr,
     )
     if stored != record.digest():
         raise TransformAuthorityError("Persisted transform-authority digest is stale.")
@@ -900,6 +966,7 @@ def load_bound_transform_authority(
         archive=archive,
         authority_node=authority_node,
         payload_node=payload_node,
+        attr_name=attr_name,
         selected_calibration_snapshot=selected_calibration_snapshot,
         _verification_seal=_BOUND_AUTHORITY_SEAL,
     )
@@ -921,13 +988,36 @@ def _stamp(
     target_frame: BoundPixelFrameAuthority,
     row_identity: BoundRowIdentityContract | None,
     selected_calibration_snapshot: Any = None,
+    attr_name: str = TRANSFORM_AUTHORITY_ATTR,
 ) -> BoundTransformAuthority:
+    if attr_name not in TRANSFORM_AUTHORITY_ATTRS:
+        raise TransformAuthorityError(
+            f"Unsupported transform-authority attr {attr_name!r}."
+        )
     try:
         attrs = require_trusted_coordinate_attrs(node, label="Transform authority")
     except PixelFrameAuthorityError as exc:
         raise TransformAuthorityError(str(exc)) from exc
     _require_archive(node, payload_node, source_frame, target_frame, row_identity)
     parsed = parse_transform_authority(record)
+    specialized_convention = {
+        TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR: "pixel_center",
+        TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR: "pixel_edge_half_open",
+    }.get(attr_name)
+    if specialized_convention is not None and (
+        parsed.kind != CROP_PLACEMENT_AUTHORITY_KIND
+        or source_frame.pixel_convention != specialized_convention
+    ):
+        convention_label = specialized_convention.replace("_", "-")
+        raise TransformAuthorityError(
+            f"The {convention_label} transform-authority attr is reserved "
+            f"for a {convention_label} crop-placement transform."
+        )
+    _require_crop_ownership_attr_pair(
+        parsed,
+        source_frame,
+        attr_name=attr_name,
+    )
     _validate(
         parsed,
         payload_node=payload_node,
@@ -937,9 +1027,10 @@ def _stamp(
         selected_calibration_snapshot=selected_calibration_snapshot,
     )
     snapshot = copy.deepcopy(dict(attrs))
+    digest_attr = f"{attr_name}_sha256"
     intended = {
-        TRANSFORM_AUTHORITY_ATTR: parsed.to_dict(),
-        TRANSFORM_AUTHORITY_DIGEST_ATTR: parsed.digest(),
+        attr_name: parsed.to_dict(),
+        digest_attr: parsed.digest(),
     }
     expected = _expected_attrs_after_update(snapshot, intended)
     try:
@@ -956,6 +1047,7 @@ def _stamp(
             target_frame=target_frame,
             row_identity=row_identity,
             selected_calibration_snapshot=selected_calibration_snapshot,
+            attr_name=attr_name,
         )
         _require_exact_attrs_state(
             require_trusted_coordinate_attrs(
@@ -1023,6 +1115,7 @@ def stamp_crop_placement_transform_authority(
     authority_id: str,
     source_frame: BoundPixelFrameAuthority,
     target_frame: BoundPixelFrameAuthority,
+    attr_name: str = TRANSFORM_AUTHORITY_ATTR,
 ) -> BoundTransformAuthority:
     source = require_roi_pixel_frame_authority(source_frame)
     target = require_source_camera_pixel_frame_authority(target_frame)
@@ -1060,6 +1153,7 @@ def stamp_crop_placement_transform_authority(
         source_frame=source,
         target_frame=target,
         row_identity=row_identity,
+        attr_name=attr_name,
     )
 
 
@@ -1183,9 +1277,12 @@ __all__ = [
     "SOURCE_CAMERA_IMAGE_SPACE_ID",
     "STIMULUS_CANVAS_SPACE_ID",
     "TRANSFORM_AUTHORITY_ATTR",
+    "TRANSFORM_AUTHORITY_ATTRS",
     "TRANSFORM_AUTHORITY_CANONICALIZATION",
     "TRANSFORM_AUTHORITY_DIGEST_ATTR",
     "TRANSFORM_AUTHORITY_KINDS",
+    "TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR",
+    "TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR",
     "TRANSFORM_AUTHORITY_SCHEMA_ID",
     "TRANSFORM_AUTHORITY_SCHEMA_VERSION",
     "AuthorityEndpoint",

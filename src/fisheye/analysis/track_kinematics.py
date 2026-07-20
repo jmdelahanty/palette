@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import hashlib
 import json
 import math
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
@@ -79,6 +82,9 @@ from fisheye.shared.pixel_frame_authority import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.observation_coordinate_publication import (
     BoundSourceCameraPositionSurface,
+    CROP_GEOMETRY_SELECTION_OPERATION,
+    CROP_GEOMETRY_SELECTION_SCHEMA_ID,
+    CROP_GEOMETRY_SELECTION_SCHEMA_VERSION,
     load_persisted_source_camera_position_surface,
     require_bound_source_camera_position_surface,
 )
@@ -86,7 +92,11 @@ from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
 )
-from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
+from fisheye.shared.run_provenance import (
+    build_run_provenance_from_stage_record,
+    sha256_payload,
+    validate_run_provenance,
+)
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.rowset_fingerprint import (
     RowsetFingerprint,
@@ -95,6 +105,7 @@ from fisheye.shared.rowset_fingerprint import (
     resolve_rowset_edit_revision,
 )
 from fisheye.shared.zarr.chunk_profiles import (
+    geometry_preload_attrs,
     geometry_preload_chunks_for_shape,
     stamp_geometry_preload_attrs,
 )
@@ -168,6 +179,93 @@ TRACK_KINEMATICS_RUN_SCHEMA_ID = "analysis.track_kinematics_runs"
 TRACK_KINEMATICS_RUN_SCHEMA_VERSION = 1
 TRACK_KINEMATICS_METHOD_VERSION = "track_kinematics.v1"
 TRACK_KINEMATICS_ROW_AXIS = "track_samples"
+CANONICAL_OFFLINE_POSITION_SOURCE_KIND = (
+    "canonical_crop_rows_source_camera_centers"
+)
+_REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
+    {
+        "detection_path",
+        "position_source_path",
+        "position_source_rowset_path",
+        "position_source_kind",
+        "crop_run",
+        "keypoint_path",
+        "tracking_path",
+    }
+)
+_OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
+    {
+        "chaser_metrics",
+        "swim_bout_run",
+    }
+)
+_CANONICAL_ONLINE_RAW_INPUT_KEYS = frozenset(
+    {
+        "stimulus_run",
+        "chaser_index",
+        "positions_px_source_path",
+        "positions_px_coordinate_descriptor_sha256",
+    }
+)
+_CANONICAL_ONLINE_REFINED_INPUT_KEYS = (
+    _CANONICAL_ONLINE_RAW_INPUT_KEYS | {"refined_online_run"}
+)
+_CANONICAL_TRACK_BASE_PARAMETER_KEYS = frozenset(
+    {
+        "fps",
+        "smoothing_seconds",
+        "smoothing_method",
+        "smoothing_alignment",
+        "savgol_polyorder",
+        "coordinate_space",
+        "hysteresis_enabled",
+        "hysteresis_high_px",
+        "hysteresis_low_px",
+        "hysteresis_min_frames",
+        "hysteresis_band_policy",
+    }
+)
+_CANONICAL_OFFLINE_PARAMETER_KEYS = (
+    _CANONICAL_TRACK_BASE_PARAMETER_KEYS | {"distance_interpolation_seconds"}
+)
+_CANONICAL_ONLINE_PARAMETER_KEYS = _CANONICAL_TRACK_BASE_PARAMETER_KEYS
+_CANONICAL_CHASER_METRICS_INPUT_KEYS = frozenset(
+    {
+        "metrics_run",
+        "stimulus_run",
+        "chaser_index",
+        "distance_interpolation_seconds",
+        "coordinate_geometry_status",
+        "coordinate_geometry_reason_code",
+        "omitted_coordinate_fields",
+    }
+)
+_CANONICAL_CHASER_METRICS_REQUIRED_ARRAYS = frozenset(
+    {
+        "camera_frame_ids",
+        "stimulus_frame_nums",
+        "timestamp_ns",
+        "trial_state",
+        "has_offline",
+    }
+)
+_CANONICAL_CHASER_METRICS_ARRAYS = (
+    _CANONICAL_CHASER_METRICS_REQUIRED_ARRAYS
+    | {
+        "metadata_mask",
+        "angle_unsigned_deg",
+        "angle_signed_deg",
+        "heading_deg",
+    }
+)
+_CANONICAL_CHASER_OMITTED_COORDINATE_FIELDS = frozenset(
+    {
+        "distance_px",
+        "distance_mm",
+        "fish_centroid_px",
+        "chaser_position_px",
+    }
+)
 
 CAMERA_PIXEL_COORDINATE_SPACES = frozenset(
     {
@@ -206,6 +304,41 @@ TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR = "coordinate_binding_status"
 TRACK_KINEMATICS_UNBOUND_STAGE_STATUS = "unbound_numeric_stage_complete_v1"
 TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS = "publishing_canonical_binding_v1"
 TRACK_KINEMATICS_BOUND_CANONICAL_STATUS = "bound_canonical_v2"
+TRACK_MOTION_PUBLICATION_MANIFEST_ATTR = (
+    "track_motion_publication_manifest"
+)
+TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR = (
+    "track_motion_publication_manifest_sha256"
+)
+TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID = (
+    "palette.track_motion_publication_manifest"
+)
+TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION = 1
+TRACK_MOTION_PUBLICATION_COMMIT_ATTR = "track_motion_publication_commit"
+TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_ID = (
+    "palette.track_motion_publication_commit"
+)
+TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION = 1
+TRACK_MOTION_INPUT_AUTHORITY_ATTR = "track_motion_input_authority"
+TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_ID = "palette.track_motion_input_authority"
+TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_VERSION = 1
+TRACK_MOTION_AXIS_TRACK_SAMPLE = "track_sample"
+TRACK_MOTION_AXIS_TRACK_TRANSITION = "track_transition_destination_sample"
+TRACK_MOTION_AXIS_TRACK_SECOND = "track_second_bin"
+TRACK_MOTION_AXIS_TRACK_BOUT = "track_bout_event"
+TRACK_MOTION_AXIS_RUN_TRACK = "run_track"
+TRACK_MOTION_AXIS_RUN_CAMERA_SAMPLE = "run_camera_sample"
+TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR = (
+    "track_kinematics_publication_owner_uuid"
+)
+TRACK_KINEMATICS_SELECTOR_OWNER_ATTR = (
+    "track_kinematics_selector_publication_owner"
+)
+TRACK_KINEMATICS_PUBLICATION_TOMBSTONE_ATTR = (
+    "track_kinematics_publication_tombstone"
+)
+_BOUND_TRACK_MOTION_SEAL = object()
+_BOUND_TRACK_MOTION_INPUT_AUTHORITY_SEAL = object()
 
 
 @dataclass(frozen=True)
@@ -233,6 +366,193 @@ class BoundTrackPositionBindings:
             if candidate_id == int(track_id):
                 return binding
         raise KeyError(f"Track {track_id} is not present in /{self.run_group.path}.")
+
+
+@dataclass(frozen=True, init=False)
+class BoundTrackMotionInputAuthority:
+    """Exact live-source evidence accepted by the future track writer."""
+
+    archive_identity: ArchiveIdentity
+    record: Mapping[str, Any]
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        archive: ArchiveIdentity,
+        record: Mapping[str, Any],
+        _verification_seal: object | None = None,
+    ) -> None:
+        if _verification_seal is not _BOUND_TRACK_MOTION_INPUT_AUTHORITY_SEAL:
+            raise ValueError(
+                "Track-motion input authority must be minted from exact live arrays."
+            )
+        object.__setattr__(self, "archive_identity", archive)
+        object.__setattr__(self, "record", _freeze_motion_manifest(record))
+        object.__setattr__(self, "_seal", _verification_seal)
+
+
+@dataclass(frozen=True, init=False)
+class BoundTrackMotionSurface:
+    """One exact live surface authorized by the full-motion manifest."""
+
+    relative_path: str
+    axis0_domain: str
+    units: str
+    semantic_profile: str
+    operation_id: str
+    input_refs: tuple[Mapping[str, Any], ...]
+    alias_of: str | None
+    dtype: str
+    shape: tuple[int, ...]
+    content_sha256: str
+    node: Any
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        relative_path: str,
+        axis0_domain: str,
+        units: str,
+        semantic_profile: str,
+        operation_id: str,
+        input_refs: tuple[Mapping[str, Any], ...],
+        alias_of: str | None,
+        dtype: str,
+        shape: tuple[int, ...],
+        content_sha256: str,
+        node: Any,
+        _verification_seal: object | None = None,
+    ) -> None:
+        if _verification_seal is not _BOUND_TRACK_MOTION_SEAL:
+            raise ValueError(
+                "Bound track-motion surfaces must be minted by the live loader."
+            )
+        object.__setattr__(self, "relative_path", relative_path)
+        object.__setattr__(self, "axis0_domain", axis0_domain)
+        object.__setattr__(self, "units", units)
+        object.__setattr__(self, "semantic_profile", semantic_profile)
+        object.__setattr__(self, "operation_id", operation_id)
+        object.__setattr__(
+            self,
+            "input_refs",
+            tuple(_freeze_motion_manifest(value) for value in input_refs),
+        )
+        object.__setattr__(self, "alias_of", alias_of)
+        object.__setattr__(self, "dtype", str(dtype))
+        object.__setattr__(self, "shape", tuple(int(value) for value in shape))
+        object.__setattr__(self, "content_sha256", str(content_sha256))
+        object.__setattr__(self, "node", node)
+        object.__setattr__(self, "_seal", _verification_seal)
+
+
+@dataclass(frozen=True, init=False)
+class BoundTrackMotionTrack:
+    """Typed full-motion bindings for one track identity."""
+
+    track_id: int
+    position_binding: TrackPositionPublicationResult
+    surfaces: tuple[BoundTrackMotionSurface, ...]
+    track_group: zarr.Group
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        track_id: int,
+        position_binding: TrackPositionPublicationResult,
+        surfaces: tuple[BoundTrackMotionSurface, ...],
+        track_group: zarr.Group,
+        _verification_seal: object | None = None,
+    ) -> None:
+        if _verification_seal is not _BOUND_TRACK_MOTION_SEAL:
+            raise ValueError(
+                "Bound track-motion tracks must be minted by the live loader."
+            )
+        object.__setattr__(self, "track_id", int(track_id))
+        object.__setattr__(self, "position_binding", position_binding)
+        object.__setattr__(self, "surfaces", tuple(surfaces))
+        object.__setattr__(self, "track_group", track_group)
+        object.__setattr__(self, "_seal", _verification_seal)
+
+    def surface(self, relative_path: str) -> BoundTrackMotionSurface:
+        for candidate in self.surfaces:
+            if candidate.relative_path == str(relative_path):
+                return candidate
+        raise KeyError(
+            f"Motion surface {relative_path!r} is not present in "
+            f"/{self.track_group.path}."
+        )
+
+
+@dataclass(frozen=True, init=False)
+class BoundTrackMotionRun:
+    """Fresh authority for every sealed public derived-motion surface."""
+
+    position_bindings: BoundTrackPositionBindings
+    manifest_sha256: str
+    manifest: Mapping[str, Any]
+    tracks: tuple[BoundTrackMotionTrack, ...]
+    run_group: zarr.Group
+    _authoritative_root: zarr.Group
+    _expected_selector_eligible: bool
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        position_bindings: BoundTrackPositionBindings,
+        manifest_sha256: str,
+        manifest: Mapping[str, Any],
+        tracks: tuple[BoundTrackMotionTrack, ...],
+        run_group: zarr.Group,
+        authoritative_root: zarr.Group,
+        expected_selector_eligible: bool,
+        _verification_seal: object | None = None,
+    ) -> None:
+        if _verification_seal is not _BOUND_TRACK_MOTION_SEAL:
+            raise ValueError(
+                "Bound track-motion runs must be minted by the live loader."
+            )
+        object.__setattr__(self, "position_bindings", position_bindings)
+        object.__setattr__(self, "manifest_sha256", str(manifest_sha256))
+        object.__setattr__(self, "manifest", _freeze_motion_manifest(manifest))
+        object.__setattr__(self, "tracks", tuple(tracks))
+        object.__setattr__(self, "run_group", run_group)
+        object.__setattr__(self, "_authoritative_root", authoritative_root)
+        object.__setattr__(
+            self,
+            "_expected_selector_eligible",
+            bool(expected_selector_eligible),
+        )
+        object.__setattr__(self, "_seal", _verification_seal)
+
+    def track(self, track_id: int) -> BoundTrackMotionTrack:
+        for candidate in self.tracks:
+            if candidate.track_id == int(track_id):
+                return candidate
+        raise KeyError(
+            f"Track {track_id} is not present in /{self.run_group.path}."
+        )
+
+    def assert_verified(self) -> None:
+        if getattr(self, "_seal", None) is not _BOUND_TRACK_MOTION_SEAL:
+            raise ValueError("Track full-motion authority is not loader-sealed.")
+        current = _load_bound_track_motion_run_impl(
+            self._authoritative_root,
+            self.run_group,
+            expected_selector_eligible=self._expected_selector_eligible,
+        )
+        if (
+            current.manifest_sha256 != self.manifest_sha256
+            or current.run_group.path != self.run_group.path
+            or current.position_bindings.archive_identity
+            != self.position_bindings.archive_identity
+        ):
+            raise ValueError(
+                "Track full-motion authority changed after it was loaded."
+            )
 
 
 def resolve_mm_per_pixel_for_coordinate_space(
@@ -299,6 +619,51 @@ MOVEMENT_SPEED_LEVEL_NAMES = {
 }
 
 
+def _controlled_two_component_run_path(
+    value: Any,
+    *,
+    families: frozenset[str],
+    label: str,
+) -> str:
+    if not isinstance(value, str) or value != value.strip().strip("/"):
+        raise ValueError(f"{label} must be one canonical archive-relative path.")
+    parts = value.split("/")
+    if (
+        len(parts) != 2
+        or parts[0] not in families
+        or parts[1] in {"", ".", ".."}
+        or parts[1].strip() != parts[1]
+    ):
+        raise ValueError(
+            f"{label} must have one controlled run-family prefix and one leaf."
+        )
+    return value
+
+
+def _controlled_run_leaf(value: Any, *, label: str) -> str:
+    """Return one canonical run-name leaf without path interpretation."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "/" in value
+        or value in {".", ".."}
+    ):
+        raise ValueError(f"{label} must be one canonical run-name leaf.")
+    return value
+
+
+def _sha256_text(value: Any, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{label} must be one lowercase SHA-256 digest.")
+    return value
+
+
 def _track_kinematics_source_refs(
     *,
     run_type: str,
@@ -308,68 +673,94 @@ def _track_kinematics_source_refs(
 
     refs: Dict[str, Any] = {}
 
-    def _set_path(key: str, prefix: str, value: Any) -> None:
-        if value in (None, ""):
-            return
-        text = str(value)
-        refs[key] = text if "/" in text else f"{prefix}/{text}"
-
     if run_type == "online":
-        _set_path(
-            "source_refined_online_path",
-            "refined_online_runs",
-            inputs.get("refined_online_run"),
-        )
-        _set_path(
-            "source_stimulus_path",
-            "analysis/stimulus_runs",
-            inputs.get("stimulus_run"),
-        )
+        refined_run = inputs.get("refined_online_run")
+        if refined_run is not None:
+            refs["source_refined_online_path"] = (
+                "refined_online_runs/"
+                + _controlled_run_leaf(
+                    refined_run,
+                    label="refined_online_run",
+                )
+            )
+        stimulus_run = inputs.get("stimulus_run")
+        if stimulus_run is not None:
+            refs["source_stimulus_path"] = (
+                "analysis/stimulus_runs/"
+                + _controlled_run_leaf(stimulus_run, label="stimulus_run")
+            )
         positions_path = inputs.get("positions_px_source_path")
         if positions_path not in (None, ""):
-            refs["source_positions_px_path"] = str(positions_path)
+            if (
+                not isinstance(positions_path, str)
+                or positions_path != positions_path.strip().strip("/")
+                or any(
+                    part in {"", ".", ".."}
+                    for part in positions_path.split("/")
+                )
+            ):
+                raise ValueError(
+                    "positions_px_source_path must be one canonical archive-relative path."
+                )
+            refs["source_positions_px_path"] = positions_path
         descriptor_digest = inputs.get(
             "positions_px_coordinate_descriptor_sha256"
         )
         if descriptor_digest not in (None, ""):
-            refs["source_positions_px_coordinate_descriptor_sha256"] = str(
-                descriptor_digest
+            refs["source_positions_px_coordinate_descriptor_sha256"] = (
+                _sha256_text(
+                    descriptor_digest,
+                    label="positions_px_coordinate_descriptor_sha256",
+                )
             )
         if inputs.get("chaser_index") is not None:
-            refs["source_chaser_index"] = int(inputs["chaser_index"])
+            chaser_index = inputs["chaser_index"]
+            if (
+                isinstance(chaser_index, (bool, np.bool_))
+                or not isinstance(chaser_index, (int, np.integer))
+                or int(chaser_index) < 0
+            ):
+                raise ValueError("chaser_index must be one nonnegative integer.")
+            refs["source_chaser_index"] = int(chaser_index)
         return refs
 
-    for source_key in ("detection_path", "position_source_path"):
+    for source_key in (
+        "detection_path",
+        "position_source_path",
+        "position_source_rowset_path",
+    ):
         value = inputs.get(source_key)
         if value not in (None, ""):
             refs[f"source_{source_key}"] = str(value)
+    position_source_kind = inputs.get("position_source_kind")
+    if position_source_kind not in (None, ""):
+        refs["source_position_source_kind"] = str(position_source_kind)
 
-    keypoint_parent = (
-        "refined_keypoints_runs"
-        if inputs.get("keypoint_variant") == "refined"
-        else "keypoints_runs"
-    )
-    _set_path(
-        "source_keypoint_path",
-        keypoint_parent,
-        inputs.get("keypoint_run"),
-    )
-    _set_path("source_crop_path", "crop_runs", inputs.get("crop_run"))
-    _set_path(
-        "source_tracking_path",
-        "tracking_runs",
-        inputs.get("source_tracking_run"),
-    )
-    _set_path(
-        "source_arena_assignment_path",
-        "arena_assignment_runs",
-        inputs.get("source_arena_assignment_run"),
-    )
-    _set_path(
-        "source_swim_bout_path",
-        "analysis/swim_bout_runs",
-        inputs.get("swim_bout_run"),
-    )
+    keypoint_path = inputs.get("keypoint_path")
+    if keypoint_path not in (None, ""):
+        refs["source_keypoint_path"] = _controlled_two_component_run_path(
+            keypoint_path,
+            families=frozenset({"keypoints_runs", "refined_keypoints_runs"}),
+            label="keypoint_path",
+        )
+    crop_run = inputs.get("crop_run")
+    if crop_run is not None:
+        refs["source_crop_path"] = (
+            "crop_runs/" + _controlled_run_leaf(crop_run, label="crop_run")
+        )
+    tracking_path = inputs.get("tracking_path")
+    if tracking_path not in (None, ""):
+        refs["source_tracking_path"] = _controlled_two_component_run_path(
+            tracking_path,
+            families=frozenset({"tracking_runs"}),
+            label="tracking_path",
+        )
+    swim_bout_run = inputs.get("swim_bout_run")
+    if swim_bout_run is not None:
+        refs["source_swim_bout_path"] = (
+            "analysis/swim_bout_runs/"
+            + _controlled_run_leaf(swim_bout_run, label="swim_bout_run")
+        )
     return refs
 
 
@@ -955,6 +1346,112 @@ def load_canonical_offline_position_source(
     )
 
 
+def _canonical_crop_detection_rowset_path(
+    coordinates: BoundCanonicalCoordinateDescriptor,
+) -> str:
+    """Return the exact detection rowset selected by one canonical crop.
+
+    The crop publication record is already digest-bound by the canonical
+    coordinate descriptor.  Future track publication projects that exact
+    authority instead of reconstructing detection lineage from crop attrs or
+    independently selected detection runs.
+    """
+
+    coordinates = require_bound_canonical_coordinate_descriptor(coordinates)
+    matches: list[str] = []
+    expected_leaves = (
+        "instance_key",
+        "source_acquisition_frame_index",
+        "bbox_norm_coords",
+        "bbox_img_xyxy",
+        "centers_img_xy",
+    )
+    for bound_record in coordinates.lineage_records:
+        bound_record.assert_verified()
+        record = bound_record.record
+        if record.get("schema_id") != CROP_GEOMETRY_SELECTION_SCHEMA_ID:
+            continue
+        if (
+            record.get("schema_version")
+            != CROP_GEOMETRY_SELECTION_SCHEMA_VERSION
+            or record.get("operation") != CROP_GEOMETRY_SELECTION_OPERATION
+        ):
+            raise ValueError(
+                "Canonical crop position lineage uses an unsupported selection "
+                "record version or operation."
+            )
+        source_rowset = record.get("source_rowset")
+        if type(source_rowset) is not dict:
+            raise ValueError(
+                "Canonical crop selection lacks one exact source rowset record."
+            )
+        rowset_path: str | None = None
+        for leaf in expected_leaves:
+            payload = source_rowset.get(leaf)
+            array_ref = payload.get("array_ref") if type(payload) is dict else None
+            suffix = f"/{leaf}"
+            if (
+                not isinstance(array_ref, str)
+                or not array_ref.startswith("/")
+                or not array_ref.endswith(suffix)
+            ):
+                raise ValueError(
+                    "Canonical crop selection source-rowset array references are "
+                    "missing or malformed."
+                )
+            candidate = array_ref[1 : -len(suffix)]
+            if not candidate or (rowset_path is not None and candidate != rowset_path):
+                raise ValueError(
+                    "Canonical crop selection source arrays do not share one exact "
+                    "detection rowset."
+                )
+            rowset_path = candidate
+        assert rowset_path is not None
+        if not (
+            rowset_path.startswith("detect_runs/")
+            or rowset_path.startswith("refined_detect_runs/")
+        ):
+            raise ValueError(
+                "Canonical crop selection does not identify a supported future "
+                "detection rowset."
+            )
+        matches.append(rowset_path)
+    if len(matches) != 1:
+        raise ValueError(
+            "Canonical crop position lineage must contain exactly one bound crop "
+            "geometry selection record."
+        )
+    return matches[0]
+
+
+def _offline_position_source_inputs(
+    source: OfflinePositionSource,
+) -> dict[str, Any]:
+    """Persist the exact coordinate array separately from its owning rowset."""
+
+    surface = require_bound_source_camera_position_surface(source.position_surface)
+    coordinate_path = str(surface.coordinates.coordinate_node.path).strip("/")
+    rowset_path = coordinate_path.rsplit("/", 1)[0]
+    if (
+        source.geometry_path != coordinate_path
+        or source.path != rowset_path
+        or source.kind != CANONICAL_OFFLINE_POSITION_SOURCE_KIND
+        or str(getattr(source.rowset_group, "path", "")).strip("/")
+        != rowset_path
+        or archive_identity(source.rowset_group)
+        != archive_identity(surface.coordinates.coordinate_node)
+    ):
+        raise ValueError(
+            "Offline position-source metadata conflicts with the exact canonical "
+            "coordinate array or its owning rowset."
+        )
+    return {
+        "position_source_path": coordinate_path,
+        "position_source_rowset_path": rowset_path,
+        "position_source_kind": CANONICAL_OFFLINE_POSITION_SOURCE_KIND,
+    }
+
+
 def load_track_source_temporal_authority(
     source_rowset: Any,
     *,
@@ -1281,6 +1778,286 @@ def resolve_canonical_track_physical_authority(
     }
 
 
+_TRACK_SELECTOR_MISSING = object()
+
+
+@dataclass(frozen=True)
+class _TrackSelectorMutation:
+    """One exact parent-attribute mutation owned by a track publication."""
+
+    parent_path: str
+    attr_name: str
+    previous: Any = dataclasses.field(repr=False, compare=False)
+    written: Any = dataclasses.field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class DeferredTrackKinematicsSelectorActivation:
+    """Process-local receipt for selected but still-ineligible track output."""
+
+    root: Any = dataclasses.field(repr=False, compare=False)
+    expected_archive: ArchiveIdentity
+    expected_owner: Mapping[str, Any]
+    mutations: tuple[_TrackSelectorMutation, ...] = dataclasses.field(
+        repr=False,
+        compare=False,
+    )
+    _commit: Callable[..., None] = dataclasses.field(repr=False, compare=False)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self._commit(*args, **kwargs)
+
+
+def _track_publication_owner_uuid(run_group: Any) -> str:
+    raw = run_group.attrs.get(TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR)
+    if not isinstance(raw, str):
+        raise RuntimeError(
+            f"/{run_group.path} lacks its atomic track-publication owner UUID."
+        )
+    try:
+        parsed = uuid.UUID(raw)
+    except (ValueError, AttributeError) as exc:
+        raise RuntimeError(
+            f"/{run_group.path} has an invalid track-publication owner UUID."
+        ) from exc
+    if str(parsed) != raw or parsed.version != 4:
+        raise RuntimeError(
+            f"/{run_group.path} has a noncanonical track-publication owner UUID."
+        )
+    return raw
+
+
+def _resolve_owned_track_run_child(
+    root: Any,
+    *,
+    run_name: str,
+    run_type: str,
+    owner_uuid: str,
+    required: bool = True,
+) -> Any | None:
+    """Freshly resolve one run child and prove exact attempt ownership."""
+
+    try:
+        current = root["analysis"]["track_kinematics_runs"][run_type][run_name]
+    except (KeyError, TypeError):
+        if not required:
+            return None
+        raise RuntimeError(
+            f"Track publication child {run_type}/{run_name!s} disappeared."
+        )
+    expected_path = f"analysis/track_kinematics_runs/{run_type}/{run_name}"
+    if (
+        str(current.path) != expected_path
+        or current.attrs.get(TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR)
+        != owner_uuid
+    ):
+        if not required:
+            return None
+        raise RuntimeError(
+            f"Track publication child {run_type}/{run_name!s} was replaced or "
+            "lost exact attempt ownership."
+        )
+    return current
+
+
+def _track_selector_owner_record(
+    *,
+    owner_uuid: str,
+    qualified_name: str,
+) -> dict[str, Any]:
+    return {
+        "schema_id": "palette.track_kinematics_selector_publication_owner",
+        "schema_version": 1,
+        "owner_uuid": owner_uuid,
+        "qualified_run_name": qualified_name,
+    }
+
+
+def _selector_value(attrs: Any, name: str) -> Any:
+    if name not in attrs:
+        return _TRACK_SELECTOR_MISSING
+    return copy.deepcopy(attrs[name])
+
+
+def _selector_value_matches(current: Any, expected: Any) -> bool:
+    if expected is _TRACK_SELECTOR_MISSING:
+        return current is _TRACK_SELECTOR_MISSING
+    return current is not _TRACK_SELECTOR_MISSING and _track_attr_values_equal(
+        current,
+        expected,
+    )
+
+
+def _resolve_track_selector_parent(
+    root: Any,
+    parent_path: str,
+    *,
+    expected_archive: ArchiveIdentity,
+) -> Any:
+    try:
+        parent = root[parent_path]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"Track selector parent /{parent_path} disappeared during rollback."
+        ) from exc
+    if (
+        str(parent.path).strip("/") != parent_path.strip("/")
+        or archive_identity(parent) != expected_archive
+    ):
+        raise RuntimeError(
+            f"Track selector parent /{parent_path} changed path or archive."
+        )
+    return parent
+
+
+def _fresh_owned_track_selector_parent(
+    root: Any,
+    *,
+    expected_archive: ArchiveIdentity,
+    expected_owner: Mapping[str, Any],
+) -> Any | None:
+    parent = _resolve_track_selector_parent(
+        root,
+        "analysis/track_kinematics_runs",
+        expected_archive=expected_archive,
+    )
+    if not _track_attr_values_equal(
+        parent.attrs.get(TRACK_KINEMATICS_SELECTOR_OWNER_ATTR),
+        dict(expected_owner),
+    ):
+        return None
+    return parent
+
+
+def _restore_track_selector_value(attrs: Any, name: str, previous: Any) -> None:
+    """Perform one injectable selector rollback mutation."""
+
+    if previous is _TRACK_SELECTOR_MISSING:
+        if name in attrs:
+            del attrs[name]
+    else:
+        attrs[name] = copy.deepcopy(previous)
+
+
+def _restore_owned_selector_mutations(
+    root: Any,
+    mutations: Iterable[_TrackSelectorMutation],
+    *,
+    expected_archive: ArchiveIdentity,
+    expected_owner: Mapping[str, Any],
+) -> None:
+    """Restore exact mutations, rechecking ownership before every write."""
+
+    errors: list[str] = []
+    for mutation in reversed(tuple(mutations)):
+        # A one-time lease check is insufficient: another publisher can take
+        # over between rollback writes. Re-resolve both the lease parent and
+        # mutation parent for every attribute and stop on any ownership loss.
+        if (
+            _fresh_owned_track_selector_parent(
+                root,
+                expected_archive=expected_archive,
+                expected_owner=expected_owner,
+            )
+            is None
+        ):
+            return
+        parent = _resolve_track_selector_parent(
+            root,
+            mutation.parent_path,
+            expected_archive=expected_archive,
+        )
+        current = _selector_value(parent.attrs, mutation.attr_name)
+        if _selector_value_matches(current, mutation.previous):
+            continue
+        if not _selector_value_matches(current, mutation.written):
+            # An unleased or partially concurrent mutation is not ours to
+            # repair. Stop instead of composing a mixed selector state.
+            return
+
+        # Reading the attempted value may itself yield control to a hostile or
+        # remote store. Recheck the exact lease immediately before mutation,
+        # then re-resolve and compare the attempted value one final time.
+        if (
+            _fresh_owned_track_selector_parent(
+                root,
+                expected_archive=expected_archive,
+                expected_owner=expected_owner,
+            )
+            is None
+        ):
+            return
+        parent = _resolve_track_selector_parent(
+            root,
+            mutation.parent_path,
+            expected_archive=expected_archive,
+        )
+        current = _selector_value(parent.attrs, mutation.attr_name)
+        if _selector_value_matches(current, mutation.previous):
+            continue
+        if not _selector_value_matches(current, mutation.written):
+            return
+        try:
+            _restore_track_selector_value(
+                parent.attrs,
+                mutation.attr_name,
+                mutation.previous,
+            )
+            restoring_lease = (
+                mutation.parent_path == "analysis/track_kinematics_runs"
+                and mutation.attr_name == TRACK_KINEMATICS_SELECTOR_OWNER_ATTR
+            )
+            if not restoring_lease and (
+                _fresh_owned_track_selector_parent(
+                    root,
+                    expected_archive=expected_archive,
+                    expected_owner=expected_owner,
+                )
+                is None
+            ):
+                return
+            verified_parent = _resolve_track_selector_parent(
+                root,
+                mutation.parent_path,
+                expected_archive=expected_archive,
+            )
+            if not _selector_value_matches(
+                _selector_value(verified_parent.attrs, mutation.attr_name),
+                mutation.previous,
+            ):
+                errors.append(
+                    f"verify selector {mutation.attr_name!r}: persisted value differs"
+                )
+                break
+        except BaseException as exc:  # pragma: no cover - hostile store
+            errors.append(f"restore selector {mutation.attr_name!r}: {exc}")
+            break
+    if errors:
+        raise RuntimeError(
+            f"Owner-aware track selector rollback was incomplete: {errors!r}."
+        )
+
+
+def rollback_deferred_track_kinematics_selector_activation(
+    activation: DeferredTrackKinematicsSelectorActivation,
+    *,
+    root: Any | None = None,
+) -> None:
+    """Cancel only the exact selector mutations recorded by one receipt."""
+
+    if type(activation) is not DeferredTrackKinematicsSelectorActivation:
+        raise TypeError("Deferred track selector activation receipt is invalid.")
+    rollback_root = activation.root if root is None else root
+    if archive_identity(rollback_root) != activation.expected_archive:
+        raise RuntimeError("Deferred track selector rollback changed archives/stores.")
+    _restore_owned_selector_mutations(
+        rollback_root,
+        activation.mutations,
+        expected_archive=activation.expected_archive,
+        expected_owner=activation.expected_owner,
+    )
+
+
 def ensure_track_kinematics_run_group(
     root: zarr.Group,
     run_name: Optional[str],
@@ -1288,7 +2065,11 @@ def ensure_track_kinematics_run_group(
     run_type: str = "online",
     overwrite: bool = False,
 ) -> Tuple[str, zarr.Group]:
-    """Create /analysis/track_kinematics_runs/<type>/<run_name>."""
+    """Create one immutable canonical track run child.
+
+    ``overwrite`` is retained only for call-site compatibility.  Occupied
+    canonical names, including failed public tombstones, are never reused.
+    """
 
     if run_type not in {"online", "offline"}:
         raise ValueError("run_type must be 'online' or 'offline'")
@@ -1325,7 +2106,11 @@ def ensure_track_kinematics_run_group(
                     f"{qualified_name!r} (status={status!r}); publish a new immutable "
                     "run name."
                 )
-            del type_parent[run_name]
+            raise ValueError(
+                f"Refusing to overwrite failed track kinematics run "
+                f"{qualified_name!r}; failed public children are immutable "
+                "tombstones. Publish a new immutable run name."
+            )
     else:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         prefix = (
@@ -1335,15 +2120,35 @@ def ensure_track_kinematics_run_group(
         )
         run_name = f"{prefix}_{timestamp}"
 
-    run_group = type_parent.create_group(
-        run_name,
-        attributes={"stage_selector_eligible": False},
-    )
+    owner_uuid = str(uuid.uuid4())
     try:
+        qualified_name = f"{run_type}/{run_name}"
+        run_group = type_parent.create_group(
+            run_name,
+            attributes={
+                "stage_selector_eligible": False,
+                TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR: owner_uuid,
+                "palette_run_completion_contract": (
+                    "palette.zarr_run_completion.v1"
+                ),
+                RUN_COMPLETION_STATUS_ATTR: "running",
+                "palette_run_started_at_utc": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "palette_run_name": qualified_name,
+                "palette_run_stage": "track_kinematics",
+            },
+        )
         mark_run_started(
             run_group,
-            run_name=f"{run_type}/{run_name}",
+            run_name=qualified_name,
             stage="track_kinematics",
+        )
+        run_group = _resolve_owned_track_run_child(
+            root,
+            run_name=run_name,
+            run_type=run_type,
+            owner_uuid=owner_uuid,
         )
         if run_group.attrs.get("stage_selector_eligible") is not False:
             raise RuntimeError(
@@ -1351,19 +2156,66 @@ def ensure_track_kinematics_run_group(
                 "creation."
             )
     except BaseException as exc:
-        try:
-            run_group.attrs["stage_selector_eligible"] = False
-            mark_run_failed(
-                run_group,
-                parent_group=track_parent,
-                run_name=f"{run_type}/{run_name}",
-                error=str(exc),
+        rollback_errors: list[str] = []
+
+        def fresh_owned_run() -> Optional[zarr.Group]:
+            return _resolve_owned_track_run_child(
+                root,
+                run_name=run_name,
+                run_type=run_type,
+                owner_uuid=owner_uuid,
+                required=False,
             )
-        except BaseException as rollback_exc:  # pragma: no cover - hostile store
+
+        owned_run = fresh_owned_run()
+        if owned_run is not None:
+            try:
+                owned_run.attrs["stage_selector_eligible"] = False
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(f"disarm eligibility: {rollback_exc}")
+            try:
+                owned_run = fresh_owned_run()
+                if owned_run is not None:
+                    if "palette_run_completed_at_utc" in owned_run.attrs:
+                        del owned_run.attrs["palette_run_completed_at_utc"]
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(f"remove completion timestamp: {rollback_exc}")
+            try:
+                owned_run = fresh_owned_run()
+                if owned_run is not None:
+                    mark_run_failed(
+                        owned_run,
+                        parent_group=track_parent,
+                        run_name=f"{run_type}/{run_name}",
+                        error=str(exc),
+                    )
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(f"mark failed: {rollback_exc}")
+            try:
+                owned_run = fresh_owned_run()
+                if owned_run is not None:
+                    owned_run.attrs[
+                        TRACK_KINEMATICS_PUBLICATION_TOMBSTONE_ATTR
+                    ] = json_attr_safe(
+                        {
+                            "schema_id": (
+                                "palette.track_kinematics_publication_tombstone"
+                            ),
+                            "schema_version": 1,
+                            "publication_owner_uuid": owner_uuid,
+                            "qualified_run_name": f"{run_type}/{run_name}",
+                            "public_path_retained": True,
+                            "selector_eligible": False,
+                            "retry_policy": "new_immutable_run_name_required",
+                        }
+                    )
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(f"persist failed tombstone: {rollback_exc}")
+        if rollback_errors:
             raise RuntimeError(
                 "Track run creation failed and could not be left explicitly failed "
-                "and selector-ineligible."
-            ) from rollback_exc
+                f"and selector-ineligible: {rollback_errors!r}."
+            ) from exc
         raise
 
     return run_name, run_group
@@ -1375,34 +2227,135 @@ def mark_track_kinematics_run_complete(
     *,
     run_name: str,
     run_type: str,
-    validate_complete_run: Callable[[], Mapping[str, Any]],
-) -> None:
+    publication_owner_uuid: str,
+    validate_complete_run: Callable[[zarr.Group], Mapping[str, Any]],
+    defer_selector_eligibility: bool = False,
+    deferred_activation_sink: (
+        Callable[[DeferredTrackKinematicsSelectorActivation], None] | None
+    ) = None,
+) -> Optional[DeferredTrackKinematicsSelectorActivation]:
     """Validate a complete ineligible run, prepare pointers, and expose it last."""
 
+    if deferred_activation_sink is not None and not defer_selector_eligibility:
+        raise ValueError(
+            "A deferred track activation sink requires deferred selector eligibility."
+        )
     track_parent = root["analysis"]["track_kinematics_runs"]
     type_parent = track_parent[run_type]
+    expected_archive = archive_identity(root)
     qualified_name = f"{run_type}/{run_name}"
     expected_path = f"analysis/track_kinematics_runs/{qualified_name}"
     if str(run_group.path) != expected_path:
         raise ValueError(
             f"Track run path /{run_group.path} differs from /{expected_path}."
         )
+    try:
+        parsed_owner = uuid.UUID(str(publication_owner_uuid))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("Track completion requires one canonical owner UUID.") from exc
+    owner_uuid = str(parsed_owner)
+    if (
+        owner_uuid != publication_owner_uuid
+        or parsed_owner.version != 4
+    ):
+        raise ValueError("Track completion requires one canonical UUIDv4 owner.")
+    resolved_run = _resolve_owned_track_run_child(
+        root,
+        run_name=run_name,
+        run_type=run_type,
+        owner_uuid=owner_uuid,
+    )
+    assert resolved_run is not None
+    run_group = resolved_run
     if run_group.attrs.get("stage_selector_eligible") is not False:
         raise ValueError(
             "Track completion requires literal stage_selector_eligible=false."
         )
-    parent_snapshots = (
-        (track_parent.attrs, copy.deepcopy(dict(track_parent.attrs))),
-        (type_parent.attrs, copy.deepcopy(dict(type_parent.attrs))),
+    selector_mutations: list[_TrackSelectorMutation] = []
+
+    def selector_parent(parent_path: str, *, require_owned: bool) -> Any:
+        if require_owned and (
+            _fresh_owned_track_selector_parent(
+                root,
+                expected_archive=expected_archive,
+                expected_owner=selector_owner,
+            )
+            is None
+        ):
+            raise RuntimeError("Track selector ownership changed during publication.")
+        return _resolve_track_selector_parent(
+            root,
+            parent_path,
+            expected_archive=expected_archive,
+        )
+
+    def write_selector(
+        parent_path: str,
+        name: str,
+        value: Any,
+        *,
+        require_owned: bool = True,
+    ) -> None:
+        parent = selector_parent(parent_path, require_owned=require_owned)
+        previous = _selector_value(parent.attrs, name)
+        written = copy.deepcopy(value)
+        selector_mutations.append(
+            _TrackSelectorMutation(
+                parent_path=parent_path,
+                attr_name=name,
+                previous=previous,
+                written=written,
+            )
+        )
+        parent.attrs[name] = copy.deepcopy(written)
+
+    def delete_selector(parent_path: str, name: str) -> None:
+        parent = selector_parent(parent_path, require_owned=True)
+        if name not in parent.attrs:
+            return
+        previous = _selector_value(parent.attrs, name)
+        selector_mutations.append(
+            _TrackSelectorMutation(
+                parent_path=parent_path,
+                attr_name=name,
+                previous=previous,
+                written=_TRACK_SELECTOR_MISSING,
+            )
+        )
+        del parent.attrs[name]
+
+    selector_owner = _track_selector_owner_record(
+        owner_uuid=owner_uuid,
+        qualified_name=qualified_name,
     )
     try:
+        provenance = build_run_provenance_from_stage_record(
+            run_group.attrs.get("provenance", {}),
+            fallback_command="track_kinematics",
+        )
+        provenance_validation = validate_run_provenance(provenance)
+        if not provenance_validation.valid:
+            raise RuntimeError(
+                "Track completion provenance is invalid: "
+                f"{provenance_validation.errors!r}."
+            )
+        run_group = _resolve_owned_track_run_child(
+            root,
+            run_name=run_name,
+            run_type=run_type,
+            owner_uuid=owner_uuid,
+        )
+        assert run_group is not None
         mark_run_complete(
             run_group,
-            parent_group=track_parent,
+            # Parent selectors are handled below under an explicit attempt
+            # owner.  Passing the parent here would let the generic lifecycle
+            # helper clear latest_pending without ownership evidence.
+            parent_group=None,
             run_name=qualified_name,
-            run_provenance=build_run_provenance_from_stage_record(
-                run_group.attrs.get("provenance", {}),
-                fallback_command="track_kinematics",
+            run_provenance=(
+                provenance_validation.normalized
+                or dict(provenance)
             ),
         )
         if (
@@ -1413,39 +2366,285 @@ def mark_track_kinematics_run_complete(
                 "Track run did not remain complete and selector-ineligible for final "
                 "validation."
             )
-        validation = validate_complete_run()
+        sealed_motion = _seal_and_load_track_motion_run_before_selection(
+            root,
+            run_group,
+            expected_publication_owner_uuid=owner_uuid,
+        )
+        if not sealed_motion.tracks:
+            raise RuntimeError(
+                "Complete track run produced no sealed full-motion tracks."
+            )
+        resolved_run = _resolve_owned_track_run_child(
+            root,
+            run_name=run_name,
+            run_type=run_type,
+            owner_uuid=owner_uuid,
+        )
+        assert resolved_run is not None
+        validation = validate_complete_run(resolved_run)
         if not isinstance(validation, Mapping) or validation.get("valid") is not True:
             raise RuntimeError(
                 "Complete track pre-selection validation did not report valid=true: "
                 f"{validation!r}."
             )
-        track_parent.attrs["latest_complete"] = qualified_name
-        track_parent.attrs["latest"] = qualified_name
-        type_parent.attrs["latest"] = run_name
+        resolved_run = _resolve_owned_track_run_child(
+            root,
+            run_name=run_name,
+            run_type=run_type,
+            owner_uuid=owner_uuid,
+        )
+        assert resolved_run is not None
+        sealed_motion.assert_verified()
+
+        write_selector(
+            "analysis/track_kinematics_runs",
+            TRACK_KINEMATICS_SELECTOR_OWNER_ATTR,
+            selector_owner,
+            require_owned=False,
+        )
+        if (
+            _fresh_owned_track_selector_parent(
+                root,
+                expected_archive=expected_archive,
+                expected_owner=selector_owner,
+            )
+            is None
+        ):
+            raise RuntimeError("Track selector ownership was lost before publication.")
+        write_selector(
+            "analysis/track_kinematics_runs",
+            "latest_complete",
+            qualified_name,
+        )
+        write_selector(
+            "analysis/track_kinematics_runs",
+            "latest",
+            qualified_name,
+        )
+        write_selector(
+            f"analysis/track_kinematics_runs/{run_type}",
+            "latest",
+            run_name,
+        )
         attr_key = "latest_online" if run_type == "online" else "latest_offline"
-        track_parent.attrs[attr_key] = run_name
-        # Persistent publication commit point: no fallible store mutation follows.
-        run_group.attrs["stage_selector_eligible"] = True
+        write_selector(
+            "analysis/track_kinematics_runs",
+            attr_key,
+            run_name,
+        )
+        pending_parent = _fresh_owned_track_selector_parent(
+            root,
+            expected_archive=expected_archive,
+            expected_owner=selector_owner,
+        )
+        if pending_parent is None:
+            raise RuntimeError("Track selector ownership changed during publication.")
+        if pending_parent.attrs.get("latest_pending") == qualified_name:
+            delete_selector(
+                "analysis/track_kinematics_runs",
+                "latest_pending",
+            )
+        fresh_track_parent = root["analysis"]["track_kinematics_runs"]
+        if (
+            fresh_track_parent.attrs.get(TRACK_KINEMATICS_SELECTOR_OWNER_ATTR)
+            != selector_owner
+        ):
+            raise RuntimeError("Track selector ownership changed during publication.")
+        resolved_run = _resolve_owned_track_run_child(
+            root,
+            run_name=run_name,
+            run_type=run_type,
+            owner_uuid=owner_uuid,
+        )
+        assert resolved_run is not None
+        sealed_motion.assert_verified()
+        baseline_motion_manifest_sha256 = getattr(
+            sealed_motion,
+            "manifest_sha256",
+            None,
+        )
+
+        def commit_selector_eligibility(
+            commit_root: zarr.Group,
+            commit_type_parent: zarr.Group,
+            commit_run_group: zarr.Group,
+            *,
+            validate_fresh_complete_run: Callable[
+                [zarr.Group], Mapping[str, Any]
+            ],
+            expected_cluster_output_staging: Any = None,
+        ) -> None:
+            """Rebind the receipt to fresh handles and expose eligibility last."""
+
+            if (
+                archive_identity(commit_root) != expected_archive
+                or archive_identity(commit_type_parent) != expected_archive
+                or archive_identity(commit_run_group) != expected_archive
+                or str(commit_type_parent.path)
+                != f"analysis/track_kinematics_runs/{run_type}"
+                or str(commit_run_group.path) != expected_path
+                or commit_run_group.attrs.get(
+                    TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR
+                )
+                != owner_uuid
+            ):
+                raise RuntimeError(
+                    "Track eligibility commit received invalid fresh archive, "
+                    "parent, run, or owner binding."
+                )
+            fresh_track_parent = commit_root["analysis"][
+                "track_kinematics_runs"
+            ]
+            fresh_type_parent = fresh_track_parent[run_type]
+            fresh_run = _resolve_owned_track_run_child(
+                commit_root,
+                run_name=run_name,
+                run_type=run_type,
+                owner_uuid=owner_uuid,
+            )
+            assert fresh_run is not None
+            if (
+                fresh_track_parent.attrs.get(
+                    TRACK_KINEMATICS_SELECTOR_OWNER_ATTR
+                )
+                != selector_owner
+                or fresh_track_parent.attrs.get("latest_complete")
+                != qualified_name
+                or fresh_track_parent.attrs.get("latest") != qualified_name
+                or fresh_track_parent.attrs.get(attr_key) != run_name
+                or fresh_type_parent.attrs.get("latest") != run_name
+                or fresh_run.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+                != RUN_STATUS_COMPLETE
+                or fresh_run.attrs.get("stage_selector_eligible") is not False
+            ):
+                raise RuntimeError(
+                    "Track eligibility commit lost its exact completed child or "
+                    "owned selector state."
+                )
+            if (
+                expected_cluster_output_staging is not None
+                and not _track_attr_values_equal(
+                    fresh_run.attrs.get("cluster_output_staging"),
+                    expected_cluster_output_staging,
+                )
+            ):
+                raise RuntimeError(
+                    "Track eligibility commit observed different final publisher "
+                    "metadata."
+                )
+            validation = validate_fresh_complete_run(fresh_run)
+            if (
+                not isinstance(validation, Mapping)
+                or validation.get("valid") is not True
+            ):
+                raise RuntimeError(
+                    "Track eligibility commit fresh validation did not report "
+                    f"valid=true: {validation!r}."
+                )
+            fresh_motion = _seal_and_load_track_motion_run_before_selection(
+                commit_root,
+                fresh_run,
+                expected_publication_owner_uuid=owner_uuid,
+            )
+            if not fresh_motion.tracks or (
+                baseline_motion_manifest_sha256 is not None
+                and getattr(fresh_motion, "manifest_sha256", None)
+                != baseline_motion_manifest_sha256
+            ):
+                raise RuntimeError(
+                    "Track eligibility commit observed different sealed motion "
+                    "payload."
+                )
+            fresh_motion.assert_verified()
+            fresh_run = _resolve_owned_track_run_child(
+                commit_root,
+                run_name=run_name,
+                run_type=run_type,
+                owner_uuid=owner_uuid,
+            )
+            assert fresh_run is not None
+            if (
+                expected_cluster_output_staging is not None
+                and not _track_attr_values_equal(
+                    fresh_run.attrs.get("cluster_output_staging"),
+                    expected_cluster_output_staging,
+                )
+            ):
+                raise RuntimeError(
+                    "Track motion revalidation changed final publisher metadata."
+                )
+            try:
+                # Persistent publication commit point: no fallible store
+                # mutation follows on the ordinary success path.
+                fresh_run.attrs["stage_selector_eligible"] = True
+            except BaseException:
+                committed = _resolve_owned_track_run_child(
+                    commit_root,
+                    run_name=run_name,
+                    run_type=run_type,
+                    owner_uuid=owner_uuid,
+                    required=False,
+                )
+                if (
+                    committed is not None
+                    and committed.attrs.get("stage_selector_eligible") is True
+                ):
+                    return
+                raise
+
+        if defer_selector_eligibility:
+            activation = DeferredTrackKinematicsSelectorActivation(
+                root=root,
+                expected_archive=expected_archive,
+                expected_owner=copy.deepcopy(selector_owner),
+                mutations=tuple(selector_mutations),
+                _commit=commit_selector_eligibility,
+            )
+            if deferred_activation_sink is not None:
+                deferred_activation_sink(activation)
+            return activation
+        commit_selector_eligibility(
+            root,
+            type_parent,
+            resolved_run,
+            validate_fresh_complete_run=validate_complete_run,
+        )
+        return None
     except BaseException as exc:
         rollback_errors: list[str] = []
+        owned_run = _resolve_owned_track_run_child(
+            root,
+            run_name=run_name,
+            run_type=run_type,
+            owner_uuid=owner_uuid,
+            required=False,
+        )
+        if owned_run is not None:
+            try:
+                owned_run.attrs["stage_selector_eligible"] = False
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(
+                    f"disarm owned selector eligibility: {rollback_exc}"
+                )
+            try:
+                mark_run_failed(
+                    owned_run,
+                    parent_group=None,
+                    run_name=qualified_name,
+                    error=str(exc),
+                )
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(f"mark owned run failed: {rollback_exc}")
         try:
-            run_group.attrs["stage_selector_eligible"] = False
-        except BaseException as rollback_exc:  # pragma: no cover - hostile store
-            rollback_errors.append(f"disarm selector eligibility: {rollback_exc}")
-        try:
-            mark_run_failed(
-                run_group,
-                parent_group=track_parent,
-                run_name=qualified_name,
-                error=str(exc),
+            _restore_owned_selector_mutations(
+                root,
+                selector_mutations,
+                expected_archive=expected_archive,
+                expected_owner=selector_owner,
             )
         except BaseException as rollback_exc:  # pragma: no cover - hostile store
-            rollback_errors.append(f"mark failed: {rollback_exc}")
-        for attrs, snapshot in parent_snapshots:
-            try:
-                _restore_track_attrs(attrs, snapshot)
-            except BaseException as rollback_exc:  # pragma: no cover - hostile store
-                rollback_errors.append(f"restore parent attrs: {rollback_exc}")
+            rollback_errors.append(str(rollback_exc))
         if rollback_errors:
             raise RuntimeError(
                 "Track completion failed and exact publication rollback was "
@@ -1639,14 +2838,23 @@ def _compute_heading_turning(
     return delta_heading, angular_velocity, angular_speed
 
 
+def _bounded_smoothing_window(requested: int, sample_count: int) -> int:
+    """Return the exact smoothing window usable by one array domain."""
+
+    if sample_count <= 0:
+        return 0
+    return min(max(1, int(requested)), int(sample_count))
+
+
 def _smooth_acceleration_trace(acceleration_px: np.ndarray, window: int) -> np.ndarray:
     """Return a centered moving average of acceleration, ignoring NaNs."""
 
     acceleration = np.asarray(acceleration_px, dtype=np.float64)
-    if window <= 1 or acceleration.size == 0:
+    effective_window = _bounded_smoothing_window(window, int(acceleration.size))
+    if effective_window <= 1:
         return acceleration.copy()
 
-    kernel = np.ones(window, dtype=np.float64)
+    kernel = np.ones(effective_window, dtype=np.float64)
     val_mask = np.isfinite(acceleration).astype(np.float64)
     accel_values = np.nan_to_num(acceleration, nan=0.0, copy=True)
     sum_values = np.convolve(accel_values, kernel, mode="same")
@@ -1655,6 +2863,52 @@ def _smooth_acceleration_trace(acceleration_px: np.ndarray, window: int) -> np.n
     valid = count_values > 0
     smoothed[valid] = sum_values[valid] / count_values[valid]
     return smoothed
+
+
+def _smooth_heading_radians(
+    headings_deg: np.ndarray,
+    requested_window: int,
+) -> tuple[np.ndarray, int]:
+    """Circularly smooth persisted float32 headings with zero-masked gaps."""
+
+    headings = np.asarray(headings_deg, dtype=np.float32)
+    heading_radians = np.deg2rad(headings)
+    effective_window = _bounded_smoothing_window(
+        requested_window,
+        int(heading_radians.size),
+    )
+    if effective_window <= 1:
+        return np.array(heading_radians, copy=True), effective_window
+
+    finite = np.isfinite(heading_radians)
+    kernel = np.ones(effective_window, dtype=np.float64)
+    valid_weights = np.convolve(finite.astype(np.float64), kernel, mode="same")
+    # Invalid headings contribute zero weight and zero numerator.  Substituting
+    # angle zero before cosine would instead inject a spurious +X unit vector.
+    cos_values = np.where(finite, np.cos(heading_radians), 0.0)
+    sin_values = np.where(finite, np.sin(heading_radians), 0.0)
+    cos_sum = np.convolve(cos_values, kernel, mode="same")
+    sin_sum = np.convolve(sin_values, kernel, mode="same")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cos_mean = np.where(valid_weights > 0, cos_sum / valid_weights, np.nan)
+        sin_mean = np.where(valid_weights > 0, sin_sum / valid_weights, np.nan)
+    return np.arctan2(sin_mean, cos_mean), effective_window
+
+
+def _physical_values_from_pixel_peer(
+    pixel_values: np.ndarray,
+    mm_per_pixel: Optional[float],
+) -> np.ndarray:
+    """Scale one finalized pixel payload in its own persisted dtype domain."""
+
+    pixel = np.asarray(pixel_values)
+    if pixel.dtype.kind != "f":
+        raise ValueError("Physical track peers require floating-point pixels.")
+    if mm_per_pixel is None or not math.isfinite(mm_per_pixel):
+        return _nan_array(pixel.shape, dtype=pixel.dtype)
+    scale = np.asarray(mm_per_pixel, dtype=pixel.dtype)
+    with np.errstate(over="ignore", invalid="ignore"):
+        return np.asarray(pixel * scale, dtype=pixel.dtype)
 
 
 def _compute_speed_derivative(
@@ -1679,27 +2933,39 @@ def _compute_speed_derivative(
         accel_vals[valid] = delta_speed_px[valid] / delta_t[valid]
         acceleration_px[1:] = accel_vals
 
-    if pixel_to_mm is not None and np.isfinite(pixel_to_mm):
-        acceleration_mm = acceleration_px * pixel_to_mm
-    else:
-        acceleration_mm = _nan_array(acceleration_px.shape, dtype=np.float64)
-
-    post_window = max(1, int(round(fps * smooth_seconds)))
-    smoothed_acceleration_px = _smooth_acceleration_trace(acceleration_px, post_window)
-    if pixel_to_mm is not None and np.isfinite(pixel_to_mm):
-        smoothed_acceleration_mm = smoothed_acceleration_px * pixel_to_mm
-    else:
-        smoothed_acceleration_mm = _nan_array(smoothed_acceleration_px.shape, dtype=np.float64)
+    requested_post_window = max(1, int(round(fps * smooth_seconds)))
+    effective_post_window = _bounded_smoothing_window(
+        requested_post_window,
+        int(acceleration_px.size),
+    )
+    smoothed_acceleration_px = _smooth_acceleration_trace(
+        acceleration_px,
+        effective_post_window,
+    )
+    # Float32 is the public acceleration precision.  Freeze it before deriving
+    # any physical peer so writer and validator share one rounding path.
+    persisted_acceleration_px = _float32(acceleration_px)
+    persisted_smoothed_acceleration_px = _float32(smoothed_acceleration_px)
+    acceleration_mm = _physical_values_from_pixel_peer(
+        persisted_acceleration_px,
+        pixel_to_mm,
+    )
+    smoothed_acceleration_mm = _physical_values_from_pixel_peer(
+        persisted_smoothed_acceleration_px,
+        pixel_to_mm,
+    )
 
     return {
-        "acceleration_px": acceleration_px,
+        "acceleration_px": persisted_acceleration_px,
         "acceleration_mm": acceleration_mm,
-        "smoothed_acceleration_px": smoothed_acceleration_px,
+        "smoothed_acceleration_px": persisted_smoothed_acceleration_px,
         "smoothed_acceleration_mm": smoothed_acceleration_mm,
         "derivative_method": "first_difference",
         "post_smoothing_method": "moving_average",
         "post_smoothing_alignment": "centered",
-        "post_smoothing_window_frames": int(post_window),
+        "post_smoothing_window_frames": int(effective_post_window),
+        "post_smoothing_window_frames_requested": int(requested_post_window),
+        "post_smoothing_window_frames_effective": int(effective_post_window),
         "post_smoothing_window_s": float(smooth_seconds),
     }
 
@@ -1813,9 +3079,11 @@ def build_track_datasets(
 
         track_frames = frames[mask]
         coords_px = positions_px[mask]
-        headings_track = headings_deg[mask]
+        # Heading-derived public surfaces use float32.  Normalize once before
+        # validity, radians, smoothing, turning, and summaries so the writer
+        # seals against the same precision that it persists.
+        headings_track = np.asarray(headings_deg[mask], dtype=np.float32)
         kp_success_track = keypoint_success[mask]
-        detection_index = np.where(mask)[0]
         det_source_track = (
             detection_source[mask].astype(np.int8)
             if detection_source is not None
@@ -1853,7 +3121,6 @@ def build_track_datasets(
             name: values[order]
             for name, values in sample_validity.items()
         }
-        detection_indices_sorted = detection_index[order]
 
         speeds = compute_track_speed(
             track_frames.copy(),
@@ -1869,42 +3136,65 @@ def build_track_datasets(
             savgol_polyorder=savgol_polyorder,
         )
 
-        speed_raw_px = speeds.speed_raw
-        speed_filtered_px = speeds.speed_filtered
-        speed_smoothed_px = speeds.speed_smoothed
-        speed_averaged_px = speeds.speed_averaged
-        frame_path_distance_raw_px = speeds.frame_path_distance_raw
-        frame_path_distance_filtered_px = speeds.frame_path_distance_filtered
-        frame_path_distance_smoothed_px = speeds.frame_path_distance_smoothed
-        cumulative_path_px = speeds.cumulative_path_distance
-        speed_per_second_px = speeds.speed_per_second
+        # Freeze every public pixel payload before producing a physical peer.
+        # This prevents independent float64 calculations from landing on a
+        # different float32 ULP than persisted_px * persisted_scale.
+        coords_px = np.array(coords_px, copy=True, order="C")
+        speed_raw_px = _float32(speeds.speed_raw)
+        speed_filtered_px = _float32(speeds.speed_filtered)
+        speed_smoothed_px = _float32(speeds.speed_smoothed)
+        speed_averaged_px = _float32(speeds.speed_averaged)
+        frame_path_distance_raw_px = _float32(speeds.frame_path_distance_raw)
+        frame_path_distance_filtered_px = _float32(
+            speeds.frame_path_distance_filtered
+        )
+        frame_path_distance_smoothed_px = _float32(
+            speeds.frame_path_distance_smoothed
+        )
+        cumulative_path_px = _float32(speeds.cumulative_path_distance)
+        speed_per_second_px = _float32(speeds.speed_per_second)
         delta_frames = speeds.delta_frames
         delta_seconds = speeds.delta_seconds
         transition_valid = speeds.transition_valid
         transition_reason_code = speeds.transition_reason_code
 
-        if pixel_to_mm_val is not None:
-            coords_mm = coords_px * pixel_to_mm_val
-            speed_raw_mm = speed_raw_px * pixel_to_mm_val
-            speed_filtered_mm = speed_filtered_px * pixel_to_mm_val
-            speed_smoothed_mm = speed_smoothed_px * pixel_to_mm_val
-            speed_averaged_mm = speed_averaged_px * pixel_to_mm_val
-            frame_path_distance_raw_mm = frame_path_distance_raw_px * pixel_to_mm_val
-            frame_path_distance_filtered_mm = frame_path_distance_filtered_px * pixel_to_mm_val
-            frame_path_distance_smoothed_mm = frame_path_distance_smoothed_px * pixel_to_mm_val
-            cumulative_path_mm = cumulative_path_px * pixel_to_mm_val
-            speed_per_second_mm = speed_per_second_px * pixel_to_mm_val
-        else:
-            coords_mm = _nan_array(coords_px.shape)
-            speed_raw_mm = _nan_array(speed_raw_px.shape)
-            speed_filtered_mm = _nan_array(speed_filtered_px.shape)
-            speed_smoothed_mm = _nan_array(speed_smoothed_px.shape)
-            speed_averaged_mm = _nan_array(speed_averaged_px.shape)
-            frame_path_distance_raw_mm = _nan_array(frame_path_distance_raw_px.shape)
-            frame_path_distance_filtered_mm = _nan_array(frame_path_distance_filtered_px.shape)
-            frame_path_distance_smoothed_mm = _nan_array(frame_path_distance_smoothed_px.shape)
-            cumulative_path_mm = _nan_array(cumulative_path_px.shape)
-            speed_per_second_mm = _nan_array(speed_per_second_px.shape)
+        coords_mm = _physical_values_from_pixel_peer(coords_px, pixel_to_mm_val)
+        speed_raw_mm = _physical_values_from_pixel_peer(
+            speed_raw_px,
+            pixel_to_mm_val,
+        )
+        speed_filtered_mm = _physical_values_from_pixel_peer(
+            speed_filtered_px,
+            pixel_to_mm_val,
+        )
+        speed_smoothed_mm = _physical_values_from_pixel_peer(
+            speed_smoothed_px,
+            pixel_to_mm_val,
+        )
+        speed_averaged_mm = _physical_values_from_pixel_peer(
+            speed_averaged_px,
+            pixel_to_mm_val,
+        )
+        frame_path_distance_raw_mm = _physical_values_from_pixel_peer(
+            frame_path_distance_raw_px,
+            pixel_to_mm_val,
+        )
+        frame_path_distance_filtered_mm = _physical_values_from_pixel_peer(
+            frame_path_distance_filtered_px,
+            pixel_to_mm_val,
+        )
+        frame_path_distance_smoothed_mm = _physical_values_from_pixel_peer(
+            frame_path_distance_smoothed_px,
+            pixel_to_mm_val,
+        )
+        cumulative_path_mm = _physical_values_from_pixel_peer(
+            cumulative_path_px,
+            pixel_to_mm_val,
+        )
+        speed_per_second_mm = _physical_values_from_pixel_peer(
+            speed_per_second_px,
+            pixel_to_mm_val,
+        )
 
         heading_rad = np.deg2rad(headings_track)
         heading_valid = np.isfinite(heading_rad)
@@ -1928,25 +3218,19 @@ def build_track_datasets(
             fps=fps,
         )
         default_speed_derivative = speed_derivatives[DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL]
-        acceleration_px = np.asarray(default_speed_derivative["acceleration_px"], dtype=np.float64)
-        accel_mm = np.asarray(default_speed_derivative["acceleration_mm"], dtype=np.float64)
-        smoothed_accel_px = np.asarray(default_speed_derivative["smoothed_acceleration_px"], dtype=np.float64)
-        smoothed_accel_mm = np.asarray(default_speed_derivative["smoothed_acceleration_mm"], dtype=np.float64)
+        acceleration_px = _float32(default_speed_derivative["acceleration_px"])
+        accel_mm = _float32(default_speed_derivative["acceleration_mm"])
+        smoothed_accel_px = _float32(
+            default_speed_derivative["smoothed_acceleration_px"]
+        )
+        smoothed_accel_mm = _float32(
+            default_speed_derivative["smoothed_acceleration_mm"]
+        )
 
-        heading_window = max(1, int(round(fps * smooth_seconds)))
-        if heading_window > 1 and heading_rad.size > 0:
-            kernel = np.ones(heading_window, dtype=np.float64)
-            valid_weights = np.convolve(heading_valid.astype(np.float64), kernel, mode="same")
-            cos_vals = np.cos(np.where(heading_valid, heading_rad, 0.0))
-            sin_vals = np.sin(np.where(heading_valid, heading_rad, 0.0))
-            cos_sum = np.convolve(cos_vals, kernel, mode="same")
-            sin_sum = np.convolve(sin_vals, kernel, mode="same")
-            with np.errstate(invalid="ignore"):
-                cos_mean = np.where(valid_weights > 0, cos_sum / valid_weights, np.nan)
-                sin_mean = np.where(valid_weights > 0, sin_sum / valid_weights, np.nan)
-            smoothed_heading_rad = np.arctan2(sin_mean, cos_mean)
-        else:
-            smoothed_heading_rad = heading_rad.copy()
+        heading_window_requested = max(1, int(round(fps * smooth_seconds)))
+        smoothed_heading_rad, heading_window_effective = (
+            _smooth_heading_radians(headings_track, heading_window_requested)
+        )
 
         smoothed_heading_deg = np.rad2deg(smoothed_heading_rad)
 
@@ -2027,7 +3311,6 @@ def build_track_datasets(
                 if source_rows_track is not None
                 else {}
             ),
-            "detection_indices": detection_indices_sorted.astype(np.int64),
             # Coordinate publication proves an exact dtype-preserving
             # subset/reorder. Kinematic derivatives may use compact float32,
             # but the authoritative positions must retain source precision.
@@ -2078,11 +3361,54 @@ def build_track_datasets(
             "frame_path_distance_smoothed_mm": _float32(frame_path_distance_smoothed_mm),
             "cumulative_path_distance_px": _float32(cumulative_path_px),
             "cumulative_path_distance_mm": _float32(cumulative_path_mm),
-            "second_indices": seconds_per_frame,
+            # The second-domain arrays below have one row per unique elapsed
+            # second, not one row per track sample.  Persist their exact key
+            # vector rather than the per-sample floor(time_seconds) mapping.
+            "second_indices": unique_seconds,
             "speed_per_second_px": _float32(speed_per_second_px),
             "speed_per_second_mm": _float32(speed_per_second_mm),
             "heading_per_second_degrees": _float32(heading_per_second_deg),
             "heading_per_second_resultant": heading_per_second_resultant.astype(np.float32),
+            "motion_smoothing_windows": {
+                "schema_id": "palette.track_motion_smoothing_windows",
+                "schema_version": 1,
+                "distance_transition": {
+                    "alignment": smoothing_alignment,
+                    "requested_frames": int(
+                        speeds.distance_smoothing_window_frames_requested
+                    ),
+                    "effective_frames": int(
+                        speeds.distance_smoothing_window_frames_effective
+                    ),
+                },
+                "speed_sample": {
+                    "alignment": smoothing_alignment,
+                    "requested_frames": int(
+                        speeds.speed_smoothing_window_frames_requested
+                    ),
+                    "effective_frames": int(
+                        speeds.speed_smoothing_window_frames_effective
+                    ),
+                },
+                "acceleration_sample": {
+                    "alignment": "centered",
+                    "requested_frames": int(
+                        default_speed_derivative[
+                            "post_smoothing_window_frames_requested"
+                        ]
+                    ),
+                    "effective_frames": int(
+                        default_speed_derivative[
+                            "post_smoothing_window_frames_effective"
+                        ]
+                    ),
+                },
+                "heading_sample": {
+                    "alignment": "centered",
+                    "requested_frames": int(heading_window_requested),
+                    "effective_frames": int(heading_window_effective),
+                },
+            },
         }
 
         # Speed metrics for all processing levels
@@ -2576,6 +3902,7 @@ def _stage_array_payload_record(
     node: Any,
     *,
     relative_ref: str,
+    include_attrs: bool = False,
 ) -> dict[str, Any]:
     dtype = np.dtype(getattr(node, "dtype"))
     shape = tuple(int(item) for item in getattr(node, "shape"))
@@ -2591,7 +3918,7 @@ def _stage_array_payload_record(
             }
             for name, field in dtype.fields.items()
         ]
-    return {
+    record = {
         "relative_ref": relative_ref,
         "dtype": dtype.str,
         "dtype_fields": dtype_fields,
@@ -2599,6 +3926,4470 @@ def _stage_array_payload_record(
         "shape": [int(item) for item in shape],
         "content_sha256": array_payload_sha256(node),
     }
+    if include_attrs:
+        attrs = _motion_json_object(
+            dict(getattr(node, "attrs", {})),
+            label=f"/{node.path} array attrs",
+        )
+        record["attrs"] = attrs
+        record["attrs_sha256"] = _canonical_json_sha256(attrs)
+    return record
+
+
+_MOTION_RUN_DERIVATION_ATTR_NAMES = (
+    "schema_id",
+    "schema_version",
+    "method",
+    "method_version",
+    "row_axis",
+    "parameters",
+    "source_refs",
+    "inputs",
+    TRACK_MOTION_INPUT_AUTHORITY_ATTR,
+    "provenance",
+    "run_provenance",
+    "fps",
+    "smoothing_seconds",
+    "smoothing_method",
+    "smoothing_alignment",
+    "savgol_polyorder",
+    "hysteresis_enabled",
+    "hysteresis_high_px",
+    "hysteresis_low_px",
+    "hysteresis_min_frames",
+    "hysteresis_band_policy",
+    "distance_interpolation_seconds",
+    "physical_outputs_status",
+    "physical_outputs_reason_code",
+    "physical_coordinate_authority",
+    "summary",
+    "track_manifest",
+    "total_distance_px",
+    "total_distance_mm",
+    "source_fingerprint",
+    "source_lineage_hash",
+    "lineage_hash",
+    "fingerprint_status",
+    "lineage_fingerprint_schema_id",
+    "lineage_fingerprint_schema_version",
+    "lineage_fingerprint_canonicalization",
+    "lineage_payload_json",
+)
+
+_MOTION_RUN_LEGACY_COMPATIBILITY_ATTR_NAMES = frozenset(
+    {
+        "created_at_utc",
+        "coordinate_space",
+        "positions_px_source_path",
+        "positions_px_source_coordinate_descriptor_sha256",
+        "num_tracks",
+        "source_zarr",
+        "output_zarr",
+    }
+)
+_MOTION_RUN_STORAGE_ATTR_NAMES = frozenset(
+    {
+        "chunk_policy_version",
+        "storage_profile_class",
+        "storage_profile_id",
+        "storage_profile_reason",
+        "storage_profile_row_chunk",
+        "node_local_materialization",
+        "physical_storage_layout",
+    }
+)
+_MOTION_RUN_LIFECYCLE_ATTR_NAMES = frozenset(
+    {
+        "palette_run_completion_contract",
+        "palette_run_completion_status",
+        "palette_run_started_at_utc",
+        "palette_run_completed_at_utc",
+        "palette_run_name",
+        "palette_run_stage",
+        "run_provenance",
+        TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR,
+    }
+)
+_MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES = frozenset(
+    {
+        "stage_selector_eligible",
+        TRACK_MOTION_PUBLICATION_MANIFEST_ATTR,
+        TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR,
+        TRACK_MOTION_PUBLICATION_COMMIT_ATTR,
+        # The atomic materializer updates this operational receipt after the
+        # scientific publication has been sealed and validated.  It is not a
+        # scientific or coordinate authority and therefore must remain outside
+        # the immutable motion manifest.
+        "cluster_output_staging",
+    }
+)
+_MOTION_RUN_ALLOWED_ATTR_NAMES = frozenset(_MOTION_RUN_DERIVATION_ATTR_NAMES) | (
+    _MOTION_RUN_LEGACY_COMPATIBILITY_ATTR_NAMES
+    | _MOTION_RUN_STORAGE_ATTR_NAMES
+    | _MOTION_RUN_LIFECYCLE_ATTR_NAMES
+    | frozenset(
+        {
+            TRACK_KINEMATICS_STAGING_MANIFEST_ATTR,
+            TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR,
+            TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR,
+        }
+    )
+)
+
+_MOTION_ARRAY_DUPLICATE_SEMANTIC_ATTR_NAMES = frozenset(
+    {
+        "authority_scope",
+        "units",
+        "axis0_domain",
+        "semantic_profile",
+        "operation_id",
+        "input_refs",
+        "alias_of",
+        "transition_anchor",
+        "pixel_source_ref",
+        "physical_authority_sha256",
+        "physical_value_comparison",
+    }
+)
+_MOTION_ARRAY_FORBIDDEN_COORDINATE_ATTR_NAMES = frozenset(
+    {
+        "coordinate_space",
+        "space_id",
+        "origin",
+        "positive_x_direction",
+        "positive_y_direction",
+        "reference_width",
+        "reference_height",
+        "pixel_convention",
+        "transform_direction",
+    }
+)
+_MOTION_ARRAY_STORAGE_ATTR_NAMES = frozenset(
+    {
+        "chunk_policy_version",
+        "storage_profile_class",
+        "storage_profile_id",
+        "storage_profile_reason",
+        "storage_profile_row_chunk",
+    }
+)
+_MOTION_ARRAY_POSITION_ATTR_NAMES = frozenset(
+    {
+        "coordinate_descriptor",
+        "coordinate_descriptor_owner_dtype",
+        "coordinate_descriptor_sha256",
+    }
+)
+_MOTION_ARRAY_IDENTITY_ATTR_NAMES = frozenset(
+    {
+        "row_identity_contract_ref",
+        "row_identity_contract_sha256",
+        "row_identity_key",
+        "row_identity_key_sha256",
+        "semantic_role",
+        "authoritative_array_ref",
+        "canonical_consumers_must_use",
+        "source_identity_domain",
+        "nullable_target_domain",
+        "primary_row_identity",
+        "null_encoding",
+    }
+)
+_MOTION_ARRAY_ALLOWED_ATTR_NAMES = (
+    _MOTION_ARRAY_STORAGE_ATTR_NAMES
+    | _MOTION_ARRAY_POSITION_ATTR_NAMES
+    | _MOTION_ARRAY_IDENTITY_ATTR_NAMES
+    | _MOTION_ARRAY_DUPLICATE_SEMANTIC_ATTR_NAMES
+)
+
+_MOTION_ARRAY_EXTRA_ATTR_NAMES_BY_PATH = {
+    "frame_indices": frozenset(
+        {
+            "semantic_role",
+            "authoritative_array_ref",
+            "canonical_consumers_must_use",
+        }
+    ),
+    "source_instance_key": frozenset(
+        {
+            "semantic_role",
+            "source_identity_domain",
+            "nullable_target_domain",
+            "primary_row_identity",
+            "null_encoding",
+        }
+    ),
+    "track_sample_key": frozenset(
+        {
+            "row_identity_contract_ref",
+            "row_identity_contract_sha256",
+            "row_identity_key",
+            "row_identity_key_sha256",
+        }
+    ),
+    "positions_px": _MOTION_ARRAY_POSITION_ATTR_NAMES,
+    "positions_mm": _MOTION_ARRAY_POSITION_ATTR_NAMES,
+}
+
+_MOTION_TRACK_GROUP_STORAGE_ATTR_NAMES = _MOTION_ARRAY_STORAGE_ATTR_NAMES
+_MOTION_TRACK_ROOT_GROUP_ATTR_NAMES = frozenset(
+    {
+        "track_id",
+        "arena_id",
+        "num_samples",
+        "sample_validity_schema_id",
+        "sample_reason_codes",
+        "transition_validity_schema_id",
+        "transition_reason_codes",
+        "motion_smoothing_windows",
+        "summary",
+        "physical_outputs_status",
+        "physical_outputs_reason_code",
+        "physical_coordinate_authority",
+        "legacy_acceleration_source_speed_level",
+        "speed_derivatives_schema_id",
+        "row_identity_contract",
+        "row_identity_contract_sha256",
+        "track_sample_time_lineage",
+        "track_sample_time_lineage_sha256",
+        "track_position_derivation",
+        "track_position_derivation_sha256",
+    }
+)
+_MOTION_SWIM_BOUT_ROOT_ATTR_NAMES = frozenset(
+    {
+        "source_swim_bout_run",
+        "source_track_kinematics_run",
+        "source_swim_bout_track_id",
+        "source_swim_bout_candidate_id",
+        "source_swim_bout_default_signal_id",
+        "mirror_scope",
+        "default_level",
+        "layout",
+        "is_hierarchical",
+        "mirrored_fields",
+    }
+)
+_MOTION_SWIM_BOUT_LEVEL_ATTR_NAMES = frozenset(
+    {
+        "speed_level",
+        "signal_id",
+        "signal_name",
+        "signal_role",
+        "signal_source_level",
+        "source_swim_bout_path",
+        "n_bouts",
+        "mirrored_fields",
+    }
+)
+
+
+def _freeze_motion_manifest(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                str(name): _freeze_motion_manifest(child)
+                for name, child in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_motion_manifest(child) for child in value)
+    return copy.deepcopy(value)
+
+
+def _thaw_motion_manifest(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(name): _thaw_motion_manifest(child)
+            for name, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_thaw_motion_manifest(child) for child in value]
+    return copy.deepcopy(value)
+
+
+def _motion_json_object(value: Mapping[str, Any], *, label: str) -> dict[str, Any]:
+    normalized = json_attr_safe(copy.deepcopy(dict(value)))
+    if type(normalized) is not dict:
+        raise ValueError(f"{label} did not normalize to one strict JSON object.")
+    _canonical_json_sha256(normalized)
+    return normalized
+
+
+def _motion_group_attrs_sha256(group: Any) -> str:
+    return str(_motion_group_attrs_record(group)["attrs_sha256"])
+
+
+def _motion_group_attrs_record(group: Any) -> dict[str, Any]:
+    attrs = _motion_json_object(
+        dict(group.attrs),
+        label=f"/{group.path} attrs",
+    )
+    return {
+        "attrs": attrs,
+        "attrs_sha256": _canonical_json_sha256(attrs),
+    }
+
+
+def _iter_motion_group_nodes(
+    group: Any,
+    *,
+    prefix: str = "",
+) -> Iterable[tuple[str, Any]]:
+    yield prefix, group
+    group_keys = getattr(group, "group_keys", None)
+    if not callable(group_keys):
+        raise ValueError(f"/{group.path} is not a traversable persisted group.")
+    for name in sorted(str(value) for value in group_keys()):
+        relative = f"{prefix}/{name}" if prefix else name
+        yield from _iter_motion_group_nodes(group[name], prefix=relative)
+
+
+def _motion_track_ref(track_group: Any, relative_path: str) -> str:
+    return f"/{track_group.path}/{relative_path}"
+
+
+def _motion_alias_target(relative_path: str) -> str | None:
+    if relative_path == "frame_indices":
+        return "source_acquisition_frame_index"
+    if relative_path == "angular_velocity_deg_s":
+        return "angular_velocity_raw_deg_s"
+    for source_level, group_level in MOVEMENT_SPEED_LEVEL_NAMES.items():
+        for suffix in ("px", "mm"):
+            if relative_path == f"{source_level}_{suffix}":
+                return f"movement/speed/{group_level}/{suffix}"
+    for level in ("raw", "filtered", "smoothed"):
+        for suffix in ("px", "mm"):
+            if relative_path == f"frame_path_distance_{level}_{suffix}":
+                return (
+                    f"movement/speed/{level}/frame_path_distance_{suffix}"
+                )
+    for suffix in ("px", "mm"):
+        if relative_path == f"acceleration_{suffix}":
+            return (
+                "speed_derivatives/"
+                f"{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_{suffix}"
+            )
+        if relative_path == f"smoothed_acceleration_{suffix}":
+            return (
+                "speed_derivatives/"
+                f"{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/"
+                f"smoothed_acceleration_{suffix}"
+            )
+    parts = relative_path.split("/")
+    if (
+        len(parts) == 4
+        and parts[:2] == ["movement", "speed"]
+        and parts[2] in MOVEMENT_SPEED_LEVEL_NAMES.values()
+        and parts[3]
+        in {
+            "acceleration_px",
+            "acceleration_mm",
+            "smoothed_acceleration_px",
+            "smoothed_acceleration_mm",
+        }
+    ):
+        source_level = next(
+            name
+            for name, group_name in MOVEMENT_SPEED_LEVEL_NAMES.items()
+            if group_name == parts[2]
+        )
+        return f"speed_derivatives/{source_level}/{parts[3]}"
+    return None
+
+
+def _motion_pixel_peer(relative_path: str) -> str | None:
+    parts = relative_path.split("/")
+    leaf = parts[-1]
+    if leaf == "mm":
+        parts[-1] = "px"
+    elif leaf.endswith("_mm"):
+        parts[-1] = f"{leaf[:-3]}_px"
+    else:
+        return None
+    return "/".join(parts)
+
+
+def _motion_physical_peer(relative_path: str) -> str | None:
+    parts = relative_path.split("/")
+    leaf = parts[-1]
+    if leaf == "px":
+        parts[-1] = "mm"
+    elif leaf.endswith("_px"):
+        parts[-1] = f"{leaf[:-3]}_mm"
+    else:
+        return None
+    return "/".join(parts)
+
+
+def _motion_units_for_physical(pixel_units: str) -> str:
+    mapping = {
+        "px": "mm",
+        "px/s": "mm/s",
+        "px/s^2": "mm/s^2",
+    }
+    if pixel_units not in mapping:
+        raise ValueError(
+            f"Pixel units {pixel_units!r} have no controlled physical mapping."
+        )
+    return mapping[pixel_units]
+
+
+def _motion_track_surface_contract(
+    track_group: Any,
+    relative_path: str,
+    *,
+    physical_authority_sha256: str | None,
+) -> dict[str, Any]:
+    """Return controlled domain/units/derivation semantics for one array."""
+
+    run_derivation_ref = "#/run_derivation"
+    input_authority_ref = "#/input_authority/fields"
+    source_coordinate_ref = "#/source_authority/position"
+    source_time_ref = "#/source_authority/temporal"
+
+    pixel_peer = _motion_pixel_peer(relative_path)
+    if pixel_peer is not None:
+        if physical_authority_sha256 is None:
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} is physical but the run "
+                "has no exact physical authority."
+            )
+        pixel = _motion_track_surface_contract(
+            track_group,
+            pixel_peer,
+            physical_authority_sha256=physical_authority_sha256,
+        )
+        alias_of = _motion_alias_target(relative_path)
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": pixel["axis0_domain"],
+            "units": _motion_units_for_physical(str(pixel["units"])),
+            "semantic_profile": str(pixel["semantic_profile"]).replace(
+                ".pixel.", ".physical."
+            ),
+            "operation_id": (
+                "exact_alias_v1"
+                if alias_of is not None
+                else "scale_by_exact_physical_mm_per_pixel_v1"
+            ),
+            "input_refs": (
+                [_motion_track_ref(track_group, alias_of)]
+                if alias_of is not None
+                else [_motion_track_ref(track_group, pixel_peer)]
+            )
+            + ["#/physical_authority"],
+            "alias_of": (
+                _motion_track_ref(track_group, alias_of)
+                if alias_of is not None
+                else None
+            ),
+            "pixel_source_ref": _motion_track_ref(track_group, pixel_peer),
+            "physical_authority_sha256": physical_authority_sha256,
+            "physical_value_comparison": {
+                "mode": "dtype_exact_after_multiply_mm_per_pixel_v1",
+                "rtol": 0.0,
+                "atol": 0.0,
+                "nan_policy": "same_mask",
+                "infinity_policy": "same_sign_mask",
+            },
+        }
+
+    def ref(name: str) -> str:
+        return _motion_track_ref(track_group, name)
+
+    track_id_ref = f"/{track_group.path}@track_id"
+    sample_specs: dict[str, tuple[str, str, str, list[str]]] = {
+        "track_sample_key": (
+            "identifier_pair",
+            "palette.track_motion.track_sample_key.v1",
+            "build_track_sample_key_v1",
+            [ref("source_acquisition_frame_index"), f"/{track_group.path}@track_id"],
+        ),
+        "source_acquisition_frame_index": (
+            "frame_index",
+            "palette.track_motion.source_acquisition_frame.v1",
+            "exact_source_row_temporal_subset_v1",
+            [ref("source_row_index"), source_time_ref],
+        ),
+        "source_frame_interpolation": (
+            "interpolation_record",
+            "palette.track_motion.source_frame_interpolation.v1",
+            "exact_source_row_temporal_subset_v1",
+            [ref("source_row_index"), source_time_ref],
+        ),
+        "source_instance_key": (
+            "instance_key",
+            "palette.track_motion.source_instance_lineage.v1",
+            "exact_nullable_source_instance_subset_v1",
+            [ref("source_row_index"), source_time_ref],
+        ),
+        "source_row_index": (
+            "row_index",
+            "palette.track_motion.source_row_index.v1",
+            "selected_source_row_index_v1",
+            [source_coordinate_ref, source_time_ref],
+        ),
+        "time_seconds": (
+            "s",
+            "palette.track_motion.sample_time.v1",
+            "acquisition_frame_divide_fps_v1",
+            [ref("source_acquisition_frame_index"), run_derivation_ref],
+        ),
+        "positions_px": (
+            "px",
+            "palette.track_motion.pixel.position_xy.v1",
+            "exact_subset_reorder_v1",
+            [source_coordinate_ref, ref("source_row_index")],
+        ),
+        "heading_degrees": (
+            "deg",
+            "palette.track_motion.heading_degrees.v1",
+            "float32_source_heading_subset_reorder_v1",
+            [
+                ref("source_row_index"),
+                f"{input_authority_ref}/heading_degrees",
+            ],
+        ),
+        "heading_radians": (
+            "rad",
+            "palette.track_motion.heading_radians.v1",
+            "degrees_to_radians_v1",
+            [ref("heading_degrees")],
+        ),
+        "smoothed_heading_degrees": (
+            "deg",
+            "palette.track_motion.smoothed_heading_degrees.v1",
+            "radians_to_degrees_v1",
+            [ref("smoothed_heading_radians")],
+        ),
+        "smoothed_heading_radians": (
+            "rad",
+            "palette.track_motion.smoothed_heading_radians.v1",
+            "circular_temporal_smoothing_v1",
+            [ref("heading_radians"), run_derivation_ref],
+        ),
+        "keypoint_success": (
+            "bool",
+            "palette.track_motion.keypoint_success.v1",
+            "exact_source_validity_subset_reorder_v1",
+            [
+                ref("source_row_index"),
+                f"{input_authority_ref}/keypoint_success",
+            ],
+        ),
+        "detection_source": (
+            "source_code",
+            "palette.track_motion.detection_source.v1",
+            "exact_source_or_default_code_subset_v1",
+            [
+                ref("source_row_index"),
+                f"{input_authority_ref}/detection_source",
+            ],
+        ),
+        "sample_observed": (
+            "bool",
+            "palette.track_motion.sample_observed.v1",
+            "assigned_track_identity_test_v1",
+            [track_id_ref, f"{input_authority_ref}/track_id"],
+        ),
+        "sample_valid": (
+            "bool",
+            "palette.track_motion.sample_valid.v1",
+            "track_sample_validity_v1",
+            [
+                ref("sample_observed"),
+                ref("source_observed"),
+                ref("keypoint_usable"),
+                ref("position_finite"),
+            ],
+        ),
+        "source_observed": (
+            "bool",
+            "palette.track_motion.source_observed.v1",
+            "detection_source_observed_test_v1",
+            [ref("detection_source")],
+        ),
+        "keypoint_usable": (
+            "bool",
+            "palette.track_motion.keypoint_usable.v1",
+            "track_sample_validity_v1",
+            [ref("keypoint_success"), ref("heading_degrees")],
+        ),
+        "position_finite": (
+            "bool",
+            "palette.track_motion.position_finite.v1",
+            "finite_xy_test_v1",
+            [ref("positions_px")],
+        ),
+        "heading_usable": (
+            "bool",
+            "palette.track_motion.heading_usable.v1",
+            "finite_heading_test_v1",
+            [ref("heading_degrees"), ref("keypoint_success")],
+        ),
+        "sample_reason_code": (
+            "reason_code",
+            "palette.track_motion.sample_reason_code.v1",
+            "track_sample_validity_reason_v1",
+            [
+                ref("sample_valid"),
+                ref("sample_observed"),
+                ref("source_observed"),
+                ref("position_finite"),
+                ref("heading_usable"),
+                ref("keypoint_success"),
+            ],
+        ),
+        "cumulative_path_distance_px": (
+            "px",
+            "palette.track_motion.pixel.cumulative_path_distance.v1",
+            "cumulative_valid_path_distance_v1",
+            [ref("movement/speed/smoothed/frame_path_distance_px")],
+        ),
+    }
+    if relative_path == "frame_indices":
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_SAMPLE,
+            "units": "frame_index",
+            "semantic_profile": "palette.track_motion.frame_indices_compatibility.v1",
+            "operation_id": "exact_alias_v1",
+            "input_refs": [ref("source_acquisition_frame_index")],
+            "alias_of": ref("source_acquisition_frame_index"),
+        }
+    if relative_path in sample_specs:
+        units, profile, operation, inputs = sample_specs[relative_path]
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_SAMPLE,
+            "units": units,
+            "semantic_profile": profile,
+            "operation_id": operation,
+            "input_refs": inputs,
+            "alias_of": None,
+        }
+
+    transition_specs: dict[str, tuple[str, str, str, list[str]]] = {
+        "delta_heading_degrees": (
+            "deg",
+            "palette.track_motion.delta_heading.v1",
+            "wrapped_heading_difference_v1",
+            [
+                ref("heading_degrees"),
+                ref("delta_seconds"),
+                ref("transition_valid"),
+                ref("sample_valid"),
+            ],
+        ),
+        "angular_velocity_raw_deg_s": (
+            "deg/s",
+            "palette.track_motion.angular_velocity_raw.v1",
+            "heading_delta_divide_delta_seconds_v1",
+            [ref("delta_heading_degrees"), ref("delta_seconds")],
+        ),
+        "angular_speed_raw_deg_s": (
+            "deg/s",
+            "palette.track_motion.angular_speed_raw.v1",
+            "absolute_value_v1",
+            [ref("angular_velocity_raw_deg_s")],
+        ),
+        "delta_heading_smoothed_degrees": (
+            "deg",
+            "palette.track_motion.delta_heading_smoothed.v1",
+            "wrapped_heading_difference_v1",
+            [
+                ref("smoothed_heading_degrees"),
+                ref("delta_seconds"),
+                ref("transition_valid"),
+                ref("sample_valid"),
+            ],
+        ),
+        "angular_velocity_smoothed_deg_s": (
+            "deg/s",
+            "palette.track_motion.angular_velocity_smoothed.v1",
+            "heading_delta_divide_delta_seconds_v1",
+            [ref("delta_heading_smoothed_degrees"), ref("delta_seconds")],
+        ),
+        "angular_speed_smoothed_deg_s": (
+            "deg/s",
+            "palette.track_motion.angular_speed_smoothed.v1",
+            "absolute_value_v1",
+            [ref("angular_velocity_smoothed_deg_s")],
+        ),
+        "delta_frames": (
+            "frame",
+            "palette.track_motion.transition_delta_frames.v1",
+            "acquisition_frame_difference_v1",
+            [ref("source_acquisition_frame_index")],
+        ),
+        "delta_seconds": (
+            "s",
+            "palette.track_motion.transition_delta_seconds.v1",
+            "frame_delta_divide_fps_v1",
+            [ref("delta_frames"), run_derivation_ref],
+        ),
+        "transition_valid": (
+            "bool",
+            "palette.track_motion.transition_valid.v1",
+            "track_transition_validity_v1",
+            [ref("delta_frames"), ref("delta_seconds"), ref("positions_px")],
+        ),
+        "transition_reason_code": (
+            "reason_code",
+            "palette.track_motion.transition_reason_code.v1",
+            "track_transition_validity_reason_v1",
+            [
+                ref("transition_valid"),
+                ref("delta_frames"),
+                ref("delta_seconds"),
+                ref("positions_px"),
+            ],
+        ),
+    }
+    if relative_path == "angular_velocity_deg_s":
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+            "units": "deg/s",
+            "semantic_profile": "palette.track_motion.angular_velocity_compatibility.v1",
+            "operation_id": "exact_alias_v1",
+            "input_refs": [ref("angular_velocity_raw_deg_s")],
+            "alias_of": ref("angular_velocity_raw_deg_s"),
+        }
+    if relative_path in transition_specs:
+        units, profile, operation, inputs = transition_specs[relative_path]
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+            "units": units,
+            "semantic_profile": profile,
+            "operation_id": operation,
+            "input_refs": inputs,
+            "alias_of": None,
+            "transition_anchor": "destination_track_sample",
+        }
+
+    for source_level, group_level in MOVEMENT_SPEED_LEVEL_NAMES.items():
+        grouped_px = f"movement/speed/{group_level}/px"
+        if relative_path == grouped_px:
+            upstream = {
+                "speed_raw": [
+                    ref("movement/speed/raw/frame_path_distance_px"),
+                    ref("delta_seconds"),
+                ],
+                "speed_filtered": [
+                    ref("movement/speed/filtered/frame_path_distance_px"),
+                    ref("delta_seconds"),
+                ],
+                "speed_smoothed": [
+                    ref("movement/speed/smoothed/frame_path_distance_px"),
+                    ref("delta_seconds"),
+                ],
+                "speed_averaged": [ref("movement/speed/smoothed/px"), run_derivation_ref],
+            }[source_level]
+            operation = {
+                "speed_raw": "euclidean_displacement_over_delta_seconds_v1",
+                "speed_filtered": "hysteresis_filter_v1",
+                "speed_smoothed": "temporal_smoothing_v1",
+                "speed_averaged": "temporal_average_v1",
+            }[source_level]
+            return {
+                "authority_scope": "public_derived_motion",
+                "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+                "units": "px/s",
+                "semantic_profile": f"palette.track_motion.pixel.{source_level}.v1",
+                "operation_id": operation,
+                "input_refs": upstream,
+                "alias_of": None,
+                "transition_anchor": "destination_track_sample",
+            }
+        flat_px = f"{source_level}_px"
+        if relative_path == flat_px:
+            target = ref(grouped_px)
+            return {
+                "authority_scope": "public_derived_motion",
+                "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+                "units": "px/s",
+                "semantic_profile": f"palette.track_motion.pixel.{source_level}_compatibility.v1",
+                "operation_id": "exact_alias_v1",
+                "input_refs": [target],
+                "alias_of": target,
+                "transition_anchor": "destination_track_sample",
+            }
+
+    for level in ("raw", "filtered", "smoothed"):
+        grouped_path = f"movement/speed/{level}/frame_path_distance_px"
+        if relative_path == grouped_path:
+            inputs = {
+                "raw": [ref("positions_px"), ref("transition_valid")],
+                "filtered": [
+                    ref("movement/speed/raw/frame_path_distance_px"),
+                    run_derivation_ref,
+                ],
+                "smoothed": [
+                    ref("movement/speed/filtered/frame_path_distance_px"),
+                    ref("transition_valid"),
+                    run_derivation_ref,
+                ],
+            }[level]
+            return {
+                "authority_scope": "public_derived_motion",
+                "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+                "units": "px",
+                "semantic_profile": f"palette.track_motion.pixel.frame_path_distance_{level}.v1",
+                "operation_id": {
+                    "raw": "valid_euclidean_displacement_v1",
+                    "filtered": "hysteresis_filter_v1",
+                    "smoothed": "temporal_smoothing_v1",
+                }[level],
+                "input_refs": inputs,
+                "alias_of": None,
+                "transition_anchor": "destination_track_sample",
+            }
+        flat_path = f"frame_path_distance_{level}_px"
+        if relative_path == flat_path:
+            target = ref(grouped_path)
+            return {
+                "authority_scope": "public_derived_motion",
+                "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+                "units": "px",
+                "semantic_profile": f"palette.track_motion.pixel.frame_path_distance_{level}_compatibility.v1",
+                "operation_id": "exact_alias_v1",
+                "input_refs": [target],
+                "alias_of": target,
+                "transition_anchor": "destination_track_sample",
+            }
+
+    parts = relative_path.split("/")
+    if (
+        len(parts) == 3
+        and parts[0] == "speed_derivatives"
+        and parts[1] in SPEED_DERIVATIVE_LEVELS
+        and parts[2]
+        in {"acceleration_px", "smoothed_acceleration_px"}
+    ):
+        smoothed = parts[2].startswith("smoothed_")
+        acceleration_ref = ref(
+            f"speed_derivatives/{parts[1]}/acceleration_px"
+        )
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+            "units": "px/s^2",
+            "semantic_profile": (
+                "palette.track_motion.pixel.smoothed_acceleration.v1"
+                if smoothed
+                else "palette.track_motion.pixel.acceleration.v1"
+            ),
+            "operation_id": (
+                "temporal_smoothing_v1"
+                if smoothed
+                else "speed_difference_over_delta_seconds_v1"
+            ),
+            "input_refs": (
+                [acceleration_ref, run_derivation_ref]
+                if smoothed
+                else [ref(f"{parts[1]}_px"), ref("delta_seconds")]
+            ),
+            "alias_of": None,
+            "transition_anchor": "destination_track_sample",
+        }
+    if (
+        len(parts) == 4
+        and parts[:2] == ["movement", "speed"]
+        and parts[2] in MOVEMENT_SPEED_LEVEL_NAMES.values()
+        and parts[3]
+        in {"acceleration_px", "smoothed_acceleration_px"}
+    ):
+        source_level = next(
+            name
+            for name, group_name in MOVEMENT_SPEED_LEVEL_NAMES.items()
+            if group_name == parts[2]
+        )
+        target = ref(f"speed_derivatives/{source_level}/{parts[3]}")
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+            "units": "px/s^2",
+            "semantic_profile": "palette.track_motion.pixel.acceleration_group_alias.v1",
+            "operation_id": "exact_alias_v1",
+            "input_refs": [target],
+            "alias_of": target,
+            "transition_anchor": "destination_track_sample",
+        }
+    if relative_path in {"acceleration_px", "smoothed_acceleration_px"}:
+        target_relative = _motion_alias_target(relative_path)
+        assert target_relative is not None
+        target = ref(target_relative)
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_TRANSITION,
+            "units": "px/s^2",
+            "semantic_profile": "palette.track_motion.pixel.acceleration_flat_alias.v1",
+            "operation_id": "exact_alias_v1",
+            "input_refs": [target],
+            "alias_of": target,
+            "transition_anchor": "destination_track_sample",
+        }
+
+    second_specs: dict[str, tuple[str, str, str, list[str]]] = {
+        "second_indices": (
+            "second_index",
+            "palette.track_motion.second_bin_identity.v1",
+            "unique_floor_time_second_bins_v1",
+            [ref("source_acquisition_frame_index"), run_derivation_ref],
+        ),
+        "speed_per_second_px": (
+            "px/s",
+            "palette.track_motion.pixel.speed_per_second.v1",
+            "aggregate_speed_by_second_v1",
+            [
+                ref("movement/speed/smoothed/frame_path_distance_px"),
+                ref("delta_seconds"),
+                ref("second_indices"),
+                ref("source_acquisition_frame_index"),
+                run_derivation_ref,
+            ],
+        ),
+        "heading_per_second_degrees": (
+            "deg",
+            "palette.track_motion.heading_per_second.v1",
+            "circular_heading_mean_by_second_v1",
+            [
+                ref("heading_radians"),
+                ref("second_indices"),
+                ref("source_acquisition_frame_index"),
+                run_derivation_ref,
+            ],
+        ),
+        "heading_per_second_resultant": (
+            "dimensionless",
+            "palette.track_motion.heading_resultant_per_second.v1",
+            "circular_heading_resultant_by_second_v1",
+            [
+                ref("heading_radians"),
+                ref("second_indices"),
+                ref("source_acquisition_frame_index"),
+                run_derivation_ref,
+            ],
+        ),
+    }
+    if relative_path in second_specs:
+        units, profile, operation, inputs = second_specs[relative_path]
+        return {
+            "authority_scope": "public_derived_motion",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_SECOND,
+            "units": units,
+            "semantic_profile": profile,
+            "operation_id": operation,
+            "input_refs": inputs,
+            "alias_of": None,
+        }
+
+    if relative_path.startswith("swim_bouts/"):
+        leaf = relative_path.rsplit("/", 1)[-1]
+        units = "field_native"
+        if leaf.endswith("_px"):
+            units = "px"
+        elif leaf.endswith("_mm"):
+            units = "mm"
+        elif leaf.endswith("_s") or "time" in leaf:
+            units = "s"
+        return {
+            "authority_scope": "sealed_auxiliary_not_motion_public",
+            "axis0_domain": TRACK_MOTION_AXIS_TRACK_BOUT,
+            "units": units,
+            "semantic_profile": "palette.track_motion.mirrored_swim_bout_field.v1",
+            "operation_id": "exact_external_swim_bout_mirror_v1",
+            "input_refs": [
+                f"/{track_group.path}/swim_bouts@source_swim_bout_run"
+            ],
+            "alias_of": None,
+        }
+
+    raise ValueError(
+        f"/{track_group.path}/{relative_path} is not in the controlled full-motion "
+        "surface vocabulary."
+    )
+
+
+def _expected_motion_track_surface_paths(*, include_physical: bool) -> set[str]:
+    paths = {
+        "frame_indices",
+        "track_sample_key",
+        "source_acquisition_frame_index",
+        "source_frame_interpolation",
+        "source_instance_key",
+        "source_row_index",
+        "time_seconds",
+        "positions_px",
+        "heading_degrees",
+        "heading_radians",
+        "delta_heading_degrees",
+        "angular_velocity_deg_s",
+        "angular_velocity_raw_deg_s",
+        "angular_speed_raw_deg_s",
+        "delta_heading_smoothed_degrees",
+        "angular_velocity_smoothed_deg_s",
+        "angular_speed_smoothed_deg_s",
+        "smoothed_heading_degrees",
+        "smoothed_heading_radians",
+        "keypoint_success",
+        "detection_source",
+        "sample_observed",
+        "sample_valid",
+        "source_observed",
+        "keypoint_usable",
+        "position_finite",
+        "heading_usable",
+        "sample_reason_code",
+        "delta_frames",
+        "delta_seconds",
+        "transition_valid",
+        "transition_reason_code",
+        "speed_raw_px",
+        "speed_filtered_px",
+        "speed_smoothed_px",
+        "speed_averaged_px",
+        "acceleration_px",
+        "smoothed_acceleration_px",
+        "frame_path_distance_raw_px",
+        "frame_path_distance_filtered_px",
+        "frame_path_distance_smoothed_px",
+        "cumulative_path_distance_px",
+        "second_indices",
+        "speed_per_second_px",
+        "heading_per_second_degrees",
+        "heading_per_second_resultant",
+    }
+    for source_level, group_level in MOVEMENT_SPEED_LEVEL_NAMES.items():
+        paths.add(f"speed_derivatives/{source_level}/acceleration_px")
+        paths.add(
+            f"speed_derivatives/{source_level}/smoothed_acceleration_px"
+        )
+        paths.add(f"movement/speed/{group_level}/px")
+        paths.add(f"movement/speed/{group_level}/acceleration_px")
+        paths.add(
+            f"movement/speed/{group_level}/smoothed_acceleration_px"
+        )
+        if group_level != "averaged":
+            paths.add(
+                f"movement/speed/{group_level}/frame_path_distance_px"
+            )
+    if include_physical:
+        physical = {
+            _motion_physical_peer(path)
+            for path in paths
+            if _motion_physical_peer(path) is not None
+        }
+        paths.update(str(path) for path in physical if path is not None)
+    return paths
+
+
+def _motion_run_array_contract(
+    run_group: Any,
+    relative_path: str,
+) -> dict[str, Any]:
+    def ref(name: str) -> str:
+        return f"/{run_group.path}/{name}"
+    if relative_path == "track_ids":
+        return {
+            "authority_scope": "run_track_inventory",
+            "axis0_domain": TRACK_MOTION_AXIS_RUN_TRACK,
+            "units": "track_id",
+            "semantic_profile": "palette.track_motion.track_inventory.v1",
+            "operation_id": "sorted_unique_track_inventory_v1",
+            "input_refs": ["#/input_authority/fields/track_id", "#/tracks"],
+        }
+    if relative_path == "track_arena_ids":
+        return {
+            "authority_scope": "run_track_inventory",
+            "axis0_domain": TRACK_MOTION_AXIS_RUN_TRACK,
+            "units": "arena_id",
+            "semantic_profile": "palette.track_motion.track_arena_identity.v1",
+            "operation_id": "exact_track_to_arena_mapping_v1",
+            "input_refs": [
+                ref("track_ids"),
+                "#/input_authority/fields/arena_id",
+                "#/input_authority/arena_inventory",
+            ],
+        }
+    camera_specs = {
+        "camera_frame_ids": ("frame_index", "camera_frame_identity"),
+        "stimulus_frame_nums": ("frame_index", "stimulus_frame_mapping"),
+        "timestamp_ns": ("ns", "camera_timestamp"),
+        "trial_state": ("state_code", "stimulus_trial_state"),
+        "metadata_mask": ("bool", "metadata_interpolation_mask"),
+        "angle_unsigned_deg": ("deg", "chaser_angle_unsigned"),
+        "angle_signed_deg": ("deg", "chaser_angle_signed"),
+        "heading_deg": ("deg", "chaser_heading"),
+        "has_offline": ("bool", "chaser_offline_presence"),
+    }
+    if relative_path in camera_specs:
+        units, semantic = camera_specs[relative_path]
+        return {
+            "authority_scope": "sealed_run_auxiliary_not_track_motion_public",
+            "axis0_domain": TRACK_MOTION_AXIS_RUN_CAMERA_SAMPLE,
+            "units": units,
+            "semantic_profile": f"palette.track_motion.{semantic}.v1",
+            "operation_id": "exact_chaser_metrics_projection_v1",
+            "input_refs": [
+                "#/run_derivation/record/inputs/chaser_metrics"
+            ],
+        }
+    raise ValueError(
+        f"Run-root array {relative_path!r} is outside the controlled motion-run "
+        "inventory."
+    )
+
+
+def _validate_track_parameter_inventory(
+    *,
+    run_type: str,
+    parameters: Mapping[str, Any],
+) -> None:
+    expected = (
+        _CANONICAL_OFFLINE_PARAMETER_KEYS
+        if run_type == "offline"
+        else _CANONICAL_ONLINE_PARAMETER_KEYS
+    )
+    missing = sorted(set(expected) - set(parameters))
+    unsupported = sorted(set(parameters) - set(expected))
+    if missing or unsupported:
+        raise ValueError(
+            f"Canonical {run_type} track parameter inventory is not closed "
+            f"(missing={missing!r}, unsupported={unsupported!r})."
+        )
+
+
+def _validate_chaser_metrics_input(
+    run_group: Any,
+    value: Any,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("chaser_metrics must be one closed persisted object.")
+    missing = sorted(_CANONICAL_CHASER_METRICS_INPUT_KEYS - set(value))
+    unsupported = sorted(set(value) - _CANONICAL_CHASER_METRICS_INPUT_KEYS)
+    if missing or unsupported:
+        raise ValueError(
+            "Canonical chaser_metrics input inventory is not closed "
+            f"(missing={missing!r}, unsupported={unsupported!r})."
+        )
+    _controlled_run_leaf(value["metrics_run"], label="chaser_metrics.metrics_run")
+    _controlled_run_leaf(
+        value["stimulus_run"],
+        label="chaser_metrics.stimulus_run",
+    )
+    chaser_index = value["chaser_index"]
+    if (
+        isinstance(chaser_index, (bool, np.bool_))
+        or not isinstance(chaser_index, (int, np.integer))
+        or int(chaser_index) < 0
+    ):
+        raise ValueError("chaser_metrics.chaser_index must be nonnegative int.")
+    try:
+        interpolation_seconds = float(value["distance_interpolation_seconds"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "chaser_metrics.distance_interpolation_seconds must be finite and nonnegative."
+        ) from exc
+    if not np.isfinite(interpolation_seconds) or interpolation_seconds < 0:
+        raise ValueError(
+            "chaser_metrics.distance_interpolation_seconds must be finite and nonnegative."
+        )
+    omitted = value["omitted_coordinate_fields"]
+    if (
+        not isinstance(omitted, list)
+        or omitted != sorted(set(omitted))
+        or any(
+            not isinstance(name, str)
+            or name not in _CANONICAL_CHASER_OMITTED_COORDINATE_FIELDS
+            for name in omitted
+        )
+    ):
+        raise ValueError(
+            "chaser_metrics.omitted_coordinate_fields must be one sorted controlled list."
+        )
+    status = value["coordinate_geometry_status"]
+    reason = value["coordinate_geometry_reason_code"]
+    if status == "omitted_untyped_legacy_chaser_metrics_v1":
+        if (
+            not omitted
+            or reason != "LEGACY_METRICS_LACK_SEALED_COORDINATE_AUTHORITY"
+        ):
+            raise ValueError(
+                "Omitted legacy chaser geometry requires its exact reason and field list."
+            )
+    elif status == "not_present":
+        if omitted or reason != "NONE":
+            raise ValueError(
+                "Absent chaser geometry must use an empty field list and reason NONE."
+            )
+    else:
+        raise ValueError("chaser_metrics.coordinate_geometry_status is unsupported.")
+    live_arrays = {str(name) for name in run_group.array_keys()}
+    missing_arrays = sorted(_CANONICAL_CHASER_METRICS_REQUIRED_ARRAYS - live_arrays)
+    if missing_arrays:
+        raise ValueError(
+            "chaser_metrics is claimed without its exact sealed auxiliary arrays "
+            f"(missing={missing_arrays!r})."
+        )
+
+
+def _validate_offline_auxiliary_inputs(
+    run_group: Any,
+    inputs: Mapping[str, Any],
+) -> None:
+    chaser_metrics = inputs.get("chaser_metrics")
+    live_arrays = {str(name) for name in run_group.array_keys()}
+    live_chaser_arrays = live_arrays & set(_CANONICAL_CHASER_METRICS_ARRAYS)
+    if chaser_metrics is None:
+        if live_chaser_arrays:
+            raise ValueError(
+                "Canonical run publishes chaser auxiliary arrays without one closed "
+                "chaser_metrics input."
+            )
+    else:
+        _validate_chaser_metrics_input(run_group, chaser_metrics)
+
+    swim_bout_run = inputs.get("swim_bout_run")
+    if swim_bout_run is not None:
+        _controlled_run_leaf(swim_bout_run, label="swim_bout_run")
+    tracks_parent = run_group["tracks"] if "tracks" in run_group else None
+    if tracks_parent is None:
+        raise ValueError("Track run lacks its exact tracks group.")
+    has_mirrors = any(
+        "swim_bouts" in tracks_parent[name]
+        for name in tracks_parent.group_keys()
+    )
+    if (swim_bout_run is None) != (not has_mirrors):
+        raise ValueError(
+            "swim_bout_run and persisted mirrored swim-bout surfaces must be present together."
+        )
+
+
+def _validate_online_input_inventory(
+    *,
+    method: Any,
+    inputs: Mapping[str, Any],
+    source_path: str,
+) -> None:
+    if method == "track_kinematics_online":
+        expected = _CANONICAL_ONLINE_RAW_INPUT_KEYS
+        refined = False
+    elif method == "track_kinematics_online_refined":
+        expected = _CANONICAL_ONLINE_REFINED_INPUT_KEYS
+        refined = True
+    else:
+        raise ValueError("Canonical online track method is unsupported.")
+    missing = sorted(set(expected) - set(inputs))
+    unsupported = sorted(set(inputs) - set(expected))
+    if missing or unsupported:
+        raise ValueError(
+            "Canonical online track input inventory is not closed "
+            f"(missing={missing!r}, unsupported={unsupported!r})."
+        )
+    stimulus_run = _controlled_run_leaf(
+        inputs["stimulus_run"],
+        label="stimulus_run",
+    )
+    if refined:
+        refined_run = _controlled_run_leaf(
+            inputs["refined_online_run"],
+            label="refined_online_run",
+        )
+        expected_source_prefix = f"refined_online_runs/{refined_run}/"
+    else:
+        expected_source_prefix = f"analysis/stimulus_runs/{stimulus_run}/"
+    if not source_path.startswith(expected_source_prefix):
+        raise ValueError(
+            "Online declared run inputs do not own the exact sealed position source."
+        )
+    # Reuse the source-ref builder for strict chaser-index, path, and digest grammar.
+    _track_kinematics_source_refs(run_type="online", inputs=inputs)
+
+
+def _motion_run_derivation_record(
+    run_group: Any,
+    positions: BoundTrackPositionBindings,
+) -> dict[str, Any]:
+    record = {
+        name: copy.deepcopy(run_group.attrs[name])
+        for name in _MOTION_RUN_DERIVATION_ATTR_NAMES
+        if name in run_group.attrs
+    }
+    required = {
+        "schema_id",
+        "schema_version",
+        "method",
+        "method_version",
+        "row_axis",
+        "parameters",
+        "source_refs",
+        "inputs",
+        "provenance",
+        "run_provenance",
+    }
+    missing = sorted(required - set(record))
+    if missing:
+        raise ValueError(
+            "Track run lacks exact derivation attrs required for full-motion "
+            f"publication: {missing!r}."
+        )
+    if not isinstance(record["parameters"], Mapping) or not isinstance(
+        record["source_refs"], Mapping
+    ) or not isinstance(record["inputs"], Mapping):
+        raise ValueError(
+            "Track motion parameters/source_refs/inputs must be persisted objects."
+        )
+    parameters = record["parameters"]
+    inputs = record["inputs"]
+    if "physical_calibration" in parameters:
+        raise ValueError(
+            "Canonical track parameters must not duplicate the typed physical "
+            "coordinate authority."
+        )
+    provenance = record["provenance"]
+    if (
+        not isinstance(provenance, Mapping)
+        or provenance.get("stage") != "track_kinematics"
+        or not _track_attr_values_equal(provenance.get("parameters"), parameters)
+        or not _track_attr_values_equal(provenance.get("inputs"), inputs)
+    ):
+        raise ValueError(
+            "Track motion stage provenance parameters or inputs conflict with the "
+            "canonical derivation mappings."
+        )
+    run_provenance = record["run_provenance"]
+    run_provenance_validation = validate_run_provenance(
+        run_provenance if isinstance(run_provenance, Mapping) else None
+    )
+    if (
+        not run_provenance_validation.valid
+        or not isinstance(run_provenance, Mapping)
+        or not _track_attr_values_equal(run_provenance.get("params"), parameters)
+        or not _track_attr_values_equal(
+            run_provenance.get("input_run_ids"),
+            inputs,
+        )
+        or run_provenance.get("config_hash") != sha256_payload(parameters)
+    ):
+        raise ValueError(
+            "Track motion finalization provenance conflicts with canonical "
+            "parameters or inputs."
+        )
+    for duplicate_name in (
+        "fps",
+        "smoothing_seconds",
+        "smoothing_method",
+        "smoothing_alignment",
+        "savgol_polyorder",
+        "hysteresis_enabled",
+        "hysteresis_high_px",
+        "hysteresis_low_px",
+        "hysteresis_min_frames",
+        "hysteresis_band_policy",
+        "distance_interpolation_seconds",
+    ):
+        if duplicate_name in record and (
+            duplicate_name not in parameters
+            or not _track_attr_values_equal(
+                record[duplicate_name],
+                parameters[duplicate_name],
+            )
+        ):
+            raise ValueError(
+                f"Track motion root {duplicate_name} conflicts with canonical "
+                "parameters."
+            )
+    path_parts = str(getattr(run_group, "path", "")).strip("/").split("/")
+    if (
+        len(path_parts) != 4
+        or path_parts[:2] != ["analysis", "track_kinematics_runs"]
+        or path_parts[2] not in {"offline", "online"}
+    ):
+        raise ValueError("Track motion run path does not identify one canonical scope.")
+    run_type = path_parts[2]
+    _validate_track_parameter_inventory(
+        run_type=run_type,
+        parameters=parameters,
+    )
+    if run_type == "offline":
+        if record["method"] != "track_kinematics_offline":
+            raise ValueError("Canonical offline track method is unsupported.")
+        required_inputs = set(_REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS)
+        allowed_inputs = required_inputs | set(
+            _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS
+        )
+        missing_inputs = sorted(required_inputs - set(inputs))
+        unsupported_inputs = sorted(set(inputs) - allowed_inputs)
+        if missing_inputs or unsupported_inputs:
+            raise ValueError(
+                "Canonical offline track input inventory is not closed "
+                f"(missing={missing_inputs!r}, unsupported={unsupported_inputs!r})."
+            )
+        _validate_offline_auxiliary_inputs(run_group, inputs)
+    expected_refs = _track_kinematics_source_refs(
+        run_type=run_type,
+        inputs=inputs,
+    )
+    if not _track_attr_values_equal(record["source_refs"], expected_refs):
+        raise ValueError(
+            "Track motion source_refs are not the exact mechanical projection of inputs."
+        )
+    source = positions.source_positions
+    source_path = str(source.coordinate_node.path).strip("/")
+    if run_type == "offline":
+        if (
+            record["source_refs"].get("source_position_source_kind")
+            != CANONICAL_OFFLINE_POSITION_SOURCE_KIND
+        ):
+            raise ValueError(
+                "Offline position source kind must identify canonical crop-row "
+                "source-camera centers."
+            )
+        if record["source_refs"].get("source_position_source_path") != source_path:
+            raise ValueError(
+                "Offline declared position source is not the exact sealed position "
+                "coordinate array."
+            )
+        declared_rowset = record["source_refs"].get(
+            "source_position_source_rowset_path"
+        )
+        expected_rowset = str(source.row_identity.rowset_path).strip("/")
+        if (
+            not isinstance(declared_rowset, str)
+            or not declared_rowset
+            or declared_rowset != expected_rowset
+            or source_path.rsplit("/", 1)[0] != expected_rowset
+        ):
+            raise ValueError(
+                "Offline declared position rowset is required and must be the "
+                "exact row-identity owner of the sealed position coordinate array."
+            )
+        if record["source_refs"].get("source_crop_path") != expected_rowset:
+            raise ValueError(
+                "Offline crop_run does not identify the exact sealed position "
+                "rowset."
+            )
+        exact_detection_path = _canonical_crop_detection_rowset_path(source)
+        if (
+            record["source_refs"].get("source_detection_path")
+            != exact_detection_path
+        ):
+            raise ValueError(
+                "Offline detection_path does not identify the exact detection "
+                "rowset bound by the canonical crop selection."
+            )
+    else:
+        _validate_online_input_inventory(
+            method=record["method"],
+            inputs=inputs,
+            source_path=source_path,
+        )
+        if (
+            record["source_refs"].get("source_positions_px_path") != source_path
+            or record["source_refs"].get(
+                "source_positions_px_coordinate_descriptor_sha256"
+            )
+            != source.descriptor.digest()
+        ):
+            raise ValueError(
+                "Online declared position path or descriptor digest differs from "
+                "the exact sealed position coordinate array."
+            )
+    normalized = _motion_json_object(
+        record,
+        label=f"/{run_group.path} motion derivation",
+    )
+    return {
+        "record": normalized,
+        "record_sha256": _canonical_json_sha256(normalized),
+    }
+
+
+def _motion_source_authority_record(
+    positions: BoundTrackPositionBindings,
+) -> dict[str, Any]:
+    source = positions.source_positions
+    temporal = positions.source_temporal_authority
+    node = source.coordinate_node
+    return {
+        "position": {
+            "array_ref": f"/{node.path}",
+            "dtype": np.dtype(node.dtype).str,
+            "shape": [int(value) for value in node.shape],
+            "content_sha256": array_payload_sha256(node),
+            "coordinate_descriptor_sha256": source.descriptor.digest(),
+            "row_identity_ref": source.row_identity.record_ref,
+            "row_identity_sha256": source.row_identity.record_sha256,
+        },
+        "temporal": {
+            "record_ref": temporal.record_ref,
+            "record_sha256": temporal.record_sha256,
+        },
+    }
+
+
+def _motion_input_array_record(node: Any) -> dict[str, Any]:
+    path = str(getattr(node, "path", "")).strip("/")
+    if not path or any(part in {"", ".", ".."} for part in path.split("/")):
+        raise ValueError("Track-motion input arrays require canonical archive paths.")
+    dtype = np.dtype(getattr(node, "dtype"))
+    shape = tuple(int(value) for value in getattr(node, "shape"))
+    if dtype.hasobject:
+        raise ValueError(f"/{path} uses an unsupported object dtype.")
+    return {
+        "array_ref": f"/{path}",
+        "dtype": dtype.str,
+        "shape": [int(value) for value in shape],
+        "content_sha256": array_payload_sha256(node),
+    }
+
+
+def _motion_input_child(group: Any, name: str) -> Any | None:
+    try:
+        return group[name]
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
+def _motion_parent_path(node: Any) -> str:
+    path = str(getattr(node, "path", "")).strip("/")
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
+def _motion_exact_sibling_ref(node: Any, leaf_name: str) -> str:
+    """Return the only accepted path for a controlled sibling input leaf."""
+
+    if (
+        not isinstance(leaf_name, str)
+        or not leaf_name
+        or "/" in leaf_name
+        or leaf_name in {".", ".."}
+    ):
+        raise ValueError("Track-motion sibling leaf name is invalid.")
+    parent = _motion_parent_path(node)
+    return f"/{parent}/{leaf_name}" if parent else f"/{leaf_name}"
+
+
+def _motion_optional_input_node(
+    authoritative_root: Any,
+    expected_ref: str,
+) -> Any | None:
+    """Resolve one optional canonical input path and distinguish absence from aliasing."""
+
+    if (
+        not isinstance(expected_ref, str)
+        or not expected_ref.startswith("/")
+        or any(part in {"", ".", ".."} for part in expected_ref[1:].split("/"))
+    ):
+        raise ValueError(f"Track-motion optional input ref {expected_ref!r} is invalid.")
+    node = authoritative_root
+    try:
+        for part in expected_ref[1:].split("/"):
+            node = node[part]
+    except (KeyError, TypeError, AttributeError):
+        return None
+    live_ref = f"/{str(getattr(node, 'path', '')).strip('/')}"
+    if live_ref != expected_ref or archive_identity(node) != archive_identity(
+        authoritative_root
+    ):
+        raise ValueError(
+            f"Track-motion sibling {expected_ref!r} resolved to another node or archive."
+        )
+    return node
+
+
+def _motion_optional_exact_sibling(
+    authoritative_root: Any,
+    source_node: Any,
+    leaf_name: str,
+) -> Any | None:
+    """Resolve one exact sibling without treating a detached lookalike as absence."""
+
+    return _motion_optional_input_node(
+        authoritative_root,
+        _motion_exact_sibling_ref(source_node, leaf_name),
+    )
+
+
+def _motion_selected_keypoint_usability_node(
+    authoritative_root: Any,
+    keypoint_sibling: Any,
+) -> tuple[str | None, Any | None]:
+    """Resolve the first live usability leaf under the controlled writer priority."""
+
+    for name in KEYPOINT_USABILITY_DATASET_CANDIDATES:
+        node = _motion_optional_exact_sibling(
+            authoritative_root,
+            keypoint_sibling,
+            name,
+        )
+        if node is not None:
+            return name, node
+    return None, None
+
+
+def _motion_input_array_field(
+    node: Any,
+    *,
+    row_alignment: str,
+    output_dtype: str,
+) -> dict[str, Any]:
+    return {
+        "source_kind": "array",
+        "row_alignment": row_alignment,
+        "output_dtype": np.dtype(output_dtype).str,
+        "array": _motion_input_array_record(node),
+    }
+
+
+def _motion_generated_field(
+    *,
+    generator_id: str,
+    row_count: int,
+    output_dtype: str,
+    value: Any | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "source_kind": "generated",
+        "generator_id": generator_id,
+        "output_dtype": np.dtype(output_dtype).str,
+        "shape": [int(row_count)],
+    }
+    if value is not None:
+        record["value"] = value
+    return record
+
+
+def build_track_motion_input_authority(
+    authoritative_root: Any,
+    *,
+    source_positions: BoundCanonicalCoordinateDescriptor,
+    mode: str,
+    heading_node: Any | None = None,
+    keypoint_usability_node: Any | None = None,
+    keypoint_row_key_node: Any | None = None,
+    tracking_group: Any | None = None,
+    detection_source_node: Any | None = None,
+    generated_track_id: int | None = None,
+) -> BoundTrackMotionInputAuthority:
+    """Bind exact row-aligned inputs used to derive one future motion run.
+
+    Offline inputs must prove keypoint and tracking row alignment through exact
+    instance-key payloads.  Online inputs may use explicitly named deterministic
+    generators for values that have no upstream array (single track id,
+    keypoint usability, and missing headings/detection codes).
+    """
+
+    if mode not in {"offline_exact_sources_v1", "online_exact_or_generated_v1"}:
+        raise ValueError(f"Unsupported track-motion input authority mode {mode!r}.")
+    source_positions = require_bound_canonical_coordinate_descriptor(
+        source_positions
+    )
+    root_archive = archive_identity(authoritative_root)
+    if root_archive != archive_identity(source_positions.coordinate_node):
+        raise ValueError(
+            "Track-motion input authority and selected positions must belong to "
+            "the same exact archive."
+        )
+    source_row_count = int(source_positions.row_identity.leading_dimension)
+    if tuple(int(value) for value in source_positions.coordinate_node.shape) != (
+        source_row_count,
+        2,
+    ):
+        raise ValueError(
+            "Track-motion source positions must contain one point_xy per source row."
+        )
+    position_key_node = source_positions.row_identity._key_array_node
+    if archive_identity(position_key_node) != root_archive:
+        raise ValueError("Track-motion source row key belongs to another archive.")
+    position_key_values = np.array(position_key_node[:], copy=True, order="C")
+    if position_key_values.shape != (source_row_count,):
+        raise ValueError("Track-motion source row key length is inconsistent.")
+
+    fields: dict[str, Any] = {}
+    keypoint_alignment: dict[str, Any]
+    if mode == "offline_exact_sources_v1":
+        if heading_node is None or keypoint_row_key_node is None:
+            raise ValueError(
+                "Offline track motion requires exact heading and keypoint row-key arrays."
+            )
+        for node in (heading_node, keypoint_row_key_node):
+            if archive_identity(node) != root_archive:
+                raise ValueError("Offline keypoint evidence belongs to another archive.")
+        keypoint_key_values = np.array(
+            keypoint_row_key_node[:], copy=True, order="C"
+        )
+        if (
+            keypoint_key_values.dtype != position_key_values.dtype
+            or keypoint_key_values.shape != position_key_values.shape
+            or not np.array_equal(keypoint_key_values, position_key_values)
+        ):
+            raise ValueError(
+                "Offline keypoint row identity does not exactly equal the selected "
+                "position row identity."
+            )
+        keypoint_alignment = {
+            "mode": "exact_row_key_equality_v1",
+            "position_row_key": _motion_input_array_record(position_key_node),
+            "keypoint_row_key": _motion_input_array_record(
+                keypoint_row_key_node
+            ),
+        }
+        if tuple(int(value) for value in heading_node.shape) != (
+            source_row_count,
+        ):
+            raise ValueError("Offline heading array is not source-row aligned.")
+        fields["heading_degrees"] = _motion_input_array_field(
+            heading_node,
+            row_alignment="keypoint_exact_row_key_equality_v1",
+            output_dtype="<f4",
+        )
+        selected_usability_name, selected_usability_node = (
+            _motion_selected_keypoint_usability_node(
+                authoritative_root,
+                heading_node,
+            )
+        )
+        if keypoint_usability_node is not None:
+            if archive_identity(keypoint_usability_node) != root_archive:
+                raise ValueError(
+                    "Offline keypoint-usability evidence belongs to another archive."
+                )
+            expected_usability_ref = (
+                _motion_exact_sibling_ref(heading_node, selected_usability_name)
+                if selected_usability_name is not None
+                else None
+            )
+            observed_usability_ref = (
+                f"/{str(getattr(keypoint_usability_node, 'path', '')).strip('/')}"
+            )
+            if (
+                selected_usability_node is None
+                or observed_usability_ref != expected_usability_ref
+            ):
+                raise ValueError(
+                    "Offline keypoint usability must be the exact first available "
+                    "controlled usability leaf from the selected keypoint run."
+                )
+            if tuple(int(value) for value in keypoint_usability_node.shape) != (
+                source_row_count,
+            ):
+                raise ValueError(
+                    "Offline keypoint-usability array is not source-row aligned."
+                )
+            fields["keypoint_success"] = _motion_input_array_field(
+                keypoint_usability_node,
+                row_alignment="keypoint_exact_row_key_equality_v1",
+                output_dtype="|b1",
+            )
+        else:
+            if selected_usability_node is not None:
+                raise ValueError(
+                    f"Offline {selected_usability_name} exists on the selected "
+                    "keypoint run and cannot be replaced by implicit_all_true."
+                )
+            fields["keypoint_success"] = _motion_generated_field(
+                generator_id="all_true_v1",
+                row_count=source_row_count,
+                output_dtype="|b1",
+                value=True,
+            )
+    else:
+        if keypoint_row_key_node is not None or keypoint_usability_node is not None:
+            raise ValueError(
+                "Online track motion uses its selected position rowset and explicit "
+                "generators, not offline keypoint evidence."
+            )
+        keypoint_alignment = {"mode": "selected_position_rowset_v1"}
+        if heading_node is None:
+            if (
+                _motion_optional_exact_sibling(
+                    authoritative_root,
+                    source_positions.coordinate_node,
+                    "visual_angle_deg",
+                )
+                is not None
+            ):
+                raise ValueError(
+                    "Online visual_angle_deg exists on the selected position rowset "
+                    "and cannot be replaced by a generated heading."
+                )
+            fields["heading_degrees"] = _motion_generated_field(
+                generator_id="all_nan_float32_v1",
+                row_count=source_row_count,
+                output_dtype="<f4",
+            )
+        else:
+            if archive_identity(heading_node) != root_archive:
+                raise ValueError("Online heading evidence belongs to another archive.")
+            if (
+                _motion_parent_path(heading_node)
+                != _motion_parent_path(source_positions.coordinate_node)
+                or f"/{str(getattr(heading_node, 'path', '')).strip('/')}"
+                != _motion_exact_sibling_ref(
+                    source_positions.coordinate_node,
+                    "visual_angle_deg",
+                )
+                or tuple(int(value) for value in heading_node.shape)
+                != (source_row_count,)
+            ):
+                raise ValueError(
+                    "Online heading must be the exact visual_angle_deg sibling of "
+                    "the selected position surface with the same row count."
+                )
+            fields["heading_degrees"] = _motion_input_array_field(
+                heading_node,
+                row_alignment="selected_position_rowset_sibling_v1",
+                output_dtype="<f4",
+            )
+        fields["keypoint_success"] = _motion_generated_field(
+            generator_id="all_true_v1",
+            row_count=source_row_count,
+            output_dtype="|b1",
+            value=True,
+        )
+
+    tracking_alignment: dict[str, Any]
+    arena_inventory: dict[str, Any] | None = None
+    if tracking_group is not None:
+        if mode != "offline_exact_sources_v1" or generated_track_id is not None:
+            raise ValueError("Exact tracking arrays are valid only for offline authority.")
+        if archive_identity(tracking_group) != root_archive:
+            raise ValueError("Tracking evidence belongs to another archive.")
+        tracking_track_ids = _motion_input_child(tracking_group, "track_ids")
+        tracking_keys = _motion_input_child(tracking_group, "instance_key")
+        if tracking_track_ids is None or tracking_keys is None:
+            raise ValueError(
+                "Future offline track motion requires tracking track_ids and "
+                "instance_key arrays."
+            )
+        raw_tracking_keys = np.array(tracking_keys[:], copy=True, order="C")
+        if (
+            raw_tracking_keys.dtype != position_key_values.dtype
+            or raw_tracking_keys.shape != position_key_values.shape
+            or np.unique(raw_tracking_keys).shape[0] != source_row_count
+            or np.unique(position_key_values).shape[0] != source_row_count
+        ):
+            raise ValueError(
+                "Tracking and position instance-key arrays must be equal-length, "
+                "unique, and dtype-identical."
+            )
+        tracking_order = np.argsort(raw_tracking_keys, kind="stable")
+        position_order = np.argsort(position_key_values, kind="stable")
+        if not np.array_equal(
+            raw_tracking_keys[tracking_order],
+            position_key_values[position_order],
+        ):
+            raise ValueError(
+                "Tracking instance-key set differs from the selected position rowset."
+            )
+        position_to_tracking = np.empty(source_row_count, dtype=np.int64)
+        position_to_tracking[position_order] = tracking_order.astype(
+            np.int64, copy=False
+        )
+        tracking_alignment = {
+            "mode": "instance_key_exact_set_reorder_v1",
+            "position_instance_key": _motion_input_array_record(
+                position_key_node
+            ),
+            "tracking_instance_key": _motion_input_array_record(tracking_keys),
+            "position_to_tracking_row_dtype": position_to_tracking.dtype.str,
+            "position_to_tracking_row_shape": [source_row_count],
+            "position_to_tracking_row_sha256": identity_array_content_sha256(
+                position_to_tracking
+            ),
+        }
+        if tuple(int(value) for value in tracking_track_ids.shape) != (
+            source_row_count,
+        ):
+            raise ValueError("Tracking track_ids is not aligned to tracking rows.")
+        fields["track_id"] = _motion_input_array_field(
+            tracking_track_ids,
+            row_alignment="tracking_instance_key_reorder_v1",
+            output_dtype="<i8",
+        )
+        tracking_arena_ids = _motion_input_child(tracking_group, "arena_ids")
+        if tracking_arena_ids is not None:
+            if tuple(int(value) for value in tracking_arena_ids.shape) != (
+                source_row_count,
+            ):
+                raise ValueError("Tracking arena_ids is not aligned to tracking rows.")
+            fields["arena_id"] = _motion_input_array_field(
+                tracking_arena_ids,
+                row_alignment="tracking_instance_key_reorder_v1",
+                output_dtype="<i8",
+            )
+        else:
+            fields["arena_id"] = _motion_generated_field(
+                generator_id="unavailable_v1",
+                row_count=source_row_count,
+                output_dtype="<i8",
+            )
+        present = _motion_input_child(tracking_group, "track_ids_present")
+        track_arenas = _motion_input_child(tracking_group, "track_arena_ids")
+        if (present is None) != (track_arenas is None):
+            raise ValueError(
+                "Tracking arena inventory requires both track_ids_present and "
+                "track_arena_ids."
+            )
+        if present is not None and track_arenas is not None:
+            if tuple(present.shape) != tuple(track_arenas.shape):
+                raise ValueError("Tracking arena inventory arrays disagree in shape.")
+            arena_inventory = {
+                "track_ids_present": _motion_input_array_record(present),
+                "track_arena_ids": _motion_input_array_record(track_arenas),
+            }
+    else:
+        if mode != "online_exact_or_generated_v1" or generated_track_id is None:
+            raise ValueError(
+                "Online track motion requires one explicit generated track id."
+            )
+        if isinstance(generated_track_id, (bool, np.bool_)) or int(
+            generated_track_id
+        ) < 0:
+            raise ValueError("Generated online track id must be a nonnegative integer.")
+        tracking_alignment = {"mode": "generated_single_track_v1"}
+        fields["track_id"] = _motion_generated_field(
+            generator_id="constant_int_v1",
+            row_count=source_row_count,
+            output_dtype="<i8",
+            value=int(generated_track_id),
+        )
+        fields["arena_id"] = _motion_generated_field(
+            generator_id="unavailable_v1",
+            row_count=source_row_count,
+            output_dtype="<i8",
+        )
+
+    if detection_source_node is None:
+        if (
+            _motion_optional_exact_sibling(
+                authoritative_root,
+                source_positions.coordinate_node,
+                "detection_source",
+            )
+            is not None
+        ):
+            raise ValueError(
+                "detection_source exists on the selected position rowset and "
+                "cannot be replaced by a generated value."
+            )
+        fields["detection_source"] = _motion_generated_field(
+            generator_id="constant_int_v1",
+            row_count=source_row_count,
+            output_dtype="|i1",
+            value=0,
+        )
+    else:
+        if (
+            archive_identity(detection_source_node) != root_archive
+            or _motion_parent_path(detection_source_node)
+            != _motion_parent_path(source_positions.coordinate_node)
+            or f"/{str(getattr(detection_source_node, 'path', '')).strip('/')}"
+            != _motion_exact_sibling_ref(
+                source_positions.coordinate_node,
+                "detection_source",
+            )
+            or tuple(int(value) for value in detection_source_node.shape)
+            != (source_row_count,)
+        ):
+            raise ValueError(
+                "Detection-source evidence must be the exact detection_source "
+                "sibling of the selected position surface."
+            )
+        fields["detection_source"] = _motion_input_array_field(
+            detection_source_node,
+            row_alignment="selected_position_rowset_sibling_v1",
+            output_dtype="|i1",
+        )
+
+    record = _motion_json_object(
+        {
+            "schema_id": TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_ID,
+            "schema_version": TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_VERSION,
+            "mode": mode,
+            "source_row_count": source_row_count,
+            "position_row_identity": {
+                "record_ref": source_positions.row_identity.record_ref,
+                "record_sha256": source_positions.row_identity.record_sha256,
+                "key_array": _motion_input_array_record(position_key_node),
+            },
+            "keypoint_alignment": keypoint_alignment,
+            "tracking_alignment": tracking_alignment,
+            "fields": fields,
+            "arena_inventory": arena_inventory,
+        },
+        label="track-motion input authority",
+    )
+    return BoundTrackMotionInputAuthority(
+        archive=root_archive,
+        record=record,
+        _verification_seal=_BOUND_TRACK_MOTION_INPUT_AUTHORITY_SEAL,
+    )
+
+
+def _resolve_motion_input_node(authoritative_root: Any, array_ref: Any) -> Any:
+    if (
+        not isinstance(array_ref, str)
+        or not array_ref.startswith("/")
+        or any(part in {"", ".", ".."} for part in array_ref[1:].split("/"))
+    ):
+        raise ValueError(f"Track-motion input array ref {array_ref!r} is invalid.")
+    node = authoritative_root
+    try:
+        for part in array_ref[1:].split("/"):
+            node = node[part]
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(
+            f"Track-motion input array {array_ref!r} is unavailable."
+        ) from exc
+    if f"/{str(getattr(node, 'path', '')).strip('/')}" != array_ref:
+        raise ValueError(
+            f"Track-motion input array {array_ref!r} resolved to another node."
+        )
+    if archive_identity(node) != archive_identity(authoritative_root):
+        raise ValueError(
+            f"Track-motion input array {array_ref!r} belongs to another archive."
+        )
+    return node
+
+
+def _validate_motion_input_array_record(
+    authoritative_root: Any,
+    value: Any,
+    *,
+    label: str,
+) -> tuple[Any, np.ndarray]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be one exact input-array record.")
+    record = dict(value)
+    if set(record) != {"array_ref", "dtype", "shape", "content_sha256"}:
+        raise ValueError(f"{label} has an unsupported input-array record shape.")
+    node = _resolve_motion_input_node(
+        authoritative_root,
+        record.get("array_ref"),
+    )
+    live = _motion_input_array_record(node)
+    if not _track_attr_values_equal(record, live):
+        raise ValueError(
+            f"{label} dtype, shape, path, or payload changed after publication."
+        )
+    return node, np.array(node[:], copy=True, order="C")
+
+
+def _motion_input_field_values(
+    authoritative_root: Any,
+    field: Any,
+    *,
+    label: str,
+    source_row_count: int,
+    position_to_tracking: np.ndarray | None,
+) -> np.ndarray | None:
+    if not isinstance(field, Mapping):
+        raise ValueError(f"{label} must be one controlled input field.")
+    source_kind = field.get("source_kind")
+    try:
+        output_dtype = np.dtype(field.get("output_dtype"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} output dtype is invalid.") from exc
+    if output_dtype.hasobject:
+        raise ValueError(f"{label} output dtype is unsupported.")
+    if source_kind == "array":
+        expected_names = {
+            "source_kind",
+            "row_alignment",
+            "output_dtype",
+            "array",
+        }
+        if set(field) != expected_names:
+            raise ValueError(f"{label} array field inventory is not closed.")
+        _node, values = _validate_motion_input_array_record(
+            authoritative_root,
+            field["array"],
+            label=f"{label}.array",
+        )
+        alignment = field.get("row_alignment")
+        if alignment == "tracking_instance_key_reorder_v1":
+            if position_to_tracking is None:
+                raise ValueError(f"{label} lacks its exact tracking row mapping.")
+            values = values[position_to_tracking]
+        elif alignment not in {
+            "keypoint_exact_row_key_equality_v1",
+            "selected_position_rowset_sibling_v1",
+        }:
+            raise ValueError(f"{label} uses an unsupported row alignment.")
+        converted = np.asarray(values, dtype=output_dtype)
+    elif source_kind == "generated":
+        allowed = {
+            "source_kind",
+            "generator_id",
+            "output_dtype",
+            "shape",
+            "value",
+        }
+        if set(field) - allowed:
+            raise ValueError(f"{label} generated field inventory is not closed.")
+        if field.get("shape") != [int(source_row_count)]:
+            raise ValueError(f"{label} generated shape is not source-row aligned.")
+        generator = field.get("generator_id")
+        if generator == "unavailable_v1":
+            if "value" in field:
+                raise ValueError(f"{label} unavailable generator cannot carry a value.")
+            return None
+        if generator == "all_nan_float32_v1":
+            if output_dtype != np.dtype("<f4") or "value" in field:
+                raise ValueError(f"{label} all-NaN generator is malformed.")
+            converted = np.full(source_row_count, np.nan, dtype=np.float32)
+        elif generator == "all_true_v1":
+            if field.get("value") is not True or output_dtype != np.dtype("|b1"):
+                raise ValueError(f"{label} all-true generator is malformed.")
+            converted = np.ones(source_row_count, dtype=bool)
+        elif generator == "constant_int_v1":
+            value = field.get("value")
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, (int, np.integer)
+            ):
+                raise ValueError(f"{label} constant integer is malformed.")
+            converted = np.full(source_row_count, int(value), dtype=output_dtype)
+        else:
+            raise ValueError(f"{label} uses an unsupported generator {generator!r}.")
+    else:
+        raise ValueError(f"{label} uses an unsupported source kind {source_kind!r}.")
+    if converted.shape != (source_row_count,):
+        raise ValueError(f"{label} does not resolve to one value per source row.")
+    return np.array(converted, copy=True, order="C")
+
+
+def _motion_array_ref_from_field(field: Any) -> str | None:
+    if not isinstance(field, Mapping) or field.get("source_kind") != "array":
+        return None
+    array = field.get("array")
+    return str(array.get("array_ref")) if isinstance(array, Mapping) else None
+
+
+def _validate_track_motion_input_authority(
+    authoritative_root: Any,
+    run_group: Any,
+    positions: BoundTrackPositionBindings,
+    groups: list[tuple[int, Any]],
+) -> tuple[dict[str, Any], dict[str, np.ndarray | None]]:
+    raw = run_group.attrs.get(TRACK_MOTION_INPUT_AUTHORITY_ATTR)
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            "Future track-motion publication requires exact persisted input authority."
+        )
+    record = _motion_json_object(
+        raw,
+        label=f"/{run_group.path} track-motion input authority",
+    )
+    expected_top_level = {
+        "schema_id",
+        "schema_version",
+        "mode",
+        "source_row_count",
+        "position_row_identity",
+        "keypoint_alignment",
+        "tracking_alignment",
+        "fields",
+        "arena_inventory",
+    }
+    if set(record) != expected_top_level:
+        raise ValueError("Track-motion input-authority field inventory is not closed.")
+    if (
+        record.get("schema_id") != TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_ID
+        or record.get("schema_version")
+        != TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_VERSION
+    ):
+        raise ValueError("Track-motion input-authority schema is unsupported.")
+    source_row_count = int(positions.source_positions.row_identity.leading_dimension)
+    if record.get("source_row_count") != source_row_count:
+        raise ValueError(
+            "Track-motion input authority and selected position row count disagree."
+        )
+    position_identity = record.get("position_row_identity")
+    if not isinstance(position_identity, Mapping) or set(position_identity) != {
+        "record_ref",
+        "record_sha256",
+        "key_array",
+    }:
+        raise ValueError("Track-motion position-row authority is malformed.")
+    if (
+        position_identity.get("record_ref")
+        != positions.source_positions.row_identity.record_ref
+        or position_identity.get("record_sha256")
+        != positions.source_positions.row_identity.record_sha256
+    ):
+        raise ValueError("Track-motion position row identity changed.")
+    _position_key_node, position_key_values = _validate_motion_input_array_record(
+        authoritative_root,
+        position_identity["key_array"],
+        label="track-motion position row key",
+    )
+    expected_position_key_record = _motion_input_array_record(
+        positions.source_positions.row_identity._key_array_node
+    )
+    if not _track_attr_values_equal(
+        position_identity["key_array"], expected_position_key_record
+    ):
+        raise ValueError(
+            "Track-motion position-row authority is not the exact selected "
+            "position row-key array."
+        )
+    if position_key_values.shape != (source_row_count,):
+        raise ValueError("Track-motion position row-key length changed.")
+
+    mode = record.get("mode")
+    keypoint_alignment = record.get("keypoint_alignment")
+    if not isinstance(keypoint_alignment, Mapping):
+        raise ValueError("Track-motion keypoint alignment is malformed.")
+    if mode == "offline_exact_sources_v1":
+        if set(keypoint_alignment) != {
+            "mode",
+            "position_row_key",
+            "keypoint_row_key",
+        } or keypoint_alignment.get("mode") != "exact_row_key_equality_v1":
+            raise ValueError("Offline keypoint alignment authority is incomplete.")
+        _kp_position_node, kp_position_values = (
+            _validate_motion_input_array_record(
+                authoritative_root,
+                keypoint_alignment["position_row_key"],
+                label="offline keypoint position row key",
+            )
+        )
+        _kp_node, keypoint_key_values = _validate_motion_input_array_record(
+            authoritative_root,
+            keypoint_alignment["keypoint_row_key"],
+            label="offline keypoint row key",
+        )
+        if (
+            not _track_attr_values_equal(
+                keypoint_alignment["position_row_key"],
+                expected_position_key_record,
+            )
+            or kp_position_values.dtype != position_key_values.dtype
+            or not np.array_equal(kp_position_values, position_key_values)
+            or keypoint_key_values.dtype != position_key_values.dtype
+            or not np.array_equal(keypoint_key_values, position_key_values)
+        ):
+            raise ValueError("Offline keypoint row mapping changed after publication.")
+    elif mode == "online_exact_or_generated_v1":
+        if dict(keypoint_alignment) != {"mode": "selected_position_rowset_v1"}:
+            raise ValueError("Online keypoint alignment authority is malformed.")
+    else:
+        raise ValueError(f"Unsupported track-motion authority mode {mode!r}.")
+
+    tracking_alignment = record.get("tracking_alignment")
+    if not isinstance(tracking_alignment, Mapping):
+        raise ValueError("Track-motion tracking alignment is malformed.")
+    position_to_tracking: np.ndarray | None = None
+    if tracking_alignment.get("mode") == "instance_key_exact_set_reorder_v1":
+        if mode != "offline_exact_sources_v1":
+            raise ValueError(
+                "Exact tracking instance-key alignment is valid only offline."
+            )
+        expected_names = {
+            "mode",
+            "position_instance_key",
+            "tracking_instance_key",
+            "position_to_tracking_row_dtype",
+            "position_to_tracking_row_shape",
+            "position_to_tracking_row_sha256",
+        }
+        if set(tracking_alignment) != expected_names:
+            raise ValueError("Tracking instance-key alignment inventory is not closed.")
+        _position_node, aligned_position_keys = _validate_motion_input_array_record(
+            authoritative_root,
+            tracking_alignment["position_instance_key"],
+            label="tracking position instance key",
+        )
+        _tracking_node, tracking_keys = _validate_motion_input_array_record(
+            authoritative_root,
+            tracking_alignment["tracking_instance_key"],
+            label="tracking instance key",
+        )
+        if (
+            not _track_attr_values_equal(
+                tracking_alignment["position_instance_key"],
+                expected_position_key_record,
+            )
+            or aligned_position_keys.dtype != position_key_values.dtype
+            or not np.array_equal(aligned_position_keys, position_key_values)
+            or tracking_keys.dtype != position_key_values.dtype
+            or tracking_keys.shape != position_key_values.shape
+            or np.unique(tracking_keys).shape[0] != source_row_count
+        ):
+            raise ValueError("Tracking instance-key evidence changed.")
+        tracking_order = np.argsort(tracking_keys, kind="stable")
+        position_order = np.argsort(position_key_values, kind="stable")
+        if not np.array_equal(
+            tracking_keys[tracking_order], position_key_values[position_order]
+        ):
+            raise ValueError("Tracking instance-key set changed.")
+        position_to_tracking = np.empty(source_row_count, dtype=np.int64)
+        position_to_tracking[position_order] = tracking_order.astype(
+            np.int64, copy=False
+        )
+        if (
+            tracking_alignment.get("position_to_tracking_row_dtype")
+            != position_to_tracking.dtype.str
+            or tracking_alignment.get("position_to_tracking_row_shape")
+            != [source_row_count]
+            or tracking_alignment.get("position_to_tracking_row_sha256")
+            != identity_array_content_sha256(position_to_tracking)
+        ):
+            raise ValueError("Tracking row-reorder mapping changed.")
+    else:
+        if dict(tracking_alignment) != {"mode": "generated_single_track_v1"}:
+            raise ValueError("Track-motion tracking alignment mode is unsupported.")
+        if mode != "online_exact_or_generated_v1":
+            raise ValueError(
+                "Generated single-track alignment is valid only online."
+            )
+
+    fields = record.get("fields")
+    expected_fields = {
+        "heading_degrees",
+        "keypoint_success",
+        "track_id",
+        "arena_id",
+        "detection_source",
+    }
+    if not isinstance(fields, Mapping) or set(fields) != expected_fields:
+        raise ValueError("Track-motion input field inventory is not closed.")
+    expected_output_dtypes = {
+        "heading_degrees": np.dtype("<f4"),
+        "keypoint_success": np.dtype("|b1"),
+        "track_id": np.dtype("<i8"),
+        "arena_id": np.dtype("<i8"),
+        "detection_source": np.dtype("|i1"),
+    }
+    for name, expected_dtype in expected_output_dtypes.items():
+        try:
+            observed_dtype = np.dtype(fields[name].get("output_dtype"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Track-motion input field {name} output dtype is invalid."
+            ) from exc
+        if observed_dtype != expected_dtype:
+            raise ValueError(
+                f"Track-motion input field {name} output dtype is not canonical."
+            )
+    values = {
+        name: _motion_input_field_values(
+            authoritative_root,
+            fields[name],
+            label=f"track-motion input field {name}",
+            source_row_count=source_row_count,
+            position_to_tracking=position_to_tracking,
+        )
+        for name in sorted(expected_fields)
+    }
+
+    source_refs = run_group.attrs.get("source_refs")
+    inputs = run_group.attrs.get("inputs")
+    if not isinstance(source_refs, Mapping) or not isinstance(inputs, Mapping):
+        raise ValueError("Track-motion run lacks source refs for input authority.")
+    if mode == "offline_exact_sources_v1":
+        keypoint_prefix = source_refs.get("source_keypoint_path")
+        tracking_prefix = source_refs.get("source_tracking_path")
+        keypoint_prefix = _controlled_two_component_run_path(
+            keypoint_prefix,
+            families=frozenset({"keypoints_runs", "refined_keypoints_runs"}),
+            label="source_keypoint_path",
+        )
+        tracking_prefix = _controlled_two_component_run_path(
+            tracking_prefix,
+            families=frozenset({"tracking_runs"}),
+            label="source_tracking_path",
+        )
+        heading_ref = _motion_array_ref_from_field(fields["heading_degrees"])
+        if heading_ref != f"/{keypoint_prefix}/heading":
+            raise ValueError("Offline heading authority is not the selected keypoint run.")
+        if fields["heading_degrees"].get("row_alignment") != (
+            "keypoint_exact_row_key_equality_v1"
+        ):
+            raise ValueError("Offline heading row alignment is not exact keypoint order.")
+        keypoint_key_ref = str(
+            keypoint_alignment["keypoint_row_key"].get("array_ref")
+        )
+        if keypoint_key_ref != f"/{keypoint_prefix}/instance_key":
+            raise ValueError(
+                "Offline row-key authority is not the selected keypoint run."
+            )
+        usability_ref = _motion_array_ref_from_field(fields["keypoint_success"])
+        selected_usability_name, selected_usability_node = (
+            _motion_selected_keypoint_usability_node(
+                authoritative_root,
+                _resolve_motion_input_node(
+                    authoritative_root,
+                    f"/{keypoint_prefix}/heading",
+                ),
+            )
+        )
+        if usability_ref is None:
+            if (
+                selected_usability_node is not None
+                or selected_usability_name is not None
+                or fields["keypoint_success"].get("source_kind") != "generated"
+                or fields["keypoint_success"].get("generator_id") != "all_true_v1"
+            ):
+                raise ValueError(
+                    "Offline generated keypoint usability either omits a controlled "
+                    "selected-run leaf or lacks the controlled all-true generator."
+                )
+        elif (
+            selected_usability_name is None
+            or selected_usability_node is None
+            or usability_ref != f"/{keypoint_prefix}/{selected_usability_name}"
+        ):
+            raise ValueError(
+                "Offline keypoint-usability authority is not the exact first "
+                "available controlled dataset from the selected keypoint run."
+            )
+        elif fields["keypoint_success"].get("row_alignment") != (
+            "keypoint_exact_row_key_equality_v1"
+        ):
+            raise ValueError(
+                "Offline keypoint-usability row alignment is not exact keypoint order."
+            )
+        track_ref = _motion_array_ref_from_field(fields["track_id"])
+        if track_ref != f"/{tracking_prefix}/track_ids":
+            raise ValueError("Offline track-id authority is not the selected tracking run.")
+        if fields["track_id"].get("row_alignment") != (
+            "tracking_instance_key_reorder_v1"
+        ):
+            raise ValueError("Offline track-id row alignment is not exact tracking order.")
+        tracking_key_ref = str(
+            tracking_alignment["tracking_instance_key"].get("array_ref")
+        )
+        if tracking_key_ref != f"/{tracking_prefix}/instance_key":
+            raise ValueError(
+                "Tracking row-key authority is not the selected tracking run."
+            )
+        arena_ref = _motion_array_ref_from_field(fields["arena_id"])
+        if arena_ref is not None and arena_ref != f"/{tracking_prefix}/arena_ids":
+            raise ValueError(
+                "Offline arena-id authority is not the selected tracking run."
+            )
+        if arena_ref is None:
+            if (
+                _motion_optional_input_node(
+                    authoritative_root,
+                    f"/{tracking_prefix}/arena_ids",
+                )
+                is not None
+                or fields["arena_id"].get("source_kind") != "generated"
+                or fields["arena_id"].get("generator_id") != "unavailable_v1"
+            ):
+                raise ValueError(
+                    "Offline missing arena-id authority is malformed or omits the "
+                    "selected tracking arena_ids leaf."
+                )
+        elif fields["arena_id"].get("row_alignment") != (
+            "tracking_instance_key_reorder_v1"
+        ):
+            raise ValueError("Offline arena-id row alignment is not exact tracking order.")
+    else:
+        if (
+            fields["keypoint_success"].get("source_kind") != "generated"
+            or fields["keypoint_success"].get("generator_id") != "all_true_v1"
+            or fields["track_id"].get("source_kind") != "generated"
+            or fields["track_id"].get("generator_id") != "constant_int_v1"
+            or fields["arena_id"].get("source_kind") != "generated"
+            or fields["arena_id"].get("generator_id") != "unavailable_v1"
+        ):
+            raise ValueError("Online generated input authority is malformed.")
+        heading_ref = _motion_array_ref_from_field(fields["heading_degrees"])
+        if heading_ref is None:
+            if (
+                _motion_optional_exact_sibling(
+                    authoritative_root,
+                    positions.source_positions.coordinate_node,
+                    "visual_angle_deg",
+                )
+                is not None
+            ):
+                raise ValueError(
+                    "Generated online heading omits the selected visual_angle_deg leaf."
+                )
+            if (
+                fields["heading_degrees"].get("source_kind") != "generated"
+                or fields["heading_degrees"].get("generator_id")
+                != "all_nan_float32_v1"
+            ):
+                raise ValueError("Online generated heading authority is malformed.")
+        elif heading_ref != _motion_exact_sibling_ref(
+            positions.source_positions.coordinate_node,
+            "visual_angle_deg",
+        ):
+            raise ValueError(
+                "Online heading is not the exact selected visual_angle_deg leaf."
+            )
+        elif fields["heading_degrees"].get("row_alignment") != (
+            "selected_position_rowset_sibling_v1"
+        ):
+            raise ValueError("Online heading row alignment is not the selected rowset.")
+
+    detection_ref = _motion_array_ref_from_field(fields["detection_source"])
+    if detection_ref is None:
+        if (
+            _motion_optional_exact_sibling(
+                authoritative_root,
+                positions.source_positions.coordinate_node,
+                "detection_source",
+            )
+            is not None
+        ):
+            raise ValueError(
+                "Generated detection-source authority omits the selected "
+                "detection_source leaf."
+            )
+        if (
+            fields["detection_source"].get("source_kind") != "generated"
+            or fields["detection_source"].get("generator_id") != "constant_int_v1"
+            or fields["detection_source"].get("value") != 0
+        ):
+            raise ValueError("Generated detection-source authority is malformed.")
+    elif detection_ref != _motion_exact_sibling_ref(
+        positions.source_positions.coordinate_node,
+        "detection_source",
+    ):
+        raise ValueError(
+            "Detection-source authority is not the exact selected detection_source leaf."
+        )
+    elif fields["detection_source"].get("row_alignment") != (
+        "selected_position_rowset_sibling_v1"
+    ):
+        raise ValueError("Detection-source row alignment is not the selected rowset.")
+
+    inventory_record = record.get("arena_inventory")
+    inventory_map: dict[int, int] | None = None
+    live_inventory_ids: Any | None = None
+    live_inventory_arenas: Any | None = None
+    if mode == "offline_exact_sources_v1":
+        tracking_prefix = source_refs["source_tracking_path"]
+        live_inventory_ids = _motion_optional_input_node(
+            authoritative_root,
+            f"/{tracking_prefix}/track_ids_present",
+        )
+        live_inventory_arenas = _motion_optional_input_node(
+            authoritative_root,
+            f"/{tracking_prefix}/track_arena_ids",
+        )
+        if (live_inventory_ids is None) != (live_inventory_arenas is None):
+            raise ValueError(
+                "Selected tracking run has an incomplete live arena inventory."
+            )
+        if inventory_record is None and live_inventory_ids is not None:
+            raise ValueError(
+                "Track-motion authority omits the selected tracking arena inventory."
+            )
+    if inventory_record is not None:
+        if not isinstance(inventory_record, Mapping) or set(inventory_record) != {
+            "track_ids_present",
+            "track_arena_ids",
+        }:
+            raise ValueError("Track arena inventory authority is malformed.")
+        if mode != "offline_exact_sources_v1":
+            raise ValueError("Track arena inventory is valid only offline.")
+        tracking_prefix = source_refs["source_tracking_path"]
+        if (
+            inventory_record["track_ids_present"].get("array_ref")
+            != f"/{tracking_prefix}/track_ids_present"
+            or inventory_record["track_arena_ids"].get("array_ref")
+            != f"/{tracking_prefix}/track_arena_ids"
+        ):
+            raise ValueError(
+                "Track arena inventory is not from the selected tracking run."
+            )
+        _ids_node, inventory_ids = _validate_motion_input_array_record(
+            authoritative_root,
+            inventory_record["track_ids_present"],
+            label="tracking track_ids_present",
+        )
+        _arenas_node, inventory_arenas = _validate_motion_input_array_record(
+            authoritative_root,
+            inventory_record["track_arena_ids"],
+            label="tracking track_arena_ids",
+        )
+        if (
+            inventory_ids.ndim != 1
+            or inventory_arenas.ndim != 1
+            or inventory_ids.shape != inventory_arenas.shape
+            or np.unique(inventory_ids).shape[0] != inventory_ids.shape[0]
+        ):
+            raise ValueError("Tracking arena inventory payload is invalid.")
+        inventory_map = {
+            int(track_id): int(arena_id)
+            for track_id, arena_id in zip(
+                inventory_ids.tolist(), inventory_arenas.tolist(), strict=True
+            )
+        }
+    arena_values = values["arena_id"]
+    track_values = values["track_id"]
+    if arena_values is not None and inventory_map is not None:
+        for track_id in np.unique(track_values):
+            selected = arena_values[track_values == track_id]
+            unique_arenas = np.unique(selected)
+            if unique_arenas.shape != (1,) or inventory_map.get(int(track_id)) != int(
+                unique_arenas[0]
+            ):
+                raise ValueError(
+                    "Tracking row-level arena IDs disagree with its exact track inventory."
+                )
+
+    track_manifest = run_group.attrs.get("track_manifest")
+    if not isinstance(track_manifest, list) or len(track_manifest) != len(groups):
+        raise ValueError("Track manifest is unavailable for input-authority checks.")
+    expected_track_arenas: list[int | None] = []
+    for index, (track_id, subgroup) in enumerate(groups):
+        source_rows = np.array(
+            subgroup["source_row_index"][:], dtype=np.int64, copy=True
+        )
+        if (
+            source_rows.ndim != 1
+            or np.any(source_rows < 0)
+            or np.any(source_rows >= source_row_count)
+        ):
+            raise ValueError(f"Track {track_id} source-row selection is invalid.")
+        expected_track_ids = track_values[source_rows]
+        if np.any(expected_track_ids != int(track_id)):
+            raise ValueError(
+                f"Track {track_id} rows are not assigned by the exact tracking authority."
+            )
+        expected_heading = np.asarray(
+            values["heading_degrees"][source_rows], dtype=np.float32
+        )
+        observed_heading = np.array(
+            subgroup["heading_degrees"][:], dtype=np.float32, copy=True
+        )
+        if not np.array_equal(observed_heading, expected_heading, equal_nan=True):
+            raise ValueError(
+                f"Track {track_id} headings differ from the exact selected source rows."
+            )
+        for name, dtype in (
+            ("keypoint_success", np.dtype(bool)),
+            ("detection_source", np.dtype(np.int8)),
+        ):
+            expected = np.asarray(values[name][source_rows], dtype=dtype)
+            observed = np.array(subgroup[name][:], dtype=dtype, copy=True)
+            if not np.array_equal(observed, expected):
+                raise ValueError(
+                    f"Track {track_id} {name} differs from its exact source rows."
+                )
+        expected_arena: int | None = None
+        if arena_values is not None:
+            selected_arenas = np.unique(arena_values[source_rows])
+            if selected_arenas.shape != (1,):
+                raise ValueError(
+                    f"Track {track_id} contains multiple authoritative arena IDs."
+                )
+            candidate = int(selected_arenas[0])
+            if inventory_map is not None and inventory_map.get(track_id) == candidate:
+                expected_arena = candidate
+        elif inventory_map is not None:
+            expected_arena = inventory_map.get(track_id)
+        manifest_entry = track_manifest[index]
+        if not isinstance(manifest_entry, Mapping):
+            raise ValueError(f"Track {track_id} manifest entry is malformed.")
+        if (
+            subgroup.attrs.get("arena_id") != expected_arena
+            or manifest_entry.get("arena_id") != expected_arena
+        ):
+            raise ValueError(
+                f"Track {track_id} arena identity differs from exact tracking authority."
+            )
+        expected_track_arenas.append(expected_arena)
+
+    has_run_arenas = "track_arena_ids" in run_group
+    if all(value is not None for value in expected_track_arenas):
+        if not has_run_arenas:
+            raise ValueError("Run omits exact track_arena_ids despite complete authority.")
+        observed = np.array(run_group["track_arena_ids"][:], copy=True)
+        expected = np.asarray(expected_track_arenas, dtype=observed.dtype)
+        if observed.ndim != 1 or not np.array_equal(observed, expected):
+            raise ValueError("Run track_arena_ids differs from exact tracking authority.")
+    elif has_run_arenas:
+        raise ValueError("Run publishes track_arena_ids without complete authority.")
+
+    manifest_record = {
+        "record": record,
+        "record_sha256": _canonical_json_sha256(record),
+    }
+    return manifest_record, values
+
+
+def _canonical_track_space_from_label(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be one controlled coordinate-space label.")
+    cleaned = value.strip()
+    if cleaned not in {
+        "source_camera_image_px",
+        "stimulus_texture_px",
+        "stimulus_canvas_px",
+        "projector_px",
+        "arena_relative_canvas_px",
+    }:
+        raise ValueError(
+            f"{label} uses unsupported track coordinate space {cleaned!r}."
+        )
+    return cleaned
+
+
+def _motion_run_root_attrs_record(
+    run_group: Any,
+    positions: BoundTrackPositionBindings,
+) -> dict[str, Any]:
+    """Return one closed, conflict-checked run-root attribute partition."""
+
+    live_names = set(str(name) for name in run_group.attrs)
+    unknown = sorted(
+        live_names
+        - set(_MOTION_RUN_ALLOWED_ATTR_NAMES)
+        - set(_MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES)
+    )
+    if unknown:
+        raise ValueError(
+            f"/{run_group.path} has unsupported run-root attrs: {unknown!r}."
+        )
+
+    expected_space = positions.source_positions.descriptor.space_id
+    parameters = run_group.attrs.get("parameters")
+    if not isinstance(parameters, Mapping) or "coordinate_space" not in parameters:
+        raise ValueError(
+            "Track run parameters lack one direction-explicit coordinate space."
+        )
+    parameter_space = _canonical_track_space_from_label(
+        parameters["coordinate_space"],
+        label="track parameters.coordinate_space",
+    )
+    if parameter_space != expected_space:
+        raise ValueError(
+            "Track parameter coordinate space conflicts with the exact selected "
+            f"position descriptor ({parameter_space!r} != {expected_space!r})."
+        )
+    if "coordinate_space" in run_group.attrs:
+        root_space = _canonical_track_space_from_label(
+            run_group.attrs["coordinate_space"],
+            label="legacy root coordinate_space",
+        )
+        if root_space != expected_space:
+            raise ValueError(
+                "Legacy root coordinate_space conflicts with the authoritative "
+                "position descriptor."
+            )
+    exact_source_path = str(positions.source_positions.coordinate_node.path).strip("/")
+    exact_source_digest = positions.source_positions.descriptor.digest()
+    if (
+        "positions_px_source_path" in run_group.attrs
+        and run_group.attrs["positions_px_source_path"] != exact_source_path
+    ):
+        raise ValueError(
+            "Legacy root positions_px_source_path conflicts with the exact sealed "
+            "position source."
+        )
+    if (
+        "positions_px_source_coordinate_descriptor_sha256" in run_group.attrs
+        and run_group.attrs["positions_px_source_coordinate_descriptor_sha256"]
+        != exact_source_digest
+    ):
+        raise ValueError(
+            "Legacy root position descriptor digest conflicts with the exact sealed "
+            "position source."
+        )
+    inputs = run_group.attrs.get("inputs")
+    if not isinstance(inputs, Mapping):
+        raise ValueError("Track run root lacks exact persisted inputs.")
+
+    immutable = {
+        name: copy.deepcopy(run_group.attrs[name])
+        for name in sorted(live_names - _MOTION_RUN_LEGACY_COMPATIBILITY_ATTR_NAMES)
+        if name not in _MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES
+    }
+    legacy = {
+        name: copy.deepcopy(run_group.attrs[name])
+        for name in sorted(live_names & _MOTION_RUN_LEGACY_COMPATIBILITY_ATTR_NAMES)
+    }
+    record = {
+        "immutable_attrs": immutable,
+        "legacy_compatibility": {
+            "authority_scope": "sealed_non_authoritative_legacy_metadata",
+            "attrs": legacy,
+        },
+    }
+    normalized = _motion_json_object(
+        record,
+        label=f"/{run_group.path} closed root attrs",
+    )
+    return {
+        "record": normalized,
+        "record_sha256": _canonical_json_sha256(normalized),
+    }
+
+
+def _validate_motion_storage_attrs(
+    attrs: Mapping[str, Any],
+    *,
+    label: str,
+    required: bool,
+) -> None:
+    expected = geometry_preload_attrs()
+    present = set(attrs) & _MOTION_ARRAY_STORAGE_ATTR_NAMES
+    if not present and not required:
+        return
+    if present != set(expected):
+        raise ValueError(
+            f"{label} storage attrs are not one exact geometry-preload profile."
+        )
+    for name, value in expected.items():
+        if not _track_attr_values_equal(attrs[name], value):
+            raise ValueError(
+                f"{label} storage attr {name!r} differs from the controlled "
+                "geometry-preload profile."
+            )
+
+
+def _motion_nested_group_expected_attrs(
+    run_group: Any,
+    relative_path: str,
+    *,
+    include_physical: bool,
+    sample_count: int,
+) -> dict[str, Any]:
+    parameters = run_group.attrs.get("parameters")
+    if not isinstance(parameters, Mapping):
+        raise ValueError("Track motion group validation requires parameters.")
+    try:
+        fps = float(parameters["fps"])
+        smooth_seconds = float(parameters["smoothing_seconds"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Track motion group validation requires numeric fps/smoothing_seconds."
+        ) from exc
+    requested_post_window = max(1, int(round(fps * smooth_seconds)))
+    effective_post_window = _bounded_smoothing_window(
+        requested_post_window,
+        sample_count,
+    )
+
+    if relative_path == "movement":
+        return {
+            "schema_id": MOVEMENT_SCHEMA_ID,
+            "layout": "movement/speed/<level>",
+            "compatibility_flat_arrays": True,
+            "compatibility_speed_derivatives": True,
+        }
+    if relative_path == "movement/speed":
+        return {
+            "schema_id": MOVEMENT_SPEED_SCHEMA_ID,
+            "levels": list(MOVEMENT_SPEED_LEVEL_NAMES.values()),
+            "source_level_names": dict(MOVEMENT_SPEED_LEVEL_NAMES),
+            "preferred_read_contract": "movement/speed/<level>",
+        }
+    if relative_path.startswith("movement/speed/"):
+        group_level = relative_path.rsplit("/", 1)[-1]
+        source_level = next(
+            (
+                source
+                for source, group in MOVEMENT_SPEED_LEVEL_NAMES.items()
+                if group == group_level
+            ),
+            None,
+        )
+        if source_level is None:
+            raise ValueError(
+                f"Unsupported movement speed group {relative_path!r}."
+            )
+        expected: dict[str, Any] = {
+            "schema_id": MOVEMENT_SPEED_LEVEL_SCHEMA_ID,
+            "source_speed_level": source_level,
+            "level": group_level,
+            "units_px": "px/s",
+            "flat_speed_px_array": f"../../../{source_level}_px",
+            "time_delta_array": "../../../delta_seconds",
+            "derivative_method": "first_difference",
+            "post_smoothing_method": "moving_average",
+            "post_smoothing_alignment": "centered",
+            "post_smoothing_window_frames": effective_post_window,
+            "post_smoothing_window_frames_requested": requested_post_window,
+            "post_smoothing_window_frames_effective": effective_post_window,
+            "post_smoothing_window_s": smooth_seconds,
+        }
+        if include_physical:
+            expected.update(
+                {
+                    "units_mm": "mm/s",
+                    "flat_speed_mm_array": f"../../../{source_level}_mm",
+                }
+            )
+        if source_level != "speed_averaged":
+            path_stem = source_level.removeprefix("speed_")
+            expected["flat_frame_path_distance_px_array"] = (
+                f"../../../frame_path_distance_{path_stem}_px"
+            )
+            if include_physical:
+                expected["flat_frame_path_distance_mm_array"] = (
+                    f"../../../frame_path_distance_{path_stem}_mm"
+                )
+        return expected
+    if relative_path == "speed_derivatives":
+        aliases = {
+            "acceleration_px": (
+                "speed_derivatives/"
+                f"{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_px"
+            ),
+            "smoothed_acceleration_px": (
+                "speed_derivatives/"
+                f"{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/"
+                "smoothed_acceleration_px"
+            ),
+        }
+        if include_physical:
+            aliases.update(
+                {
+                    "acceleration_mm": (
+                        "speed_derivatives/"
+                        f"{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/"
+                        "acceleration_mm"
+                    ),
+                    "smoothed_acceleration_mm": (
+                        "speed_derivatives/"
+                        f"{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/"
+                        "smoothed_acceleration_mm"
+                    ),
+                }
+            )
+        return {
+            "schema_id": SPEED_DERIVATIVES_SCHEMA_ID,
+            "speed_levels": list(SPEED_DERIVATIVE_LEVELS),
+            "default_source_speed_level": (
+                DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL
+            ),
+            "compatibility_alias_arrays": aliases,
+        }
+    if relative_path.startswith("speed_derivatives/"):
+        source_level = relative_path.rsplit("/", 1)[-1]
+        if source_level not in SPEED_DERIVATIVE_LEVELS:
+            raise ValueError(
+                f"Unsupported speed-derivative group {relative_path!r}."
+            )
+        expected = {
+            "schema_id": SPEED_DERIVATIVE_SCHEMA_ID,
+            "source_speed_level": source_level,
+            "source_speed_px_array": f"../../{source_level}_px",
+            "time_delta_array": "../../delta_seconds",
+            "derivative_method": "first_difference",
+            "post_smoothing_method": "moving_average",
+            "post_smoothing_alignment": "centered",
+            "post_smoothing_window_frames": effective_post_window,
+            "post_smoothing_window_frames_requested": requested_post_window,
+            "post_smoothing_window_frames_effective": effective_post_window,
+            "post_smoothing_window_s": smooth_seconds,
+            "interpretation": (
+                "Framewise time derivative of the named source speed trace. "
+                "Use this group, not the legacy flat acceleration arrays, when "
+                "the source speed semantics matter."
+            ),
+        }
+        if include_physical:
+            expected["source_speed_mm_array"] = f"../../{source_level}_mm"
+        return expected
+    raise ValueError(
+        f"/{relative_path} is outside the controlled track group metadata schema."
+    )
+
+
+def _expected_motion_smoothing_windows(
+    run_group: Any,
+    *,
+    sample_count: int,
+) -> dict[str, Any]:
+    parameters = run_group.attrs.get("parameters")
+    if not isinstance(parameters, Mapping):
+        raise ValueError("Track motion smoothing validation requires parameters.")
+    try:
+        requested = max(
+            1,
+            int(
+                round(
+                    float(parameters["fps"])
+                    * float(parameters["smoothing_seconds"])
+                )
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Track motion smoothing validation requires numeric fps and "
+            "smoothing_seconds."
+        ) from exc
+    alignment = str(parameters.get("smoothing_alignment", "centered"))
+    distance_effective = _bounded_smoothing_window(
+        requested,
+        max(0, int(sample_count) - 1),
+    )
+    smoothing_method = str(parameters.get("smoothing_method", "moving_average"))
+    if smoothing_method == "savitzky_golay" and distance_effective > 1:
+        savgol_window = (
+            distance_effective
+            if distance_effective % 2 == 1
+            else distance_effective - 1
+        )
+        savgol_window = max(1, savgol_window)
+        raw_polyorder = parameters.get("savgol_polyorder")
+        polyorder = 3 if raw_polyorder is None else int(raw_polyorder)
+        polyorder = min(polyorder, savgol_window - 1)
+        if savgol_window >= polyorder + 2:
+            distance_effective = savgol_window
+    return {
+        "schema_id": "palette.track_motion_smoothing_windows",
+        "schema_version": 1,
+        "distance_transition": {
+            "alignment": alignment,
+            "requested_frames": requested,
+            "effective_frames": distance_effective,
+        },
+        "speed_sample": {
+            "alignment": alignment,
+            "requested_frames": requested,
+            "effective_frames": _bounded_smoothing_window(
+                requested,
+                int(sample_count),
+            ),
+        },
+        "acceleration_sample": {
+            "alignment": "centered",
+            "requested_frames": requested,
+            "effective_frames": _bounded_smoothing_window(
+                requested,
+                int(sample_count),
+            ),
+        },
+        "heading_sample": {
+            "alignment": "centered",
+            "requested_frames": requested,
+            "effective_frames": _bounded_smoothing_window(
+                requested,
+                int(sample_count),
+            ),
+        },
+    }
+
+
+def _validate_motion_group_semantic_attrs(
+    run_group: Any,
+    track_group: Any,
+    relative_path: str,
+    group: Any,
+    *,
+    track_id: int,
+    include_physical: bool,
+) -> None:
+    attrs = dict(group.attrs)
+    label = f"/{group.path}"
+    if relative_path == "swim_bouts" or relative_path.startswith("swim_bouts/"):
+        allowed = (
+            _MOTION_SWIM_BOUT_ROOT_ATTR_NAMES
+            if relative_path == "swim_bouts"
+            else _MOTION_SWIM_BOUT_LEVEL_ATTR_NAMES
+        ) | _MOTION_TRACK_GROUP_STORAGE_ATTR_NAMES
+        unknown = sorted(set(attrs) - allowed)
+        if unknown:
+            raise ValueError(
+                f"{label} has unsupported auxiliary group attrs: {unknown!r}."
+            )
+        _validate_motion_storage_attrs(
+            attrs,
+            label=label,
+            required=False,
+        )
+        if relative_path == "swim_bouts":
+            inputs = run_group.attrs.get("inputs")
+            expected_run = (
+                inputs.get("swim_bout_run")
+                if isinstance(inputs, Mapping)
+                else None
+            )
+            if expected_run is not None and attrs.get("source_swim_bout_run") != expected_run:
+                raise ValueError(
+                    f"{label} source swim-bout run conflicts with run inputs."
+                )
+        return
+
+    _validate_motion_storage_attrs(attrs, label=label, required=True)
+    storage_names = set(_MOTION_TRACK_GROUP_STORAGE_ATTR_NAMES)
+    if relative_path == "":
+        expected_names = storage_names | set(_MOTION_TRACK_ROOT_GROUP_ATTR_NAMES)
+        if set(attrs) != expected_names:
+            raise ValueError(
+                f"{label} track-root group attr inventory is not closed "
+                f"(expected={sorted(expected_names)!r}, "
+                f"found={sorted(attrs)!r})."
+            )
+        fixed = {
+            "track_id": int(track_id),
+            "num_samples": int(track_group["track_sample_key"].shape[0]),
+            "sample_validity_schema_id": "palette.track_sample_validity.v1",
+            "sample_reason_codes": dict(SAMPLE_REASON_CODES),
+            "transition_validity_schema_id": (
+                "palette.track_transition_validity.v1"
+            ),
+            "transition_reason_codes": dict(TRANSITION_REASON_CODES),
+            "motion_smoothing_windows": _expected_motion_smoothing_windows(
+                run_group,
+                sample_count=int(track_group["track_sample_key"].shape[0]),
+            ),
+            "legacy_acceleration_source_speed_level": (
+                DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL
+            ),
+            "speed_derivatives_schema_id": SPEED_DERIVATIVES_SCHEMA_ID,
+            "physical_outputs_status": run_group.attrs.get(
+                "physical_outputs_status"
+            ),
+            "physical_outputs_reason_code": run_group.attrs.get(
+                "physical_outputs_reason_code"
+            ),
+            "physical_coordinate_authority": run_group.attrs.get(
+                "physical_coordinate_authority"
+            ),
+        }
+        for name, expected in fixed.items():
+            if not _track_attr_values_equal(attrs[name], expected):
+                raise ValueError(
+                    f"{label} group attr {name!r} conflicts with the controlled "
+                    "track-motion metadata contract."
+                )
+        arena_id = attrs["arena_id"]
+        if arena_id is not None and (
+            isinstance(arena_id, (bool, np.bool_))
+            or not isinstance(arena_id, (int, np.integer))
+        ):
+            raise ValueError(f"{label} arena_id must be one integer or null.")
+        return
+
+    expected = _motion_nested_group_expected_attrs(
+        run_group,
+        relative_path,
+        include_physical=include_physical,
+        sample_count=int(track_group["track_sample_key"].shape[0]),
+    )
+    expected_names = storage_names | set(expected)
+    if set(attrs) != expected_names:
+        raise ValueError(
+            f"{label} group attr inventory is not closed "
+            f"(expected={sorted(expected_names)!r}, found={sorted(attrs)!r})."
+        )
+    for name, value in expected.items():
+        if not _track_attr_values_equal(attrs[name], value):
+            raise ValueError(
+                f"{label} group attr {name!r} conflicts with the controlled "
+                "track-motion metadata contract."
+            )
+
+
+def _validate_motion_array_semantic_attrs(
+    node: Any,
+    contract: Mapping[str, Any],
+    *,
+    relative_path: str,
+    position_surface: bool,
+    source_identity_domain: str | None = None,
+) -> None:
+    attrs = dict(getattr(node, "attrs", {}))
+    extras = _MOTION_ARRAY_EXTRA_ATTR_NAMES_BY_PATH.get(
+        relative_path,
+        frozenset(),
+    )
+    expected_names = set(_MOTION_ARRAY_STORAGE_ATTR_NAMES) | set(extras)
+    if set(attrs) != expected_names:
+        raise ValueError(
+            f"/{node.path} array attr inventory is not closed "
+            f"(expected={sorted(expected_names)!r}, found={sorted(attrs)!r})."
+        )
+    _validate_motion_storage_attrs(
+        attrs,
+        label=f"/{node.path}",
+        required=True,
+    )
+    for name in _MOTION_ARRAY_DUPLICATE_SEMANTIC_ATTR_NAMES:
+        if name not in attrs:
+            continue
+        expected = contract.get(name)
+        if not _track_attr_values_equal(attrs[name], expected):
+            raise ValueError(
+                f"/{node.path} array attr {name!r} conflicts with its controlled "
+                "track-motion surface contract."
+            )
+    forbidden = sorted(
+        name
+        for name in attrs
+        if name in _MOTION_ARRAY_FORBIDDEN_COORDINATE_ATTR_NAMES
+    )
+    if forbidden:
+        raise ValueError(
+            f"/{node.path} carries forbidden duplicate coordinate attrs: "
+            f"{forbidden!r}."
+        )
+    coordinate_attrs = sorted(
+        name for name in attrs if str(name).startswith("coordinate_descriptor")
+    )
+    if coordinate_attrs and not position_surface:
+        raise ValueError(
+            f"/{node.path} is not a position surface but carries coordinate "
+            f"descriptor attrs: {coordinate_attrs!r}."
+        )
+    if position_surface and relative_path not in {"positions_px", "positions_mm"}:
+        raise ValueError("Internal position-surface classification is inconsistent.")
+    if relative_path == "frame_indices":
+        expected_identity = {
+            "semantic_role": (
+                "compatibility_alias_of_source_acquisition_frame_index"
+            ),
+            "authoritative_array_ref": (
+                f"/{node.path.rsplit('/', 1)[0]}/"
+                "source_acquisition_frame_index"
+            ),
+            "canonical_consumers_must_use": (
+                "track_sample_key_and_source_acquisition_frame_index"
+            ),
+        }
+        for name, expected in expected_identity.items():
+            if not _track_attr_values_equal(attrs[name], expected):
+                raise ValueError(
+                    f"/{node.path} identity attr {name!r} conflicts with its "
+                    "controlled compatibility role."
+                )
+    elif relative_path == "source_instance_key":
+        if not isinstance(source_identity_domain, str) or not source_identity_domain:
+            raise ValueError(
+                "Source-instance array validation lacks its exact identity domain."
+            )
+        expected_identity = {
+            "semantic_role": "nullable_source_observation_identity_lineage",
+            "source_identity_domain": source_identity_domain,
+            "nullable_target_domain": "observation_instance",
+            "primary_row_identity": False,
+            "null_encoding": "valid_false_instance_key_zero",
+        }
+        for name, expected in expected_identity.items():
+            if not _track_attr_values_equal(attrs[name], expected):
+                raise ValueError(
+                    f"/{node.path} identity attr {name!r} conflicts with its "
+                    "controlled nullable-source role."
+                )
+
+
+def _resolve_motion_manifest_pointer(
+    context: Mapping[str, Any],
+    pointer: str,
+) -> Any:
+    if not pointer.startswith("#/"):
+        raise ValueError(f"Motion manifest pointer {pointer!r} is not canonical.")
+    value: Any = context
+    for encoded in pointer[2:].split("/"):
+        name = encoded.replace("~1", "/").replace("~0", "~")
+        if not isinstance(value, Mapping) or name not in value:
+            raise ValueError(
+                f"Motion derivation manifest pointer {pointer!r} does not resolve."
+            )
+        value = value[name]
+    return value
+
+
+def _bind_motion_input_refs(
+    raw_refs: Any,
+    *,
+    run_group: Any,
+    local_array_records: Mapping[str, Mapping[str, Any]],
+    manifest_context: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_refs, list) or not all(
+        isinstance(value, str) and value for value in raw_refs
+    ):
+        raise ValueError("Motion derivation input refs must be nonempty strings.")
+    run_prefix = f"/{run_group.path}/"
+    bound: list[dict[str, Any]] = []
+    for raw_ref in raw_refs:
+        if raw_ref.startswith("#/"):
+            value = _resolve_motion_manifest_pointer(manifest_context, raw_ref)
+            normalized = json_attr_safe(copy.deepcopy(value))
+            record = _motion_json_object(
+                {"value": normalized},
+                label=f"motion manifest input {raw_ref}",
+            )
+            bound.append(
+                {
+                    "kind": (
+                        "external_lineage"
+                        if raw_ref.startswith(
+                            "#/run_derivation/record/source_refs"
+                        )
+                        or raw_ref.startswith(
+                            "#/run_derivation/record/inputs/"
+                        )
+                        else "manifest_record"
+                    ),
+                    "ref": raw_ref,
+                    "record_sha256": _canonical_json_sha256(record),
+                }
+            )
+            continue
+        if not raw_ref.startswith(run_prefix):
+            raise ValueError(
+                f"Motion derivation input ref {raw_ref!r} escapes /{run_group.path}."
+            )
+        if "@" in raw_ref:
+            group_ref, attr_name = raw_ref.rsplit("@", 1)
+            if not attr_name:
+                raise ValueError(
+                    f"Motion group-attr input ref {raw_ref!r} lacks an attr name."
+                )
+            relative_group = group_ref[len(run_prefix) :]
+            group = (
+                run_group
+                if not relative_group
+                else _relative_child(run_group, relative_group)
+            )
+            if attr_name not in group.attrs:
+                raise ValueError(
+                    f"Motion group-attr input ref {raw_ref!r} does not resolve."
+                )
+            value_record = _motion_json_object(
+                {"value": copy.deepcopy(group.attrs[attr_name])},
+                label=f"motion group-attr input {raw_ref}",
+            )
+            bound.append(
+                {
+                    "kind": "group_attr",
+                    "ref": raw_ref,
+                    "value_sha256": _canonical_json_sha256(value_record),
+                }
+            )
+            continue
+        target = local_array_records.get(raw_ref)
+        if target is None:
+            raise ValueError(
+                f"Motion local-array input ref {raw_ref!r} does not resolve."
+            )
+        bound.append(
+            {
+                "kind": "array",
+                "ref": raw_ref,
+                "dtype": target.get("dtype"),
+                "shape": copy.deepcopy(target.get("shape")),
+                "content_sha256": target.get("content_sha256"),
+            }
+        )
+    return bound
+
+
+def _bind_track_motion_surface_inputs(
+    track_group: Any,
+    records: dict[str, dict[str, Any]],
+    *,
+    run_group: Any,
+    manifest_context: Mapping[str, Any],
+) -> None:
+    absolute = {
+        f"/{track_group.path}/{relative_path}": record
+        for relative_path, record in records.items()
+    }
+    for record in records.values():
+        record["input_refs"] = _bind_motion_input_refs(
+            record.get("input_refs"),
+            run_group=run_group,
+            local_array_records=absolute,
+            manifest_context=manifest_context,
+        )
+
+
+def _motion_surface_record(
+    track_group: Any,
+    relative_path: str,
+    node: Any,
+    *,
+    sample_count: int,
+    second_count: int,
+    row_identity_ref: str,
+    row_identity_sha256: str,
+    track_time_lineage_ref: str,
+    track_time_lineage_sha256: str,
+    second_identity_sha256: str,
+    physical_authority_sha256: str | None,
+    source_identity_domain: str,
+) -> dict[str, Any]:
+    contract = _motion_track_surface_contract(
+        track_group,
+        relative_path,
+        physical_authority_sha256=physical_authority_sha256,
+    )
+    _validate_motion_array_semantic_attrs(
+        node,
+        contract,
+        relative_path=relative_path,
+        position_surface=relative_path in {"positions_px", "positions_mm"},
+        source_identity_domain=source_identity_domain,
+    )
+    record = _stage_array_payload_record(
+        node,
+        relative_ref=relative_path,
+        include_attrs=True,
+    )
+    axis = contract["axis0_domain"]
+    shape = record["shape"]
+    if not shape:
+        raise ValueError(
+            f"/{track_group.path}/{relative_path} must expose an axis-0 domain."
+        )
+    if axis in {
+        TRACK_MOTION_AXIS_TRACK_SAMPLE,
+        TRACK_MOTION_AXIS_TRACK_TRANSITION,
+    }:
+        if shape[0] != sample_count:
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} axis-0 length {shape[0]} "
+                f"does not match track-sample count {sample_count}."
+            )
+        contract["axis0_identity"] = {
+            "domain": "track_sample",
+            "key_array_ref": f"/{track_group.path}/track_sample_key",
+            "row_identity_ref": row_identity_ref,
+            "row_identity_sha256": row_identity_sha256,
+            "track_time_lineage_ref": track_time_lineage_ref,
+            "track_time_lineage_sha256": track_time_lineage_sha256,
+            **(
+                {"transition_anchor": "destination_track_sample"}
+                if axis == TRACK_MOTION_AXIS_TRACK_TRANSITION
+                else {}
+            ),
+        }
+    elif axis == TRACK_MOTION_AXIS_TRACK_SECOND:
+        if shape[0] != second_count:
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} axis-0 length {shape[0]} "
+                f"does not match second-bin count {second_count}."
+            )
+        contract["axis0_identity"] = {
+            "domain": TRACK_MOTION_AXIS_TRACK_SECOND,
+            "key_array_ref": f"/{track_group.path}/second_indices",
+            "key_content_sha256": second_identity_sha256,
+        }
+    elif axis == TRACK_MOTION_AXIS_TRACK_BOUT:
+        contract["axis0_identity"] = {
+            "domain": TRACK_MOTION_AXIS_TRACK_BOUT,
+            "group_ref": (
+                f"/{track_group.path}/{relative_path.rsplit('/', 1)[0]}"
+            ),
+        }
+    else:  # pragma: no cover - controlled contract bug
+        raise ValueError(f"Unsupported track motion axis domain {axis!r}.")
+    record.update(contract)
+    return record
+
+
+def _validate_motion_alias_records(
+    track_group: Any,
+    records: Mapping[str, Mapping[str, Any]],
+) -> None:
+    prefix = f"/{track_group.path}/"
+    for relative_path, record in records.items():
+        alias_ref = record.get("alias_of")
+        if alias_ref is None:
+            continue
+        if not isinstance(alias_ref, str) or not alias_ref.startswith(prefix):
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} has a nonlocal alias target."
+            )
+        target_path = alias_ref[len(prefix) :]
+        target = records.get(target_path)
+        if target is None:
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} alias target "
+                f"{target_path!r} is missing."
+            )
+        for field in ("dtype", "dtype_fields", "itemsize", "shape", "content_sha256"):
+            if record.get(field) != target.get(field):
+                raise ValueError(
+                    f"/{track_group.path}/{relative_path} disagrees with exact "
+                    f"alias target {target_path!r} in {field}."
+                )
+
+
+def _validate_motion_physical_values(
+    track_group: Any,
+    records: Mapping[str, Mapping[str, Any]],
+    *,
+    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+) -> None:
+    physical_records = {
+        path: record
+        for path, record in records.items()
+        if record.get("physical_authority_sha256") is not None
+    }
+    if not physical_records:
+        if physical_authority is not None:
+            raise ValueError(
+                f"/{track_group.path} has physical authority but no physical surfaces."
+            )
+        return
+    if physical_authority is None:
+        raise ValueError(
+            f"/{track_group.path} has physical surfaces without exact authority."
+        )
+    scale_value = float(physical_authority.mm_per_pixel)
+    if not math.isfinite(scale_value) or scale_value <= 0:
+        raise ValueError("Track physical authority has invalid mm_per_pixel.")
+    prefix = f"/{track_group.path}/"
+    for relative_path, record in physical_records.items():
+        pixel_ref = record.get("pixel_source_ref")
+        if not isinstance(pixel_ref, str) or not pixel_ref.startswith(prefix):
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} has invalid physical pixel peer."
+            )
+        pixel_path = pixel_ref[len(prefix) :]
+        if pixel_path not in records:
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} physical pixel peer is missing."
+            )
+        physical_values = np.array(
+            _relative_child(track_group, relative_path)[:],
+            copy=True,
+            order="C",
+        )
+        pixel_values = np.array(
+            _relative_child(track_group, pixel_path)[:],
+            copy=True,
+            order="C",
+        )
+        if (
+            physical_values.dtype != pixel_values.dtype
+            or physical_values.shape != pixel_values.shape
+            or physical_values.dtype.kind != "f"
+        ):
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} physical dtype/shape differs "
+                "from its exact pixel peer."
+            )
+        scale = np.asarray(scale_value, dtype=pixel_values.dtype)
+        with np.errstate(over="ignore", invalid="ignore"):
+            expected = np.asarray(pixel_values * scale, dtype=pixel_values.dtype)
+        if (
+            not np.array_equal(np.isnan(physical_values), np.isnan(expected))
+            or not np.array_equal(np.isposinf(physical_values), np.isposinf(expected))
+            or not np.array_equal(np.isneginf(physical_values), np.isneginf(expected))
+        ):
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} physical NaN/Inf mask differs "
+                "from pixel * mm_per_pixel."
+            )
+        finite = np.isfinite(expected)
+        if not np.array_equal(physical_values[finite], expected[finite]):
+            raise ValueError(
+                f"/{track_group.path}/{relative_path} does not exactly equal its "
+                "pixel peer multiplied by authoritative mm_per_pixel."
+            )
+
+
+def _exact_motion_array(
+    track_group: Any,
+    relative_path: str,
+    expected: Any,
+) -> None:
+    observed = np.array(
+        _relative_child(track_group, relative_path)[:],
+        copy=True,
+        order="C",
+    )
+    expected_array = np.asarray(expected)
+    if (
+        observed.dtype != expected_array.dtype
+        or observed.shape != expected_array.shape
+        or not np.array_equal(observed, expected_array, equal_nan=True)
+    ):
+        raise ValueError(
+            f"/{track_group.path}/{relative_path} violates its exact controlled "
+            "numeric derivation invariant."
+        )
+
+
+def _float32_angle_pair_matches(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    left_to_right: Callable[[np.ndarray], np.ndarray],
+) -> bool:
+    if (
+        left.dtype != np.dtype("<f4")
+        or right.dtype != np.dtype("<f4")
+        or left.shape != right.shape
+    ):
+        return False
+    expected = np.asarray(
+        left_to_right(left.astype(np.float64)),
+        dtype=np.float32,
+    )
+    if (
+        not np.array_equal(np.isnan(right), np.isnan(expected))
+        or not np.array_equal(np.isposinf(right), np.isposinf(expected))
+        or not np.array_equal(np.isneginf(right), np.isneginf(expected))
+    ):
+        return False
+    finite = np.isfinite(expected)
+    epsilon = np.finfo(np.float32).eps
+    return bool(
+        np.allclose(
+            right[finite],
+            expected[finite],
+            rtol=4.0 * epsilon,
+            atol=4.0 * epsilon,
+        )
+    )
+
+
+def _validate_motion_core_numeric_invariants(
+    run_group: Any,
+    track_group: Any,
+    *,
+    track_id: int,
+) -> None:
+    """Re-evaluate bounded, controlled invariants using existing kernels."""
+
+    parameters = run_group.attrs.get("parameters")
+    if not isinstance(parameters, Mapping):
+        raise ValueError("Track motion numeric validation requires parameters.")
+
+    def numeric_parameter(name: str, *, positive: bool = False) -> float:
+        raw = parameters.get(name, run_group.attrs.get(name))
+        if isinstance(raw, (bool, np.bool_)):
+            raise ValueError(f"Track parameter {name!r} is not numeric.")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Track parameter {name!r} is not numeric.") from exc
+        if not math.isfinite(value) or (positive and value <= 0):
+            raise ValueError(f"Track parameter {name!r} is invalid.")
+        if name in run_group.attrs and float(run_group.attrs[name]) != value:
+            raise ValueError(
+                f"Track root attr {name!r} conflicts with parameters.{name}."
+            )
+        return value
+
+    fps = numeric_parameter("fps", positive=True)
+    smooth_seconds = numeric_parameter("smoothing_seconds", positive=True)
+    smoothing_method = str(
+        parameters.get(
+            "smoothing_method",
+            run_group.attrs.get("smoothing_method", "moving_average"),
+        )
+    )
+    smoothing_alignment = str(
+        parameters.get(
+            "smoothing_alignment",
+            run_group.attrs.get(
+                "smoothing_alignment",
+                DEFAULT_SMOOTHING_ALIGNMENT,
+            ),
+        )
+    )
+    savgol_raw = parameters.get(
+        "savgol_polyorder",
+        run_group.attrs.get("savgol_polyorder"),
+    )
+    savgol_polyorder = 3 if savgol_raw is None else int(savgol_raw)
+    hysteresis_enabled = bool(
+        parameters.get(
+            "hysteresis_enabled",
+            run_group.attrs.get("hysteresis_enabled", False),
+        )
+    )
+
+    def optional_float(name: str) -> float | None:
+        if not hysteresis_enabled:
+            return None
+        raw = parameters.get(name, run_group.attrs.get(name))
+        if raw is None:
+            raise ValueError(
+                f"Enabled track hysteresis lacks parameter {name!r}."
+            )
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"Track hysteresis parameter {name!r} is invalid.")
+        return value
+
+    hysteresis_high = optional_float("hysteresis_high_px")
+    hysteresis_low = optional_float("hysteresis_low_px")
+    hysteresis_min_raw = parameters.get(
+        "hysteresis_min_frames",
+        run_group.attrs.get("hysteresis_min_frames"),
+    )
+    hysteresis_min = (
+        int(hysteresis_min_raw)
+        if hysteresis_enabled and hysteresis_min_raw is not None
+        else None
+    )
+    hysteresis_policy = str(
+        parameters.get(
+            "hysteresis_band_policy",
+            run_group.attrs.get(
+                "hysteresis_band_policy",
+                DEFAULT_HYSTERESIS_BAND_POLICY,
+            ),
+        )
+    )
+    if hysteresis_policy not in HYSTERESIS_BAND_POLICIES:
+        raise ValueError(
+            "Track hysteresis_band_policy must remain one valid effective "
+            f"policy even when hysteresis is disabled; got {hysteresis_policy!r}."
+        )
+
+    frames = np.array(
+        track_group["source_acquisition_frame_index"][:],
+        copy=True,
+        order="C",
+    )
+    positions = np.array(
+        track_group["positions_px"][:],
+        copy=True,
+        order="C",
+    )
+    headings = np.array(
+        track_group["heading_degrees"][:],
+        copy=True,
+        order="C",
+    )
+    keypoint_success = np.array(
+        track_group["keypoint_success"][:],
+        copy=True,
+        order="C",
+    )
+    detection_source = np.array(
+        track_group["detection_source"][:],
+        copy=True,
+        order="C",
+    )
+    if frames.dtype != np.dtype("<i8"):
+        raise ValueError("Track acquisition-frame identity must be exact int64.")
+
+    _exact_motion_array(track_group, "frame_indices", frames)
+    expected_key = build_track_sample_key(
+        np.full(frames.shape, int(track_id), dtype=np.int64),
+        frames,
+    )
+    _exact_motion_array(track_group, "track_sample_key", expected_key)
+    expected_time = np.asarray(
+        frames.astype(np.float64) / fps,
+        dtype=np.float32,
+    )
+    _exact_motion_array(track_group, "time_seconds", expected_time)
+
+    validity = _build_sample_validity_arrays(
+        track_id=int(track_id),
+        positions_px=positions,
+        headings_deg=headings,
+        keypoint_success=keypoint_success,
+        detection_source=detection_source,
+    )
+    for name in (
+        "sample_observed",
+        "sample_valid",
+        "source_observed",
+        "keypoint_usable",
+        "position_finite",
+        "heading_usable",
+        "sample_reason_code",
+    ):
+        expected = (
+            validity[name].astype(np.int16)
+            if name == "sample_reason_code"
+            else validity[name].astype(bool)
+        )
+        _exact_motion_array(track_group, name, expected)
+
+    recomputed = compute_track_speed(
+        frames.copy(),
+        positions.copy(),
+        fps=fps,
+        smooth_seconds=smooth_seconds,
+        hysteresis_high_px=hysteresis_high,
+        hysteresis_low_px=hysteresis_low,
+        hysteresis_min_frames=hysteresis_min,
+        hysteresis_band_policy=hysteresis_policy,
+        smoothing_method=smoothing_method,
+        smoothing_alignment=smoothing_alignment,
+        savgol_polyorder=savgol_polyorder,
+    )
+    exact_speed_surfaces = {
+        "delta_frames": recomputed.delta_frames,
+        "delta_seconds": recomputed.delta_seconds,
+        "transition_valid": recomputed.transition_valid,
+        "transition_reason_code": recomputed.transition_reason_code,
+        "speed_raw_px": recomputed.speed_raw,
+        "speed_filtered_px": recomputed.speed_filtered,
+        "speed_smoothed_px": recomputed.speed_smoothed,
+        "speed_averaged_px": recomputed.speed_averaged,
+        "frame_path_distance_raw_px": recomputed.frame_path_distance_raw,
+        "frame_path_distance_filtered_px": recomputed.frame_path_distance_filtered,
+        "frame_path_distance_smoothed_px": recomputed.frame_path_distance_smoothed,
+        "cumulative_path_distance_px": recomputed.cumulative_path_distance,
+        "second_indices": recomputed.seconds,
+        "speed_per_second_px": recomputed.speed_per_second,
+    }
+    for path, expected in exact_speed_surfaces.items():
+        _exact_motion_array(track_group, path, expected)
+
+    heading_radians = np.array(track_group["heading_radians"][:], copy=True)
+    smoothed_degrees = np.array(
+        track_group["smoothed_heading_degrees"][:], copy=True
+    )
+    smoothed_radians = np.array(
+        track_group["smoothed_heading_radians"][:], copy=True
+    )
+    if not _float32_angle_pair_matches(
+        headings,
+        heading_radians,
+        left_to_right=np.deg2rad,
+    ):
+        raise ValueError("Track heading degree/radian surfaces disagree.")
+    if not _float32_angle_pair_matches(
+        smoothed_degrees,
+        smoothed_radians,
+        left_to_right=np.deg2rad,
+    ):
+        raise ValueError("Track smoothed-heading degree/radian surfaces disagree.")
+
+    # Reuse the writer's bounded circular-heading kernel in the exact persisted
+    # float32 heading domain.
+    heading_radians_kernel = np.deg2rad(headings)
+    heading_finite = np.isfinite(heading_radians_kernel)
+    heading_window_requested = max(1, int(round(fps * smooth_seconds)))
+    expected_smoothed_radians, _heading_window_effective = (
+        _smooth_heading_radians(headings, heading_window_requested)
+    )
+    expected_smoothed_degrees = np.rad2deg(expected_smoothed_radians)
+    _exact_motion_array(
+        track_group,
+        "smoothed_heading_radians",
+        np.asarray(expected_smoothed_radians, dtype=np.float32),
+    )
+    _exact_motion_array(
+        track_group,
+        "smoothed_heading_degrees",
+        np.asarray(expected_smoothed_degrees, dtype=np.float32),
+    )
+
+    delta_seconds_kernel = np.zeros(frames.shape[0], dtype=np.float64)
+    if frames.size >= 2:
+        delta_seconds_kernel[1:] = np.diff(frames) / fps
+    raw_turning = _compute_heading_turning(
+        headings,
+        delta_seconds_kernel,
+        transition_valid=recomputed.transition_valid,
+        sample_valid=validity["sample_valid"],
+    )
+    smoothed_turning = _compute_heading_turning(
+        expected_smoothed_degrees,
+        delta_seconds_kernel,
+        transition_valid=recomputed.transition_valid,
+        sample_valid=validity["sample_valid"],
+    )
+    turning_surfaces = {
+        "delta_heading_degrees": raw_turning[0],
+        "angular_velocity_deg_s": raw_turning[1],
+        "angular_velocity_raw_deg_s": raw_turning[1],
+        "angular_speed_raw_deg_s": raw_turning[2],
+        "delta_heading_smoothed_degrees": smoothed_turning[0],
+        "angular_velocity_smoothed_deg_s": smoothed_turning[1],
+        "angular_speed_smoothed_deg_s": smoothed_turning[2],
+    }
+    for path, expected in turning_surfaces.items():
+        _exact_motion_array(
+            track_group,
+            path,
+            np.asarray(expected, dtype=np.float32),
+        )
+
+    derivatives = _compute_speed_derivatives(
+        {
+            "speed_raw": recomputed.speed_raw,
+            "speed_filtered": recomputed.speed_filtered,
+            "speed_smoothed": recomputed.speed_smoothed,
+            "speed_averaged": recomputed.speed_averaged,
+        },
+        delta_seconds_kernel,
+        pixel_to_mm=None,
+        smooth_seconds=smooth_seconds,
+        fps=fps,
+    )
+    for level, derivative in derivatives.items():
+        for leaf in ("acceleration_px", "smoothed_acceleration_px"):
+            _exact_motion_array(
+                track_group,
+                f"speed_derivatives/{level}/{leaf}",
+                np.asarray(derivative[leaf], dtype=np.float32),
+            )
+
+    seconds = recomputed.seconds
+    for path in (
+        "speed_per_second_px",
+        "heading_per_second_degrees",
+        "heading_per_second_resultant",
+    ):
+        if int(track_group[path].shape[0]) != int(seconds.shape[0]):
+            raise ValueError(
+                f"/{track_group.path}/{path} is not aligned to unique second bins."
+            )
+    seconds_per_sample = np.floor(frames.astype(np.float64) / fps).astype(
+        np.int64
+    )
+    expected_heading_by_second = np.full(
+        seconds.size,
+        np.nan,
+        dtype=np.float64,
+    )
+    expected_resultant = np.zeros(seconds.size, dtype=np.float32)
+    for index, second in enumerate(seconds):
+        mask = (seconds_per_sample == second) & heading_finite
+        valid_angles = heading_radians_kernel[mask]
+        if valid_angles.size:
+            mean_vector = np.mean(np.exp(1j * valid_angles))
+            expected_heading_by_second[index] = math.atan2(
+                mean_vector.imag,
+                mean_vector.real,
+            )
+            expected_resultant[index] = np.float32(np.abs(mean_vector))
+    _exact_motion_array(
+        track_group,
+        "heading_per_second_degrees",
+        np.asarray(
+            np.rad2deg(expected_heading_by_second),
+            dtype=np.float32,
+        ),
+    )
+    _exact_motion_array(
+        track_group,
+        "heading_per_second_resultant",
+        expected_resultant,
+    )
+
+    # Track summaries are public numeric surfaces too.  Recompute every
+    # pixel/non-physical field from the same bounded kernels above instead of
+    # treating a self-consistent, re-minted attrs payload as authoritative.
+    summary = track_group.attrs.get("summary")
+    if type(summary) is not dict:
+        raise ValueError(f"/{track_group.path} summary attrs are invalid.")
+
+    def speed_statistics(values: np.ndarray) -> tuple[float, float, float]:
+        finite = values[np.isfinite(values)]
+        if not finite.size:
+            nan = float("nan")
+            return nan, nan, nan
+        return (
+            float(np.mean(finite)),
+            float(np.median(finite)),
+            float(np.max(finite)),
+        )
+
+    expected_summary: dict[str, Any] = {
+        "track_id": float(track_id),
+        "samples": int(frames.size),
+    }
+    for level_name, values in (
+        ("raw", recomputed.speed_raw),
+        ("filtered", recomputed.speed_filtered),
+        ("smoothed", recomputed.speed_smoothed),
+        ("averaged", recomputed.speed_averaged),
+    ):
+        mean_value, median_value, max_value = speed_statistics(values)
+        expected_summary.update(
+            {
+                f"mean_speed_{level_name}_px": mean_value,
+                f"median_speed_{level_name}_px": median_value,
+                f"max_speed_{level_name}_px": max_value,
+            }
+        )
+
+    speed_per_second = recomputed.speed_per_second
+    expected_summary["mean_speed_per_second_px"] = (
+        float(np.nanmean(speed_per_second))
+        if speed_per_second.size and np.any(~np.isnan(speed_per_second))
+        else float("nan")
+    )
+    expected_summary.update(
+        {
+            "total_path_distance_raw_px": (
+                float(np.sum(recomputed.frame_path_distance_raw))
+                if recomputed.frame_path_distance_raw.size
+                else 0.0
+            ),
+            "total_path_distance_filtered_px": (
+                float(np.sum(recomputed.frame_path_distance_filtered))
+                if recomputed.frame_path_distance_filtered.size
+                else 0.0
+            ),
+            "total_path_distance_smoothed_px": (
+                float(np.sum(recomputed.frame_path_distance_smoothed))
+                if recomputed.frame_path_distance_smoothed.size
+                else 0.0
+            ),
+            "total_distance_px": (
+                float(recomputed.cumulative_path_distance[-1])
+                if recomputed.cumulative_path_distance.size
+                else 0.0
+            ),
+        }
+    )
+
+    valid_headings = heading_radians_kernel[heading_finite]
+    if valid_headings.size:
+        mean_vector = np.mean(np.exp(1j * valid_headings))
+        expected_summary["heading_mean_deg"] = float(
+            math.degrees(math.atan2(mean_vector.imag, mean_vector.real))
+        )
+        expected_summary["heading_resultant"] = float(np.abs(mean_vector))
+    else:
+        expected_summary["heading_mean_deg"] = float("nan")
+        expected_summary["heading_resultant"] = float("nan")
+
+    default_derivative = derivatives[DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL]
+    summary_acceleration = np.asarray(
+        default_derivative["smoothed_acceleration_px"],
+        dtype=np.float64,
+    )
+    finite_acceleration = summary_acceleration[np.isfinite(summary_acceleration)]
+    expected_summary["mean_acceleration_px"] = (
+        float(np.mean(finite_acceleration))
+        if finite_acceleration.size
+        else float("nan")
+    )
+    expected_summary["acceleration_std_px"] = (
+        float(np.std(finite_acceleration))
+        if finite_acceleration.size
+        else float("nan")
+    )
+    expected_summary["keypoint_success_rate"] = (
+        float(np.mean(keypoint_success))
+        if keypoint_success.size
+        else float("nan")
+    )
+    summary_times = frames.astype(np.float64) / fps
+    expected_summary["duration_seconds"] = (
+        float(summary_times[-1] - summary_times[0])
+        if summary_times.size > 1
+        else 0.0
+    )
+
+    normalized_expected_summary = json_attr_safe(expected_summary)
+    if type(normalized_expected_summary) is not dict:  # pragma: no cover
+        raise ValueError("Recomputed track summary is not a JSON object.")
+    expected_summary_names = set(normalized_expected_summary)
+    if run_group.attrs.get("physical_coordinate_authority") is not None:
+        expected_summary_names.update(
+            f"{name[:-3]}_mm"
+            for name in normalized_expected_summary
+            if name.endswith("_px")
+        )
+    if set(summary) != expected_summary_names:
+        raise ValueError(
+            f"/{track_group.path} summary inventory differs from the controlled "
+            f"numeric schema (expected={sorted(expected_summary_names)!r}, "
+            f"found={sorted(summary)!r})."
+        )
+    for name, expected in normalized_expected_summary.items():
+        if not _track_attr_values_equal(summary[name], expected):
+            raise ValueError(
+                f"/{track_group.path} summary field {name!r} violates its exact "
+                "controlled numeric derivation invariant."
+            )
+
+    resultant = np.array(track_group["heading_per_second_resultant"][:], copy=True)
+    finite_resultant = resultant[np.isfinite(resultant)]
+    if np.any(finite_resultant < 0.0) or np.any(finite_resultant > 1.0):
+        raise ValueError("Track heading resultants must remain within [0, 1].")
+
+
+def _validate_motion_bout_domains(
+    track_group: Any,
+    records: Mapping[str, Mapping[str, Any]],
+) -> None:
+    counts: dict[str, int] = {}
+    for relative_path, record in records.items():
+        if record.get("axis0_domain") != TRACK_MOTION_AXIS_TRACK_BOUT:
+            continue
+        parent = relative_path.rsplit("/", 1)[0]
+        count = int(record["shape"][0])
+        prior = counts.setdefault(parent, count)
+        if prior != count:
+            raise ValueError(
+                f"/{track_group.path}/{parent} mirrored bout fields disagree in "
+                "axis-0 length."
+            )
+
+
+def _allowed_motion_track_group(relative_path: str) -> bool:
+    if relative_path in {
+        "",
+        "movement",
+        "movement/speed",
+        "speed_derivatives",
+    }:
+        return True
+    if relative_path.startswith("movement/speed/"):
+        return relative_path.count("/") == 2 and relative_path.rsplit("/", 1)[-1] in (
+            set(MOVEMENT_SPEED_LEVEL_NAMES.values())
+        )
+    if relative_path.startswith("speed_derivatives/"):
+        return relative_path.count("/") == 1 and relative_path.rsplit("/", 1)[-1] in (
+            set(SPEED_DERIVATIVE_LEVELS)
+        )
+    return relative_path == "swim_bouts" or (
+        relative_path.startswith("swim_bouts/")
+        and relative_path.count("/") == 1
+    )
+
+
+def _build_track_motion_publication_manifest(
+    authoritative_root: Any,
+    run_group: Any,
+    positions: BoundTrackPositionBindings,
+) -> dict[str, Any]:
+    """Build and validate the exact live full-motion inventory."""
+
+    if positions.run_group.path != run_group.path:
+        raise ValueError("Position bindings and motion run paths disagree.")
+    root_group_names = sorted(str(value) for value in run_group.group_keys())
+    if root_group_names != ["tracks"]:
+        raise ValueError(
+            f"/{run_group.path} full-motion root group inventory is not closed "
+            f"(expected=['tracks'], found={root_group_names!r})."
+        )
+    groups = _live_track_groups(run_group)
+    if [track_id for track_id, _ in groups] != [
+        track_id for track_id, _ in positions.track_positions
+    ]:
+        raise ValueError("Position bindings and live track inventory disagree.")
+    input_authority, _input_values = _validate_track_motion_input_authority(
+        authoritative_root,
+        run_group,
+        positions,
+        groups,
+    )
+    physical_record = _physical_authority_manifest_record(
+        positions.physical_authority
+    )
+    physical_sha256 = (
+        _canonical_json_sha256(physical_record)
+        if physical_record is not None
+        else None
+    )
+    include_physical = physical_record is not None
+    source_authority = _motion_source_authority_record(positions)
+    run_derivation = _motion_run_derivation_record(run_group, positions)
+    run_root_attrs = _motion_run_root_attrs_record(run_group, positions)
+    manifest_context: dict[str, Any] = {
+        "source_authority": source_authority,
+        "physical_authority": physical_record,
+        "run_derivation": run_derivation,
+        "input_authority": input_authority["record"],
+    }
+    expected_paths = _expected_motion_track_surface_paths(
+        include_physical=include_physical
+    )
+    position_by_id = dict(positions.track_positions)
+
+    tracks_parent = run_group["tracks"]
+    tracks_parent_attrs = dict(tracks_parent.attrs)
+    expected_tracks_parent_attrs = geometry_preload_attrs()
+    if set(tracks_parent_attrs) != set(expected_tracks_parent_attrs):
+        raise ValueError(
+            f"/{tracks_parent.path} attr inventory is not closed "
+            f"(expected={sorted(expected_tracks_parent_attrs)!r}, "
+            f"found={sorted(tracks_parent_attrs)!r})."
+        )
+    _validate_motion_storage_attrs(
+        tracks_parent_attrs,
+        label=f"/{tracks_parent.path}",
+        required=True,
+    )
+    tracks_parent_attr_record = _motion_group_attrs_record(tracks_parent)
+    track_records: dict[str, Any] = {}
+    for track_id, track_group in groups:
+        position = position_by_id[track_id]
+        track_key = np.array(
+            track_group["track_sample_key"][:], copy=True, order="C"
+        )
+        second_key = np.array(
+            track_group["second_indices"][:], copy=True, order="C"
+        )
+        if track_key.dtype != np.dtype("<i8") or track_key.ndim != 2 or track_key.shape[1] != 2:
+            raise ValueError(
+                f"/{track_group.path}/track_sample_key is not exact int64 (N, 2)."
+            )
+        if (
+            second_key.dtype != np.dtype("<i8")
+            or second_key.ndim != 1
+            or (
+                second_key.size > 1
+                and np.any(np.diff(second_key) <= 0)
+            )
+        ):
+            raise ValueError(
+                f"/{track_group.path}/second_indices is not a strictly increasing "
+                "int64 second-bin identity."
+            )
+        sample_count = int(track_key.shape[0])
+        second_count = int(second_key.shape[0])
+        row_identity = position.positions_px.row_identity
+        if row_identity.leading_dimension != sample_count:
+            raise ValueError(
+                f"/{track_group.path} row identity and track sample count disagree."
+            )
+        track_time_lineage = load_bound_track_sample_time_lineage(
+            track_group,
+            track_group["track_sample_key"],
+            track_group["source_row_index"],
+            track_group["source_acquisition_frame_index"],
+            track_group["source_frame_interpolation"],
+            track_group["source_instance_key"],
+            source_temporal_authority=positions.source_temporal_authority,
+        )
+
+        group_records: dict[str, Any] = {}
+        for relative_group, group in _iter_motion_group_nodes(track_group):
+            if not _allowed_motion_track_group(relative_group):
+                raise ValueError(
+                    f"/{track_group.path}/{relative_group} is an unexpected "
+                    "full-motion group."
+                )
+            _validate_motion_group_semantic_attrs(
+                run_group,
+                track_group,
+                relative_group,
+                group,
+                track_id=track_id,
+                include_physical=include_physical,
+            )
+            group_records[relative_group or "."] = {
+                "relative_ref": relative_group or ".",
+                **_motion_group_attrs_record(group),
+                "array_names": sorted(str(name) for name in group.array_keys()),
+                "group_names": sorted(str(name) for name in group.group_keys()),
+            }
+
+        surface_nodes = dict(_iter_track_array_nodes(track_group))
+        public_paths = {
+            path
+            for path in surface_nodes
+            if not path.startswith("swim_bouts/")
+        }
+        if public_paths != expected_paths:
+            raise ValueError(
+                f"/{track_group.path} full-motion array inventory differs from "
+                f"the controlled schema (missing={sorted(expected_paths - public_paths)!r}, "
+                f"extra={sorted(public_paths - expected_paths)!r})."
+            )
+        second_digest = array_payload_sha256(track_group["second_indices"])
+        surfaces = {
+            path: _motion_surface_record(
+                track_group,
+                path,
+                node,
+                sample_count=sample_count,
+                second_count=second_count,
+                row_identity_ref=row_identity.record_ref,
+                row_identity_sha256=row_identity.record_sha256,
+                track_time_lineage_ref=track_time_lineage.record_ref,
+                track_time_lineage_sha256=track_time_lineage.record_sha256,
+                second_identity_sha256=second_digest,
+                physical_authority_sha256=physical_sha256,
+                source_identity_domain=(
+                    positions.source_temporal_authority.record.source_identity_domain
+                ),
+            )
+            for path, node in sorted(surface_nodes.items())
+        }
+        _bind_track_motion_surface_inputs(
+            track_group,
+            surfaces,
+            run_group=run_group,
+            manifest_context=manifest_context,
+        )
+        _validate_motion_core_numeric_invariants(
+            run_group,
+            track_group,
+            track_id=track_id,
+        )
+        _validate_motion_physical_values(
+            track_group,
+            surfaces,
+            physical_authority=positions.physical_authority,
+        )
+        _validate_motion_alias_records(track_group, surfaces)
+        _validate_motion_bout_domains(track_group, surfaces)
+        track_records[f"id_{track_id}"] = {
+            "track_id": int(track_id),
+            "track_ref": f"/{track_group.path}",
+            "track_sample_count": sample_count,
+            "second_bin_count": second_count,
+            "row_identity_ref": row_identity.record_ref,
+            "row_identity_sha256": row_identity.record_sha256,
+            "track_time_lineage_ref": track_time_lineage.record_ref,
+            "track_time_lineage_sha256": track_time_lineage.record_sha256,
+            "position_derivation_ref": position.derivation.record_ref,
+            "position_derivation_sha256": position.derivation.record_sha256,
+            "groups": group_records,
+            "surfaces": surfaces,
+        }
+
+    run_arrays: dict[str, Any] = {}
+    track_count = len(groups)
+    root_array_names = sorted(str(value) for value in run_group.array_keys())
+    camera_count = (
+        int(run_group["camera_frame_ids"].shape[0])
+        if "camera_frame_ids" in root_array_names
+        else None
+    )
+    for name in root_array_names:
+        node = run_group[name]
+        contract = _motion_run_array_contract(run_group, name)
+        _validate_motion_array_semantic_attrs(
+            node,
+            contract,
+            relative_path=name,
+            position_surface=False,
+        )
+        record = _stage_array_payload_record(
+            node,
+            relative_ref=name,
+            include_attrs=True,
+        )
+        record.update(contract)
+        if not record["shape"]:
+            raise ValueError(f"/{node.path} must expose an axis-0 domain.")
+        if contract["axis0_domain"] == TRACK_MOTION_AXIS_RUN_TRACK:
+            if record["shape"][0] != track_count:
+                raise ValueError(
+                    f"/{node.path} axis-0 length differs from track inventory."
+                )
+            record["axis0_identity"] = {
+                "domain": TRACK_MOTION_AXIS_RUN_TRACK,
+                "key_array_ref": f"/{run_group.path}/track_ids",
+            }
+        else:
+            if camera_count is None:
+                raise ValueError(
+                    "Run camera-sample auxiliary arrays require camera_frame_ids "
+                    "as their exact row identity."
+                )
+            if record["shape"][0] != camera_count:
+                raise ValueError(
+                    f"/{node.path} axis-0 length differs from camera_frame_ids."
+                )
+            record["axis0_identity"] = {
+                "domain": TRACK_MOTION_AXIS_RUN_CAMERA_SAMPLE,
+                "key_array_ref": f"/{run_group.path}/camera_frame_ids",
+            }
+        run_arrays[name] = record
+    if "track_ids" not in run_arrays:
+        raise ValueError("Full-motion run lacks exact track_ids inventory.")
+    track_ids_digest = str(run_arrays["track_ids"]["content_sha256"])
+    camera_ids_digest = (
+        str(run_arrays["camera_frame_ids"]["content_sha256"])
+        if "camera_frame_ids" in run_arrays
+        else None
+    )
+    for record in run_arrays.values():
+        identity = record.get("axis0_identity")
+        if not isinstance(identity, dict):
+            raise ValueError("Run motion array lacks exact axis-0 identity.")
+        if record.get("axis0_domain") == TRACK_MOTION_AXIS_RUN_TRACK:
+            identity["key_content_sha256"] = track_ids_digest
+        elif camera_ids_digest is not None:
+            identity["key_content_sha256"] = camera_ids_digest
+    manifest_context["tracks"] = track_records
+    absolute_run_arrays = {
+        f"/{run_group.path}/{name}": record
+        for name, record in run_arrays.items()
+    }
+    for record in run_arrays.values():
+        record["input_refs"] = _bind_motion_input_refs(
+            record.get("input_refs"),
+            run_group=run_group,
+            local_array_records=absolute_run_arrays,
+            manifest_context=manifest_context,
+        )
+
+    manifest = {
+        "schema_id": TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
+        "schema_version": TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
+        "run_ref": f"/{run_group.path}",
+        "run_type": positions.run_type,
+        "run_name": positions.run_name,
+        "coordinate_binding_status": run_group.attrs.get(
+            TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR
+        ),
+        "source_authority": source_authority,
+        "input_authority": input_authority,
+        "physical_authority": physical_record,
+        "run_derivation": run_derivation,
+        "run_root_attrs": run_root_attrs,
+        "run_group_inventory": {
+            "array_names": root_array_names,
+            "group_names": root_group_names,
+        },
+        "tracks_group_inventory": {
+            **tracks_parent_attr_record,
+            "array_names": sorted(
+                str(name) for name in tracks_parent.array_keys()
+            ),
+            "group_names": sorted(
+                str(name) for name in tracks_parent.group_keys()
+            ),
+        },
+        "run_arrays": run_arrays,
+        "track_count": track_count,
+        "tracks": track_records,
+    }
+    return _motion_json_object(
+        manifest,
+        label=f"/{run_group.path} full-motion publication manifest",
+    )
+
+
+def _track_motion_publication_commit(
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    tracks = manifest.get("tracks")
+    source = manifest.get("source_authority")
+    derivation = manifest.get("run_derivation")
+    input_authority = manifest.get("input_authority")
+    if not isinstance(tracks, Mapping) or not isinstance(
+        source, Mapping
+    ) or not isinstance(derivation, Mapping) or not isinstance(
+        input_authority, Mapping
+    ):
+        raise ValueError("Full-motion manifest cannot mint a publication commit.")
+    position_derivations = {
+        str(name): {
+            "record_ref": record.get("position_derivation_ref"),
+            "record_sha256": record.get("position_derivation_sha256"),
+        }
+        for name, record in tracks.items()
+        if isinstance(record, Mapping)
+    }
+    commit = {
+        "schema_id": TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_ID,
+        "schema_version": TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION,
+        "run_ref": manifest.get("run_ref"),
+        "manifest_sha256": _canonical_json_sha256(manifest),
+        "source_authority_sha256": _canonical_json_sha256(source),
+        "input_authority_sha256": input_authority.get("record_sha256"),
+        "run_derivation_sha256": derivation.get("record_sha256"),
+        "position_derivations": position_derivations,
+    }
+    return _motion_json_object(commit, label="track motion publication commit")
 
 
 def _build_track_staging_manifest(
@@ -2711,6 +8502,7 @@ def save_track_kinematics_tracks(
     *,
     source_temporal_authority: Any,
     positions_px_source: BoundCanonicalCoordinateDescriptor,
+    input_authority: BoundTrackMotionInputAuthority | None = None,
     physical_frame: BoundPhysicalFrameCalibration | None = None,
     physical_authority: BoundStimulusPhysicalCoordinateAuthority | None = None,
     physical_omission_reason_code: str = "NO_COMPATIBLE_TYPED_PHYSICAL_FRAME",
@@ -2753,6 +8545,38 @@ def save_track_kinematics_tracks(
     positions_px_source = require_bound_canonical_coordinate_descriptor(
         positions_px_source
     )
+    if input_authority is not None:
+        if (
+            type(input_authority) is not BoundTrackMotionInputAuthority
+            or getattr(input_authority, "_seal", None)
+            is not _BOUND_TRACK_MOTION_INPUT_AUTHORITY_SEAL
+        ):
+            raise ValueError(
+                "Track input authority was not minted from exact live arrays."
+            )
+        if input_authority.archive_identity != archive_identity(
+            positions_px_source.coordinate_node
+        ):
+            raise ValueError(
+                "Track input authority and selected positions belong to different "
+                "archives."
+            )
+        authority_record = _motion_json_object(
+            _thaw_motion_manifest(input_authority.record),
+            label="track-motion writer input authority",
+        )
+        position_identity = authority_record.get("position_row_identity")
+        if (
+            not isinstance(position_identity, Mapping)
+            or position_identity.get("record_ref")
+            != positions_px_source.row_identity.record_ref
+            or position_identity.get("record_sha256")
+            != positions_px_source.row_identity.record_sha256
+        ):
+            raise ValueError(
+                "Track input authority does not bind the selected position row identity."
+            )
+        run_group.attrs[TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority_record
     include_physical = physical_authority is not None
     if physical_authority is not None:
         if physical_authority.archive_identity != archive_identity(
@@ -3049,7 +8873,6 @@ def save_track_kinematics_tracks(
                 track_time_lineage=track_time_lineage,
             )
         subgroup.create_array("time_seconds", data=data["time_seconds"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("detection_indices", data=data["detection_indices"], chunks=base_chunk, overwrite=True)
         positions_px_array = subgroup.create_array(
             "positions_px",
             data=data["positions_px"],
@@ -3230,6 +9053,9 @@ def save_track_kinematics_tracks(
                 "sample_reason_codes": dict(SAMPLE_REASON_CODES),
                 "transition_validity_schema_id": "palette.track_transition_validity.v1",
                 "transition_reason_codes": dict(TRANSITION_REASON_CODES),
+                "motion_smoothing_windows": copy.deepcopy(
+                    data["motion_smoothing_windows"]
+                ),
                 "summary": persisted_summary,
                 "physical_outputs_status": (
                     "available_typed_source_camera_frame"
@@ -3428,6 +9254,21 @@ def _validate_run_track_physical_surfaces(
             "Track run summary/manifest does not match its exact track inventory."
         )
 
+    run_track_arenas: np.ndarray | None = None
+    if "track_arena_ids" in run_group:
+        run_track_arenas = np.array(
+            run_group["track_arena_ids"][:],
+            copy=True,
+            order="C",
+        )
+        if (
+            run_track_arenas.dtype != np.dtype("<i4")
+            or run_track_arenas.shape != (len(groups),)
+        ):
+            raise ValueError(
+                "Run track_arena_ids must be exact int32 and align with track_ids."
+            )
+
     for index, (track_id, subgroup) in enumerate(groups):
         name = f"id_{track_id}"
         if (
@@ -3474,6 +9315,18 @@ def _validate_run_track_physical_surfaces(
             or manifest_entry.get("samples") != subgroup.attrs.get("num_samples")
         ):
             raise ValueError(f"{name} track_manifest identity is invalid.")
+        subgroup_arena = subgroup.attrs.get("arena_id")
+        if manifest_entry.get("arena_id") != subgroup_arena:
+            raise ValueError(
+                f"{name} track_manifest arena_id differs from subgroup authority."
+            )
+        if run_track_arenas is not None and (
+            subgroup_arena is None
+            or int(run_track_arenas[index]) != int(subgroup_arena)
+        ):
+            raise ValueError(
+                f"{name} run, subgroup, and manifest arena identities disagree."
+            )
         _validate_track_summary_physical_fields(
             manifest_entry,
             physical_authority=physical_authority,
@@ -4117,6 +9970,40 @@ def _load_bound_track_publication_from_source(
     )
 
 
+def _fresh_track_run_group(
+    authoritative_root: Any,
+    run_group: Any,
+) -> Any:
+    """Resolve a caller-supplied track path from the authoritative root."""
+
+    path = str(getattr(run_group, "path", "")).strip("/")
+    parts = path.split("/")
+    if (
+        len(parts) != 4
+        or parts[:2] != ["analysis", "track_kinematics_runs"]
+        or parts[2] not in {"online", "offline"}
+        or not parts[3]
+    ):
+        raise ValueError("Track run is not at one canonical typed run path.")
+    try:
+        fresh = authoritative_root
+        for part in parts:
+            fresh = fresh[part]
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(
+            f"Authoritative track run /{path} is unavailable."
+        ) from exc
+    if (
+        str(getattr(fresh, "path", "")).strip("/") != path
+        or not callable(getattr(fresh, "group_keys", None))
+        or not callable(getattr(fresh, "array_keys", None))
+    ):
+        raise ValueError(
+            f"Authoritative track run /{path} resolved to a different node."
+        )
+    return fresh
+
+
 def _live_track_groups(run_group: zarr.Group) -> list[tuple[int, zarr.Group]]:
     try:
         track_ids_node = run_group["track_ids"]
@@ -4131,8 +10018,15 @@ def _live_track_groups(run_group: zarr.Group) -> list[tuple[int, zarr.Group]]:
         raise ValueError("Track run track_ids must be strictly increasing and unique.")
     expected_names = [f"id_{track_id}" for track_id in ids]
     group_keys = getattr(tracks_group, "group_keys", None)
-    if not callable(group_keys):
+    array_keys = getattr(tracks_group, "array_keys", None)
+    if not callable(group_keys) or not callable(array_keys):
         raise ValueError("Track run tracks node is not a persisted group.")
+    unexpected_arrays = sorted(str(name) for name in array_keys())
+    if unexpected_arrays:
+        raise ValueError(
+            "Track run /tracks array inventory is not closed "
+            f"(unexpected={unexpected_arrays!r})."
+        )
     live_names = sorted(str(name) for name in group_keys())
     if live_names != sorted(expected_names):
         raise ValueError("Track run track_ids and track subgroup inventory disagree.")
@@ -4292,14 +10186,8 @@ def _load_bound_track_position_bindings_impl(
     require_complete: bool,
     expected_selector_eligible: bool,
 ) -> BoundTrackPositionBindings:
+    run_group = _fresh_track_run_group(authoritative_root, run_group)
     parts = str(run_group.path).split("/")
-    if (
-        len(parts) != 4
-        or parts[:2] != ["analysis", "track_kinematics_runs"]
-        or parts[2] not in {"online", "offline"}
-        or not parts[3]
-    ):
-        raise ValueError("Track run is not at one canonical typed run path.")
     expected_status = RUN_STATUS_COMPLETE if require_complete else "running"
     if (
         run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != expected_status
@@ -4394,6 +10282,264 @@ def validate_bound_track_position_bindings(
     """Validate and return the same typed bindings as the canonical loader."""
 
     return load_bound_track_position_bindings(authoritative_root, run_group)
+
+
+def _load_bound_track_motion_run_impl(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_selector_eligible: bool,
+) -> BoundTrackMotionRun:
+    """Freshly bind the exact sealed motion payload from live arrays."""
+
+    if expected_selector_eligible:
+        positions = load_bound_track_position_bindings(
+            authoritative_root,
+            run_group,
+        )
+    else:
+        positions = _load_bound_track_position_bindings_before_selection(
+            authoritative_root,
+            run_group,
+            require_complete=True,
+        )
+    # Position binding resolves the child from the authoritative root.  Every
+    # subsequent payload and attribute read must use that same fresh node, not
+    # the caller's potentially detached or replaced handle.
+    run_group = positions.run_group
+    raw_manifest = run_group.attrs.get(TRACK_MOTION_PUBLICATION_MANIFEST_ATTR)
+    raw_digest = run_group.attrs.get(
+        TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR
+    )
+    raw_commit = run_group.attrs.get(TRACK_MOTION_PUBLICATION_COMMIT_ATTR)
+    if (
+        not isinstance(raw_manifest, Mapping)
+        or not isinstance(raw_digest, str)
+        or not isinstance(raw_commit, Mapping)
+    ):
+        raise ValueError(
+            "Track run lacks one versioned digest-bound full-motion manifest "
+            "and publication commit."
+        )
+    manifest = _motion_json_object(
+        raw_manifest,
+        label=f"/{run_group.path} persisted full-motion manifest",
+    )
+    expected_digest = _canonical_json_sha256(manifest)
+    if (
+        manifest.get("schema_id") != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID
+        or manifest.get("schema_version")
+        != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        or manifest.get("run_ref") != f"/{run_group.path}"
+        or manifest.get("run_type") != positions.run_type
+        or manifest.get("run_name") != positions.run_name
+        or raw_digest != expected_digest
+    ):
+        raise ValueError(
+            "Track full-motion manifest schema, run identity, or digest is invalid."
+        )
+    commit = _motion_json_object(
+        raw_commit,
+        label=f"/{run_group.path} persisted full-motion publication commit",
+    )
+    if commit != _track_motion_publication_commit(manifest):
+        raise ValueError(
+            "Track full-motion publication commit does not bind the exact manifest."
+        )
+    live_manifest = _build_track_motion_publication_manifest(
+        authoritative_root,
+        run_group,
+        positions,
+    )
+    if not _track_attr_values_equal(manifest, live_manifest):
+        raise ValueError(
+            "Track full-motion manifest differs from the exact live payload, "
+            "domains, aliases, derivations, or authorities."
+        )
+
+    position_by_id = dict(positions.track_positions)
+    track_bindings: list[BoundTrackMotionTrack] = []
+    tracks_record = manifest.get("tracks")
+    if not isinstance(tracks_record, Mapping):  # pragma: no cover - schema guard
+        raise ValueError("Track full-motion manifest track inventory is invalid.")
+    for track_id, track_group in _live_track_groups(run_group):
+        record = tracks_record.get(f"id_{track_id}")
+        if not isinstance(record, Mapping) or not isinstance(
+            record.get("surfaces"), Mapping
+        ):
+            raise ValueError(
+                f"Track {track_id} full-motion manifest record is invalid."
+            )
+        surfaces: list[BoundTrackMotionSurface] = []
+        for relative_path, surface_record in sorted(
+            record["surfaces"].items()
+        ):
+            if not isinstance(surface_record, Mapping):
+                raise ValueError(
+                    f"Track {track_id} motion surface record is invalid."
+                )
+            if surface_record.get("authority_scope") != "public_derived_motion":
+                continue
+            input_refs = surface_record.get("input_refs")
+            if not isinstance(input_refs, list) or not all(
+                isinstance(value, Mapping)
+                and value.get("kind")
+                in {
+                    "array",
+                    "group_attr",
+                    "manifest_record",
+                    "external_lineage",
+                }
+                and isinstance(value.get("ref"), str)
+                for value in input_refs
+            ):
+                raise ValueError(
+                    f"Track {track_id} motion derivation input refs are invalid."
+                )
+            surface_shape = surface_record.get("shape")
+            surface_dtype = surface_record.get("dtype")
+            surface_digest = surface_record.get("content_sha256")
+            if (
+                not isinstance(surface_shape, list)
+                or not all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    and value >= 0
+                    for value in surface_shape
+                )
+                or not isinstance(surface_dtype, str)
+                or not isinstance(surface_digest, str)
+            ):
+                raise ValueError(
+                    f"Track {track_id} motion surface payload binding is invalid."
+                )
+            _sha256_text(
+                surface_digest,
+                label=f"track {track_id} {relative_path} content_sha256",
+            )
+            surfaces.append(
+                BoundTrackMotionSurface(
+                    relative_path=str(relative_path),
+                    axis0_domain=str(surface_record["axis0_domain"]),
+                    units=str(surface_record["units"]),
+                    semantic_profile=str(surface_record["semantic_profile"]),
+                    operation_id=str(surface_record["operation_id"]),
+                    input_refs=tuple(dict(value) for value in input_refs),
+                    alias_of=(
+                        str(surface_record["alias_of"])
+                        if surface_record.get("alias_of") is not None
+                        else None
+                    ),
+                    dtype=surface_dtype,
+                    shape=tuple(surface_shape),
+                    content_sha256=surface_digest,
+                    node=_relative_child(track_group, str(relative_path)),
+                    _verification_seal=_BOUND_TRACK_MOTION_SEAL,
+                )
+            )
+        track_bindings.append(
+            BoundTrackMotionTrack(
+                track_id=track_id,
+                position_binding=position_by_id[track_id],
+                surfaces=tuple(surfaces),
+                track_group=track_group,
+                _verification_seal=_BOUND_TRACK_MOTION_SEAL,
+            )
+        )
+    return BoundTrackMotionRun(
+        position_bindings=positions,
+        manifest_sha256=expected_digest,
+        manifest=manifest,
+        tracks=tuple(track_bindings),
+        run_group=run_group,
+        authoritative_root=authoritative_root,
+        expected_selector_eligible=expected_selector_eligible,
+        _verification_seal=_BOUND_TRACK_MOTION_SEAL,
+    )
+
+
+def _seal_and_load_track_motion_run_before_selection(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_publication_owner_uuid: str | None = None,
+) -> BoundTrackMotionRun:
+    """Persist then freshly reload a complete, selector-ineligible motion seal."""
+
+    run_group = _fresh_track_run_group(authoritative_root, run_group)
+    owner_uuid = (
+        _track_publication_owner_uuid(run_group)
+        if expected_publication_owner_uuid is None
+        else str(expected_publication_owner_uuid)
+    )
+    if _track_publication_owner_uuid(run_group) != owner_uuid:
+        raise RuntimeError(
+            "Full-motion sealing observed a different publication owner."
+        )
+    if (
+        run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Full-motion sealing requires a complete, literally selector-ineligible run."
+        )
+    positions = _load_bound_track_position_bindings_before_selection(
+        authoritative_root,
+        run_group,
+        require_complete=True,
+    )
+    manifest = _build_track_motion_publication_manifest(
+        authoritative_root,
+        run_group,
+        positions,
+    )
+    run_group.attrs[TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = manifest
+    run_group = _resolve_owned_track_run_child(
+        authoritative_root,
+        run_name=positions.run_name,
+        run_type=positions.run_type,
+        owner_uuid=owner_uuid,
+    )
+    assert run_group is not None
+    run_group.attrs[TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR] = (
+        _canonical_json_sha256(manifest)
+    )
+    run_group = _resolve_owned_track_run_child(
+        authoritative_root,
+        run_name=positions.run_name,
+        run_type=positions.run_type,
+        owner_uuid=owner_uuid,
+    )
+    assert run_group is not None
+    run_group.attrs[TRACK_MOTION_PUBLICATION_COMMIT_ATTR] = (
+        _track_motion_publication_commit(manifest)
+    )
+    return _load_bound_track_motion_run_impl(
+        authoritative_root,
+        run_group,
+        expected_selector_eligible=False,
+    )
+
+
+def load_bound_track_motion_run(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+) -> BoundTrackMotionRun:
+    """Load a complete public run with an exact live full-motion seal."""
+
+    return _load_bound_track_motion_run_impl(
+        authoritative_root,
+        run_group,
+        expected_selector_eligible=True,
+    )
+
+
+def validate_bound_track_motion_run(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+) -> BoundTrackMotionRun:
+    """Validate and return the same typed full-motion authority."""
+
+    return load_bound_track_motion_run(authoritative_root, run_group)
 
 
 def _validate_direct_track_kinematics_run_before_selection(
@@ -4835,6 +10981,18 @@ def _write_movement_speed_groups(
                 "post_smoothing_method": str(derivative.get("post_smoothing_method", "moving_average")),
                 "post_smoothing_alignment": str(derivative.get("post_smoothing_alignment", "centered")),
                 "post_smoothing_window_frames": int(derivative.get("post_smoothing_window_frames", 1)),
+                "post_smoothing_window_frames_requested": int(
+                    derivative.get(
+                        "post_smoothing_window_frames_requested",
+                        derivative.get("post_smoothing_window_frames", 1),
+                    )
+                ),
+                "post_smoothing_window_frames_effective": int(
+                    derivative.get(
+                        "post_smoothing_window_frames_effective",
+                        derivative.get("post_smoothing_window_frames", 1),
+                    )
+                ),
                 "post_smoothing_window_s": float(derivative.get("post_smoothing_window_s", 0.0)),
         }
         if include_physical:
@@ -4946,6 +11104,18 @@ def _write_speed_derivative_groups(
                 "post_smoothing_method": str(item.get("post_smoothing_method", "moving_average")),
                 "post_smoothing_alignment": str(item.get("post_smoothing_alignment", "centered")),
                 "post_smoothing_window_frames": int(item.get("post_smoothing_window_frames", 1)),
+                "post_smoothing_window_frames_requested": int(
+                    item.get(
+                        "post_smoothing_window_frames_requested",
+                        item.get("post_smoothing_window_frames", 1),
+                    )
+                ),
+                "post_smoothing_window_frames_effective": int(
+                    item.get(
+                        "post_smoothing_window_frames_effective",
+                        item.get("post_smoothing_window_frames", 1),
+                    )
+                ),
                 "post_smoothing_window_s": float(item.get("post_smoothing_window_s", 0.0)),
                 "interpretation": (
                     "Framewise time derivative of the named source speed trace. "
@@ -5635,8 +11805,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if fps <= 0:
         raise ValueError("FPS must be positive.")
 
-    _, legacy_calibration_info = resolve_calibration(root)
-
     if render_online:
         # Online track kinematics prefers the sealed refined surface and otherwise
         # selects an exact row subset from the sealed stimulus point surface.
@@ -5649,6 +11817,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         online_source_temporal_authority = None
         raw_online_rowset: zarr.Group | None = None
         handoff: CanonicalOnlineCoordinateHandoff | None = None
+        online_heading_authority_node: Any | None = None
 
         # Check for refined online data (use by default if available)
         if "refined_online_runs" in root:
@@ -5704,8 +11873,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
                 # Get source stimulus run for provenance
                 stimulus_run_name = refined_group.attrs.get("source_stimulus_run")
-                texture_to_camera_scale = None
-
                 coordinate_space = online_positions_px_source.descriptor.space_id
                 # A numeric projector scale alone does not define a physical
                 # frame for arena-relative/canvas coordinates.  Preserve px
@@ -5786,11 +11953,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 )
                 coordinate_space = online_positions_px_source.descriptor.space_id
 
-        if render_online and not use_refined_online:
-            # Scalar texture/canvas ratios are not calibration or transform
-            # authority. The exact native stimulus coordinates remain unchanged.
-            texture_to_camera_scale = None
-
         if render_online:
             # Get heading from online fields if available, otherwise NaN
             if use_refined_online:
@@ -5800,6 +11962,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 assert raw_online_rowset is not None
                 heading_node = raw_online_rowset.get("visual_angle_deg")
                 if heading_node is not None:
+                    online_heading_authority_node = heading_node
                     heading_values = np.asarray(heading_node[:], dtype=np.float64)
                     assert online_source_row_index is not None
                     if heading_values.shape != (
@@ -5820,6 +11983,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             # Single track ID for online (chaser)
             track_ids_online = np.zeros(frames_online.shape[0], dtype=np.int64)
             keypoint_success_online = np.ones(frames_online.shape[0], dtype=bool)
+
+            online_input_authority = build_track_motion_input_authority(
+                root,
+                source_positions=online_positions_px_source,
+                mode="online_exact_or_generated_v1",
+                heading_node=online_heading_authority_node,
+                generated_track_id=0,
+            )
 
             console.print(f"[blue]Online frames:[/blue] {frames_online.shape[0]} (full experimental session: PRE + TRAINING + POST)")
 
@@ -5858,6 +12029,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     run_name, run_group = ensure_track_kinematics_run_group(
                         output_root, args.run_name, run_type="online"
                     )
+                    online_publication_owner_uuid = (
+                        _track_publication_owner_uuid(run_group)
+                    )
                     ordered_track_ids = save_track_kinematics_tracks(
                         run_group,
                         tracks_online,
@@ -5866,6 +12040,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             online_source_temporal_authority
                         ),
                         positions_px_source=online_positions_px_source,
+                        input_authority=online_input_authority,
                     )
 
                     created_at = datetime.now(timezone.utc).isoformat()
@@ -5885,9 +12060,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             ),
                         }
                         method = "track_kinematics_online_refined"
-                        # For refined online data, save the coordinate space and calibration used
                         saved_coordinate_space = coordinate_space
-                        saved_pixel_to_mm = pixel_to_mm_online
                     else:
                         inputs = {
                             "stimulus_run": stimulus_run_name,
@@ -5899,7 +12072,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         }
                         method = "track_kinematics_online"
                         saved_coordinate_space = coordinate_space
-                        saved_pixel_to_mm = None
 
                     # Canonical stage provenance.
                     online_params = {
@@ -5908,9 +12080,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         "smoothing_method": args.smoothing_method,
                         "smoothing_alignment": args.smoothing_alignment,
                         "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
+                        "hysteresis_enabled": False,
+                        "hysteresis_high_px": None,
+                        "hysteresis_low_px": None,
+                        "hysteresis_min_frames": None,
+                        "hysteresis_band_policy": (
+                            DEFAULT_HYSTERESIS_BAND_POLICY
+                        ),
                         "coordinate_space": saved_coordinate_space,
-                        "calibration_used": saved_pixel_to_mm,
-                        "texture_to_camera_scale": texture_to_camera_scale,
                     }
                     provenance = build_stage_provenance(
                         stage="track_kinematics",
@@ -5938,9 +12115,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "smoothing_method": args.smoothing_method,
                             "smoothing_alignment": args.smoothing_alignment,
                             "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
-                            "calibration": legacy_calibration_info,
+                            "hysteresis_enabled": False,
+                            "hysteresis_high_px": None,
+                            "hysteresis_low_px": None,
+                            "hysteresis_min_frames": None,
+                            "hysteresis_band_policy": (
+                                DEFAULT_HYSTERESIS_BAND_POLICY
+                            ),
                             "inputs": inputs,
-                            "texture_to_camera_scale": texture_to_camera_scale,
                             "coordinate_space": saved_coordinate_space,
                             "positions_px_source_path": online_positions_px_source_path,
                             "positions_px_source_coordinate_descriptor_sha256": (
@@ -5960,10 +12142,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         run_group,
                         run_name=run_name,
                         run_type="online",
-                        validate_complete_run=lambda: (
+                        publication_owner_uuid=online_publication_owner_uuid,
+                        validate_complete_run=lambda fresh_run: (
                             _validate_direct_track_kinematics_run_before_selection(
                                 output_root,
-                                run_group,
+                                fresh_run,
                                 run_name=run_name,
                                 run_type="online",
                                 source_positions=online_positions_px_source,
@@ -5985,42 +12168,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
         keypoints_offline = resolve_keypoint_group(root, args.keypoint_run, console)
         crop_group_offline = root[f"crop_runs/{keypoints_offline.crop_run}"]
-        detection_path_offline = crop_group_offline.attrs.get("source_coords_path")
-        crop_row_source_label = _crop_row_source_label(crop_group_offline.attrs)
-        if detection_path_offline:
-            detection_offline: Optional[DetectionResolution] = resolve_detection_from_path(
-                root,
-                detection_path_offline,
-            )
-            preferred_detection_offline = prefer_refined_detection(
-                root,
-                detection_offline,
-                console,
-            )
-            detection_offline = preferred_detection_offline
-        else:
-            if (
-                "frame_indices" not in crop_group_offline
-                or (
-                    "bbox_img_xyxy" not in crop_group_offline
-                    and "bbox_norm_coords" not in crop_group_offline
-                )
-            ):
-                raise ValueError(
-                    f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path'; cannot determine detection source."
-                )
-            if not crop_row_source_label:
-                raise ValueError(
-                    f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path' "
-                    "and source_detect_run/detection_source_type; cannot determine tracking lineage."
-                )
-            console.print(
-                "[cyan]Using row-aligned crop metadata as offline position source:[/cyan] "
-                f"crop_runs/{keypoints_offline.crop_run} "
-                f"(source={crop_row_source_label})"
-            )
-            detection_offline = None
-
         position_source_offline = load_canonical_offline_position_source(
             root,
             crop_group_offline,
@@ -6035,6 +12182,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 "Canonical offline track publication requires a sealed source-camera "
                 "position surface."
             )
+        detection_path_offline = _canonical_crop_detection_rowset_path(
+            canonical_position_surface.coordinates
+        )
+        detection_offline = resolve_detection_from_path(
+            root,
+            detection_path_offline,
+        )
+        console.print(
+            "[cyan]Using canonical crop-bound offline geometry:[/cyan] "
+            f"crop_runs/{keypoints_offline.crop_run} "
+            f"(detection_rowset={detection_path_offline})"
+        )
         (
             offline_physical_authority,
             offline_physical_calibration_info,
@@ -6079,12 +12238,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
         )
 
-        if detection_offline is not None:
-            expected_detect_run = (
-                detection_offline.source_detect_run or detection_offline.run_name
-            )
-        else:
-            expected_detect_run = crop_row_source_label
+        expected_detect_run = (
+            detection_offline.source_detect_run or detection_offline.run_name
+        )
         if not expected_detect_run:
             raise ValueError(
                 "Offline: unable to determine source_detect_run for tracking lookup."
@@ -6094,9 +12250,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             frame_indices_offline.shape[0],
             expected_detect_run=expected_detect_run,
             expected_refined_run=(
-                detection_offline.run_name
-                if detection_offline is not None and detection_offline.is_refined
-                else None
+                detection_offline.run_name if detection_offline.is_refined else None
             ),
             expected_source_rowset_path=position_source_offline.path,
             expected_instance_key=position_source_offline.instance_key,
@@ -6110,6 +12264,32 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 tracking_metadata.get("track_id_to_arena_id", {}) or {}
             ).items()
         }
+        tracking_run_name = tracking_metadata.get("track_run")
+        if not isinstance(tracking_run_name, str) or not tracking_run_name:
+            raise ValueError("Offline tracking metadata lacks one exact run name.")
+        tracking_group_offline = root[f"tracking_runs/{tracking_run_name}"]
+        keypoint_row_key_node = _motion_input_child(
+            keypoints_offline.group,
+            "instance_key",
+        )
+        keypoint_usability_node = (
+            None
+            if keypoint_usability_dataset == "implicit_all_true"
+            else keypoints_offline.group[keypoint_usability_dataset]
+        )
+        offline_input_authority = build_track_motion_input_authority(
+            root,
+            source_positions=canonical_position_surface.coordinates,
+            mode="offline_exact_sources_v1",
+            heading_node=keypoints_offline.group["heading"],
+            keypoint_usability_node=keypoint_usability_node,
+            keypoint_row_key_node=keypoint_row_key_node,
+            tracking_group=tracking_group_offline,
+            detection_source_node=_motion_input_child(
+                position_source_offline.rowset_group,
+                "detection_source",
+            ),
+        )
 
         console.print(f"[blue]Offline frames:[/blue] {frame_indices_offline.shape[0]} (all keypoint detections)")
 
@@ -6206,6 +12386,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             run_type="offline",
                             overwrite=True,
                         )
+                        offline_publication_owner_uuid = (
+                            _track_publication_owner_uuid(offline_group)
+                        )
                         ordered_ids_offline = save_track_kinematics_tracks(
                             offline_group,
                             tracks_offline,
@@ -6214,6 +12397,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 offline_source_temporal_authority
                             ),
                             positions_px_source=canonical_position_surface.coordinates,
+                            input_authority=offline_input_authority,
                             physical_authority=offline_physical_authority,
                             physical_omission_reason_code=(
                                 offline_physical_reason_code
@@ -6294,42 +12478,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         env_info = get_environment_info()
 
                         offline_inputs = {
-                            "detection_path": (
-                                detection_offline.path
-                                if detection_offline is not None
-                                else None
+                            "detection_path": detection_path_offline,
+                            **_offline_position_source_inputs(
+                                position_source_offline
                             ),
-                            "detection_run": (
-                                detection_offline.run_name
-                                if detection_offline is not None
-                                else crop_row_source_label
-                            ),
-                            "detection_variant": (
-                                detection_offline.variant
-                                if detection_offline is not None
-                                else "crop_rows"
-                            ),
-                            "source_detect_run": (
-                                detection_offline.source_detect_run
-                                if detection_offline is not None
-                                else crop_row_source_label
-                            ),
-                            "position_source_path": position_source_offline.path,
-                            "position_source_kind": position_source_offline.kind,
-                            "position_geometry_path": (
-                                position_source_offline.geometry_path
-                            ),
-                            "keypoint_run": keypoints_offline.run_name,
-                            "keypoint_variant": "refined" if keypoints_offline.is_refined else "raw",
-                            "base_keypoint_run": keypoints_offline.base_run_name,
-                            "keypoint_usability_dataset": keypoint_usability_dataset,
+                            "keypoint_path": (
+                                "refined_keypoints_runs/"
+                                if keypoints_offline.is_refined
+                                else "keypoints_runs/"
+                            )
+                            + keypoints_offline.run_name,
                             "crop_run": keypoints_offline.crop_run,
-                            "source_tracking_run": tracking_metadata.get("track_run"),
-                            "source_arena_assignment_run": tracking_metadata.get("source_arena_assignment_run"),
-                            "source_tracking_rowset_fingerprint": tracking_metadata.get("source_rowset_fingerprint"),
+                            "tracking_path": f"tracking_runs/{tracking_run_name}",
                         }
-                        if tracking_metadata:
-                            offline_inputs["tracking_metadata"] = tracking_metadata
                         if metrics_metadata:
                             offline_inputs["chaser_metrics"] = metrics_metadata
                         if swim_bout_mirror:
@@ -6343,15 +12504,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "smoothing_alignment": args.smoothing_alignment,
                             "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                             "distance_interpolation_seconds": args.distance_interpolation_seconds,
-                            "coordinate_space": "camera",
-                            "physical_calibration": (
-                                offline_physical_calibration_info
-                            ),
+                            "coordinate_space": "source_camera_image_px",
                             "hysteresis_enabled": not args.no_hysteresis,
                             "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
                             "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
                             "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
-                            "hysteresis_band_policy": args.hysteresis_band_policy if not args.no_hysteresis else None,
+                            "hysteresis_band_policy": args.hysteresis_band_policy,
                         }
                         offline_provenance = build_stage_provenance(
                             stage="track_kinematics",
@@ -6380,17 +12538,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "smoothing_alignment": args.smoothing_alignment,
                                 "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                                 "distance_interpolation_seconds": args.distance_interpolation_seconds,
-                                "physical_calibration": (
-                                    offline_physical_calibration_info
-                                ),
                                 "hysteresis_enabled": not args.no_hysteresis,
                                 "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
                                 "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
                                 "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
-                                "hysteresis_band_policy": args.hysteresis_band_policy if not args.no_hysteresis else None,
-                                "source_tracking_run": tracking_metadata.get("track_run"),
-                                "source_arena_assignment_run": tracking_metadata.get("source_arena_assignment_run"),
-                                "source_tracking_rowset_fingerprint": tracking_metadata.get("source_rowset_fingerprint"),
+                                "hysteresis_band_policy": args.hysteresis_band_policy,
                                 "inputs": offline_inputs,
                                 "num_tracks": len(ordered_ids_offline),
                                 "source_zarr": str(source_path),
@@ -6431,10 +12583,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 offline_group,
                                 run_name=offline_run_name,
                                 run_type="offline",
-                                validate_complete_run=lambda: (
+                                publication_owner_uuid=(
+                                    offline_publication_owner_uuid
+                                ),
+                                validate_complete_run=lambda fresh_run: (
                                     _validate_direct_track_kinematics_run_before_selection(
                                         output_root,
-                                        offline_group,
+                                        fresh_run,
                                         run_name=offline_run_name,
                                         run_type="offline",
                                         source_positions=(
@@ -6456,7 +12611,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 
 __all__ = [
+    "BoundTrackMotionRun",
+    "BoundTrackMotionSurface",
+    "BoundTrackMotionTrack",
     "BoundTrackPositionBindings",
+    "DeferredTrackKinematicsSelectorActivation",
     "TrackSpeeds",
     "_ordered_track_arena_ids",
     "bind_staged_offline_track_kinematics_run",
@@ -6464,9 +12623,12 @@ __all__ = [
     "find_fps",
     "_filter_public_track_rows",
     "load_arena_ids",
+    "load_bound_track_motion_run",
     "load_bound_track_position_bindings",
     "resolve_dimensions",
+    "rollback_deferred_track_kinematics_selector_activation",
     "stage_offline_track_kinematics_run",
+    "validate_bound_track_motion_run",
     "validate_bound_track_position_bindings",
     "main",
 ]

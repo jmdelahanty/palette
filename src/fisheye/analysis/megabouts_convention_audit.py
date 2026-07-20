@@ -8,12 +8,17 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import zarr
 
+from .subject_shape_io import resolve_canonical_subject_shape_run
+from .tail_kinematics_io import resolve_tail_kinematics_run
 from ..shared.json_safety import json_attr_safe
+from ..shared.tail_coordinate_publication import (
+    load_tail_kinematics_coordinate_publication,
+)
 from ..shared.zarr_io import open_zarr_root
 
 DEFAULT_MEGABOUTS_KEYPOINT_COUNT = 11
@@ -29,8 +34,9 @@ class MegaboutsAngleAuditArrays:
     tail_sample_xy: np.ndarray
     head_xy: np.ndarray
     palette_tail_angle_rad: np.ndarray
-    frame_index: np.ndarray
+    source_acquisition_frame_index: np.ndarray
     valid: np.ndarray
+    source_refs: dict[str, str]
 
 
 _json_safe = json_attr_safe
@@ -48,18 +54,6 @@ def _require_array(group: zarr.Group, name: str) -> object:
     if arr is None:
         raise ValueError(f"Missing required array: {group.name}/{name}")
     return arr
-
-
-def _resolve_run(parent: zarr.Group, run_name: Optional[str], *, kind: str) -> tuple[str, zarr.Group]:
-    name = str(run_name or parent.attrs.get("latest") or "")
-    if not name:
-        raise ValueError(f"No {kind} run specified and {parent.name}.attrs['latest'] is missing.")
-    if name not in parent:
-        raise ValueError(f"{parent.name}/{name} not found.")
-    run = parent[name]
-    if not isinstance(run, zarr.Group):
-        raise ValueError(f"{parent.name}/{name} is not a group.")
-    return name, run
 
 
 def _finite_rows(*arrays: np.ndarray) -> np.ndarray:
@@ -302,11 +296,28 @@ def _read_audit_arrays(
     tail_kinematics_run: Optional[str] = None,
     head_source: str = "head_endpoint_xy",
 ) -> tuple[str, str, MegaboutsAngleAuditArrays]:
-    analysis = _require_group(root, "analysis")
-    shape_parent = _require_group(analysis, "subject_shape_runs")
-    shape_name, shape = _resolve_run(shape_parent, subject_shape_run, kind="subject-shape")
-    tail_parent = _require_group(analysis, "tail_kinematics_runs")
-    tail_name, tail_run = _resolve_run(tail_parent, tail_kinematics_run, kind="tail-kinematics")
+    (
+        shape,
+        shape_name,
+        shape_path,
+        shape_publication,
+    ) = resolve_canonical_subject_shape_run(root, subject_shape_run)
+    tail_run, tail_name, tail_path = resolve_tail_kinematics_run(
+        root,
+        tail_kinematics_run,
+    )
+    tail_publication = load_tail_kinematics_coordinate_publication(root, tail_path)
+    if (
+        tail_publication.source.run_path != shape_path
+        or tail_publication.source.manifest.record_ref
+        != shape_publication.manifest.record_ref
+        or tail_publication.source.manifest.record_sha256
+        != shape_publication.manifest.record_sha256
+    ):
+        raise ValueError(
+            "Selected tail-kinematics publication is not bound to the exact "
+            "selected subject-shape publication."
+        )
 
     body = _require_group(_require_group(shape, "components"), "subject_body")
     tail_sample_xy = np.asarray(_require_array(body, "tail_sample_xy")[:], dtype=np.float32)
@@ -314,6 +325,14 @@ def _read_audit_arrays(
     source_tail_sample_s = np.asarray(_require_array(body, "tail_sample_s")[:], dtype=np.float32)
     head_xy = np.asarray(_require_array(body, head_source)[:], dtype=np.float32)
     palette_tail_angle = np.asarray(_require_array(tail_run, "tail_angle_rad")[:], dtype=np.float32)
+    shape_frame_index = np.asarray(
+        _require_array(shape, "source_acquisition_frame_index")[:],
+        dtype=np.int64,
+    ).reshape(-1)
+    frame_index = np.asarray(
+        _require_array(tail_run, "source_acquisition_frame_index")[:],
+        dtype=np.int64,
+    ).reshape(-1)
 
     valid = _finite_rows(tail_sample_xy, head_xy, palette_tail_angle)
     for group, name in ((body, "tail_sample_valid"), (body, "bspline_valid"), (tail_run, "valid")):
@@ -324,23 +343,75 @@ def _read_audit_arrays(
                 raise ValueError(f"{group.name}/{name} row count does not match subject-shape rows.")
             valid &= data
 
-    frame_arr = tail_run.get("frame_index")
-    if frame_arr is None:
-        row_index = tail_run.get("row_index")
-        if isinstance(row_index, zarr.Group) and row_index.get("frame_indices") is not None:
-            frame_arr = row_index["frame_indices"]
-    frame_index = (
-        np.arange(row_count, dtype=np.int64)
-        if frame_arr is None
-        else np.asarray(frame_arr[:], dtype=np.int64).reshape(-1)
-    )
-
     if head_xy.shape != (row_count, 2):
         raise ValueError(f"{body.name}/{head_source} must have shape (N, 2).")
     if int(palette_tail_angle.shape[0]) != row_count:
         raise ValueError("tail_kinematics tail_angle_rad row count does not match subject-shape rows.")
     if int(frame_index.shape[0]) != row_count:
-        raise ValueError("frame_index row count does not match subject-shape rows.")
+        raise ValueError(
+            "source_acquisition_frame_index row count does not match "
+            "subject-shape rows."
+        )
+    if shape_frame_index.shape != frame_index.shape or not np.array_equal(
+        shape_frame_index,
+        frame_index,
+    ):
+        raise ValueError(
+            "Tail-kinematics source_acquisition_frame_index does not exactly "
+            "match its selected subject-shape source."
+        )
+
+    source_refs = {
+        "subject_shape_run": shape_path,
+        "subject_shape_publication_manifest_ref": (
+            shape_publication.manifest.record_ref
+        ),
+        "subject_shape_publication_manifest_sha256": (
+            shape_publication.manifest.record_sha256
+        ),
+        "tail_kinematics_run": tail_path,
+        "tail_kinematics_publication_manifest_ref": (
+            tail_publication.manifest.record_ref
+        ),
+        "tail_kinematics_publication_manifest_sha256": (
+            tail_publication.manifest.record_sha256
+        ),
+        "source_acquisition_frame_index": (
+            f"{tail_path}/source_acquisition_frame_index"
+        ),
+    }
+    (
+        _fresh_shape,
+        fresh_shape_name,
+        fresh_shape_path,
+        fresh_shape_publication,
+    ) = resolve_canonical_subject_shape_run(root, shape_name)
+    fresh_tail_publication = load_tail_kinematics_coordinate_publication(
+        root,
+        tail_path,
+    )
+    if (
+        fresh_shape_name != shape_name
+        or fresh_shape_path != shape_path
+        or fresh_shape_publication.manifest.record_ref
+        != shape_publication.manifest.record_ref
+        or fresh_shape_publication.manifest.record_sha256
+        != shape_publication.manifest.record_sha256
+        or fresh_tail_publication.run_path != tail_path
+        or fresh_tail_publication.manifest.record_ref
+        != tail_publication.manifest.record_ref
+        or fresh_tail_publication.manifest.record_sha256
+        != tail_publication.manifest.record_sha256
+        or fresh_tail_publication.source.run_path != shape_path
+        or fresh_tail_publication.source.manifest.record_ref
+        != shape_publication.manifest.record_ref
+        or fresh_tail_publication.source.manifest.record_sha256
+        != shape_publication.manifest.record_sha256
+    ):
+        raise ValueError(
+            "Subject-shape or tail-kinematics publication changed while "
+            "Megabouts audit inputs were copied."
+        )
 
     return (
         shape_name,
@@ -350,8 +421,9 @@ def _read_audit_arrays(
             tail_sample_xy=tail_sample_xy,
             head_xy=head_xy,
             palette_tail_angle_rad=palette_tail_angle,
-            frame_index=frame_index,
+            source_acquisition_frame_index=frame_index,
             valid=valid,
+            source_refs=source_refs,
         ),
     )
 
@@ -391,7 +463,7 @@ def audit_megabouts_tail_convention_group(
         megabouts_tail_angle_rad=megabouts_angle,
         palette_tail_angle_rad=arrays.palette_tail_angle_rad,
         valid=arrays.valid,
-        frame_index=arrays.frame_index,
+        frame_index=arrays.source_acquisition_frame_index,
         max_worst_rows=int(max_worst_rows),
     )
     direct_p95_deg = comparison.get("direct", {}).get("p95_abs_deg")  # type: ignore[union-attr]
@@ -410,6 +482,7 @@ def audit_megabouts_tail_convention_group(
         "mutates_archive": False,
         "source_subject_shape_run": shape_name,
         "source_tail_kinematics_run": tail_name,
+        "source_refs": arrays.source_refs,
         "head_source": head_source,
         "megabouts_keypoint_count": int(keypoint_count),
         "megabouts_segment_count": int(megabouts_angle.shape[1]),

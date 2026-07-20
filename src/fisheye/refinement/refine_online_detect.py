@@ -25,6 +25,7 @@ import hashlib
 import json
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -88,6 +89,11 @@ from ..shared.stimulus_frame_transform import (
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.run_provenance import build_run_provenance_from_stage_record
+from ..shared.selector_activation import (
+    SelectorActivationError,
+    activate_selector_eligible_run,
+    write_activation_attr,
+)
 from ..shared.zarr_run_completion import (
     RUN_COMPLETED_AT_ATTR,
     RUN_COMPLETION_CONTRACT,
@@ -123,6 +129,16 @@ PROCESSING_RECORD_DIGEST_ATTR = f"{PROCESSING_RECORD_ATTR}_sha256"
 PROCESSING_RECORD_SCHEMA_ID = "palette.refined_online_coordinate_processing"
 PROCESSING_RECORD_SCHEMA_VERSION = 1
 COORDINATE_CONTRACT_EPOCH = "canonical_v2_future_only"
+REFINED_ONLINE_PUBLICATION_OWNER_ATTR = "refined_online_publication_owner_uuid"
+REFINED_ONLINE_PARENT_PUBLICATION_LEASE_ATTR = (
+    "refined_online_publication_lease"
+)
+REFINED_ONLINE_PUBLICATION_GENERATION_ATTR = "publication_generation"
+REFINED_ONLINE_PUBLICATION_POLICY_ATTR = "publication_policy"
+REFINED_ONLINE_PUBLICATION_TOMBSTONE_ATTR = "refined_online_publication_tombstone"
+REFINED_ONLINE_PUBLICATION_POLICY = (
+    "owner_generation_guarded_selectors_then_eligibility_v1"
+)
 _BOUND_REFINED_ONLINE_EVIDENCE_SEAL = object()
 
 
@@ -262,6 +278,15 @@ class BoundRefinedOnlineCoordinateEvidence:
 
 def _fail(message: str) -> None:
     raise CanonicalOnlineRefinementError(message)
+
+
+def _print_after_commit(console: Console, message: str) -> None:
+    """Best-effort reporting that cannot invalidate a committed publication."""
+
+    try:
+        console.print(message)
+    except BaseException:
+        return
 
 
 def _canonical_mapping_digest(value: Mapping[str, Any]) -> str:
@@ -411,7 +436,7 @@ def _resolve_persisted_canonical_source(
         ) from exc
     if (
         raw_descriptor.profile_id != CANONICAL_ARENA_PROFILE
-        or raw_descriptor.geometry_type != "points_xy"
+        or raw_descriptor.geometry_type != "point_xy"
         or raw_descriptor.components != ("x", "y")
         or raw_descriptor.component_units != ("px", "px")
     ):
@@ -1510,7 +1535,7 @@ def _load_bound_refined_online_coordinate_evidence(
         descriptor = bound.descriptor
         if (
             descriptor.profile_id != CANONICAL_ARENA_PROFILE
-            or descriptor.geometry_type != "points_xy"
+            or descriptor.geometry_type != "point_xy"
             or descriptor.components != ("x", "y")
             or descriptor.component_units != ("px", "px")
             or descriptor.source_camera_overlay.status
@@ -1668,25 +1693,73 @@ def validate_refined_online_run(
     )
 
 
+def _write_refined_online_activation_attr(attrs: Any, name: str, value: Any) -> None:
+    """One injectable activation write for hostile-concurrency tests."""
+
+    write_activation_attr(attrs, name, value)
+
+
 def _activate_refined_online_run(
+    root: zarr.Group,
     refined_runs: zarr.Group,
     refined_group: zarr.Group,
     *,
     run_name: str,
+    expected_publication_owner_uuid: str,
 ) -> None:
-    """Publish parent selectors, then make the already-validated run eligible.
+    """Lease one parent generation and expose eligibility as the commit point."""
 
-    Selector resolution skips an ineligible complete child and continues to the
-    previous complete run.  Writing both selectors before the final eligibility
-    flip therefore gives concurrent readers either the old validated run or the
-    new validated run, never the candidate while it is being checked.
-    """
+    expected_path = f"{REFINED_ONLINE_GROUP}/{run_name}"
 
-    if refined_group.attrs.get("stage_selector_eligible") is not False:
-        _fail("Refined run must remain selector-ineligible until activation.")
-    refined_runs.attrs[RUN_LATEST_COMPLETE_ATTR] = str(run_name)
-    refined_runs.attrs["latest"] = str(run_name)
-    refined_group.attrs["stage_selector_eligible"] = True
+    def proof() -> tuple[Any, ...]:
+        candidate = root[expected_path]
+        evidence = _load_bound_refined_online_coordinate_evidence(
+            root,
+            candidate,
+            require_complete=True,
+            expected_selector_eligible=False,
+        )
+        return (
+            candidate.attrs.get(REFINED_ONLINE_PUBLICATION_OWNER_ATTR),
+            candidate.attrs.get(RUN_COMPLETION_STATUS_ATTR),
+            candidate.attrs.get(RUN_COMPLETED_AT_ATTR),
+            _canonical_mapping_digest(candidate.attrs.get("run_provenance", {})),
+            evidence.archive_identity,
+            evidence.row_identity.record_ref,
+            evidence.row_identity.record_sha256,
+            evidence.source_temporal_authority.record_sha256,
+            evidence.source_mapping.record_sha256,
+            evidence.processing_record.record_sha256,
+            evidence.surface_manifest.record_sha256,
+            tuple(
+                (name, binding.descriptor.digest())
+                for name, binding in evidence.descriptor_bindings
+            ),
+        )
+
+    try:
+        activate_selector_eligible_run(
+            root,
+            refined_runs,
+            refined_group,
+            parent_path=REFINED_ONLINE_GROUP,
+            run_path=expected_path,
+            run_name=run_name,
+            owner_attr=REFINED_ONLINE_PUBLICATION_OWNER_ATTR,
+            expected_owner_uuid=expected_publication_owner_uuid,
+            policy_attr=REFINED_ONLINE_PUBLICATION_POLICY_ATTR,
+            generation_attr=REFINED_ONLINE_PUBLICATION_GENERATION_ATTR,
+            lease_attr=REFINED_ONLINE_PARENT_PUBLICATION_LEASE_ATTR,
+            policy=REFINED_ONLINE_PUBLICATION_POLICY,
+            lease_schema_id="palette.refined_online_publication_lease",
+            proof_loader=proof,
+            selector_attrs=(RUN_LATEST_COMPLETE_ATTR, "latest"),
+            attr_writer=_write_refined_online_activation_attr,
+        )
+    except SelectorActivationError as exc:
+        raise CanonicalOnlineRefinementError(
+            f"Refined-online activation lost exact ownership: {exc}."
+        ) from exc
 
 
 def refine_online_positions(
@@ -1818,9 +1891,17 @@ def refine_online_positions(
 
     refined_runs = require_runs_parent(root, REFINED_ONLINE_GROUP)
 
+    occupied_pending = refined_runs.attrs.get(RUN_LATEST_PENDING_ATTR)
+    if occupied_pending is not None and str(occupied_pending).strip():
+        _fail(
+            "Refined-online publication refused an occupied latest_pending; "
+            "the existing writer must finish or fail before another starts."
+        )
+
     # Create timestamped run
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_name = f"refined_online_{timestamp}"
+    publication_owner_uuid = str(uuid.uuid4())
     pointer_names = (
         "latest",
         RUN_LATEST_COMPLETE_ATTR,
@@ -1833,16 +1914,23 @@ def refine_online_positions(
         )
         for name in pointer_names
     }
-    staging_created = False
     try:
-        refined_group = refined_runs.create_group(run_name)
-        staging_created = True
+        refined_group = refined_runs.create_group(
+            run_name,
+            attributes={
+                REFINED_ONLINE_PUBLICATION_OWNER_ATTR: publication_owner_uuid,
+                "stage_selector_eligible": False,
+                "publication_status": "staging",
+            },
+        )
         mark_run_started(
             refined_group,
             run_name=run_name,
             stage="refine_online_detect",
         )
         refined_runs.attrs[RUN_LATEST_PENDING_ATTR] = run_name
+        if refined_runs.attrs.get(RUN_LATEST_PENDING_ATTR) != run_name:
+            _fail("Refined-online latest_pending acquisition did not persist.")
         refined_group.attrs.update(
             {
                 "publication_status": "staging",
@@ -2162,7 +2250,7 @@ def refine_online_positions(
             build_bound_canonical_coordinate_descriptor(
                 node,
                 profile_id=CANONICAL_ARENA_PROFILE,
-                geometry_type="points_xy",
+                geometry_type="point_xy",
                 components=("x", "y"),
                 component_units=("px", "px"),
                 pixel_convention=coordinate_descriptor.pixel_convention,
@@ -2192,6 +2280,10 @@ def refine_online_positions(
             provenance_record,
             fallback_command="palette refine-online-detect",
         )
+        if refined_runs.attrs.get(RUN_LATEST_PENDING_ATTR) != run_name:
+            _fail("Refined-online staging ownership changed before completion.")
+        if RUN_LATEST_PENDING_ATTR in refined_runs.attrs:
+            del refined_runs.attrs[RUN_LATEST_PENDING_ATTR]
         mark_run_complete(
             refined_group,
             parent_group=refined_runs,
@@ -2208,29 +2300,76 @@ def refine_online_positions(
         )
         fresh_evidence.assert_verified()
         _activate_refined_online_run(
+            root,
             refined_runs,
             refined_group,
             run_name=run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
         )
     except BaseException as publication_exc:
         cleanup_errors: list[str] = []
         failed_mark_error: BaseException | None = None
         try:
-            if staging_created and run_name in refined_runs:
+            if run_name in refined_runs:
                 failed_group = refined_runs[run_name]
-                try:
-                    if RUN_COMPLETED_AT_ATTR in failed_group.attrs:
-                        del failed_group.attrs[RUN_COMPLETED_AT_ATTR]
-                    failed_group.attrs["publication_status"] = "failed"
-                    mark_run_failed(
-                        failed_group,
-                        parent_group=refined_runs,
-                        run_name=run_name,
-                        error=str(publication_exc),
-                    )
-                except BaseException as cleanup_exc:  # pragma: no cover - hostile store
-                    failed_mark_error = cleanup_exc
-                del refined_runs[run_name]
+                if (
+                    failed_group.attrs.get(REFINED_ONLINE_PUBLICATION_OWNER_ATTR)
+                    == publication_owner_uuid
+                ):
+                    try:
+                        failed_group.attrs["stage_selector_eligible"] = False
+                        failed_group.attrs["publication_status"] = "failed"
+                    except BaseException as cleanup_exc:  # pragma: no cover - hostile store
+                        cleanup_errors.append(f"disarm failed run: {cleanup_exc}")
+                    try:
+                        if RUN_COMPLETED_AT_ATTR in failed_group.attrs:
+                            del failed_group.attrs[RUN_COMPLETED_AT_ATTR]
+                        mark_run_failed(
+                            failed_group,
+                            parent_group=refined_runs,
+                            run_name=run_name,
+                            error=str(publication_exc),
+                        )
+                    except BaseException as cleanup_exc:  # pragma: no cover - hostile store
+                        failed_mark_error = cleanup_exc
+                    try:
+                        failed_group.attrs[
+                            REFINED_ONLINE_PUBLICATION_TOMBSTONE_ATTR
+                        ] = {
+                            "schema_id": "palette.refined_online_publication_tombstone",
+                            "schema_version": 1,
+                            "publication_owner_uuid": publication_owner_uuid,
+                            "run_name": run_name,
+                            "public_path_retained": True,
+                            "selector_eligible": False,
+                            "retry_policy": "new_immutable_run_name_required",
+                        }
+                    except BaseException as cleanup_exc:  # pragma: no cover - hostile store
+                        cleanup_errors.append(f"failed tombstone: {cleanup_exc}")
+                    if failed_mark_error is not None:
+                        cleanup_errors.append(f"failed marker: {failed_mark_error}")
+                    try:
+                        tombstone = failed_group.attrs.get(
+                            REFINED_ONLINE_PUBLICATION_TOMBSTONE_ATTR
+                        )
+                        if (
+                            failed_group.attrs.get(
+                                REFINED_ONLINE_PUBLICATION_OWNER_ATTR
+                            )
+                            != publication_owner_uuid
+                            or failed_group.attrs.get("stage_selector_eligible")
+                            is not False
+                            or failed_group.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+                            != "failed"
+                            or not isinstance(tombstone, Mapping)
+                            or tombstone.get("publication_owner_uuid")
+                            != publication_owner_uuid
+                        ):
+                            raise RuntimeError(
+                                "failed public tombstone did not persist exactly"
+                            )
+                    except BaseException as cleanup_exc:  # pragma: no cover - hostile store
+                        cleanup_errors.append(f"verify failed tombstone: {cleanup_exc}")
         except BaseException as cleanup_exc:  # pragma: no cover - hostile store
             detail = f"staging run: {cleanup_exc}"
             if failed_mark_error is not None:
@@ -2238,6 +2377,10 @@ def refine_online_positions(
             cleanup_errors.append(detail)
         try:
             for name, (was_present, previous_value) in pointer_snapshot.items():
+                if name != RUN_LATEST_PENDING_ATTR:
+                    continue
+                if refined_runs.attrs.get(name) != run_name:
+                    continue
                 if was_present:
                     refined_runs.attrs[name] = previous_value
                 elif name in refined_runs.attrs:
@@ -2250,8 +2393,14 @@ def refine_online_positions(
             ) from publication_exc
         raise
 
-    console.print(f"[green]✓[/green] Refined run saved: {refined_group.path}")
-    console.print(f"[green]✓[/green] Processing completed in {duration:.2f} seconds")
+    _print_after_commit(
+        console,
+        f"[green]✓[/green] Refined run saved: {refined_group.path}",
+    )
+    _print_after_commit(
+        console,
+        f"[green]✓[/green] Processing completed in {duration:.2f} seconds",
+    )
 
     return run_name
 

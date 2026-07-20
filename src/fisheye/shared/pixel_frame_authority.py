@@ -113,6 +113,19 @@ CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID = "palette.crop_placement_ownership"
 CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION = 1
 CROP_PLACEMENT_OWNERSHIP_ATTR = "crop_placement_ownership"
 CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR = "crop_placement_ownership_sha256"
+CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR = (
+    "crop_placement_ownership_pixel_center"
+)
+CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR = (
+    "crop_placement_ownership_pixel_edge_half_open"
+)
+CROP_PLACEMENT_OWNERSHIP_ATTRS = frozenset(
+    {
+        CROP_PLACEMENT_OWNERSHIP_ATTR,
+        CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+        CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    }
+)
 CROP_PLACEMENT_PRODUCER = "palette.crop_writer.v1"
 CROP_PLACEMENT_WINDOW_POLICY = "contained_actual_source_window_v1"
 
@@ -3455,6 +3468,7 @@ class BoundCropPlacementOwnership:
     record: CropPlacementOwnershipRecord
     record_ref: str
     record_sha256: str
+    attr_name: str
     row_identity: BoundRowIdentityContract = field(repr=False, compare=False)
     source_camera_frame: BoundPixelFrameAuthority = field(repr=False, compare=False)
     _archive_identity: ArchiveIdentity = field(repr=False, compare=False)
@@ -3469,6 +3483,7 @@ class BoundCropPlacementOwnership:
         source_camera_frame: BoundPixelFrameAuthority,
         archive: ArchiveIdentity,
         placement_node: Any,
+        attr_name: str,
         _verification_seal: object | None = None,
     ) -> None:
         if _verification_seal is not _BOUND_CROP_PLACEMENT_OWNERSHIP_SEAL:
@@ -3479,9 +3494,10 @@ class BoundCropPlacementOwnership:
         object.__setattr__(
             self,
             "record_ref",
-            f"/{canonical_node_path(placement_node)}@{CROP_PLACEMENT_OWNERSHIP_ATTR}",
+            f"/{canonical_node_path(placement_node)}@{attr_name}",
         )
         object.__setattr__(self, "record_sha256", record.digest())
+        object.__setattr__(self, "attr_name", attr_name)
         object.__setattr__(self, "row_identity", row_identity)
         object.__setattr__(self, "source_camera_frame", source_camera_frame)
         object.__setattr__(self, "_archive_identity", archive)
@@ -3501,6 +3517,7 @@ class BoundCropPlacementOwnership:
             self._placement_node,
             row_identity=self.row_identity,
             source_camera_frame=self.source_camera_frame,
+            attr_name=self.attr_name,
         )
         if (
             current.record != self.record
@@ -3641,9 +3658,27 @@ def load_crop_placement_ownership(
     *,
     row_identity: BoundRowIdentityContract,
     source_camera_frame: BoundPixelFrameAuthority,
+    attr_name: str = CROP_PLACEMENT_OWNERSHIP_ATTR,
 ) -> BoundCropPlacementOwnership:
+    if attr_name not in CROP_PLACEMENT_OWNERSHIP_ATTRS:
+        raise PixelFrameAuthorityError(
+            f"Unsupported crop-placement ownership attr {attr_name!r}."
+        )
+    camera = require_source_camera_pixel_frame_authority(source_camera_frame)
+    expected_convention = {
+        CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR: "pixel_center",
+        CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR: "pixel_edge_half_open",
+    }.get(attr_name)
+    if (
+        expected_convention is not None
+        and camera.pixel_convention != expected_convention
+    ):
+        raise PixelFrameAuthorityError(
+            f"The {expected_convention} crop-placement ownership attr requires "
+            f"a {expected_convention} source-camera frame."
+        )
     expected = _crop_ownership_record(
-        placement_node, row_identity, source_camera_frame
+        placement_node, row_identity, camera
     )
     try:
         archive = require_same_archive(
@@ -3657,15 +3692,16 @@ def load_crop_placement_ownership(
     attrs = getattr(placement_node, "attrs", None)
     if not isinstance(attrs, Mapping):
         raise PixelFrameAuthorityError("Crop placement must expose persisted attrs.")
-    raw = attrs.get(CROP_PLACEMENT_OWNERSHIP_ATTR)
+    digest_attr = f"{attr_name}_sha256"
+    raw = attrs.get(attr_name)
     record = parse_crop_placement_ownership(raw)
     if not isinstance(raw, Mapping) or not _exact_json_equal(raw, record.to_dict()):
         raise PixelFrameAuthorityError(
             "Raw crop ownership is not its exact canonical mapping."
         )
     stored = _sha256(
-        attrs.get(CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR),
-        field_name=CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR,
+        attrs.get(digest_attr),
+        field_name=digest_attr,
     )
     if stored != record.digest() or record != expected:
         raise PixelFrameAuthorityError(
@@ -3677,6 +3713,7 @@ def load_crop_placement_ownership(
         source_camera_frame=source_camera_frame,
         archive=archive,
         placement_node=placement_node,
+        attr_name=attr_name,
         _verification_seal=_BOUND_CROP_PLACEMENT_OWNERSHIP_SEAL,
     )
 
@@ -3686,18 +3723,37 @@ def stamp_crop_placement_ownership(
     *,
     row_identity: BoundRowIdentityContract,
     source_camera_frame: BoundPixelFrameAuthority,
+    attr_name: str = CROP_PLACEMENT_OWNERSHIP_ATTR,
 ) -> BoundCropPlacementOwnership:
+    if attr_name not in CROP_PLACEMENT_OWNERSHIP_ATTRS:
+        raise PixelFrameAuthorityError(
+            f"Unsupported crop-placement ownership attr {attr_name!r}."
+        )
+    camera = require_source_camera_pixel_frame_authority(source_camera_frame)
+    expected_convention = {
+        CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR: "pixel_center",
+        CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR: "pixel_edge_half_open",
+    }.get(attr_name)
+    if (
+        expected_convention is not None
+        and camera.pixel_convention != expected_convention
+    ):
+        raise PixelFrameAuthorityError(
+            f"The {expected_convention} crop-placement ownership attr requires "
+            f"a {expected_convention} source-camera frame."
+        )
     record = _crop_ownership_record(
-        placement_node, row_identity, source_camera_frame
+        placement_node, row_identity, camera
     )
     attrs = require_trusted_coordinate_attrs(
         placement_node,
         label="Crop placement",
     )
     snapshot = copy.deepcopy(dict(attrs))
+    digest_attr = f"{attr_name}_sha256"
     intended = {
-        CROP_PLACEMENT_OWNERSHIP_ATTR: record.to_dict(),
-        CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR: record.digest(),
+        attr_name: record.to_dict(),
+        digest_attr: record.digest(),
     }
     expected = _expected_attrs_after_update(snapshot, intended)
     try:
@@ -3710,7 +3766,8 @@ def stamp_crop_placement_ownership(
         bound = load_crop_placement_ownership(
             placement_node,
             row_identity=row_identity,
-            source_camera_frame=source_camera_frame,
+            source_camera_frame=camera,
+            attr_name=attr_name,
         )
         _require_exact_attrs_state(
             require_trusted_coordinate_attrs(
@@ -4609,7 +4666,10 @@ __all__ = [
     "ARENA_RELATIVE_CANVAS_FRAME_KIND",
     "ARENA_RELATIVE_CANVAS_SPACE_ID",
     "CROP_PLACEMENT_OWNERSHIP_ATTR",
+    "CROP_PLACEMENT_OWNERSHIP_ATTRS",
     "CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR",
+    "CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR",
+    "CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR",
     "CROP_PLACEMENT_OWNERSHIP_SCHEMA_ID",
     "CROP_PLACEMENT_OWNERSHIP_SCHEMA_VERSION",
     "CROP_PLACEMENT_WINDOW_POLICY",

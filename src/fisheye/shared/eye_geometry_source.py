@@ -11,7 +11,15 @@ import zarr
 
 from .mask_store import MaskStore, MaskStoreError, open_mask_store
 from .provenance_attrs import resolve_source_keypoints_run
+from .refined_subject_mask_coordinate_publication import (
+    RefinedSubjectMaskCoordinatePublicationError,
+    load_persisted_refined_subject_mask_coordinate_surfaces,
+)
 from .refined_subject_eye_geometry import EYE_COMPONENTS
+from .subject_shape_coordinate_publication import (
+    SubjectShapeCoordinatePublicationError,
+    load_persisted_subject_shape_coordinate_publication,
+)
 from .zarr_run_completion import resolve_authoritative_run_name
 
 
@@ -291,6 +299,7 @@ class EyeGeometrySource:
     source_refined_eye_run: Optional[str] = None
     source_refined_subject_run: Optional[str] = None
     source_subject_shape_run: Optional[str] = None
+    coordinate_authority_status: str = "canonical"
 
 
 def _has_subject_eye_geometry(group: zarr.Group) -> bool:
@@ -354,18 +363,73 @@ def _find_latest_subject_shape_eye_geometry(root: zarr.Group) -> tuple[Optional[
     parent = _group_get(root, EYE_GEOMETRY_STAGE_SUBJECT_SHAPE)
     if parent is None:
         return None, None
+    latest = _normalize_text(parent.attrs.get("latest"))
+    if latest is None:
+        raise ValueError(
+            "analysis/subject_shape_runs has no exact latest publication selector."
+        )
+    return _strict_subject_shape_eye_geometry(root, latest)
 
-    latest = _normalize_text(resolve_authoritative_run_name(parent))
-    if latest:
-        latest_group = _group_get(parent, latest)
-        if latest_group is not None and _has_subject_shape_eye_geometry(latest_group):
-            return latest, latest_group
 
-    for name in reversed(_group_names(parent)):
-        group = _group_get(parent, name)
-        if group is not None and _has_subject_shape_eye_geometry(group):
-            return name, group
-    return None, None
+def _normalized_run_name(value: Optional[str]) -> Optional[str]:
+    text = _normalize_text(value)
+    if text is None or text.lower() == "latest":
+        return None
+    return text.strip("/").rsplit("/", 1)[-1]
+
+
+def _strict_subject_shape_eye_geometry(
+    root: zarr.Group,
+    run_name: Optional[str],
+) -> tuple[str, zarr.Group]:
+    parent = _group_get(root, EYE_GEOMETRY_STAGE_SUBJECT_SHAPE)
+    if parent is None:
+        raise ValueError("Archive has no analysis/subject_shape_runs group.")
+    selected = _normalized_run_name(run_name) or _normalize_text(
+        parent.attrs.get("latest")
+    )
+    if selected is None:
+        raise ValueError(
+            "analysis/subject_shape_runs has no exact latest publication selector."
+        )
+    path = f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{selected}"
+    try:
+        load_persisted_subject_shape_coordinate_publication(root, path)
+    except (SubjectShapeCoordinatePublicationError, KeyError, ValueError) as exc:
+        raise ValueError(
+            f"Subject-shape eye source {path!r} is not a canonical publication: {exc}"
+        ) from exc
+    group = _group_get(root, path)
+    if group is None or not _has_subject_shape_eye_geometry(group):
+        raise ValueError(f"{path} is missing canonical subject-shape eye geometry.")
+    return selected, group
+
+
+def _strict_refined_subject_eye_geometry(
+    root: zarr.Group,
+    run_name: Optional[str],
+) -> tuple[str, zarr.Group]:
+    parent = _group_get(root, EYE_GEOMETRY_STAGE_REFINED_SUBJECT)
+    if parent is None:
+        raise ValueError("Archive has no refined_subject_masks_runs group.")
+    selected = _normalized_run_name(run_name) or _normalize_text(
+        parent.attrs.get("latest")
+    )
+    if selected is None:
+        raise ValueError(
+            "refined_subject_masks_runs has no exact latest publication selector."
+        )
+    path = f"{EYE_GEOMETRY_STAGE_REFINED_SUBJECT}/{selected}"
+    try:
+        load_persisted_refined_subject_mask_coordinate_surfaces(root, path)
+    except (RefinedSubjectMaskCoordinatePublicationError, KeyError, ValueError) as exc:
+        raise ValueError(
+            f"Refined-subject eye source {path!r} is not a canonical publication: {exc}"
+        ) from exc
+    group = _group_get(root, path)
+    if group is None or not _has_subject_eye_geometry(group):
+        raise ValueError(f"{path} is missing canonical refined-subject eye geometry.")
+    return selected, group
 
 
 def _build_subject_source(
@@ -373,6 +437,7 @@ def _build_subject_source(
     group: zarr.Group,
     *,
     source_refined_eye_run: Optional[str] = None,
+    historical_compatibility: bool = False,
 ) -> EyeGeometrySource:
     if not _has_subject_eye_geometry(group):
         raise ValueError(f"{EYE_GEOMETRY_STAGE_REFINED_SUBJECT}/{run_name} missing canonical eye geometry.")
@@ -396,6 +461,11 @@ def _build_subject_source(
         ]
     )
     source_refined_eye_run = source_refined_eye_run or _normalize_text(group.attrs.get("source_refined_eye_masks_run"))
+    lineage_attrs = dict(group.attrs)
+    if historical_compatibility:
+        lineage_attrs["coordinate_authority_status"] = (
+            "historical_compatibility_noncanonical"
+        )
     return EyeGeometrySource(
         stage_group=EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
         run_name=run_name,
@@ -405,9 +475,14 @@ def _build_subject_source(
         ellipse_params=ellipse_params,
         ellipse_success=ellipse_success,
         eye_separation=group["relations/eye_pair/metrics/separation_px"],
-        lineage_attrs=dict(group.attrs),
+        lineage_attrs=lineage_attrs,
         source_refined_eye_run=source_refined_eye_run,
         source_refined_subject_run=run_name,
+        coordinate_authority_status=(
+            "historical_compatibility_noncanonical"
+            if historical_compatibility
+            else "canonical"
+        ),
     )
 
 
@@ -449,39 +524,46 @@ def resolve_eye_geometry_source(
     refined_subject_run: Optional[str] = None,
     prefer_subject_shape: bool = False,
     prefer_subject: bool = True,
+    historical_refined_subject_compatibility: bool = False,
 ) -> EyeGeometrySource:
     """Resolve the active eye geometry source.
 
-    Callers that only need analysis-facing geometry can opt into
-    ``analysis/subject_shape_runs/<run>`` preference. Callers that need mask
-    pixels should keep the default refined-subject behavior.
+    Subject-shape and refined-subject normal reads both require strict
+    canonical publication reloads. Historical refined-subject geometry is
+    available only through the explicitly noncanonical compatibility flag;
+    it must not be used as future scientific coordinate authority.
     """
 
     if subject_shape_run:
-        run_name, group = _resolve_run_group(
+        run_name, group = _strict_subject_shape_eye_geometry(
             root,
-            EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
             subject_shape_run,
-            fallback_to_latest=True,
         )
-        if run_name is None or group is None:
-            raise ValueError(f"Subject-shape run not found: {subject_shape_run}.")
         return _build_subject_shape_source(run_name, group)
 
     if refined_subject_run:
-        run_name, group = _resolve_run_group(
-            root,
-            EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
-            refined_subject_run,
-            fallback_to_latest=True,
-        )
-        if run_name is None or group is None:
-            raise ValueError(f"Refined subject-mask run not found: {refined_subject_run}.")
+        if historical_refined_subject_compatibility:
+            run_name, group = _resolve_run_group(
+                root,
+                EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
+                refined_subject_run,
+                fallback_to_latest=False,
+            )
+            if run_name is None or group is None:
+                raise ValueError(
+                    f"Historical refined subject-mask run not found: {refined_subject_run}."
+                )
+        else:
+            run_name, group = _strict_refined_subject_eye_geometry(
+                root,
+                refined_subject_run,
+            )
         source_refined_eye_run = _normalize_text(group.attrs.get("source_refined_eye_masks_run"))
         return _build_subject_source(
             run_name,
             group,
             source_refined_eye_run=source_refined_eye_run,
+            historical_compatibility=historical_refined_subject_compatibility,
         )
 
     if prefer_subject_shape:
@@ -490,13 +572,23 @@ def resolve_eye_geometry_source(
             return _build_subject_shape_source(shape_name, shape_group)
 
     if prefer_subject:
-        subject_name, subject_group = _find_latest_subject_eye_geometry(root)
+        if historical_refined_subject_compatibility:
+            subject_name, subject_group = _find_latest_subject_eye_geometry(root)
+        else:
+            try:
+                subject_name, subject_group = _strict_refined_subject_eye_geometry(
+                    root,
+                    None,
+                )
+            except ValueError:
+                subject_name, subject_group = None, None
         if subject_name is not None and subject_group is not None:
             source_refined_eye_run = _normalize_text(subject_group.attrs.get("source_refined_eye_masks_run"))
             return _build_subject_source(
                 subject_name,
                 subject_group,
                 source_refined_eye_run=source_refined_eye_run,
+                historical_compatibility=historical_refined_subject_compatibility,
             )
 
     raise ValueError("No canonical subject-shape or refined-subject eye geometry found.")

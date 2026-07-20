@@ -8,10 +8,31 @@ from typing import Sequence
 
 from PIL import Image, ImageDraw, ImageFont
 
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 
 from .models import LoadedTile, MontageArtifactSpec, MontageLayout, RegistryRecording
+
+
+CHASER_DISTANCE_PARENT = "analysis/chaser_distance_runs"
+
+
+def _chaser_artifact_request(path: str) -> tuple[str, str] | None:
+    normalized = "/".join(part for part in str(path).strip("/").split("/") if part)
+    prefix = CHASER_DISTANCE_PARENT + "/"
+    if not normalized.startswith(prefix):
+        return None
+    parts = normalized[len(prefix) :].split("/")
+    if len(parts) < 2 or any(part in {"", ".", ".."} for part in parts):
+        raise ChaserDistanceReadError(
+            "A chaser montage artifact must identify one exact run child and one "
+            "relative artifact path."
+        )
+    return parts[0], "/".join(parts[1:])
 
 
 def _font(size: int) -> ImageFont.ImageFont:
@@ -120,21 +141,32 @@ def load_recording_tiles(
 
     for spec in specs:
         try:
-            resolved_path, png_bytes = load_png_artifact_bytes(root, spec.path)
-            if spec.visualization_contract_id is not None:
-                actual_contract = root[resolved_path].attrs.get("visualization_contract_id")
-                if actual_contract != spec.visualization_contract_id:
-                    raise ValueError(
-                        f"visualization contract mismatch: expected "
-                        f"{spec.visualization_contract_id!r}, found {actual_contract!r}"
+            chaser_request = _chaser_artifact_request(spec.path)
+            if chaser_request is not None:
+                run_name, relative_path = chaser_request
+                distance = load_chaser_distance_run(root, run_name=run_name)
+                distance.require_derived_surface_authority(relative_path)
+            else:
+                resolved_path, png_bytes = load_png_artifact_bytes(root, spec.path)
+                if spec.visualization_contract_id is not None:
+                    actual_contract = root[resolved_path].attrs.get(
+                        "visualization_contract_id"
                     )
-            image = Image.open(BytesIO(png_bytes)).convert("RGB")
-            image.load()
-            tiles.append(LoadedTile(spec.artifact_id, spec.label, spec.path, image, None))
+                    if actual_contract != spec.visualization_contract_id:
+                        raise ValueError(
+                            f"visualization contract mismatch: expected "
+                            f"{spec.visualization_contract_id!r}, found {actual_contract!r}"
+                        )
+                image = Image.open(BytesIO(png_bytes)).convert("RGB")
+                image.load()
+                tiles.append(LoadedTile(spec.artifact_id, spec.label, spec.path, image, None))
         except Exception as exc:
             if fail_on_missing:
                 raise
-            error = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, ChaserDistanceReadError):
+                error = f"canonical chaser artifact preflight failed closed: {exc}"
+            else:
+                error = f"{type(exc).__name__}: {exc}"
             tiles.append(LoadedTile(spec.artifact_id, spec.label, spec.path, None, error))
             missing.append(
                 {

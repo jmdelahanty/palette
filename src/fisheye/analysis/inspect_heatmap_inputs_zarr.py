@@ -42,13 +42,6 @@ def analyze_heatmap_inputs(
     if analysis is None:
         raise ValueError("Archive missing 'analysis' group.")
 
-    movement_parent = analysis.get("track_kinematics_runs")
-    if movement_parent is None or not movement_parent:
-        raise ValueError("No track kinematics runs found under analysis/track_kinematics_runs.")
-    movement_run_group, track_kinematics_run_name = _resolve_latest(
-        movement_parent, track_kinematics_run_name, "track_kinematics_run", console
-    )
-
     stimulus_parent = analysis.get("stimulus_runs")
     if stimulus_parent is None or not stimulus_parent:
         raise ValueError("No stimulus runs found under analysis/stimulus_runs.")
@@ -65,8 +58,15 @@ def analyze_heatmap_inputs(
         raise ValueError("Stimulus metadata missing 'triggering_camera_frame_id'.")
     camera_frames_all = camera_frames_all.astype(np.int64, copy=False)
 
-    console.log("[bold]Loading track kinematics run positions...[/bold]")
-    frames, positions = _collect_positions(movement_run_group)
+    console.log("[bold]Loading verified source-camera track positions...[/bold]")
+    verified_positions = _collect_positions(
+        root,
+        track_kinematics_run_name,
+        console,
+    )
+    track_kinematics_run_name = verified_positions.run_label
+    frames = verified_positions.frames
+    positions = verified_positions.positions
 
     periods = _determine_periods(events, stim_to_camera, camera_frames_all, console)
 

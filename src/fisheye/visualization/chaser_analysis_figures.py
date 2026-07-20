@@ -27,7 +27,7 @@ from io import BytesIO
 import math
 from pathlib import Path
 import sqlite3
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 import warnings
 
 import matplotlib
@@ -37,8 +37,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
-from fisheye.shared.arena_geometry import resolve_arena_geometry  # noqa: E402
-
+from fisheye.analysis.chaser_distance_io import load_chaser_distance_run  # noqa: E402
 warnings.filterwarnings("ignore")
 
 OBJ_COLOR = {"aggressive": "#dc2626", "inert": "#2563eb"}
@@ -46,7 +45,9 @@ CTRL_COLOR = "#94a3b8"
 EPOCH_STYLE = {"pre_event": dict(ls="--", alpha=0.85), "post_event": dict(ls="-", alpha=1.0)}
 
 
-def _latest(group: zarr.Group | None) -> zarr.Group | None:
+def _latest_unsealed_inspection_child(group: zarr.Group | None) -> zarr.Group | None:
+    """Historical inspection helper; never use for a normal scientific read."""
+
     if group is None:
         return None
     keys = list(group.keys())
@@ -63,36 +64,8 @@ class RecordingData:
     def __init__(self, zarr_path: Path):
         self.path = Path(zarr_path)
         self.root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
-        parent = self.root.get("analysis/chaser_distance_runs")
-        if parent is None or not list(parent.keys()):
-            raise ValueError(f"No chaser_distance_run in {zarr_path}")
-        self.run = _latest(parent)
-        self.recording_id = str(self.run.attrs.get("recording_id") or self.path.stem)
-        self.ppm = float(self.run.attrs["pixels_per_mm_projector"])
-        self.fps = float(self.run.attrs.get("fps", 100.0))
-        self.geometry, _notes = resolve_arena_geometry(self.root, self.run, pixels_per_mm=self.ppm)
-
-        self.fish = np.asarray(self.run["positions/fish_centroid_arena_xy"][:], dtype=np.float64) / self.ppm
-        self.fish_valid = np.asarray(self.run["positions/fish_valid"][:], dtype=bool)
-        es = self.run["epoch_summary"]
-        self.epoch_labels = _text(es["label_bytes"][:])
-        self.epoch_start = np.asarray(es["start_frame"][:], dtype=np.int64)
-        self.epoch_end = np.asarray(es["end_frame"][:], dtype=np.int64)
-
-        # object roles come from the CRA endpoint, never from index order
-        self.roles: dict[int, str] = {}
-        cra = _latest(self.run.get("cra_primary_endpoint"))
-        if cra is not None:
-            o = cra["objects"]
-            idx = np.asarray(o["object_index"][:]).reshape(-1)
-            code = np.asarray(o["object_role_code"][:]).reshape(-1)
-            for i in range(len(idx)):
-                self.roles[int(idx[i])] = "aggressive" if int(code[i]) == 1 else "inert"
-
-        self.near_field = _latest(self.run.get("cra_near_field"))
-        self.regimes = _latest(self.run.get("chaser_response_regimes"))
-        self.bout = _latest(self.run.get("chaser_bout_response"))
-        self.occupancy = _latest(self.run.get("chaser_radial_occupancy"))
+        self.distance = load_chaser_distance_run(self.root)
+        self.distance.require_derived_surface_authority("cra_primary_endpoint")
 
     # ---- derived ----
     def wall_distance_mm(self, epoch: str) -> np.ndarray:

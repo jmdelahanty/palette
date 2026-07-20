@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pytest
 import zarr
+
+import fisheye.analysis.stimulus_response as stimulus_response_module
 
 from fisheye.analysis.stimulus_response import (
     BoutEntry,
@@ -62,7 +65,65 @@ def write_stimulus_response_run(*args, **kwargs):
     """Keep legacy structure tests on hierarchical-v1 unless they opt out."""
 
     kwargs.setdefault("layout", STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1)
+    parameters = dict(kwargs.get("parameters", {}))
+    parameters.setdefault("fps", 30.0)
+    kwargs["parameters"] = parameters
+    kwargs.setdefault(
+        "upstream_lineage",
+        _synthetic_track_motion_lineage(
+            run_name=kwargs["source_kinematics_run"],
+            scope=kwargs["source_kinematics_type"],
+            track_ids=tuple(
+                int(value)
+                for value in np.asarray(kwargs["global_metrics"]["fish_id"])
+            ),
+            fps=float(kwargs.get("parameters", {}).get("fps", 30.0)),
+        ),
+    )
     return _write_stimulus_response_run(*args, **kwargs)
+
+
+def _synthetic_track_motion_lineage(
+    *,
+    run_name: str,
+    scope: str,
+    track_ids: tuple[int, ...] = (0,),
+    fps: float = 30.0,
+    source_refs: Dict[str, object] | None = None,
+):
+    """Mint deterministic test-only evidence below the real strict loader."""
+
+    run_path = f"analysis/track_kinematics_runs/{scope}/{run_name}"
+    digest = "a" * 64
+    bound = SimpleNamespace(
+        run_group=SimpleNamespace(path=run_path),
+        manifest_sha256=digest,
+        tracks=tuple(SimpleNamespace(track_id=value) for value in track_ids),
+        manifest={
+            "run_root_attrs": {
+                "record": {"immutable_attrs": {"fps": float(fps)}}
+            },
+            "run_derivation": {
+                "record": {
+                    "parameters": {"fps": float(fps)},
+                    "source_refs": dict(source_refs or {}),
+                }
+            },
+        },
+        assert_verified=lambda: None,
+    )
+    record = stimulus_response_module._expected_track_motion_lineage_record(bound)
+    return stimulus_response_module.VerifiedTrackMotionLineage(
+        record=record,
+        run_path=run_path,
+        manifest_sha256=digest,
+        track_ids=track_ids,
+        fps=fps,
+        bound_run=bound,
+        _verification_seal=(
+            stimulus_response_module._VERIFIED_TRACK_MOTION_LINEAGE_SEAL
+        ),
+    )
 
 
 def _make_kinematics_zarr(
@@ -81,6 +142,13 @@ def _make_kinematics_zarr(
     run = kin_parent.create_group("test_run")
     kin_parent.attrs["latest"] = "test_run"
     run.attrs["fps"] = fps
+    run.attrs["track_motion_publication_manifest_sha256"] = "a" * 64
+    run.attrs["source_refs"] = {
+        "source_detection_path": "detect_runs/detect_fixture",
+        "source_keypoint_path": "keypoints_runs/keypoints_fixture",
+        "source_crop_path": "crop_runs/crop_fixture",
+        "source_tracking_path": "tracking_runs/tracking_fixture",
+    }
 
     track_ids = np.array(list(fish_ids), dtype=np.int32)
     run.create_array("track_ids", data=track_ids)
@@ -117,6 +185,78 @@ def _make_kinematics_zarr(
         tg.create_array("detection_source", data=np.zeros(n_samples, dtype=np.int8))
 
     return root
+
+
+def _patch_synthetic_verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep sparse-to-dense unit tests below the strict reader boundary."""
+
+    def _load(
+        root: zarr.Group,
+        *,
+        run_name: str,
+        scope: str,
+        track_id: int,
+        required_speed_levels=(),
+    ) -> SimpleNamespace:
+        del required_speed_levels
+        run = root["analysis"]["track_kinematics_runs"][scope][run_name]
+        track = run["tracks"][f"id_{int(track_id)}"]
+        run_path = f"analysis/track_kinematics_runs/{scope}/{run_name}"
+        return SimpleNamespace(
+            track_id=int(track_id),
+            track_path=f"{run_path}/tracks/id_{int(track_id)}",
+            run_path=run_path,
+            authority_status="verified_canonical_track_motion_v1",
+            motion_manifest_sha256=run.attrs[
+                "track_motion_publication_manifest_sha256"
+            ],
+            frame_indices=np.asarray(track["frame_indices"][:]),
+            speed_mm_by_level={
+                "smoothed": np.asarray(track["speed_smoothed_mm"][:]),
+            },
+            heading_degrees=np.asarray(track["heading_degrees"][:]),
+            positions_mm=np.asarray(track["positions_mm"][:]),
+            angular_velocity_deg_s=np.asarray(
+                track["angular_velocity_deg_s"][:]
+            ),
+            time_seconds=np.asarray(track["time_seconds"][:]),
+            detection_source=np.asarray(track["detection_source"][:]),
+            frame_path_distance_mm_by_level={
+                "smoothed": np.asarray(
+                    track["frame_path_distance_smoothed_mm"][:]
+                ),
+            },
+            cumulative_path_distance_mm=np.asarray(
+                track["cumulative_path_distance_mm"][:]
+            ),
+        )
+
+    monkeypatch.setattr(
+        stimulus_response_module,
+        "load_track_kinematics_track",
+        _load,
+    )
+
+    def _lineage(root: zarr.Group, kin_group: zarr.Group):
+        del root
+        track_ids = tuple(
+            int(value) for value in np.asarray(kin_group["track_ids"][:])
+        )
+        evidence = _synthetic_track_motion_lineage(
+            run_name=str(kin_group.path).strip("/").rsplit("/", 1)[-1],
+            scope=str(kin_group.path).strip("/").split("/")[2],
+            track_ids=track_ids,
+            fps=float(kin_group.attrs["fps"]),
+            source_refs=dict(kin_group.attrs["source_refs"]),
+        )
+        evidence._bound_run.run_group = kin_group
+        return evidence
+
+    monkeypatch.setattr(
+        stimulus_response_module,
+        "_load_verified_track_motion_lineage",
+        _lineage,
+    )
 
 
 def _make_stimulus_zarr(
@@ -288,8 +428,9 @@ def _make_dense_tracks(
 
 class TestLoadTrackData:
 
-    def test_basic_load(self) -> None:
+    def test_basic_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
         root = _make_kinematics_zarr(n_frames=50, fish_ids=(0,))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         tracks, run_name, n_frames, _ = load_track_data(root, kinematics_type="offline")
         assert len(tracks) == 1
         assert run_name == "test_run"
@@ -298,8 +439,12 @@ class TestLoadTrackData:
         assert tracks[0].valid.shape == (50,)
         assert tracks[0].valid.all()
 
-    def test_gaps_produce_zeros_and_false_valid(self) -> None:
+    def test_gaps_produce_zeros_and_false_valid(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         root = _make_kinematics_zarr(n_frames=20, fish_ids=(0,), gap_frames=(5, 10, 15))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         tracks, _, n_frames, _ = load_track_data(root, kinematics_type="offline")
         t = tracks[0]
         assert n_frames == 20
@@ -323,8 +468,9 @@ class TestLoadTrackData:
         assert t.cumulative_path_distance_mm is not None
         assert t.cumulative_path_distance_mm[5] == t.cumulative_path_distance_mm[4]
 
-    def test_multiple_fish(self) -> None:
+    def test_multiple_fish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         root = _make_kinematics_zarr(n_frames=30, fish_ids=(0, 1, 2))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         tracks, _, _, _ = load_track_data(root, kinematics_type="offline")
         assert len(tracks) == 3
         assert [t.fish_id for t in tracks] == [0, 1, 2]
@@ -524,6 +670,103 @@ class TestComputeStepBaseMetrics:
 
 class TestWriteStimulusResponseRun:
 
+    @staticmethod
+    def _minimal_write_kwargs():
+        tracks = _make_dense_tracks(n_frames=2, n_fish=1)
+        step = ProtocolStep(0, "test", "SOLID_BLACK", 4, 0, 2, 2 / 30.0)
+        return {
+            "global_metrics": compute_global_metrics(
+                tracks,
+                fps=30.0,
+                moving_threshold=2.0,
+            ),
+            "steps": [step],
+            "step_metrics": [
+                compute_step_base_metrics(
+                    tracks,
+                    step,
+                    fps=30.0,
+                    moving_threshold=2.0,
+                )
+            ],
+            "source_kinematics_run": "test_kin",
+            "source_kinematics_type": "offline",
+            "source_stimulus_run": "test_stim",
+            "parameters": {"fps": 30.0},
+            "run_name": "strict_lineage",
+        }
+
+    @pytest.mark.parametrize("lineage", (None, {"manifest": "forged"}))
+    def test_writer_rejects_missing_or_plain_mapping_lineage(self, lineage) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = lineage
+
+        with pytest.raises(ValueError, match="requires live verified"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rejects_conflicting_duplicate_source_args(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="different_run",
+            scope="offline",
+        )
+
+        with pytest.raises(ValueError, match="conflict with verified lineage"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    @pytest.mark.parametrize(
+        ("track_ids", "fps", "message"),
+        (
+            ((99,), 30.0, "fish IDs conflict"),
+            ((0,), 60.0, "fps conflicts"),
+        ),
+    )
+    def test_writer_rejects_payload_or_fps_lineage_mismatch(
+        self,
+        track_ids: tuple[int, ...],
+        fps: float,
+        message: str,
+    ) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+            track_ids=track_ids,
+            fps=fps,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rechecks_live_lineage_before_completion(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        evidence = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+        )
+        calls = 0
+
+        def _assert_stable_then_change() -> None:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise ValueError("track source changed during publication")
+
+        evidence._bound_run.assert_verified = _assert_stable_then_change
+        kwargs["upstream_lineage"] = evidence
+
+        with pytest.raises(ValueError, match="changed during publication"):
+            _write_stimulus_response_run(root, **kwargs)
+        run = root["analysis/stimulus_response_runs/strict_lineage"]
+        assert run.attrs.get("palette_run_completion_status") != "complete"
+
     def test_default_layout_is_compact_v2(self) -> None:
         root = zarr.group()
         tracks = _make_dense_tracks(n_frames=50, n_fish=1)
@@ -539,7 +782,12 @@ class TestWriteStimulusResponseRun:
             source_kinematics_run="test_kin",
             source_kinematics_type="offline",
             source_stimulus_run="test_stim",
-            parameters={},
+            upstream_lineage=_synthetic_track_motion_lineage(
+                run_name="test_kin",
+                scope="offline",
+                track_ids=(0,),
+            ),
+            parameters={"fps": 30.0},
             run_name="default_layout",
         )
 
@@ -1621,25 +1869,58 @@ class TestMultiDirectionGrating:
 
 class TestProvenanceLineage:
 
-    def test_upstream_lineage_embedded(self) -> None:
-        root = _make_kinematics_zarr(n_frames=50, fish_ids=(0,))
-        # Add upstream attrs to the kinematics run (simulating what
-        # track_kinematics writes).
+    def test_upstream_lineage_rejects_unbound_track_manifest(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _make_kinematics_zarr(n_frames=2, fish_ids=(0,))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         kin = root["analysis"]["track_kinematics_runs"]["offline"]["test_run"]
-        kin.attrs["inputs"] = {
-            "detection_run": "detect_2026-01-01",
-            "keypoint_run": "refined_kp_2026-01-01",
-            "crop_run": "crop_2026-01-01",
+        stale = SimpleNamespace(
+            authority_status="verified_canonical_track_motion_v1",
+            motion_manifest_sha256="b" * 64,
+            run_path=str(kin.path),
+        )
+
+        with pytest.raises(ValueError, match="do not share one freshly verified"):
+            stimulus_response_module._snapshot_upstream_lineage(
+                root,
+                kin,
+                [stale],
+            )
+
+    def test_upstream_lineage_embedded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _make_kinematics_zarr(n_frames=50, fish_ids=(0,))
+        _patch_synthetic_verified_track_reader(monkeypatch)
+        kin = root["analysis"]["track_kinematics_runs"]["offline"]["test_run"]
+        kin.attrs["source_refs"] = {
+            "source_detection_path": "detect_runs/detect_2026-01-01",
+            "source_keypoint_path": (
+                "refined_keypoints_runs/refined_kp_2026-01-01"
+            ),
+            "source_crop_path": "crop_runs/crop_2026-01-01",
+            "source_tracking_path": "tracking_runs/tracking_2026-01-01",
         }
-        kin.attrs["source_tracking_run"] = "tracking_2026-01-01"
-        kin.attrs["source_arena_assignment_run"] = "arena_2026-01-01"
 
         tracks, _, _, lineage = load_track_data(root, kinematics_type="offline")
-        assert lineage["detection_run"] == "detect_2026-01-01"
-        assert lineage["keypoint_run"] == "refined_kp_2026-01-01"
-        assert lineage["crop_run"] == "crop_2026-01-01"
-        assert lineage["source_tracking_run"] == "tracking_2026-01-01"
-        assert lineage["source_arena_assignment_run"] == "arena_2026-01-01"
+        assert dict(lineage.record) == {
+            "schema_id": "palette.stimulus_response.track_motion_lineage",
+            "schema_version": 1,
+            "source_track_motion_run_ref": (
+                "/analysis/track_kinematics_runs/offline/test_run"
+            ),
+            "source_track_motion_manifest_ref": (
+                "/analysis/track_kinematics_runs/offline/test_run"
+                "@track_motion_publication_manifest"
+            ),
+            "source_track_motion_manifest_sha256": "a" * 64,
+            "source_track_ids": [0],
+            "source_fps": 30.0,
+            "source_refs": dict(kin.attrs["source_refs"]),
+        }
 
     def test_archive_identity_from_root_attrs(self) -> None:
         root = zarr.group()

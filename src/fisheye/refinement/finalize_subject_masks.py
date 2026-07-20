@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
@@ -16,6 +17,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -41,6 +43,9 @@ from ..shared.provenance_attrs import (
     build_source_keypoints_attrs,
 )
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources, stamp_row_identity_mode
+from ..shared.refined_subject_mask_mutation import (
+    resolve_mutable_refined_subject_mask_run,
+)
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.mask_store import (
@@ -60,7 +65,7 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_storage_chunks,
 )
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
-from ..shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from ..tune.refined_subject_mask_review import (
     DEFAULT_REVIEW_INTENDED_USE,
     DEFAULT_REVIEW_METHOD,
@@ -98,6 +103,20 @@ from .assemble_refined_subject_masks import (
 from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
 from ..shared.refined_subject_eye_geometry import EYE_GEOMETRY_SCHEMA_ID
 from ..shared.refined_subject_eye_geometry import EYE_PAIR_RELATION_SCHEMA_ID
+from ..shared.refined_subject_mask_coordinate_publication import (
+    REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+    REFINED_SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+    REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
+    REFINED_SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+    _activate_validated_refined_subject_mask_coordinate_surfaces,
+    prepare_refined_subject_mask_coordinate_context,
+    publish_refined_subject_mask_coordinate_surfaces,
+)
+from ..shared.keypoint_coordinate_publication import (
+    BoundKeypointCoordinateSurfaces,
+    load_persisted_keypoint_coordinate_surfaces,
+    require_bound_keypoint_coordinate_surfaces,
+)
 from ..shared.refined_subject_component_contours import (
     COMPONENT_CONTOUR_SCHEMA_ID,
     DEFAULT_BOUNDARY_POLICY,
@@ -161,6 +180,22 @@ _MASK_STORAGES_WITH_RLE = {"dense_and_rle", "dense_bitpacked_and_rle"}
 _MASK_STORAGES_REMOVE_DENSE: set[str] = set()
 _MASK_STORAGES_DIRECT_BITPACKED: set[str] = set()
 _MASK_RLE_VALIDATION_MODES = MASK_RLE_VALIDATION_MODES
+_CANONICAL_REFINED_SOURCE_ARRAYS = (
+    "source_crop_row_ids",
+    "instance_key",
+    "source_acquisition_frame_index",
+    "source_crop_xywh",
+)
+_CANONICAL_REFINED_SELECTOR_ATTRS = (
+    "latest",
+    "latest_complete",
+    "latest_pending",
+    "authoritative_run",
+    "authoritative_run_provenance",
+    REFINED_SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+    REFINED_SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+    REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+)
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
 _SOURCE_SEED_MASKS_SCHEMA_ID = "refined_subject_component_source_seed_masks_v1"
@@ -533,6 +568,7 @@ class _EyeAssignmentContext:
     keypoint_success_dataset: str
     keypoint_source_kind: str
     row_identity_summary: Mapping[str, object]
+    canonical_coordinate_surfaces: BoundKeypointCoordinateSurfaces | None = None
 
 
 @dataclass(frozen=True)
@@ -1624,6 +1660,95 @@ def _resolve_assignment_keypoint_rows(
     )
 
 
+def _canonical_assignment_keypoint_path(source: SourceSubjectMaskRun) -> str:
+    """Resolve the exact raw-keypoint dependency for a canonical finalization."""
+
+    assignment_group = source.assignment_keypoint_group
+    assignment_run = source.assignment_keypoints_run
+    source_group = source.source_keypoint_group
+    source_run = source.source_keypoints_run
+    if bool(assignment_group) != bool(assignment_run):
+        raise ValueError(
+            f"subject_mask_runs/{source.run_name} has incomplete assignment-keypoint lineage."
+        )
+    if bool(source_group) != bool(source_run):
+        raise ValueError(
+            f"subject_mask_runs/{source.run_name} has incomplete source-keypoint lineage."
+        )
+    if (
+        assignment_group
+        and assignment_run
+        and source_group
+        and source_run
+        and (str(assignment_group), str(assignment_run))
+        != (str(source_group), str(source_run))
+    ):
+        raise ValueError(
+            f"subject_mask_runs/{source.run_name} has conflicting complete assignment_* "
+            "and source_* keypoint lineage."
+        )
+    group_name = str(assignment_group or source_group or "")
+    run_name = str(assignment_run or source_run or "")
+    if not group_name or not run_name:
+        raise ValueError(
+            f"Canonical subject_mask_runs/{source.run_name} has no exact keypoint lineage "
+            "for eyes_union assignment."
+        )
+    if group_name != "keypoints_runs":
+        raise ValueError(
+            "Canonical eye assignment currently accepts only raw keypoints_runs with "
+            "their own canonical publisher; refined/legacy keypoint sources are unsupported."
+        )
+    return f"keypoints_runs/{run_name}"
+
+
+def _require_exact_canonical_assignment_compatibility(
+    source: SourceSubjectMaskRun,
+    surfaces: BoundKeypointCoordinateSurfaces,
+) -> None:
+    """Fail unless keypoints and masks select the identical crop observations."""
+
+    context = surfaces.context
+    expected_crop_path = f"crop_runs/{source.crop_run}"
+    if context.source.crop_path != expected_crop_path:
+        raise ValueError(
+            "Canonical eye-assignment keypoints use a different exact crop run than "
+            f"subject_mask_runs/{source.run_name}."
+        )
+    source_arrays = {
+        "source_crop_row_ids": context.source_crop_row_ids,
+        "instance_key": context.instance_key,
+        "source_acquisition_frame_index": context.source_acquisition_frame_index,
+        "source_crop_xywh": context.source_crop_xywh,
+    }
+    for name, keypoint_values in source_arrays.items():
+        source_node = source.group.get(name)
+        if source_node is None:
+            raise ValueError(
+                f"Canonical subject_mask_runs/{source.run_name} is missing exact {name}."
+            )
+        mask_values = np.asarray(source_node[:])
+        keypoint_array = np.asarray(keypoint_values)
+        if (
+            mask_values.dtype != keypoint_array.dtype
+            or mask_values.shape != keypoint_array.shape
+            or not np.array_equal(mask_values, keypoint_array)
+        ):
+            raise ValueError(
+                f"Canonical eye assignment requires exact dtype-preserving {name} "
+                "equality between the selected subject-mask and raw-keypoint rowsets."
+            )
+    mask_extent = tuple(int(value) for value in source.masks_roi.shape[2:])
+    keypoint_extent = (
+        int(context.roi_frame.endpoint.height),
+        int(context.roi_frame.endpoint.width),
+    )
+    if mask_extent != keypoint_extent:
+        raise ValueError(
+            "Canonical eye-assignment keypoints and subject masks use different exact ROI extents."
+        )
+
+
 def _resolve_eye_assignment_context(
     root: zarr.Group,
     source: SourceSubjectMaskRun,
@@ -1631,6 +1756,66 @@ def _resolve_eye_assignment_context(
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
 ) -> _EyeAssignmentContext:
+    if source.canonical_coordinates:
+        if assignment_keypoint_group is not None or assignment_keypoints_run is not None:
+            raise ValueError(
+                "Explicit assignment-keypoint overrides are legacy-only and cannot produce "
+                "a canonical refined subject-mask run."
+            )
+        keypoint_path = _canonical_assignment_keypoint_path(source)
+        try:
+            canonical = load_persisted_keypoint_coordinate_surfaces(
+                root,
+                keypoint_path,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Canonical eye assignment requires an exact selector-eligible {keypoint_path}: {exc}"
+            ) from exc
+        _require_exact_canonical_assignment_compatibility(source, canonical)
+        kp_group = canonical.context._run_group
+        keypoint_run_name = keypoint_path.split("/", 1)[1]
+        keypoints_roi = canonical.keypoints_roi.coordinate_node
+        success_dataset = "detection_success"
+        success_node = kp_group.get(success_dataset)
+        if success_node is None:
+            raise ValueError(
+                "Canonical raw-keypoint eye assignment requires the exact "
+                "detection_success leaf; fallback success aliases are unsupported."
+            )
+        keypoint_success = np.asarray(success_node[:])
+        if success_node is None or np.dtype(success_node.dtype) != np.dtype("bool"):
+            raise ValueError("Canonical keypoint success authority must use exact bool dtype.")
+        if np.asarray(keypoint_success).shape != (canonical.context.row_identity.leading_dimension,):
+            raise ValueError(
+                "Canonical keypoint success authority must have one exact value per keypoint row."
+            )
+        eye_keypoint_indices = _resolve_eye_keypoint_indices(
+            kp_group,
+            keypoint_run_name,
+        )
+        rows = int(canonical.context.row_identity.leading_dimension)
+        return _EyeAssignmentContext(
+            keypoints_roi=keypoints_roi,
+            keypoint_success=np.asarray(keypoint_success, dtype=bool),
+            eye_keypoint_indices=eye_keypoint_indices,
+            keypoint_run_name=keypoint_run_name,
+            keypoint_group_name="keypoints_runs",
+            keypoint_success_dataset=str(success_dataset),
+            keypoint_source_kind="canonical_raw_keypoint_lineage",
+            row_identity_summary={
+                "row_identity_check": "exact_canonical_crop_instance_roi_placement_equality",
+                "rows_checked": rows,
+                "keypoint_has_source_crop_row_ids": True,
+                "mask_has_source_crop_row_ids": True,
+                "keypoint_rows_available": rows,
+                "keypoint_rows_selected": rows,
+                "keypoint_selection_min_row": 0 if rows else None,
+                "keypoint_selection_max_row": rows - 1 if rows else None,
+            },
+            canonical_coordinate_surfaces=canonical,
+        )
+
     kp_group, keypoint_run_name, keypoint_group_name, keypoint_source_kind = _resolve_subject_keypoint_group(
         root,
         source,
@@ -1661,6 +1846,7 @@ def _resolve_eye_assignment_context(
         keypoint_success_dataset=str(success_dataset),
         keypoint_source_kind=str(keypoint_source_kind),
         row_identity_summary=dict(row_identity_summary),
+        canonical_coordinate_surfaces=None,
     )
 
 
@@ -1947,6 +2133,70 @@ def _source_lineage_map(source: SourceSubjectMaskRun) -> dict[str, object | None
     return lineage
 
 
+def _copy_exact_canonical_source_arrays(
+    run_group: zarr.Group,
+    source: SourceSubjectMaskRun,
+) -> None:
+    """Copy the exact canonical raw selection without introducing legacy aliases."""
+
+    for name in _CANONICAL_REFINED_SOURCE_ARRAYS:
+        source_array = source.group.get(name)
+        if source_array is None:
+            raise ValueError(
+                f"subject_mask_runs/{source.run_name} is canonical but lacks required {name}."
+            )
+        values = np.asarray(source_array[:])
+        chunks = getattr(source_array, "chunks", None)
+        kwargs: dict[str, object] = {}
+        if chunks and values.ndim:
+            chunks_tuple = tuple(int(value) for value in chunks)
+            kwargs["chunks"] = tuple(
+                max(1, min(int(values.shape[axis]), chunks_tuple[axis]))
+                for axis in range(values.ndim)
+            )
+        run_group.create_array(
+            name,
+            data=values,
+            overwrite=True,
+            **kwargs,
+        )
+
+
+def _canonical_refined_selector_snapshot(parent: zarr.Group) -> dict[str, tuple[bool, Any]]:
+    return {
+        name: (name in parent.attrs, copy.deepcopy(parent.attrs.get(name)))
+        for name in _CANONICAL_REFINED_SELECTOR_ATTRS
+    }
+
+
+def _restore_attempt_pending_selector(
+    parent: zarr.Group,
+    snapshot: Mapping[str, tuple[bool, Any]],
+    *,
+    run_name: str,
+) -> None:
+    """Restore only an attempt-owned pending selector after pre-activation failure."""
+
+    if parent.attrs.get("latest_pending") != str(run_name):
+        return
+    present, value = snapshot["latest_pending"]
+    if present:
+        parent.attrs["latest_pending"] = copy.deepcopy(value)
+    else:
+        del parent.attrs["latest_pending"]
+
+
+def _stamp_non_authoritative_refined_mask_caches(run_group: zarr.Group) -> None:
+    for name in ("mask_bitpacked", "mask_rle"):
+        cache = run_group.get(name)
+        if cache is None:
+            continue
+        cache.attrs["surface_role"] = "derived_display_archive_cache"
+        cache.attrs["authoritative_pixels"] = False
+        cache.attrs["source_array"] = "masks_roi"
+        cache.attrs["source_run"] = str(run_group.attrs.get("palette_run_name") or "")
+
+
 def _create_component_shell(
     run_group: zarr.Group,
     *,
@@ -2179,6 +2429,7 @@ def _create_refined_run_shell(
     dense_mask_row_chunk: int | None = None,
     create_dense_masks: bool = True,
     create_bitpacked_masks: bool = False,
+    publication_owner: str | None = None,
 ) -> zarr.Group:
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
@@ -2191,14 +2442,30 @@ def _create_refined_run_shell(
     )
     component_names = tuple(str(name) for name in component_names)
     created = _utc_now()
+    future_canonical = bool(source.canonical_coordinates)
 
     run_group = refined_parent.create_group(target_run)
-    run_group.create_array(
-        "detection_source",
-        data=np.asarray(source.detection_source[:], dtype=np.int8),
-        chunks=(refined_subject_mask_metric_row_chunk(total_rows),),
-        overwrite=True,
-    )
+    if future_canonical:
+        owner = str(publication_owner or "")
+        if len(owner) != 32:
+            raise ValueError("Canonical refined output requires an unguessable publication owner.")
+        run_group.attrs[REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR] = owner
+        run_group.attrs["stage_selector_eligible"] = False
+        mark_run_started(
+            run_group,
+            run_name=target_run,
+            stage=REFINED_SUBJECT_STAGE_NAME,
+            started_at_utc=created,
+        )
+    if not future_canonical:
+        if source.detection_source is None:
+            raise ValueError("Legacy refined output requires source detection_source.")
+        run_group.create_array(
+            "detection_source",
+            data=np.asarray(source.detection_source[:], dtype=np.int8),
+            chunks=(refined_subject_mask_metric_row_chunk(total_rows),),
+            overwrite=True,
+        )
     if create_dense_masks:
         _create_filled_array(
             run_group,
@@ -2232,7 +2499,14 @@ def _create_refined_run_shell(
         dtype=bool,
         chunks=_live_metric_chunks_2d(total_rows),
     )
-    copy_row_lineage_arrays_from_sources(run_group, _source_lineage_map(source), total_rois=total_rows)
+    if future_canonical:
+        _copy_exact_canonical_source_arrays(run_group, source)
+    else:
+        copy_row_lineage_arrays_from_sources(
+            run_group,
+            _source_lineage_map(source),
+            total_rois=total_rows,
+        )
 
     metrics_group = run_group.require_group("metrics")
     _create_filled_array(
@@ -2314,8 +2588,16 @@ def _create_refined_run_shell(
     run_group.attrs["created_at_utc"] = created
     run_group.attrs["created_utc"] = created
     run_group.attrs["duration_seconds"] = 0.0
+    # This writer always creates the full bbox surface from masks using the
+    # shared half-open derivation, independent of the source run's age.
+    run_group.attrs["bbox_xyxy_convention"] = "pixel_edge_half_open"
+    run_group.attrs["bbox_xyxy_derivation"] = (
+        "foreground_half_open_pixel_edges_xyxy_v1"
+    )
     for key, value in extra_attrs.items():
         run_group.attrs[str(key)] = value
+    if future_canonical:
+        run_group.attrs["masks_roi_materialized"] = True
     requested_identity_mode = run_group.attrs.get("row_identity_mode")
     if requested_identity_mode is None:
         requested_identity_mode = source.group.attrs.get("row_identity_mode")
@@ -3742,6 +4024,62 @@ def _existing_component_reasons(component_group: zarr.Group, total_rows: int) ->
     return arr.copy()
 
 
+def _require_exact_existing_half_open_bbox_surface(
+    mask_store: Any,
+    run_group: zarr.Group,
+    *,
+    total_rows: int,
+    component_count: int,
+    chunk_size: int,
+) -> None:
+    """Validate every existing bbox cell before a partial metric refresh."""
+
+    if (
+        run_group.attrs.get("bbox_xyxy_convention") != "pixel_edge_half_open"
+        or run_group.attrs.get("bbox_xyxy_derivation")
+        != "foreground_half_open_pixel_edges_xyxy_v1"
+    ):
+        raise ValueError(
+            "Partial refined metric refresh requires an existing, explicitly stamped "
+            "half-open bbox surface. Run a full all-component refresh first."
+        )
+    metrics = run_group.get("metrics")
+    if metrics is None or "bbox_xyxy" not in metrics or "bbox_valid" not in metrics:
+        raise ValueError(
+            "Partial refined metric refresh cannot create a bbox surface; run a full "
+            "all-component refresh first."
+        )
+    bbox = metrics["bbox_xyxy"]
+    valid = metrics["bbox_valid"]
+    if tuple(int(v) for v in bbox.shape) != (total_rows, component_count, 4) or tuple(
+        int(v) for v in valid.shape
+    ) != (total_rows, component_count):
+        raise ValueError(
+            "Partial refined metric refresh requires complete bbox_xyxy/bbox_valid arrays."
+        )
+    for start_row, stop_row in _row_chunks(total_rows, max(1, int(chunk_size))):
+        row_slice = slice(start_row, stop_row)
+        masks = np.asarray(mask_store.read_dense(rows=row_slice), dtype=np.uint8)
+        expected = batch_mask_spatial_metrics(
+            masks.reshape((-1, int(masks.shape[2]), int(masks.shape[3])))
+        )
+        expected_bbox = np.asarray(expected["bbox_xyxy"], dtype=np.float32).reshape(
+            (stop_row - start_row, component_count, 4)
+        )
+        expected_valid = np.asarray(expected["bbox_valid"], dtype=bool).reshape(
+            (stop_row - start_row, component_count)
+        )
+        actual_bbox = np.asarray(bbox[row_slice], dtype=np.float32)
+        actual_valid = np.asarray(valid[row_slice], dtype=bool)
+        if not np.array_equal(actual_bbox, expected_bbox, equal_nan=True) or not np.array_equal(
+            actual_valid, expected_valid
+        ):
+            raise ValueError(
+                "Partial refined metric refresh found bbox values that are not the exact "
+                "half-open derivation of the current masks. Run a full all-component refresh."
+            )
+
+
 def refresh_refined_subject_mask_metrics_run(
     root: zarr.Group,
     *,
@@ -3761,6 +4099,9 @@ def refresh_refined_subject_mask_metrics_run(
     stage_start = time.perf_counter()
     timing = _TimingRecorder()
     run_name, run_group = _resolve_refined_subject_run_group(root, refined_run)
+    # Discard the resolver's possibly cached child and authorize a fresh handle
+    # before opening stores or creating any metric shell.
+    run_group = resolve_mutable_refined_subject_mask_run(root, run_name)
     try:
         mask_store = open_mask_store(
             run_group,
@@ -3791,8 +4132,29 @@ def refresh_refined_subject_mask_metrics_run(
         "chunk_alignment": "requested_chunk_size",
     }
     component_count = int(mask_shape[1])
-    _ensure_refined_run_metric_shell(run_group, total_rows=total_rows, component_count=component_count)
     component_indices = _component_indices_for_refined_run(run_group, components)
+    selected_indices = {int(index) for _name, index in component_indices}
+    full_component_refresh = selected_indices == set(range(component_count))
+    if not full_component_refresh:
+        _require_exact_existing_half_open_bbox_surface(
+            mask_store,
+            run_group,
+            total_rows=total_rows,
+            component_count=component_count,
+            chunk_size=requested_chunk_size,
+        )
+
+    # Re-resolve immediately before the first mutation so a stale cached handle
+    # cannot bypass a publication seal installed during validation above.
+    run_group = resolve_mutable_refined_subject_mask_run(root, run_name)
+    mask_store = open_mask_store(
+        run_group,
+        source_path=f"refined_subject_masks_runs/{run_name}",
+        prefer="dense",
+    )
+    if tuple(int(value) for value in mask_store.shape) != mask_shape:
+        raise RuntimeError("Refined mask store changed during metric refresh preflight.")
+    _ensure_refined_run_metric_shell(run_group, total_rows=total_rows, component_count=component_count)
     chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
     review_counts: dict[str, dict[str, int]] = {}
     refreshed_components: list[str] = []
@@ -3861,6 +4223,14 @@ def refresh_refined_subject_mask_metrics_run(
             )
         _add_review_counts(review_counts, component_name, reason_labels_by_component[component_name])
         refreshed_components.append(component_name)
+
+    if full_component_refresh:
+        # This stamp is the commit marker: failures before this point leave the
+        # surface unstamped and therefore unusable by any later partial refresh.
+        run_group.attrs["bbox_xyxy_convention"] = "pixel_edge_half_open"
+        run_group.attrs["bbox_xyxy_derivation"] = (
+            "foreground_half_open_pixel_edges_xyxy_v1"
+        )
 
     if write_eye_geometry and set(_EYE_COMPONENTS).issubset({name for name, _idx in component_indices}):
         write_refined_subject_eye_geometry(run_group)
@@ -4546,6 +4916,19 @@ def finalize_subject_mask_run(
         subject_shard_runs=subject_shard_runs,
         target_crop_run=target_crop_run,
     )
+    future_canonical = bool(source.canonical_coordinates and shard_collection is None)
+    if future_canonical and retain_source_seeds:
+        raise ValueError(
+            "Canonical refined outputs forbid retain_source_seeds; debug seed rasters "
+            "are not sealed coordinate surfaces."
+        )
+    if future_canonical and (
+        assignment_keypoint_group is not None or assignment_keypoints_run is not None
+    ):
+        raise ValueError(
+            "Explicit assignment-keypoint overrides are legacy-only and cannot produce "
+            "a canonical refined subject-mask run."
+        )
     collection_worker_plan = (
         _build_collection_worker_plan(shard_collection)
         if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND and shard_collection is not None
@@ -4614,6 +4997,11 @@ def finalize_subject_mask_run(
     target_run = str(refined_run or _default_refined_run_name())
     refined_parent = root.get("refined_subject_masks_runs")
     target_exists = refined_parent is not None and target_run in refined_parent
+    if target_exists and future_canonical and not dry_run:
+        raise ValueError(
+            f"refined_subject_masks_runs/{target_run} is immutable canonical output; "
+            "choose a new run name instead of overwrite=True."
+        )
     summary: dict[str, object] = {
         "status": "planned" if dry_run else "updated",
         "source_subject_mask_run": source.run_name,
@@ -4652,6 +5040,7 @@ def finalize_subject_mask_run(
         "postcompute_num_workers": normalized_postcompute_num_workers,
         **execution_metadata,
         "source_surface_kind": source.mask_surface_kind,
+        "canonical_coordinate_publication": future_canonical,
     }
     if shard_collection is not None:
         summary.update(
@@ -4707,9 +5096,10 @@ def finalize_subject_mask_run(
 
     refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
     if target_run in refined_parent:
-        if not overwrite:
+        if future_canonical or not overwrite:
             raise ValueError(
-                f"refined_subject_masks_runs/{target_run} already exists. Pass overwrite=True to replace it."
+                f"refined_subject_masks_runs/{target_run} already exists. "
+                "Canonical runs are immutable; legacy runs require overwrite=True."
             )
         del refined_parent[target_run]
 
@@ -4752,6 +5142,38 @@ def finalize_subject_mask_run(
         assignment_keypoint_attrs["assignment_keypoint_row_identity_check"] = str(
             eye_assignment_context.row_identity_summary.get("row_identity_check", "unknown")
         )
+        canonical_keypoints = eye_assignment_context.canonical_coordinate_surfaces
+        if canonical_keypoints is not None:
+            assignment_keypoint_attrs.update(
+                {
+                    "assignment_keypoint_coordinate_contract": "canonical_v2_exact",
+                    "assignment_keypoint_coordinate_run_path": (
+                        canonical_keypoints.context.run_path
+                    ),
+                    "assignment_keypoint_roi_descriptor_ref": (
+                        f"/{canonical_keypoints.context.run_path}/keypoints_roi@coordinate_descriptor"
+                    ),
+                    "assignment_keypoint_roi_descriptor_sha256": (
+                        canonical_keypoints.keypoints_roi.descriptor.digest()
+                    ),
+                    "assignment_keypoint_coordinate_derivation_ref": (
+                        canonical_keypoints.derivation.record_ref
+                    ),
+                    "assignment_keypoint_coordinate_derivation_sha256": (
+                        canonical_keypoints.derivation.record_sha256
+                    ),
+                    "assignment_keypoint_row_identity_ref": (
+                        canonical_keypoints.context.row_identity.record_ref
+                    ),
+                    "assignment_keypoint_row_identity_sha256": (
+                        canonical_keypoints.context.row_identity.record_sha256
+                    ),
+                    "assignment_keypoint_eye_indices": {
+                        "eye_left": int(eye_assignment_context.eye_keypoint_indices[0]),
+                        "eye_right": int(eye_assignment_context.eye_keypoint_indices[1]),
+                    },
+                }
+            )
 
     extra_attrs: dict[str, object] = {
         "finalization_semantics": "smart_probability_to_refined_candidate",
@@ -4851,6 +5273,7 @@ def finalize_subject_mask_run(
     if eye_assignment_context is not None:
         provenance_inputs.update(assignment_keypoint_attrs)
 
+    canonical_publication_owner = uuid4().hex if future_canonical else None
     with progress.phase("target_init"):
         with timing.phase("target_init"):
             run_group = _create_refined_run_shell(
@@ -4865,6 +5288,7 @@ def finalize_subject_mask_run(
                 dense_mask_row_chunk=int(effective_dense_mask_row_chunk),
                 create_dense_masks=not direct_bitpacked_output,
                 create_bitpacked_masks=direct_bitpacked_output,
+                publication_owner=canonical_publication_owner,
             )
 
     if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND:
@@ -5623,16 +6047,79 @@ def finalize_subject_mask_run(
     run_group.attrs["requested_chunk_size"] = int(requested_chunk_size)
     run_group.attrs["worker_chunk_size"] = int(worker_chunk_size)
     run_group.attrs["chunk_alignment"] = str(execution_metadata["chunk_alignment"])
-    mark_run_complete(
-        run_group,
-        parent_group=refined_parent,
-        run_name=target_run,
-        run_provenance=build_run_provenance_from_stage_record(
-            run_group.attrs.get("provenance", {}),
-            fallback_command="finalize_subject_masks",
-        ),
+    run_provenance = build_run_provenance_from_stage_record(
+        run_group.attrs.get("provenance", {}),
+        fallback_command="finalize_subject_masks",
     )
-    refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
+    if future_canonical:
+        assert canonical_publication_owner is not None
+        if eye_assignment_context is not None:
+            canonical_keypoints = eye_assignment_context.canonical_coordinate_surfaces
+            if canonical_keypoints is None:
+                raise RuntimeError(
+                    "Canonical refined eye assignment lost its sealed keypoint dependency."
+                )
+            require_bound_keypoint_coordinate_surfaces(canonical_keypoints)
+        # Bind coordinate authority only after all scientific outputs and
+        # provenance inputs are final. Preparing earlier would seal a
+        # provisional provenance record that the eye-assignment summary later
+        # changes, making a correct publication fail its own fresh preflight.
+        prepare_refined_subject_mask_coordinate_context(
+            root,
+            f"refined_subject_masks_runs/{target_run}",
+            expected_publication_owner=canonical_publication_owner,
+            source_subject_mask_path=f"subject_mask_runs/{source.run_name}",
+            mask_labels=component_names,
+            assignment_keypoint_surfaces=(
+                eye_assignment_context.canonical_coordinate_surfaces
+                if eye_assignment_context is not None
+                else None
+            ),
+        )
+        run_group = root[f"refined_subject_masks_runs/{target_run}"]
+        _stamp_non_authoritative_refined_mask_caches(run_group)
+        pending_coordinate_surfaces = publish_refined_subject_mask_coordinate_surfaces(
+            root,
+            f"refined_subject_masks_runs/{target_run}",
+            expected_publication_owner=canonical_publication_owner,
+        )
+        # The publisher stamps run attrs through fresh handles; do not finalize
+        # completion through the pre-publication cached metadata object.
+        run_group = root[f"refined_subject_masks_runs/{target_run}"]
+        mark_run_complete(
+            run_group,
+            parent_group=None,
+            run_name=target_run,
+            run_provenance=run_provenance,
+        )
+        selector_snapshot = _canonical_refined_selector_snapshot(refined_parent)
+        try:
+            refined_parent.attrs["latest_pending"] = target_run
+            if refined_parent.attrs.get("latest_pending") != target_run:
+                raise RuntimeError("Canonical refined latest_pending did not persist exactly.")
+            _activate_validated_refined_subject_mask_coordinate_surfaces(
+                root,
+                refined_parent,
+                pending_coordinate_surfaces,
+                run_name=target_run,
+                publication_owner_token=canonical_publication_owner,
+                selector_snapshot=selector_snapshot,
+            )
+        except BaseException:
+            _restore_attempt_pending_selector(
+                refined_parent,
+                selector_snapshot,
+                run_name=target_run,
+            )
+            raise
+    else:
+        mark_run_complete(
+            run_group,
+            parent_group=refined_parent,
+            run_name=target_run,
+            run_provenance=run_provenance,
+        )
+        refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
 
     summary.update(
         {

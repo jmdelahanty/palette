@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Mapping, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -90,9 +90,20 @@ def _resolve_refined_parent(root: zarr.Group) -> tuple[Optional[str], Optional[z
     return None, None
 
 
-def _resolve_refined_run(parent_group: zarr.Group, requested_refined_run: Optional[str]) -> Optional[str]:
+def _resolve_refined_run(
+    parent_group: zarr.Group,
+    requested_refined_run: Optional[str],
+    *,
+    allow_legacy_latest_fallback: bool = False,
+) -> Optional[str]:
     if requested_refined_run:
         return requested_refined_run if requested_refined_run in parent_group else None
+    if not allow_legacy_latest_fallback:
+        raise ValueError(
+            "Refined-keypoint quality diagnostics require one exact run name. "
+            "Implicit latest/sorted-child selection is legacy inference; opt in "
+            "explicitly only for historical diagnosis."
+        )
     latest = _decode_text(parent_group.attrs.get("latest"))
     if latest and latest in parent_group:
         return latest
@@ -267,6 +278,8 @@ def _build_rate_items(quality: Mapping[str, object], total_rows: int) -> list[tu
 def load_keypoint_quality_report(
     zarr_path: str,
     refined_run: Optional[str] = None,
+    *,
+    allow_legacy_latest_fallback: bool = False,
 ) -> Dict[str, object]:
     """Load refined keypoint quality arrays and metadata for plotting."""
     root = zarr.open_group(zarr_path, mode="r")
@@ -275,7 +288,11 @@ def load_keypoint_quality_report(
     if parent_name is None or parent_group is None:
         raise ValueError("No refined keypoint runs found.")
 
-    selected_run = _resolve_refined_run(parent_group, refined_run)
+    selected_run = _resolve_refined_run(
+        parent_group,
+        refined_run,
+        allow_legacy_latest_fallback=allow_legacy_latest_fallback,
+    )
     if selected_run is None:
         raise ValueError("No refined keypoint run available.")
 
@@ -315,6 +332,8 @@ def load_keypoint_quality_report(
         "zarr_path": str(zarr_path),
         "parent_name": parent_name,
         "refined_run": selected_run,
+        "coordinate_verification": "legacy_unverified_diagnostic",
+        "source_camera_overlay_authority": False,
         "source_keypoints_run": _decode_text(run_group.attrs.get("source_keypoints_run")),
         "source_crop_run": _decode_text(run_group.attrs.get("source_crop_run")),
         "source_detect_run": _decode_text(run_group.attrs.get("source_detect_run")),
@@ -347,7 +366,11 @@ def load_keypoint_quality_report(
 def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) -> plt.Figure:
     """Create a quality dashboard figure for a refined keypoint run."""
     fig = plt.figure(figsize=(22, 11))
-    fig.suptitle("Keypoint Refinement Quality Overview", fontsize=16, fontweight="bold")
+    fig.suptitle(
+        "UNVERIFIED DIAGNOSTIC — Keypoint Refinement Quality Overview",
+        fontsize=16,
+        fontweight="bold",
+    )
     gs = fig.add_gridspec(2, 4, hspace=0.32, wspace=0.26)
 
     summary = _normalize_summary_statistics(quality_data.get("summary_statistics"))
@@ -517,7 +540,11 @@ def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) ->
 def create_keypoint_refinement_pipeline_visualization(quality_data: Mapping[str, object]) -> plt.Figure:
     """Create a refinement-pipeline summary figure for a refined keypoint run."""
     fig = plt.figure(figsize=(20, 8))
-    fig.suptitle("Keypoint Refinement Pipeline Overview", fontsize=16, fontweight="bold")
+    fig.suptitle(
+        "UNVERIFIED DIAGNOSTIC — Keypoint Refinement Pipeline Overview",
+        fontsize=16,
+        fontweight="bold",
+    )
     gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.25, 1.15], wspace=0.24)
 
     summary = _normalize_summary_statistics(quality_data.get("summary_statistics"))
@@ -627,9 +654,14 @@ def render_keypoint_quality_png(
     *,
     dpi: int = 150,
     show: bool = False,
+    allow_legacy_latest_fallback: bool = False,
 ) -> tuple[bytes, Dict[str, object]]:
     """Render keypoint quality overview PNG bytes for a refined run."""
-    quality_data = load_keypoint_quality_report(zarr_path, refined_run=refined_run)
+    quality_data = load_keypoint_quality_report(
+        zarr_path,
+        refined_run=refined_run,
+        allow_legacy_latest_fallback=allow_legacy_latest_fallback,
+    )
     fig = create_keypoint_quality_visualization(quality_data)
     if show:
         plt.show()
@@ -641,6 +673,8 @@ def render_keypoint_quality_png(
         "refined_run": quality_data.get("refined_run"),
         "summary_statistics": quality_data.get("summary_statistics"),
         "parameters": quality_data.get("parameters"),
+        "coordinate_verification": quality_data.get("coordinate_verification"),
+        "source_camera_overlay_authority": False,
     }
     return buffer.getvalue(), meta
 
@@ -651,9 +685,14 @@ def render_keypoint_refinement_pipeline_png(
     *,
     dpi: int = 150,
     show: bool = False,
+    allow_legacy_latest_fallback: bool = False,
 ) -> tuple[bytes, Dict[str, object]]:
     """Render keypoint refinement-pipeline overview PNG bytes for a refined run."""
-    quality_data = load_keypoint_quality_report(zarr_path, refined_run=refined_run)
+    quality_data = load_keypoint_quality_report(
+        zarr_path,
+        refined_run=refined_run,
+        allow_legacy_latest_fallback=allow_legacy_latest_fallback,
+    )
     fig = create_keypoint_refinement_pipeline_visualization(quality_data)
     if show:
         plt.show()
@@ -665,6 +704,8 @@ def render_keypoint_refinement_pipeline_png(
         "refined_run": quality_data.get("refined_run"),
         "summary_statistics": quality_data.get("summary_statistics"),
         "review_status": quality_data.get("review_status"),
+        "coordinate_verification": quality_data.get("coordinate_verification"),
+        "source_camera_overlay_authority": False,
     }
     return buffer.getvalue(), meta
 
@@ -672,7 +713,18 @@ def render_keypoint_refinement_pipeline_png(
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path, help="Path to archive zarr.")
-    parser.add_argument("--refined-run", help="Specific refined keypoint run (default: latest).")
+    parser.add_argument(
+        "--refined-run",
+        help="Exact refined keypoint run required unless legacy fallback is enabled.",
+    )
+    parser.add_argument(
+        "--allow-legacy-latest-fallback",
+        action="store_true",
+        help=(
+            "Permit historical latest/sorted-child selection for an explicitly "
+            "unverified diagnostic rendering."
+        ),
+    )
     parser.add_argument(
         "--artifact",
         choices=[QUALITY_ARTIFACT_NAME, REFINEMENT_PIPELINE_ARTIFACT_NAME],
@@ -690,6 +742,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 refined_run=args.refined_run,
                 dpi=int(args.dpi),
                 show=args.output is None,
+                allow_legacy_latest_fallback=args.allow_legacy_latest_fallback,
             )
         else:
             png_bytes, _meta = render_keypoint_refinement_pipeline_png(
@@ -697,6 +750,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 refined_run=args.refined_run,
                 dpi=int(args.dpi),
                 show=args.output is None,
+                allow_legacy_latest_fallback=args.allow_legacy_latest_fallback,
             )
     except Exception as exc:
         print(f"Keypoint quality visualization failed: {exc}")

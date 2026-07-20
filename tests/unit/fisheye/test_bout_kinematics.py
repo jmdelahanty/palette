@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,6 +19,108 @@ from fisheye.analysis.bout_kinematics import (
     resolve_bout_kinematics_tables,
 )
 from fisheye.shared.zarr.columnar import load_structured_dataset, write_columnar_dataset
+
+
+_MOTION_MANIFEST_SHA256 = "a" * 64
+_POSITIONS_PX_DESCRIPTOR_SHA256 = "b" * 64
+_POSITIONS_MM_DESCRIPTOR_SHA256 = "c" * 64
+
+
+def _track_motion_authority() -> dict[str, object]:
+    run_ref = "/analysis/track_kinematics_runs/offline/tk_1"
+    track_ref = f"{run_ref}/tracks/id_0"
+    return {
+        "schema_id": "palette.track_motion_read_authority",
+        "schema_version": 1,
+        "run_ref": run_ref,
+        "track_ref": track_ref,
+        "track_id": 0,
+        "motion_manifest_ref": (
+            f"{run_ref}@track_motion_publication_manifest"
+        ),
+        "motion_manifest_sha256": _MOTION_MANIFEST_SHA256,
+        "positions_px_ref": f"{track_ref}/positions_px",
+        "positions_px_coordinate_descriptor_sha256": (
+            _POSITIONS_PX_DESCRIPTOR_SHA256
+        ),
+        "positions_mm_ref": f"{track_ref}/positions_mm",
+        "positions_mm_coordinate_descriptor_sha256": (
+            _POSITIONS_MM_DESCRIPTOR_SHA256
+        ),
+        "track_sample_key_ref": f"{track_ref}/track_sample_key",
+        "source_acquisition_frame_index_ref": (
+            f"{track_ref}/source_acquisition_frame_index"
+        ),
+    }
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _load_verified_track(
+        root: zarr.Group,
+        *,
+        run_name: str = "latest",
+        scope: str = "offline",
+        track_id: int = 0,
+        required_speed_levels: tuple[str, ...] = (),
+    ) -> SimpleNamespace:
+        assert required_speed_levels in {(), ("filtered",)}
+        offline = root["analysis/track_kinematics_runs"][scope]
+        resolved_name = str(offline.attrs["latest"] if run_name == "latest" else run_name)
+        run_path = f"analysis/track_kinematics_runs/{scope}/{resolved_name}"
+        track_path = f"{run_path}/tracks/id_{int(track_id)}"
+        run = root[run_path]
+        track = root[track_path]
+        authority = _track_motion_authority()
+        return SimpleNamespace(
+            run_name=resolved_name,
+            scope=scope,
+            run_path=run_path,
+            track_id=int(track_id),
+            track_path=track_path,
+            run_attrs=dict(run.attrs),
+            authority_status="verified_canonical_track_motion_v1",
+            motion_manifest_sha256=_MOTION_MANIFEST_SHA256,
+            positions_px_descriptor_sha256=(
+                _POSITIONS_PX_DESCRIPTOR_SHA256
+            ),
+            positions_mm_descriptor_sha256=(
+                _POSITIONS_MM_DESCRIPTOR_SHA256
+            ),
+            source_acquisition_frame_index=np.asarray(
+                track["source_acquisition_frame_index"][:], dtype=np.int64
+            ),
+            time_seconds=np.asarray(track["time_seconds"][:], dtype=np.float64),
+            positions_mm=np.asarray(track["positions_mm"][:], dtype=np.float64),
+            positions_px=np.asarray(track["positions_px"][:], dtype=np.float64),
+            speed_mm_by_level={
+                "filtered": np.asarray(track["speed_filtered_mm"][:])
+            },
+            frame_path_distance_mm_by_level={
+                "filtered": np.asarray(
+                    track["frame_path_distance_filtered_mm"][:]
+                )
+            },
+            frame_path_distance_px_by_level={
+                "filtered": np.asarray(
+                    track["frame_path_distance_filtered_px"][:]
+                )
+            },
+            delta_seconds=np.asarray(track["delta_seconds"][:]),
+            transition_valid=np.asarray(track["transition_valid"][:]),
+            sample_valid=np.asarray(track["sample_valid"][:]),
+            smoothed_heading_degrees=np.asarray(
+                track["smoothed_heading_degrees"][:]
+            ),
+            heading_degrees=np.asarray(track["heading_degrees"][:]),
+            authority_record=lambda: dict(authority),
+        )
+
+    monkeypatch.setattr(
+        bout_kinematics_module,
+        "load_track_kinematics_track",
+        _load_verified_track,
+    )
 
 
 def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
@@ -37,6 +140,7 @@ def _make_archive(tmp_path: Path) -> Path:
     track = tk.create_group("tracks").create_group("id_0")
     frames = np.arange(10, dtype=np.int64)
     _write_array(track, "frame_indices", frames)
+    _write_array(track, "source_acquisition_frame_index", frames)
     _write_array(track, "time_seconds", frames.astype(np.float32) / 10.0)
     _write_array(
         track,
@@ -85,6 +189,10 @@ def _make_archive(tmp_path: Path) -> Path:
     bout_run.attrs["source_track_kinematics_run"] = "tk_1"
     bout_run.attrs["track_id"] = 0
     bout_run.attrs["default_level"] = "speed_filtered"
+    bout_run.attrs["source_track_motion_manifest_sha256"] = (
+        _MOTION_MANIFEST_SHA256
+    )
+    bout_run.attrs["source_track_motion_authority"] = _track_motion_authority()
     speed_group = bout_run.create_group("speed_filtered")
     bouts = np.asarray(
         [(1, 3, 5, 3, 5, 0.25, 0.55, 0.30, True, True)],
@@ -191,6 +299,73 @@ def test_default_eye_gaze_fails_before_creating_output_without_eye_angles(
     assert "bout_kinematics_runs" not in root["analysis"]
 
 
+def test_compute_rejects_swim_bouts_without_typed_track_motion_authority(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    del root["analysis/swim_bout_runs/bouts_1"].attrs[
+        "source_track_motion_authority"
+    ]
+
+    with pytest.raises(ValueError, match="no typed source track-motion authority"):
+        compute_and_save_bout_kinematics(
+            zarr_path,
+            run_name="unbound_swim_source",
+            track_kinematics_run="tk_1",
+            track_id=0,
+            swim_bout_run="bouts_1",
+            include_eye_gaze=False,
+        )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert "bout_kinematics_runs" not in root["analysis"]
+
+
+def test_compute_fails_if_track_motion_authority_changes_before_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+    original_loader = bout_kinematics_module.load_track_kinematics_track
+    calls = 0
+
+    def _changing_loader(*args: object, **kwargs: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        tables = original_loader(*args, **kwargs)
+        if calls > 1:
+            changed = tables.authority_record()
+            changed["motion_manifest_sha256"] = "d" * 64
+            tables.authority_record = lambda: dict(changed)
+        return tables
+
+    monkeypatch.setattr(
+        bout_kinematics_module,
+        "load_track_kinematics_track",
+        _changing_loader,
+    )
+
+    with pytest.raises(ValueError, match="authority changed"):
+        compute_and_save_bout_kinematics(
+            zarr_path,
+            run_name="source_replaced",
+            track_kinematics_run="tk_1",
+            track_id=0,
+            swim_bout_run="bouts_1",
+            include_eye_gaze=False,
+        )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    parent = root["analysis/bout_kinematics_runs"]
+    assert "latest" not in parent.attrs
+    assert parent["source_replaced"].attrs["status"] == "failed"
+    assert (
+        parent["source_replaced"].attrs["failure_stage"]
+        == "source_track_motion_revalidation"
+    )
+
+
 def test_compute_can_write_separate_node_local_output_without_mutating_source(
     tmp_path: Path,
 ) -> None:
@@ -276,7 +451,7 @@ def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp
         "resolved_boundary_margin_frames": 1,
         "threshold_mm_s": 0.1,
         "measurement_signal_level": "speed_filtered",
-        "measurement_signal_array": "speed_filtered_mm",
+        "measurement_signal_array": "movement/speed/filtered/mm",
     }
     assert run.attrs["source_refs"]["zarr_path"] == str(zarr_path)
     assert run.attrs["source_refs"]["source_track_id"] == 0
@@ -294,15 +469,24 @@ def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp
         "positions_mm": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/positions_mm",
         "positions_px": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/positions_px",
     }
+    assert run.attrs["source_refs"]["source_track_motion_authority"] == (
+        _track_motion_authority()
+    )
+    assert run.attrs["source_refs"][
+        "source_swim_bout_track_motion_authority"
+    ] == _track_motion_authority()
     assert run.attrs["source_refs"]["source_movement_arrays"] == {
-        "physical_active_speed": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/speed_filtered_mm",
+        "physical_active_speed": (
+            "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/"
+            "movement/speed/filtered/mm"
+        ),
         "physical_active_path_distance_mm": (
             "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/"
-            "frame_path_distance_filtered_mm"
+            "movement/speed/filtered/frame_path_distance_mm"
         ),
         "physical_active_path_distance_px": (
             "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/"
-            "frame_path_distance_filtered_px"
+            "movement/speed/filtered/frame_path_distance_px"
         ),
     }
     assert run.attrs["source_refs"]["source_validity_arrays"] == {

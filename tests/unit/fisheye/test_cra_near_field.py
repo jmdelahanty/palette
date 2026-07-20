@@ -56,7 +56,12 @@ def _add_circle_geometry(zarr_path: Path) -> None:
 
 
 def _write_sources(zarr_path: Path) -> str:
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     _add_circle_geometry(zarr_path)
     endpoint = build_cra_primary_endpoint_result(
         zarr_path,

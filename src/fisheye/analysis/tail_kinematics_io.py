@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 import zarr
 
+from ..shared.subject_shape_coordinate_publication import (
+    SubjectShapeCoordinatePublicationError,
+    load_persisted_subject_shape_coordinate_publication,
+)
+from ..shared.tail_coordinate_publication import (
+    TailCoordinatePublicationError,
+    load_tail_kinematics_coordinate_publication,
+)
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..shared.zarr_helpers import (
     safe_int as _safe_int,
     zarr_attrs_dict as _attrs_dict,
@@ -66,6 +76,8 @@ class TailKinematicsCatalog:
     source_curvature_sample_s: np.ndarray
     source_curvature_sample_count: int
     source_shape_attrs: Mapping[str, Any]
+    source_shape_manifest_sha256: str | None
+    tail_publication_manifest_sha256: str
 
 
 @dataclass(frozen=True)
@@ -99,6 +111,10 @@ def _positive_float(value: object) -> float | None:
     return result if np.isfinite(result) and result > 0 else None
 
 
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def resolve_tail_kinematics_run(
     root: zarr.Group,
     run_name: str | None = None,
@@ -106,12 +122,28 @@ def resolve_tail_kinematics_run(
     parent = root.get(TAIL_KINEMATICS_RUN_PARENT)
     if parent is None:
         raise TailKinematicsIOError("No analysis/tail_kinematics_runs group found.")
-    if run_name is None or str(run_name).strip().lower() in {"", "latest"}:
-        latest = parent.attrs.get("latest_complete") or parent.attrs.get("latest")
-        resolved = str(latest or "")
+    implicit = run_name is None or str(run_name).strip().lower() in {"", "latest"}
+    if implicit:
+        resolved = str(
+            resolve_latest_complete_run_name(parent, legacy_default=False) or ""
+        )
     else:
-        normalized = _normal_path(run_name)
-        resolved = normalized.split("/")[-1]
+        run_spec = str(run_name).strip()
+        prefix = f"{TAIL_KINEMATICS_RUN_PARENT}/"
+        if "/" not in run_spec:
+            resolved = run_spec
+        elif run_spec.startswith(prefix) and "/" not in run_spec[len(prefix) :]:
+            resolved = run_spec[len(prefix) :]
+        else:
+            raise TailKinematicsIOError(
+                "Tail-kinematics run must be a bare child name or the exact path "
+                f"{TAIL_KINEMATICS_RUN_PARENT}/<run>; got {run_name!r}."
+            )
+    if implicit and not resolved:
+        raise TailKinematicsIOError(
+            "No stable complete selector-eligible tail-kinematics run is selected; "
+            "selector activation may be in progress, so retry the read."
+        )
     if not resolved or resolved not in parent:
         raise TailKinematicsIOError(
             f"Tail-kinematics run {run_name!r} not found in {TAIL_KINEMATICS_RUN_PARENT}."
@@ -127,9 +159,15 @@ def _run_dimensions(run_group: zarr.Group, run_path: str) -> tuple[int, int]:
     angle = _array_handle(run_group, "tail_angle_deg", path=run_path)
     if len(angle.shape) != 2 or int(angle.shape[0]) <= 0 or int(angle.shape[1]) <= 1:
         raise TailKinematicsIOError(f"{run_path}/tail_angle_deg must have shape (rows, samples).")
-    frame_index = _array_handle(run_group, "frame_index", path=run_path)
+    frame_index = _array_handle(
+        run_group,
+        "source_acquisition_frame_index",
+        path=run_path,
+    )
     if len(frame_index.shape) != 1 or int(frame_index.shape[0]) != int(angle.shape[0]):
-        raise TailKinematicsIOError(f"{run_path}/frame_index does not align with tail_angle_deg.")
+        raise TailKinematicsIOError(
+            f"{run_path}/source_acquisition_frame_index does not align with tail_angle_deg."
+        )
     return int(angle.shape[0]), int(angle.shape[1])
 
 
@@ -137,7 +175,9 @@ def discover_tail_kinematics_run_options(root: zarr.Group) -> list[TailKinematic
     parent = root.get(TAIL_KINEMATICS_RUN_PARENT)
     if parent is None:
         return []
-    latest = str(parent.attrs.get("latest_complete") or parent.attrs.get("latest") or "")
+    latest = str(
+        resolve_latest_complete_run_name(parent, legacy_default=False) or ""
+    )
     options: list[TailKinematicsRunOption] = []
     for run_name in _group_keys(parent):
         try:
@@ -149,12 +189,16 @@ def discover_tail_kinematics_run_options(root: zarr.Group) -> list[TailKinematic
             row_count, sample_count = _run_dimensions(
                 run_group, f"{TAIL_KINEMATICS_RUN_PARENT}/{run_name}"
             )
+            publication = load_tail_kinematics_coordinate_publication(
+                root,
+                f"{TAIL_KINEMATICS_RUN_PARENT}/{run_name}",
+            )
         except Exception:
             continue
         schema_version = _safe_int(attrs.get("schema_version"))
         method = str(attrs.get("method")) if attrs.get("method") is not None else None
-        source_shape = attrs.get("source_subject_shape_run")
-        source_shape_name = str(source_shape) if source_shape is not None else None
+        source_shape_path = _normal_path(publication.source.run_path)
+        source_shape_name = source_shape_path.split("/")[-1] or None
         is_latest = str(run_name) == latest
         label_parts = [str(run_name)]
         if schema_version is not None:
@@ -193,24 +237,49 @@ def _resolve_fps(root: zarr.Group, run_attrs: Mapping[str, Any]) -> tuple[float 
 
 def _subject_shape_catalog(
     root: zarr.Group,
-    source_run_name: str | None,
+    source_run_path: str | None,
     *,
     expected_rows: int,
-) -> tuple[str | None, np.ndarray, Mapping[str, Any]]:
-    if not source_run_name:
-        return None, np.asarray([], dtype=np.float32), {}
-    normalized = _normal_path(source_run_name)
-    resolved_name = normalized.split("/")[-1]
-    run_path = f"{SUBJECT_SHAPE_RUN_PARENT}/{resolved_name}"
+    expected_manifest_sha256: str,
+) -> tuple[str, np.ndarray, Mapping[str, Any], str]:
+    if not source_run_path:
+        raise TailKinematicsIOError(
+            "Canonical tail-kinematics reads require an exact source publication path."
+        )
+    run_path = _normal_path(source_run_path)
+    prefix = f"{SUBJECT_SHAPE_RUN_PARENT}/"
+    if not run_path.startswith(prefix) or "/" in run_path[len(prefix) :]:
+        raise TailKinematicsIOError(
+            "Tail-kinematics source publication path is outside the controlled "
+            "subject-shape parent."
+        )
     try:
+        publication = load_persisted_subject_shape_coordinate_publication(
+            root,
+            run_path,
+        )
+        curvature_binding = publication.require_scalar_surface(
+            "components/subject_body/tail_curvature_px_inv",
+            units="px^-1",
+            surface_kind="row_profile",
+        )
         run_group = root[run_path]
         body = run_group["components/subject_body"]
-        curvature = body["tail_curvature_px_inv"]
+        curvature = curvature_binding.array_node
         sample_s = np.asarray(body["tail_sample_s"][:], dtype=np.float32).reshape(-1)
-        sample_valid = body["tail_sample_valid"]
-        frame_indices = run_group["row_index/frame_indices"]
-    except Exception:
-        return None, np.asarray([], dtype=np.float32), {}
+        sample_valid = curvature_binding.validity_node
+        frame_indices = run_group["source_acquisition_frame_index"]
+    except (SubjectShapeCoordinatePublicationError, KeyError, ValueError) as exc:
+        raise TailKinematicsIOError(
+            f"Tail-kinematics source {run_path!r} is not an exact canonical "
+            f"subject-shape publication: {exc}"
+        ) from exc
+    observed_manifest_sha256 = publication.manifest.record_sha256
+    if observed_manifest_sha256 != expected_manifest_sha256:
+        raise TailKinematicsIOError(
+            f"Tail-kinematics source {run_path!r} publication digest does not match "
+            "source_subject_shape_publication_manifest_sha256."
+        )
     if (
         len(curvature.shape) != 2
         or int(curvature.shape[0]) != int(expected_rows)
@@ -220,8 +289,16 @@ def _subject_shape_catalog(
         or len(frame_indices.shape) != 1
         or int(frame_indices.shape[0]) != int(expected_rows)
     ):
-        return None, np.asarray([], dtype=np.float32), {}
-    return run_path, sample_s, _attrs_dict(run_group)
+        raise TailKinematicsIOError(
+            f"Tail-kinematics source {run_path!r} has incompatible curvature, "
+            "sample-axis, validity, or row cardinality."
+        )
+    return (
+        run_path,
+        sample_s,
+        _attrs_dict(run_group),
+        observed_manifest_sha256,
+    )
 
 
 def catalog_tail_kinematics_run(
@@ -230,13 +307,25 @@ def catalog_tail_kinematics_run(
     run_name: str | None = None,
 ) -> TailKinematicsCatalog:
     run_group, resolved_run, run_path = resolve_tail_kinematics_run(root, run_name)
+    try:
+        tail_publication = load_tail_kinematics_coordinate_publication(root, run_path)
+    except TailCoordinatePublicationError as exc:
+        raise TailKinematicsIOError(
+            f"{run_path} is not an exact canonical tail publication: {exc}"
+        ) from exc
     attrs = _attrs_dict(run_group)
     row_count, sample_count = _run_dimensions(run_group, run_path)
-    frame_index = _array_handle(run_group, "frame_index", path=run_path)
+    frame_index = _array_handle(
+        run_group,
+        "source_acquisition_frame_index",
+        path=run_path,
+    )
     frame_start = int(np.asarray(frame_index[0]).reshape(-1)[0])
     frame_stop = int(np.asarray(frame_index[row_count - 1]).reshape(-1)[0])
     if frame_start < 0 or frame_stop < frame_start:
-        raise TailKinematicsIOError(f"{run_path}/frame_index is not a valid increasing coordinate.")
+        raise TailKinematicsIOError(
+            f"{run_path}/source_acquisition_frame_index is not a valid increasing coordinate."
+        )
     angle_sample_s = np.asarray(
         _array_handle(run_group, "tail_angle_sample_s", path=run_path)[:],
         dtype=np.float32,
@@ -251,17 +340,30 @@ def catalog_tail_kinematics_run(
         time_start_s = float(frame_start) / fps
         time_stop_s = float(frame_stop) / fps
 
-    source_shape_name_raw = attrs.get("source_subject_shape_run")
-    source_shape_name = None
-    if source_shape_name_raw is not None:
-        normalized_source = _normal_path(source_shape_name_raw)
-        source_shape_name = normalized_source.split("/")[-1] or None
-    source_shape_path, curvature_sample_s, source_shape_attrs = _subject_shape_catalog(
-        root,
-        source_shape_name,
-        expected_rows=row_count,
+    source_shape_path_exact = _normal_path(tail_publication.source.run_path)
+    source_shape_name = source_shape_path_exact.split("/")[-1]
+    source_shape_manifest_attr = attrs.get(
+        "source_subject_shape_publication_manifest_sha256"
     )
-    scalar_series = tuple(name for name in TAIL_SCALAR_SERIES if name in run_group)
+    if not _is_sha256(source_shape_manifest_attr):
+        raise TailKinematicsIOError(
+            f"{run_path} must persist a lowercase SHA-256 "
+            "source_subject_shape_publication_manifest_sha256."
+        )
+    (
+        source_shape_path,
+        curvature_sample_s,
+        source_shape_attrs,
+        source_shape_manifest_sha256,
+    ) = _subject_shape_catalog(
+        root,
+        source_shape_path_exact,
+        expected_rows=row_count,
+        expected_manifest_sha256=str(source_shape_manifest_attr),
+    )
+    scalar_series = tuple(
+        name for name in TAIL_SCALAR_SERIES if name in tail_publication.measurements
+    )
     return TailKinematicsCatalog(
         run_name=resolved_run,
         run_path=run_path,
@@ -280,6 +382,8 @@ def catalog_tail_kinematics_run(
         source_curvature_sample_s=curvature_sample_s,
         source_curvature_sample_count=int(curvature_sample_s.shape[0]),
         source_shape_attrs=source_shape_attrs,
+        source_shape_manifest_sha256=source_shape_manifest_sha256,
+        tail_publication_manifest_sha256=tail_publication.manifest.record_sha256,
     )
 
 
@@ -345,7 +449,11 @@ def load_tail_kinematics_window(
 ) -> TailKinematicsWindow:
     catalog = catalog_tail_kinematics_run(root, run_name=run_name)
     run_group, _resolved_run, run_path = resolve_tail_kinematics_run(root, catalog.run_name)
-    frame_array = _array_handle(run_group, "frame_index", path=run_path)
+    frame_array = _array_handle(
+        run_group,
+        "source_acquisition_frame_index",
+        path=run_path,
+    )
     row_slice, start_frame, stop_frame = _selected_row_slice(
         frame_array,
         catalog,
@@ -362,7 +470,9 @@ def load_tail_kinematics_window(
     ).reshape(-1)[in_window]
     source_paths: dict[str, str] = {
         "run": run_path,
-        "frame_index": f"{run_path}/frame_index",
+        "source_acquisition_frame_index": (
+            f"{run_path}/source_acquisition_frame_index"
+        ),
         "valid": f"{run_path}/valid",
         "angle_sample_s": f"{run_path}/tail_angle_sample_s",
     }
@@ -390,20 +500,43 @@ def load_tail_kinematics_window(
 
     dense_curvature = np.empty((frames.shape[0], 0), dtype=np.float32)
     if include_dense_curvature and catalog.source_shape_run_path is not None:
+        try:
+            shape_publication = load_persisted_subject_shape_coordinate_publication(
+                root,
+                catalog.source_shape_run_path,
+            )
+            curvature_binding = shape_publication.require_scalar_surface(
+                "components/subject_body/tail_curvature_px_inv",
+                units="px^-1",
+                surface_kind="row_profile",
+            )
+        except (SubjectShapeCoordinatePublicationError, ValueError) as exc:
+            raise TailKinematicsIOError(
+                "Source subject-shape publication failed fresh curvature preflight: "
+                f"{exc}"
+            ) from exc
+        if (
+            catalog.source_shape_manifest_sha256 is None
+            or shape_publication.manifest.record_sha256
+            != catalog.source_shape_manifest_sha256
+        ):
+            raise TailKinematicsIOError(
+                "Source subject-shape publication changed after catalog preflight."
+            )
         shape_group = root[catalog.source_shape_run_path]
         shape_frames = np.asarray(
-            shape_group["row_index/frame_indices"][row_slice], dtype=np.int64
+            shape_group["source_acquisition_frame_index"][row_slice], dtype=np.int64
         ).reshape(-1)[in_window]
         if not np.array_equal(shape_frames, frames):
             raise TailKinematicsIOError(
                 "Source subject-shape frame lineage does not align with the tail run."
             )
         dense_curvature = np.asarray(
-            shape_group["components/subject_body/tail_curvature_px_inv"][row_slice],
+            curvature_binding.array_node[row_slice],
             dtype=np.float32,
         )[in_window]
         shape_valid = np.asarray(
-            shape_group["components/subject_body/tail_sample_valid"][row_slice],
+            curvature_binding.validity_node[row_slice],
             dtype=bool,
         ).reshape(-1)[in_window]
         dense_valid = valid & shape_valid
@@ -418,9 +551,41 @@ def load_tail_kinematics_window(
                     f"{catalog.source_shape_run_path}/components/subject_body/tail_sample_s"
                 ),
                 "source_shape_frame_indices": (
-                    f"{catalog.source_shape_run_path}/row_index/frame_indices"
+                    f"{catalog.source_shape_run_path}/source_acquisition_frame_index"
                 ),
             }
+        )
+
+    try:
+        final_tail_publication = load_tail_kinematics_coordinate_publication(
+            root,
+            catalog.run_path,
+        )
+        if catalog.source_shape_run_path is None:
+            raise TailKinematicsIOError(
+                "Tail catalog lost its exact source subject-shape path."
+            )
+        final_shape_publication = load_persisted_subject_shape_coordinate_publication(
+            root,
+            catalog.source_shape_run_path,
+        )
+    except (
+        TailCoordinatePublicationError,
+        SubjectShapeCoordinatePublicationError,
+        KeyError,
+        ValueError,
+    ) as exc:
+        raise TailKinematicsIOError(
+            f"Tail or source publication failed post-copy validation: {exc}"
+        ) from exc
+    if (
+        final_tail_publication.manifest.record_sha256
+        != catalog.tail_publication_manifest_sha256
+        or final_shape_publication.manifest.record_sha256
+        != catalog.source_shape_manifest_sha256
+    ):
+        raise TailKinematicsIOError(
+            "Tail or source publication changed while the requested window was copied."
         )
 
     return TailKinematicsWindow(

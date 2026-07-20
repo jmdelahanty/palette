@@ -23,6 +23,7 @@ from threading import Thread
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Sequence
 from datetime import datetime, timezone
 import time
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -39,6 +40,10 @@ from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.keypoint_coordinate_publication import (
+    KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR,
+    KEYPOINT_PUBLICATION_GENERATION_ATTR,
+    KEYPOINT_PUBLICATION_OWNER_ATTR,
+    KEYPOINT_PUBLICATION_POLICY_ATTR,
     _activate_validated_keypoint_coordinate_surfaces,
     _load_completed_ineligible_keypoint_coordinate_surfaces,
     capture_keypoint_coordinate_publication_checkpoint,
@@ -63,6 +68,10 @@ from ..shared.row_lineage import (
 from ..shared.row_source_signature import copy_selected_row_source_signatures
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.artifact_fingerprint import fingerprint_artifact
+from ..shared.pose_model_schema_binding import (
+    load_pose_model_schema_binding,
+    pose_schema_from_model_binding,
+)
 from ..shared.run_provenance import (
     CLI_RUN_PROVENANCE_ATTR,
     RUN_PROVENANCE_ATTR,
@@ -99,6 +108,14 @@ KEYPOINT_SHARD_WRITE_SCHEMA = "palette.keypoint_double_buffered_shards.v1"
 DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 131_072
 DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 131_072
 KEYPOINT_SHARD_WRITER_QUIESCE_TIMEOUT_SECONDS = 300.0
+_KEYPOINT_PARENT_SELECTOR_ATTRS = (
+    "latest",
+    "latest_complete",
+    "latest_pending",
+    KEYPOINT_PUBLICATION_GENERATION_ATTR,
+    KEYPOINT_PUBLICATION_POLICY_ATTR,
+    KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR,
+)
 
 
 def _normalize_keypoint_output_parent(output_parent: Optional[str]) -> str:
@@ -142,6 +159,110 @@ def _restore_selected_attrs(
         raise RuntimeError(f"Keypoint selector rollback was incomplete: {failures!r}.")
 
 
+def _restore_owned_keypoint_selectors(
+    parent: Any,
+    root: Any,
+    parent_snapshot: Mapping[str, tuple[bool, Any]],
+    root_snapshot: Mapping[str, tuple[bool, Any]],
+    *,
+    run_name: str | None,
+    owner_token: str | None,
+) -> None:
+    """Restore only selector/publication state still owned by this attempt."""
+
+    if run_name is None or owner_token is None:
+        return
+    parent_attrs = parent.attrs
+    lease = parent_attrs.get(KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR)
+    lease_owned = (
+        isinstance(lease, dict)
+        and lease.get("run_path") == f"keypoints_runs/{run_name}"
+        and lease.get("publication_owner") == owner_token
+    )
+    lease_present, lease_snapshot = parent_snapshot[
+        KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR
+    ]
+    if (
+        lease is not None
+        and not lease_owned
+        and (not lease_present or lease != lease_snapshot)
+    ):
+        return
+    if lease_owned:
+        base_generation = lease.get("base_generation")
+        next_generation = lease.get("next_generation")
+        current_generation = parent_attrs.get(
+            KEYPOINT_PUBLICATION_GENERATION_ATTR,
+            0,
+        )
+        if (
+            type(base_generation) is not int
+            or type(next_generation) is not int
+            or next_generation != base_generation + 1
+            or type(current_generation) is not int
+            or current_generation not in {base_generation, next_generation}
+        ):
+            return
+
+    failures: list[str] = []
+
+    def restore_if_owned(
+        attrs: Any,
+        snapshot: Mapping[str, tuple[bool, Any]],
+        name: str,
+        owned_value: Any,
+    ) -> None:
+        if attrs.get(name) != owned_value:
+            return
+        present, value = snapshot[name]
+        if present:
+            attrs[name] = copy.deepcopy(value)
+        elif name in attrs:
+            del attrs[name]
+        if present and attrs.get(name) != value:
+            raise RuntimeError("restored value differs from snapshot")
+        if not present and name in attrs:
+            raise RuntimeError("owned selector survived rollback")
+
+    for name in ("latest", "latest_complete", "latest_pending"):
+        try:
+            restore_if_owned(parent_attrs, parent_snapshot, name, run_name)
+        except BaseException as exc:  # pragma: no cover - hostile store
+            failures.append(f"parent {name}: {exc}")
+    try:
+        restore_if_owned(
+            root.attrs,
+            root_snapshot,
+            "current_keypoint_group_path",
+            f"keypoints_runs/{run_name}",
+        )
+    except BaseException as exc:  # pragma: no cover - hostile store
+        failures.append(f"root current_keypoint_group_path: {exc}")
+
+    if lease_owned:
+        for name in (
+            KEYPOINT_PUBLICATION_GENERATION_ATTR,
+            KEYPOINT_PUBLICATION_POLICY_ATTR,
+            KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR,
+        ):
+            try:
+                present, value = parent_snapshot[name]
+                if present:
+                    parent_attrs[name] = copy.deepcopy(value)
+                elif name in parent_attrs:
+                    del parent_attrs[name]
+                if present and parent_attrs.get(name) != value:
+                    raise RuntimeError("restored value differs from snapshot")
+                if not present and name in parent_attrs:
+                    raise RuntimeError("owned publication state survived rollback")
+            except BaseException as exc:  # pragma: no cover - hostile store
+                failures.append(f"parent {name}: {exc}")
+    if failures:
+        raise RuntimeError(
+            f"Keypoint owned selector rollback was incomplete: {failures!r}."
+        )
+
+
 class _KeypointAttemptFailureBoundary:
     """Fail one newly created keypoint attempt closed across the whole writer."""
 
@@ -156,6 +277,7 @@ class _KeypointAttemptFailureBoundary:
         self.crop_source: Any | None = None
         self.shard_writer: _AlignedKeypointShardWriter | None = None
         self.coordinate_checkpoint: Any | None = None
+        self.owner_token: str | None = None
         self.finalized = False
 
     def prepare(self, *, root: Any, parent: Any) -> None:
@@ -165,16 +287,24 @@ class _KeypointAttemptFailureBoundary:
         self.parent = parent
         self.parent_selector_snapshot = _snapshot_selected_attrs(
             parent,
-            ("latest", "latest_complete", "latest_pending"),
+            _KEYPOINT_PARENT_SELECTOR_ATTRS,
         )
         self.root_pointer_snapshot = _snapshot_selected_attrs(
             root,
             ("current_keypoint_group_path",),
         )
+        self.owner_token = uuid4().hex
 
     def bind_run(self, run: Any, run_name: str) -> None:
         if self.run is not None:
             raise RuntimeError("A keypoint attempt cannot bind more than one run.")
+        if (
+            self.owner_token is None
+            or run.attrs.get(KEYPOINT_PUBLICATION_OWNER_ATTR) != self.owner_token
+        ):
+            raise RuntimeError(
+                "Keypoint child did not persist its atomic publication owner."
+            )
         self.run = run
         self.run_name = str(run_name)
         self.run_path = str(getattr(run, "path", "")).strip("/") or None
@@ -202,6 +332,34 @@ class _KeypointAttemptFailureBoundary:
         self.finalized = True
         self.coordinate_checkpoint = None
 
+    def fresh_parent(self) -> Any:
+        if self.parent is None:
+            raise RuntimeError("Keypoint publication parent is not bound.")
+        path = str(getattr(self.parent, "path", "")).strip("/")
+        if self.root is not None and path:
+            try:
+                self.parent = self.root[path]
+            except BaseException as exc:
+                raise RuntimeError("Keypoint publication parent disappeared.") from exc
+        return self.parent
+
+    def require_owned_run(self) -> Any:
+        if (
+            self.run_name is None
+            or self.owner_token is None
+        ):
+            raise RuntimeError("Keypoint publication ownership is not bound.")
+        try:
+            run = self.fresh_parent()[self.run_name]
+        except BaseException as exc:
+            raise RuntimeError("Keypoint publication child disappeared.") from exc
+        if run.attrs.get(KEYPOINT_PUBLICATION_OWNER_ATTR) != self.owner_token:
+            raise RuntimeError(
+                "Keypoint publication child was replaced by another owner."
+            )
+        self.run = run
+        return run
+
     def fail(self, original: BaseException) -> None:
         failures: list[str] = []
         writer_quiescent = True
@@ -216,52 +374,56 @@ class _KeypointAttemptFailureBoundary:
                     "shard writer remains active; failed status cannot be published safely"
                 )
         if self.run is not None and not self.finalized:
-            if writer_quiescent and self.coordinate_checkpoint is not None:
+            try:
+                run_for_failure = self.require_owned_run()
+            except BaseException:
+                run_for_failure = None
+            if (
+                writer_quiescent
+                and run_for_failure is not None
+                and self.coordinate_checkpoint is not None
+                and run_for_failure.attrs.get("stage_selector_eligible") is not True
+            ):
                 try:
                     rollback_keypoint_coordinate_publication(
                         self.coordinate_checkpoint
                     )
                 except BaseException as exc:  # pragma: no cover - hostile store
                     failures.append(f"coordinate publication: {exc}")
-            if writer_quiescent:
-                run_for_failure = self.run
-                if self.root is not None and self.run_path is not None:
-                    try:
-                        run_for_failure = self.root[self.run_path]
-                        self.run = run_for_failure
-                    except BaseException as exc:  # pragma: no cover - hostile store
-                        failures.append(f"fresh failed-run reload: {exc}")
+            publication_committed = (
+                run_for_failure is not None
+                and run_for_failure.attrs.get("stage_selector_eligible") is True
+            )
+            if writer_quiescent and run_for_failure is not None and not publication_committed:
                 try:
+                    run_for_failure.attrs["stage_selector_eligible"] = False
                     mark_run_failed(
                         run_for_failure,
-                        parent_group=self.parent,
+                        parent_group=None,
                         run_name=self.run_name,
                         error=f"keypoint writer failed: {original}",
                     )
+                    run_for_failure.attrs["stage_selector_eligible"] = False
                 except BaseException as exc:  # pragma: no cover - hostile store
                     failures.append(f"run completion: {exc}")
-            if self.parent is not None and self.run_name is not None:
+            if (
+                run_for_failure is not None
+                and not publication_committed
+                and self.parent_selector_snapshot is not None
+                and self.root_pointer_snapshot is not None
+                and self.root is not None
+            ):
                 try:
-                    if self.parent.attrs.get("latest_pending") == self.run_name:
-                        del self.parent.attrs["latest_pending"]
-                except BaseException as exc:  # pragma: no cover - hostile store
-                    failures.append(f"pending selector: {exc}")
-            if self.parent is not None and self.parent_selector_snapshot is not None:
-                try:
-                    _restore_selected_attrs(
-                        self.parent,
-                        self.parent_selector_snapshot,
-                    )
-                except BaseException as exc:  # pragma: no cover - hostile store
-                    failures.append(f"parent selectors: {exc}")
-            if self.root is not None and self.root_pointer_snapshot is not None:
-                try:
-                    _restore_selected_attrs(
+                    _restore_owned_keypoint_selectors(
+                        self.fresh_parent(),
                         self.root,
+                        self.parent_selector_snapshot,
                         self.root_pointer_snapshot,
+                        run_name=self.run_name,
+                        owner_token=self.owner_token,
                     )
                 except BaseException as exc:  # pragma: no cover - hostile store
-                    failures.append(f"root compatibility pointer: {exc}")
+                    failures.append(f"owned selectors: {exc}")
         if self.crop_source is not None:
             try:
                 self.close_crop_source()
@@ -362,6 +524,83 @@ def _current_model_device(model: YOLO, *, fallback: Optional[str]) -> Optional[s
         return fallback
 
 
+def _revalidate_keypoint_model_artifact(
+    model_path: Path,
+    expected_artifact: Mapping[str, Any],
+    *,
+    checkpoint: str,
+) -> None:
+    """Re-hash the exact live model and reject replacement or in-place drift."""
+
+    expected_fields = (
+        "role",
+        "path",
+        "fingerprint_scheme",
+        "sha256",
+        "size_bytes",
+        "mtime_ns",
+    )
+    if (
+        not isinstance(expected_artifact, Mapping)
+        or expected_artifact.get("mismatch") is True
+        or "error" in expected_artifact
+        or any(name not in expected_artifact for name in expected_fields)
+    ):
+        raise ValueError(
+            "Keypoint model lacks exact pre-load path/content/size/mtime evidence."
+        )
+    try:
+        resolved = model_path.expanduser().resolve(strict=True)
+        path_stat_before = resolved.stat()
+        digest = hashlib.sha256()
+        with resolved.open("rb") as stream:
+            fd_stat_before = os.fstat(stream.fileno())
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+            fd_stat_after = os.fstat(stream.fileno())
+        path_stat_after = resolved.stat()
+    except OSError as exc:
+        raise ValueError(
+            f"Keypoint model became unreadable {checkpoint}: {exc}."
+        ) from exc
+
+    def stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            int(value.st_dev),
+            int(value.st_ino),
+            int(value.st_size),
+            int(value.st_mtime_ns),
+            int(value.st_ctime_ns),
+        )
+
+    if not (
+        stat_identity(path_stat_before)
+        == stat_identity(fd_stat_before)
+        == stat_identity(fd_stat_after)
+        == stat_identity(path_stat_after)
+    ):
+        raise ValueError(
+            f"Keypoint model changed while it was revalidated {checkpoint}."
+        )
+    observed = {
+        "role": "keypoint_model",
+        "path": str(resolved),
+        "fingerprint_scheme": "content_v1",
+        "sha256": digest.hexdigest(),
+        "size_bytes": int(path_stat_after.st_size),
+        "mtime_ns": int(path_stat_after.st_mtime_ns),
+    }
+    expected = {name: expected_artifact.get(name) for name in expected_fields}
+    if observed != expected:
+        differing = sorted(
+            name for name in expected_fields if observed[name] != expected[name]
+        )
+        raise ValueError(
+            "Keypoint model path/content/size/mtime evidence changed "
+            f"{checkpoint}; differing_fields={differing!r}."
+        )
+
+
 def _scheduler_payload(env_info: Dict[str, Any]) -> Dict[str, Any]:
     platform_info = env_info.get("platform", {})
     gpu_info = env_info.get("gpu", {})
@@ -445,6 +684,12 @@ def _prepare_run_group_for_parent(
         if run_name in parent:
             raise ValueError(f"{output_parent}/{run_name} already exists")
         run_group = parent.create_group(run_name)
+        publication_owner = (
+            boundary.owner_token if boundary is not None else uuid4().hex
+        )
+        run_group.attrs[KEYPOINT_PUBLICATION_OWNER_ATTR] = publication_owner
+        if run_group.attrs.get(KEYPOINT_PUBLICATION_OWNER_ATTR) != publication_owner:
+            raise RuntimeError("Keypoint publication owner did not persist exactly.")
         if boundary is not None:
             boundary.bind_run(run_group, run_name)
         mark_run_started(run_group, run_name=run_name, stage="keypoints")
@@ -463,6 +708,12 @@ def _prepare_run_group_for_parent(
         resolved_name = f"{base_name}_{suffix:03d}"
         suffix += 1
     run_group = parent.create_group(resolved_name)
+    publication_owner = (
+        boundary.owner_token if boundary is not None else uuid4().hex
+    )
+    run_group.attrs[KEYPOINT_PUBLICATION_OWNER_ATTR] = publication_owner
+    if run_group.attrs.get(KEYPOINT_PUBLICATION_OWNER_ATTR) != publication_owner:
+        raise RuntimeError("Keypoint publication owner did not persist exactly.")
     if boundary is not None:
         boundary.bind_run(run_group, resolved_name)
     mark_run_started(run_group, run_name=resolved_name, stage="keypoints")
@@ -1409,7 +1660,8 @@ def detect_keypoints_yolo(
     run_name: Optional[str] = None,
     output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
     crop_run: Optional[str] = None,
-    pose_schema: str = DEFAULT_POSE_SCHEMA_NAME,
+    pose_schema: Optional[str] = None,
+    model_pose_schema_binding: Optional[Mapping[str, Any] | str | Path] = None,
     batch_size: int = 256,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
@@ -1503,7 +1755,59 @@ def detect_keypoints_yolo(
         registry_hash=model_sha256,
     )
 
+    if canonical_coordinates:
+        if model_pose_schema_binding is None:
+            raise ValueError(
+                "Canonical keypoint inference requires an explicit digest-bound "
+                "model_pose_schema_binding; model keypoint identity cannot be "
+                "inferred from a default pose schema or keypoint cardinality."
+            )
+        raw_model_pose_schema_binding = (
+            load_pose_model_schema_binding(model_pose_schema_binding)
+            if isinstance(model_pose_schema_binding, (str, Path))
+            else dict(model_pose_schema_binding)
+        )
+        model_digest = model_artifact.get("sha256")
+        if not isinstance(model_digest, str):
+            raise ValueError(
+                "Canonical keypoint inference cannot bind pose semantics without "
+                "an exact model content digest."
+            )
+        pose_schema_obj, pose_schema_attrs, validated_model_pose_schema_binding = (
+            pose_schema_from_model_binding(
+                raw_model_pose_schema_binding,
+                expected_model_sha256=model_digest,
+            )
+        )
+        model_artifact = {
+            **model_artifact,
+            "pose_schema_binding": validated_model_pose_schema_binding,
+        }
+        if pose_schema is not None:
+            asserted_schema, asserted_attrs = schema_payload_from_package(pose_schema)
+            if (
+                asserted_attrs.get("skeleton_id") != pose_schema_attrs.get("skeleton_id")
+                or asserted_attrs.get("keypoint_labels")
+                != pose_schema_attrs.get("keypoint_labels")
+                or asserted_attrs.get("edges") != pose_schema_attrs.get("edges")
+            ):
+                raise ValueError(
+                    "Explicit pose_schema package disagrees with the digest-bound "
+                    "model pose-schema binding."
+                )
+            # Retain the binding-derived object as the sole publication authority.
+            del asserted_schema
+    else:
+        pose_schema_obj, pose_schema_attrs = schema_payload_from_package(
+            pose_schema or DEFAULT_POSE_SCHEMA_NAME
+        )
+
     model = YOLO(str(model_path))
+    _revalidate_keypoint_model_artifact(
+        model_path,
+        model_artifact,
+        checkpoint="after YOLO load and before inference",
+    )
     torch_device = _normalize_torch_device(device)
     if torch_device:
         model.to(torch_device)
@@ -1512,9 +1816,13 @@ def detect_keypoints_yolo(
     except (AttributeError, StopIteration):
         model_device = torch_device or ("cuda" if torch.cuda.is_available() else "cpu")
     model_path_resolved = model_path.resolve()
-    pose_schema_obj, pose_schema_attrs = schema_payload_from_package(pose_schema)
     n_keypoints = int(pose_schema_obj.num_keypoints)
     model_kpt_shape = _resolve_model_kpt_shape(model)
+    if canonical_coordinates and model_kpt_shape is None:
+        raise ValueError(
+            "Canonical keypoint inference requires an explicit model kpt_shape; "
+            "the model architecture cannot be bound to the selected pose schema."
+        )
     if model_kpt_shape is not None and int(model_kpt_shape[0]) != n_keypoints:
         raise ValueError(
             f"Model keypoint count {int(model_kpt_shape[0])} does not match "
@@ -1723,7 +2031,20 @@ def detect_keypoints_yolo(
                 else None
             ),
         )
-    if "source_crop_row_ids" not in lineage_result.copied:
+    if canonical_coordinates:
+        # ``source_crop_row_ids`` on this output maps keypoint rows into the
+        # selected crop rowset.  A same-named array already present on that crop
+        # describes the crop's own upstream lineage and must never be inherited
+        # as though it were this new relationship.  Canonical direct inference
+        # consumes the complete crop in physical row order, so its exact mapping
+        # is always 0..N-1.
+        write_direct_source_crop_row_ids(
+            run_group,
+            total_rois=total_rois,
+            overwrite=True,
+            shard_rows=keypoint_roi_shard_rows,
+        )
+    elif "source_crop_row_ids" not in lineage_result.copied:
         write_direct_source_crop_row_ids(
             run_group,
             total_rois=total_rois,
@@ -1981,9 +2302,15 @@ def detect_keypoints_yolo(
                         continue
 
                     kp = kp_xy[det_idx].detach().cpu().numpy()
-                    if kp.shape[0] < n_keypoints:
-                        continue
-                    if kp.shape[0] > n_keypoints:
+                    if kp.shape[0] != n_keypoints:
+                        if keypoint_coordinate_context is not None:
+                            raise ValueError(
+                                "Canonical model result keypoint count "
+                                f"{kp.shape[0]} does not match the bound pose-schema "
+                                f"keypoint count {n_keypoints}."
+                            )
+                        if kp.shape[0] < n_keypoints:
+                            continue
                         kp = kp[:n_keypoints]
                     if keypoint_coordinate_context is not None:
                         kp = model_input_batch_to_roi(
@@ -2219,12 +2546,49 @@ def detect_keypoints_yolo(
             }
         )
 
+    model_binding_attrs: dict[str, Any] = {}
+    if canonical_coordinates:
+        binding_model = validated_model_pose_schema_binding["model"]
+        binding_authority = validated_model_pose_schema_binding["authority"]
+        model_binding_attrs = {
+            "model_pose_schema_binding_schema_id": (
+                validated_model_pose_schema_binding["schema_id"]
+            ),
+            "model_pose_schema_binding_sha256": (
+                validated_model_pose_schema_binding["binding_sha256"]
+            ),
+            "model_pose_schema_binding_kind": (
+                validated_model_pose_schema_binding["binding_kind"]
+            ),
+            "model_sha256": binding_model["sha256"],
+            "model_training_manifest_sha256": binding_authority[
+                "training_manifest_sha256"
+            ],
+        }
+        if binding_model["registry_run_id"] is not None:
+            model_binding_attrs.update(
+                {
+                    "model_resolution_mode": "registry",
+                    "model_resolution_task": "pose",
+                    "model_resolution_selected_run_id": binding_model[
+                        "registry_run_id"
+                    ],
+                    "model_resolution_selected_set_id": binding_model[
+                        "registry_set_id"
+                    ],
+                    "model_resolution_selected_model_path": str(
+                        model_path_resolved
+                    ),
+                }
+            )
+
     run_group.attrs.update({
         "method": "yolo_pose",
         "coordinate_contract_mode": coordinate_contract_mode,
         "keypoints_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "model_path": str(model_path_resolved),
         "model_name": model_path.name,
+        **model_binding_attrs,
         "ultralytics_version": ultralytics_version,
         "device": resolved_model_device,
         "requested_device": device,
@@ -2573,11 +2937,20 @@ def detect_keypoints_yolo(
     else:  # pragma: no cover - the public writer is always boundary-decorated
         crop_source.close()
 
+    _revalidate_keypoint_model_artifact(
+        model_path,
+        model_artifact,
+        checkpoint="after inference and before publication",
+    )
+
     run_path = f"{output_parent_name}/{resolved_run_name}"
     if keypoint_coordinate_context is not None:
         checkpoint = capture_keypoint_coordinate_publication_checkpoint(
             root,
             run_path,
+            expected_publication_owner=(
+                boundary.owner_token if boundary is not None else None
+            ),
         )
         if boundary is not None:
             boundary.bind_coordinate_checkpoint(checkpoint)
@@ -2590,7 +2963,9 @@ def detect_keypoints_yolo(
 
     mark_run_complete(
         run_group,
-        parent_group=run_parent,
+        # Canonical activation owns selector publication under its lease.
+        # Noncanonical collection shards use the generic completion cleanup.
+        parent_group=(None if keypoint_coordinate_context is not None else run_parent),
         run_name=resolved_run_name,
         run_provenance=effective_run_provenance,
     )
@@ -2604,6 +2979,29 @@ def detect_keypoints_yolo(
             run_parent,
             fresh_surfaces,
             run_name=resolved_run_name,
+            publication_owner_token=(
+                boundary.owner_token
+                if boundary is not None and boundary.owner_token is not None
+                else str(run_group.attrs[KEYPOINT_PUBLICATION_OWNER_ATTR])
+            ),
+            parent_selector_snapshot=(
+                boundary.parent_selector_snapshot
+                if boundary is not None
+                and boundary.parent_selector_snapshot is not None
+                else _snapshot_selected_attrs(
+                    run_parent,
+                    _KEYPOINT_PARENT_SELECTOR_ATTRS,
+                )
+            ),
+            root_pointer_snapshot=(
+                boundary.root_pointer_snapshot
+                if boundary is not None
+                and boundary.root_pointer_snapshot is not None
+                else _snapshot_selected_attrs(
+                    root,
+                    ("current_keypoint_group_path",),
+                )
+            ),
         )
     if boundary is not None:
         boundary.mark_finalized()
@@ -2706,10 +3104,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crop-run", help="Optional crop run override (defaults to latest)")
     parser.add_argument(
         "--pose-schema",
-        default=DEFAULT_POSE_SCHEMA_NAME,
+        default=None,
         help=(
-            "Pose schema from configs/fisheye/pose_schemas to stamp on the output run "
-            f"(default: {DEFAULT_POSE_SCHEMA_NAME})."
+            "Optional package-schema consistency assertion. Canonical publication "
+            "takes ordered labels only from --model-pose-schema-binding; "
+            f"legacy_noncanonical defaults to {DEFAULT_POSE_SCHEMA_NAME}."
+        ),
+    )
+    parser.add_argument(
+        "--model-pose-schema-binding",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit digest-bound JSON mapping from this model artifact to its "
+            "ordered pose schema; required for canonical direct-model inference."
         ),
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for inference")
@@ -2851,6 +3259,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         output_parent=args.output_parent,
         crop_run=args.crop_run,
         pose_schema=args.pose_schema,
+        model_pose_schema_binding=args.model_pose_schema_binding,
         batch_size=args.batch_size,
         device=args.device,
         imgsz=args.imgsz,

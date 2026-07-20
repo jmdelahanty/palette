@@ -8,6 +8,7 @@ import pytest
 import zarr
 
 from fisheye.analysis_workflows.materializers import eye_angles as mod
+from fisheye.shared import eye_geometry_source as eye_geometry_source_mod
 
 
 def _build_source(path: Path, *, rows: int = 4) -> None:
@@ -183,11 +184,17 @@ def test_rsync_staging_preserves_the_planned_physical_revision(tmp_path: Path) -
 
 
 def test_materializer_stages_computes_shards_and_publishes_with_provenance(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.zarr"
     scratch = tmp_path / "scratch"
     _build_source(source)
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda _root, _path: object(),
+    )
 
     result = mod.materialize_eye_angles(
         source,
@@ -223,6 +230,9 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     run = parent["eye_1"]
     assert parent.attrs["latest"] == "eye_1"
     assert parent.attrs["latest_complete"] == "eye_1"
+    assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs["atomic_publication_owner_uuid"]
+    assert "atomic_publication_tombstone" not in run.attrs
     assert run.attrs["schema_version"] == 5
     assert run.attrs["eye_angle_output_schema"]["schema_version"] == 8
     assert run.attrs["eye_angle_algorithm_contract"]["schema_version"] == 1
@@ -263,6 +273,9 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         "schema_id": "palette.atomic_run_group_publisher",
         "schema_version": 1,
     }
+    assert publication["promotion_policy"] == (
+        "complete_ineligible_then_pointers_then_eligibility_final"
+    )
     assert publication["physical_copy"]["verification"] == (
         "sha256_all_physical_files"
     )

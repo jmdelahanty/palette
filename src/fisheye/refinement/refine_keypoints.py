@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -83,9 +84,14 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..shared.type_conversions import as_float, normalize_attr
 from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr_run_completion import (
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_NAME_ATTR,
+    RUN_STAGE_ATTR,
+    RUN_STARTED_AT_ATTR,
+    RUN_STATUS_RUNNING,
     mark_run_complete,
-    mark_run_started,
-    note_pending_latest,
     require_runs_parent,
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
@@ -98,6 +104,81 @@ _DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 _TRADITIONAL_HEURISTIC_METHOD = "traditional_pose"
 _TRADITIONAL_FLIP_FAMILY = "traditional_eye_flip_v1"
 _DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+_LEGACY_UNVERIFIED_OUTPUT_CONTRACT = (
+    "palette.refined_keypoints.legacy_unverified_nonselector.v1"
+)
+REFINED_KEYPOINT_DIAGNOSTIC_OWNER_ATTR = (
+    "refined_keypoint_diagnostic_owner_uuid"
+)
+
+
+class RefinedKeypointCoordinatePublicationUnavailable(RuntimeError):
+    """Raised before mutation when canonical refined publication is unavailable."""
+
+
+def _require_refined_keypoint_publication_mode(
+    *,
+    allow_legacy_unverified_diagnostic_output: bool,
+) -> None:
+    if allow_legacy_unverified_diagnostic_output is True:
+        return
+    raise RefinedKeypointCoordinatePublicationUnavailable(
+        "Refined keypoint publication is disabled for future-normal processing: "
+        "the current writer changes coordinate-bearing arrays without publishing "
+        "a canonical array-owned refinement descriptor and exact transform lineage. "
+        "Use the base canonical keypoint run, or pass "
+        "--allow-legacy-unverified-diagnostic-output only for explicit historical "
+        "diagnosis. That compatibility output is permanently nonselector-eligible."
+    )
+
+
+def require_future_normal_refined_keypoint_publication() -> None:
+    """Fail before orchestration mutates anything until canonical output exists."""
+
+    _require_refined_keypoint_publication_mode(
+        allow_legacy_unverified_diagnostic_output=False,
+    )
+
+
+def _stamp_legacy_unverified_diagnostic_output(run_group: Any) -> None:
+    run_group.attrs.update(
+        {
+            "stage_selector_eligible": False,
+            "coordinate_contract": _LEGACY_UNVERIFIED_OUTPUT_CONTRACT,
+            "legacy_unverified_diagnostic_output": True,
+            "publication_scope": "historical_diagnostic_only",
+        }
+    )
+
+
+def _create_refined_keypoint_diagnostic_candidate(
+    parent: Any,
+    *,
+    run_name: str,
+    started_at_utc: str,
+) -> Any:
+    """Atomically create one owner-bound, permanently ineligible diagnostic."""
+
+    owner_uuid = str(uuid.uuid4())
+    initial_attrs = {
+        REFINED_KEYPOINT_DIAGNOSTIC_OWNER_ATTR: owner_uuid,
+        "stage_selector_eligible": False,
+        "coordinate_contract": _LEGACY_UNVERIFIED_OUTPUT_CONTRACT,
+        "legacy_unverified_diagnostic_output": True,
+        "publication_scope": "historical_diagnostic_only",
+        RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
+        RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
+        RUN_STARTED_AT_ATTR: str(started_at_utc),
+        RUN_NAME_ATTR: str(run_name),
+        RUN_STAGE_ATTR: "refined_keypoints",
+    }
+    candidate = parent.create_group(run_name, attributes=initial_attrs)
+    if any(candidate.attrs.get(key) != value for key, value in initial_attrs.items()):
+        raise RuntimeError(
+            "Refined-keypoint diagnostic did not persist its exact atomic "
+            "owner-bound, running, selector-ineligible creation contract."
+        )
+    return candidate
 
 TRADITIONAL_REFINEMENT_HEURISTIC_PROFILE = heuristic_profile_from_package(
     _TRADITIONAL_HEURISTIC_METHOD,
@@ -1024,30 +1105,43 @@ def create_refined_keypoint_run(
     run_name: Optional[str] = None,
     command: Optional[str] = None,
     created_at_utc: Optional[str] = None,
+    allow_legacy_unverified_diagnostic_output: bool = False,
 ) -> str:
     """
-    Create a refined keypoint run with geometry-based validation.
+    Create a compatibility-only refined keypoint diagnostic run.
+
+    Future-normal publication fails before the archive is opened.  The current
+    implementation changes coordinate-bearing point arrays but does not yet
+    publish an exact canonical refinement derivation.  Its historical output
+    is therefore available only through an explicit diagnostic opt-in and is
+    never eligible for parent selectors.
 
     Returns name of the created run.
     """
+    _require_refined_keypoint_publication_mode(
+        allow_legacy_unverified_diagnostic_output=(
+            allow_legacy_unverified_diagnostic_output
+        ),
+    )
     if console is None:
         console = Console()
 
     console.rule("[bold]Keypoint Refinement[/bold]")
+    console.print(
+        "[yellow]Compatibility diagnostic mode:[/yellow] the output will be "
+        "marked legacy-unverified and will not update refined-keypoint selectors."
+    )
     start_time = time.perf_counter()
 
     root = zarr.open_group(zarr_path, mode="a", use_consolidated=False)
-    if _registry_writes_disabled():
-        status_context = None
-        console.print(
-            "[yellow]Registry writes disabled:[/yellow] "
-            "refined-keypoint run will be written to Zarr only; "
-            "run the batch registry finalizer to sync step status."
-        )
-    else:
-        status_context = _resolve_status_context_from_root(root, zarr_path)
-        if status_context is None:
-            status_context = _resolve_status_context(zarr_path)
+    # Compatibility diagnostics must not advertise a normal completed stage in
+    # the registry.  A registry consumer cannot recover the missing canonical
+    # coordinate authority from a status row.
+    status_context = None
+    console.print(
+        "[yellow]Registry publication disabled:[/yellow] diagnostic compatibility "
+        "runs are Zarr-local and nonselector-only."
+    )
     if "keypoints_runs" not in root or root["keypoints_runs"].attrs.get("latest") is None:
         _emit_refined_keypoint_status(
             context=status_context,
@@ -1126,11 +1220,12 @@ def create_refined_keypoint_run(
         run_name = f"refined_keypoints_{timestamp}"
     if run_name in kp_refined_root:
         raise ValueError(f"Refined keypoint run already exists: {REFINED_KEYPOINT_GROUP}/{run_name}")
-    kp_refined = kp_refined_root.create_group(run_name)
-    mark_run_started(kp_refined, run_name=run_name, stage="refined_keypoints")
-    note_pending_latest(kp_refined_root, run_name)
-
     created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
+    kp_refined = _create_refined_keypoint_diagnostic_candidate(
+        kp_refined_root,
+        run_name=run_name,
+        started_at_utc=created_timestamp,
+    )
 
     source_crop_run = kp_source.attrs.get("source_crop_run")
     source_detect_run = kp_source.attrs.get("source_detect_run")
@@ -1795,37 +1890,6 @@ def create_refined_keypoint_run(
     ]
 
     console.print("\n".join(report_lines))
-    console.print(f"[green]✓[/green] Saved refined keypoints run: [cyan]{run_name}[/cyan]")
-
-    mark_run_complete(
-        kp_refined,
-        parent_group=kp_refined_root,
-        run_name=run_name,
-        run_provenance=build_run_provenance_from_stage_record(provenance_record),
-    )
-
-    _emit_refined_keypoint_status(
-        context=status_context,
-        status="ok",
-        run_name=run_name,
-        method=normalize_attr(kp_refined.attrs.get("method")) or "refine_keypoints",
-        coverage_pct=pass_rate,
-        review_status_json=_as_mapping(kp_refined.attrs.get("keypoint_review_status")),
-        details={
-            "reason": "present",
-            "source_keypoints_run": keypoint_run,
-            "source_crop_run": normalize_attr(kp_refined.attrs.get("source_crop_run")),
-            "source_detect_run": normalize_attr(kp_refined.attrs.get("source_detect_run")),
-            "source_refined_run": normalize_attr(kp_refined.attrs.get("source_refined_run")),
-            "total_rois": stats["total"],
-            "refined_success": stats["refined_success"],
-            "usable_keypoints": stats["usable"],
-            "usable_keypoints_pct": (float(stats["usable"]) / float(stats["total"]) * 100.0) if stats["total"] else None,
-            "pass_rate_percent": pass_rate,
-        },
-        console=console,
-    )
-
     _run_post_refinement_diagnostics(
         zarr_path=zarr_path,
         run_name=run_name,
@@ -1835,6 +1899,16 @@ def create_refined_keypoint_run(
         console=console,
     )
 
+    console.print(
+        "[yellow]Finalizing nonselector diagnostic run:[/yellow] "
+        f"[cyan]{run_name}[/cyan]"
+    )
+    mark_run_complete(
+        kp_refined,
+        parent_group=kp_refined_root,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance_record),
+    )
     return run_name
 
 
@@ -1895,6 +1969,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         type=str,
         help="Directory for post-refinement audit/overlap JSON files (default: /tmp).",
     )
+    parser.add_argument(
+        "--allow-legacy-unverified-diagnostic-output",
+        action="store_true",
+        help=(
+            "Explicitly run the historical refined-keypoint writer for diagnosis. "
+            "The resulting run is permanently nonselector-eligible and must not "
+            "be used as a future-normal coordinate source."
+        ),
+    )
 
     args = parser.parse_args(argv)
     console = Console()
@@ -1949,6 +2032,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         config=config_to_use,
         console=console,
         run_name=args.run_name,
+        allow_legacy_unverified_diagnostic_output=(
+            args.allow_legacy_unverified_diagnostic_output
+        ),
     )
 
     console.print(

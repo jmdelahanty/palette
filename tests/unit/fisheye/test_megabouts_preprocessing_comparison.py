@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from fisheye.analysis.megabouts_classifier_inputs import build_megabouts_classifier_input_pack
 from fisheye.analysis.megabouts_preprocessing_comparison import (
@@ -11,7 +12,17 @@ from fisheye.analysis.megabouts_preprocessing_comparison import (
     build_megabouts_preprocessed_input_pack,
     compare_megabouts_preprocessing_with_palette,
 )
-from tests.unit.fisheye.test_megabouts_classifier_inputs import _build_root
+from tests.unit.fisheye.test_megabouts_classifier_inputs import (
+    _build_root,
+    _install_verified_source_readers,
+    _reason_bytes,
+    _replace_array,
+)
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_verified_source_readers(monkeypatch)
 
 
 class _FakeTailPreprocessingConfig:
@@ -78,6 +89,42 @@ def _fake_preprocessing_runtime() -> MegaboutsPreprocessingRuntime:
     )
 
 
+def _prepend_competing_posture_instance(root) -> np.ndarray:
+    posture = root["analysis/tail_posture_view_runs/posture_001"]
+    original_angles = np.asarray(posture["tail_angle_rad"][:])
+    original_valid = np.asarray(posture["valid"][:])
+    original_reasons = np.asarray(posture["failure_reason_bytes"][:])
+    _replace_array(
+        posture,
+        "source_acquisition_frame_index",
+        np.asarray([1, 0, 1, 2, 3, 4, 5, 6, 7], dtype=np.int64),
+    )
+    _replace_array(
+        posture,
+        "instance_key",
+        np.asarray([999, 100, 101, 102, 103, 104, 105, 106, 107], dtype=np.uint64),
+    )
+    _replace_array(
+        posture,
+        "tail_angle_rad",
+        np.concatenate(
+            [np.full((1, 10), 99.0, dtype=np.float32), original_angles],
+            axis=0,
+        ),
+    )
+    _replace_array(
+        posture,
+        "valid",
+        np.concatenate([np.asarray([True]), original_valid]),
+    )
+    _replace_array(
+        posture,
+        "failure_reason_bytes",
+        np.concatenate([_reason_bytes(["wrong_animal"]), original_reasons], axis=0),
+    )
+    return original_angles
+
+
 def test_build_megabouts_preprocessed_input_pack_uses_same_windows() -> None:
     root = _build_root()
     source_pack = build_megabouts_classifier_input_pack(
@@ -109,6 +156,48 @@ def test_build_megabouts_preprocessed_input_pack_uses_same_windows() -> None:
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_preprocessed_tail_uses_track_source_instance_key_on_shared_frame() -> None:
+    root = _build_root()
+    original_angles = _prepend_competing_posture_instance(root)
+    source_pack = build_megabouts_classifier_input_pack(
+        root,
+        bout_duration_frames=1,
+        min_tail_valid_fraction=0.0,
+        min_traj_valid_fraction=0.0,
+    )
+
+    preprocessed = build_megabouts_preprocessed_input_pack(
+        root,
+        source_pack=source_pack,
+        runtime=_fake_preprocessing_runtime(),
+    )
+
+    np.testing.assert_allclose(
+        preprocessed.tail_array[0, :, 0],
+        original_angles[1] + 0.5,
+    )
+    assert not np.all(preprocessed.tail_array[0, :, 0] == 99.5)
+
+
+def test_preprocessed_tail_rejects_instance_key_frame_disagreement() -> None:
+    root = _build_root()
+    source_pack = build_megabouts_classifier_input_pack(
+        root,
+        bout_duration_frames=1,
+    )
+    posture = root["analysis/tail_posture_view_runs/posture_001"]
+    frames = np.asarray(posture["source_acquisition_frame_index"][:])
+    frames[1] = 2
+    _replace_array(posture, "source_acquisition_frame_index", frames)
+
+    with pytest.raises(ValueError, match="acquisition-frame mismatch"):
+        build_megabouts_preprocessed_input_pack(
+            root,
+            source_pack=source_pack,
+            runtime=_fake_preprocessing_runtime(),
+        )
 
 
 def test_compare_megabouts_preprocessing_reports_input_similarity() -> None:

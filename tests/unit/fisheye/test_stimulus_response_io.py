@@ -15,6 +15,9 @@ from fisheye.analysis.stimulus_response import (
     write_stimulus_response_run,
 )
 from fisheye.analysis.stimulus_response_omr import OMRStepData
+from tests.unit.fisheye.test_stimulus_response import (
+    _synthetic_track_motion_lineage,
+)
 
 
 def _array(group, name: str, values) -> None:
@@ -201,7 +204,16 @@ def test_compact_writer_roundtrips_through_resolver() -> None:
         source_kinematics_run="tk",
         source_kinematics_type="offline",
         source_stimulus_run="stim",
-        parameters={"layout": STIMULUS_RESPONSE_LAYOUT_COMPACT_V2},
+        upstream_lineage=_synthetic_track_motion_lineage(
+            run_name="tk",
+            scope="offline",
+            track_ids=(0,),
+            fps=30.0,
+        ),
+        parameters={
+            "layout": STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+            "fps": 30.0,
+        },
         run_name="compact",
         layout=STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
     )

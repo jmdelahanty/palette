@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
+import pytest
 import zarr
 
 from apps.marimo.components.goodcopbadcop_chaser import (
@@ -83,13 +84,21 @@ from tests.unit.fisheye.test_export_cross_recording_analytics import _add_goodco
 
 def _make_archive_with_goodcopbadcop_spec(tmp_path):
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     return zarr_path
 
 
-def _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path):
+def _make_archive_with_goodcopbadcop_egocentric_spec(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
-    _add_track_kinematics_run(zarr_path)
+    _add_track_kinematics_run(zarr_path, monkeypatch=monkeypatch)
     result = build_chaser_egocentric_bearing_result(
         zarr_path,
         chaser_distance_run="chaser_distance_1",
@@ -481,8 +490,14 @@ def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> Non
     assert loaded.load_duration_ms >= 0.0
 
 
-def test_goodcopbadcop_component_projects_only_selected_analysis_family(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+def test_goodcopbadcop_component_projects_only_selected_analysis_family(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
     option = discover_interactive_spec_options(zarr_path)[0]
 
     loaded = load_goodcopbadcop_view(
@@ -540,8 +555,14 @@ def test_chaser_gaze_component_is_discovered_and_loaded_without_frame_arrays(
     assert loaded.summary_png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
     _add_swim_bout_run(zarr_path)
     option = discover_interactive_spec_options(zarr_path)[0]
 
@@ -591,8 +612,14 @@ def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> Non
     assert table["bout_count"].to_list() == [2, 1, 1]
 
 
-def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
     _add_swim_bout_run(zarr_path)
     result = build_goodcopbadcop_epoch_behavior_summary_result(
         zarr_path,
@@ -696,8 +723,14 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
     assert output[-1]["mean_inter_bout_interval_s"].to_list()[0] == 0.06
 
 
-def test_goodcopbadcop_component_loads_and_renders_egocentric_static_polar_png(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+def test_goodcopbadcop_component_loads_and_renders_egocentric_static_polar_png(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
     option = discover_interactive_spec_options(zarr_path)[0]
 
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
@@ -1114,8 +1147,14 @@ def test_goodcopbadcop_spatial_occupancy_panel_marks_prepost_chaser_zones(tmp_pa
     assert [row[4] for row in post_fig.data[0].customdata] == ["none", "none", "chaser 1", "chaser 0"]
 
 
-def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+def test_goodcopbadcop_egocentric_panels_render_from_linked_component(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
     option = discover_interactive_spec_options(zarr_path)[0]
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
     window = GoodCopBadCopTimeWindow(
@@ -1235,8 +1274,14 @@ def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) 
     assert len(multi_epoch_figures) == 3
 
 
-def test_goodcopbadcop_multi_epoch_picker_resolves_selected_windows_in_time_order(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+def test_goodcopbadcop_multi_epoch_picker_resolves_selected_windows_in_time_order(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
     option = discover_interactive_spec_options(zarr_path)[0]
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
 

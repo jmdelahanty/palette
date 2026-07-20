@@ -148,7 +148,12 @@ def _make_archive(
         histogram_counts=np.zeros((n_w, n_chasers, 2), dtype=np.uint32),
         histogram_density=np.zeros((n_w, n_chasers, 2), dtype=np.float32),
     )
-    write_chaser_distance_run(zarr_path, result, overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        result,
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     return zarr_path
 
 

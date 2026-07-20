@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 from scipy.ndimage import convolve
@@ -26,6 +26,9 @@ from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import hole_stats
 from ..shared.mask_store import MaskStoreError, open_mask_store
+from ..shared.refined_subject_mask_mutation import (
+    resolve_mutable_refined_subject_mask_run,
+)
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..shared.zarr_io import open_zarr_root
 
@@ -418,7 +421,8 @@ def write_subject_body_mask_qc_group(
     """Compute and persist ``components/subject_body/qc`` for a refined run."""
 
     resolved_policy = policy or SubjectBodyMaskQcPolicy()
-    run_name, refined_group = _resolve_refined_run(root, refined_run)
+    run_name, _cached_group = _resolve_refined_run(root, refined_run)
+    refined_group = resolve_mutable_refined_subject_mask_run(root, run_name)
     body_idx = _subject_body_channel_index(refined_group)
     if not _available_channel(refined_group, body_idx):
         raise ValueError(f"refined_subject_masks_runs/{run_name} subject_body channel is unavailable.")

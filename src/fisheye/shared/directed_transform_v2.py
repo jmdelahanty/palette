@@ -41,6 +41,9 @@ from fisheye.shared.transform_authority import (
     MODEL_INPUT_PREPROCESSING_AUTHORITY_KIND,
     NORMALIZED_TO_PIXEL_AUTHORITY_KIND,
     SELECTED_CALIBRATION_AUTHORITY_KIND,
+    TRANSFORM_AUTHORITY_ATTR,
+    TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR,
+    TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     AuthorityPayload,
     AuthorityRowIdentity,
     BoundTransformAuthority,
@@ -54,6 +57,38 @@ DIRECTED_TRANSFORM_V2_SCHEMA_ID = "palette.directed_transform"
 DIRECTED_TRANSFORM_V2_SCHEMA_VERSION = 2
 DIRECTED_TRANSFORM_V2_ATTR = "directed_transform_v2"
 DIRECTED_TRANSFORM_V2_DIGEST_ATTR = "directed_transform_v2_sha256"
+DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR = "directed_transform_v2_pixel_center"
+DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR = (
+    "directed_transform_v2_pixel_edge_half_open"
+)
+DIRECTED_TRANSFORM_V2_ATTRS = frozenset(
+    {
+        DIRECTED_TRANSFORM_V2_ATTR,
+        DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR,
+        DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+    }
+)
+
+
+def _require_transform_authority_attr_pair(
+    authority: BoundTransformAuthority,
+    *,
+    attr_name: str,
+) -> None:
+    if authority.record.kind != CROP_PLACEMENT_AUTHORITY_KIND:
+        return
+    expected = {
+        DIRECTED_TRANSFORM_V2_ATTR: TRANSFORM_AUTHORITY_ATTR,
+        DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR: (
+            TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR
+        ),
+        DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR: TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+    }[attr_name]
+    if authority.attr_name != expected:
+        raise DirectedTransformV2Error(
+            "Directed crop-placement transform is cross-wired to the wrong "
+            "closed transform-authority attr."
+        )
 DIRECTED_TRANSFORM_V2_DIRECTION = "source_to_target"
 DIRECTED_TRANSFORM_V2_CANONICALIZATION = "canonical_json_sort_keys_v1"
 MIGRATION_ELIGIBILITY_SCHEMA_ID = (
@@ -754,6 +789,7 @@ class BoundDirectedTransformV2:
     transform: DirectedTransformV2
     array_path: str
     transform_sha256: str
+    attr_name: str
     payload_values: np.ndarray = field(repr=False, compare=False)
     authority: BoundTransformAuthority = field(repr=False, compare=False)
     source_frame: BoundPixelFrameAuthority = field(repr=False, compare=False)
@@ -777,6 +813,7 @@ class BoundDirectedTransformV2:
         inverse_of: BoundDirectedTransformV2 | None,
         archive: ArchiveIdentity,
         node: Any,
+        attr_name: str,
         _verification_seal: object | None = None,
     ) -> None:
         if _verification_seal is not _BOUND_TRANSFORM_SEAL:
@@ -786,6 +823,7 @@ class BoundDirectedTransformV2:
         object.__setattr__(self, "transform", transform)
         object.__setattr__(self, "array_path", array_path)
         object.__setattr__(self, "transform_sha256", transform.digest())
+        object.__setattr__(self, "attr_name", attr_name)
         object.__setattr__(self, "payload_values", values)
         object.__setattr__(self, "authority", authority)
         object.__setattr__(self, "source_frame", source_frame)
@@ -798,7 +836,7 @@ class BoundDirectedTransformV2:
 
     @property
     def record_ref(self) -> str:
-        return f"/{self.array_path}@{DIRECTED_TRANSFORM_V2_ATTR}"
+        return f"/{self.array_path}@{self.attr_name}"
 
     @property
     def matrix(self) -> np.ndarray:
@@ -820,6 +858,7 @@ class BoundDirectedTransformV2:
             target_frame=self.target_frame,
             row_identity=self.row_identity,
             inverse_of=self.inverse_of,
+            attr_name=self.attr_name,
         )
         if (
             current.transform != self.transform
@@ -838,7 +877,12 @@ def load_bound_directed_transform_v2(
     target_frame: BoundPixelFrameAuthority,
     row_identity: BoundRowIdentityContract | None = None,
     inverse_of: BoundDirectedTransformV2 | None = None,
+    attr_name: str = DIRECTED_TRANSFORM_V2_ATTR,
 ) -> BoundDirectedTransformV2:
+    if attr_name not in DIRECTED_TRANSFORM_V2_ATTRS:
+        raise DirectedTransformV2Error(
+            f"Unsupported directed-transform-v2 attr {attr_name!r}."
+        )
     archive = _require_archive(node, authority, source_frame, target_frame, row_identity, inverse_of)
     attrs = getattr(node, "attrs", None)
     if not isinstance(attrs, Mapping):
@@ -848,15 +892,37 @@ def load_bound_directed_transform_v2(
         raise DirectedTransformV2Error(
             f"Canonical transform carries historical attrs {historical!r}."
         )
-    raw = attrs.get(DIRECTED_TRANSFORM_V2_ATTR)
+    digest_attr = f"{attr_name}_sha256"
+    raw = attrs.get(attr_name)
     transform = parse_directed_transform_v2(raw)
+    specialized = {
+        DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR: (
+            "pixel_center",
+            SCALE_XY_PIXEL_CENTER_V1,
+        ),
+        DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR: (
+            "pixel_edge_half_open",
+            SCALE_XY_EDGE_ALIGNED_V1,
+        ),
+    }.get(attr_name)
+    if specialized is not None and (
+        transform.kind != AFFINE_2D_ROWWISE_KIND
+        or transform.sampling_formula != specialized[1]
+        or source_frame.pixel_convention != specialized[0]
+    ):
+        convention_label = specialized[0].replace("_", "-")
+        raise DirectedTransformV2Error(
+            f"The {convention_label} directed-transform attr is reserved for a "
+            f"{convention_label} rowwise crop-placement transform."
+        )
+    _require_transform_authority_attr_pair(authority, attr_name=attr_name)
     if not isinstance(raw, Mapping) or not _exact_json_equal(raw, transform.to_dict()):
         raise DirectedTransformV2Error(
             "Raw persisted transform mapping is not its parsed canonical form."
         )
     stored = _sha256(
-        attrs.get(DIRECTED_TRANSFORM_V2_DIGEST_ATTR),
-        field_name=DIRECTED_TRANSFORM_V2_DIGEST_ATTR,
+        attrs.get(digest_attr),
+        field_name=digest_attr,
     )
     if stored != transform.digest():
         raise DirectedTransformV2Error("Persisted transform digest is stale.")
@@ -880,6 +946,7 @@ def load_bound_directed_transform_v2(
         inverse_of=inverse_of,
         archive=archive,
         node=node,
+        attr_name=attr_name,
         _verification_seal=_BOUND_TRANSFORM_SEAL,
     )
 
@@ -1197,7 +1264,12 @@ def _stamp(
     target_frame: BoundPixelFrameAuthority,
     row_identity: BoundRowIdentityContract | None,
     inverse_of: BoundDirectedTransformV2 | None,
+    attr_name: str = DIRECTED_TRANSFORM_V2_ATTR,
 ) -> BoundDirectedTransformV2:
+    if attr_name not in DIRECTED_TRANSFORM_V2_ATTRS:
+        raise DirectedTransformV2Error(
+            f"Unsupported directed-transform-v2 attr {attr_name!r}."
+        )
     try:
         attrs = require_trusted_coordinate_attrs(node, label="Directed transform")
     except PixelFrameAuthorityError as exc:
@@ -1208,6 +1280,27 @@ def _stamp(
             f"Canonical transform publication refuses historical attrs {historical!r}."
         )
     parsed = parse_directed_transform_v2(transform)
+    specialized = {
+        DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR: (
+            "pixel_center",
+            SCALE_XY_PIXEL_CENTER_V1,
+        ),
+        DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR: (
+            "pixel_edge_half_open",
+            SCALE_XY_EDGE_ALIGNED_V1,
+        ),
+    }.get(attr_name)
+    if specialized is not None and (
+        parsed.kind != AFFINE_2D_ROWWISE_KIND
+        or parsed.sampling_formula != specialized[1]
+        or source_frame.pixel_convention != specialized[0]
+    ):
+        convention_label = specialized[0].replace("_", "-")
+        raise DirectedTransformV2Error(
+            f"The {convention_label} directed-transform attr is reserved for a "
+            f"{convention_label} rowwise crop-placement transform."
+        )
+    _require_transform_authority_attr_pair(authority, attr_name=attr_name)
     _validate(
         parsed,
         node=node,
@@ -1218,9 +1311,10 @@ def _stamp(
         inverse_of=inverse_of,
     )
     snapshot = copy.deepcopy(dict(attrs))
+    digest_attr = f"{attr_name}_sha256"
     intended = {
-        DIRECTED_TRANSFORM_V2_ATTR: parsed.to_dict(),
-        DIRECTED_TRANSFORM_V2_DIGEST_ATTR: parsed.digest(),
+        attr_name: parsed.to_dict(),
+        digest_attr: parsed.digest(),
     }
     expected = _expected_attrs_after_update(snapshot, intended)
     try:
@@ -1237,6 +1331,7 @@ def _stamp(
             target_frame=target_frame,
             row_identity=row_identity,
             inverse_of=inverse_of,
+            attr_name=attr_name,
         )
         _require_exact_attrs_state(
             require_trusted_coordinate_attrs(
@@ -1267,6 +1362,7 @@ def stamp_directed_transform_v2(
     source_frame: BoundPixelFrameAuthority,
     target_frame: BoundPixelFrameAuthority,
     row_identity: BoundRowIdentityContract | None = None,
+    attr_name: str = DIRECTED_TRANSFORM_V2_ATTR,
 ) -> BoundDirectedTransformV2:
     transform = _record(
         transform_id=transform_id,
@@ -1284,6 +1380,7 @@ def stamp_directed_transform_v2(
         target_frame=target_frame,
         row_identity=row_identity,
         inverse_of=None,
+        attr_name=attr_name,
     )
 
 
@@ -1404,10 +1501,13 @@ __all__ = [
     "AFFINE_2D_CONSTANT_KIND",
     "AFFINE_2D_ROWWISE_KIND",
     "DIRECTED_TRANSFORM_V2_ATTR",
+    "DIRECTED_TRANSFORM_V2_ATTRS",
     "DIRECTED_TRANSFORM_V2_CANONICALIZATION",
     "DIRECTED_TRANSFORM_V2_DIGEST_ATTR",
     "DIRECTED_TRANSFORM_V2_DIRECTION",
     "DIRECTED_TRANSFORM_V2_KINDS",
+    "DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR",
+    "DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR",
     "DIRECTED_TRANSFORM_V2_SCHEMA_ID",
     "DIRECTED_TRANSFORM_V2_SCHEMA_VERSION",
     "HOMOGRAPHY_KIND",

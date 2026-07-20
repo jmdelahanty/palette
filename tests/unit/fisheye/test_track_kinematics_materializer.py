@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+import uuid
 
 import numpy as np
 import pytest
@@ -59,6 +60,9 @@ def _populate_unbound_stage(
             "palette_run_completion_contract": "palette.zarr_run_completion.v1",
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": False,
+            mod.track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR: str(
+                uuid.uuid4()
+            ),
             mod.COORDINATE_BINDING_STATUS_ATTR: mod.UNBOUND_STAGE_STATUS,
             mod.STAGING_MANIFEST_ATTR: staging_manifest,
             mod.STAGING_MANIFEST_DIGEST_ATTR: mod._canonical_mapping_sha256(
@@ -278,8 +282,27 @@ def _install_writer_api(
         assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
         events.append(("validate_public", True, "complete"))
         return SimpleNamespace(
-            run_name="track_1",
-            track_positions=((0, object()), (1, object())),
+            position_bindings=SimpleNamespace(run_name="track_1"),
+            tracks=(object(), object()),
+            manifest_sha256="e" * 64,
+        )
+
+    def seal_motion(
+        authoritative_root,
+        final_run_group,
+        *,
+        expected_publication_owner_uuid,
+    ):
+        assert final_run_group.attrs["palette_run_completion_status"] == "complete"
+        assert final_run_group.attrs["stage_selector_eligible"] is False
+        assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
+        assert expected_publication_owner_uuid == final_run_group.attrs[
+            mod.track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR
+        ]
+        events.append(("seal_motion", False, "complete"))
+        return SimpleNamespace(
+            tracks=(object(), object()),
+            assert_verified=lambda: None,
         )
 
     monkeypatch.setattr(
@@ -302,8 +325,14 @@ def _install_writer_api(
     )
     monkeypatch.setattr(
         mod.track_writer,
-        "validate_bound_track_position_bindings",
+        "validate_bound_track_motion_run",
         validate_public,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mod.track_writer,
+        "_seal_and_load_track_motion_run_before_selection",
+        seal_motion,
         raising=False,
     )
 
@@ -333,7 +362,11 @@ def _assert_previous_pointers_restored(source: Path) -> None:
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     track_parent = root["analysis/track_kinematics_runs"]
     offline_parent = track_parent["offline"]
-    assert "track_1" not in offline_parent
+    assert "track_1" in offline_parent
+    failed = offline_parent["track_1"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert "atomic_publication_tombstone" in failed.attrs
     assert track_parent.attrs["latest"] == "offline/previous"
     assert track_parent.attrs["latest_complete"] == "offline/previous"
     assert track_parent.attrs["latest_offline"] == "previous"
@@ -403,8 +436,11 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     )
     assert events[2:] == [
         ("validate_before", False, "running"),
+        ("seal_motion", False, "complete"),
         ("validate_before", True, "complete"),
-        ("validate_public", True, "complete"),
+        ("validate_before", True, "complete"),
+        ("validate_before", True, "complete"),
+        ("seal_motion", False, "complete"),
     ]
 
     local_run = zarr.open_group(
@@ -447,6 +483,7 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     position = run["tracks/id_0/positions_px"]
     assert position.attrs["coordinate_descriptor"]["node_ref"] == f"/{position.path}"
     staging = run.attrs["cluster_output_staging"]
+    assert staging["final_validation"]["valid"] is True
     assert staging["serialization_policy"] == "per_recording_advisory_file_lock"
     assert staging["canonical_binding"] == {
         "valid": True,
@@ -599,6 +636,308 @@ def test_completion_failure_after_pointer_update_rolls_back_both_parents(
         )
 
     _assert_previous_pointers_restored(source)
+
+
+def test_final_validation_after_completion_precedes_eligibility_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_previous_pointers(source)
+    events: list[tuple[Any, ...]] = []
+    _install_writer_api(monkeypatch, events)
+    real_validate = mod._validate_track_run
+
+    def fail_completed_validation(path, **kwargs):
+        result = real_validate(path, **kwargs)
+        if (
+            kwargs.get("expected_binding_status") == mod.BOUND_CANONICAL_STATUS
+            and kwargs.get("require_complete") is True
+        ):
+            result["valid"] = False
+            result["errors"].append("injected post-completion validation failure")
+        return result
+
+    monkeypatch.setattr(mod, "_validate_track_run", fail_completed_validation)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Published final run validation failed",
+    ):
+        mod.materialize_track_kinematics(
+            source,
+            scratch_root=scratch,
+            keypoint_run="refined/kp_1",
+            run_name="track_1",
+            output_shard_rows=5,
+            copy_backend="python",
+            apply=True,
+        )
+
+    _assert_previous_pointers_restored(source)
+
+
+def test_outer_rollback_preserves_publication_committed_before_track_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_previous_pointers(source)
+    events: list[tuple[Any, ...]] = []
+    _install_writer_api(monkeypatch, events)
+    mark_complete = mod.track_writer.mark_track_kinematics_run_complete
+    real_validate = mod._validate_track_run
+    intervening = "intervening_winner"
+    intervening_owner = str(uuid.uuid4())
+
+    def intervene_before_track_lease(*args, **kwargs):
+        root = args[0]
+        track_parent = root["analysis/track_kinematics_runs"]
+        offline = track_parent["offline"]
+        track_parent.attrs.update(
+            {
+                mod.track_writer.TRACK_KINEMATICS_SELECTOR_OWNER_ATTR: (
+                    mod.track_writer._track_selector_owner_record(
+                        owner_uuid=intervening_owner,
+                        qualified_name=f"offline/{intervening}",
+                    )
+                ),
+                "latest": f"offline/{intervening}",
+                "latest_complete": f"offline/{intervening}",
+                "latest_offline": intervening,
+            }
+        )
+        offline.attrs["latest"] = intervening
+        return mark_complete(*args, **kwargs)
+
+    def fail_completed_validation(path, **kwargs):
+        result = real_validate(path, **kwargs)
+        if (
+            kwargs.get("expected_binding_status") == mod.BOUND_CANONICAL_STATUS
+            and kwargs.get("require_complete") is True
+        ):
+            result["valid"] = False
+            result["errors"].append("injected failure after deferred receipt")
+        return result
+
+    monkeypatch.setattr(
+        mod.track_writer,
+        "mark_track_kinematics_run_complete",
+        intervene_before_track_lease,
+    )
+    monkeypatch.setattr(mod, "_validate_track_run", fail_completed_validation)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Published final run validation failed",
+    ):
+        mod.materialize_track_kinematics(
+            source,
+            scratch_root=scratch,
+            keypoint_run="refined/kp_1",
+            run_name="track_1",
+            output_shard_rows=5,
+            copy_backend="python",
+            apply=True,
+        )
+
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    track_parent = root["analysis/track_kinematics_runs"]
+    offline = track_parent["offline"]
+    failed = offline["track_1"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert "atomic_publication_tombstone" in failed.attrs
+    assert track_parent.attrs[mod.track_writer.TRACK_KINEMATICS_SELECTOR_OWNER_ATTR][
+        "owner_uuid"
+    ] == intervening_owner
+    assert track_parent.attrs["latest"] == f"offline/{intervening}"
+    assert track_parent.attrs["latest_complete"] == f"offline/{intervening}"
+    assert track_parent.attrs["latest_offline"] == intervening
+    assert offline.attrs["latest"] == intervening
+
+
+def test_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_previous_pointers(source)
+    events: list[tuple[Any, ...]] = []
+    _install_writer_api(monkeypatch, events)
+    mark_complete = mod.track_writer.mark_track_kinematics_run_complete
+    real_validate = mod._validate_track_run
+    intervening = "intervening_winner"
+    intervening_owner = str(uuid.uuid4())
+    rollback_attempted = False
+
+    def intervene_before_track_lease(*args, **kwargs):
+        root = args[0]
+        track_parent = root["analysis/track_kinematics_runs"]
+        offline = track_parent["offline"]
+        track_parent.attrs.update(
+            {
+                mod.track_writer.TRACK_KINEMATICS_SELECTOR_OWNER_ATTR: (
+                    mod.track_writer._track_selector_owner_record(
+                        owner_uuid=intervening_owner,
+                        qualified_name=f"offline/{intervening}",
+                    )
+                ),
+                "latest": f"offline/{intervening}",
+                "latest_complete": f"offline/{intervening}",
+                "latest_offline": intervening,
+            }
+        )
+        offline.attrs["latest"] = intervening
+        return mark_complete(*args, **kwargs)
+
+    def fail_completed_validation(path, **kwargs):
+        result = real_validate(path, **kwargs)
+        if (
+            kwargs.get("expected_binding_status") == mod.BOUND_CANONICAL_STATUS
+            and kwargs.get("require_complete") is True
+        ):
+            result["valid"] = False
+            result["errors"].append("injected failure after deferred receipt")
+        return result
+
+    def fail_exact_receipt_rollback(activation, *, root=None):
+        nonlocal rollback_attempted
+        rollback_attempted = True
+        assert root is not None
+        assert activation.expected_owner["qualified_run_name"] == "offline/track_1"
+        raise RuntimeError("injected exact receipt rollback failure")
+
+    monkeypatch.setattr(
+        mod.track_writer,
+        "mark_track_kinematics_run_complete",
+        intervene_before_track_lease,
+    )
+    monkeypatch.setattr(mod, "_validate_track_run", fail_completed_validation)
+    monkeypatch.setattr(
+        mod.track_writer,
+        "rollback_deferred_track_kinematics_selector_activation",
+        fail_exact_receipt_rollback,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="rollback was incomplete.*exact receipt rollback failure",
+    ):
+        mod.materialize_track_kinematics(
+            source,
+            scratch_root=scratch,
+            keypoint_run="refined/kp_1",
+            run_name="track_1",
+            output_shard_rows=5,
+            copy_backend="python",
+            apply=True,
+        )
+
+    assert rollback_attempted is True
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    track_parent = root["analysis/track_kinematics_runs"]
+    offline = track_parent["offline"]
+    failed = offline["track_1"]
+    candidate_owner = failed.attrs[
+        mod.track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR
+    ]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert track_parent.attrs[mod.track_writer.TRACK_KINEMATICS_SELECTOR_OWNER_ATTR][
+        "owner_uuid"
+    ] == candidate_owner
+    # Exact rollback failed while C still owned the lease. The safe residue is
+    # C's now-ineligible selector state, never the generic pre-copy snapshot A.
+    assert track_parent.attrs["latest"] == "offline/track_1"
+    assert track_parent.attrs["latest_complete"] == "offline/track_1"
+    assert track_parent.attrs["latest_offline"] == "track_1"
+    assert offline.attrs["latest"] == "track_1"
+
+
+def test_outer_rollback_preserves_replacement_target_and_winner_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_previous_pointers(source)
+    events: list[tuple[Any, ...]] = []
+    _install_writer_api(monkeypatch, events)
+    mark_complete = mod.track_writer.mark_track_kinematics_run_complete
+    winner: dict[str, str] = {}
+
+    def replace_target_after_completion(*args, **kwargs):
+        mark_complete(*args, **kwargs)
+        root = args[0]
+        run_name = kwargs["run_name"]
+        track_parent = root["analysis/track_kinematics_runs"]
+        offline = track_parent["offline"]
+        del offline[run_name]
+        winner_owner = str(uuid.uuid4())
+        winner["owner_uuid"] = winner_owner
+        offline.create_group(
+            run_name,
+            attributes={
+                mod.track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR: (
+                    winner_owner
+                ),
+                "palette_run_completion_status": "complete",
+                "stage_selector_eligible": True,
+            },
+        )
+        track_parent.attrs.update(
+            {
+                mod.track_writer.TRACK_KINEMATICS_SELECTOR_OWNER_ATTR: {
+                    "owner_uuid": winner_owner,
+                },
+                "latest": f"offline/{run_name}",
+                "latest_complete": f"offline/{run_name}",
+                "latest_offline": run_name,
+            }
+        )
+        offline.attrs["latest"] = run_name
+        raise RuntimeError("concurrent winner replaced published target")
+
+    monkeypatch.setattr(
+        mod.track_writer,
+        "mark_track_kinematics_run_complete",
+        replace_target_after_completion,
+    )
+
+    with pytest.raises(RuntimeError, match="concurrent winner replaced"):
+        mod.materialize_track_kinematics(
+            source,
+            scratch_root=scratch,
+            keypoint_run="refined/kp_1",
+            run_name="track_1",
+            output_shard_rows=5,
+            copy_backend="python",
+            apply=True,
+        )
+
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    track_parent = root["analysis/track_kinematics_runs"]
+    offline = track_parent["offline"]
+    replacement = offline["track_1"]
+    assert replacement.attrs[
+        mod.track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR
+    ] == winner["owner_uuid"]
+    assert replacement.attrs["stage_selector_eligible"] is True
+    assert track_parent.attrs[
+        mod.track_writer.TRACK_KINEMATICS_SELECTOR_OWNER_ATTR
+    ]["owner_uuid"] == winner["owner_uuid"]
+    assert track_parent.attrs["latest"] == "offline/track_1"
+    assert track_parent.attrs["latest_complete"] == "offline/track_1"
+    assert track_parent.attrs["latest_offline"] == "track_1"
+    assert offline.attrs["latest"] == "track_1"
 
 
 @pytest.mark.parametrize(

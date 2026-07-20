@@ -81,7 +81,7 @@ def _source(world, *, dtype: np.dtype | type = np.float32):
     binding = build_bound_canonical_coordinate_descriptor(
         positions,
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",

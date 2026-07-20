@@ -64,16 +64,20 @@ from fisheye.shared.observation_coordinate_publication import (
     DETECTION_ACQUISITION_MAPPING_SCHEMA_ID,
     DETECTION_ACQUISITION_MAPPING_SCHEMA_VERSION,
     DETECTION_INSTANCE_KEY_DERIVATION_ATTR,
+    DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
     DETECTION_OBSERVATION_CARDINALITY_ATTR,
     EMPTY_OBSERVATION_DECLARATION_ATTR,
     EMPTY_OBSERVATION_DECLARATION_SCHEMA_ID as _EMPTY_OBSERVATION_DECLARATION_SCHEMA_ID,
     EMPTY_OBSERVATION_DECLARATION_SCHEMA_VERSION as _EMPTY_OBSERVATION_DECLARATION_SCHEMA_VERSION,
     OBSERVATION_ROW_COUNT_ATTR,
+    SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+    SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
     build_bound_detection_frame_evidence,
     capture_observation_coordinate_publication_checkpoint,
     derive_detection_source_camera_geometry,
     _load_persisted_detection_observation_geometry,
     publish_detection_observation_geometry,
+    publish_detection_backend_result_projection,
     publish_detection_instance_key_derivation,
     publish_detection_observation_cardinality,
     publish_empty_detection_observation_declaration,
@@ -180,6 +184,8 @@ _CANONICAL_DETECTION_PUBLICATION_ATTRS = frozenset(
         "source_row_temporal_authority_sha256",
         DETECTION_ACQUISITION_MAPPING_ATTR,
         f"{DETECTION_ACQUISITION_MAPPING_ATTR}_sha256",
+        DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
+        f"{DETECTION_BACKEND_RESULT_PROJECTION_ATTR}_sha256",
         DETECTION_INSTANCE_KEY_DERIVATION_ATTR,
         f"{DETECTION_INSTANCE_KEY_DERIVATION_ATTR}_sha256",
         DETECTION_OBSERVATION_CARDINALITY_ATTR,
@@ -731,10 +737,23 @@ def _publish_detection_frame_evidence(
     camera_id = acquisition_frame.record.camera_id
     camera_node = _require_group_path(
         root,
-        f"analysis/coordinate_frames/source_camera/{camera_id}/continuous",
+        (
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_POINT_PIXEL_CONVENTION}"
+        ),
+    )
+    bbox_camera_node = _require_group_path(
+        root,
+        (
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_BBOX_PIXEL_CONVENTION}"
+        ),
     )
     checkpoints: list[Any] = [
-        capture_observation_coordinate_publication_checkpoint(camera_node)
+        capture_observation_coordinate_publication_checkpoint(
+            camera_node,
+            bbox_camera_node,
+        )
     ]
     try:
         # Source-camera stamping is included in the same transaction as the
@@ -742,8 +761,17 @@ def _publish_detection_frame_evidence(
         # but its exact pre-publication attrs are still rollback authority.
         source_camera = stamp_source_camera_pixel_frame_authority(
             camera_node,
-            frame_id=f"{camera_id}_source_camera_continuous",
-            pixel_convention="continuous",
+            # This is the archive-wide continuous source-camera authority.
+            # Stimulus/calibration publishers share the same write-once node,
+            # so its frame identity must be producer-independent.
+            frame_id=f"{camera_id}_source_camera",
+            pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+            acquisition_frame=acquisition_frame,
+        )
+        bbox_source_camera = stamp_source_camera_pixel_frame_authority(
+            bbox_camera_node,
+            frame_id=f"{camera_id}_source_camera_pixel_edge_half_open",
+            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
             acquisition_frame=acquisition_frame,
         )
         frame_group = run_group.require_group("coordinate_frames")
@@ -755,10 +783,10 @@ def _publish_detection_frame_evidence(
         normalized = stamp_normalized_pixel_frame_authority(
             normalized_node,
             frame_id=f"detect_source_camera_normalized_{token}",
-            pixel_frame=source_camera,
+            pixel_frame=bbox_source_camera,
         )
         transform_group = run_group.require_group("coordinate_transforms")
-        expected_matrix = normalized_to_pixel_matrix(source_camera)
+        expected_matrix = normalized_to_pixel_matrix(bbox_source_camera)
         if "source_camera_normalized_to_image" in transform_group:
             matrix_node = transform_group["source_camera_normalized_to_image"]
             if not np.array_equal(np.asarray(matrix_node[:]), expected_matrix):
@@ -786,17 +814,18 @@ def _publish_detection_frame_evidence(
             authority_id=f"detect_source_camera_normalized_to_image_{token}",
             matrix_node=matrix_node,
             source_frame=normalized,
-            target_frame=source_camera,
+            target_frame=bbox_source_camera,
         )
         transform = stamp_directed_transform_v2(
             matrix_node,
             transform_id=f"detect_source_camera_normalized_to_image_{token}",
             authority=authority,
             source_frame=normalized,
-            target_frame=source_camera,
+            target_frame=bbox_source_camera,
         )
         evidence = build_bound_detection_frame_evidence(
             source_camera_frame=source_camera,
+            bbox_source_camera_frame=bbox_source_camera,
             normalized_frame=normalized,
             normalized_to_source_camera=resolve_bound_directed_transform_chain(
                 (transform,)
@@ -2711,6 +2740,8 @@ def detect_yolo(
     # Storage for detections
     frame_counts = np.zeros(n_frames, dtype=np.int32)
     batch_results = []
+    validated_backend_result_count = 0
+    validated_backend_result_orig_shapes: set[tuple[int, int]] = set()
 
     def accumulate_results(
         result: Any,
@@ -2719,6 +2750,11 @@ def detect_yolo(
         orig_shape: tuple[int, int],
     ) -> None:
         """Vectorize detection accumulation for a single frame."""
+        nonlocal validated_backend_result_count
+        validated_backend_result_count += 1
+        validated_backend_result_orig_shapes.add(
+            (int(orig_shape[0]), int(orig_shape[1]))
+        )
         if result.boxes is None or len(result.boxes) == 0:
             return
 
@@ -3107,6 +3143,18 @@ def detect_yolo(
         decord_reader=vr,
         opencv_stream_exhausted=opencv_stream_exhausted,
     )
+    expected_backend_result_shape = (int(inference_height), int(inference_width))
+    if (
+        validated_backend_result_count != int(n_frames)
+        or validated_backend_result_orig_shapes != {expected_backend_result_shape}
+    ):
+        raise RuntimeError(
+            "Validated YOLO result count/orig_shape evidence is incomplete or "
+            "non-uniform: "
+            f"count={validated_backend_result_count}, expected={n_frames}, "
+            f"shapes={sorted(validated_backend_result_orig_shapes)!r}, "
+            f"expected_shape={expected_backend_result_shape!r}."
+        )
 
     # Decoder resources remain owned by the encompassing publication attempt
     # and are closed exactly once by its finalization boundary.
@@ -3343,14 +3391,21 @@ def detect_yolo(
         'coordinate_contract_mode': coordinate_contract_mode,
         OBSERVATION_ROW_COUNT_ATTR: int(total_detections),
         'model_type': 'yolo_object_detection',
-        'model_path': str(model_path.absolute()),
-        'model_name': model_path.name,
+        'model_path': str(model_artifact.get('path') or model_path.absolute()),
+        'model_name': Path(
+            str(model_artifact.get('path') or model_path.absolute())
+        ).name,
         'source_video_width': source_video_width,
         'source_video_height': source_video_height,
         'source_full_width': source_full_width,
         'source_full_height': source_full_height,
         'inference_width': int(inference_width),
         'inference_height': int(inference_height),
+        'validated_backend_result_count': int(validated_backend_result_count),
+        'validated_backend_result_orig_shape_hw': [
+            int(inference_height),
+            int(inference_width),
+        ],
         'parameters': {
             'conf_threshold': conf_threshold,
             'iou_threshold': iou_threshold,
@@ -3583,6 +3638,12 @@ def detect_yolo(
             run_group=detect_group,
             acquisition_frame=canonical_acquisition_frame,
         )
+        backend_result_projection = publish_detection_backend_result_projection(
+            detect_group,
+            detect_group["bbox_norm_coords"],
+            frame_evidence=canonical_frame_evidence,
+            model_artifact=model_artifact,
+        )
         instance_key_derivation = publish_detection_instance_key_derivation(
             detect_group,
             detect_group["instance_key"],
@@ -3604,7 +3665,11 @@ def detect_yolo(
             detect_group["bbox_img_xyxy"],
             detect_group["centers_img_xy"],
             frame_evidence=canonical_frame_evidence,
-            source_lineage_records=(mapping_record, instance_key_derivation),
+            source_lineage_records=(
+                mapping_record,
+                backend_result_projection,
+                instance_key_derivation,
+            ),
         )
         if int(total_detections) == 0:
             _publish_empty_detection_observation_declaration(

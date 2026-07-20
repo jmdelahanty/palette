@@ -992,9 +992,9 @@ def _validate_target_descriptor(
         raise ChaserMetricsCoordinateContractError(
             "target_position_xy requires the canonical arena-relative canvas profile."
         )
-    if descriptor.geometry_type != "points_xy":
+    if descriptor.geometry_type != "point_xy":
         raise ChaserMetricsCoordinateContractError(
-            "target_position_xy requires canonical geometry_type='points_xy'."
+            "target_position_xy requires canonical geometry_type='point_xy'."
         )
     if descriptor.components != ("x", "y"):
         raise ChaserMetricsCoordinateContractError(

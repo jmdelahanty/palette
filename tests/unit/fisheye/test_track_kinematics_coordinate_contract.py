@@ -168,6 +168,11 @@ def test_offline_loader_uses_exact_persisted_crop_center_surface(
     assert loaded.position_surface is crop.position_surface
     assert loaded.geometry_path == "crop_runs/c1/centers_img_xy"
     assert loaded.kind == "canonical_crop_rows_source_camera_centers"
+    assert mod._offline_position_source_inputs(loaded) == {
+        "position_source_path": "crop_runs/c1/centers_img_xy",
+        "position_source_rowset_path": "crop_runs/c1",
+        "position_source_kind": "canonical_crop_rows_source_camera_centers",
+    }
     np.testing.assert_array_equal(loaded.positions_px, centers[:])
     np.testing.assert_array_equal(loaded.frame_indices, source_frames[:])
     np.testing.assert_array_equal(loaded.instance_key, key[:])
@@ -601,7 +606,11 @@ def test_deferred_track_stage_binds_only_at_authoritative_final_path(
     run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
         mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
     )
-    root = FakeGroup(path="", archive_token=world["archive_token"])
+    root = _WritableGroup(path="", archive_token=world["archive_token"])
+    analysis = root.create_group("analysis")
+    runs = analysis.create_group("track_kinematics_runs")
+    offline = runs.create_group("offline")
+    offline.children[run_name] = run
 
     bound = mod.bind_staged_offline_track_kinematics_run(
         root,

@@ -688,8 +688,8 @@ def _load_descriptor(
         raise StimulusCoordinateContractError(
             "Chaser descriptor must use the canonical arena-relative profile."
         )
-    if descriptor.geometry_type != "points_xy":
-        raise StimulusCoordinateContractError("Chaser descriptor must use points_xy.")
+    if descriptor.geometry_type != "point_xy":
+        raise StimulusCoordinateContractError("Chaser descriptor must use point_xy.")
     if descriptor.components != ("x", "y"):
         raise StimulusCoordinateContractError("Chaser descriptor components must be x,y.")
     if descriptor.space_id != "arena_relative_canvas_px":
@@ -2229,7 +2229,7 @@ def materialize_stimulus_coordinate_contract(
             build_bound_canonical_coordinate_descriptor(
                 surface_nodes[name],
                 profile_id="arena_relative_canvas_px.top_left_y_down.v1",
-                geometry_type="points_xy",
+                geometry_type="point_xy",
                 components=("x", "y"),
                 component_units=("px", "px"),
                 pixel_convention=descriptor.pixel_convention,
@@ -2734,7 +2734,7 @@ def _load_bound_stimulus_coordinate_evidence_impl(
         if (
             point_descriptor.profile_id
             != "arena_relative_canvas_px.top_left_y_down.v1"
-            or point_descriptor.geometry_type != "points_xy"
+            or point_descriptor.geometry_type != "point_xy"
             or point_descriptor.components != ("x", "y")
             or point_descriptor.component_units != ("px", "px")
             or point_descriptor.source_camera_overlay.status

@@ -37,20 +37,15 @@ import argparse
 import numpy as np
 import zarr
 
-from fisheye.analysis.goodcopbadcop_common import load_epochs, open_distance_run, resolve_cohort
-from fisheye.shared.arena_geometry import resolve_arena_geometry
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
+from fisheye.analysis.goodcopbadcop_common import resolve_cohort
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 OUTER_WALL_FRAC = 0.8   # positions with center-distance > 0.8 * radius = "near wall" (outer 20%)
 LATE_FROM = 5
-
-
-def _geometry(root, cd):
-    ppm = float(cd.attrs.get("pixels_per_mm_projector"))
-    geo, _ = resolve_arena_geometry(root, cd, pixels_per_mm=ppm)
-    if geo.center_x_px is None:
-        raise ValueError("no arena geometry")
-    return geo, ppm
 
 
 def r_of(angles: np.ndarray) -> float:
@@ -59,42 +54,14 @@ def r_of(angles: np.ndarray) -> float:
 
 def load_angular(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = open_distance_run(r)
-    geo, _ = _geometry(r, cd)
-    fish = np.asarray(cd["positions"]["fish_centroid_arena_xy"][:], float)
-    fv = np.asarray(cd["positions"]["fish_valid"][:], bool)
-    cx, cy, rpx = geo.center_x_px, geo.center_y_px, geo.radius_px
-    cdist = np.hypot(fish[:, 0] - cx, fish[:, 1] - cy)
-    ang = np.arctan2(fish[:, 1] - cy, fish[:, 0] - cx)
-    out = {}
-    for epoch, (s, e) in load_epochs(r).items():
-        sl = slice(s, e + 1)
-        finite = fv[sl] & np.isfinite(cdist[sl])
-        near = finite & (cdist[sl] > OUTER_WALL_FRAC * rpx)
-        frac_nearwall = near.sum() / max(finite.sum(), 1)
-        out[epoch] = (r_of(ang[sl][near]), float(frac_nearwall), int(near.sum()))
-    return out
+    distance = load_chaser_distance_run(r)
+    distance.require_arena_geometry_authority()
 
 
 def load_partial(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = open_distance_run(r)
-    geo, ppm = _geometry(r, cd)
-    fish = np.asarray(cd["positions"]["fish_centroid_arena_xy"][:], float)
-    fv = np.asarray(cd["positions"]["fish_valid"][:], bool)
-    cdist = np.hypot(fish[:, 0] - geo.center_x_px, fish[:, 1] - geo.center_y_px) / ppm  # mm from centre
-    ef = cd["chaser_escape_freeze"][sorted(cd["chaser_escape_freeze"].group_keys())[-1]]
-    ordv = np.asarray(ef["trials"]["trial_ordinal"][:], int)
-    sf = np.asarray(ef["trials"]["start_frame"][:], int)
-    en = np.asarray(ef["trials"]["end_frame"][:], int)
-    ff = np.asarray(ef["trial_metrics"]["freeze_low_speed_fraction"][:], float)
-    rows = []
-    for o, s, e, f in zip(ordv, sf, en, ff):
-        seg = cdist[s:e + 1]
-        v = fv[s:e + 1] & np.isfinite(seg)
-        if v.sum() >= 20 and np.isfinite(f):
-            rows.append((int(o), float(np.median(seg[v])), float(f)))
-    return np.array(rows)  # (n,3): ordinal, centre_dist_mm, freeze
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_escape_freeze")
 
 
 def partial_r(y, x, z) -> float:
@@ -111,6 +78,8 @@ def run_angular(cohort) -> None:
     for rid, zp in cohort:
         try:
             rows.append((rid.split("_GoodCop")[0], load_angular(zp)))
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], ex)
     print("R = angular concentration of near-wall positions (outer 20%). "
@@ -134,6 +103,8 @@ def run_partial(cohort) -> None:
     for rid, zp in cohort:
         try:
             tr = load_partial(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], ex)
             continue

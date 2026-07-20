@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import Any, Optional, Sequence
 
 import zarr
 
+from ...analysis import tail_kinematics_runs as tail_mod
 from ...analysis.tail_kinematics_runs import (
     DEFAULT_BLOCK_ROWS,
     DEFAULT_OUTPUT_SHARD_ROWS,
@@ -39,6 +41,7 @@ from ...analysis.tail_kinematics_runs import (
 )
 from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance_from_stage_record
+from ...shared import tail_coordinate_publication as tail_publication_mod
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
@@ -80,6 +83,7 @@ class TailKinematicsMaterializationPlan:
     inventory_sha256: str
     source_metadata_sha256: str
     source_contract: dict[str, Any]
+    staged_source_authority: dict[str, Any]
 
     @property
     def files_manifest_path(self) -> Path:
@@ -118,6 +122,10 @@ class TailKinematicsMaterializationPlan:
             "inventory_sha256": self.inventory_sha256,
             "source_metadata_sha256": self.source_metadata_sha256,
             "source_contract": json_attr_safe(self.source_contract),
+            "staged_source_authority_sha256": self.staged_source_authority.get(
+                "record_sha256"
+            ),
+            "staged_source_authority": json_attr_safe(self.staged_source_authority),
             "files_manifest_path": str(self.files_manifest_path),
             "staging_manifest_path": str(self.staging_manifest_path),
             "local_run_path": str(self.local_run_path),
@@ -225,7 +233,6 @@ def _selected_source_files(
         f"{run_prefix}/components",
         f"{run_prefix}/components/subject_body",
         f"{run_prefix}/body_frame",
-        f"{run_prefix}/row_index",
         f"{run_prefix}/source_refined_subject_masks",
     ):
         _add_group_metadata(source_zarr, group_path, selected)
@@ -247,7 +254,7 @@ def _selected_source_files(
             selected_paths,
             required=name in required_body,
         )
-    required_body_frame = {"forward_axis_xy", "left_axis_xy", "valid"}
+    required_body_frame = {"forward_axis_xy", "left_axis_xy", "axis_valid"}
     for name in SUBJECT_SHAPE_BODY_FRAME_ARRAY_NAMES:
         _add_array_tree(
             source_zarr,
@@ -259,10 +266,10 @@ def _selected_source_files(
     for name in ROW_LINEAGE_NAMES:
         _add_array_tree(
             source_zarr,
-            f"{run_prefix}/row_index/{name}",
+            f"{run_prefix}/{name}",
             selected,
             selected_paths,
-            required=False,
+            required=True,
         )
     for name in SOURCE_REVISION_ARRAY_NAMES:
         _add_array_tree(
@@ -360,7 +367,16 @@ def build_tail_kinematics_materialization_plan(
                 )
                 if key in shape_group.attrs
             }
+            | {
+                "canonical_publication_manifest_sha256": (
+                    sources.source_publication_manifest_sha256
+                ),
+                "staged_source_authority_sha256": sources.source_authority.get(
+                    "record_sha256"
+                ),
+            }
         ),
+        staged_source_authority=json_attr_safe(sources.source_authority),
     )
 
 
@@ -455,6 +471,7 @@ def stage_tail_kinematics_sources(
     staged_shape_run, _shape_group, staged_sources = _resolve_tail_kinematics_sources(
         staged_root,
         plan.shape_run,
+        _staged_source_authority=plan.staged_source_authority,
     )
     if staged_shape_run != plan.shape_run or int(staged_sources.row_count) != int(plan.row_count):
         raise RuntimeError("Staged subject-shape logical validation did not match the staging plan.")
@@ -478,6 +495,10 @@ def stage_tail_kinematics_sources(
         "selected_paths": list(plan.selected_paths),
         "source_metadata_sha256": plan.source_metadata_sha256,
         "source_contract": json_attr_safe(plan.source_contract),
+        "staged_source_authority_sha256": plan.staged_source_authority.get(
+            "record_sha256"
+        ),
+        "staged_source_authority": json_attr_safe(plan.staged_source_authority),
         "inventory": validation,
         "capacity": {
             "check_enabled": bool(check_capacity),
@@ -502,6 +523,9 @@ def _validate_tail_run(path: Path, *, row_count: int, sample_count: int) -> dict
     if str(attrs.get("compute_kernel")) != TAIL_KINEMATICS_COMPUTE_KERNEL:
         errors.append("compute_kernel mismatch")
     expected_shapes = {
+        "instance_key": (int(row_count),),
+        "source_crop_row_ids": (int(row_count),),
+        "source_acquisition_frame_index": (int(row_count),),
         "valid": (int(row_count),),
         "failure_reason_bytes": (int(row_count), 64),
         "tail_angle_sample_s": (int(sample_count),),
@@ -528,6 +552,10 @@ def _validate_tail_run(path: Path, *, row_count: int, sample_count: int) -> dict
         attrs.get("completed_worker_task_count", -1)
     ) != int(attrs.get("worker_task_count", -2)):
         errors.append("worker task completion mismatch")
+    if attrs.get("stage_selector_eligible") is True and not isinstance(
+        attrs.get("tail_coordinate_publication_manifest_sha256"), str
+    ):
+        errors.append("selector-eligible run lacks tail coordinate publication seal")
     return {
         "valid": not errors,
         "errors": errors,
@@ -553,6 +581,20 @@ def publish_tail_kinematics_run(
     """Validate and atomically publish one completed local run group."""
 
     source_run = plan.local_run_path
+    source_owner = open_zarr_root(source_run, mode="r").attrs.get(
+        tail_publication_mod.TAIL_PUBLICATION_OWNER_ATTR
+    )
+    try:
+        expected_publication_owner_uuid = str(uuid.UUID(str(source_owner)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise RuntimeError(
+            "Tail-kinematics publication source lacks one valid publication owner."
+        ) from exc
+    if source_owner != expected_publication_owner_uuid:
+        raise RuntimeError(
+            "Tail-kinematics publication source owner is not one canonical UUID."
+        )
+    deferred_activation: list[Any] = []
     def validate(path: Path) -> dict[str, Any]:
         return _validate_tail_run(
             path,
@@ -569,11 +611,15 @@ def publish_tail_kinematics_run(
         )
 
     def complete(
-        _root: zarr.Group,
+        root: zarr.Group,
         parent: zarr.Group,
         run_group: zarr.Group,
     ) -> None:
         command = " ".join(sys.argv) if sys.argv else "unknown"
+        if "tail_coordinate_publication_deferred" in run_group.attrs:
+            del run_group.attrs["tail_coordinate_publication_deferred"]
+        run_group.attrs["stage_selector_eligible"] = False
+        tail_mod.publish_tail_kinematics_coordinate_surfaces(root, run_group)
         mark_run_complete(
             run_group,
             parent_group=parent,
@@ -583,6 +629,36 @@ def publish_tail_kinematics_run(
                 fallback_command=command,
             ),
         )
+        activation = tail_publication_mod.defer_tail_coordinate_publication_activation(
+            root,
+            parent,
+            run_group,
+            run_name=plan.run_name,
+            expected_publication_owner_uuid=expected_publication_owner_uuid,
+        )
+        deferred_activation[:] = [activation]
+
+    def activate(
+        root: zarr.Group,
+        parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if len(deferred_activation) != 1:
+            raise RuntimeError(
+                "Tail-kinematics publication lacks one deferred activation receipt."
+            )
+        tail_publication_mod.commit_deferred_tail_coordinate_publication_activation(
+            deferred_activation[0],
+            root=root,
+            parent=parent,
+            run=run_group,
+        )
+
+    def rollback_activation() -> None:
+        if deferred_activation:
+            tail_publication_mod.rollback_deferred_tail_coordinate_publication_activation(
+                deferred_activation[0]
+            )
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/tail_kinematics_runs"]
@@ -601,14 +677,20 @@ def publish_tail_kinematics_run(
             publish_schema_id=PUBLISH_SCHEMA_ID,
             policy="node_local_source_and_output_atomic_run_group_publish",
             rollback_policy=(
-                "remove_new_target_and_restore_parent_attrs_on_post_rename_failure"
+                "retain_owner_bound_failed_public_tombstone_and_"
+                "stage_specific_receipt_rollback_only"
             ),
+            publication_owner_attr=tail_publication_mod.TAIL_PUBLICATION_OWNER_ATTR,
+            # The sealed stage receipt is the only selector rollback authority.
+            # A generic pre-copy snapshot can predate an intervening publication.
         ),
         copy_backend=copy_backend,
         validate_run=validate,
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
+        rollback_activation=rollback_activation,
         payload_metadata={
             "staged_zarr": str(plan.staged_zarr),
             "source_run_path": str(source_run),
@@ -678,6 +760,7 @@ def materialize_tail_kinematics(
             overwrite=False,
             dry_run=False,
             stage_command=stage_command or (" ".join(sys.argv) if sys.argv else "unknown"),
+            _staged_source_authority=plan.staged_source_authority,
         )
         local_run = local_root["analysis"]["tail_kinematics_runs"][plan.run_name]
         local_run.attrs["node_local_source_staging"] = staging

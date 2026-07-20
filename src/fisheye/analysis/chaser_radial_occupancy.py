@@ -47,6 +47,11 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.analysis.chaser_near_field_occupancy import _rectangle_annulus_area_mm2
 from fisheye.shared.arena_geometry import (
     ArenaGeometry,
@@ -56,7 +61,6 @@ from fisheye.shared.arena_geometry import (
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
-from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.shared.system_metadata import get_git_info
 
 
@@ -211,38 +215,60 @@ def _decode_text_column(data: np.ndarray) -> list[str]:
     return [decode_null_terminated_text(value).strip() for value in values.reshape(-1)]
 
 
-def _resolve_chaser_distance_run(root: zarr.Group, run_name: str) -> tuple[zarr.Group, str, str]:
-    parent = root.get("analysis/chaser_distance_runs")
-    if parent is None:
-        raise ValueError("Archive has no analysis/chaser_distance_runs group.")
-    resolved = str(run_name).strip()
-    if not resolved or resolved == "latest":
-        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
-    return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"
+def _resolve_chaser_distance_run(
+    root: zarr.Group,
+    run_name: str,
+) -> tuple[ChaserDistanceReadSnapshot, str, str]:
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(run_name).strip() or "latest",
+    )
+    return snapshot, snapshot.run_name, snapshot.run_path
 
 
-def _resolve_arena_geometry(root: zarr.Group, run_group: zarr.Group, *, pixels_per_mm: float) -> ArenaGeometry:
+def _resolve_arena_geometry(
+    root: zarr.Group,
+    distance: ChaserDistanceReadSnapshot,
+    *,
+    pixels_per_mm: float,
+) -> ArenaGeometry:
     """Prefer the fitted dish mask over the projector's nominal experimental_area circle.
 
     See fisheye.shared.arena_geometry: they are different circles, and the nominal one is 3 mm
     off-centre and 2.4 mm small, which puts a wall-hugging fish "outside the arena".
     """
 
-    geometry, _notes = _resolve_shared_arena_geometry(root, run_group, pixels_per_mm=float(pixels_per_mm))
+    geometry, _notes = _resolve_shared_arena_geometry(
+        root,
+        root[distance.run_path],
+        pixels_per_mm=float(pixels_per_mm),
+    )
     return geometry
 
 
 def resolve_arena_geometry_with_notes(
-    root: zarr.Group, run_group: zarr.Group, *, pixels_per_mm: float
+    root: zarr.Group,
+    distance: ChaserDistanceReadSnapshot,
+    *,
+    pixels_per_mm: float,
 ) -> tuple[ArenaGeometry, list[str]]:
-    return _resolve_shared_arena_geometry(root, run_group, pixels_per_mm=float(pixels_per_mm))
+    # Arena-geometry authority has not yet moved behind its own detached
+    # snapshot.  Resolve the exact already-verified child only; do not perform a
+    # second run selection here.  The remaining geometry lineage hardening is a
+    # separate fail-closed work item.
+    return _resolve_shared_arena_geometry(
+        root,
+        root[distance.run_path],
+        pixels_per_mm=float(pixels_per_mm),
+    )
 
 
-def _read_epochs(run_group: zarr.Group, *, total_frames: int) -> tuple[ChaserRadialEpoch, ...]:
-    summary = run_group.get("epoch_summary")
-    if summary is None or "start_frame" not in summary or "end_frame" not in summary:
+def _read_epochs(
+    distance: ChaserDistanceReadSnapshot,
+    *,
+    total_frames: int,
+) -> tuple[ChaserRadialEpoch, ...]:
+    if distance.epoch_start_frame.size == 0:
         return (
             ChaserRadialEpoch(
                 window_id=-1,
@@ -255,14 +281,10 @@ def _read_epochs(run_group: zarr.Group, *, total_frames: int) -> tuple[ChaserRad
                 static_configuration=False,
             ),
         )
-    starts = np.asarray(summary["start_frame"][:], dtype=np.int64).reshape(-1)
-    ends = np.asarray(summary["end_frame"][:], dtype=np.int64).reshape(-1)
-    ids = (
-        np.asarray(summary["window_id"][:], dtype=np.int64).reshape(-1)
-        if "window_id" in summary
-        else np.arange(starts.shape[0], dtype=np.int64)
-    )
-    labels = _decode_text_column(np.asarray(summary["label_bytes"][:])) if "label_bytes" in summary else []
+    starts = np.asarray(distance.epoch_start_frame, dtype=np.int64).reshape(-1)
+    ends = np.asarray(distance.epoch_end_frame, dtype=np.int64).reshape(-1)
+    ids = np.asarray(distance.epoch_window_id, dtype=np.int64).reshape(-1)
+    labels = list(distance.epoch_labels)
     epochs: list[ChaserRadialEpoch] = []
     for idx in range(starts.shape[0]):
         start = max(0, int(starts[idx]))
@@ -286,10 +308,13 @@ def _read_epochs(run_group: zarr.Group, *, total_frames: int) -> tuple[ChaserRad
     return tuple(epochs)
 
 
-def _protocol_position_transition_s(root: zarr.Group, run_group: zarr.Group) -> float:
+def _protocol_position_transition_s(
+    root: zarr.Group,
+    distance: ChaserDistanceReadSnapshot,
+) -> float:
     """The scripted duration objects take to move into their next static configuration."""
 
-    source_path = str(run_group.attrs.get("source_stimulus_path") or "").strip()
+    source_path = str(distance.source_stimulus_path or "").strip()
     stim_group = _get_group_by_path(root, source_path) if source_path else None
     if stim_group is None:
         return 0.0
@@ -923,53 +948,43 @@ def build_chaser_radial_occupancy_result(
         raise ValueError("radial_bin_width_mm must be positive.")
 
     root = _open_root(zarr_path, mode="r")
-    run_group, run_name, run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    distance, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_arena_geometry_authority()
 
-    coordinate_frame = str(run_group.attrs.get("coordinate_frame") or "")
-    coordinate_origin = str(run_group.attrs.get("coordinate_origin") or "")
+    coordinate_frame = distance.coordinate_space_id
+    coordinate_origin = distance.coordinate_origin
     if coordinate_frame != "arena_relative_canvas_px":
         raise ValueError(
-            f"Chaser radial occupancy requires coordinate_frame='arena_relative_canvas_px'; got {coordinate_frame!r}."
+            "Chaser radial occupancy requires typed "
+            f"space_id='arena_relative_canvas_px'; got {coordinate_frame!r}."
         )
-    if coordinate_origin != "top_left_of_active_arena":
+    if coordinate_origin != "arena_top_left":
         raise ValueError(
-            f"Chaser radial occupancy requires coordinate_origin='top_left_of_active_arena'; got {coordinate_origin!r}."
+            "Chaser radial occupancy requires typed "
+            f"origin='arena_top_left'; got {coordinate_origin!r}."
         )
-    pixels_per_mm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    if not math.isfinite(pixels_per_mm) or pixels_per_mm <= 0:
-        raise ValueError("Chaser-distance run lacks a positive pixels_per_mm_projector attr.")
+    pixels_per_mm = float(distance.pixels_per_mm_projector)
 
-    if "positions" not in run_group or "distances" not in run_group or "chasers" not in run_group:
-        raise ValueError("Chaser-distance run is missing positions, distances, or chasers group.")
-    positions = run_group["positions"]
-    distances = run_group["distances"]
-    chasers = run_group["chasers"]
-    missing = [
-        name
-        for name in ("fish_centroid_arena_xy", "chaser_arena_xy", "fish_valid", "chaser_valid")
-        if name not in positions
-    ]
-    missing += [name for name in ("distance_mm",) if name not in distances]
-    missing += [name for name in ("chaser_index",) if name not in chasers]
-    if missing:
-        raise ValueError(f"Chaser-distance run missing required array(s) for radial occupancy: {missing}")
-
-    fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float32)
-    chaser_xy = np.asarray(positions["chaser_arena_xy"][:], dtype=np.float32)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
-    distance_mm = np.asarray(distances["distance_mm"][:], dtype=np.float32)
-    chaser_indices = np.asarray(chasers["chaser_index"][:], dtype=np.int64).reshape(-1)
+    fish_xy = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float32)
+    chaser_xy = np.asarray(distance.chaser_arena_xy, dtype=np.float32)
+    fish_valid = np.asarray(distance.fish_valid, dtype=bool)
+    chaser_valid = np.asarray(distance.chaser_valid, dtype=bool)
+    distance_mm = np.asarray(distance.distance_mm, dtype=np.float32)
+    chaser_indices = np.asarray(distance.chaser_index, dtype=np.int64).reshape(-1)
+    # Protocol-derived roles are intentionally unavailable until their own
+    # semantic authority is sealed.  Radial computation is identity-based and
+    # remains valid without assigning role labels.
     behavior_labels: tuple[str, ...] = ()
-    if "behavior_class_label_bytes" in chasers:
-        behavior_labels = tuple(_decode_text_column(np.asarray(chasers["behavior_class_label_bytes"][:])))
 
     total_frames = int(fish_xy.shape[0])
-    total_frames_attr = int(run_group.attrs.get("total_frames", 0) or 0)
-    if total_frames_attr > 0 and total_frames_attr != total_frames:
+    if distance.total_frames != total_frames:
         raise ValueError(
-            "Chaser-distance run frame-axis mismatch: "
-            f"attrs total_frames={total_frames_attr}, fish_centroid_arena_xy length={total_frames}."
+            "Chaser-distance typed frame-axis mismatch: "
+            f"authority total_frames={distance.total_frames}, "
+            f"fish_centroid_arena_xy length={total_frames}."
         )
     if fish_xy.ndim != 2 or fish_xy.shape[1] != 2:
         raise ValueError("positions/fish_centroid_arena_xy must have shape (frame, xy).")
@@ -982,12 +997,18 @@ def build_chaser_radial_occupancy_result(
     if chaser_indices.shape[0] != distance_mm.shape[1]:
         raise ValueError("chasers/chaser_index length does not match distance columns.")
 
-    geometry, geometry_notes = resolve_arena_geometry_with_notes(root, run_group, pixels_per_mm=float(pixels_per_mm))
+    geometry, geometry_notes = resolve_arena_geometry_with_notes(
+        root,
+        distance,
+        pixels_per_mm=float(pixels_per_mm),
+    )
     geometry_notes = geometry_notes + out_of_bounds_notes(fish_xy, fish_valid, geometry, label="fish")
-    fps = _safe_float(run_group.attrs.get("fps"), 1.0)
-    epochs = _read_epochs(run_group, total_frames=total_frames)
+    fps = float(distance.fps)
+    epochs = _read_epochs(distance, total_frames=total_frames)
     resolved_settle_trim_s = (
-        _protocol_position_transition_s(root, run_group) if settle_trim_s is None else max(0.0, float(settle_trim_s))
+        _protocol_position_transition_s(root, distance)
+        if settle_trim_s is None
+        else max(0.0, float(settle_trim_s))
     )
     epochs = _apply_settle_trim(
         epochs,
@@ -1032,7 +1053,7 @@ def build_chaser_radial_occupancy_result(
     )
 
     qc_warnings = tuple(dict.fromkeys(list(qc_warnings) + list(geometry_notes)))
-    recording_id = str(run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or Path(zarr_path).stem)
+    recording_id = distance.recording_id
     summary = _build_summary(
         recording_id=recording_id,
         epochs=epochs,
@@ -1052,10 +1073,10 @@ def build_chaser_radial_occupancy_result(
         component_name=str(component_name),
         chaser_distance_run_name=run_name,
         chaser_distance_run_path=run_path,
-        source_stimulus_run=run_group.attrs.get("source_stimulus_run"),
-        source_stimulus_path=run_group.attrs.get("source_stimulus_path"),
-        source_stimulus_epoch_run=run_group.attrs.get("source_stimulus_epoch_run"),
-        source_stimulus_epoch_path=run_group.attrs.get("source_stimulus_epoch_path"),
+        source_stimulus_run=distance.source_stimulus_run,
+        source_stimulus_path=distance.source_stimulus_path,
+        source_stimulus_epoch_run=distance.source_stimulus_epoch_run,
+        source_stimulus_epoch_path=distance.source_stimulus_epoch_path,
         fps=float(fps),
         total_frames=int(total_frames),
         pixels_per_mm_projector=float(pixels_per_mm),
@@ -1255,6 +1276,12 @@ def write_chaser_radial_occupancy_component(
     write_interactive_spec: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name

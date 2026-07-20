@@ -51,6 +51,7 @@ from fisheye.shared.directed_transform_v2 import (
     AFFINE_2D_ROWWISE_KIND,
     DIRECTED_TRANSFORM_V2_ATTR,
     DIRECTED_TRANSFORM_V2_DIGEST_ATTR,
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
     HOMOGRAPHY_KIND,
     stamp_directed_transform_v2,
 )
@@ -69,7 +70,9 @@ from fisheye.shared.observation_coordinate_publication import (
     build_bound_detection_frame_evidence,
     derive_detection_source_camera_geometry,
     publish_crop_observation_geometry,
+    publish_crop_roi_bbox_edge_reference_extent,
     publish_crop_roi_geometry,
+    publish_detection_backend_result_projection,
     publish_detection_observation_geometry,
 )
 from fisheye.shared.coordinate_identity import (
@@ -87,6 +90,7 @@ from fisheye.shared.coordinate_identity import (
     stamp_track_sample_time_lineage,
 )
 from fisheye.shared.pixel_frame_authority import (
+    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     PIXEL_FRAME_AUTHORITY_ATTR,
     normalized_to_pixel_matrix,
     stamp_crop_placement_ownership,
@@ -101,6 +105,7 @@ from fisheye.shared.selected_calibration import (
 )
 from fisheye.shared.transform_authority import (
     AuthorityRowIdentity,
+    TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     stamp_crop_placement_transform_authority,
     stamp_normalized_to_pixel_transform_authority,
 )
@@ -241,6 +246,16 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
         token,
         root_attrs,
     ) = _sealed_source_camera_frame_attrs(pixel_convention="continuous")
+    bbox_camera_path = (
+        "analysis/coordinate_frames/source_camera/camera-1/pixel_edge_half_open"
+    )
+    bbox_camera_node = _MemoryNode(bbox_camera_path, token=token)
+    bbox_camera_frame = stamp_source_camera_pixel_frame_authority(
+        bbox_camera_node,
+        frame_id="camera_1_native_bbox_edge",
+        pixel_convention="pixel_edge_half_open",
+        acquisition_frame=acquisition,
+    )
     normalized_node = _MemoryNode(
         "detect_runs/d1/coordinate_frames/source_camera_normalized",
         token=token,
@@ -248,12 +263,12 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
     normalized_frame = stamp_normalized_pixel_frame_authority(
         normalized_node,
         frame_id="d1_source_camera_normalized",
-        pixel_frame=camera_frame,
+        pixel_frame=bbox_camera_frame,
     )
     transform_node = _MemoryNode(
         "detect_runs/d1/transforms/source_camera_normalized_to_image",
         token=token,
-        data=normalized_to_pixel_matrix(camera_frame),
+        data=normalized_to_pixel_matrix(bbox_camera_frame),
     )
     transform_authority_node = _MemoryNode(
         "detect_runs/d1/transforms/source_camera_normalized_to_image_authority",
@@ -264,17 +279,18 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
         authority_id="d1_source_camera_normalized_to_image",
         matrix_node=transform_node,
         source_frame=normalized_frame,
-        target_frame=camera_frame,
+        target_frame=bbox_camera_frame,
     )
     normalized_to_image = stamp_directed_transform_v2(
         transform_node,
         transform_id="d1_source_camera_normalized_to_image",
         authority=transform_authority,
         source_frame=normalized_frame,
-        target_frame=camera_frame,
+        target_frame=bbox_camera_frame,
     )
     frame_evidence = build_bound_detection_frame_evidence(
         source_camera_frame=camera_frame,
+        bbox_source_camera_frame=bbox_camera_frame,
         normalized_frame=normalized_frame,
         normalized_to_source_camera=resolve_bound_directed_transform_chain(
             (normalized_to_image,)
@@ -342,6 +358,40 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
         mapping_record,
         attr_name=DETECTION_ACQUISITION_MAPPING_ATTR,
     )
+    detect.attrs.update(
+        {
+            "model_path": "/models/detect.pt",
+            "model_name": "detect.pt",
+            "inference_height": 240,
+            "inference_width": 320,
+            "validated_backend_result_count": 2,
+            "validated_backend_result_orig_shape_hw": [240, 320],
+            "decode_backend_effective": "opencv",
+            "video_reader_type": "opencv",
+            "parameters": {
+                "decode_backend_effective": "opencv",
+                "resize_dims": [240, 320],
+                "pre_resize_dims": [240, 320],
+                "effective_input_resize_dims": [240, 320],
+                "tensor_resize_dims": None,
+                "imgsz_applied": [240, 320],
+            },
+        }
+    )
+    backend_projection = publish_detection_backend_result_projection(
+        detect,
+        bbox_norm,
+        frame_evidence=frame_evidence,
+        model_artifact={
+            "role": "detect_model",
+            "path": "/models/detect.pt",
+            "fingerprint_scheme": "content_v1",
+            "sha256": "b" * 64,
+            "size_bytes": 321,
+            "mtime_ns": 654,
+            "source": "computed",
+        },
+    )
     detection = publish_detection_observation_geometry(
         detect,
         instance_key,
@@ -350,7 +400,7 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
         bbox_img,
         centers,
         frame_evidence=frame_evidence,
-        source_lineage_records=(mapping,),
+        source_lineage_records=(mapping, backend_projection),
     )
 
     crop = _MemoryNode("crop_runs/c1", token=token)
@@ -403,35 +453,70 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
             dtype=np.float64,
         ),
     )
-    crop_ownership = stamp_crop_placement_ownership(
-        source_crop,
-        row_identity=crop_geometry.row_identity,
-        source_camera_frame=camera_frame,
-    )
     roi_images = _MemoryNode(
         "crop_runs/c1/roi_images",
         token=token,
         data=np.zeros((2, 480, 640), dtype=np.uint8),
     )
-    roi_frame = stamp_roi_pixel_frame_authority(
+    point_ownership = stamp_crop_placement_ownership(
+        source_crop,
+        row_identity=crop_geometry.row_identity,
+        source_camera_frame=camera_frame,
+    )
+    point_roi_frame = stamp_roi_pixel_frame_authority(
         bind_array_reference_extent(roi_images, units="px"),
-        frame_id="c1_roi",
+        frame_id="c1_roi_continuous",
         pixel_convention="continuous",
+        crop_placement_ownership=point_ownership,
+    )
+    point_transform_authority = stamp_crop_placement_transform_authority(
+        source_crop,
+        authority_id="c1_roi_continuous_to_source_camera",
+        source_frame=point_roi_frame,
+        target_frame=camera_frame,
+    )
+    stamp_directed_transform_v2(
+        source_crop,
+        transform_id="c1_roi_continuous_to_source_camera",
+        authority=point_transform_authority,
+        source_frame=point_roi_frame,
+        target_frame=camera_frame,
+        row_identity=crop_geometry.row_identity,
+    )
+    crop_ownership = stamp_crop_placement_ownership(
+        source_crop,
+        row_identity=crop_geometry.row_identity,
+        source_camera_frame=bbox_camera_frame,
+        attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    )
+    bbox_roi_frame_node = _MemoryNode(
+        "crop_runs/c1/coordinate_frames/roi_bbox_edge",
+        token=token,
+    )
+    roi_frame = stamp_roi_pixel_frame_authority(
+        publish_crop_roi_bbox_edge_reference_extent(
+            bbox_roi_frame_node,
+            roi_images,
+        ),
+        frame_id="c1_roi_bbox_edge",
+        pixel_convention="pixel_edge_half_open",
         crop_placement_ownership=crop_ownership,
     )
     crop_transform_authority = stamp_crop_placement_transform_authority(
         source_crop,
         authority_id="c1_roi_to_source_camera",
         source_frame=roi_frame,
-        target_frame=camera_frame,
+        target_frame=bbox_camera_frame,
+        attr_name=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     )
     crop_transform = stamp_directed_transform_v2(
         source_crop,
         transform_id="c1_roi_to_source_camera",
         authority=crop_transform_authority,
         source_frame=roi_frame,
-        target_frame=camera_frame,
+        target_frame=bbox_camera_frame,
         row_identity=crop_geometry.row_identity,
+        attr_name=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
     )
     bbox_roi = _MemoryNode(
         "crop_runs/c1/bbox_roi_xyxy",
@@ -468,10 +553,16 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
             attrs=acquisition_attrs,
         ),
         camera_path: _MemoryNode(camera_path, token=token, attrs=camera_attrs),
+        bbox_camera_path: _MemoryNode(
+            bbox_camera_path,
+            token=token,
+            attrs=dict(bbox_camera_node.attrs),
+        ),
         normalized_node.path: normalized_node,
         transform_authority_node.path: transform_authority_node,
         detect.path: detect,
         crop.path: crop,
+        bbox_roi_frame_node.path: bbox_roi_frame_node,
     }
     arrays = (
         transform_node,
@@ -1520,6 +1611,79 @@ def test_canonical_detection_crop_records_require_live_payload_validation(
     }
 
 
+def test_scanner_v12_accepts_distinct_crop_point_and_bbox_edge_chains() -> None:
+    nodes = _canonical_detection_crop_metadata_nodes()
+    placement = nodes["crop_runs/c1/source_crop_xywh"]
+
+    for attr_name in (
+        DIRECTED_TRANSFORM_V2_ATTR,
+        DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+    ):
+        transform, issues = coordinate_audit._parse_directed_transform_v2_node(
+            placement,
+            record_ref=f"/crop_runs/c1/source_crop_xywh@{attr_name}",
+            nodes=nodes,
+        )
+        assert transform is not None
+        assert not any(
+            issue["severity"] in {"error", "critical"} for issue in issues
+        )
+
+    _surface_type, result = _classify_metadata_surface(
+        nodes,
+        "crop_runs/c1/source_crop_xywh",
+    )
+    assert result["status"] == "numerical_validation_required"
+
+
+def test_scanner_v12_rejects_missing_run_local_crop_bbox_edge_frame() -> None:
+    nodes = dict(_canonical_detection_crop_metadata_nodes())
+    nodes.pop("crop_runs/c1/coordinate_frames/roi_bbox_edge")
+
+    _surface_type, result = _classify_metadata_surface(
+        nodes,
+        "crop_runs/c1/source_crop_xywh",
+    )
+
+    assert result["status"] == "ambiguous_fail_closed"
+    assert "CROP_ROI_BBOX_EDGE_FRAME_INVALID" in {
+        issue["code"] for issue in result["issues"]
+    }
+
+
+def test_scanner_v12_rejects_bbox_derivation_crosswired_to_point_transform() -> None:
+    surface_path = "crop_runs/c1/source_crop_xywh"
+    nodes = _canonical_detection_crop_metadata_nodes()
+    placement = nodes[surface_path]
+    point_transform = placement.attributes[DIRECTED_TRANSFORM_V2_ATTR]
+    nodes = _redigest_observation_record(
+        nodes,
+        owner_path="crop_runs/c1",
+        attr_name=coordinate_audit.CROP_ROI_GEOMETRY_DERIVATION_ATTR,
+        mutate=lambda record: record.__setitem__(
+            "transform_chain",
+            [
+                {
+                    "record_ref": (
+                        f"/{surface_path}@{DIRECTED_TRANSFORM_V2_ATTR}"
+                    ),
+                    "record_sha256": coordinate_audit._fingerprint(
+                        point_transform
+                    ),
+                }
+            ],
+        ),
+        descriptor_paths=(surface_path,),
+    )
+
+    _surface_type, result = _classify_metadata_surface(nodes, surface_path)
+
+    assert result["status"] == "ambiguous_fail_closed"
+    assert "CROP_ROI_GEOMETRY_DERIVATION_INVALID" in {
+        issue["code"] for issue in result["issues"]
+    }
+
+
 @pytest.mark.parametrize(
     ("rowset_path", "surface_path"),
     [
@@ -1563,6 +1727,11 @@ def test_scanner_v12_rejects_noncomplete_canonical_observation_records_even_unse
     ("field", "bad_value"),
     [
         ("direction", "source_camera_image_px_to_source_camera_normalized_xy"),
+        ("destination_pixel_convention", "continuous"),
+        (
+            "formula",
+            "cxcywh_normalized_to_xyxy_edges_using_exact_reference_extent_v1",
+        ),
         ("reference_width_px", 641),
         ("reference_height_px", 481),
         (
@@ -1591,6 +1760,83 @@ def test_detection_projection_semantics_fail_closed_after_valid_redigest(
 
     assert result["status"] == "ambiguous_fail_closed"
     assert "DETECTION_BBOX_PROJECTION_INVALID" in {
+        issue["code"] for issue in result["issues"]
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong_payload",
+        "crosswired_normalized_frame",
+        "wrong_directional_matrix",
+        "wrong_runtime_shape",
+        "forged_model_artifact",
+    ],
+)
+def test_detection_backend_projection_semantics_fail_closed_after_valid_redigest(
+    mutation: str,
+) -> None:
+    surface_path = "detect_runs/d1/bbox_norm_coords"
+
+    def mutate(record: dict[str, Any]) -> None:
+        if mutation == "wrong_payload":
+            record["published_bbox_normalized"]["array_ref"] = (
+                "/detect_runs/d1/bbox_img_xyxy"
+            )
+        elif mutation == "crosswired_normalized_frame":
+            record["source_camera_normalized_frame"] = dict(
+                record["source_camera_bbox_frame"]
+            )
+        elif mutation == "wrong_directional_matrix":
+            record["result_px_to_source_camera_bbox_matrix"][0][0] = 0.5
+        elif mutation == "wrong_runtime_shape":
+            record["runtime_result_validation"][
+                "validated_result_orig_shape_hw"
+            ] = [120, 160]
+        else:
+            record["model_artifact"]["unexpected"] = "forged"
+
+    nodes = _redigest_observation_record(
+        _canonical_detection_crop_metadata_nodes(),
+        owner_path="detect_runs/d1",
+        attr_name=coordinate_audit.DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
+        mutate=mutate,
+        descriptor_paths=(surface_path,),
+    )
+
+    _surface_type, result = _classify_metadata_surface(nodes, surface_path)
+
+    assert result["status"] == "ambiguous_fail_closed"
+    assert "DETECTION_BACKEND_RESULT_PROJECTION_INVALID" in {
+        issue["code"] for issue in result["issues"]
+    }
+
+
+def test_detection_backend_projection_is_required_exactly_once() -> None:
+    surface_path = "detect_runs/d1/bbox_norm_coords"
+    nodes = _canonical_detection_crop_metadata_nodes()
+    surface = nodes[surface_path]
+    attrs = json.loads(json.dumps(surface.attributes))
+    descriptor = attrs["coordinate_descriptor"]
+    record_ref = (
+        "/detect_runs/d1@"
+        f"{coordinate_audit.DETECTION_BACKEND_RESULT_PROJECTION_ATTR}"
+    )
+    descriptor["lineage_refs"] = [
+        pointer
+        for pointer in descriptor["lineage_refs"]
+        if pointer.get("record_ref") != record_ref
+    ]
+    attrs["coordinate_descriptor_sha256"] = (
+        canonical_coordinate_descriptor_v2_digest(descriptor)
+    )
+    nodes[surface_path] = replace(surface, attributes=attrs)
+
+    _surface_type, result = _classify_metadata_surface(nodes, surface_path)
+
+    assert result["status"] == "ambiguous_fail_closed"
+    assert "OBSERVATION_COORDINATE_LINEAGE_REQUIRED" in {
         issue["code"] for issue in result["issues"]
     }
 
@@ -1797,13 +2043,13 @@ def test_acquisition_schema_hidden_under_wrong_attr_fails_inventory_closed(
     }
 
 
-def test_scanner_v12_versions_move_as_one_ruleset() -> None:
+def test_scanner_schema_v12_and_semantic_ruleset_v13_are_independent() -> None:
     assert {
         coordinate_audit.AUDIT_SCHEMA_VERSION,
         coordinate_audit.CHECKPOINT_SCHEMA_VERSION,
         coordinate_audit.ARTIFACT_SCHEMA_VERSION,
-        coordinate_audit.AUDIT_RULESET_VERSION,
     } == {12}
+    assert coordinate_audit.AUDIT_RULESET_VERSION == 13
 
 
 def test_registry_is_query_only_and_every_row_is_preserved(tmp_path: Path) -> None:
@@ -2627,6 +2873,22 @@ def test_normalized_artifact_set_is_complete_and_deterministic(tmp_path: Path) -
     assert coverage["registry_dataset_row_count"] == 2
     assert coverage["represented_dataset_row_count"] == 2
     assert coverage["important_coordinate_surface_count"] == 1
+    assert coverage["audit_ruleset_id"] == coordinate_audit.AUDIT_RULESET_ID
+    assert coverage["audit_ruleset_version"] == 13
+    assert coverage["ruleset_content_sha256"] == (
+        coordinate_audit._ruleset_content_sha256()
+    )
+    artifact_manifest = json.loads(
+        (first_dir / "artifact_manifest.json").read_text(encoding="utf-8")
+    )
+    assert artifact_manifest["schema_version"] == 12
+    assert artifact_manifest["audit_ruleset_id"] == (
+        coordinate_audit.AUDIT_RULESET_ID
+    )
+    assert artifact_manifest["audit_ruleset_version"] == 13
+    assert artifact_manifest["ruleset_content_sha256"] == (
+        coordinate_audit._ruleset_content_sha256()
+    )
     assert {row["migration_class"] for row in migration} == {
         "ambiguous_fail_closed",
         "no_change",
@@ -2655,6 +2917,21 @@ def test_normalized_artifact_set_is_complete_and_deterministic(tmp_path: Path) -
     assert (first_dir / "issue_summary.csv").read_text(encoding="utf-8").startswith(
         "issue_code,severity,occurrence_count"
     )
+    manifest_path = first_dir / "artifact_manifest.json"
+    original_manifest_bytes = manifest_path.read_bytes()
+    forged_manifest = json.loads(original_manifest_bytes)
+    forged_manifest["audit_ruleset_version"] = 12
+    forged_manifest.pop("generation_sha256")
+    forged_manifest["generation_sha256"] = coordinate_audit._fingerprint(
+        forged_manifest
+    )
+    manifest_path.write_text(
+        json.dumps(forged_manifest, sort_keys=True),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="ruleset binding"):
+        coordinate_audit.verify_normalized_artifact_generation(first_dir)
+    manifest_path.write_bytes(original_manifest_bytes)
     (first_dir / "targets.jsonl").write_text("mixed generation\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mismatch"):
         coordinate_audit.verify_normalized_artifact_generation(first_dir)
@@ -3374,7 +3651,7 @@ def test_canonical_physical_profile_preserves_source_camera_directions(
     )
     descriptor = build_canonical_coordinate_descriptor(
         profile_id=PHYSICAL_SOURCE_CAMERA_PROFILE_ID,
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("mm", "mm"),
         reference_width=physical.reference_width,
@@ -5906,7 +6183,7 @@ def test_canonical_v2_descriptor_resolves_exact_identity_and_authority_records(
     )
     descriptor = build_canonical_coordinate_descriptor(
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         reference_width=640,

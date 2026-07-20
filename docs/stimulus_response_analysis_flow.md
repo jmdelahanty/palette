@@ -219,16 +219,23 @@ provenance.inputs:
     source_video_path           ← which video file
     session_uuid                ← unique recording identity
   upstream_lineage:
-    detection_run               ← which detections
-    keypoint_run                ← which keypoints
-    crop_run                    ← which crops
-    source_tracking_run         ← which tracking run
-    source_arena_assignment_run ← which arena assignment
-    fps, pixel_to_mm            ← calibration used
-    kinematics_git_commit       ← code version that produced kinematics
+    schema_id                   ← palette.stimulus_response.track_motion_lineage
+    source_track_motion_run_ref ← exact canonical track-motion run
+    source_track_motion_manifest_ref
+    source_track_motion_manifest_sha256
+    source_track_ids             ← exact sealed track inventory
+    source_fps                   ← canonical run-derivation parameters.fps
+    source_refs                 ← exact source refs sealed by that manifest
 ```
 
-One read gives the full chain from biological metric to source video.
+The motion-manifest digest is the downstream authority. Readers do not copy or
+interpret historical tracking/keypoint aliases, guessed calibration fields, or
+raw nested inputs. One verified manifest resolves the exact upstream chain from
+the biological metric to source geometry. Before creating a run, the writer
+requires `global_metrics["fish_id"]` to equal the sealed track inventory and
+`parameters["fps"]` to equal the sealed canonical track-derivation FPS. It
+rechecks the live source immediately before completion; a legacy duplicate
+run-root `fps` attr is not the authority.
 
 ## Usage
 

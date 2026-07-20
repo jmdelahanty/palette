@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fnmatch import fnmatch
-import json
 from typing import Any, Iterable, Mapping
 
-from fisheye.analysis.chaser_behavior import resolve_configured_chaser_behaviors
-from fisheye.shared.type_conversions import normalize_attr
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.shared.zarr_helpers import (
     safe_int,
     zarr_attrs_dict,
@@ -37,6 +38,7 @@ _INCOMPLETE_STATUSES = {"failed", "running", "pending", "incomplete"}
 class RunHandle:
     reference: ResolvedRun
     group: Any
+    root: Any
     attrs: Mapping[str, Any]
     parent_order: int
     authoritative: bool
@@ -96,6 +98,16 @@ def _parent_authoritative_name(parent: Any) -> str | None:
 def list_family_runs(root: Any, spec: AnalysisFamilySpec) -> tuple[RunHandle, ...]:
     """List usable run candidates for a logical family without mutating the store."""
 
+    if spec.family_id == "stimulus.chaser_distance":
+        # Reporting is a normal presentation consumer, not an inventory bypass.
+        # Pay the full canonical base-publication verification cost, then expose
+        # no raw child while its dashboard/component artifacts remain unsealed.
+        try:
+            load_chaser_distance_run(root, run_name="latest")
+        except ChaserDistanceReadError:
+            return ()
+        return ()
+
     handles: list[RunHandle] = []
     for parent_order, parent_path in enumerate(spec.run_parent_paths):
         parent = zarr_child_group(root, parent_path)
@@ -145,6 +157,7 @@ def list_family_runs(root: Any, spec: AnalysisFamilySpec) -> tuple[RunHandle, ..
                         entity_id=entity_id,
                     ),
                     group=group,
+                    root=root,
                     attrs=attrs,
                     parent_order=parent_order,
                     authoritative=authoritative,
@@ -197,6 +210,7 @@ def select_family_run(
         selected = RunHandle(
             reference=reference,
             group=selected.group,
+            root=selected.root,
             attrs=selected.attrs,
             parent_order=selected.parent_order,
             authoritative=selected.authoritative,
@@ -257,37 +271,14 @@ def discover_stimulus_steps(stimulus_run: RunHandle | None) -> tuple[StimulusSte
 
 
 def discover_chasers(stimulus_run: RunHandle | None) -> tuple[ChaserEntity, ...]:
-    """Resolve configured variable-cardinality chasers from protocol metadata."""
+    """Fail closed until behavior roles have sealed protocol authority.
 
-    if stimulus_run is None:
-        return ()
-    raw_value = stimulus_run.attrs.get("protocol_json")
-    payload: Mapping[str, Any] | None
-    raw: str | None = None
-    if isinstance(raw_value, Mapping):
-        payload = raw_value
-    else:
-        raw = normalize_attr(raw_value)
-        payload = None
-    if payload is None and isinstance(raw, str) and raw.strip():
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError:
-            decoded = None
-        payload = decoded if isinstance(decoded, Mapping) else None
-    if payload is None:
-        return ()
-    try:
-        behaviors = resolve_configured_chaser_behaviors(payload)
-    except ValueError:
-        return ()
-    return tuple(
-        ChaserEntity(
-            chaser_index=int(behavior.chaser_index),
-            behavior_class=str(behavior.behavior_class),
-        )
-        for behavior in behaviors
-    )
+    Raw ``protocol_json`` can describe authoring intent, but it is not a
+    payload-bound scientific identity/behavior contract and reporting must not
+    promote it into presentation labels.
+    """
+
+    return ()
 
 
 def missing_source_requirements(root: Any, spec: AnalysisFamilySpec) -> tuple[str, ...]:
@@ -339,14 +330,121 @@ def find_artifacts(
     entity_id: str | None,
 ) -> tuple[ArtifactReference, ...]:
     pattern = path_pattern.format(entity_id=entity_id if entity_id is not None else "*")
+    container_group = run.group
+    container_path = run.reference.path
+    expected_motion_authority: Mapping[str, Any] | None = None
+    if (
+        run.reference.family_id == "core.track_kinematics"
+        and pattern.startswith("visualizations/")
+    ):
+        parts = run.reference.path.split("/")
+        track_id = safe_int(entity_id)
+        if (
+            len(parts) != 4
+            or parts[:2] != ["analysis", "track_kinematics_runs"]
+            or track_id is None
+            or track_id < 0
+        ):
+            return ()
+        visualization_parent_path = (
+            "analysis/track_kinematics_visualization_runs/"
+            f"{parts[2]}/{parts[3]}/tracks/id_{track_id}"
+        )
+        parent = zarr_child_group(run.root, visualization_parent_path)
+        if parent is None:
+            return ()
+        render_name = _parent_authoritative_name(parent)
+        render = zarr_child_group(parent, render_name) if render_name else None
+        if render is None:
+            return ()
+        render_attrs = zarr_attrs_dict(render)
+        if (
+            str(render_attrs.get(RUN_COMPLETION_STATUS_ATTR) or "").lower()
+            != "complete"
+            or render_attrs.get("stage_selector_eligible") is not True
+        ):
+            return ()
+        authority = render_attrs.get("source_track_motion_authority")
+        track_ref = f"/{run.reference.path}/tracks/id_{track_id}"
+        run_ref = f"/{run.reference.path}"
+        positions_px_ref = f"{track_ref}/positions_px"
+        positions_mm_ref = f"{track_ref}/positions_mm"
+        track_group = zarr_child_group(
+            run.group,
+            f"tracks/id_{track_id}",
+        )
+        positions_px = (
+            track_group.get("positions_px") if track_group is not None else None
+        )
+        positions_px_attrs = zarr_attrs_dict(positions_px)
+        positions_mm = (
+            track_group.get("positions_mm") if track_group is not None else None
+        )
+        positions_mm_attrs = zarr_attrs_dict(positions_mm)
+        if (
+            not isinstance(authority, Mapping)
+            or authority.get("run_ref") != run_ref
+            or authority.get("track_ref") != track_ref
+            or safe_int(authority.get("track_id")) != track_id
+            or authority.get("schema_id")
+            != "palette.track_motion_read_authority"
+            or safe_int(authority.get("schema_version")) != 1
+            or authority.get("motion_manifest_ref")
+            != f"{run_ref}@track_motion_publication_manifest"
+            or authority.get("positions_px_ref") != positions_px_ref
+            or authority.get("track_sample_key_ref")
+            != f"{track_ref}/track_sample_key"
+            or authority.get("source_acquisition_frame_index_ref")
+            != f"{track_ref}/source_acquisition_frame_index"
+            or run.attrs.get("coordinate_binding_status") != "bound_canonical_v2"
+            or str(run.attrs.get(RUN_COMPLETION_STATUS_ATTR) or "").lower()
+            != "complete"
+            or run.attrs.get("stage_selector_eligible") is not True
+            or authority.get("motion_manifest_sha256")
+            != run.attrs.get("track_motion_publication_manifest_sha256")
+            or authority.get("positions_px_coordinate_descriptor_sha256")
+            != positions_px_attrs.get("coordinate_descriptor_sha256")
+            or (
+                positions_mm is None
+                and (
+                    authority.get("positions_mm_ref") is not None
+                    or authority.get(
+                        "positions_mm_coordinate_descriptor_sha256"
+                    )
+                    is not None
+                )
+            )
+            or (
+                positions_mm is not None
+                and (
+                    authority.get("positions_mm_ref") != positions_mm_ref
+                    or authority.get(
+                        "positions_mm_coordinate_descriptor_sha256"
+                    )
+                    != positions_mm_attrs.get("coordinate_descriptor_sha256")
+                )
+            )
+            or safe_int(render_attrs.get("track_id")) != track_id
+        ):
+            return ()
+        expected_motion_authority = authority
+        container_group = render
+        container_path = f"{visualization_parent_path}/{render_name}"
+
     found: list[ArtifactReference] = []
-    for relative_path, node in _iter_artifact_nodes(run.group):
+    for relative_path, node in _iter_artifact_nodes(container_group):
         if not fnmatch(relative_path, pattern):
             continue
         attrs = zarr_attrs_dict(node)
+        if (
+            expected_motion_authority is not None
+            and attrs.get("track_motion_authority")
+            != expected_motion_authority
+        ):
+            continue
         found.append(
             ArtifactReference(
-                path=f"{run.reference.path}/{relative_path}",
+                path=f"{container_path}/{relative_path}",
                 artifact_name=relative_path.rsplit("/", 1)[-1],
                 artifact_role=_as_text(attrs.get("artifact_role")),
                 visualization_contract_id=_as_text(

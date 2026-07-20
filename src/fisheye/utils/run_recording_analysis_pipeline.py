@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.refinement.refine_keypoints import (
+    require_future_normal_refined_keypoint_publication,
+)
 from fisheye.utils.import_recording_analysis import (
     RecordingAnalysisPlan,
     RecordingImportOptions,
@@ -204,6 +207,8 @@ def process_recording_analysis_pipeline(
     registry: Optional[Registry] = None,
     logger: Optional[Callable[..., None]] = None,
 ) -> RecordingPipelineResult:
+    if opts.refine_keypoints:
+        require_future_normal_refined_keypoint_publication()
     import_result = process_recording_import(plan, opts.import_opts, logger=logger)
     if not import_result.ok:
         return RecordingPipelineResult(
@@ -471,7 +476,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--refine-keypoints",
         action="store_true",
-        help="Run refine_keypoints after keypoints (or existing keypoints if --keypoints is omitted).",
+        help=(
+            "Request refine_keypoints after keypoints; future-normal refined "
+            "publication currently fails closed before opening the archive."
+        ),
     )
     parser.add_argument(
         "--keypoints-config",

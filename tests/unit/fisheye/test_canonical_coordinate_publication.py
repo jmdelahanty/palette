@@ -146,6 +146,103 @@ def test_public_verifier_accepts_only_the_sealed_live_binding() -> None:
     }
 
 
+def test_source_camera_unit_vectors_round_trip_without_inheriting_point_semantics() -> None:
+    from tests.unit.fisheye.test_directed_transform_chain import _world
+
+    world = _world(convention="continuous")
+    _, _, identity = _identity(archive_token=world["archive_token"])
+    vectors = _Array(
+        np.asarray([[1.0, 0.0], [0.0, -1.0], [np.nan, np.nan]], dtype=np.float32),
+        path="analysis/detect_runs/d1/body_forward_axis_xy",
+        archive_token=world["archive_token"],
+    )
+    binding = build_bound_canonical_coordinate_descriptor(
+        vectors,
+        profile_id="source_camera_image_px.unit_vector_y_down.v1",
+        geometry_type="vector_xy",
+        components=("x", "y"),
+        component_units=("unitless", "unitless"),
+        pixel_convention="not_applicable",
+        row_identity=identity,
+        reference_frame_authority=world["camera_frame"],
+        source_camera_overlay_status=CANONICAL_OVERLAY_NOT_SUITABLE,
+    )
+    stamp_bound_canonical_coordinate_descriptor(binding)
+    loaded = load_bound_canonical_coordinate_descriptor(
+        vectors,
+        row_identity=identity,
+        reference_frame_authority=world["camera_frame"],
+    )
+    assert loaded.descriptor.profile_id == "source_camera_image_px.unit_vector_y_down.v1"
+    assert loaded.descriptor.component_units == ("unitless", "unitless")
+
+    with pytest.raises(ValueError, match="Profile does not permit 'direct'"):
+        build_bound_canonical_coordinate_descriptor(
+            vectors,
+            profile_id="source_camera_image_px.unit_vector_y_down.v1",
+            geometry_type="vector_xy",
+            components=("x", "y"),
+            component_units=("unitless", "unitless"),
+            pixel_convention="not_applicable",
+            row_identity=identity,
+            reference_frame_authority=world["camera_frame"],
+            source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "geometry_type", "shape", "units"),
+    (
+        (
+            "source_camera_image_px.unit_vector_y_down.v1",
+            "vector_sequence_xy",
+            (3, 5, 2),
+            ("unitless", "unitless"),
+        ),
+        (
+            "source_camera_image_px.displacement_vector_y_down.v1",
+            "vector_xy",
+            (3, 2),
+            ("px", "px"),
+        ),
+    ),
+)
+def test_nonpositional_source_camera_vectors_bind_exact_frame_without_pixel_sampling(
+    profile_id: str,
+    geometry_type: str,
+    shape: tuple[int, ...],
+    units: tuple[str, str],
+) -> None:
+    from tests.unit.fisheye.test_directed_transform_chain import _world
+
+    world = _world(convention="continuous")
+    _, _, identity = _identity(archive_token=world["archive_token"])
+    values = _Array(
+        np.zeros(shape, dtype=np.float32),
+        path="analysis/detect_runs/d1/nonpositional_vector",
+        archive_token=world["archive_token"],
+    )
+    binding = build_bound_canonical_coordinate_descriptor(
+        values,
+        profile_id=profile_id,
+        geometry_type=geometry_type,
+        components=("x", "y"),
+        component_units=units,
+        pixel_convention="not_applicable",
+        row_identity=identity,
+        reference_frame_authority=world["camera_frame"],
+        source_camera_overlay_status=CANONICAL_OVERLAY_NOT_SUITABLE,
+    )
+    stamp_bound_canonical_coordinate_descriptor(binding)
+    loaded = load_bound_canonical_coordinate_descriptor(
+        values,
+        row_identity=identity,
+        reference_frame_authority=world["camera_frame"],
+    )
+    assert loaded.descriptor.profile_id == profile_id
+    assert loaded.descriptor.pixel_convention == "not_applicable"
+
+
 def test_generic_extent_cannot_authorize_source_camera_coordinates() -> None:
     _, _, identity = _identity()
     camera = _Array(

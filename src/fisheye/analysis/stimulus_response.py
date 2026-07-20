@@ -60,7 +60,6 @@ from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.track_kinematics_io import (
-    list_track_ids,
     load_track_kinematics_track,
     resolve_track_kinematics_run,
 )
@@ -150,57 +149,197 @@ _json_safe_attr_value = json_attr_safe
 _json_safe_attrs = json_attr_safe_mapping
 
 
+_VERIFIED_TRACK_MOTION_LINEAGE_SEAL = object()
+
+
+@dataclass(frozen=True, init=False)
+class VerifiedTrackMotionLineage:
+    """Live proof that one exact track-motion publication remains unchanged."""
+
+    record: Mapping[str, Any]
+    run_path: str
+    manifest_sha256: str
+    track_ids: tuple[int, ...]
+    fps: float
+    _bound_run: Any = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        record: Mapping[str, Any],
+        run_path: str,
+        manifest_sha256: str,
+        track_ids: Sequence[int],
+        fps: float,
+        bound_run: Any,
+        _verification_seal: object | None = None,
+    ) -> None:
+        if _verification_seal is not _VERIFIED_TRACK_MOTION_LINEAGE_SEAL:
+            raise ValueError(
+                "Track-motion lineage must be minted by the strict live loader."
+            )
+        object.__setattr__(self, "record", dict(record))
+        object.__setattr__(self, "run_path", str(run_path).strip("/"))
+        object.__setattr__(self, "manifest_sha256", str(manifest_sha256))
+        object.__setattr__(
+            self,
+            "track_ids",
+            tuple(int(value) for value in track_ids),
+        )
+        object.__setattr__(self, "fps", float(fps))
+        object.__setattr__(self, "_bound_run", bound_run)
+        object.__setattr__(self, "_seal", _verification_seal)
+
+    def assert_verified(self) -> None:
+        if self._seal is not _VERIFIED_TRACK_MOTION_LINEAGE_SEAL:
+            raise ValueError("Track-motion lineage proof is not loader sealed.")
+        self._bound_run.assert_verified()
+        expected = _expected_track_motion_lineage_record(self._bound_run)
+        if (
+            str(getattr(self._bound_run.run_group, "path", "")).strip("/")
+            != self.run_path
+            or self._bound_run.manifest_sha256 != self.manifest_sha256
+            or tuple(
+                int(track.track_id) for track in self._bound_run.tracks
+            )
+            != self.track_ids
+            or not math.isclose(
+                float(expected["source_fps"]),
+                self.fps,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            or _json_safe_attr_value(dict(self.record)) != expected
+        ):
+            raise ValueError("Track-motion lineage changed after it was loaded.")
+
+
+def _manifest_track_run_derivation(bound: Any) -> Mapping[str, Any]:
+    binding = bound.manifest.get("run_derivation")
+    record = binding.get("record") if isinstance(binding, Mapping) else None
+    if not isinstance(record, Mapping):
+        raise ValueError("Verified track-motion manifest lacks run derivation.")
+    return record
+
+
+def _expected_track_motion_lineage_record(bound: Any) -> Dict[str, Any]:
+    manifest = bound.manifest
+    derivation_record = _manifest_track_run_derivation(bound)
+    source_refs = (
+        derivation_record.get("source_refs")
+        if isinstance(derivation_record, Mapping)
+        else None
+    )
+    parameters = derivation_record.get("parameters")
+    run_path = str(getattr(bound.run_group, "path", "")).strip("/")
+    digest = bound.manifest_sha256
+    track_ids = tuple(int(track.track_id) for track in bound.tracks)
+    try:
+        fps = float(parameters["fps"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Verified track-motion derivation lacks exact canonical fps."
+        ) from exc
+    if (
+        not run_path
+        or not isinstance(source_refs, Mapping)
+        or not isinstance(parameters, Mapping)
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or not track_ids
+        or track_ids != tuple(sorted(set(track_ids)))
+        or not np.isfinite(fps)
+        or fps <= 0
+    ):
+        raise ValueError("Verified track-motion lineage record is incomplete.")
+    return {
+        "schema_id": "palette.stimulus_response.track_motion_lineage",
+        "schema_version": 1,
+        "source_track_motion_run_ref": f"/{run_path}",
+        "source_track_motion_manifest_ref": (
+            f"/{run_path}@track_motion_publication_manifest"
+        ),
+        "source_track_motion_manifest_sha256": digest,
+        "source_track_ids": list(track_ids),
+        "source_fps": fps,
+        "source_refs": _json_safe_attr_value(dict(source_refs)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Input loading
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_upstream_lineage(kin_group) -> Dict[str, Any]:
-    """Read the track_kinematics run's upstream provenance for embedding."""
-    lineage: Dict[str, Any] = {}
-    attrs = kin_group.attrs if hasattr(kin_group, "attrs") else {}
+def _load_verified_track_motion_lineage(
+    root: zarr.Group,
+    kin_group: zarr.Group,
+) -> VerifiedTrackMotionLineage:
+    """Reload one sealed run and extract source refs from its bound manifest."""
 
-    # Direct lineage attrs written by track_kinematics.
-    for key in (
-        "source_tracking_run",
-        "source_arena_assignment_run",
-        "method",
-        "fps",
-        "pixel_to_mm",
-        "coordinate_space",
-    ):
-        val = attrs.get(key)
-        if val is not None:
-            lineage[key] = val
+    from fisheye.analysis.track_kinematics import load_bound_track_motion_run
 
-    # The inputs dict (if present) has the full upstream chain.
-    inputs = attrs.get("inputs")
-    if isinstance(inputs, dict):
-        for key in (
-            "detection_run",
-            "detection_path",
-            "detection_variant",
-            "source_detect_run",
-            "keypoint_run",
-            "keypoint_variant",
-            "base_keypoint_run",
-            "crop_run",
+    bound = load_bound_track_motion_run(root, kin_group)
+    record = _expected_track_motion_lineage_record(bound)
+    run_path = str(record["source_track_motion_run_ref"]).strip("/")
+    manifest_sha256 = str(record["source_track_motion_manifest_sha256"])
+    track_ids = tuple(int(value) for value in record["source_track_ids"])
+    fps = float(record["source_fps"])
+    evidence = VerifiedTrackMotionLineage(
+        record=record,
+        run_path=run_path,
+        manifest_sha256=manifest_sha256,
+        track_ids=track_ids,
+        fps=fps,
+        bound_run=bound,
+        _verification_seal=_VERIFIED_TRACK_MOTION_LINEAGE_SEAL,
+    )
+    evidence.assert_verified()
+    return evidence
+
+
+def _snapshot_upstream_lineage(
+    root: zarr.Group,
+    kin_group,
+    tracks: Sequence[Any],
+) -> VerifiedTrackMotionLineage:
+    """Bind downstream lineage to one freshly verified track-motion run."""
+
+    if not tracks:
+        raise ValueError("Track-motion lineage requires at least one verified track.")
+    evidence = _load_verified_track_motion_lineage(
+        root,
+        kin_group,
+    )
+    run_path = evidence.run_path
+    manifest_sha256 = evidence.manifest_sha256
+    observed_track_ids: list[int] = []
+    for track in tracks:
+        if (
+            getattr(track, "authority_status", None)
+            != "verified_canonical_track_motion_v1"
+            or getattr(track, "motion_manifest_sha256", None) != manifest_sha256
+            or str(getattr(track, "run_path", "")).strip("/") != run_path
         ):
-            val = inputs.get(key)
-            if val is not None:
-                lineage[key] = val
-
-    # Provenance contract info if available.
-    prov = attrs.get("provenance")
-    if isinstance(prov, dict):
-        contract = prov.get("contract")
-        if isinstance(contract, dict):
-            lineage["provenance_contract"] = contract
-        git = prov.get("git")
-        if isinstance(git, dict):
-            lineage["kinematics_git_commit"] = git.get("commit")
-
-    return lineage
+            raise ValueError(
+                "Stimulus-response inputs do not share one freshly verified "
+                "track-motion publication."
+            )
+        try:
+            observed_track_ids.append(int(getattr(track, "track_id")))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Stimulus-response inputs do not share one freshly verified "
+                "track-motion publication."
+            ) from exc
+    if tuple(observed_track_ids) != evidence.track_ids:
+        raise ValueError(
+            "Stimulus-response track inventory differs from the freshly verified "
+            "track-motion publication."
+        )
+    evidence.assert_verified()
+    return evidence
 
 
 def load_track_data(
@@ -209,7 +348,7 @@ def load_track_data(
     kinematics_type: str = "offline",
     kinematics_run: Optional[str] = None,
     console: Optional[Console] = None,
-) -> Tuple[List[DenseTrack], str, int, Dict[str, Any]]:
+) -> Tuple[List[DenseTrack], str, int, VerifiedTrackMotionLineage]:
     """Load track kinematics and expand sparse arrays to dense frame-aligned representation.
 
     Returns
@@ -220,9 +359,8 @@ def load_track_data(
         Resolved kinematics run name.
     n_frames : int
         Total frames (max frame_index + 1 across all tracks).
-    upstream_lineage : dict
-        Snapshot of the kinematics run's upstream provenance (detection run,
-        keypoint run, crop run, tracking run, etc.).
+    upstream_lineage : VerifiedTrackMotionLineage
+        Live exact-run proof plus the persisted lineage record.
     """
     console = console or Console()
 
@@ -232,11 +370,12 @@ def load_track_data(
         scope=kinematics_type,
     )
 
-    fps = float(kin_group.attrs.get("fps", 30.0))
-
-    track_ids = list_track_ids(kin_group)
-    if not track_ids:
-        raise ValueError(f"No tracks found in {run_path}/")
+    initial_lineage = _load_verified_track_motion_lineage(root, kin_group)
+    if initial_lineage.run_path != run_path:
+        raise ValueError("Resolved track run differs from its strict bound child.")
+    kin_group = initial_lineage._bound_run.run_group
+    fps = initial_lineage.fps
+    track_ids = initial_lineage.track_ids
 
     # First pass: determine total frame span and validate inputs.
     max_frame = 0
@@ -315,7 +454,7 @@ def load_track_data(
             cumulative_path_distance_mm=cumulative_path_distance_mm,
         ))
 
-    upstream_lineage = _snapshot_upstream_lineage(kin_group)
+    upstream_lineage = _snapshot_upstream_lineage(root, kin_group, sparse_tracks)
 
     console.print(
         f"  Loaded {len(tracks)} track(s) from {run_path}/ "
@@ -1912,7 +2051,7 @@ def write_stimulus_response_run(
     source_kinematics_type: str,
     source_stimulus_run: str,
     source_bout_run: Optional[str] = None,
-    upstream_lineage: Optional[Dict[str, Any]] = None,
+    upstream_lineage: Optional[VerifiedTrackMotionLineage] = None,
     parameters: Dict[str, Any],
     run_name: Optional[str] = None,
     overwrite: bool = False,
@@ -1922,6 +2061,64 @@ def write_stimulus_response_run(
 ) -> str:
     """Write stimulus response run to zarr."""
     console = console or Console()
+    if (
+        not isinstance(upstream_lineage, VerifiedTrackMotionLineage)
+        or upstream_lineage._seal is not _VERIFIED_TRACK_MOTION_LINEAGE_SEAL
+    ):
+        raise ValueError(
+            "Stimulus-response publication requires live verified track-motion lineage."
+        )
+    upstream_lineage.assert_verified()
+    lineage_parts = upstream_lineage.run_path.split("/")
+    if (
+        len(lineage_parts) != 4
+        or lineage_parts[:2] != ["analysis", "track_kinematics_runs"]
+        or lineage_parts[2] != source_kinematics_type
+        or lineage_parts[3] != source_kinematics_run
+    ):
+        raise ValueError(
+            "Stimulus-response source run/type arguments conflict with verified lineage."
+        )
+    fish_id_values = np.asarray(global_metrics.get("fish_id"))
+    if (
+        fish_id_values.ndim != 1
+        or fish_id_values.dtype.kind not in "iu"
+        or fish_id_values.dtype.kind == "b"
+    ):
+        raise ValueError(
+            "Stimulus-response global fish_id must be one exact integer track inventory."
+        )
+    payload_track_ids = tuple(int(value) for value in fish_id_values.tolist())
+    if (
+        not payload_track_ids
+        or payload_track_ids != tuple(sorted(set(payload_track_ids)))
+        or payload_track_ids != upstream_lineage.track_ids
+    ):
+        raise ValueError(
+            "Stimulus-response fish IDs conflict with verified track-motion lineage."
+        )
+    try:
+        parameter_fps = float(parameters["fps"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Stimulus-response parameters require the exact verified track fps."
+        ) from exc
+    if (
+        not np.isfinite(parameter_fps)
+        or parameter_fps <= 0
+        or not math.isclose(
+            parameter_fps,
+            upstream_lineage.fps,
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+    ):
+        raise ValueError(
+            "Stimulus-response fps conflicts with verified track-motion lineage."
+        )
+    upstream_lineage_record = _json_safe_attr_value(
+        dict(upstream_lineage.record)
+    )
     if layout not in {STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1, STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}:
         raise ValueError(
             "Unsupported stimulus_response layout "
@@ -1945,7 +2142,7 @@ def write_stimulus_response_run(
     mark_run_started(run_group, run_name=run_name, stage="stimulus_response")
 
     # Provenance.
-    fish_ids = global_metrics["fish_id"].tolist()
+    fish_ids = list(payload_track_ids)
     inputs_dict: Dict[str, Any] = {
         "source_track_kinematics_run": (
             f"analysis/track_kinematics_runs/{source_kinematics_type}/"
@@ -1977,8 +2174,7 @@ def write_stimulus_response_run(
                 archive_identity["session_uuid"] = str(val) if isinstance(val, bytes) else val
     if archive_identity:
         inputs_dict["archive"] = archive_identity
-    if upstream_lineage:
-        inputs_dict["upstream_lineage"] = upstream_lineage
+    inputs_dict["upstream_lineage"] = upstream_lineage_record
 
     safe_parameters = _json_safe_attr_value(parameters)
     safe_inputs = _json_safe_attr_value(inputs_dict)
@@ -2032,6 +2228,7 @@ def write_stimulus_response_run(
             f"  Wrote stimulus_response_runs/{run_name}/ "
             f"({len(steps)} steps, {len(fish_ids)} fish, layout {layout})"
         )
+        upstream_lineage.assert_verified()
         mark_run_complete(
             run_group,
             parent_group=parent,
@@ -2215,6 +2412,7 @@ def write_stimulus_response_run(
         f"  Wrote stimulus_response_runs/{run_name}/ "
         f"({len(steps)} steps, {len(fish_ids)} fish)"
     )
+    upstream_lineage.assert_verified()
     mark_run_complete(
         run_group,
         parent_group=parent,
@@ -2449,10 +2647,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         console=console,
     )
 
-    fps_attr = root.get("analysis", {})
-    kin_parent = f"analysis/track_kinematics_runs/{args.track_kinematics_type}"
-    kin_group, _ = resolve_zarr_run(root, kin_parent, run_name=kin_run)
-    fps = float(kin_group.attrs.get("fps", 30.0))
+    fps = upstream_lineage.fps
 
     steps, stim_run, protocol = parse_protocol_steps(
         root,

@@ -1,14 +1,53 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis import subject_shape_runs as mod
 from fisheye.analysis_workflows.materializers import subject_shape as materializer
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
+from fisheye.shared.refined_subject_mask_mutation import (
+    RefinedSubjectMaskMutationError,
+)
+from fisheye.shared.subject_shape_coordinate_publication import (
+    SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+    SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
+    SUBJECT_SHAPE_DERIVATION_ATTR,
+    SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR,
+    SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    SUBJECT_SHAPE_PUBLICATION_POLICY,
+    SUBJECT_SHAPE_PUBLICATION_POLICY_ATTR,
+    SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
+    SubjectShapeCoordinatePublicationError,
+    load_persisted_subject_shape_coordinate_publication,
+)
+from tests.unit.fisheye.test_subject_shape_coordinate_publication import (
+    _canonical_refined_archive,
+)
+
+
+@pytest.fixture(scope="module")
+def canonical_refined_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    template_parent = tmp_path_factory.mktemp("canonical-subject-shape-template")
+    _root, _refined = _canonical_refined_archive(template_parent)
+    return template_parent / "canonical.zarr"
+
+
+@pytest.fixture
+def canonical_refined_root(
+    tmp_path: Path,
+    canonical_refined_template: Path,
+) -> zarr.Group:
+    target = tmp_path / "canonical.zarr"
+    shutil.copytree(canonical_refined_template, target)
+    return zarr.open_group(str(target), mode="a", use_consolidated=False)
 
 
 def _patch_provenance(monkeypatch) -> None:
@@ -118,21 +157,16 @@ def test_snout_join_prefers_medial_head_region_over_branch_endpoint() -> None:
     assert abs(float(np.dot(path[selected] - origin, left))) < abs(float(np.dot(path[0] - origin, left)))
 
 
-def _add_component_row_revisions(root: zarr.Group, revisions: dict[str, list[int]]) -> None:
-    run = root["refined_subject_masks_runs"]["refined_001"]
-    components = run.require_group("components")
-    for component_name, values in revisions.items():
-        component = components.require_group(component_name)
-        component.create_array("row_revision", data=np.asarray(values, dtype=np.int64), overwrite=True)
-
-
-def test_write_subject_shape_run_group_creates_coherent_components_and_relations(monkeypatch) -> None:
+def test_write_subject_shape_run_group_creates_coherent_components_and_relations(
+    monkeypatch,
+    canonical_refined_root: zarr.Group,
+) -> None:
     _patch_provenance(monkeypatch)
-    root = _build_refined_root()
+    root = canonical_refined_root
 
     summary = mod.write_subject_shape_run_group(
         root,
-        refined_run="refined_001",
+        refined_run="r1",
         run_name="shape_001",
         chunk_size=2,
         include_chunk_timings=True,
@@ -142,9 +176,9 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     run = root["analysis"]["subject_shape_runs"]["shape_001"]
     assert root["analysis"]["subject_shape_runs"].attrs["latest"] == "shape_001"
     assert run.attrs["schema_id"] == "analysis.subject_shape_runs"
-    assert run.attrs["schema_version"] == 3
-    assert run.attrs["method"] == "subject_shape_from_refined_masks_v10"
-    assert run.attrs["method_version"] == 10
+    assert run.attrs["schema_version"] == 4
+    assert run.attrs["method"] == "subject_shape_from_refined_masks_v11"
+    assert run.attrs["method_version"] == 11
     assert run.attrs["snout_tip_estimator"] == "subject_body_contour_max_forward_projection_v1"
     assert run.attrs["centerline_method"] == "snout_anchored_skeleton_longest_endpoint_path_v1"
     assert run.attrs["centerline_skeleton_method"] == "skeleton_longest_endpoint_path_v1"
@@ -152,17 +186,20 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert run.attrs["centerline_snout_join_method"] == "body_frame_lateral_min_head_region_v1"
     assert run.attrs["head_endpoint_semantics"] == "validated_snout_tip"
     assert run.attrs["centerline_snout_check_method"] == "head_endpoint_to_snout_distance_v1"
-    assert run.attrs["source_refined_subject_masks_run"] == "refined_001"
+    assert run.attrs["source_refined_subject_masks_run"] == "r1"
     assert run.attrs["component_names"] == ["subject_body", "swim_bladder", "eye_left", "eye_right"]
-    assert run["row_index"]["frame_indices"][:].tolist() == [10, 11, 12]
-    assert run["row_index"]["source_refined_row_ids"][:].tolist() == [100, 101, 102]
+    np.testing.assert_array_equal(run["instance_key"][:], root["refined_subject_masks_runs/r1/instance_key"][:])
+    np.testing.assert_array_equal(
+        run["source_acquisition_frame_index"][:],
+        root["refined_subject_masks_runs/r1/source_acquisition_frame_index"][:],
+    )
     source_revisions = run["source_refined_subject_masks"]
     assert source_revisions.attrs["schema_id"] == "analysis.subject_shape.source_refined_subject_masks_v1"
-    assert source_revisions.attrs["source_run"] == "refined_001"
+    assert source_revisions.attrs["source_run"] == "r1"
     assert source_revisions.attrs["component_names"] == ["subject_body", "swim_bladder", "eye_left", "eye_right"]
     np.testing.assert_array_equal(
         np.asarray(source_revisions["row_revision"][:], dtype=np.int64),
-        np.zeros((3, 4), dtype=np.int64),
+        np.zeros((2, 4), dtype=np.int64),
     )
     np.testing.assert_array_equal(
         np.asarray(source_revisions["row_revision_available"][:], dtype=bool),
@@ -170,30 +207,33 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     )
 
     body = run["components"]["subject_body"]
-    assert body["mask_present"][:].tolist() == [True, True, True]
+    assert body["mask_present"][:].tolist() == [True, True]
     assert np.all(np.asarray(body["principal_axis_valid"][:], dtype=bool))
     assert np.all(np.asarray(body["principal_axis_length_px"][:], dtype=np.float32) > 0)
 
     eye_pair = run["relations"]["eye_pair"]
-    assert eye_pair["separation_valid"][:].tolist() == [True, True, True]
-    assert np.all(np.asarray(eye_pair["separation_px"][:], dtype=np.float32) > 0)
+    assert eye_pair["separation_valid"][:].tolist() == [True, False]
+    assert float(eye_pair["separation_px"][0]) > 0
+    assert np.isnan(float(eye_pair["separation_px"][1]))
     swim_to_body = run["relations"]["swim_bladder_to_body"]
-    assert swim_to_body["relation_valid"][:].tolist() == [True, True, True]
+    assert swim_to_body["relation_valid"][:].tolist() == [True, True]
     eyes_to_body = run["relations"]["eyes_to_body"]
-    assert eyes_to_body["left_eye_relation_valid"][:].tolist() == [True, True, True]
+    assert eyes_to_body["left_eye_relation_valid"][:].tolist() == [True, True]
 
     body_frame = run["body_frame"]
     assert body_frame.attrs["body_frame_estimator"] == "mask_component_axis"
-    assert body_frame["valid"][:].tolist() == [True, True, True]
+    assert body_frame["valid"][:].tolist() == [True, False]
     forward = np.asarray(body_frame["forward_axis_xy"][:], dtype=np.float32)
-    assert np.all(np.isfinite(forward))
-    assert np.all(forward[:, 1] < 0.0)
+    assert np.all(np.isfinite(forward[0]))
+    assert np.all(np.isnan(forward[1]))
+    assert forward[0, 1] < 0.0
 
     swim = run["components"]["swim_bladder"]
-    assert swim["caudal_contour_valid"][:].tolist() == [True, True, True]
+    assert swim["caudal_contour_valid"][:].tolist() == [True, False]
     caudal = np.asarray(swim["caudal_contour_point_xy"][:], dtype=np.float32)
-    assert np.all(np.isfinite(caudal))
-    assert np.all(caudal[:, 1] > 10.0)
+    assert np.all(np.isfinite(caudal[0]))
+    assert np.all(np.isnan(caudal[1]))
+    assert float(caudal[0, 1]) > 10.0
 
     assert body.attrs["centerline_method"] == "snout_anchored_skeleton_longest_endpoint_path_v1"
     assert body.attrs["centerline_skeleton_method"] == "skeleton_longest_endpoint_path_v1"
@@ -204,77 +244,87 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert body.attrs["centerline_snout_check_method"] == "head_endpoint_to_snout_distance_v1"
     assert body.attrs["bspline_method"] == "centerline_scipy_splprep_v1"
     assert body.attrs["bspline_fit_mode"] == "interpolating"
-    assert body["snout_tip_valid"][:].tolist() == [True, True, True]
+    assert body["snout_tip_valid"][:].tolist() == [True, False]
     snout = np.asarray(body["snout_tip_xy"][:], dtype=np.float32)
-    assert np.all(np.isfinite(snout))
-    assert body["centerline_valid"][:].tolist() == [True, True, True]
+    assert np.all(np.isfinite(snout[0]))
+    assert np.all(np.isnan(snout[1]))
+    assert body["centerline_valid"][:].tolist() == [True, False]
     centerline = np.asarray(body["centerline_xy"][:], dtype=np.float32)
-    assert centerline.shape == (3, mod.CENTERLINE_SAMPLE_COUNT, 2)
+    assert centerline.shape == (2, mod.CENTERLINE_SAMPLE_COUNT, 2)
     head = np.asarray(body["head_endpoint_xy"][:], dtype=np.float32)
     tail = np.asarray(body["tail_tip_xy"][:], dtype=np.float32)
-    np.testing.assert_allclose(head, snout, atol=1e-5)
+    np.testing.assert_allclose(head, snout, atol=1e-5, equal_nan=True)
     np.testing.assert_allclose(
         np.asarray(body["head_endpoint_to_snout_distance_px"][:], dtype=np.float32),
-        np.zeros((3,), dtype=np.float32),
+        np.asarray([0.0, np.nan], dtype=np.float32),
         atol=1e-5,
+        equal_nan=True,
     )
-    assert body["centerline_reaches_snout"][:].tolist() == [True, True, True]
+    assert body["centerline_reaches_snout"][:].tolist() == [True, False]
     assert _decode_reason_row(body["centerline_snout_check_reason_bytes"][0]) == "ok"
-    assert np.all(head[:, 1] < tail[:, 1])
-    assert body["tail_base_valid"][:].tolist() == [True, True, True]
-    assert np.all(np.asarray(body["body_arclength_px"][:], dtype=np.float32) > 0)
-    assert np.all(np.asarray(body["tail_segment_arclength_px"][:], dtype=np.float32) >= 0)
-    assert body["bspline_valid"][:].tolist() == [True, True, True]
-    assert body["tail_sample_valid"][:].tolist() == [False, False, False]
-    assert _decode_reason_row(body["tail_sample_failure_reason_bytes"][0]) == "tail_segment_too_short"
-    assert np.asarray(body["bspline_sample_xy"][:], dtype=np.float32).shape == (3, mod.CENTERLINE_SAMPLE_COUNT, 2)
-    assert np.asarray(body["tail_sample_xy"][:], dtype=np.float32).shape == (3, mod.TAIL_SAMPLE_COUNT, 2)
+    assert _decode_reason_row(body["centerline_snout_check_reason_bytes"][1]) == (
+        "missing_snout_tip"
+    )
+    assert float(head[0, 1]) < float(tail[0, 1])
+    assert np.all(np.isnan(head[1]))
+    assert np.all(np.isnan(tail[1]))
+    assert body["tail_base_valid"][:].tolist() == [True, False]
+    body_arclength = np.asarray(body["body_arclength_px"][:], dtype=np.float32)
+    tail_arclength = np.asarray(
+        body["tail_segment_arclength_px"][:], dtype=np.float32
+    )
+    assert float(body_arclength[0]) > 0
+    assert np.isnan(float(body_arclength[1]))
+    assert float(tail_arclength[0]) >= 0
+    assert np.isnan(float(tail_arclength[1]))
+    assert body["bspline_valid"][:].tolist() == [True, False]
+    assert np.asarray(body["bspline_sample_xy"][:], dtype=np.float32).shape == (2, mod.CENTERLINE_SAMPLE_COUNT, 2)
+    assert np.asarray(body["tail_sample_xy"][:], dtype=np.float32).shape == (2, mod.TAIL_SAMPLE_COUNT, 2)
     np.testing.assert_allclose(
         np.asarray(body["tail_sample_s"][:], dtype=np.float32),
         np.linspace(0.0, 1.0, mod.TAIL_SAMPLE_COUNT, dtype=np.float32),
     )
-    assert np.all(np.asarray(body["bspline_arc_length_px"][:], dtype=np.float32) > 0)
+    bspline_arclength = np.asarray(
+        body["bspline_arc_length_px"][:], dtype=np.float32
+    )
+    assert float(bspline_arclength[0]) > 0
+    assert np.isnan(float(bspline_arclength[1]))
     assert run.attrs["provenance"]["stage"] == "analysis.subject_shape_runs"
     assert run.attrs["subject_shape_chunk_timing_storage"] == "embedded_full_records"
-    assert len(run.attrs["subject_shape_chunk_timings"]) == 2
+    assert len(run.attrs["subject_shape_chunk_timings"]) == 1
 
 
-def test_write_subject_shape_run_group_can_read_source_and_write_separate_root(
+def test_direct_canonical_writer_rejects_separate_root(
     monkeypatch,
     tmp_path: Path,
+    canonical_refined_root: zarr.Group,
 ) -> None:
     _patch_provenance(monkeypatch)
-    source_path = tmp_path / "source.zarr"
+    source_path = tmp_path / "canonical.zarr"
     output_path = tmp_path / "output.zarr"
-    source = _build_refined_root(source_path)
+    source = canonical_refined_root
     output = zarr.open_group(str(output_path), mode="w", zarr_format=3)
 
-    summary = mod.write_subject_shape_run_group(
-        source,
-        zarr_path=source_path,
-        output_root=output,
-        output_zarr_path=output_path,
-        refined_run="refined_001",
-        run_name="shape_separate",
-        chunk_size=2,
-        execution_backend="dask_worker_chunks",
-        scheduler="single-threaded",
-        centerline_crop_to_foreground=True,
-        native_threads=1,
-    )
-
-    assert summary["status"] == "updated"
-    assert "analysis" not in source
-    run = output["analysis"]["subject_shape_runs"]["shape_separate"]
-    assert run.attrs["palette_run_completion_status"] == "complete"
-    assert run.attrs["centerline_crop_to_foreground"] is True
-    assert run.attrs["native_threads_per_worker"] == 1
-    assert run["row_index"]["frame_indices"][:].tolist() == [10, 11, 12]
+    with pytest.raises(ValueError, match="same archive"):
+        mod.write_subject_shape_run_group(
+            source,
+            zarr_path=source_path,
+            output_root=output,
+            output_zarr_path=output_path,
+            refined_run="r1",
+            run_name="shape_separate",
+            chunk_size=2,
+            execution_backend="dask_worker_chunks",
+            scheduler="single-threaded",
+            centerline_crop_to_foreground=True,
+            native_threads=1,
+        )
 
 
 def test_subject_shape_materializer_computes_shards_and_publishes(
     monkeypatch,
     tmp_path: Path,
+    canonical_refined_root: zarr.Group,
 ) -> None:
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(
@@ -282,17 +332,17 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
         "write_best_effort_run_lineage_attrs",
         lambda *args, **kwargs: None,
     )
-    source_path = tmp_path / "source.zarr"
-    source = _build_refined_root(source_path)
+    source_path = tmp_path / "canonical.zarr"
+    source = canonical_refined_root
     masks_before = np.asarray(
-        source["refined_subject_masks_runs"]["refined_001"]["masks_roi"][:]
+        source["refined_subject_masks_runs"]["r1"]["masks_roi"][:]
     ).copy()
     scratch = tmp_path / "scratch"
 
     planned = materializer.materialize_subject_shape(
         source_path,
         scratch_root=scratch,
-        refined_run="refined_001",
+        refined_run="r1",
         run_name="shape_materialized",
         block_rows=2,
         output_shard_rows=4,
@@ -311,7 +361,7 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
     result = materializer.materialize_subject_shape(
         source_path,
         scratch_root=scratch,
-        refined_run="refined_001",
+        refined_run="r1",
         run_name="shape_materialized",
         block_rows=2,
         output_shard_rows=4,
@@ -331,25 +381,274 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
     assert result["local_materialization"]["node_local_sharding"]["exact_decoded_validation"] is True
     root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
     np.testing.assert_array_equal(
-        np.asarray(root["refined_subject_masks_runs"]["refined_001"]["masks_roi"][:]),
+        np.asarray(root["refined_subject_masks_runs"]["r1"]["masks_roi"][:]),
         masks_before,
     )
     parent = root["analysis"]["subject_shape_runs"]
     assert parent.attrs["latest"] == "shape_materialized"
     run = parent["shape_materialized"]
     assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["coordinate_binding_status"] == "bound_canonical_v2"
+    assert run.attrs["stage_selector_eligible"] is True
     assert run.attrs["centerline_crop_to_foreground"] is True
     assert run.attrs["physical_storage_layout"]["layout"] == "zarr_v3_indexed_sharding"
-    assert tuple(run["components"]["subject_body"]["centerline_xy"].shards) == (6, 64, 2)
-    assert run.attrs["cluster_output_staging"]["schema_id"] == materializer.PUBLISH_SCHEMA_ID
+    assert tuple(run["components"]["subject_body"]["centerline_xy"].shards[1:]) == (
+        64,
+        2,
+    )
+    cluster_output_staging = run.attrs["cluster_output_staging"]
+    assert cluster_output_staging["schema_id"] == materializer.PUBLISH_SCHEMA_ID
+    assert cluster_output_staging["final_validation"]["valid"] is True
     assert scratch.is_dir()
+    scratch_compute = zarr.open_group(
+        str(scratch / "compute.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )["analysis/subject_shape_runs/shape_materialized"]
+    assert scratch_compute.attrs["coordinate_binding_status"] == (
+        "unbound_numeric_stage_complete_v1"
+    )
+    assert "coordinate_records" not in scratch_compute
+    assert "instance_key" not in scratch_compute
+    consumed = run["coordinate_records/consumed_unbound_stage"]
+    scratch_receipt = scratch_compute.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
+    assert consumed.attrs[SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR] == scratch_receipt
+    assert run.attrs["unbound_numeric_stage_manifest_sha256_consumed"] == (
+        consumed.attrs[f"{SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR}_sha256"]
+    )
+    derivation = run.attrs[SUBJECT_SHAPE_DERIVATION_ATTR]
+    assert derivation["unbound_numeric_stage"]["record_ref"].endswith(
+        "coordinate_records/consumed_unbound_stage@"
+        f"{SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR}"
+    )
 
 
-def test_write_subject_shape_run_group_reads_compact_mask_store_without_dense_masks(monkeypatch) -> None:
+def test_subject_shape_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    root = zarr.open_group(str(source), mode="w", use_consolidated=False)
+    parent = root.require_group("analysis").require_group("subject_shape_runs")
+    parent.attrs.update({"latest": "shape_a", "latest_complete": "shape_a"})
+
+    local = tmp_path / "local-shape.zarr"
+    local_run = zarr.open_group(str(local), mode="w", use_consolidated=False)
+    candidate_owner = "a" * 32
+    local_run.attrs.update(
+        {
+            SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR: candidate_owner,
+            "palette_run_completion_status": "running",
+            "stage_selector_eligible": False,
+        }
+    )
+    target = source / "analysis" / "subject_shape_runs" / "shape_c"
+    plan = SimpleNamespace(
+        source_zarr=source,
+        sharded_run=local,
+        target_run_path=target,
+        run_name="shape_c",
+        row_count=1,
+        refined_run="refined_1",
+    )
+    receipt = object()
+    intervening_seen: list[bool] = []
+    rollback_attempted: list[bool] = []
+    intervening_owner = "b" * 32
+
+    def validate(path: Path, **_kwargs):
+        group = zarr.open_group(str(path), mode="r", use_consolidated=False)
+        complete = group.attrs.get("palette_run_completion_status") == "complete"
+        return {
+            "valid": not complete,
+            "errors": ["injected failure after deferred receipt"] if complete else [],
+            "row_count": 1,
+        }
+
+    def complete_with_intervening_publication(
+        open_root,
+        run_group,
+        *,
+        expected_run_name,
+        publication_owner,
+    ):
+        assert expected_run_name == "shape_c"
+        assert publication_owner == candidate_owner
+        run_group.attrs.update(
+            {
+                "palette_run_completion_status": "complete",
+                "stage_selector_eligible": False,
+                "coordinate_binding_status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+            }
+        )
+        live_parent = open_root["analysis/subject_shape_runs"]
+        live_parent.attrs.update(
+            {
+                "latest": "shape_b",
+                "latest_complete": "shape_b",
+                SUBJECT_SHAPE_PUBLICATION_POLICY_ATTR: (
+                    SUBJECT_SHAPE_PUBLICATION_POLICY
+                ),
+                SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR: 1,
+                SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR: {
+                    "owner_uuid": intervening_owner,
+                    "base_generation": 0,
+                    "next_generation": 1,
+                },
+            }
+        )
+        intervening_seen.append(True)
+        live_parent.attrs.update(
+            {
+                "latest": "shape_c",
+                "latest_complete": "shape_c",
+                SUBJECT_SHAPE_PUBLICATION_POLICY_ATTR: (
+                    SUBJECT_SHAPE_PUBLICATION_POLICY
+                ),
+                SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR: 2,
+                SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR: {
+                    "schema_id": "palette.subject_shape_publication_lease",
+                    "schema_version": 1,
+                    "policy": SUBJECT_SHAPE_PUBLICATION_POLICY,
+                    "run_path": "analysis/subject_shape_runs/shape_c",
+                    "publication_owner": candidate_owner,
+                    "owner_uuid": candidate_owner,
+                    "base_generation": 1,
+                    "next_generation": 2,
+                },
+            }
+        )
+        return {"valid": True}, receipt
+
+    def fail_exact_rollback(value) -> None:
+        assert value is receipt
+        rollback_attempted.append(True)
+        raise RuntimeError("injected exact subject-shape receipt rollback failure")
+
+    monkeypatch.setattr(materializer, "_validate_subject_shape_run", validate)
+    monkeypatch.setattr(
+        materializer,
+        "write_best_effort_run_lineage_attrs",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "bind_staged_subject_shape_run",
+        lambda *_args, **_kwargs: {"valid": True},
+    )
+    monkeypatch.setattr(
+        materializer,
+        "complete_bound_subject_shape_run_for_deferred_activation",
+        complete_with_intervening_publication,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "rollback_deferred_subject_shape_coordinate_activation",
+        fail_exact_rollback,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="rollback was incomplete.*exact subject-shape receipt rollback failure",
+    ):
+        materializer.publish_subject_shape_run(
+            plan,
+            materialization_payload={},
+            copy_backend="python",
+        )
+
+    assert intervening_seen == [True]
+    assert rollback_attempted == [True]
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = root["analysis/subject_shape_runs"]
+    failed = parent["shape_c"]
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert parent.attrs["latest"] == "shape_c"
+    assert parent.attrs["latest_complete"] == "shape_c"
+    assert parent.attrs[SUBJECT_SHAPE_PUBLICATION_GENERATION_ATTR] == 2
+    assert parent.attrs[SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR][
+        "owner_uuid"
+    ] == candidate_owner
+
+
+def test_unbound_subject_shape_receipt_rejects_scientific_and_schema_drift_before_binding(
+    monkeypatch,
+    tmp_path: Path,
+    canonical_refined_root: zarr.Group,
+) -> None:
     _patch_provenance(monkeypatch)
-    root = _build_refined_root()
-    refined = root["refined_subject_masks_runs"]["refined_001"]
-    dense = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    root = canonical_refined_root
+    scratch_path = tmp_path / "hostile-subject-shape-compute.zarr"
+    scratch_root = zarr.open_group(str(scratch_path), mode="w", zarr_format=3)
+    mod.write_subject_shape_run_group(
+        root,
+        zarr_path=tmp_path / "canonical.zarr",
+        output_root=scratch_root,
+        output_zarr_path=scratch_path,
+        refined_run="r1",
+        run_name="shape_unbound_hostile",
+        chunk_size=2,
+        _unbound_coordinate_stage=True,
+    )
+    run = scratch_root["analysis/subject_shape_runs/shape_unbound_hostile"]
+    receipt = dict(run.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR])
+    assert receipt["scientific_configuration"]["run_attrs"]["bspline_smoothing"] == (
+        mod.DEFAULT_BSPLINE_SMOOTHING
+    )
+    assert receipt["schema_inventory"]["closed_group_inventory"] is True
+    assert receipt["schema_inventory"]["closed_array_inventory"] is True
+    assert receipt["schema_inventory"]["closed_attr_inventory"] is True
+
+    def validate() -> dict[str, object]:
+        return mod.validate_unbound_subject_shape_run(
+            root,
+            run,
+            expected_refined_run="r1",
+            expected_run_name="shape_unbound_hostile",
+        )
+
+    original_smoothing = run.attrs["bspline_smoothing"]
+    run.attrs["bspline_smoothing"] = float(original_smoothing) + 1.0
+    with pytest.raises(ValueError, match="unbound|scientific|manifest"):
+        validate()
+    run.attrs["bspline_smoothing"] = original_smoothing
+
+    body = run["components/subject_body"]
+    body.create_array(
+        "debug_point_xy",
+        data=np.zeros((2, 2), dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="array inventory"):
+        validate()
+    del body["debug_point_xy"]
+
+    body.create_group("debug_empty")
+    with pytest.raises(ValueError, match="group inventory"):
+        validate()
+    del body["debug_empty"]
+
+    body.attrs["coordinate_space"] = "roi_local_px"
+    with pytest.raises(ValueError, match="attrs differ"):
+        validate()
+    del body.attrs["coordinate_space"]
+
+    body["centroid_xy"].attrs["coordinate_space"] = "roi_local_px"
+    with pytest.raises(ValueError, match="attrs differ"):
+        validate()
+    del body["centroid_xy"].attrs["coordinate_space"]
+
+    result = validate()
+    assert result["valid"] is True
+
+
+def test_future_subject_shape_writer_fails_closed_for_compact_only_refined_source(
+    monkeypatch,
+    canonical_refined_root: zarr.Group,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = canonical_refined_root
+    refined = root["refined_subject_masks_runs"]["r1"]
     write_component_rle_mask_store_from_dense(
         refined,
         refined["masks_roi"],
@@ -358,38 +657,27 @@ def test_write_subject_shape_run_group_reads_compact_mask_store_without_dense_ma
     )
     del refined["masks_roi"]
 
-    summary = mod.write_subject_shape_run_group(
-        root,
-        refined_run="refined_001",
-        run_name="shape_rle_only",
-        chunk_size=2,
-    )
-
-    assert summary["status"] == "updated"
-    run = root["analysis"]["subject_shape_runs"]["shape_rle_only"]
-    assert run.attrs["source_mask_store_encoding"] == "component_rle_v1"
-    assert run.attrs["source_mask_storage_surface"] == "mask_rle"
-    assert run.attrs["source_mask_store_path"] == "refined_subject_masks_runs/refined_001/mask_rle"
-    assert run.attrs["source_refs"]["refined_subject_masks_mask_store"] == (
-        "refined_subject_masks_runs/refined_001/mask_rle"
-    )
-    assert "refined_subject_masks_masks_roi" not in run.attrs["source_refs"]
-    assert run.attrs["source_refs"]["refined_subject_masks_mask_rle"] == (
-        "refined_subject_masks_runs/refined_001/mask_rle"
-    )
-    assert run["components"]["subject_body"]["mask_present"][:].tolist() == [True, True, True]
-    assert run["components"]["eye_left"]["area_px"][:].tolist() == dense[:, 1].sum(axis=(1, 2)).tolist()
-    assert run["body_frame"]["valid"][:].tolist() == [True, True, True]
+    with pytest.raises(ValueError):
+        mod.write_subject_shape_run_group(
+            root,
+            refined_run="r1",
+            run_name="shape_rle_only",
+            chunk_size=2,
+        )
 
 
-def test_write_subject_shape_run_uses_dask_worker_chunks(tmp_path: Path, monkeypatch) -> None:
+def test_write_subject_shape_run_uses_dask_worker_chunks(
+    tmp_path: Path,
+    monkeypatch,
+    canonical_refined_root: zarr.Group,
+) -> None:
     _patch_provenance(monkeypatch)
-    zarr_path = tmp_path / "shape.zarr"
-    _build_refined_root(zarr_path)
+    zarr_path = tmp_path / "canonical.zarr"
+    assert canonical_refined_root.path == ""
 
     summary = mod.write_subject_shape_run(
         zarr_path,
-        refined_run="refined_001",
+        refined_run="r1",
         run_name="shape_dask",
         chunk_size=1,
         execution_backend="dask_worker_chunks",
@@ -399,9 +687,9 @@ def test_write_subject_shape_run_uses_dask_worker_chunks(tmp_path: Path, monkeyp
     assert summary["status"] == "updated"
     assert summary["execution_backend"] == "dask_worker_chunks"
     assert summary["chunk_size"] == 1
-    assert summary["worker_chunk_size"] == 3
+    assert summary["worker_chunk_size"] == 2
     assert summary["dask_requested_chunk_size"] == 1
-    assert summary["dask_chunk_size"] == 3
+    assert summary["dask_chunk_size"] == 2
     assert summary["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
     assert summary["chunk_count"] == 1
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -409,21 +697,21 @@ def test_write_subject_shape_run_uses_dask_worker_chunks(tmp_path: Path, monkeyp
     assert run.attrs["dask_execution_enabled"] is True
     assert run.attrs["dask_scheduler"] == "single-threaded"
     assert run.attrs["chunk_size"] == 1
-    assert run.attrs["worker_chunk_size"] == 3
+    assert run.attrs["worker_chunk_size"] == 2
     assert run.attrs["dask_requested_chunk_size"] == 1
-    assert run.attrs["dask_chunk_size"] == 3
+    assert run.attrs["dask_chunk_size"] == 2
     assert run.attrs["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
-    assert run.attrs["provenance"]["parameters"]["worker_chunk_size"] == 3
+    assert run.attrs["provenance"]["parameters"]["worker_chunk_size"] == 2
     assert run.attrs["provenance"]["scheduler"]["dask_requested_chunk_size"] == 1
-    assert run.attrs["provenance"]["scheduler"]["dask_chunk_size"] == 3
+    assert run.attrs["provenance"]["scheduler"]["dask_chunk_size"] == 2
     assert run.attrs["subject_shape_chunk_timing_count"] == 1
     assert run.attrs["subject_shape_chunk_timing_storage"] == "summary_only"
     assert "subject_shape_chunk_timings" not in run.attrs
     assert run.attrs["subject_shape_timing_summary"]["chunk_timings"]["chunk_count"] == 1
-    assert run["components"]["eye_left"]["ellipse_success"][:].tolist() == [True, True, True]
-    assert run["relations"]["eye_pair"]["separation_valid"][:].tolist() == [True, True, True]
-    assert run["body_frame"]["valid"][:].tolist() == [True, True, True]
-    assert run["components"]["subject_body"]["centerline_valid"][:].tolist() == [True, True, True]
+    assert run["components"]["eye_left"]["ellipse_success"][:].tolist() == [True, True]
+    assert run["relations"]["eye_pair"]["separation_valid"][:].tolist() == [True, False]
+    assert run["body_frame"]["valid"][:].tolist() == [True, False]
+    assert run["components"]["subject_body"]["centerline_valid"][:].tolist() == [True, False]
 
 
 def test_subject_shape_dask_worker_chunk_size_rounds_to_metric_grid() -> None:
@@ -434,161 +722,147 @@ def test_subject_shape_dask_worker_chunk_size_rounds_to_metric_grid() -> None:
     assert mod._worker_chunk_size_for_backend(1000, 500, "serial_driver") == 500
 
 
-def test_write_subject_shape_run_dry_run_does_not_create_analysis_group() -> None:
-    root = _build_refined_root()
+def test_write_subject_shape_run_dry_run_does_not_create_subject_shape_group(
+    canonical_refined_root: zarr.Group,
+) -> None:
+    root = canonical_refined_root
 
     summary = mod.write_subject_shape_run_group(
         root,
-        refined_run="refined_001",
+        refined_run="r1",
         run_name="shape_dry",
         dry_run=True,
     )
 
     assert summary["status"] == "planned"
-    assert "analysis" not in root
+    assert root.get("analysis/subject_shape_runs") is None
 
 
-def test_subject_shape_tail_geometry_fails_closed_for_fragmented_body(monkeypatch) -> None:
+def test_subject_shape_writer_rejects_post_publication_mask_payload_mutation(
+    monkeypatch,
+    canonical_refined_root: zarr.Group,
+) -> None:
     _patch_provenance(monkeypatch)
-    root = _build_refined_root()
-    refined = root["refined_subject_masks_runs"]["refined_001"]
+    root = canonical_refined_root
+    refined = root["refined_subject_masks_runs"]["r1"]
     masks = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
     masks[1, 0] = 0
     masks[1, 0, 2:5, 4:7] = 1
     masks[1, 0, 10:13, 9:12] = 1
     refined["masks_roi"][:] = masks
 
-    mod.write_subject_shape_run_group(
-        root,
-        refined_run="refined_001",
-        run_name="shape_fragmented",
-        chunk_size=2,
-    )
-
-    body = root["analysis"]["subject_shape_runs"]["shape_fragmented"]["components"]["subject_body"]
-    assert body["snout_tip_valid"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["snout_tip_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
-    assert body["centerline_reaches_snout"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["centerline_snout_check_reason_bytes"][1]) == "missing_snout_tip"
-    assert body["centerline_valid"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["centerline_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
-    assert body["bspline_valid"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["bspline_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
+    with pytest.raises(ValueError):
+        mod.write_subject_shape_run_group(
+            root,
+            refined_run="r1",
+            run_name="shape_fragmented",
+            chunk_size=2,
+        )
 
 
-def test_subject_shape_tail_geometry_fails_closed_for_source_body_qc(monkeypatch) -> None:
+def test_subject_shape_writer_rejects_unsealed_source_body_qc_mutation(
+    monkeypatch,
+    canonical_refined_root: zarr.Group,
+) -> None:
     _patch_provenance(monkeypatch)
-    root = _build_refined_root()
-    refined = root["refined_subject_masks_runs"]["refined_001"]
-    masks = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
-    masks[1, 0, 7:9, 0:16] = 1
-    masks[1, 0, 10:12, 0:16] = 1
-    refined["masks_roi"][:] = masks
-    write_subject_body_mask_qc_group(root, refined_run="refined_001", chunk_size=2)
-    assert bool(np.asarray(refined["components/subject_body/qc/severe_qc_failure"][1], dtype=bool)) is True
+    root = canonical_refined_root
+    refined = root["refined_subject_masks_runs"]["r1"]
+    # The supported writer must honor the immutable canonical refined-run
+    # guard; the test does not disable or monkeypatch that protection.
+    with pytest.raises(RefinedSubjectMaskMutationError, match="immutable canonical publication"):
+        write_subject_body_mask_qc_group(root, refined_run="r1", chunk_size=2)
 
-    mod.write_subject_shape_run_group(
-        root,
-        refined_run="refined_001",
-        run_name="shape_source_body_qc",
-        chunk_size=2,
-    )
-
-    body = root["analysis"]["subject_shape_runs"]["shape_source_body_qc"]["components"]["subject_body"]
-    assert body["source_mask_qc_available"][:].tolist() == [True, True, True]
-    assert bool(np.asarray(body["source_mask_qc_severe_failure"][1], dtype=bool)) is True
-    assert body["snout_tip_valid"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["snout_tip_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
-    assert body["centerline_reaches_snout"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["centerline_snout_check_reason_bytes"][1]) == "missing_snout_tip"
-    assert body["centerline_valid"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["centerline_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
-    assert _decode_reason_row(body["tail_base_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
-    assert body["bspline_valid"][:].tolist() == [True, False, True]
-    assert _decode_reason_row(body["bspline_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
-    assert _decode_reason_row(body["tail_sample_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
-
-
-def test_subject_shape_run_records_and_audits_source_row_revisions(monkeypatch) -> None:
-    _patch_provenance(monkeypatch)
-    root = _build_refined_root()
-    _add_component_row_revisions(
-        root,
+    # Model an adversarial/out-of-band archive mutation after publication.  A
+    # newly injected, unsealed QC group must invalidate the exact component-QC
+    # inventory during subject-shape source preflight.
+    body = refined.require_group("components").require_group("subject_body")
+    qc = body.create_group("qc")
+    qc.attrs.update(
         {
-            "subject_body": [0, 2, 0],
-            "swim_bladder": [0, 0, 1],
-        },
+            "schema_id": "refined_subject_body_mask_qc",
+            "schema_version": 1,
+            "status": "adversarial_unsealed_test_fixture",
+        }
     )
+    assert "qc" in refined["components/subject_body"]
 
+    with pytest.raises(ValueError):
+        mod.write_subject_shape_run_group(
+            root,
+            refined_run="r1",
+            run_name="shape_source_body_qc",
+            chunk_size=2,
+        )
+
+
+def test_subject_shape_publication_rejects_post_publication_source_revision_injection(
+    monkeypatch,
+    canonical_refined_root: zarr.Group,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = canonical_refined_root
     mod.write_subject_shape_run_group(
         root,
-        refined_run="refined_001",
-        run_name="shape_revisions",
+        refined_run="r1",
+        run_name="shape_before_revision_injection",
         chunk_size=2,
     )
 
-    run = root["analysis"]["subject_shape_runs"]["shape_revisions"]
-    source_revisions = run["source_refined_subject_masks"]
-    np.testing.assert_array_equal(
-        np.asarray(source_revisions["row_revision"][:], dtype=np.int64),
-        np.asarray(
-            [
-                [0, 0, 0, 0],
-                [2, 0, 0, 0],
-                [0, 1, 0, 0],
-            ],
-            dtype=np.int64,
-        ),
+    refined = root["refined_subject_masks_runs/r1"]
+    body = refined.require_group("components").require_group("subject_body")
+    body.create_array(
+        "row_revision",
+        data=np.asarray([0, 1], dtype=np.int64),
+        overwrite=True,
     )
-    np.testing.assert_array_equal(
-        np.asarray(source_revisions["row_revision_available"][:], dtype=bool),
-        np.asarray([True, True, False, False], dtype=bool),
-    )
-    assert mod.audit_subject_shape_source_revisions_group(root, shape_run="shape_revisions")["status"] == "current"
 
-    refined = root["refined_subject_masks_runs"]["refined_001"]
-    refined["components/subject_body/row_revision"][1] = np.int64(3)
-    audit = mod.audit_subject_shape_source_revisions_group(root, shape_run="shape_revisions")
+    with pytest.raises(SubjectShapeCoordinatePublicationError):
+        load_persisted_subject_shape_coordinate_publication(
+            root,
+            "analysis/subject_shape_runs/shape_before_revision_injection",
+        )
+    with pytest.raises(ValueError):
+        mod.write_subject_shape_run_group(
+            root,
+            refined_run="r1",
+            run_name="shape_after_revision_injection",
+            chunk_size=2,
+        )
 
-    assert audit["status"] == "stale"
-    assert audit["stale_row_count"] == 1
-    assert audit["stale_rows"] == [1]
-    assert audit["stale_rows_by_component"] == {"subject_body": [1]}
 
-
-def test_write_subject_shape_run_group_copies_instance_key_lineage(monkeypatch) -> None:
+def test_write_subject_shape_run_group_copies_instance_key_lineage(
+    monkeypatch,
+    canonical_refined_root: zarr.Group,
+) -> None:
     _patch_provenance(monkeypatch)
-    root = _build_refined_root()
-    refined = root["refined_subject_masks_runs"]["refined_001"]
-    refined.create_array("instance_key", data=np.asarray([11, 22, 33], dtype=np.uint64), overwrite=True)
-    refined.create_array("source_crop_row_ids", data=np.asarray([5, 6, 7], dtype=np.int64), overwrite=True)
+    root = canonical_refined_root
+    refined = root["refined_subject_masks_runs"]["r1"]
 
     mod.write_subject_shape_run_group(
         root,
-        refined_run="refined_001",
+        refined_run="r1",
         run_name="shape_001",
         chunk_size=2,
     )
 
     run = root["analysis"]["subject_shape_runs"]["shape_001"]
-    assert run["row_index"]["instance_key"][:].tolist() == [11, 22, 33]
-    assert run["row_index"]["source_crop_row_ids"][:].tolist() == [5, 6, 7]
+    np.testing.assert_array_equal(run["instance_key"][:], refined["instance_key"][:])
+    np.testing.assert_array_equal(
+        run["source_crop_row_ids"][:],
+        refined["source_crop_row_ids"][:],
+    )
     assert "instance_key" in run.attrs["row_lineage_copied"]
     assert "source_crop_row_ids" in run.attrs["row_lineage_copied"]
 
 
-def test_write_subject_shape_run_group_reports_instance_key_missing_for_legacy_sources(monkeypatch) -> None:
+def test_future_subject_shape_writer_fails_closed_without_instance_key(monkeypatch) -> None:
     _patch_provenance(monkeypatch)
     root = _build_refined_root()
 
-    mod.write_subject_shape_run_group(
-        root,
-        refined_run="refined_001",
-        run_name="shape_001",
-        chunk_size=2,
-    )
-
-    run = root["analysis"]["subject_shape_runs"]["shape_001"]
-    assert "instance_key" not in run["row_index"]
-    assert "instance_key" in run.attrs["row_lineage_missing"]
-    assert "source_crop_row_ids" in run.attrs["row_lineage_missing"]
+    with pytest.raises(ValueError):
+        mod.write_subject_shape_run_group(
+            root,
+            refined_run="refined_001",
+            run_name="shape_001",
+            chunk_size=2,
+        )

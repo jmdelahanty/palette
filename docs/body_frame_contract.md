@@ -1,7 +1,7 @@
 # Body Frame Contract
 <!-- contract-meta
-version: 1
-status: draft
+version: 2
+status: active
 last_verified: 2026-07-19
 -->
 
@@ -57,6 +57,14 @@ from `forward_axis_xy` using the fixed angle convention below. If a producer
 also persists a heading array, that array requires its own row-bound contract;
 its presence does not establish body-frame authority.
 
+Subject-shape method v11 implements that additional contract as
+`palette.subject_shape_row_bound_heading_semantics`. It digest-binds the exact
+`heading_deg`, `forward_axis_xy`, and `axis_valid` arrays, the forward-axis
+coordinate descriptor, fish body-frame record, and row identity. It declares
+degrees, zero along source-camera positive X, positive rotation after the
+source-camera Y flip, and NaN for invalid rows. Readers must validate this
+record; a plausible scalar range or the array name is not evidence.
+
 ### Canonical version-1 derivation authority
 
 A canonical body-frame record is not established by plausible orthonormal
@@ -109,8 +117,8 @@ does not require masks.
 
 ## Coordinate Convention
 
-Stored `*_xy` arrays use the exact coordinate profile of their bound source
-descriptor. Canonical version 1 accepts only:
+Stored `*_xy` arrays remain bound to the exact frame authority of their source.
+Canonical version-1 estimator source descriptors accept only:
 
 - `source_camera_image_px.top_left_y_down.v1`
 - `physical_mm.source_camera_y_down.v1`
@@ -120,6 +128,27 @@ model-input, normalized, arena-relative, canvas, projector, and generic
 `image_pixels` inputs are not accepted by version 1, even when their numeric
 ranges or axes look compatible. A future profile may admit one only through a
 typed, direction-labelled transform lineage and a new controlled contract.
+
+Array descriptors remain geometry-specific:
+
+- a source-camera `origin_xy` is `point_xy` in
+  `source_camera_image_px.top_left_y_down.v1`, with pixel units, continuous
+  convention, and direct source-camera overlay status
+- `forward_axis_xy` and `left_axis_xy` are unitless `vector_xy` in the narrow
+  `source_camera_image_px.unit_vector_y_down.v1` profile, with
+  `pixel_convention = "not_applicable"` and overlay status `not_suitable`;
+  axes are directions, not drawable camera points
+- a mask-component centroid source with physical shape `(N, C, 2)` is
+  `point_xy` plus `collection_axis.role = "subject_component"`, cardinality
+  `C`, and the exact digest-bound component-label authority
+- uncollected `points_xy` is reserved for `(N, P, 2)` point sequences. A
+  multi-point-per-component surface `(N, C, P, 2)` requires a separately
+  defined shape rule and must not reuse the centroid collection contract
+
+The coordinate descriptors and body-frame record share the exact bound row
+identity, but they are distinct authorities. `instance_key` says which
+observation a row represents; it does not encode component labels, anatomical
+polarity, coordinate space, or frame axes.
 
 `heading_deg` uses the existing keypoint heading convention:
 
@@ -216,6 +245,10 @@ invalid rows have `axis_valid == false` and all-NaN values in all three geometry
 arrays. Heading, failure reasons, midlines, and arclengths may be persisted as
 separate derived surfaces, but they are not optional members of the canonical
 body-frame geometry record and do not inherit its authority implicitly.
+
+In subject-shape method v11, a historical sibling `valid` may remain only as
+an explicitly declared compatibility alias of `axis_valid`; it is not the
+field authorized by the sealed frame record.
 
 The body-frame origin is estimator-defined. For the current
 `mask_component_axis` estimator, `origin_xy` is the eye-pair midpoint. That

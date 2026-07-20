@@ -13,7 +13,7 @@ import math
 import sys
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 import zarr
@@ -36,12 +36,13 @@ from fisheye.analysis.megabouts_classifier_inputs import (
     MegaboutsClassifierInputPack,
     _align_traj_array_to_reference,
     _frame_to_index,
+    _join_posture_rows_to_track_sources,
     _json_safe,
     _load_track_arrays,
     _max_consecutive_false,
     _require_array,
-    _resolve_tail_posture_view_run,
-    _resolve_track_run,
+    _require_input_pack_tail_posture_publication,
+    _require_posture_instance_keys,
     build_megabouts_classifier_input_pack,
     summarize_input_pack,
 )
@@ -193,14 +194,59 @@ def _window_extract(
     return out, out_valid
 
 
+def _load_pack_track_arrays(
+    root: zarr.Group,
+    pack: MegaboutsClassifierInputPack,
+) -> tuple[object, dict[str, np.ndarray]]:
+    run_name = str(pack.parameters["track_kinematics_run"])
+    scope = str(pack.parameters["track_kinematics_scope"])
+    track_id = int(pack.parameters["track_id"])
+    heading_source = str(
+        pack.parameters.get("heading_source", DEFAULT_HEADING_SOURCE)
+    )
+    tables, arrays, refs, _fps = _load_track_arrays(
+        root,
+        run_name=run_name,
+        track_scope=scope,
+        track_id=track_id,
+        heading_source=heading_source,
+    )
+    expected_run_path = str(pack.source_refs.get("track_kinematics_run") or "")
+    expected_track_path = str(pack.source_refs.get("track_group") or "")
+    expected_manifest = str(
+        pack.source_refs.get("track_motion_manifest_sha256") or ""
+    )
+    if (
+        tables.run_path != expected_run_path
+        or tables.track_path != expected_track_path
+        or refs["track_motion_manifest_sha256"] != expected_manifest
+    ):
+        raise ValueError(
+            "Megabouts preprocessing source track authority changed since the "
+            "input pack was built."
+        )
+    return tables, arrays
+
+
 def _build_dense_tail_df(
     root: zarr.Group,
     pack: MegaboutsClassifierInputPack,
 ) -> tuple[object, np.ndarray, np.ndarray]:
     import pandas as pd
 
+    _require_input_pack_tail_posture_publication(
+        root,
+        pack.source_refs,
+        error_message=(
+            "Megabouts preprocessing source tail-posture publication changed "
+            "since the input pack was built."
+        ),
+    )
     posture = root[pack.source_refs["tail_posture_view_run"]]
-    posture_frames = np.asarray(_require_array(posture, "frame_index")[:], dtype=np.int64)
+    posture_frames = np.asarray(
+        _require_array(posture, "source_acquisition_frame_index")[:],
+        dtype=np.int64,
+    )
     posture_valid = np.asarray(_require_array(posture, "valid")[:], dtype=bool)
     tail_angle = np.asarray(_require_array(posture, "tail_angle_rad")[:], dtype=np.float32)
     if tail_angle.ndim != 2 or tail_angle.shape[1] != MEGABOUTS_TAIL_SEGMENT_COUNT:
@@ -208,24 +254,61 @@ def _build_dense_tail_df(
             "Tail posture view must provide "
             f"{MEGABOUTS_TAIL_SEGMENT_COUNT} tail-angle channels, got {tail_angle.shape}."
         )
+    if (
+        posture_frames.shape != (int(tail_angle.shape[0]),)
+        or posture_valid.shape != (int(tail_angle.shape[0]),)
+    ):
+        raise ValueError(
+            "Tail posture identity, validity, and angle surfaces must be row aligned."
+        )
+    posture_instance_keys = _require_posture_instance_keys(
+        posture,
+        row_count=int(tail_angle.shape[0]),
+    )
+    _track_tables, track_arrays = _load_pack_track_arrays(root, pack)
+    track_frames = np.asarray(track_arrays["frame_indices"], dtype=np.int64)
+    posture_row_by_track_index = _join_posture_rows_to_track_sources(
+        posture_instance_keys=posture_instance_keys,
+        posture_frames=posture_frames,
+        track_source_instance_keys=track_arrays["source_instance_key"],
+        track_frames=track_frames,
+    )
 
     frame_axis = _dense_frame_axis(
-        posture_frames,
+        track_frames,
         np.asarray(pack.window_start_frame, dtype=np.int64),
         np.asarray(pack.window_end_frame, dtype=np.int64),
     )
     dense = np.full((frame_axis.size, MEGABOUTS_TAIL_SEGMENT_COUNT), np.nan, dtype=np.float32)
     if frame_axis.size:
         lookup = _frame_to_index(frame_axis)
-        for row_idx, frame in enumerate(posture_frames.tolist()):
+        for track_index, frame in enumerate(track_frames.tolist()):
             dense_idx = lookup.get(int(frame))
-            if dense_idx is None or not bool(posture_valid[row_idx]):
+            posture_index = int(posture_row_by_track_index[track_index])
+            if (
+                dense_idx is None
+                or posture_index < 0
+                or not bool(posture_valid[posture_index])
+            ):
                 continue
-            values = tail_angle[row_idx]
+            values = tail_angle[posture_index]
             if np.all(np.isfinite(values)):
                 dense[dense_idx, :] = values
     columns = [f"angle_{idx}" for idx in range(MEGABOUTS_TAIL_SEGMENT_COUNT)]
-    return pd.DataFrame(dense, columns=columns), frame_axis, np.all(np.isfinite(dense), axis=1)
+    result = (
+        pd.DataFrame(dense, columns=columns),
+        frame_axis,
+        np.all(np.isfinite(dense), axis=1),
+    )
+    _require_input_pack_tail_posture_publication(
+        root,
+        pack.source_refs,
+        error_message=(
+            "Tail posture or its source subject-shape publication changed while "
+            "Megabouts preprocessing inputs were copied."
+        ),
+    )
+    return result
 
 
 def _build_dense_traj_df(
@@ -234,22 +317,7 @@ def _build_dense_traj_df(
 ) -> tuple[object, np.ndarray, np.ndarray]:
     import pandas as pd
 
-    track_run_path = str(pack.source_refs["track_kinematics_run"])
-    track_scope = track_run_path.split("/")[-2]
-    track_run_name = track_run_path.split("/")[-1]
-    track_run, _, resolved_path, _ = _resolve_track_run(
-        root,
-        f"{track_scope}/{track_run_name}",
-        track_scope=track_scope,
-    )
-    track_id = int(pack.parameters.get("track_id", 0))
-    heading_source = str(pack.parameters.get("heading_source", DEFAULT_HEADING_SOURCE))
-    _, track_arrays, _, _ = _load_track_arrays(
-        track_run,
-        resolved_path,
-        track_id=track_id,
-        heading_source=heading_source,
-    )
+    _, track_arrays = _load_pack_track_arrays(root, pack)
 
     track_frames = np.asarray(track_arrays["frame_indices"], dtype=np.int64)
     frame_axis = _dense_frame_axis(

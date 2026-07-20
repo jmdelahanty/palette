@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -19,15 +22,40 @@ from fisheye.diagnostics.build_subject_mask_finalizer_ab_fixture import (
 from fisheye.refinement import finalize_subject_masks as mod
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.mask_store import open_mask_store, write_component_rle_mask_store_from_dense
+from fisheye.shared.refined_subject_masks_io import (
+    RefinedSubjectMasksIOError,
+    load_canonical_refined_subject_masks_run_tables,
+)
+from fisheye.shared.subject_mask_coordinate_publication import (
+    SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+    SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+    SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
+    SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+    _activate_validated_subject_mask_coordinate_surfaces,
+    _load_completed_ineligible_subject_mask_coordinate_surfaces,
+    load_persisted_subject_mask_crop_source,
+    prepare_subject_mask_coordinate_context,
+    publish_subject_mask_coordinate_surfaces,
+    selected_subject_mask_crop_values,
+)
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
     RUN_LATEST_COMPLETE_ATTR,
     RUN_STATUS_COMPLETE,
+    mark_run_complete,
+    mark_run_started,
 )
 from fisheye.shared.zarr.stage_arrays import REFINED_SUBJECT_MASKS_SPEC, validate_run
 from fisheye.tune import refined_subject_mask_review as review_mod
+from tests.unit.fisheye.test_keypoint_coordinate_publication import (
+    _real_canonical_archive,
+)
+from tests.unit.fisheye.test_subject_mask_coordinate_publication import (
+    MODEL_ARTIFACT,
+    MODEL_TRANSFORM,
+)
 
 
 def _patch_refined_subject_provenance(monkeypatch) -> None:
@@ -56,6 +84,164 @@ def _patch_refined_subject_provenance(monkeypatch) -> None:
             },
         },
     )
+
+
+def _publish_real_canonical_subject_mask(
+    root: zarr.Group,
+    *,
+    selected_rows: np.ndarray | None = None,
+) -> zarr.Group:
+    """Publish a small raw subject-mask run over the real canonical crop fixture."""
+
+    keypoints = root["keypoints_runs/k1"]
+    keypoints.create_array(
+        "detection_success",
+        data=np.asarray([True, True], dtype=bool),
+        overwrite=True,
+    )
+
+    source = load_persisted_subject_mask_crop_source(root, "crop_runs/c1")
+    parent = root.require_group("subject_mask_runs")
+    run = parent.create_group("s1")
+    owner = uuid4().hex
+    run.attrs.update(
+        {
+            SUBJECT_MASK_PUBLICATION_OWNER_ATTR: owner,
+            "stage_selector_eligible": False,
+            "source_crop_run": "c1",
+            "source_keypoint_group": "keypoints_runs",
+            "source_keypoints_run": "k1",
+            "assignment_keypoint_group": "keypoints_runs",
+            "assignment_keypoints_run": "k1",
+            "mask_labels": ["subject_body", "eyes_union", "swim_bladder"],
+            "label_schema_id": "subject_v1_union_eyes",
+            "method": "unit_test_canonical_subject_masks",
+            "model_input_transform": MODEL_TRANSFORM.to_attrs(),
+            "mask_probability_threshold": 0.5,
+            "output_semantics": "multilabel",
+            "overlap_policy": "independent_sigmoid",
+            "probability_semantics": "sigmoid_multilabel_logits",
+            "probabilities_dtype": "uint8",
+            "probabilities_encoding": "linear_uint8_0_255",
+            "masks_roi_materialized": True,
+            "binary_masks_materialized": True,
+            "binary_masks_source": "threshold(mask_probs_roi, threshold=0.5)",
+            "bbox_xyxy_convention": "pixel_edge_half_open",
+            "bbox_xyxy_derivation": "foreground_half_open_pixel_edges_xyxy_v1",
+            "source_checkpoint": MODEL_ARTIFACT["path"],
+            "subject_mask_model_artifact": dict(MODEL_ARTIFACT),
+            "provenance": {
+                "stage": "subject_masks",
+                "method": "unit_test_canonical_subject_masks",
+                "source": "crop_runs/c1",
+            },
+        }
+    )
+    mark_run_started(run, run_name="s1", stage="subject_masks")
+    selected = selected_subject_mask_crop_values(
+        source,
+        np.asarray(
+            [1, 0] if selected_rows is None else selected_rows,
+            dtype="<i8",
+        ),
+    )
+    for name in (
+        "source_crop_row_ids",
+        "instance_key",
+        "source_acquisition_frame_index",
+        "source_crop_xywh",
+    ):
+        values = np.asarray(selected[name])
+        run.create_array(name, data=values, chunks=values.shape)
+
+    masks = np.zeros((2, 3, 40, 40), dtype=np.uint8)
+    masks[:, 0, 10:30, 10:30] = 1
+    keypoint_values = np.asarray(keypoints["keypoints_roi"][:], dtype=np.float64)
+    for row in range(2):
+        for point in keypoint_values[row]:
+            x = int(np.floor(point[0]))
+            y = int(np.floor(point[1]))
+            masks[row, 1, max(0, y - 1) : y + 2, max(0, x - 1) : x + 2] = 1
+    masks[:, 2, 25:30, 18:23] = 1
+    probabilities = np.asarray(masks * np.uint8(255), dtype=np.uint8)
+    run.create_array(
+        "mask_probs_roi",
+        data=probabilities,
+        chunks=(1, 1, 40, 40),
+    )
+    run.create_array(
+        "masks_roi",
+        data=masks,
+        chunks=(1, 1, 40, 40),
+    )
+    run.create_array(
+        "available_channels",
+        data=np.ones((3,), dtype=bool),
+        chunks=(3,),
+    )
+    spatial = mod.batch_mask_spatial_metrics(masks)
+    metrics = run.create_group("metrics")
+    metrics.create_array(
+        "prob_max",
+        data=np.ones((2, 3), dtype=np.float32),
+        chunks=(2, 3),
+    )
+    for name in (
+        "mask_present",
+        "area_px",
+        "centroid_xy",
+        "centroid_valid",
+        "bbox_xyxy",
+        "bbox_valid",
+    ):
+        values = np.asarray(spatial[name])
+        metrics.create_array(name, data=values, chunks=values.shape)
+
+    prepare_subject_mask_coordinate_context(
+        root,
+        "subject_mask_runs/s1",
+        expected_publication_owner=owner,
+        crop_path="crop_runs/c1",
+        mask_labels=("subject_body", "eyes_union", "swim_bladder"),
+        model_input_transform=MODEL_TRANSFORM,
+        model_artifact=MODEL_ARTIFACT,
+        mask_probability_threshold=0.5,
+    )
+    publish_subject_mask_coordinate_surfaces(
+        root,
+        "subject_mask_runs/s1",
+        expected_publication_owner=owner,
+    )
+    run = root["subject_mask_runs/s1"]
+    selector_snapshot = {
+        name: (name in parent.attrs, parent.attrs.get(name))
+        for name in (
+            "latest",
+            "latest_complete",
+            "latest_pending",
+            "authoritative_run",
+            "authoritative_run_provenance",
+            SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+            SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+            SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+        )
+    }
+    parent.attrs["latest_pending"] = "s1"
+    mark_run_complete(run, parent_group=None, run_name="s1")
+    fresh = _load_completed_ineligible_subject_mask_coordinate_surfaces(
+        root,
+        "subject_mask_runs/s1",
+        expected_publication_owner=owner,
+    )
+    _activate_validated_subject_mask_coordinate_surfaces(
+        root,
+        parent,
+        fresh,
+        run_name="s1",
+        publication_owner_token=owner,
+        selector_snapshot=selector_snapshot,
+    )
+    return run
 
 
 @pytest.mark.parametrize("key", ["shard_runs", "subject_mask_shard_runs", "runs"])
@@ -125,6 +311,316 @@ def test_indexed_collection_array_preserves_component_and_scalar_indexing() -> N
     np.testing.assert_array_equal(collection[2, 0], second.data[0, 0])
     assert first.keys == [(slice(1, 3), 1)]
     assert second.keys == [(slice(0, 2), 1), (slice(0, 1), 0)]
+
+
+def test_canonical_refined_lineage_copy_is_exact_and_omits_legacy_aliases() -> None:
+    root = zarr.group()
+    raw = root.create_group("subject_mask_runs").create_group("raw")
+    values = {
+        "source_crop_row_ids": np.asarray([7, 3], dtype="<i8"),
+        "instance_key": np.asarray([101, 202], dtype="<u8"),
+        "source_acquisition_frame_index": np.asarray([44, 45], dtype="<i8"),
+        "source_crop_xywh": np.asarray([[11, 12, 20, 21], [31, 32, 20, 21]], dtype="<i4"),
+    }
+    for name, data in values.items():
+        raw.create_array(name, data=data, chunks=data.shape)
+    raw.create_array("frame_indices", data=np.asarray([44, 45], dtype=np.int32))
+    refined = root.create_group("refined_subject_masks_runs").create_group("refined")
+
+    mod._copy_exact_canonical_source_arrays(
+        refined,
+        SimpleNamespace(group=raw, run_name="raw"),
+    )
+
+    assert set(refined.array_keys()) == set(values)
+    assert "frame_indices" not in refined
+    for name, expected in values.items():
+        actual = np.asarray(refined[name][:])
+        assert actual.dtype == expected.dtype
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_compact_refined_surfaces_are_explicit_non_authoritative_caches() -> None:
+    root = zarr.group()
+    run = root.create_group("refined_subject_masks_runs").create_group("refined")
+    run.attrs["palette_run_name"] = "refined"
+    run.create_group("mask_bitpacked")
+    run.create_group("mask_rle")
+
+    mod._stamp_non_authoritative_refined_mask_caches(run)
+
+    for name in ("mask_bitpacked", "mask_rle"):
+        attrs = run[name].attrs
+        assert attrs["surface_role"] == "derived_display_archive_cache"
+        assert attrs["authoritative_pixels"] is False
+        assert attrs["source_array"] == "masks_roi"
+        assert attrs["source_run"] == "refined"
+
+
+def test_finalizer_routes_canonical_source_through_strict_publication_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    raw = root["subject_mask_runs/subject_probs_001"]
+    raw.create_array(
+        "instance_key",
+        data=np.asarray([101, 202], dtype="<u8"),
+        chunks=(2,),
+    )
+    raw.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([10, 11], dtype="<i8"),
+        chunks=(2,),
+    )
+    raw.create_array(
+        "source_crop_xywh",
+        data=np.asarray([[2, 3, 10, 10], [4, 5, 10, 10]], dtype="<i4"),
+        chunks=(2, 4),
+    )
+    source = replace(
+        review_mod._load_source_subject_mask_run(root, "subject_probs_001"),
+        canonical_coordinates=True,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_subject_mask_source",
+        lambda *_args, **_kwargs: (source, None),
+    )
+    events: list[str] = []
+    pending = object()
+
+    def prepare(*_args, **kwargs):
+        run = root["refined_subject_masks_runs/canonical_refined"]
+        assert run.attrs["palette_run_completion_status"] == "running"
+        assert run.attrs["stage_selector_eligible"] is False
+        assert kwargs["source_subject_mask_path"] == "subject_mask_runs/subject_probs_001"
+        events.append("prepare")
+
+    def publish(*_args, **_kwargs):
+        run = root["refined_subject_masks_runs/canonical_refined"]
+        assert run.attrs["palette_run_completion_status"] == "running"
+        run.attrs["coordinate_contract"] = "canonical_v2"
+        events.append("publish")
+        return pending
+
+    def activate(_root, parent, value, **kwargs):
+        run = root["refined_subject_masks_runs/canonical_refined"]
+        assert value is pending
+        assert run.attrs["palette_run_completion_status"] == "complete"
+        assert run.attrs["stage_selector_eligible"] is False
+        assert parent.attrs["latest_pending"] == "canonical_refined"
+        assert kwargs["publication_owner_token"] == run.attrs[
+            mod.REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
+        ]
+        parent.attrs["latest_complete"] = "canonical_refined"
+        parent.attrs["latest"] = "canonical_refined"
+        del parent.attrs["latest_pending"]
+        run.attrs["stage_selector_eligible"] = True
+        events.append("activate")
+
+    monkeypatch.setattr(mod, "prepare_refined_subject_mask_coordinate_context", prepare)
+    monkeypatch.setattr(mod, "publish_refined_subject_mask_coordinate_surfaces", publish)
+    monkeypatch.setattr(
+        mod,
+        "_activate_validated_refined_subject_mask_coordinate_surfaces",
+        activate,
+    )
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="canonical_refined",
+        components=("subject_body", "swim_bladder"),
+        chunk_size=2,
+        write_eye_geometry=False,
+        write_component_contours=False,
+        write_sampled_component_contours=False,
+    )
+
+    run = root["refined_subject_masks_runs/canonical_refined"]
+    assert summary["canonical_coordinate_publication"] is True
+    assert events == ["prepare", "publish", "activate"]
+    assert run.attrs["stage_selector_eligible"] is True
+    assert len(run.attrs[mod.REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR]) == 32
+    assert run.attrs["bbox_xyxy_convention"] == "pixel_edge_half_open"
+    assert "detection_source" not in run
+    assert "frame_indices" not in run
+    for name in mod._CANONICAL_REFINED_SOURCE_ARRAYS:
+        np.testing.assert_array_equal(run[name][:], raw[name][:])
+        assert run[name].dtype == raw[name].dtype
+    expected = mod.batch_mask_spatial_metrics(np.asarray(run["masks_roi"][:], dtype=np.uint8))
+    np.testing.assert_array_equal(run["metrics/bbox_xyxy"][:], expected["bbox_xyxy"])
+
+
+def test_canonical_finalizer_forbids_retained_source_seed_rasters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_probability_root()
+    source = replace(
+        review_mod._load_source_subject_mask_run(root, "subject_probs_001"),
+        canonical_coordinates=True,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_subject_mask_source",
+        lambda *_args, **_kwargs: (source, None),
+    )
+
+    with pytest.raises(ValueError, match="forbid retain_source_seeds"):
+        mod.finalize_subject_mask_run(
+            root,
+            subject_run="subject_probs_001",
+            refined_run="canonical_with_debug_seeds",
+            retain_source_seeds=True,
+        )
+
+    parent = root.get("refined_subject_masks_runs")
+    assert parent is None or "canonical_with_debug_seeds" not in parent
+
+
+def test_real_finalizer_publication_activation_and_strict_reader_integration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _keypoints = _real_canonical_archive(tmp_path)
+    _publish_real_canonical_subject_mask(root)
+    monkeypatch.setattr(
+        mod,
+        "get_git_info",
+        lambda repo_path=None: {  # noqa: ARG005
+            "commit_hash": "c" * 40,
+            "short_hash": "cccccccc",
+            "branch": "main",
+            "is_dirty": False,
+            "remote_url": "git@example.com:palette.git",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_environment_info",
+        lambda **kwargs: {  # noqa: ARG005
+            "environment": {"python": "3.12"},
+            "platform": {
+                "hostname": "finalize-host",
+                "system": "Linux",
+                "release": "6.8",
+                "python_version": "3.12.0",
+                "machine": "x86_64",
+            },
+        },
+    )
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="s1",
+        refined_run="r1",
+        chunk_size=2,
+        write_eye_geometry=False,
+        write_component_contours=False,
+        write_sampled_component_contours=False,
+    )
+    loaded = load_canonical_refined_subject_masks_run_tables(root)
+
+    assert summary["canonical_coordinate_publication"] is True
+    assert loaded.run_name == "r1"
+    assert loaded.coordinate_surfaces.context.assignment_keypoint_authority.record[
+        "status"
+    ] == "used"
+    assert loaded.coordinate_surfaces.context.assignment_keypoint_authority.record[
+        "keypoint_run_path"
+    ] == "keypoints_runs/k1"
+    assignment_authority = (
+        loaded.coordinate_surfaces.context.assignment_keypoint_authority.record
+    )
+    assert assignment_authority["success"]["dataset"] == "detection_success"
+    assert assignment_authority["raw_subject_mask_dependency"]["run_path"] == (
+        "subject_mask_runs/s1"
+    )
+    assert loaded.coordinate_surfaces.scientific_manifest.record["policy"] == (
+        "typed_sealed_scientific_subset_only_v1"
+    )
+    assert "edit_applied" not in loaded.tables.run_arrays
+    assert loaded.tables.components == {}
+    assert loaded.tables.relations == {}
+    assert loaded.coordinate_surfaces.component_qc_inventory.record["components"][
+        "subject_body"
+    ]["status"] == "absent"
+    assert root["refined_subject_masks_runs"].attrs["latest"] == "r1"
+    assert root["refined_subject_masks_runs/r1"].attrs[
+        "stage_selector_eligible"
+    ] is True
+
+    root["keypoints_runs/k1/keypoints_roi"][0, 0, 0] += 1.0
+    with pytest.raises(
+        RefinedSubjectMasksIOError,
+        match="keypoint|Keypoint|dependency|payload",
+    ):
+        load_canonical_refined_subject_masks_run_tables(root, run_name="r1")
+
+
+def test_canonical_finalizer_rejects_keypoint_and_mask_selection_mismatch(
+    tmp_path: Path,
+) -> None:
+    root, _keypoints = _real_canonical_archive(tmp_path)
+    _publish_real_canonical_subject_mask(
+        root,
+        selected_rows=np.asarray([0, 1], dtype="<i8"),
+    )
+
+    with pytest.raises(ValueError, match="exact dtype-preserving"):
+        mod.finalize_subject_mask_run(
+            root,
+            subject_run="s1",
+            refined_run="mismatched_keypoint_selection",
+            chunk_size=2,
+            write_eye_geometry=False,
+            write_component_contours=False,
+            write_sampled_component_contours=False,
+        )
+
+    parent = root.get("refined_subject_masks_runs")
+    assert parent is None or "mismatched_keypoint_selection" not in parent
+
+
+def test_canonical_finalizer_requires_exact_detection_success_leaf(
+    tmp_path: Path,
+) -> None:
+    root, _keypoints = _real_canonical_archive(tmp_path)
+    _publish_real_canonical_subject_mask(root)
+    keypoints = root["keypoints_runs/k1"]
+    success = np.asarray(keypoints["detection_success"][:], dtype=bool)
+    del keypoints["detection_success"]
+    keypoints.create_array("usable_keypoints", data=success, overwrite=True)
+
+    with pytest.raises(ValueError, match="exact detection_success leaf"):
+        mod.finalize_subject_mask_run(
+            root,
+            subject_run="s1",
+            refined_run="missing_exact_success_leaf",
+            chunk_size=2,
+            write_eye_geometry=False,
+            write_component_contours=False,
+            write_sampled_component_contours=False,
+        )
+
+
+def test_canonical_assignment_rejects_conflicting_complete_lineage(
+    tmp_path: Path,
+) -> None:
+    root, _keypoints = _real_canonical_archive(tmp_path)
+    _publish_real_canonical_subject_mask(root)
+    source = mod._load_source_subject_mask_run(root, "s1")
+    source = replace(
+        source,
+        source_keypoint_group="keypoints_runs",
+        source_keypoints_run="k1",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoints_run="different_keypoint_run",
+    )
+
+    with pytest.raises(ValueError, match=r"conflicting complete assignment_\*"):
+        mod._canonical_assignment_keypoint_path(source)
 
 
 def _build_probability_root(
@@ -1002,6 +1498,39 @@ def test_refresh_refined_subject_mask_metrics_prefers_dense_when_rle_cache_exist
     assert store.encoding == "component_rle_v1"
 
 
+def test_refresh_refined_metrics_freshly_rejects_a_canonical_run_before_write(
+    monkeypatch,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    run_name = "refined_subject_masks_refresh_guard"
+    mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run=run_name,
+        chunk_size=1,
+    )
+    run = root[f"refined_subject_masks_runs/{run_name}"]
+    area_before = np.asarray(run["metrics/area_px"][:], dtype=np.float32).copy()
+    run.attrs["coordinate_contract"] = "canonical_v2"
+    run.attrs["refined_subject_mask_publication_owner"] = "c" * 32
+    monkeypatch.setattr(
+        mod,
+        "_resolve_refined_subject_run_group",
+        lambda _root, _name: (run_name, SimpleNamespace(attrs={})),
+    )
+
+    with pytest.raises(RuntimeError, match="immutable canonical publication"):
+        mod.refresh_refined_subject_mask_metrics_run(
+            root,
+            refined_run=run_name,
+            components=None,
+            chunk_size=1,
+        )
+
+    np.testing.assert_array_equal(run["metrics/area_px"][:], area_before)
+
+
 def test_finalize_subject_mask_run_can_retain_source_seed_masks(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()
@@ -1535,6 +2064,8 @@ def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypa
     edited_body[1, 1] = 1
     edited_body[8, 8] = 1
     run["masks_roi"][1, body_idx] = edited_body
+    del run.attrs["bbox_xyxy_convention"]
+    del run.attrs["bbox_xyxy_derivation"]
     write_reason_columns(
         run["components/subject_body"],
         np.asarray(["clean", "manual_correction|needs_review_metric_holes"], dtype=object),
@@ -1545,12 +2076,18 @@ def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypa
     summary = mod.refresh_refined_subject_mask_metrics_run(
         root,
         refined_run="refined_subject_masks_smart_001",
-        components=["subject_body"],
+        components=None,
         chunk_size=1,
         metric_level="cheap",
     )
 
-    assert summary["components"] == ["subject_body"]
+    run = root["refined_subject_masks_runs/refined_subject_masks_smart_001"]
+    assert summary["components"] == list(run.attrs["mask_labels"])
+    assert run.attrs["bbox_xyxy_convention"] == "pixel_edge_half_open"
+    assert (
+        run.attrs["bbox_xyxy_derivation"]
+        == "foreground_half_open_pixel_edges_xyxy_v1"
+    )
     assert summary["review_counts"]["subject_body"]["needs_review"] == 1
     assert float(np.asarray(run["metrics/area_px"][1, body_idx], dtype=np.float32)) == pytest.approx(2.0)
     component_metrics = run["components/subject_body/metrics"]

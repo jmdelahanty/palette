@@ -44,13 +44,12 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
-    latest,
-    load_epochs,
-    nav,
     resolve_cohort,
-    resolve_object_roles,
 )
-from fisheye.shared.arena_geometry import resolve_arena_geometry
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 EPOCHS = ("pre", "chase", "post")
@@ -88,36 +87,8 @@ def rotate_about(pt_xy, cx, cy, deg):
 
 def load(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
-    eb = latest(nav(cd, ["egocentric_bearing"]))
-    roles = resolve_object_roles(r)
-    agg = roles["aggressive"]
-    fish = np.asarray(cd["positions"]["fish_centroid_arena_xy"][:], float)
-    fvalid = np.asarray(cd["positions"]["fish_valid"][:], bool)
-    chas = np.asarray(cd["positions"]["chaser_arena_xy"][:], float)
-    cvalid = np.asarray(cd["positions"]["chaser_valid"][:], bool)[:, agg]
-    obj = chas[:, agg, :]
-    heading = np.asarray(eb["frames"]["fish_heading_deg"][:], float)
-    hvalid = np.asarray(eb["frames"]["fish_heading_valid"][:], bool)
-    ppm = float(cd.attrs.get("pixels_per_mm_projector"))
-    geo, _ = resolve_arena_geometry(r, cd, pixels_per_mm=ppm)
-    cx, cy = geo.center_x_px, geo.center_y_px
-    if cx is None:
-        raise ValueError("no arena geometry")
-    base_valid = fvalid & cvalid & hvalid & np.isfinite(heading)
-
-    refs = {"object": (obj, base_valid)}
-    for rot in VIRTUAL_ROT_DEG:
-        obj_r = rotate_about(obj, cx, cy, rot)
-        refs[f"virt_{rot:.0f}"] = (obj_r, fvalid & hvalid & np.isfinite(heading))
-
-    bearings, dists = {}, {}
-    for key, (pos, val) in refs.items():
-        bearings[key] = bearing_of(pos, fish, heading)
-        dists[key] = np.hypot(pos[:, 0] - fish[:, 0], pos[:, 1] - fish[:, 1]) / ppm
-    return {"bearings": bearings, "dists": dists,
-            "valid": {k: v for k, (_, v) in refs.items()},
-            "epochs": load_epochs(r)}
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("egocentric_bearing")
 
 
 def sector_fractions(bearing, valid, dist, epoch_range, near_mm):
@@ -261,6 +232,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             d = load(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], type(ex).__name__, ex)
             continue

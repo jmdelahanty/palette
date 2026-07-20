@@ -91,6 +91,9 @@ def test_materializer_computes_locally_and_publishes_atomically(
     assert parent.attrs["latest"] == "response_1"
     assert parent.attrs["latest_complete"] == "response_1"
     run = parent["response_1"]
+    assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs["atomic_publication_owner_uuid"]
+    assert "atomic_publication_tombstone" not in run.attrs
     assert run.attrs["cluster_output_staging"]["publisher_contract"] == {
         "schema_id": "palette.atomic_run_group_publisher",
         "schema_version": 1,

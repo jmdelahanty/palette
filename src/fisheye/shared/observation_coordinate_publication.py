@@ -9,7 +9,7 @@ authority.
 Detection publication persists three deliberately redundant surfaces:
 
 * ``bbox_norm_coords`` -- source-camera-normalized ``cx,cy,w,h``;
-* ``bbox_img_xyxy`` -- source-camera continuous pixel edges; and
+* ``bbox_img_xyxy`` -- source-camera half-open pixel edges; and
 * ``centers_img_xy`` -- source-camera continuous points derived from the exact
   persisted pixel bbox.
 
@@ -60,7 +60,9 @@ from fisheye.shared.coordinate_record import (
     verify_bound_coordinate_record,
 )
 from fisheye.shared.coordinate_reference import (
+    BoundReferenceExtent,
     bind_array_reference_extent,
+    bind_persisted_record_reference_extent,
     canonical_node_path,
 )
 from fisheye.shared.directed_transform_chain import (
@@ -69,7 +71,10 @@ from fisheye.shared.directed_transform_chain import (
     require_bound_directed_transform_chain,
     resolve_bound_directed_transform_chain,
 )
-from fisheye.shared.directed_transform_v2 import load_bound_directed_transform_v2
+from fisheye.shared.directed_transform_v2 import (
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+    load_bound_directed_transform_v2,
+)
 from fisheye.shared.immutable_yolo_storage import (
     IMMUTABLE_YOLO_STORAGE_ATTR,
     IMMUTABLE_YOLO_STORAGE_SCHEMA,
@@ -81,6 +86,8 @@ from fisheye.shared.instance_keys import (
     mint_detection_instance_keys,
 )
 from fisheye.shared.pixel_frame_authority import (
+    CROP_PLACEMENT_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     ROI_FRAME_KIND,
     SOURCE_CAMERA_FRAME_KIND,
     SOURCE_CAMERA_NORMALIZED_FRAME_KIND,
@@ -99,7 +106,10 @@ from fisheye.shared.pixel_frame_authority import (
     require_source_camera_pixel_frame_authority,
     require_trusted_coordinate_attrs,
 )
-from fisheye.shared.transform_authority import load_bound_transform_authority
+from fisheye.shared.transform_authority import (
+    TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+    load_bound_transform_authority,
+)
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
@@ -110,8 +120,19 @@ from fisheye.shared.zarr_run_completion import (
 
 DETECTION_BBOX_PROJECTION_ATTR = "detection_bbox_projection"
 DETECTION_BBOX_PROJECTION_SCHEMA_ID = "palette.detection_bbox_projection"
-DETECTION_BBOX_PROJECTION_SCHEMA_VERSION = 1
-DETECTION_BBOX_PROJECTION_OPERATION = "source_camera_normalized_cxcywh_to_image_xyxy_v1"
+DETECTION_BBOX_PROJECTION_SCHEMA_VERSION = 2
+DETECTION_BBOX_PROJECTION_OPERATION = (
+    "source_camera_normalized_cxcywh_to_half_open_image_xyxy_v2"
+)
+
+DETECTION_BACKEND_RESULT_PROJECTION_ATTR = "detection_backend_result_projection"
+DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID = (
+    "palette.detection_backend_result_projection"
+)
+DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_VERSION = 1
+DETECTION_BACKEND_RESULT_PROJECTION_OPERATION = (
+    "validated_yolo_result_xyxy_to_source_camera_normalized_cxcywh_v1"
+)
 
 DETECTION_ACQUISITION_MAPPING_ATTR = "detection_acquisition_frame_mapping"
 DETECTION_ACQUISITION_MAPPING_SCHEMA_ID = "palette.detection_acquisition_frame_mapping"
@@ -145,8 +166,10 @@ SUPPORTED_DETECTION_DECODE_DOMAIN_PROOFS = frozenset(
 
 BBOX_CENTER_DERIVATION_ATTR = "bbox_center_derivation"
 BBOX_CENTER_DERIVATION_SCHEMA_ID = "palette.bbox_center_derivation"
-BBOX_CENTER_DERIVATION_SCHEMA_VERSION = 1
-BBOX_CENTER_DERIVATION_OPERATION = "xyxy_midpoint_v1"
+BBOX_CENTER_DERIVATION_SCHEMA_VERSION = 2
+BBOX_CENTER_DERIVATION_OPERATION = (
+    "half_open_xyxy_edges_to_continuous_midpoint_v2"
+)
 
 CROP_GEOMETRY_SELECTION_ATTR = "crop_geometry_selection"
 CROP_GEOMETRY_SELECTION_SCHEMA_ID = "palette.crop_geometry_selection"
@@ -162,14 +185,22 @@ CROP_ROI_GEOMETRY_DERIVATION_OPERATION = (
 
 CROP_ROI_TOP_LEFT_DERIVATION_ATTR = "crop_roi_top_left_derivation"
 CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_ID = "palette.crop_roi_top_left_derivation"
-CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_VERSION = 1
+CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_VERSION = 2
 CROP_ROI_TOP_LEFT_DERIVATION_OPERATION = (
-    "source_crop_xywh_to_roi_coordinates_full_top_left_v1"
+    "source_crop_xywh_to_source_camera_continuous_top_left_v2"
 )
+
+CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH = "coordinate_frames/roi_bbox_edge"
+CROP_ROI_BBOX_EDGE_EXTENT_ATTR = "crop_roi_bbox_edge_reference_extent"
+CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_ID = (
+    "palette.crop_roi_bbox_edge_reference_extent"
+)
+CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_VERSION = 1
 
 SOURCE_CAMERA_PROFILE_ID = "source_camera_image_px.top_left_y_down.v1"
 SOURCE_CAMERA_NORMALIZED_PROFILE_ID = "source_camera_normalized_xy.top_left_y_down.v1"
-SOURCE_CAMERA_PIXEL_CONVENTION = "continuous"
+SOURCE_CAMERA_POINT_PIXEL_CONVENTION = "continuous"
+SOURCE_CAMERA_BBOX_PIXEL_CONVENTION = "pixel_edge_half_open"
 
 _BOUND_DETECTION_FRAME_EVIDENCE_SEAL = object()
 _BOUND_DETECTION_GEOMETRY_SEAL = object()
@@ -229,6 +260,153 @@ def _payload(node: Any, values: np.ndarray) -> dict[str, Any]:
         "dtype": values.dtype.str,
         "shape": [int(item) for item in values.shape],
         "content_sha256": array_payload_sha256(node),
+    }
+
+
+def _strict_detection_model_artifact(value: Any) -> dict[str, Any]:
+    if type(value) is not dict:
+        _fail(
+            "Canonical detection requires one exact model content-fingerprint "
+            "mapping."
+        )
+    expected_fields = {
+        "role",
+        "path",
+        "fingerprint_scheme",
+        "sha256",
+        "size_bytes",
+        "mtime_ns",
+        "source",
+    }
+    if set(value) != expected_fields:
+        _fail(
+            "Canonical detection model evidence must contain only the strict "
+            f"content-v1 fields {sorted(expected_fields)!r}."
+        )
+    artifact = copy.deepcopy(value)
+    digest = artifact.get("sha256")
+    if (
+        artifact.get("role") != "detect_model"
+        or artifact.get("fingerprint_scheme") != "content_v1"
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        _fail("Canonical detection model fingerprint is missing or unsupported.")
+    path = artifact.get("path")
+    if (
+        not isinstance(path, str)
+        or not path.startswith("/")
+        or not path.strip()
+        or path != path.strip()
+    ):
+        _fail("Canonical detection model fingerprint requires an absolute path.")
+    for name in ("size_bytes", "mtime_ns"):
+        if type(artifact.get(name)) is not int or artifact[name] < 0:
+            _fail(f"Canonical detection model {name} must be nonnegative int.")
+    if artifact.get("source") not in {"computed", "sidecar", "registry"}:
+        _fail("Canonical detection model fingerprint source is unsupported.")
+    return artifact
+
+
+def _optional_hw(value: Any, *, label: str) -> list[int] | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not list
+        or len(value) != 2
+        or any(type(item) is not int or item <= 0 for item in value)
+    ):
+        _fail(f"{label} must be null or one exact positive [height, width] list.")
+    return [int(value[0]), int(value[1])]
+
+
+def _runtime_detection_result_contract(
+    rowset_node: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> dict[str, Any]:
+    attrs = require_trusted_coordinate_attrs(
+        rowset_node,
+        label="Canonical detection backend-result rowset",
+    )
+    parameters = attrs.get("parameters")
+    if type(parameters) is not dict:
+        _fail("Canonical detection lacks exact runtime parameter metadata.")
+    backend = attrs.get("decode_backend_effective")
+    reader = attrs.get("video_reader_type")
+    if (
+        not isinstance(backend, str)
+        or not backend
+        or backend != backend.strip()
+        or not isinstance(reader, str)
+        or not reader
+        or reader != reader.strip()
+    ):
+        _fail("Canonical detection lacks an exact decoder/backend identity.")
+    height = attrs.get("inference_height")
+    width = attrs.get("inference_width")
+    result_count = attrs.get("validated_backend_result_count")
+    result_shape = _optional_hw(
+        attrs.get("validated_backend_result_orig_shape_hw"),
+        label="validated_backend_result_orig_shape_hw",
+    )
+    if (
+        type(height) is not int
+        or height <= 0
+        or type(width) is not int
+        or width <= 0
+        or type(result_count) is not int
+        or result_count != acquisition_frame.record.source_total_frames
+        or result_shape != [height, width]
+    ):
+        _fail(
+            "Canonical detection backend-result count/orig_shape does not match "
+            "the exact acquisition and runtime input extent."
+        )
+    if parameters.get("decode_backend_effective") != backend:
+        _fail("Detection parameters and backend-result decoder identity disagree.")
+    requested = _optional_hw(
+        parameters.get("resize_dims"),
+        label="parameters.resize_dims",
+    )
+    pre_resize = _optional_hw(
+        parameters.get("pre_resize_dims"),
+        label="parameters.pre_resize_dims",
+    )
+    effective = _optional_hw(
+        parameters.get("effective_input_resize_dims"),
+        label="parameters.effective_input_resize_dims",
+    )
+    tensor_resize = _optional_hw(
+        parameters.get("tensor_resize_dims"),
+        label="parameters.tensor_resize_dims",
+    )
+    imgsz = parameters.get("imgsz_applied")
+    if imgsz is not None and not (
+        type(imgsz) is int
+        and imgsz > 0
+        or type(imgsz) is list
+        and len(imgsz) == 2
+        and all(type(item) is int and item > 0 for item in imgsz)
+    ):
+        _fail("parameters.imgsz_applied is not one exact supported shape.")
+    return {
+        "decode_backend_effective": backend,
+        "video_reader_type": reader,
+        "validated_result_count": result_count,
+        "validated_result_orig_shape_hw": result_shape,
+        "requested_resize_dims_hw": requested,
+        "pre_resize_dims_hw": pre_resize,
+        "effective_runtime_input_resize_dims_hw": effective,
+        "tensor_resize_dims_hw": tensor_resize,
+        "ultralytics_imgsz_applied": copy.deepcopy(imgsz),
+        "result_coordinate_contract": (
+            "ultralytics_boxes_xyxy_in_validated_result_orig_shape_px"
+        ),
+        "network_preprocessing_authority": (
+            "not_persisted_not_used_as_coordinate_projection_authority"
+        ),
     }
 
 
@@ -351,9 +529,10 @@ def restore_observation_coordinate_publication_checkpoint(
 
 @dataclass(frozen=True, init=False)
 class BoundDetectionFrameEvidence:
-    """Sealed normalized-to-source-camera frame and transform evidence."""
+    """Sealed point, bbox-edge, and normalized source-camera evidence."""
 
     source_camera_frame: BoundPixelFrameAuthority = field(repr=False)
+    bbox_source_camera_frame: BoundPixelFrameAuthority = field(repr=False)
     normalized_frame: BoundPixelFrameAuthority = field(repr=False)
     normalized_to_source_camera: BoundDirectedTransformChain = field(repr=False)
     _seal: object = field(repr=False, compare=False)
@@ -362,6 +541,7 @@ class BoundDetectionFrameEvidence:
         self,
         *,
         source_camera_frame: BoundPixelFrameAuthority,
+        bbox_source_camera_frame: BoundPixelFrameAuthority,
         normalized_frame: BoundPixelFrameAuthority,
         normalized_to_source_camera: BoundDirectedTransformChain,
         _verification_seal: object | None = None,
@@ -369,6 +549,11 @@ class BoundDetectionFrameEvidence:
         if _verification_seal is not _BOUND_DETECTION_FRAME_EVIDENCE_SEAL:
             _fail("Detection frame evidence must be built by the sealed verifier.")
         object.__setattr__(self, "source_camera_frame", source_camera_frame)
+        object.__setattr__(
+            self,
+            "bbox_source_camera_frame",
+            bbox_source_camera_frame,
+        )
         object.__setattr__(self, "normalized_frame", normalized_frame)
         object.__setattr__(
             self,
@@ -389,31 +574,52 @@ class BoundDetectionFrameEvidence:
 def build_bound_detection_frame_evidence(
     *,
     source_camera_frame: BoundPixelFrameAuthority,
+    bbox_source_camera_frame: BoundPixelFrameAuthority,
     normalized_frame: BoundPixelFrameAuthority,
     normalized_to_source_camera: BoundDirectedTransformChain,
 ) -> BoundDetectionFrameEvidence:
-    """Verify one exact continuous source-camera normalized-to-pixel chain."""
+    """Verify exact point and half-open bbox source-camera authorities."""
 
     camera = require_source_camera_pixel_frame_authority(source_camera_frame)
+    bbox_camera = require_source_camera_pixel_frame_authority(
+        bbox_source_camera_frame
+    )
     normalized = require_normalized_pixel_frame_authority(normalized_frame)
     chain = require_bound_directed_transform_chain(normalized_to_source_camera)
     if camera.record.kind != SOURCE_CAMERA_FRAME_KIND:
         _fail("Detection geometry requires a source-camera pixel frame.")
-    if camera.pixel_convention != SOURCE_CAMERA_PIXEL_CONVENTION:
-        _fail("Detection source-camera geometry requires continuous coordinates.")
+    if camera.pixel_convention != SOURCE_CAMERA_POINT_PIXEL_CONVENTION:
+        _fail("Detection source-camera point geometry requires continuous coordinates.")
+    if bbox_camera.pixel_convention != SOURCE_CAMERA_BBOX_PIXEL_CONVENTION:
+        _fail(
+            "Detection source-camera bbox geometry requires half-open pixel-edge "
+            "coordinates."
+        )
+    if (
+        camera.reference_extent.record_ref
+        != bbox_camera.reference_extent.record_ref
+        or camera.reference_extent.record_sha256
+        != bbox_camera.reference_extent.record_sha256
+        or camera.endpoint.width != bbox_camera.endpoint.width
+        or camera.endpoint.height != bbox_camera.endpoint.height
+    ):
+        _fail(
+            "Detection point and bbox source-camera frames do not bind the exact "
+            "same acquisition extent."
+        )
     if normalized.record.kind != SOURCE_CAMERA_NORMALIZED_FRAME_KIND:
         _fail(
             "Detection normalized geometry requires a source-camera normalized frame."
         )
     expected_camera_ref = {
-        "record_ref": camera.record_ref,
-        "record_sha256": camera.record_sha256,
+        "record_ref": bbox_camera.record_ref,
+        "record_sha256": bbox_camera.record_sha256,
     }
     if normalized.record.lineage.get("pixel_frame") != expected_camera_ref:
         _fail("Normalized frame does not bind the exact source-camera frame.")
     if (
         not _same_pixel_frame(chain.descriptor_frame_authority, normalized)
-        or not _same_pixel_frame(chain.source_camera_frame_authority, camera)
+        or not _same_pixel_frame(chain.source_camera_frame_authority, bbox_camera)
         or chain.row_identity is not None
         or chain.descriptor_space_id != "source_camera_normalized_xy"
         or chain.source_camera_space_id != "source_camera_image_px"
@@ -423,11 +629,15 @@ def build_bound_detection_frame_evidence(
             "endpoints, or row domain."
         )
     if not (
-        camera.archive_identity == normalized.archive_identity == chain.archive_identity
+        camera.archive_identity
+        == bbox_camera.archive_identity
+        == normalized.archive_identity
+        == chain.archive_identity
     ):
         _fail("Detection frame evidence spans different archives.")
     return BoundDetectionFrameEvidence(
         source_camera_frame=camera,
+        bbox_source_camera_frame=bbox_camera,
         normalized_frame=normalized,
         normalized_to_source_camera=chain,
         _verification_seal=_BOUND_DETECTION_FRAME_EVIDENCE_SEAL,
@@ -444,12 +654,150 @@ def require_bound_detection_frame_evidence(
         _fail("A sealed detection frame-evidence bundle is required.")
     current = build_bound_detection_frame_evidence(
         source_camera_frame=value.source_camera_frame,
+        bbox_source_camera_frame=value.bbox_source_camera_frame,
         normalized_frame=value.normalized_frame,
         normalized_to_source_camera=value.normalized_to_source_camera,
     )
     if current != value:
         _fail("Detection frame evidence changed after binding.")
     return value
+
+
+def _detection_backend_result_projection_record(
+    rowset_node: Any,
+    bbox_norm_node: Any,
+    *,
+    frame_evidence: BoundDetectionFrameEvidence,
+    model_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = require_bound_detection_frame_evidence(frame_evidence)
+    _require_child_path(bbox_norm_node, rowset_node, "bbox_norm_coords")
+    bbox_norm = _array(bbox_norm_node, label="bbox_norm_coords")
+    if (
+        bbox_norm.dtype.kind != "f"
+        or bbox_norm.ndim != 2
+        or bbox_norm.shape[1:] != (4,)
+        or not np.isfinite(bbox_norm).all()
+    ):
+        _fail(
+            "Canonical detection backend-result projection requires a finite "
+            "floating (N,4) bbox_norm_coords surface."
+        )
+    artifact = _strict_detection_model_artifact(model_artifact)
+    attrs = require_trusted_coordinate_attrs(
+        rowset_node,
+        label="Canonical detection backend-result rowset",
+    )
+    if (
+        attrs.get("model_path") != artifact["path"]
+        or attrs.get("model_name") != artifact["path"].rsplit("/", 1)[-1]
+    ):
+        _fail(
+            "Canonical detection model attrs differ from the exact fingerprinted "
+            "model artifact."
+        )
+    runtime = _runtime_detection_result_contract(
+        rowset_node,
+        acquisition_frame=evidence.acquisition_frame,
+    )
+    result_height, result_width = runtime["validated_result_orig_shape_hw"]
+    source_width = int(evidence.bbox_source_camera_frame.endpoint.width)
+    source_height = int(evidence.bbox_source_camera_frame.endpoint.height)
+    return {
+        "schema_id": DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID,
+        "schema_version": DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_VERSION,
+        "operation": DETECTION_BACKEND_RESULT_PROJECTION_OPERATION,
+        "direction": (
+            "detector_backend_result_image_px_to_source_camera_normalized_xy"
+        ),
+        "backend_result_space": {
+            "space_id": "detector_backend_result_image_px",
+            "geometry_type": "bbox_xyxy",
+            "pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+            "reference_width_px": int(result_width),
+            "reference_height_px": int(result_height),
+        },
+        "source_camera_normalized_frame": {
+            "record_ref": evidence.normalized_frame.record_ref,
+            "record_sha256": evidence.normalized_frame.record_sha256,
+        },
+        "source_camera_bbox_frame": {
+            "record_ref": evidence.bbox_source_camera_frame.record_ref,
+            "record_sha256": evidence.bbox_source_camera_frame.record_sha256,
+        },
+        "acquisition_camera_frame": {
+            "record_ref": evidence.acquisition_frame.record_ref,
+            "record_sha256": evidence.acquisition_frame.record_sha256,
+        },
+        "published_bbox_normalized": _payload(bbox_norm_node, bbox_norm),
+        "result_px_to_source_camera_normalized_matrix": [
+            [1.0 / float(result_width), 0.0, 0.0],
+            [0.0, 1.0 / float(result_height), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        "result_px_to_source_camera_bbox_matrix": [
+            [float(source_width) / float(result_width), 0.0, 0.0],
+            [0.0, float(source_height) / float(result_height), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        "runtime_result_validation": runtime,
+        "model_artifact": artifact,
+        "proof": (
+            "every_backend_result_orig_shape_equaled_its_exact_runtime_input_"
+            "shape_before_bbox_normalization_v1"
+        ),
+    }
+
+
+def publish_detection_backend_result_projection(
+    rowset_node: Any,
+    bbox_norm_node: Any,
+    *,
+    frame_evidence: BoundDetectionFrameEvidence,
+    model_artifact: Mapping[str, Any],
+) -> BoundCoordinateRecord:
+    """Persist the verified YOLO result-space projection without guessing letterbox."""
+
+    record = _detection_backend_result_projection_record(
+        rowset_node,
+        bbox_norm_node,
+        frame_evidence=frame_evidence,
+        model_artifact=model_artifact,
+    )
+    return stamp_and_bind_persisted_coordinate_record(
+        rowset_node,
+        record,
+        attr_name=DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
+    )
+
+
+def load_detection_backend_result_projection(
+    rowset_node: Any,
+    bbox_norm_node: Any,
+    *,
+    frame_evidence: BoundDetectionFrameEvidence,
+) -> BoundCoordinateRecord:
+    """Freshly verify exact persisted backend-result projection evidence."""
+
+    bound = bind_persisted_coordinate_record(
+        rowset_node,
+        attr_name=DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
+    )
+    artifact = _strict_detection_model_artifact(
+        bound.record.get("model_artifact")
+    )
+    expected = _detection_backend_result_projection_record(
+        rowset_node,
+        bbox_norm_node,
+        frame_evidence=frame_evidence,
+        model_artifact=artifact,
+    )
+    if bound.record != expected:
+        _fail(
+            "Persisted detection backend-result projection differs from the "
+            "exact live result shape, source frames, model, or bbox payload."
+        )
+    return bound
 
 
 def derive_detection_source_camera_geometry(
@@ -491,8 +839,14 @@ def derive_detection_source_camera_geometry(
             "Canonical normalized detection boxes must have positive extents "
             "and remain inside the exact source-camera extent."
         )
-    width_px = np.asarray(evidence.source_camera_frame.endpoint.width, dtype=dtype)
-    height_px = np.asarray(evidence.source_camera_frame.endpoint.height, dtype=dtype)
+    width_px = np.asarray(
+        evidence.bbox_source_camera_frame.endpoint.width,
+        dtype=dtype,
+    )
+    height_px = np.asarray(
+        evidence.bbox_source_camera_frame.endpoint.height,
+        dtype=dtype,
+    )
     bbox_img = np.column_stack(
         (
             x_min_norm * width_px,
@@ -526,7 +880,8 @@ def _detection_records(
     centers_img: np.ndarray,
     source_lineage_records: tuple[BoundCoordinateRecord, ...],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    camera = frame_evidence.source_camera_frame
+    point_camera = frame_evidence.source_camera_frame
+    bbox_camera = frame_evidence.bbox_source_camera_frame
     normalized = frame_evidence.normalized_frame
     chain = frame_evidence.normalized_to_source_camera
     projection = {
@@ -540,8 +895,8 @@ def _detection_records(
         },
         "destination_bbox": _payload(bbox_img_node, bbox_img),
         "destination_frame": {
-            "record_ref": camera.record_ref,
-            "record_sha256": camera.record_sha256,
+            "record_ref": bbox_camera.record_ref,
+            "record_sha256": bbox_camera.record_sha256,
         },
         "direction": "source_camera_normalized_xy_to_source_camera_image_px",
         "transform_chain": [
@@ -551,9 +906,13 @@ def _detection_records(
             }
             for item in chain.transform_records
         ],
-        "reference_width_px": int(camera.endpoint.width),
-        "reference_height_px": int(camera.endpoint.height),
-        "formula": ("cxcywh_normalized_to_xyxy_edges_using_exact_reference_extent_v1"),
+        "destination_pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+        "reference_width_px": int(bbox_camera.endpoint.width),
+        "reference_height_px": int(bbox_camera.endpoint.height),
+        "formula": (
+            "cxcywh_normalized_to_xyxy_half_open_edges_using_exact_"
+            "reference_extent_v2"
+        ),
         "row_identity": {
             "record_ref": row_identity.record_ref,
             "record_sha256": row_identity.record_sha256,
@@ -576,10 +935,18 @@ def _detection_records(
         "operation": BBOX_CENTER_DERIVATION_OPERATION,
         "source_bbox": _payload(bbox_img_node, bbox_img),
         "output_centers": _payload(centers_img_node, centers_img),
-        "coordinate_frame": {
-            "record_ref": camera.record_ref,
-            "record_sha256": camera.record_sha256,
+        "source_frame": {
+            "record_ref": bbox_camera.record_ref,
+            "record_sha256": bbox_camera.record_sha256,
         },
+        "destination_frame": {
+            "record_ref": point_camera.record_ref,
+            "record_sha256": point_camera.record_sha256,
+        },
+        "direction": (
+            "source_camera_bbox_pixel_edge_half_open_to_"
+            "source_camera_point_continuous"
+        ),
         "formula": "center_x=(x_min+x_max)/2;center_y=(y_min+y_max)/2",
         "row_identity": {
             "record_ref": row_identity.record_ref,
@@ -627,7 +994,8 @@ def _position_surface(
         or descriptor.descriptor.geometry_type != "point_xy"
         or descriptor.descriptor.components != ("x", "y")
         or descriptor.descriptor.component_units != ("px", "px")
-        or descriptor.descriptor.pixel_convention != SOURCE_CAMERA_PIXEL_CONVENTION
+        or descriptor.descriptor.pixel_convention
+        != SOURCE_CAMERA_POINT_PIXEL_CONVENTION
         or descriptor.descriptor.source_camera_overlay.status
         != CANONICAL_OVERLAY_DIRECT
     ):
@@ -829,7 +1197,10 @@ def publish_detection_observation_geometry(
         frame_evidence=evidence,
     )
     common_archive = archive_identity(rowset_node)
-    if evidence.source_camera_frame.archive_identity != common_archive:
+    if (
+        evidence.source_camera_frame.archive_identity != common_archive
+        or evidence.bbox_source_camera_frame.archive_identity != common_archive
+    ):
         _fail("Detection geometry and frame evidence use different archives.")
     for label, node in (
         ("instance_key", key_node),
@@ -910,9 +1281,9 @@ def publish_detection_observation_geometry(
             geometry_type="bbox_xyxy",
             components=("x_min", "y_min", "x_max", "y_max"),
             component_units=("px", "px", "px", "px"),
-            pixel_convention=SOURCE_CAMERA_PIXEL_CONVENTION,
+            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
             row_identity=identity,
-            reference_frame_authority=evidence.source_camera_frame,
+            reference_frame_authority=evidence.bbox_source_camera_frame,
             source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
             lineage_records=(*source_lineage, projection),
         )
@@ -922,7 +1293,7 @@ def publish_detection_observation_geometry(
             geometry_type="point_xy",
             components=("x", "y"),
             component_units=("px", "px"),
-            pixel_convention=SOURCE_CAMERA_PIXEL_CONVENTION,
+            pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
             row_identity=identity,
             reference_frame_authority=evidence.source_camera_frame,
             source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
@@ -1020,7 +1391,7 @@ def load_detection_observation_geometry(
     bbox_image = load_bound_canonical_coordinate_descriptor(
         bbox_img_node,
         row_identity=identity,
-        reference_frame_authority=evidence.source_camera_frame,
+        reference_frame_authority=evidence.bbox_source_camera_frame,
         lineage_records=(*source_lineage, projection),
     )
     centers_image = load_bound_canonical_coordinate_descriptor(
@@ -1562,7 +1933,9 @@ def load_crop_observation_geometry(
     bbox_image = load_bound_canonical_coordinate_descriptor(
         bbox_img_node,
         row_identity=identity,
-        reference_frame_authority=source.frame_evidence.source_camera_frame,
+        reference_frame_authority=(
+            source.frame_evidence.bbox_source_camera_frame
+        ),
         lineage_records=(*source.bbox_image.lineage_records, selection),
     )
     centers_image = load_bound_canonical_coordinate_descriptor(
@@ -1652,6 +2025,113 @@ def require_bound_crop_observation_geometry(
     return value
 
 
+def _crop_roi_bbox_edge_extent_record(
+    roi_images_node: Any,
+) -> tuple[dict[str, Any], BoundReferenceExtent]:
+    source_extent = bind_array_reference_extent(roi_images_node, units="px")
+    return (
+        {
+            "schema_id": CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_ID,
+            "schema_version": CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_VERSION,
+            "width_px": int(source_extent.width),
+            "height_px": int(source_extent.height),
+            "units": "px",
+            "source_roi_images_extent": {
+                "record_ref": source_extent.record_ref,
+                "record_sha256": source_extent.record_sha256,
+                "selector": source_extent.selector,
+            },
+            "purpose": "half_open_bbox_edge_frame_extent_only",
+        },
+        source_extent,
+    )
+
+
+def _require_crop_roi_bbox_edge_frame_path(
+    frame_node: Any,
+    roi_images_node: Any,
+) -> None:
+    roi_path = canonical_node_path(roi_images_node)
+    if not roi_path.endswith("/roi_images"):
+        _fail("Crop ROI pixel authority must be the exact roi_images child.")
+    rowset_path = roi_path[: -len("/roi_images")]
+    expected = f"{rowset_path}/{CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH}"
+    if canonical_node_path(frame_node) != expected:
+        _fail(
+            "Crop ROI bbox-edge frame must use its exact run-local canonical "
+            f"path {expected!r}."
+        )
+
+
+def publish_crop_roi_bbox_edge_reference_extent(
+    frame_node: Any,
+    roi_images_node: Any,
+) -> BoundReferenceExtent:
+    """Bind a separate half-open bbox frame to exact live ROI image metadata."""
+
+    _require_crop_roi_bbox_edge_frame_path(frame_node, roi_images_node)
+    record, _ = _crop_roi_bbox_edge_extent_record(roi_images_node)
+    attrs_targets, snapshots = _attrs_snapshots(frame_node)
+    try:
+        attrs = require_trusted_coordinate_attrs(
+            frame_node,
+            label="Crop ROI bbox-edge extent frame",
+        )
+        attrs.update(
+            {
+                "width_px": int(record["width_px"]),
+                "height_px": int(record["height_px"]),
+                "units": "px",
+            }
+        )
+        stamp_and_bind_persisted_coordinate_record(
+            frame_node,
+            record,
+            attr_name=CROP_ROI_BBOX_EDGE_EXTENT_ATTR,
+        )
+        return load_crop_roi_bbox_edge_reference_extent(
+            frame_node,
+            roi_images_node,
+        )
+    except BaseException as exc:
+        _rollback_attrs(attrs_targets, snapshots, cause=exc)
+        raise
+
+
+def load_crop_roi_bbox_edge_reference_extent(
+    frame_node: Any,
+    roi_images_node: Any,
+) -> BoundReferenceExtent:
+    """Freshly validate a separate ROI bbox-edge frame extent authority."""
+
+    _require_crop_roi_bbox_edge_frame_path(frame_node, roi_images_node)
+    expected, source_extent = _crop_roi_bbox_edge_extent_record(roi_images_node)
+    record = bind_persisted_coordinate_record(
+        frame_node,
+        attr_name=CROP_ROI_BBOX_EDGE_EXTENT_ATTR,
+    )
+    if record.record != expected:
+        _fail(
+            "Crop ROI bbox-edge extent differs from exact live roi_images "
+            "metadata."
+        )
+    extent = bind_persisted_record_reference_extent(
+        frame_node,
+        record_attr=CROP_ROI_BBOX_EDGE_EXTENT_ATTR,
+        digest_attr=f"{CROP_ROI_BBOX_EDGE_EXTENT_ATTR}_sha256",
+        width_field="width_px",
+        height_field="height_px",
+        units_field="units",
+    )
+    if (
+        extent.width != source_extent.width
+        or extent.height != source_extent.height
+        or extent.units != source_extent.units
+    ):
+        _fail("Crop ROI bbox-edge extent does not equal roi_images shape[-2:].")
+    return extent
+
+
 @dataclass(frozen=True)
 class CropRoiGeometryPublicationResult:
     """Canonical crop placement and ROI-local bbox descriptors."""
@@ -1694,12 +2174,13 @@ def _validate_crop_roi_top_left(
 def _crop_roi_top_left_record(
     *,
     crop: BoundCropObservationGeometry,
-    source_camera_frame: BoundPixelFrameAuthority,
+    point_placement_ownership: BoundCropPlacementOwnership,
     source_crop_xywh_node: Any,
     placement: np.ndarray,
     roi_top_left_node: Any,
     top_left: np.ndarray,
 ) -> dict[str, Any]:
+    point_camera = point_placement_ownership.source_camera_frame
     return {
         "schema_id": CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_ID,
         "schema_version": CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_VERSION,
@@ -1710,13 +2191,55 @@ def _crop_roi_top_left_record(
             "record_ref": crop.row_identity.record_ref,
             "record_sha256": crop.row_identity.record_sha256,
         },
+        "crop_placement_ownership": {
+            "record_ref": point_placement_ownership.record_ref,
+            "record_sha256": point_placement_ownership.record_sha256,
+        },
         "reference_frame": {
-            "record_ref": source_camera_frame.record_ref,
-            "record_sha256": source_camera_frame.record_sha256,
+            "record_ref": point_camera.record_ref,
+            "record_sha256": point_camera.record_sha256,
         },
         "direction": "source_crop_xywh_to_source_camera_top_left_points_xy",
+        "pixel_convention": SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
         "formula": "roi_coordinates_full = source_crop_xywh[:, :2]",
     }
+
+
+def _validate_crop_roi_top_left_point_ownership(
+    *,
+    crop: BoundCropObservationGeometry,
+    source_crop_xywh_node: Any,
+    point_placement_ownership: BoundCropPlacementOwnership,
+) -> BoundCropPlacementOwnership:
+    ownership = require_bound_crop_placement_ownership(
+        point_placement_ownership
+    )
+    expected_camera = crop.source_geometry.frame_evidence.source_camera_frame
+    if ownership.attr_name != CROP_PLACEMENT_OWNERSHIP_ATTR:
+        _fail(
+            "Crop ROI top-left point geometry requires the canonical continuous "
+            "crop-placement ownership attr."
+        )
+    if not _same_row_identity(ownership.row_identity, crop.row_identity):
+        _fail("Crop ROI top-left ownership uses a different observation identity.")
+    if not _same_pixel_frame(ownership.source_camera_frame, expected_camera):
+        _fail(
+            "Crop ROI top-left ownership targets a different source-camera "
+            "point frame."
+        )
+    if (
+        ownership.source_camera_frame.pixel_convention
+        != SOURCE_CAMERA_POINT_PIXEL_CONVENTION
+    ):
+        _fail("Crop ROI top-left ownership must target continuous point coordinates.")
+    if canonical_node_path(ownership._placement_node) != canonical_node_path(
+        source_crop_xywh_node
+    ):
+        _fail(
+            "Crop ROI top-left ownership does not bind the exact "
+            "source_crop_xywh payload."
+        )
+    return ownership
 
 
 def _validate_crop_roi_evidence(
@@ -1740,15 +2263,21 @@ def _validate_crop_roi_evidence(
     ownership = require_bound_crop_placement_ownership(crop_placement_ownership)
     roi = require_roi_pixel_frame_authority(roi_frame)
     chain = require_bound_directed_transform_chain(roi_to_source_camera)
-    if roi.record.kind != ROI_FRAME_KIND or roi.pixel_convention != "continuous":
-        _fail("Canonical ROI bbox geometry requires a continuous crop-ROI frame.")
+    if (
+        roi.record.kind != ROI_FRAME_KIND
+        or roi.pixel_convention != SOURCE_CAMERA_BBOX_PIXEL_CONVENTION
+    ):
+        _fail(
+            "Canonical ROI bbox geometry requires a half-open pixel-edge "
+            "crop-ROI frame."
+        )
     if not _same_row_identity(ownership.row_identity, crop.row_identity):
         _fail("Crop placement ownership uses a different observation identity.")
     if not _same_row_identity(roi.row_identity, crop.row_identity):
         _fail("ROI frame uses a different observation identity.")
     if not _same_pixel_frame(
         ownership.source_camera_frame,
-        crop.source_geometry.frame_evidence.source_camera_frame,
+        crop.source_geometry.frame_evidence.bbox_source_camera_frame,
     ):
         _fail("Crop placement targets a different source-camera frame.")
     if (
@@ -1846,6 +2375,7 @@ def publish_crop_roi_geometry(
     roi_frame: BoundPixelFrameAuthority,
     roi_to_source_camera: BoundDirectedTransformChain,
     roi_top_left_node: Any | None = None,
+    roi_top_left_placement_ownership: BoundCropPlacementOwnership | None = None,
 ) -> CropRoiGeometryPublicationResult:
     """Publish ROI-local geometry only through exact crop-placement lineage."""
 
@@ -1859,6 +2389,20 @@ def publish_crop_roi_geometry(
             roi_to_source_camera=roi_to_source_camera,
         )
     )
+    if (roi_top_left_node is None) != (
+        roi_top_left_placement_ownership is None
+    ):
+        _fail(
+            "Crop ROI top-left publication requires both its array and its "
+            "continuous point-placement ownership."
+        )
+    point_ownership = None
+    if roi_top_left_placement_ownership is not None:
+        point_ownership = _validate_crop_roi_top_left_point_ownership(
+            crop=crop,
+            source_crop_xywh_node=source_crop_xywh_node,
+            point_placement_ownership=roi_top_left_placement_ownership,
+        )
     attrs_targets, snapshots = _attrs_snapshots(
         crop._rowset_node,
         source_crop_xywh_node,
@@ -1884,7 +2428,7 @@ def publish_crop_roi_geometry(
         )
         top_left_derivation = None
         top_left_binding = None
-        if roi_top_left_node is not None:
+        if roi_top_left_node is not None and point_ownership is not None:
             top_left = _validate_crop_roi_top_left(
                 crop=crop,
                 source_crop_xywh_node=source_crop_xywh_node,
@@ -1893,7 +2437,7 @@ def publish_crop_roi_geometry(
             )
             top_left_record = _crop_roi_top_left_record(
                 crop=crop,
-                source_camera_frame=ownership.source_camera_frame,
+                point_placement_ownership=point_ownership,
                 source_crop_xywh_node=source_crop_xywh_node,
                 placement=placement,
                 roi_top_left_node=roi_top_left_node,
@@ -1910,7 +2454,7 @@ def publish_crop_roi_geometry(
             geometry_type="bbox_xywh",
             components=("x", "y", "width", "height"),
             component_units=("px", "px", "px", "px"),
-            pixel_convention=SOURCE_CAMERA_PIXEL_CONVENTION,
+            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
             row_identity=crop.row_identity,
             reference_frame_authority=ownership.source_camera_frame,
             source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
@@ -1922,7 +2466,7 @@ def publish_crop_roi_geometry(
             geometry_type="bbox_xyxy",
             components=("x_min", "y_min", "x_max", "y_max"),
             component_units=("px", "px", "px", "px"),
-            pixel_convention="continuous",
+            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
             row_identity=crop.row_identity,
             reference_frame_authority=roi,
             source_camera_overlay_status=CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
@@ -1934,12 +2478,12 @@ def publish_crop_roi_geometry(
             top_left_binding = build_bound_canonical_coordinate_descriptor(
                 roi_top_left_node,
                 profile_id=SOURCE_CAMERA_PROFILE_ID,
-                geometry_type="points_xy",
+                geometry_type="point_xy",
                 components=("x", "y"),
                 component_units=("px", "px"),
-                pixel_convention=SOURCE_CAMERA_PIXEL_CONVENTION,
+                pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
                 row_identity=crop.row_identity,
-                reference_frame_authority=ownership.source_camera_frame,
+                reference_frame_authority=point_ownership.source_camera_frame,
                 source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
                 lineage_records=(
                     crop.selection_derivation,
@@ -1956,6 +2500,7 @@ def publish_crop_roi_geometry(
             roi_frame=roi,
             roi_to_source_camera=chain,
             roi_top_left_node=roi_top_left_node,
+            roi_top_left_placement_ownership=point_ownership,
         )
     except BaseException as exc:
         _rollback_attrs(attrs_targets, snapshots, cause=exc)
@@ -1971,6 +2516,7 @@ def load_crop_roi_geometry(
     roi_frame: BoundPixelFrameAuthority,
     roi_to_source_camera: BoundDirectedTransformChain,
     roi_top_left_node: Any | None = None,
+    roi_top_left_placement_ownership: BoundCropPlacementOwnership | None = None,
 ) -> CropRoiGeometryPublicationResult:
     """Freshly verify source-camera crop placement and ROI-local bbox metadata."""
 
@@ -1984,6 +2530,20 @@ def load_crop_roi_geometry(
             roi_to_source_camera=roi_to_source_camera,
         )
     )
+    if (roi_top_left_node is None) != (
+        roi_top_left_placement_ownership is None
+    ):
+        _fail(
+            "Crop ROI top-left loading requires both its array and its "
+            "continuous point-placement ownership."
+        )
+    point_ownership = None
+    if roi_top_left_placement_ownership is not None:
+        point_ownership = _validate_crop_roi_top_left_point_ownership(
+            crop=crop,
+            source_crop_xywh_node=source_crop_xywh_node,
+            point_placement_ownership=roi_top_left_placement_ownership,
+        )
     derivation = bind_persisted_coordinate_record(
         crop._rowset_node,
         attr_name=CROP_ROI_GEOMETRY_DERIVATION_ATTR,
@@ -2016,7 +2576,7 @@ def load_crop_roi_geometry(
     )
     top_left_derivation = None
     top_left_binding = None
-    if roi_top_left_node is not None:
+    if roi_top_left_node is not None and point_ownership is not None:
         top_left = _validate_crop_roi_top_left(
             crop=crop,
             source_crop_xywh_node=source_crop_xywh_node,
@@ -2029,7 +2589,7 @@ def load_crop_roi_geometry(
         )
         expected_top_left = _crop_roi_top_left_record(
             crop=crop,
-            source_camera_frame=ownership.source_camera_frame,
+            point_placement_ownership=point_ownership,
             source_crop_xywh_node=source_crop_xywh_node,
             placement=placement,
             roi_top_left_node=roi_top_left_node,
@@ -2043,7 +2603,7 @@ def load_crop_roi_geometry(
         top_left_binding = load_bound_canonical_coordinate_descriptor(
             roi_top_left_node,
             row_identity=crop.row_identity,
-            reference_frame_authority=ownership.source_camera_frame,
+            reference_frame_authority=point_ownership.source_camera_frame,
             lineage_records=(
                 crop.selection_derivation,
                 top_left_derivation,
@@ -2058,7 +2618,7 @@ def load_crop_roi_geometry(
             top_left_binding is not None
             and (
                 top_left_binding.descriptor.profile_id != SOURCE_CAMERA_PROFILE_ID
-                or top_left_binding.descriptor.geometry_type != "points_xy"
+                or top_left_binding.descriptor.geometry_type != "point_xy"
                 or top_left_binding.descriptor.source_camera_overlay.status
                 != CANONICAL_OVERLAY_DIRECT
             )
@@ -2931,11 +3491,26 @@ def _load_persisted_detection_observation_geometry(
     camera_id = acquisition.record.camera_id
     camera_node = _persisted_node(
         root_node,
-        f"analysis/coordinate_frames/source_camera/{camera_id}/continuous",
+        (
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_POINT_PIXEL_CONVENTION}"
+        ),
         label="source-camera frame authority",
     )
     camera = load_source_camera_pixel_frame_authority(
         camera_node,
+        acquisition_frame=acquisition,
+    )
+    bbox_camera_node = _persisted_node(
+        root_node,
+        (
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_BBOX_PIXEL_CONVENTION}"
+        ),
+        label="source-camera bbox-edge frame authority",
+    )
+    bbox_camera = load_source_camera_pixel_frame_authority(
+        bbox_camera_node,
         acquisition_frame=acquisition,
     )
     normalized_node = _persisted_node(
@@ -2945,7 +3520,7 @@ def _load_persisted_detection_observation_geometry(
     )
     normalized = load_normalized_pixel_frame_authority(
         normalized_node,
-        pixel_frame=camera,
+        pixel_frame=bbox_camera,
     )
     matrix_node = _persisted_node(
         root_node,
@@ -2967,16 +3542,17 @@ def _load_persisted_detection_observation_geometry(
         authority_node,
         payload_node=matrix_node,
         source_frame=normalized,
-        target_frame=camera,
+        target_frame=bbox_camera,
     )
     transform = load_bound_directed_transform_v2(
         matrix_node,
         authority=authority,
         source_frame=normalized,
-        target_frame=camera,
+        target_frame=bbox_camera,
     )
     evidence = build_bound_detection_frame_evidence(
         source_camera_frame=camera,
+        bbox_source_camera_frame=bbox_camera,
         normalized_frame=normalized,
         normalized_to_source_camera=resolve_bound_directed_transform_chain(
             (transform,)
@@ -3006,6 +3582,11 @@ def _load_persisted_detection_observation_geometry(
         root_node,
         f"{base}/bbox_norm_coords",
         label="detection normalized bbox",
+    )
+    backend_result_projection = load_detection_backend_result_projection(
+        rowset,
+        bbox_norm_node,
+        frame_evidence=evidence,
     )
     class_id_node = _persisted_node(
         root_node,
@@ -3048,7 +3629,11 @@ def _load_persisted_detection_observation_geometry(
         bbox_img_node,
         centers_img_node,
         frame_evidence=evidence,
-        source_lineage_records=(mapping, instance_key_derivation),
+        source_lineage_records=(
+            mapping,
+            backend_result_projection,
+            instance_key_derivation,
+        ),
     )
     return geometry
 
@@ -3195,40 +3780,82 @@ def _load_persisted_ordinary_crop_observation_geometry(
         f"{base}/roi_coordinates_full",
         label="ordinary crop source-camera top-left compatibility surface",
     )
-    source_camera = crop.source_geometry.frame_evidence.source_camera_frame
-    ownership = load_crop_placement_ownership(
+    point_camera = crop.source_geometry.frame_evidence.source_camera_frame
+    point_ownership = load_crop_placement_ownership(
         placement_node,
         row_identity=crop.row_identity,
-        source_camera_frame=source_camera,
+        source_camera_frame=point_camera,
     )
-    roi_extent = bind_array_reference_extent(roi_images_node, units="px")
-    roi_frame = load_roi_pixel_frame_authority(
+    point_roi_extent = bind_array_reference_extent(roi_images_node, units="px")
+    point_roi_frame = load_roi_pixel_frame_authority(
         roi_images_node,
-        reference_extent=roi_extent,
-        crop_placement_ownership=ownership,
+        reference_extent=point_roi_extent,
+        crop_placement_ownership=point_ownership,
     )
-    transform_authority = load_bound_transform_authority(
+    point_transform_authority = load_bound_transform_authority(
         placement_node,
         payload_node=placement_node,
-        source_frame=roi_frame,
-        target_frame=source_camera,
+        source_frame=point_roi_frame,
+        target_frame=point_camera,
         row_identity=crop.row_identity,
     )
-    transform = load_bound_directed_transform_v2(
+    point_transform = load_bound_directed_transform_v2(
         placement_node,
-        authority=transform_authority,
-        source_frame=roi_frame,
-        target_frame=source_camera,
+        authority=point_transform_authority,
+        source_frame=point_roi_frame,
+        target_frame=point_camera,
         row_identity=crop.row_identity,
+    )
+    resolve_bound_directed_transform_chain((point_transform,))
+
+    bbox_camera = crop.source_geometry.frame_evidence.bbox_source_camera_frame
+    bbox_ownership = load_crop_placement_ownership(
+        placement_node,
+        row_identity=crop.row_identity,
+        source_camera_frame=bbox_camera,
+        attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    )
+    bbox_frame_node = _persisted_node(
+        root_node,
+        f"{base}/{CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH}",
+        label="ordinary crop ROI bbox-edge frame",
+    )
+    bbox_roi_extent = load_crop_roi_bbox_edge_reference_extent(
+        bbox_frame_node,
+        roi_images_node,
+    )
+    bbox_roi_frame = load_roi_pixel_frame_authority(
+        bbox_frame_node,
+        reference_extent=bbox_roi_extent,
+        crop_placement_ownership=bbox_ownership,
+    )
+    bbox_transform_authority = load_bound_transform_authority(
+        placement_node,
+        payload_node=placement_node,
+        source_frame=bbox_roi_frame,
+        target_frame=bbox_camera,
+        row_identity=crop.row_identity,
+        attr_name=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+    )
+    bbox_transform = load_bound_directed_transform_v2(
+        placement_node,
+        authority=bbox_transform_authority,
+        source_frame=bbox_roi_frame,
+        target_frame=bbox_camera,
+        row_identity=crop.row_identity,
+        attr_name=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
     )
     load_crop_roi_geometry(
         placement_node,
         bbox_roi_node,
         crop_geometry=crop,
-        crop_placement_ownership=ownership,
-        roi_frame=roi_frame,
-        roi_to_source_camera=resolve_bound_directed_transform_chain((transform,)),
+        crop_placement_ownership=bbox_ownership,
+        roi_frame=bbox_roi_frame,
+        roi_to_source_camera=resolve_bound_directed_transform_chain(
+            (bbox_transform,)
+        ),
         roi_top_left_node=top_left_node,
+        roi_top_left_placement_ownership=point_ownership,
     )
     return crop
 

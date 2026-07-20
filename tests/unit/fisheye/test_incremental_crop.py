@@ -167,7 +167,12 @@ def _run(
             "bbox_roi_xyxy": bbox_img - offsets,
         }
 
-    def fake_publish(run_group: Any, _roi_images: Any, **_kwargs: Any) -> None:
+    def fake_publish(
+        run_group: Any,
+        _roi_images: Any,
+        _bbox_edge_frame_node: Any,
+        **_kwargs: Any,
+    ) -> None:
         assert run_group.attrs["stage_selector_eligible"] is False
         run_group.attrs["coordinate_contract"] = "canonical_v2"
         run_group["bbox_img_xyxy"].attrs["coordinate_descriptor"] = {
@@ -194,14 +199,16 @@ def _run(
         incremental_crop_module._canonical_roi_top_left,
         incremental_crop_module._canonical_crop_coordinate_arrays,
         incremental_crop_module._publish_canonical_crop_coordinate_contract,
-        incremental_crop_module._load_persisted_crop_observation_geometry,
+        incremental_crop_module._load_persisted_ordinary_crop_observation_geometry,
         incremental_crop_module.mark_run_complete,
     )
     incremental_crop_module.resolve_incremental_crop_coordinate_context = fake_resolve
     incremental_crop_module._canonical_roi_top_left = fake_top_left
     incremental_crop_module._canonical_crop_coordinate_arrays = fake_coordinate_arrays
     incremental_crop_module._publish_canonical_crop_coordinate_contract = fake_publish
-    incremental_crop_module._load_persisted_crop_observation_geometry = fake_final_load
+    incremental_crop_module._load_persisted_ordinary_crop_observation_geometry = (
+        fake_final_load
+    )
     if completion_failure:
         incremental_crop_module.mark_run_complete = fake_complete
     try:
@@ -227,7 +234,7 @@ def _run(
             incremental_crop_module._canonical_roi_top_left,
             incremental_crop_module._canonical_crop_coordinate_arrays,
             incremental_crop_module._publish_canonical_crop_coordinate_contract,
-            incremental_crop_module._load_persisted_crop_observation_geometry,
+            incremental_crop_module._load_persisted_ordinary_crop_observation_geometry,
             incremental_crop_module.mark_run_complete,
         ) = originals
 

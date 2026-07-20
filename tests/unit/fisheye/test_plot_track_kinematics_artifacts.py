@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 from rich.console import Console
 
 from fisheye.analysis import plot_track_kinematics as mod
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
+from tests.unit.fisheye.test_track_kinematics_io import _patch_bound_loader
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_motion(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_bound_loader(monkeypatch)
 
 
 def _write_track_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
@@ -46,8 +54,32 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
 
     _write_track_array(track, "time_seconds", time_seconds)
     _write_track_array(track, "frame_indices", np.arange(n, dtype=np.int32))
+    _write_track_array(
+        track,
+        "source_acquisition_frame_index",
+        np.arange(n, dtype=np.int64),
+    )
+    _write_track_array(
+        track,
+        "track_sample_key",
+        np.column_stack(
+            [np.zeros(n, dtype=np.int64), np.arange(n, dtype=np.int64)]
+        ),
+    )
+    _write_track_array(
+        track,
+        "source_frame_interpolation",
+        np.zeros(n, dtype=np.int8),
+    )
+    _write_track_array(track, "source_instance_key", np.arange(n, dtype=np.int64))
+    _write_track_array(track, "source_row_index", np.arange(n, dtype=np.int64))
     _write_track_array(track, "positions_px", positions_px)
     _write_track_array(track, "positions_mm", positions_mm)
+    _write_track_array(
+        track,
+        "delta_seconds",
+        np.asarray([np.nan, *([1.0 / 200.0] * (n - 1))], dtype=np.float32),
+    )
     _write_track_array(track, "speed_raw_px", speed_px)
     _write_track_array(track, "speed_raw_mm", speed_mm)
     _write_track_array(track, "speed_filtered_px", speed_px)
@@ -57,6 +89,9 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_track_array(track, "speed_averaged_px", speed_px)
     _write_track_array(track, "speed_averaged_mm", speed_mm)
     _write_track_array(track, "smoothed_heading_degrees", np.linspace(0.0, 5.0, n, dtype=np.float32))
+    _write_track_array(track, "heading_degrees", np.linspace(0.0, 5.0, n, dtype=np.float32))
+    _write_track_array(track, "heading_radians", np.deg2rad(np.linspace(0.0, 5.0, n)).astype(np.float32))
+    _write_track_array(track, "smoothed_heading_radians", np.deg2rad(np.linspace(0.0, 5.0, n)).astype(np.float32))
     _write_track_array(track, "delta_heading_degrees", np.linspace(0.0, 2.0, n, dtype=np.float32))
     _write_track_array(track, "angular_velocity_deg_s", np.linspace(0.0, 20.0, n, dtype=np.float32))
     _write_track_array(track, "angular_velocity_raw_deg_s", np.linspace(0.0, 20.0, n, dtype=np.float32))
@@ -64,6 +99,7 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_track_array(track, "delta_heading_smoothed_degrees", np.linspace(0.0, 1.0, n, dtype=np.float32))
     _write_track_array(track, "angular_velocity_smoothed_deg_s", np.linspace(0.0, 10.0, n, dtype=np.float32))
     _write_track_array(track, "angular_speed_smoothed_deg_s", np.linspace(0.0, 10.0, n, dtype=np.float32))
+    _write_track_array(track, "detection_source", np.ones(n, dtype=np.int16))
     _write_track_array(track, "acceleration_px", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "acceleration_mm", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "smoothed_acceleration_px", np.zeros(n, dtype=np.float32))
@@ -217,7 +253,14 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
 
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["analysis"]["track_kinematics_runs"]["offline"]["track_kinematics_1"]
-    visualizations = run["visualizations"]
+    assert "visualizations" not in run
+    render_parent = root["analysis"]["track_kinematics_visualization_runs"][
+        "offline"
+    ]["track_kinematics_1"]["tracks"]["id_0"]
+    render = render_parent[render_parent.attrs["latest"]]
+    assert render.attrs["palette_run_completion_status"] == "complete"
+    assert render.attrs["stage_selector_eligible"] is True
+    visualizations = render["visualizations"]
 
     png = visualizations["track_kinematics_summary_track_0_png"]
     assert bytes(np.asarray(png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
@@ -283,7 +326,7 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
         "/tracks/id_0/positions_mm"
     )
 
-    manifest = run.attrs["visualizations"]
+    manifest = render.attrs["visualizations"]
     assert manifest["track_kinematics_summary_track_0_png"]["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
     assert manifest["track_kinematics_summary_track_0_png"]["visualization_contract_id"] == (
         mod.TRACK_KINEMATICS_VISUALIZATION_CONTRACT_ID
@@ -318,6 +361,7 @@ def test_plot_track_kinematics_can_skip_default_zarr_artifacts(tmp_path: Path) -
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["analysis"]["track_kinematics_runs"]["offline"]["track_kinematics_1"]
     assert "visualizations" not in run
+    assert "track_kinematics_visualization_runs" not in root["analysis"]
     assert save_path.with_name("track_plot_offline_track_kinematics_1.png").exists()
 
 
@@ -345,8 +389,11 @@ def test_plot_track_kinematics_accepts_exponential_swim_bout_overlay(tmp_path: P
     )
 
     root = zarr.open_group(str(zarr_path), mode="r")
-    run = root["analysis"]["track_kinematics_runs"]["offline"]["track_kinematics_1"]
-    spec_group = run["visualizations"]["track_kinematics_summary_track_0_interactive"]
+    render_parent = root["analysis"]["track_kinematics_visualization_runs"][
+        "offline"
+    ]["track_kinematics_1"]["tracks"]["id_0"]
+    render = render_parent[render_parent.attrs["latest"]]
+    spec_group = render["visualizations"]["track_kinematics_summary_track_0_interactive"]
     spec_bytes = np.asarray(spec_group["spec_json"][:], dtype=np.uint8).tobytes()
     spec = json.loads(spec_bytes.decode("utf-8"))
 
@@ -355,3 +402,156 @@ def test_plot_track_kinematics_accepts_exponential_swim_bout_overlay(tmp_path: P
         "peak_event_bouts (speed_exponential) (threshold)"
     )
     assert spec_group.attrs["parameters"]["speed_level"] == "exponential"
+
+
+def test_visualization_publication_restores_selectors_on_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    tables = mod.load_track_kinematics_track(
+        root,
+        run_name="track_kinematics_1",
+        scope="offline",
+        track_id=0,
+        required_speed_levels=("raw", "smoothed"),
+    )
+    parent = root.require_group(
+        "analysis/track_kinematics_visualization_runs/offline/"
+        "track_kinematics_1/tracks/id_0"
+    )
+    parent.create_group("prior")
+    parent.attrs["latest"] = "prior"
+    parent.attrs["latest_complete"] = "prior"
+
+    def interrupt(**_kwargs) -> None:
+        raise KeyboardInterrupt("hostile interrupt")
+
+    monkeypatch.setattr(mod, "write_track_kinematics_plot_artifacts", interrupt)
+
+    with pytest.raises(KeyboardInterrupt, match="hostile interrupt"):
+        mod.publish_track_kinematics_plot_artifacts(
+            root=root,
+            zarr_path=zarr_path,
+            run_name="offline/track_kinematics_1",
+            track_tables=tables,
+            track_id=0,
+            png_bytes=b"not-used",
+            bins=8,
+            artifact_dpi=72,
+            swim_bout_label=None,
+            swim_bout_requested=None,
+            speed_level="smoothed",
+            distance_series_present=False,
+            stimulus_run=None,
+            console=Console(record=True),
+        )
+
+    assert parent.attrs["latest"] == "prior"
+    assert parent.attrs["latest_complete"] == "prior"
+    assert list(parent.group_keys()) == ["prior"]
+    source_run = root[
+        "analysis/track_kinematics_runs/offline/track_kinematics_1"
+    ]
+    assert "visualizations" not in source_run
+
+
+def test_visualization_selectors_are_independent_per_track(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    tables_0 = mod.load_track_kinematics_track(
+        root,
+        run_name="track_kinematics_1",
+        scope="offline",
+        track_id=0,
+        required_speed_levels=("raw", "smoothed"),
+    )
+    tables_1 = replace(
+        tables_0,
+        track_id=1,
+        track_path=(
+            "analysis/track_kinematics_runs/offline/"
+            "track_kinematics_1/tracks/id_1"
+        ),
+    )
+
+    def reload_track(_root, *, track_id: int, **_kwargs):
+        return tables_0 if track_id == 0 else tables_1
+
+    monkeypatch.setattr(mod, "load_track_kinematics_track", reload_track)
+    for track_id, tables in ((0, tables_0), (1, tables_1)):
+        mod.publish_track_kinematics_plot_artifacts(
+            root=root,
+            zarr_path=zarr_path,
+            run_name="offline/track_kinematics_1",
+            track_tables=tables,
+            track_id=track_id,
+            png_bytes=f"png-{track_id}".encode(),
+            bins=8,
+            artifact_dpi=72,
+            swim_bout_label=None,
+            swim_bout_requested=None,
+            speed_level="smoothed",
+            distance_series_present=False,
+            stimulus_run=None,
+            console=Console(record=True),
+        )
+
+    source_parent = root[
+        "analysis/track_kinematics_visualization_runs/offline/track_kinematics_1"
+    ]
+    for track_id in (0, 1):
+        parent = source_parent[f"tracks/id_{track_id}"]
+        render = parent[parent.attrs["latest_complete"]]
+        assert render.attrs["track_id"] == track_id
+        assert (
+            f"track_kinematics_summary_track_{track_id}_png"
+            in render["visualizations"]
+        )
+
+
+def test_visualization_seal_rejects_equal_shaped_source_path_substitution(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    mod.main(
+        [
+            str(zarr_path),
+            "--offline-only",
+            "--track-id",
+            "0",
+            "--swim-bout-run",
+            "none",
+        ]
+    )
+    root = zarr.open_group(str(zarr_path), mode="a")
+    parent = root[
+        "analysis/track_kinematics_visualization_runs/offline/"
+        "track_kinematics_1/tracks/id_0"
+    ]
+    render = parent[parent.attrs["latest_complete"]]
+    tables = mod.load_track_kinematics_track(
+        root,
+        run_name="track_kinematics_1",
+        scope="offline",
+        track_id=0,
+        required_speed_levels=("raw", "smoothed"),
+    )
+    expected_paths = mod._track_source_paths("offline/track_kinematics_1", tables)
+    artifact = render["visualizations/track_kinematics_summary_track_0_png"]
+    artifact.attrs["source_paths"] = {
+        **expected_paths,
+        "positions_px": "decoy_positions_px",
+    }
+
+    with pytest.raises(ValueError, match="failed integrity validation"):
+        mod._validate_track_visualization_run(
+            render,
+            track_id=0,
+            source_authority=tables.authority_record(),
+            expected_source_paths=expected_paths,
+        )

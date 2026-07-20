@@ -13,6 +13,7 @@ from fisheye.shared.coordinate_descriptor import (
     CANONICAL_OVERLAY_DIRECT,
     CANONICAL_OVERLAY_NOT_SUITABLE,
     PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+    CanonicalCollectionAxis,
     CanonicalFrameRecord,
     DigestBoundCoordinateRecordRef,
     build_canonical_coordinate_descriptor,
@@ -733,6 +734,8 @@ def _typed_source_descriptor(
     rowset_path: str,
     values: np.ndarray,
     geometry_type: str,
+    collection_axis: CanonicalCollectionAxis | None = None,
+    lineage_records: tuple[Any, ...] = (),
 ) -> dict[str, Any]:
     rowset, key, identity = _identity(
         token=physical_inputs["token"],
@@ -753,12 +756,15 @@ def _typed_source_descriptor(
         row_identity=identity,
         reference_frame_authority=physical_inputs["source"],
         source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
+        collection_axis=collection_axis,
+        lineage_records=lineage_records,
     )
     stamp_bound_canonical_coordinate_descriptor(publication)
     source = bind_body_source_coordinate_descriptor(
         coordinates,
         row_identity=identity,
         source_camera_pixels=physical_inputs["source"],
+        lineage_records=lineage_records,
     )
     return {
         "rowset": rowset,
@@ -1200,6 +1206,15 @@ def test_mask_and_spline_estimators_require_their_exact_typed_source_bundles(
     physical_inputs: dict[str, Any],
 ) -> None:
     token = physical_inputs["token"]
+    mask_schema = stamp_and_bind_persisted_coordinate_record(
+        _Node("analysis/body_source_schemas/mask_v1", token=token),
+        {
+            "schema_id": "palette.mask_component_geometry_schema",
+            "schema_version": 1,
+            "components": ["eye_left", "eye_right", "swim_bladder"],
+        },
+        attr_name="component_schema",
+    )
     mask_source = _typed_source_descriptor(
         physical_inputs,
         rowset_path="analysis/body_mask_source",
@@ -1211,7 +1226,17 @@ def test_mask_and_spline_estimators_require_their_exact_typed_source_bundles(
             ],
             dtype=np.float32,
         ),
-        geometry_type="points_xy",
+        geometry_type="point_xy",
+        collection_axis=CanonicalCollectionAxis(
+            axis=1,
+            role="subject_component",
+            cardinality=3,
+            label_authority=DigestBoundCoordinateRecordRef(
+                record_ref=mask_schema.record_ref,
+                record_sha256=mask_schema.record_sha256,
+            ),
+        ),
+        lineage_records=(mask_schema,),
     )
     mask_estimator = stamp_body_frame_estimator(
         _Node("analysis/body_estimators/mask_v1", token=token),
@@ -1225,15 +1250,6 @@ def test_mask_and_spline_estimators_require_their_exact_typed_source_bundles(
                 "posterior_anchor": "swim_bladder",
             },
         ),
-    )
-    mask_schema = stamp_and_bind_persisted_coordinate_record(
-        _Node("analysis/body_source_schemas/mask_v1", token=token),
-        {
-            "schema_id": "palette.mask_component_geometry_schema",
-            "schema_version": 1,
-            "components": ["eye_left", "eye_right", "swim_bladder"],
-        },
-        attr_name="component_schema",
     )
     mask_validity = _Node(
         f"{mask_source['rowset'].path}/component_valid",
@@ -1259,6 +1275,46 @@ def test_mask_and_spline_estimators_require_their_exact_typed_source_bundles(
         producer_manifest=mask_manifest,
     )
     assert mask_bundle.record.method == "mask_component_axis"
+    assert mask_source["source"].descriptor.geometry_type == "point_xy"
+    assert mask_source["source"].descriptor.collection_axis is not None
+    assert (
+        mask_source["source"].descriptor.collection_axis.label_authority.record_ref
+        == mask_schema.record_ref
+    )
+
+    uncollected_mask_source = _typed_source_descriptor(
+        physical_inputs,
+        rowset_path="analysis/body_mask_source_uncollected",
+        values=np.asarray(mask_source["coordinates"][:], dtype=np.float32),
+        geometry_type="points_xy",
+    )
+    uncollected_validity = _Node(
+        f"{uncollected_mask_source['rowset'].path}/component_valid",
+        token=token,
+        data=np.ones((3, 3), dtype=np.bool_),
+    )
+    uncollected_manifest = stamp_and_bind_persisted_coordinate_record(
+        uncollected_mask_source["rowset"],
+        build_body_estimator_source_manifest_record(
+            method="mask_component_axis",
+            source_descriptor=uncollected_mask_source["source"],
+            estimator=mask_estimator,
+            source_schema=mask_schema,
+            support_nodes={"validity": uncollected_validity},
+        ),
+        attr_name=BODY_ESTIMATOR_SOURCE_MANIFEST_ATTR,
+    )
+    with pytest.raises(
+        CoordinateFrameRecordError,
+        match="mask-component sources require collected point_xy",
+    ):
+        bind_mask_component_axis_source(
+            source_descriptor=uncollected_mask_source["source"],
+            estimator=mask_estimator,
+            component_schema=mask_schema,
+            validity_node=uncollected_validity,
+            producer_manifest=uncollected_manifest,
+        )
     mask_frame = _Node("analysis/body_frames/mask_v1", token=token)
     mask_geometry = bind_body_frame_geometry(
         mask_frame,

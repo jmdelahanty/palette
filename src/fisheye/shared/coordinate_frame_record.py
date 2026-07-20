@@ -685,6 +685,19 @@ def array_payload_sha256(node: Any) -> str:
     return snapshot.content_sha256
 
 
+def array_values_sha256(values: Any) -> str:
+    """Hash one owned/in-memory array with the canonical payload grammar."""
+
+    array = np.asarray(values)
+    if array.dtype.hasobject:
+        _fail(
+            "array_dtype_invalid",
+            "values.dtype",
+            "Object-reference arrays do not have deterministic payload bytes.",
+        )
+    return _array_content_sha256(array)
+
+
 @dataclass(frozen=True)
 class SelectedCameraFrameEvidenceRecord:
     source_camera: Mapping[str, Any]
@@ -2786,15 +2799,36 @@ def _bind_body_estimator_source(
     leading = source.row_identity.leading_dimension
     snapshots = {name: _read_array_snapshot(node) for name, node in support_nodes.items()}
     if method in {"keypoint_head_axis", "mask_component_axis"}:
-        if source.descriptor.geometry_type != "points_xy" or len(shape) != 3 or shape != (
-            leading,
-            len(labels),
-            2,
-        ):
+        expected_shape = (leading, len(labels), 2)
+        if method == "keypoint_head_axis":
+            source_geometry_valid = (
+                source.descriptor.geometry_type == "points_xy"
+                and len(shape) == 3
+                and shape == expected_shape
+            )
+        else:
+            collection = source.descriptor.collection_axis
+            source_geometry_valid = (
+                source.descriptor.geometry_type == "point_xy"
+                and len(shape) == 3
+                and shape == expected_shape
+                and collection is not None
+                and collection.axis == 1
+                and collection.role == "subject_component"
+                and collection.cardinality == len(labels)
+                and collection.label_authority.record_ref == schema.record_ref
+                and collection.label_authority.record_sha256
+                == schema.record_sha256
+            )
+        if not source_geometry_valid:
             _fail(
                 "estimator_source_geometry_invalid",
                 "source_descriptor",
-                "Keypoint/mask component sources require labeled points_xy with shape (N, labels, 2).",
+                (
+                    "Keypoint sources require points_xy with shape (N, labels, 2); "
+                    "mask-component sources require collected point_xy with the "
+                    "exact subject-component label authority and that same shape."
+                ),
             )
         validity = snapshots.get("validity")
         if validity is None or validity.values.dtype != np.dtype("bool") or validity.shape != (
@@ -3777,6 +3811,20 @@ def _require_body_dependency_graph(
         paths["rowset"],
         paths["row_key"],
     }
+    collection = source.descriptor.collection_axis
+    shared_mask_schema_path = (
+        paths["estimator_source_schema"]
+        if (
+            estimator_source.record.method == "mask_component_axis"
+            and collection is not None
+            and collection.role == "subject_component"
+            and collection.label_authority.record_ref
+            == estimator_source.source_schema.record_ref
+            and collection.label_authority.record_sha256
+            == estimator_source.source_schema.record_sha256
+        )
+        else None
+    )
     occupied_non_source = {
         path
         for role, path in paths.items()
@@ -3785,6 +3833,12 @@ def _require_body_dependency_graph(
     extra_source_nodes: list[Any] = []
     for node in source.dependency_nodes:
         path = _node_path(node)
+        # A collected mask-component point surface deliberately uses the exact
+        # estimator component schema as its collection-label authority.  This
+        # is one authority serving one semantic role, not a cross-role alias or
+        # cycle; the schema node is already present in `roles`.
+        if path == shared_mask_schema_path:
+            continue
         if path in occupied_non_source:
             code = "dependency_cycle" if path == paths["frame"] else "dependency_alias"
             _fail(
@@ -4295,6 +4349,7 @@ __all__ = [
     "SELECTED_CAMERA_FRAME_EVIDENCE_SCHEMA_ID",
     "SOURCE_CAMERA_PROFILE_ID",
     "array_payload_sha256",
+    "array_values_sha256",
     "bind_body_frame_geometry",
     "bind_body_spline_with_anchor_polarity_source",
     "bind_body_source_coordinate_descriptor",

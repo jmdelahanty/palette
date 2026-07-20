@@ -39,23 +39,19 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter  # noqa: E402
 from matplotlib.collections import LineCollection  # noqa: E402
 import numpy as np  # noqa: E402
-import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_bout_response import (
     DEFAULT_VISIT_ENTER_MM,
     DEFAULT_VISIT_EXIT_MM,
     _segment_visits,
-    bearing_deg,
 )
 from fisheye.analysis.chaser_radial_occupancy import (
     _apply_settle_trim,
-    _decode_text_column,
     _open_root,
     _protocol_position_transition_s,
     _read_epochs,
     _resolve_arena_geometry,
     _resolve_chaser_distance_run,
-    _safe_float,
 )
 
 
@@ -108,42 +104,67 @@ def collect_visits(
     visit_exit_mm: float = DEFAULT_VISIT_EXIT_MM,
     pad_s: float = 1.0,
 ) -> tuple[list[VisitScene], dict[str, Any]]:
+    """Fail closed until every derived input to the visit view is sealed."""
+
     root = _open_root(zarr_path, mode="r")
-    run_group, run_name, _run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
-    ppm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    fps = _safe_float(run_group.attrs.get("fps"), 1.0)
-    geometry = _resolve_arena_geometry(root, run_group, pixels_per_mm=float(ppm))
+    distance, _run_name, _run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_derived_surface_authority("egocentric_bearing")
+
+
+def _collect_visits_unsealed_inspection(
+    zarr_path: Path,
+    *,
+    chaser_distance_run: str = "latest",
+    swim_bout_run: str = "latest",
+    epochs_wanted: Sequence[str] = DEFAULT_EPOCHS,
+    virtual_rotations_deg: Sequence[float] = DEFAULT_VIRTUAL_ROTATIONS_DEG,
+    visit_enter_mm: float = DEFAULT_VISIT_ENTER_MM,
+    visit_exit_mm: float = DEFAULT_VISIT_EXIT_MM,
+    pad_s: float = 1.0,
+) -> tuple[list[VisitScene], dict[str, Any]]:
+    root = _open_root(zarr_path, mode="r")
+    distance, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    ppm = float(distance.pixels_per_mm_projector)
+    fps = float(distance.fps)
+    geometry = _resolve_arena_geometry(
+        root,
+        distance,
+        pixels_per_mm=float(ppm),
+    )
     if geometry.shape != "circle" or geometry.center_x_px is None:
         raise ValueError("Visit trajectories need a circular arena geometry.")
 
-    positions = run_group["positions"]
-    fish = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64) / ppm
-    chaser = np.asarray(positions["chaser_arena_xy"][:], dtype=np.float64) / ppm
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
-    chaser_idx = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.int64).reshape(-1)
+    fish = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float64) / ppm
+    chaser = np.asarray(distance.chaser_arena_xy, dtype=np.float64) / ppm
+    fish_valid = np.asarray(distance.fish_valid, dtype=bool)
+    chaser_valid = np.asarray(distance.chaser_valid, dtype=bool)
+    chaser_idx = np.asarray(distance.chaser_index, dtype=np.int64).reshape(-1)
     labels: tuple[str, ...] = ()
-    if "behavior_class_label_bytes" in run_group["chasers"]:
-        labels = tuple(_decode_text_column(np.asarray(run_group["chasers"]["behavior_class_label_bytes"][:])))
 
     center = np.asarray([geometry.center_x_px, geometry.center_y_px], dtype=np.float64) / ppm
     arena_r = float(geometry.radius_px) / ppm
     total_frames = int(fish.shape[0])
 
-    all_epochs = _read_epochs(run_group, total_frames=total_frames)
+    all_epochs = _read_epochs(distance, total_frames=total_frames)
     all_epochs = _apply_settle_trim(
         all_epochs,
-        chaser_xy=np.asarray(positions["chaser_arena_xy"][:], dtype=np.float32),
+        chaser_xy=np.asarray(distance.chaser_arena_xy, dtype=np.float32),
         chaser_valid=chaser_valid,
         fps=float(fps),
         pixels_per_mm=float(ppm),
-        settle_trim_s=_protocol_position_transition_s(root, run_group),
+        settle_trim_s=_protocol_position_transition_s(root, distance),
         motion_spread_threshold_mm=1.0,
     )
 
     # heading, for the arrow in the animation
     heading = np.full(total_frames, np.nan)
-    ego = run_group.get("egocentric_bearing")
+    ego = root[run_path].get("egocentric_bearing")
     if ego is not None:
         keys = list(ego.keys())
         if keys:
@@ -223,7 +244,7 @@ def collect_visits(
                 scenes.append(scene)
 
     meta = {
-        "recording_id": str(run_group.attrs.get("recording_id") or Path(zarr_path).stem),
+        "recording_id": distance.recording_id,
         "run": run_name,
         "fps": float(fps),
         "arena_radius_mm": arena_r,

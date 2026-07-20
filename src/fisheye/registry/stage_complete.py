@@ -24,6 +24,7 @@ from ..shared.run_provenance import RUN_PROVENANCE_ATTR
 from ..shared.run_provenance import validate_run_provenance
 from ..shared.zarr_run_completion import RUN_PROVENANCE_BYPASS_ATTR
 from ..shared.zarr_run_completion import is_run_complete_in_parent
+from ..shared.zarr_run_completion import is_run_selector_eligible
 from ..shared.zarr_run_completion import requires_completion_provenance
 
 RegistryInput = Optional[Union[Registry, Path, str]]
@@ -210,6 +211,11 @@ def _validate_completion_run_group(
         raise RuntimeError(
             f"Refusing to mark {step_name} run {run_name!r} ok because "
             "the Zarr run-completion marker is not complete"
+        )
+    if not is_run_selector_eligible(run_group):
+        raise RuntimeError(
+            f"Refusing to mark {step_name} run {run_name!r} ok because "
+            "the completed Zarr run is not selector-eligible"
         )
 
     provenance_details: dict[str, Any] = {

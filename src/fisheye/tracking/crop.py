@@ -81,7 +81,10 @@ from ..shared.acquisition_publication_status import (
 )
 from ..shared.coordinate_reference import bind_array_reference_extent, canonical_node_path
 from ..shared.directed_transform_chain import resolve_bound_directed_transform_chain
-from ..shared.directed_transform_v2 import stamp_directed_transform_v2
+from ..shared.directed_transform_v2 import (
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+    stamp_directed_transform_v2,
+)
 from ..shared.import_source_fingerprint import source_stat_fingerprint_attrs
 from ..shared.observation_coordinate_publication import (
     BoundDetectionObservationGeometry,
@@ -89,11 +92,13 @@ from ..shared.observation_coordinate_publication import (
     capture_observation_coordinate_publication_checkpoint,
     detection_observation_geometry_values,
     load_persisted_detection_observation_geometry,
+    publish_crop_roi_bbox_edge_reference_extent,
     publish_crop_observation_geometry,
     publish_crop_roi_geometry,
     restore_observation_coordinate_publication_checkpoint,
 )
 from ..shared.pixel_frame_authority import (
+    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     load_persisted_acquisition_camera_authority,
     stamp_crop_placement_ownership,
     stamp_roi_pixel_frame_authority,
@@ -116,7 +121,10 @@ from ..shared.zarr_run_completion import (
     note_pending_latest,
 )
 from ..shared.source_video_metadata import resolve_source_video
-from ..shared.transform_authority import stamp_crop_placement_transform_authority
+from ..shared.transform_authority import (
+    TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+    stamp_crop_placement_transform_authority,
+)
 from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -836,6 +844,9 @@ def _publish_ordinary_crop_coordinate_contract(
         raise OrdinaryCropCoordinateError(
             "Persisted ROI placement differs from canonical preflight placement."
         )
+    bbox_edge_frame_node = crop_group.require_group(
+        "coordinate_frames"
+    ).require_group("roi_bbox_edge")
     checkpoint = capture_observation_coordinate_publication_checkpoint(
         crop_group,
         crop_group["instance_key"],
@@ -848,6 +859,7 @@ def _publish_ordinary_crop_coordinate_contract(
         crop_group["bbox_roi_xyxy"],
         crop_group["roi_coordinates_full"],
         crop_group["roi_images"],
+        bbox_edge_frame_node,
     )
     try:
         crop_geometry = publish_crop_observation_geometry(
@@ -861,40 +873,87 @@ def _publish_ordinary_crop_coordinate_contract(
             source_geometry=preflight.source_geometry,
         )
         placement_node = crop_group["source_crop_xywh"]
-        ownership = stamp_crop_placement_ownership(
+        point_ownership = stamp_crop_placement_ownership(
             placement_node,
             row_identity=crop_geometry.row_identity,
-            source_camera_frame=preflight.source_geometry.frame_evidence.source_camera_frame,
+            source_camera_frame=(
+                preflight.source_geometry.frame_evidence.source_camera_frame
+            ),
         )
         token = hashlib.sha256(f"crop_runs/{run_name}".encode("utf-8")).hexdigest()[:16]
-        roi_frame = stamp_roi_pixel_frame_authority(
+        point_roi_frame = stamp_roi_pixel_frame_authority(
             bind_array_reference_extent(crop_group["roi_images"], units="px"),
-            frame_id=f"crop_roi_{token}",
+            frame_id=f"crop_roi_continuous_{token}",
             pixel_convention="continuous",
-            crop_placement_ownership=ownership,
+            crop_placement_ownership=point_ownership,
         )
-        transform_authority = stamp_crop_placement_transform_authority(
+        point_transform_authority = stamp_crop_placement_transform_authority(
             placement_node,
-            authority_id=f"crop_roi_to_source_camera_{token}",
-            source_frame=roi_frame,
-            target_frame=preflight.source_geometry.frame_evidence.source_camera_frame,
+            authority_id=f"crop_roi_continuous_to_source_camera_{token}",
+            source_frame=point_roi_frame,
+            target_frame=(
+                preflight.source_geometry.frame_evidence.source_camera_frame
+            ),
         )
-        transform = stamp_directed_transform_v2(
+        stamp_directed_transform_v2(
             placement_node,
-            transform_id=f"crop_roi_to_source_camera_{token}",
-            authority=transform_authority,
-            source_frame=roi_frame,
-            target_frame=preflight.source_geometry.frame_evidence.source_camera_frame,
+            transform_id=f"crop_roi_continuous_to_source_camera_{token}",
+            authority=point_transform_authority,
+            source_frame=point_roi_frame,
+            target_frame=(
+                preflight.source_geometry.frame_evidence.source_camera_frame
+            ),
             row_identity=crop_geometry.row_identity,
+        )
+
+        bbox_ownership = stamp_crop_placement_ownership(
+            placement_node,
+            row_identity=crop_geometry.row_identity,
+            source_camera_frame=(
+                preflight.source_geometry.frame_evidence.bbox_source_camera_frame
+            ),
+            attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+        )
+        bbox_roi_frame = stamp_roi_pixel_frame_authority(
+            publish_crop_roi_bbox_edge_reference_extent(
+                bbox_edge_frame_node,
+                crop_group["roi_images"],
+            ),
+            frame_id=f"crop_roi_bbox_edge_{token}",
+            pixel_convention="pixel_edge_half_open",
+            crop_placement_ownership=bbox_ownership,
+        )
+        bbox_transform_authority = stamp_crop_placement_transform_authority(
+            placement_node,
+            authority_id=f"crop_roi_bbox_edge_to_source_camera_{token}",
+            source_frame=bbox_roi_frame,
+            target_frame=(
+                preflight.source_geometry.frame_evidence.bbox_source_camera_frame
+            ),
+            attr_name=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+        )
+        bbox_transform = stamp_directed_transform_v2(
+            placement_node,
+            transform_id=f"crop_roi_bbox_edge_to_source_camera_{token}",
+            authority=bbox_transform_authority,
+            source_frame=bbox_roi_frame,
+            target_frame=(
+                preflight.source_geometry.frame_evidence.bbox_source_camera_frame
+            ),
+            row_identity=crop_geometry.row_identity,
+            attr_name=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
         )
         publish_crop_roi_geometry(
             placement_node,
             crop_group["bbox_roi_xyxy"],
             crop_geometry=crop_geometry,
-            crop_placement_ownership=ownership,
-            roi_frame=roi_frame,
-            roi_to_source_camera=resolve_bound_directed_transform_chain((transform,)),
+            crop_placement_ownership=bbox_ownership,
+            roi_frame=bbox_roi_frame,
+            roi_to_source_camera=resolve_bound_directed_transform_chain(
+                (bbox_transform,)
+            ),
             roi_top_left_node=crop_group["roi_coordinates_full"],
+            roi_top_left_placement_ownership=point_ownership,
         )
         crop_group.attrs["coordinate_contract"] = "canonical_v2"
         crop_group.attrs["status"] = "completed"

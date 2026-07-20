@@ -79,13 +79,13 @@ Data Architecture & Design Philosophy
 from __future__ import annotations
 
 import argparse
-import copy
 from contextlib import contextmanager
 import json
 import re
 from hashlib import sha256
 from dataclasses import asdict
 from datetime import datetime, timezone
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -95,6 +95,8 @@ from numpy.lib import recfunctions as rfn
 import zarr
 from rich.console import Console
 
+from fisheye.shared.archive_identity import archive_identity
+from fisheye.shared.coordinate_reference import canonical_node_path
 from .chaser_state_interpolator import (
     analyze_frame_gaps,
     interpolate_metadata,
@@ -114,6 +116,11 @@ from fisheye.shared.citrus_enums import (
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_provenance import build_writer_run_provenance
+from fisheye.shared.selector_activation import (
+    SelectorActivationError,
+    activate_selector_eligible_run,
+    write_activation_attr,
+)
 from fisheye.shared.selected_calibration import (
     SelectedCalibrationSnapshot,
     stamp_selected_calibration_snapshot,
@@ -129,22 +136,52 @@ from fisheye.shared.stimulus_coordinate_contract import (
     validate_stimulus_destination_acquisition_authority,
 )
 from fisheye.shared.stimulus_physical_coordinate import (
+    STIMULUS_PHYSICAL_COORDINATE_INVALIDATED_STATUS,
+    STIMULUS_PHYSICAL_COORDINATE_MANIFEST_REF_ATTR,
+    STIMULUS_PHYSICAL_COORDINATE_MANIFEST_SHA256_ATTR,
+    STIMULUS_PHYSICAL_COORDINATE_REASON_CODE_ATTR,
+    STIMULUS_PHYSICAL_COORDINATE_REASON_PARENT_RUN_FAILED,
+    STIMULUS_PHYSICAL_COORDINATE_STATUS_ATTR,
     _load_stimulus_physical_coordinate_authority_before_selection,
-    invalidate_stimulus_physical_coordinate_publication,
     publish_stimulus_physical_coordinate_authority,
 )
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETED_AT_ATTR,
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_NAME_ATTR,
+    RUN_STATUS_FAILED,
     mark_run_complete,
-    mark_run_failed,
     mark_run_started,
     require_runs_parent,
+    utc_now_iso,
+)
+
+
+STIMULUS_PUBLICATION_OWNER_ATTR = "stimulus_publication_owner_uuid"
+STIMULUS_PARENT_PUBLICATION_LEASE_ATTR = "stimulus_publication_lease"
+STIMULUS_PUBLICATION_GENERATION_ATTR = "publication_generation"
+STIMULUS_PUBLICATION_POLICY_ATTR = "publication_policy"
+STIMULUS_PUBLICATION_TOMBSTONE_ATTR = "stimulus_publication_tombstone"
+STIMULUS_PUBLICATION_POLICY = (
+    "owner_generation_guarded_selectors_then_eligibility_v1"
 )
 
 
 def _log(console: Optional[Console], message: str) -> None:
     if console is not None:
         console.log(message)
+
+
+def _log_after_commit(console: Optional[Console], message: str) -> None:
+    """Best-effort reporting that cannot turn a committed run into a failure."""
+
+    try:
+        _log(console, message)
+    except BaseException:
+        return
 
 
 def _normalize_attr_value(value):
@@ -1404,75 +1441,382 @@ def backfill_stimulus_step_metadata(
     return summary
 
 
+def _create_stimulus_public_candidate(
+    runs_parent: zarr.Group,
+    *,
+    run_name: str,
+    publication_owner_uuid: str,
+) -> zarr.Group:
+    """Create one owner-bound public child; injectable for ambiguity tests."""
+
+    return runs_parent.create_group(
+        run_name,
+        attributes={
+            "stage_selector_eligible": False,
+            STIMULUS_PUBLICATION_OWNER_ATTR: publication_owner_uuid,
+        },
+    )
+
+
+def _write_stimulus_failure_attr(attrs: Any, name: str, value: Any) -> None:
+    """Persist one cleanup attr; injectable for hostile-takeover tests."""
+
+    attrs[name] = value
+
+
+def _delete_stimulus_failure_attr(attrs: Any, name: str) -> None:
+    """Delete one cleanup attr; injectable for hostile-takeover tests."""
+
+    del attrs[name]
+
+
+def _fresh_owned_stimulus_candidate(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    publication_owner_uuid: str,
+) -> Optional[zarr.Group]:
+    candidate = root.get(run_path)
+    if not isinstance(candidate, zarr.Group):
+        return None
+    try:
+        exact_binding = (
+            canonical_node_path(candidate) == run_path
+            and archive_identity(candidate) == archive_identity(root)
+        )
+    except Exception:
+        return None
+    if (
+        not exact_binding
+        or candidate.attrs.get(STIMULUS_PUBLICATION_OWNER_ATTR)
+        != publication_owner_uuid
+    ):
+        return None
+    return candidate
+
+
+def _persist_owned_stimulus_attr(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    publication_owner_uuid: str,
+    name: str,
+    value: Any,
+) -> bool:
+    """Write and freshly verify one attr, accepting persist-then-raise stores."""
+
+    candidate = _fresh_owned_stimulus_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if candidate is None:
+        return False
+    try:
+        _write_stimulus_failure_attr(candidate.attrs, name, value)
+    except BaseException:
+        fresh = _fresh_owned_stimulus_candidate(
+            root,
+            run_path=run_path,
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        if fresh is not None and fresh.attrs.get(name) == value:
+            return True
+        raise
+    fresh = _fresh_owned_stimulus_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if fresh is None:
+        return False
+    if fresh.attrs.get(name) != value:
+        raise RuntimeError(f"Stimulus cleanup attr {name!r} did not persist.")
+    return True
+
+
+def _delete_owned_stimulus_attr(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    publication_owner_uuid: str,
+    name: str,
+) -> bool:
+    """Delete and freshly verify one attr without following a stale handle."""
+
+    candidate = _fresh_owned_stimulus_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if candidate is None:
+        return False
+    if name not in candidate.attrs:
+        return True
+    try:
+        _delete_stimulus_failure_attr(candidate.attrs, name)
+    except BaseException:
+        fresh = _fresh_owned_stimulus_candidate(
+            root,
+            run_path=run_path,
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        if fresh is not None and name not in fresh.attrs:
+            return True
+        raise
+    fresh = _fresh_owned_stimulus_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if fresh is None:
+        return False
+    if name in fresh.attrs:
+        raise RuntimeError(f"Stimulus cleanup attr {name!r} was not deleted.")
+    return True
+
+
+def _cleanup_failed_stimulus_candidate(
+    root: zarr.Group,
+    *,
+    run_name: str,
+    publication_owner_uuid: str,
+    error: BaseException,
+) -> bool:
+    """Persist an exact owned tombstone, stopping immediately on takeover."""
+
+    run_path = f"analysis/stimulus_runs/{run_name}"
+
+    def persist(name: str, value: Any) -> bool:
+        return _persist_owned_stimulus_attr(
+            root,
+            run_path=run_path,
+            publication_owner_uuid=publication_owner_uuid,
+            name=name,
+            value=value,
+        )
+
+    def discard(name: str) -> bool:
+        return _delete_owned_stimulus_attr(
+            root,
+            run_path=run_path,
+            publication_owner_uuid=publication_owner_uuid,
+            name=name,
+        )
+
+    for name, value in (
+        ("stage_selector_eligible", False),
+        (RUN_COMPLETION_CONTRACT_ATTR, RUN_COMPLETION_CONTRACT),
+        (RUN_COMPLETION_STATUS_ATTR, RUN_STATUS_FAILED),
+        ("palette_run_failed_at_utc", utc_now_iso()),
+        (RUN_NAME_ATTR, run_name),
+        ("palette_run_error", str(error)),
+    ):
+        if not persist(name, value):
+            return False
+    if not discard(RUN_COMPLETED_AT_ATTR):
+        return False
+
+    candidate = _fresh_owned_stimulus_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if candidate is None:
+        return False
+    if STIMULUS_PHYSICAL_COORDINATE_STATUS_ATTR in candidate.attrs:
+        for name, value in (
+            (
+                STIMULUS_PHYSICAL_COORDINATE_STATUS_ATTR,
+                STIMULUS_PHYSICAL_COORDINATE_INVALIDATED_STATUS,
+            ),
+            (
+                STIMULUS_PHYSICAL_COORDINATE_REASON_CODE_ATTR,
+                STIMULUS_PHYSICAL_COORDINATE_REASON_PARENT_RUN_FAILED,
+            ),
+        ):
+            if not persist(name, value):
+                return False
+        for name in (
+            STIMULUS_PHYSICAL_COORDINATE_MANIFEST_REF_ATTR,
+            STIMULUS_PHYSICAL_COORDINATE_MANIFEST_SHA256_ATTR,
+        ):
+            if not discard(name):
+                return False
+
+    tombstone = json_attr_safe(
+        {
+            "schema_id": "palette.stimulus_publication_tombstone",
+            "schema_version": 1,
+            "publication_owner_uuid": publication_owner_uuid,
+            "run_name": run_name,
+            "public_path_retained": True,
+            "selector_eligible": False,
+            "retry_policy": "new_immutable_run_name_required",
+        }
+    )
+    if not persist(STIMULUS_PUBLICATION_TOMBSTONE_ATTR, tombstone):
+        return False
+
+    fresh = _fresh_owned_stimulus_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if fresh is None:
+        return False
+    if (
+        fresh.attrs.get("stage_selector_eligible") is not False
+        or fresh.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_FAILED
+        or RUN_COMPLETED_AT_ATTR in fresh.attrs
+        or fresh.attrs.get(STIMULUS_PUBLICATION_TOMBSTONE_ATTR) != tombstone
+    ):
+        raise RuntimeError("Owned stimulus failure tombstone did not verify exactly.")
+    return True
+
+
 @contextmanager
 def _staged_run_failure_guard(
-    run_group: zarr.Group,
+    root: zarr.Group,
     *,
     runs_parent: zarr.Group,
     run_name: str,
+    publication_owner_uuid: str,
 ):
-    """Mark every post-start failure and ensure no failed run remains published."""
+    """Create, guard, and fail-close one exact owner-bound public candidate."""
 
-    pointer_names = (
-        "latest",
-        "latest_complete",
-        "latest_pending",
-        "authoritative_run",
-        "authoritative_run_provenance",
-    )
-    pointer_snapshot = {
-        name: (name in runs_parent.attrs, copy.deepcopy(runs_parent.attrs.get(name)))
-        for name in pointer_names
-    }
     try:
-        yield
+        _create_stimulus_public_candidate(
+            runs_parent,
+            run_name=run_name,
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        fresh = _fresh_owned_stimulus_candidate(
+            root,
+            run_path=f"analysis/stimulus_runs/{run_name}",
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        if fresh is None:
+            raise RuntimeError(
+                "Stimulus public candidate did not freshly bind to its exact "
+                "owner, path, and archive."
+            )
+        yield fresh
     except BaseException as exc:
-        rollback_errors: list[str] = []
         try:
-            run_group.attrs["stage_selector_eligible"] = False
-        except BaseException as rollback_exc:  # pragma: no cover - hostile store
-            rollback_errors.append(f"disarm selector eligibility: {rollback_exc}")
-        try:
-            mark_run_failed(
-                run_group,
-                parent_group=runs_parent,
+            _cleanup_failed_stimulus_candidate(
+                root,
                 run_name=run_name,
-                error=str(exc),
+                publication_owner_uuid=publication_owner_uuid,
+                error=exc,
             )
         except BaseException as rollback_exc:  # pragma: no cover - hostile store
-            rollback_errors.append(f"mark failed: {rollback_exc}")
-        try:
-            invalidate_stimulus_physical_coordinate_publication(run_group)
-        except BaseException as rollback_exc:  # pragma: no cover - hostile store
-            rollback_errors.append(f"invalidate physical authority: {rollback_exc}")
-        for attr_name, (was_present, value) in pointer_snapshot.items():
-            try:
-                if was_present:
-                    runs_parent.attrs[attr_name] = copy.deepcopy(value)
-                elif attr_name in runs_parent.attrs:
-                    del runs_parent.attrs[attr_name]
-            except BaseException as rollback_exc:  # pragma: no cover - hostile store
-                rollback_errors.append(
-                    f"restore stimulus-runs pointer {attr_name}: {rollback_exc}"
-                )
-        for attr_name, (was_present, value) in pointer_snapshot.items():
-            try:
-                if (attr_name in runs_parent.attrs) != was_present or (
-                    was_present and runs_parent.attrs.get(attr_name) != value
-                ):
-                    rollback_errors.append(
-                        f"verify stimulus-runs pointer {attr_name}: persisted value differs"
-                    )
-            except BaseException as rollback_exc:  # pragma: no cover - hostile store
-                rollback_errors.append(
-                    f"verify stimulus-runs pointer {attr_name}: {rollback_exc}"
-                )
-        if rollback_errors:
             raise RuntimeError(
-                "Stimulus import failed and publication rollback was incomplete: "
-                f"{rollback_errors!r}."
-            ) from exc
+                "Stimulus import failed and exact owned tombstone cleanup was incomplete."
+            ) from rollback_exc
         raise
+
+
+def _write_stimulus_activation_attr(attrs: Any, name: str, value: Any) -> None:
+    """One injectable activation write for hostile-concurrency tests."""
+
+    write_activation_attr(attrs, name, value)
+
+
+def _activate_stimulus_run(
+    root: zarr.Group,
+    runs_parent: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    expected_publication_owner_uuid: str,
+    expect_coordinate_surfaces: bool,
+    expect_physical_authority: bool,
+) -> None:
+    """Lease one parent generation and expose the exact validated stimulus run."""
+
+    run_path = f"analysis/stimulus_runs/{run_name}"
+
+    def proof() -> tuple[Any, ...]:
+        candidate = root[run_path]
+        coordinate_token: tuple[Any, ...] | None = None
+        if expect_coordinate_surfaces:
+            chaser = candidate["tracking_data/chaser_states"]
+            evidence = _load_bound_stimulus_coordinate_evidence_before_selection(
+                candidate,
+                chaser,
+                root_node=root,
+                require_complete=True,
+            )
+            coordinate_token = (
+                evidence.archive_identity,
+                evidence.row_identity.record_sha256,
+                evidence.surface_manifest.record_sha256,
+                evidence.camera_mapping.record_sha256,
+                evidence.source_temporal_authority.record_sha256,
+                evidence.import_lineage.record_sha256,
+                evidence.output_manifest.record_sha256,
+            )
+        physical = _load_stimulus_physical_coordinate_authority_before_selection(
+            root,
+            stimulus_run=run_name,
+            require_complete=True,
+        )
+        if (physical is not None) is not expect_physical_authority:
+            raise RuntimeError(
+                "Stimulus physical-coordinate authority changed before activation."
+            )
+        physical_token = (
+            None
+            if physical is None
+            else (
+                physical.archive_identity,
+                physical.manifest.record_ref,
+                physical.manifest.record_sha256,
+                physical.physical_frame.record_ref,
+                physical.physical_frame.record_sha256,
+            )
+        )
+        provenance_digest = sha256(
+            _json_dumps_safe(candidate.attrs.get("run_provenance", {})).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return (
+            candidate.attrs.get(STIMULUS_PUBLICATION_OWNER_ATTR),
+            candidate.attrs.get("palette_run_completion_status"),
+            candidate.attrs.get("palette_run_completion_contract"),
+            candidate.attrs.get("palette_run_completed_at_utc"),
+            candidate.attrs.get("palette_run_name"),
+            candidate.attrs.get("palette_run_stage"),
+            provenance_digest,
+            coordinate_token,
+            physical_token,
+        )
+
+    try:
+        activate_selector_eligible_run(
+            root,
+            runs_parent,
+            run_group,
+            parent_path="analysis/stimulus_runs",
+            run_path=run_path,
+            run_name=run_name,
+            owner_attr=STIMULUS_PUBLICATION_OWNER_ATTR,
+            expected_owner_uuid=expected_publication_owner_uuid,
+            policy_attr=STIMULUS_PUBLICATION_POLICY_ATTR,
+            generation_attr=STIMULUS_PUBLICATION_GENERATION_ATTR,
+            lease_attr=STIMULUS_PARENT_PUBLICATION_LEASE_ATTR,
+            policy=STIMULUS_PUBLICATION_POLICY,
+            lease_schema_id="palette.stimulus_publication_lease",
+            proof_loader=proof,
+            selector_attrs=("latest_complete", "latest"),
+            attr_writer=_write_stimulus_activation_attr,
+        )
+    except SelectorActivationError as exc:
+        raise RuntimeError(
+            f"Stimulus activation lost exact ownership: {exc}."
+        ) from exc
 
 
 def import_stimulus_to_zarr(
@@ -1562,7 +1906,7 @@ def _import_stimulus_from_open_h5(
         if not overwrite:
             raise ValueError(
                 f"analysis/stimulus_runs/{run_name} already exists. "
-                "Use --overwrite to replace the existing run."
+                "Public run children are immutable; use a new run name."
             )
         existing_status = runs_parent[run_name].attrs.get(
             "palette_run_completion_status"
@@ -1572,17 +1916,18 @@ def _import_stimulus_from_open_h5(
                 f"Refusing to overwrite non-failed stimulus run {run_name!r} "
                 f"(status={existing_status!r}); use a new immutable run name."
             )
-        del runs_parent[run_name]
+        raise ValueError(
+            f"Refusing to overwrite failed stimulus run {run_name!r}; failed "
+            "public children are immutable tombstones. Use a new run name."
+        )
 
-    run_group = runs_parent.create_group(
-        run_name,
-        attributes={"stage_selector_eligible": False},
-    )
+    publication_owner_uuid = str(uuid.uuid4())
     with _staged_run_failure_guard(
-        run_group,
+        root,
         runs_parent=runs_parent,
         run_name=run_name,
-    ):
+        publication_owner_uuid=publication_owner_uuid,
+    ) as run_group:
         mark_run_started(run_group, run_name=run_name, stage="stimulus")
         if run_group.attrs.get("stage_selector_eligible") is not False:
             raise RuntimeError(
@@ -1878,15 +2223,20 @@ def _import_stimulus_from_open_h5(
             raise ValueError(
                 "Stimulus physical-coordinate authority changed during import."
             )
-        runs_parent.attrs["latest_complete"] = run_name
-        runs_parent.attrs["latest"] = run_name
-        # Persistent publication commit point: no fallible store mutation follows.
-        run_group.attrs["stage_selector_eligible"] = True
-        _log(
-            console,
-            f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]",
+        _activate_stimulus_run(
+            root,
+            runs_parent,
+            run_group,
+            run_name=run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+            expect_coordinate_surfaces=bool(coordinate_preflight.surfaces),
+            expect_physical_authority=physical_authority is not None,
         )
-        return run_name
+    _log_after_commit(
+        console,
+        f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]",
+    )
+    return run_name
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -1905,9 +2255,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help=(
-            "Allow replacing an existing failed, non-selected stimulus run with the "
-            "same name. Complete, running, legacy-unmarked, latest, pending, and "
-            "authoritative runs are immutable."
+            "Legacy compatibility flag. Public stimulus run children, including "
+            "failed tombstones, are immutable; retries require a new run name."
         ),
     )
     parser.add_argument(

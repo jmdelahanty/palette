@@ -30,6 +30,9 @@ RUN_COMPLETION_CONTRACT_ATTR = "palette_run_completion_contract"
 RUN_COMPLETION_CONTRACT = "palette.zarr_run_completion.v1"
 TRACK_KINEMATICS_VISUALIZATION_STAGE = "track_kinematics_visualization"
 TRACK_KINEMATICS_PARENT = "analysis/track_kinematics_runs/offline"
+TRACK_KINEMATICS_VISUALIZATION_PARENT = (
+    "analysis/track_kinematics_visualization_runs/offline"
+)
 TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = (
     "visualizations/track_kinematics_summary_track_0_interactive"
 )
@@ -92,10 +95,7 @@ def stage_run_relative_path(stage_id: str, run_name: str) -> str:
 
     canonical = canonical_stage_id(stage_id)
     if canonical == TRACK_KINEMATICS_VISUALIZATION_STAGE:
-        return (
-            f"{TRACK_KINEMATICS_PARENT}/{_safe_run_name(run_name)}/"
-            f"{TRACK_KINEMATICS_INTERACTIVE_ARTIFACT}"
-        )
+        return f"{TRACK_KINEMATICS_VISUALIZATION_PARENT}/{_safe_run_name(run_name)}"
     parents = STAGE_RUN_PARENTS.get(canonical)
     if not parents:
         raise KeyError(f"no run parent is registered for stage {canonical!r}")
@@ -184,9 +184,53 @@ def _track_kinematics_visualization_availability(
             reason="selected track-kinematics run lacks a required complete marker",
         )
 
-    artifact_relative_path = stage_run_relative_path(
-        TRACK_KINEMATICS_VISUALIZATION_STAGE,
-        run_name,
+    visualization_parent_relative = stage_run_relative_path(
+        TRACK_KINEMATICS_VISUALIZATION_STAGE, run_name
+    ) + "/tracks/id_0"
+    visualization_parent = root / visualization_parent_relative
+    if not (visualization_parent / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=visualization_parent_relative,
+            run_name=run_name,
+            reason="sibling track-kinematics visualization parent is missing",
+            completion_status=status,
+        )
+    visualization_parent_attrs = _attrs(visualization_parent)
+    render_name = ""
+    for key in POINTER_KEYS:
+        value = visualization_parent_attrs.get(key)
+        if isinstance(value, str) and value.strip():
+            render_name = _safe_run_name(value)
+            break
+    if not render_name:
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=visualization_parent_relative,
+            run_name=run_name,
+            reason="visualization parent has no selected render run",
+            completion_status=status,
+        )
+    render_relative_path = f"{visualization_parent_relative}/{render_name}"
+    render_path = root / render_relative_path
+    render_attrs = _attrs(render_path)
+    render_status = _completion_status(render_attrs)
+    if (
+        render_status not in COMPLETE_STATUSES
+        or render_attrs.get("stage_selector_eligible") is not True
+    ):
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=render_relative_path,
+            run_name=run_name,
+            reason="selected visualization render is not complete and eligible",
+            completion_status=render_status,
+        )
+    artifact_relative_path = (
+        f"{render_relative_path}/{TRACK_KINEMATICS_INTERACTIVE_ARTIFACT}"
     )
     artifact_path = root / artifact_relative_path
     if not (artifact_path / "zarr.json").is_file():
@@ -220,6 +264,32 @@ def _track_kinematics_visualization_availability(
                 f"{renderer!r}"
             ),
             completion_status=status,
+        )
+    motion_authority = artifact_attrs.get("track_motion_authority")
+    motion_authority = (
+        dict(motion_authority) if isinstance(motion_authority, Mapping) else {}
+    )
+    expected_run_ref = f"/{run_relative_path}"
+    expected_track_ref = f"{expected_run_ref}/tracks/id_0"
+    if (
+        motion_authority.get("run_ref") != expected_run_ref
+        or motion_authority.get("track_ref") != expected_track_ref
+        or motion_authority.get("track_id") != 0
+        or not str(motion_authority.get("motion_manifest_sha256") or "").strip()
+        or not str(
+            motion_authority.get("positions_px_coordinate_descriptor_sha256")
+            or ""
+        ).strip()
+        or render_attrs.get("source_track_motion_authority") != motion_authority
+        or render_attrs.get("track_id") != 0
+    ):
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=artifact_relative_path,
+            run_name=run_name,
+            reason="interactive contract lacks exact track-motion authority",
+            completion_status=render_status,
         )
     expected_runs = dict(dependency_runs or {})
     source_runs = artifact_attrs.get("source_runs")
@@ -257,7 +327,7 @@ def _track_kinematics_visualization_availability(
         artifact_path=artifact_relative_path,
         run_name=run_name,
         reason="persisted interactive track-kinematics contract is available",
-        completion_status=status,
+        completion_status=render_status,
     )
 
 
@@ -290,7 +360,6 @@ def discover_stage_availability(
         if not (parent / "zarr.json").is_file():
             continue
         parent_attrs = _attrs(parent)
-        pointer_key: str | None = None
         if requested_run and requested_run != "latest":
             run_name = _safe_run_name(requested_run)
         else:
@@ -299,7 +368,6 @@ def discover_stage_availability(
                 value = parent_attrs.get(key)
                 if isinstance(value, str) and value.strip():
                     run_name = _safe_run_name(value)
-                    pointer_key = key
                     break
             if not run_name:
                 return StageAvailability(

@@ -73,6 +73,9 @@ class Candidate:
     feature_match_counts: dict[str, int]
     feature_weights_used: float
     model_sha256: Optional[str] = None
+    manifest_path: Optional[str] = None
+    manifest_sha256: Optional[str] = None
+    skeleton_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -421,6 +424,9 @@ def load_candidates(
         "  ts.task_type AS set_task_type,",
         "  COALESCE(tm.model_path, tr.model_path) AS model_path,",
         "  COALESCE(tm.model_sha256, tr.model_sha256) AS model_sha256,",
+        "  tr.manifest_path AS manifest_path,",
+        "  tr.manifest_sha256 AS manifest_sha256,",
+        "  COALESCE(tr.skeleton_id, ts.skeleton_id) AS skeleton_id,",
         "  COALESCE(tm.status, tr.status) AS status,",
         "  tr.created_utc AS created_utc,",
         "  ts.dataset_ids_json AS dataset_ids_json",
@@ -471,6 +477,9 @@ def load_candidates(
                 weighted_score=float(weighted_score),
                 feature_match_counts=match_counts,
                 feature_weights_used=float(weights_used),
+                manifest_path=_norm_text(row["manifest_path"]),
+                manifest_sha256=_norm_text(row["manifest_sha256"]),
+                skeleton_id=_norm_text(row["skeleton_id"]),
             )
         )
     candidates.sort(

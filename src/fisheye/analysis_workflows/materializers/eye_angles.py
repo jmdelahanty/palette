@@ -1027,13 +1027,43 @@ def publish_eye_angle_run(
                 fallback_command="eye_angle_materializer",
             ),
         )
+        parent.attrs["latest_complete"] = plan.run_name
+        parent.attrs["latest"] = plan.run_name
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/eye_angle_runs"]
+        run_group = parent[plan.run_name]
         if str(parent.attrs.get("latest")) != plan.run_name or str(
             parent.attrs.get("latest_complete")
-        ) != plan.run_name:
-            raise RuntimeError("Eye-angle parent pointers were not updated consistently.")
+        ) != plan.run_name or (
+            run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Eye-angle run was not persisted complete and ineligible behind "
+                "its parent pointers."
+            )
+
+    def activate(
+        _root: zarr.Group,
+        parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if (
+            str(parent.attrs.get("latest")) != plan.run_name
+            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Eye-angle activation requires one complete, ineligible run."
+            )
+        try:
+            run_group.attrs["stage_selector_eligible"] = True
+        except BaseException:
+            if run_group.attrs.get("stage_selector_eligible") is True:
+                return
+            raise
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -1048,7 +1078,7 @@ def publish_eye_angle_run(
                 "atomic_run_group_publish"
             ),
             rollback_policy=(
-                "remove_new_target_and_restore_parent_attrs_on_post_rename_failure"
+                "retain_failed_public_tombstone_leave_unleased_parent_state_untouched"
             ),
             content_checksum=True,
         ),
@@ -1057,12 +1087,16 @@ def publish_eye_angle_run(
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
         after_rename=after_rename,
         payload_metadata={
             "authoritative_source_zarr": str(plan.source_zarr),
             "node_local_staged_zarr": str(plan.staged_zarr),
             "node_local_regular_run": str(plan.local_run_path),
             "node_local_sharded_run": str(plan.sharded_run),
+            "promotion_policy": (
+                "complete_ineligible_then_pointers_then_eligibility_final"
+            ),
             "materialization": json_attr_safe(materialization_payload),
         },
     )

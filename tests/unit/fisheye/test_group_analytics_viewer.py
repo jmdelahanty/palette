@@ -109,10 +109,18 @@ def test_unknown_chaser_roles_are_resolved_by_recording_and_object_column() -> N
     assert [row["raw_color_hex"] for row in enriched] == ["#ff0000", "#1600ff"]
 
 
-def _make_goodcopbadcop_export(tmp_path: Path):
+def _make_goodcopbadcop_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     source = _make_archive_with_detection_occupancy(tmp_path)
     _add_goodcopbadcop_cra_protocol_metadata(source)
-    write_chaser_distance_run(source, _make_chaser_result(source), overwrite=True)
+    write_chaser_distance_run(
+        source,
+        _make_chaser_result(source),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     cra_result = build_cra_primary_endpoint_result(source, chaser_distance_run="chaser_distance_1")
     write_cra_primary_endpoint_component(source, cra_result, overwrite=True)
     _add_circle_geometry(source)
@@ -129,7 +137,7 @@ def _make_goodcopbadcop_export(tmp_path: Path):
         perimeter_band_mm=2.0,
     )
     write_cra_near_field_component(source, near_field_result, overwrite=True)
-    _add_track_kinematics_run(source)
+    _add_track_kinematics_run(source, monkeypatch=monkeypatch)
     _add_goodcopbadcop_swim_bout_run(source)
     epoch_behavior_result = build_goodcopbadcop_epoch_behavior_summary_result(
         source,
@@ -195,8 +203,11 @@ def _write_goodcopbadcop_statistics(context, *, families=("chaser_distance",)) -
     )
 
 
-def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> None:
-    context = _make_goodcopbadcop_export(tmp_path)
+def test_group_analytics_viewer_queries_goodcopbadcop_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _make_goodcopbadcop_export(tmp_path, monkeypatch)
 
     health = build_health_report(context)
     assert health.ok is True
@@ -488,8 +499,11 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     assert recordings["rows"][0]["pre_event_chaser_0_alignment"] is not None
 
 
-def test_group_analytics_viewer_queries_matching_statistics_export(tmp_path: Path) -> None:
-    context = _make_goodcopbadcop_export(tmp_path)
+def test_group_analytics_viewer_queries_matching_statistics_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _make_goodcopbadcop_export(tmp_path, monkeypatch)
     _write_goodcopbadcop_statistics(context)
 
     summary = query_export_summary(context)
@@ -520,8 +534,11 @@ def test_group_analytics_viewer_queries_matching_statistics_export(tmp_path: Pat
     assert "p_value" in first
 
 
-def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(tmp_path: Path) -> None:
-    context = _make_goodcopbadcop_export(tmp_path)
+def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _make_goodcopbadcop_export(tmp_path, monkeypatch)
     _write_goodcopbadcop_statistics(context, families=("epoch_behavior",))
 
     summary = query_export_summary(context)
@@ -550,8 +567,11 @@ def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(tmp_p
     assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
 
 
-def test_group_analytics_viewer_queries_cra_primary_endpoint_statistics(tmp_path: Path) -> None:
-    context = _make_goodcopbadcop_export(tmp_path)
+def test_group_analytics_viewer_queries_cra_primary_endpoint_statistics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _make_goodcopbadcop_export(tmp_path, monkeypatch)
     _write_goodcopbadcop_statistics(context, families=("cra_primary_endpoint",))
 
     summary = query_export_summary(context)
@@ -573,8 +593,11 @@ def test_group_analytics_viewer_queries_cra_primary_endpoint_statistics(tmp_path
     assert by_metric["delta_occ_agg"]["paired_unit_count"] == 1
 
 
-def test_group_analytics_viewer_queries_cra_near_field_statistics(tmp_path: Path) -> None:
-    context = _make_goodcopbadcop_export(tmp_path)
+def test_group_analytics_viewer_queries_cra_near_field_statistics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _make_goodcopbadcop_export(tmp_path, monkeypatch)
     _write_goodcopbadcop_statistics(context, families=("cra_near_field",))
 
     summary = query_export_summary(context)
@@ -593,8 +616,11 @@ def test_group_analytics_viewer_queries_cra_near_field_statistics(tmp_path: Path
     assert by_metric["nearzone_occ_specificity"]["paired_unit_count"] == 1
 
 
-def test_group_analytics_viewer_rejects_unknown_metric(tmp_path: Path) -> None:
-    context = _make_goodcopbadcop_export(tmp_path)
+def test_group_analytics_viewer_rejects_unknown_metric(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _make_goodcopbadcop_export(tmp_path, monkeypatch)
 
     with pytest.raises(ValueError, match="Unsupported spatial metric"):
         query_spatial_occupancy(context, metric="not_a_metric")

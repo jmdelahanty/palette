@@ -1584,26 +1584,36 @@ Track kinematics results organized by type:
 
 **Structure**: `analysis/track_kinematics_runs/<online|offline>/<run_name>/`
 
-**Run Attributes**:
-- `method`: Analysis method used
-  - `track_kinematics_online`: Raw online data (transformed to camera space)
-  - `track_kinematics_online_refined`: Refined online data (texture space)
-  - `track_kinematics_offline`: Offline detection data
-- `created_at_utc`: Analysis timestamp
-- `fps`: Frame rate used
-- `smoothing_seconds`: Temporal smoothing window
-- `pixel_to_mm`: Calibration used for this run
-  - For `online_refined`: Uses `pixels_per_mm_projector` (texture space)
-  - For `online` and `offline`: Uses `pixels_per_mm_camera` (camera space)
-- `coordinate_space`: "texture" or "camera"
-- `inputs`: Source data references
-  - Online refined: `refined_online_run`, `stimulus_run`, `chaser_index`
-  - Online raw: `stimulus_run`, `chaser_index`
-  - Offline: `detection_run`, `keypoint_run`, `source_tracking_run`, `source_arena_assignment_run`, optional `chaser_metrics` dict (metrics run, stimulus run, chaser index)
-- Offline runs also persist `source_tracking_run` and
-  `source_arena_assignment_run` as top-level attrs for direct lineage lookup.
-- `summary`: Per-track summary statistics
-- `total_distance_px`, `total_distance_mm`: Aggregate distances
+**Future-normal run authority**:
+
+- completion gates: `palette_run_completion_status == "complete"`,
+  `stage_selector_eligible == true`, and
+  `coordinate_binding_status == "bound_canonical_v2"`;
+- `track_motion_publication_manifest`, its SHA-256, and
+  `track_motion_publication_commit`: closed live array/group/attrs and
+  derivation authority;
+- `parameters.coordinate_space`: a direction-explicit controlled space such as
+  `source_camera_image_px` or `arena_relative_canvas_px`, never legacy
+  `"camera"`/`"texture"`;
+- offline `inputs`: exactly `detection_path`, `position_source_path`,
+  `position_source_rowset_path`, `position_source_kind`, `crop_run`,
+  `keypoint_path`, and `tracking_path`, plus only the controlled optional
+  `chaser_metrics` and `swim_bout_run` inputs;
+- offline `keypoint_path` and `tracking_path`: exact two-component run paths
+  (`keypoints_runs/<run>` or `refined_keypoints_runs/<run>`, and
+  `tracking_runs/<run>`); variant/run-name pairs, nested tracking metadata, and
+  reconstructed usability selectors are not future authority;
+- `source_refs`: the exact mechanical projection of `inputs`, validated against
+  the selected crop/detection/keypoint/tracking arrays;
+- `track_motion_input_authority`: digest-bound row alignment and exact input
+  array authority;
+- `physical_coordinate_authority`: the only authority for `positions_mm` and
+  other physical surfaces. A root scalar `pixel_to_mm`, duplicated
+  `physical_calibration`, or resolution ratio cannot authorize them.
+
+Historical run-level `coordinate_space`, `pixel_to_mm`, source-run aliases, and
+flat layouts are inspection/migration metadata only. They are not accepted by
+the normal future reader.
 
 **Shared Root Arrays (offline runs only)**:
 - `camera_frame_ids` (`int64`): Master frame index aligned to all chaser metrics.
@@ -1620,9 +1630,16 @@ Track kinematics results organized by type:
 Consumers map from track-level `frame_indices` into these arrays using `camera_frame_ids` and the `has_offline` mask.
 
 **Per-Track Data** (`tracks/id_<track>/`):
-Each track stores the ordered samples for that ID:
-- `frame_indices` (`int64`), `time_seconds` (`float32`), `detection_indices` (`int64`)
-- `positions_px`, `positions_mm` (`float32`, `[N, 2]`)
+Each track stores ordered samples for that ID. `track_sample_key = (track_id,
+source_acquisition_frame_index)` is primary identity; `source_instance_key` is
+nullable observation lineage, and `source_row_index` is the exact selected
+upstream row. `frame_indices` is only a sealed exact alias of the acquisition
+frame column. Historical `detection_indices` is not in the future-normal
+schema.
+
+- `positions_px`, optional `positions_mm` (`float32`, `[N, 2]`): each array owns
+  a canonical coordinate descriptor and digest. Pixel positions retain the
+  exact selected native frame; millimetres require the typed physical authority.
 - `speed_raw_px`, `speed_raw_mm`: Gap-aware raw speed from validity-filtered frame path-distance increments
 - `speed_filtered_px`, `speed_filtered_mm`: Speed after hysteresis filtering
 - `speed_smoothed_px`, `speed_smoothed_mm`: Speed after temporal smoothing
@@ -1632,6 +1649,10 @@ Each track stores the ordered samples for that ID:
   `acceleration_mm`, `smoothed_acceleration_px`,
   `smoothed_acceleration_mm`, and, where defined for that level,
   `frame_path_distance_px` and `frame_path_distance_mm`.
+  These paths aid discovery only; the sealed surface record supplies units,
+  axis domain, operation, and exact inputs. Flat speed names may remain as
+  sealed compatibility aliases during transition but are never a fallback for
+  the normal logical reader.
 - `speed_derivatives/`: Transitional source-scoped acceleration mirror. Each child group is
   keyed by source speed level: `speed_raw`, `speed_filtered`,
   `speed_smoothed`, `speed_averaged`.

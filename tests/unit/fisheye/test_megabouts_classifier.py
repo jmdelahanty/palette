@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.shared.zarr.columnar import read_columnar_dataset
@@ -15,7 +16,15 @@ from fisheye.analysis.megabouts_classifier import (
     write_megabouts_classification_run,
 )
 from fisheye.analysis.megabouts_classifier_inputs import build_megabouts_classifier_input_pack
-from tests.unit.fisheye.test_megabouts_classifier_inputs import _build_root
+from tests.unit.fisheye.test_megabouts_classifier_inputs import (
+    _build_root,
+    _install_verified_source_readers,
+)
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_verified_source_readers(monkeypatch)
 
 
 def _build_classifier_root() -> zarr.Group:

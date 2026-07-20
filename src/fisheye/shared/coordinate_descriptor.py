@@ -78,6 +78,7 @@ GEOMETRY_TYPES = frozenset(
         "polyline_xy",
         "polygon_xy",
         "vector_xy",
+        "vector_sequence_xy",
         "line_segment_xyxy",
         "circle_cxcy_r",
         "ellipse_cxcy_wh_angle",
@@ -96,6 +97,7 @@ _GEOMETRY_COMPONENTS: dict[str, tuple[str, ...]] = {
     "polyline_xy": ("x", "y"),
     "polygon_xy": ("x", "y"),
     "vector_xy": ("x", "y"),
+    "vector_sequence_xy": ("x", "y"),
     "line_segment_xyxy": ("x0", "y0", "x1", "y1"),
     "circle_cxcy_r": ("center_x", "center_y", "radius"),
     "ellipse_cxcy_wh_angle": (
@@ -1033,6 +1035,15 @@ CANONICAL_FRAME_RECORD_KINDS = frozenset(
     }
 )
 
+CANONICAL_COLLECTION_AXIS_ROLES = frozenset(
+    {
+        "subject_component",
+        "keypoint",
+        "tail_segment",
+        "chaser",
+    }
+)
+
 _CANONICAL_RECORD_ATTR_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _CANONICAL_RECORD_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.:+-]+$")
 _CANONICAL_ATTR_SELECTOR_RE = re.compile(
@@ -1150,6 +1161,31 @@ class CanonicalFrameRecord:
 
 
 @dataclass(frozen=True)
+class CanonicalCollectionAxis:
+    """One controlled non-coordinate axis on a coordinate-bearing array.
+
+    The axis is deliberately distinct from ``components``: those fields name
+    the coordinate tuple itself, while this record names a collection of
+    scientific surfaces that share one coordinate frame.  Version 2 admits
+    only controlled, named collection roles and binds their exact labels via a
+    persisted, digest-bound authority record.
+    """
+
+    axis: int
+    role: str
+    cardinality: int
+    label_authority: DigestBoundCoordinateRecordRef
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "axis": self.axis,
+            "role": self.role,
+            "cardinality": self.cardinality,
+            "label_authority": self.label_authority.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class CanonicalCoordinateProfile:
     """Controlled field combination for one scientifically defined space."""
 
@@ -1218,6 +1254,32 @@ CANONICAL_COORDINATE_PROFILES: Mapping[str, CanonicalCoordinateProfile] = {
             reference_units="px",
             overlay_statuses=frozenset({CANONICAL_OVERLAY_DIRECT}),
             frame_record_kind=PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+        ),
+        _canonical_profile(
+            "source_camera_image_px.unit_vector_y_down.v1",
+            "source_camera_image_px",
+            origin="not_applicable",
+            positive_x="right",
+            positive_y="down",
+            coordinate_unit="unitless",
+            reference_units="px",
+            pixel_conventions=frozenset({"not_applicable"}),
+            overlay_statuses=frozenset({CANONICAL_OVERLAY_NOT_SUITABLE}),
+            frame_record_kind=PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+            geometry_types=frozenset({"vector_xy", "vector_sequence_xy"}),
+        ),
+        _canonical_profile(
+            "source_camera_image_px.displacement_vector_y_down.v1",
+            "source_camera_image_px",
+            origin="not_applicable",
+            positive_x="right",
+            positive_y="down",
+            coordinate_unit="px",
+            reference_units="px",
+            pixel_conventions=frozenset({"not_applicable"}),
+            overlay_statuses=frozenset({CANONICAL_OVERLAY_NOT_SUITABLE}),
+            frame_record_kind=PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+            geometry_types=frozenset({"vector_xy"}),
         ),
         _canonical_profile(
             "source_camera_normalized_xy.top_left_y_down.v1",
@@ -1396,6 +1458,7 @@ class CanonicalCoordinateDescriptor:
     row_identity: CanonicalRowIdentityRef
     source_camera_overlay: CanonicalSourceCameraOverlay
     lineage_refs: tuple[DigestBoundCoordinateRecordRef, ...]
+    collection_axis: CanonicalCollectionAxis | None = None
     frame_record: CanonicalFrameRecord | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -1417,6 +1480,8 @@ class CanonicalCoordinateDescriptor:
         }
         if self.frame_record is not None:
             payload["frame_record"] = self.frame_record.to_dict()
+        if self.collection_axis is not None:
+            payload["collection_axis"] = self.collection_axis.to_dict()
         return payload
 
     def canonical_json(self) -> str:
@@ -1454,7 +1519,7 @@ _CANONICAL_V2_REQUIRED_FIELDS = frozenset(
         "lineage_refs",
     }
 )
-_CANONICAL_V2_OPTIONAL_FIELDS = frozenset({"frame_record"})
+_CANONICAL_V2_OPTIONAL_FIELDS = frozenset({"frame_record", "collection_axis"})
 
 
 def _canonical_archive_record_ref(
@@ -1708,6 +1773,80 @@ def _parse_canonical_frame_record(
     )
 
 
+def _parse_canonical_collection_axis(
+    value: Any,
+    issues: list[CoordinateIssue],
+) -> CanonicalCollectionAxis | None:
+    path = "$.collection_axis"
+    start = len(issues)
+    expected = {"axis", "role", "cardinality", "label_authority"}
+    if not isinstance(value, Mapping):
+        issues.append(
+            _issue(
+                "collection_axis_invalid",
+                path,
+                "Collection axis must be a mapping.",
+            )
+        )
+        return None
+    for name in sorted(expected - set(value)):
+        issues.append(
+            _issue("missing_field", f"{path}.{name}", "Required field is missing.")
+        )
+    for name in sorted(set(value) - expected):
+        issues.append(
+            _issue(
+                "unknown_field",
+                f"{path}.{name}",
+                "Field is not part of the canonical collection-axis record.",
+            )
+        )
+
+    axis = value.get("axis")
+    if type(axis) is not int or axis != 1:
+        issues.append(
+            _issue(
+                "collection_axis_index_unsupported",
+                f"{path}.axis",
+                "A controlled collection axis must be exact physical axis 1; axis 0 is row identity and arbitrary unnamed axes are forbidden.",
+            )
+        )
+    role = value.get("role")
+    if role not in CANONICAL_COLLECTION_AXIS_ROLES:
+        issues.append(
+            _issue(
+                "collection_axis_role_unsupported",
+                f"{path}.role",
+                f"Unsupported collection-axis role {role!r}.",
+            )
+        )
+    cardinality = value.get("cardinality")
+    if type(cardinality) is not int or cardinality <= 0:
+        issues.append(
+            _issue(
+                "collection_axis_cardinality_invalid",
+                f"{path}.cardinality",
+                "Collection-axis cardinality must be an exact positive integer.",
+            )
+        )
+    authority = _parse_digest_bound_record_ref(
+        value.get("label_authority"),
+        path=f"{path}.label_authority",
+        issues=issues,
+    )
+    if len(issues) != start or authority is None:
+        return None
+    assert type(axis) is int
+    assert isinstance(role, str)
+    assert type(cardinality) is int
+    return CanonicalCollectionAxis(
+        axis=axis,
+        role=role,
+        cardinality=cardinality,
+        label_authority=authority,
+    )
+
+
 def _canonical_v2_payload_mapping(
     value: Any,
 ) -> tuple[Mapping[str, Any] | None, list[CoordinateIssue]]:
@@ -1876,6 +2015,22 @@ def _canonical_profile_issues(
     if authority_lineage is None or authority_lineage.record_sha256 != authority.record_sha256:
         issues.append(_issue("reference_authority_lineage_missing", "$.lineage_refs", "Exact reference authority and digest must occur in lineage_refs."))
 
+    collection_axis = descriptor.collection_axis
+    if collection_axis is not None:
+        label_authority = collection_axis.label_authority
+        label_lineage = lineage_by_ref.get(label_authority.record_ref)
+        if (
+            label_lineage is None
+            or label_lineage.record_sha256 != label_authority.record_sha256
+        ):
+            issues.append(
+                _issue(
+                    "collection_axis_authority_lineage_missing",
+                    "$.lineage_refs",
+                    "The exact collection-label authority and digest must occur in lineage_refs.",
+                )
+            )
+
     if profile.frame_record_kind is None:
         if descriptor.frame_record is not None:
             issues.append(_issue("frame_record_forbidden", "$.frame_record", "This profile does not use a local frame record."))
@@ -1955,6 +2110,12 @@ def _parse_canonical_coordinate_descriptor_v2(
     frame_record = None
     if "frame_record" in payload:
         frame_record = _parse_canonical_frame_record(payload["frame_record"], issues)
+    collection_axis = None
+    if "collection_axis" in payload:
+        collection_axis = _parse_canonical_collection_axis(
+            payload["collection_axis"],
+            issues,
+        )
 
     if issues:
         raise CoordinateDescriptorError(issues)
@@ -1980,6 +2141,7 @@ def _parse_canonical_coordinate_descriptor_v2(
         row_identity=row_identity,
         source_camera_overlay=overlay,
         lineage_refs=lineage_refs,
+        collection_axis=collection_axis,
         frame_record=frame_record,
     )
     profile_issues = _canonical_profile_issues(descriptor)
@@ -2056,6 +2218,7 @@ def build_canonical_coordinate_descriptor(
     source_camera_overlay_status: str,
     overlay_transform_refs: Sequence[DigestBoundCoordinateRecordRef] = (),
     lineage_refs: Sequence[DigestBoundCoordinateRecordRef] = (),
+    collection_axis: CanonicalCollectionAxis | None = None,
     frame_record: CanonicalFrameRecord | None = None,
 ) -> CanonicalCoordinateDescriptor:
     """Build one strict future descriptor from controlled profiles and records."""
@@ -2107,6 +2270,23 @@ def build_canonical_coordinate_descriptor(
     add_lineage(authority, path="$.reference_extent.authority")
     if frame_record is not None:
         add_lineage(frame_record.record, path="$.frame_record")
+    parsed_collection_axis: CanonicalCollectionAxis | None = None
+    if collection_axis is not None:
+        collection_issues: list[CoordinateIssue] = []
+        parsed_collection_axis = _parse_canonical_collection_axis(
+            (
+                collection_axis.to_dict()
+                if isinstance(collection_axis, CanonicalCollectionAxis)
+                else collection_axis
+            ),
+            collection_issues,
+        )
+        if collection_issues or parsed_collection_axis is None:
+            raise CoordinateDescriptorError(collection_issues)
+        add_lineage(
+            parsed_collection_axis.label_authority,
+            path="$.collection_axis.label_authority",
+        )
     for index, item in enumerate(lineage_refs):
         add_lineage(item, path=f"$.lineage_refs[{index}]")
 
@@ -2151,6 +2331,7 @@ def build_canonical_coordinate_descriptor(
         ),
         source_camera_overlay=overlay,
         lineage_refs=tuple(combined_lineage),
+        collection_axis=parsed_collection_axis,
         frame_record=frame_record,
     )
     return parse_canonical_coordinate_descriptor(descriptor)
@@ -2252,15 +2433,83 @@ def _canonical_geometry_shape_issues(
                 )
             )
 
-    if geometry in {"point_xy", "vector_xy"}:
-        exact_rank_and_components(2, 2)
-    elif geometry == "points_xy":
-        if len(shape) not in {2, 3} or shape[-1] != 2:
+    collection = descriptor.collection_axis
+    if collection is not None:
+        if collection.axis >= len(shape):
+            issues.append(
+                _issue(
+                    "collection_axis_out_of_bounds",
+                    "$.collection_axis.axis",
+                    "Collection axis is outside the physical owner shape.",
+                )
+            )
+            return tuple(issues)
+        if shape[collection.axis] != collection.cardinality:
+            issues.append(
+                _issue(
+                    "collection_axis_cardinality_mismatch",
+                    "$.owner_shape",
+                    "Physical collection-axis cardinality disagrees with the digest-bound label authority.",
+                )
+            )
+        expected_shape: tuple[int | None, ...] | None = None
+        if geometry == "raster_yx":
+            expected_shape = (None, collection.cardinality, None, None)
+            if len(shape) == 4 and (shape[2] <= 0 or shape[3] <= 0):
+                issues.append(
+                    _issue(
+                        "geometry_owner_shape_mismatch",
+                        "$.owner_shape",
+                        "A collected raster_yx requires positive H and W dimensions.",
+                    )
+                )
+        elif geometry == "point_xy":
+            expected_shape = (None, collection.cardinality, 2)
+        elif geometry in {"bbox_xyxy", "bbox_xywh", "bbox_cxcywh"}:
+            expected_shape = (None, collection.cardinality, 4)
+        else:
+            issues.append(
+                _issue(
+                    "collection_axis_geometry_unsupported",
+                    "$.geometry_type",
+                    "A controlled collection axis supports raster_yx, point_xy, "
+                    "and bbox geometry.",
+                )
+            )
+        if expected_shape is not None and (
+            len(shape) != len(expected_shape)
+            or any(
+                expected is not None and actual != expected
+                for actual, expected in zip(shape, expected_shape, strict=False)
+            )
+        ):
             issues.append(
                 _issue(
                     "geometry_owner_shape_mismatch",
                     "$.owner_shape",
-                    "points_xy requires (N, 2) or (N, P, 2).",
+                    f"Collected {geometry} has an invalid physical layout for axis {collection.axis} and cardinality {collection.cardinality}.",
+                )
+            )
+        return tuple(issues)
+
+    if geometry in {"point_xy", "vector_xy"}:
+        exact_rank_and_components(2, 2)
+    elif geometry == "points_xy":
+        if len(shape) != 3 or shape[-1] != 2 or shape[1] <= 0:
+            issues.append(
+                _issue(
+                    "geometry_owner_shape_mismatch",
+                    "$.owner_shape",
+                    "points_xy requires physical shape (N, P, 2) with P > 0; use point_xy for one point per row.",
+                )
+            )
+    elif geometry == "vector_sequence_xy":
+        if len(shape) != 3 or shape[-1] != 2 or shape[1] <= 0:
+            issues.append(
+                _issue(
+                    "geometry_owner_shape_mismatch",
+                    "$.owner_shape",
+                    "vector_sequence_xy requires physical shape (N, K, 2) with K > 0; use vector_xy for one vector per row.",
                 )
             )
     elif geometry in {"bbox_xyxy", "bbox_xywh", "bbox_cxcywh", "line_segment_xyxy"}:
@@ -2447,12 +2696,14 @@ __all__ = [
     "PHYSICAL_FRAME_CALIBRATION_RECORD_KIND",
     "FISH_BODY_FRAME_RECORD_KIND",
     "CANONICAL_FRAME_RECORD_KINDS",
+    "CANONICAL_COLLECTION_AXIS_ROLES",
     "DigestBoundCoordinateRecordRef",
     "CanonicalReferenceAuthority",
     "CanonicalReferenceExtent",
     "CanonicalRowIdentityRef",
     "CanonicalSourceCameraOverlay",
     "CanonicalFrameRecord",
+    "CanonicalCollectionAxis",
     "CanonicalCoordinateProfile",
     "CanonicalCoordinateDescriptor",
     "parse_canonical_coordinate_descriptor",

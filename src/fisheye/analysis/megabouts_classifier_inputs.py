@@ -8,14 +8,26 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
 
-from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.analysis.swim_bout_io import load_swim_bout_tables
+from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.shared.coordinate_identity import (
+    TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE,
+)
+from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
+from fisheye.shared.tail_coordinate_publication import (
+    BoundTailCoordinatePublication,
+    load_tail_posture_coordinate_publication,
+)
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+)
 
 DEFAULT_TAIL_POSTURE_VIEW_FAMILY = "megabouts_compatible"
 DEFAULT_BOUT_DURATION_S = 0.2
@@ -89,21 +101,147 @@ def _resolve_tail_posture_view_run(
     run_name: str,
     *,
     view_family: str = DEFAULT_TAIL_POSTURE_VIEW_FAMILY,
-) -> tuple[zarr.Group, str, str]:
+) -> tuple[zarr.Group, str, str, BoundTailCoordinatePublication]:
     analysis = _require_group(root, "analysis")
     parent = _require_group(analysis, "tail_posture_view_runs")
-    spec = str(run_name or "latest").strip().strip("/")
-    parts = spec.split("/")
-    if spec.startswith("analysis/tail_posture_view_runs/") and len(parts) >= 3:
-        resolved = parts[2]
-    elif spec == "latest":
-        resolved = parent.attrs.get(f"latest_{view_family}") or parent.attrs.get("latest")
-    else:
-        resolved = spec
-    if not resolved or resolved not in parent:
-        raise ValueError(f"Tail posture view run {run_name!r} not found.")
-    path = f"analysis/tail_posture_view_runs/{resolved}"
-    return parent[resolved], str(resolved), path
+    spec = str(run_name or "latest").strip()
+    if spec != spec.strip("/") or "//" in spec:
+        raise ValueError(
+            f"Tail posture view run selector {run_name!r} is not an exact canonical path."
+        )
+    prefix = "analysis/tail_posture_view_runs/"
+    family = str(view_family).strip()
+    if not family or "/" in family:
+        raise ValueError("Tail posture view_family must be one non-empty selector token.")
+
+    def load_exact(name: str) -> tuple[
+        zarr.Group,
+        str,
+        str,
+        BoundTailCoordinatePublication,
+    ]:
+        if not name or "/" in name or name not in parent:
+            raise ValueError(f"Tail posture view run {run_name!r} not found.")
+        child = parent[name]
+        if not isinstance(child, zarr.Group):
+            raise ValueError(f"{prefix}{name} is not a Zarr group.")
+        if str(child.attrs.get("view_family") or "") != family:
+            raise ValueError(
+                f"Tail posture selector for family {family!r} names "
+                f"a run from family {child.attrs.get('view_family')!r}."
+            )
+        if not is_run_selector_eligible(child) or not is_run_complete_in_parent(
+            parent,
+            child,
+            legacy_default=False,
+        ):
+            raise ValueError(f"Tail posture view run {name!r} is not complete and selector-eligible.")
+        path = f"{prefix}{name}"
+        publication = load_tail_posture_coordinate_publication(root, path)
+        return child, name, path, publication
+
+    if spec.startswith(prefix):
+        resolved = spec[len(prefix) :]
+        if not resolved or "/" in resolved:
+            raise ValueError(f"Tail posture view run path {run_name!r} is invalid.")
+        return load_exact(resolved)
+    if spec != "latest":
+        return load_exact(spec)
+
+    family_selector = f"latest_{family}"
+    preferred_raw = parent.attrs.get(family_selector)
+    preferred = str(preferred_raw) if preferred_raw is not None else ""
+    if not preferred:
+        raise ValueError(
+            f"Tail posture family selector {family_selector!r} is missing."
+        )
+    if preferred != preferred.strip() or "/" in preferred or preferred not in parent:
+        raise ValueError(
+            f"Tail posture family selector {family_selector!r} is invalid."
+        )
+    child = parent[preferred]
+    if not isinstance(child, zarr.Group):
+        raise ValueError(
+            f"Tail posture family selector {family_selector!r} does not name a group."
+        )
+    if str(child.attrs.get("view_family") or "") != family:
+        raise ValueError(
+            f"Tail posture family selector {family_selector!r} names the wrong family."
+        )
+    if not is_run_selector_eligible(child) or not is_run_complete_in_parent(
+        parent,
+        child,
+        legacy_default=False,
+    ):
+        raise ValueError(
+            f"Tail posture family selector {family_selector!r} names a run that "
+            "is not complete and selector-eligible; canonical readers do not "
+            "guess a prior run."
+        )
+    return load_exact(preferred)
+
+
+def _require_unchanged_tail_posture_publication(
+    root: zarr.Group,
+    run_path: str,
+    *,
+    expected_manifest_ref: str,
+    expected_manifest_sha256: str,
+    expected_source_run_path: str,
+    expected_source_manifest_ref: str,
+    expected_source_manifest_sha256: str,
+    error_message: str,
+) -> None:
+    fresh = load_tail_posture_coordinate_publication(root, run_path)
+    if (
+        fresh.run_path != run_path
+        or fresh.manifest.record_ref != expected_manifest_ref
+        or fresh.manifest.record_sha256 != expected_manifest_sha256
+        or fresh.source.run_path != expected_source_run_path
+        or fresh.source.manifest.record_ref != expected_source_manifest_ref
+        or fresh.source.manifest.record_sha256 != expected_source_manifest_sha256
+    ):
+        raise ValueError(error_message)
+
+
+def _require_input_pack_tail_posture_publication(
+    root: zarr.Group,
+    source_refs: Mapping[str, str],
+    *,
+    error_message: str,
+) -> None:
+    required_refs = (
+        "tail_posture_view_run",
+        "tail_posture_publication_manifest_ref",
+        "tail_posture_publication_manifest_sha256",
+        "tail_posture_source_subject_shape_run",
+        "tail_posture_source_subject_shape_publication_manifest_ref",
+        "tail_posture_source_subject_shape_publication_manifest_sha256",
+    )
+    missing = [name for name in required_refs if not source_refs.get(name)]
+    if missing:
+        raise ValueError(
+            "Megabouts input pack is missing required tail-posture publication "
+            f"references: {', '.join(missing)}."
+        )
+    _require_unchanged_tail_posture_publication(
+        root,
+        source_refs["tail_posture_view_run"],
+        expected_manifest_ref=source_refs["tail_posture_publication_manifest_ref"],
+        expected_manifest_sha256=source_refs[
+            "tail_posture_publication_manifest_sha256"
+        ],
+        expected_source_run_path=source_refs[
+            "tail_posture_source_subject_shape_run"
+        ],
+        expected_source_manifest_ref=source_refs[
+            "tail_posture_source_subject_shape_publication_manifest_ref"
+        ],
+        expected_source_manifest_sha256=source_refs[
+            "tail_posture_source_subject_shape_publication_manifest_sha256"
+        ],
+        error_message=error_message,
+    )
 
 
 def _resolve_track_run(
@@ -114,30 +252,215 @@ def _resolve_track_run(
 ) -> tuple[zarr.Group, str, str, str]:
     analysis = _require_group(root, "analysis")
     parent = _require_group(analysis, "track_kinematics_runs")
-    spec = str(run_name or "latest").strip().strip("/")
+    spec = str(run_name or "latest").strip()
+    if spec != spec.strip("/") or "//" in spec:
+        raise ValueError(
+            f"Track kinematics run selector {run_name!r} is not an exact canonical path."
+        )
     parts = spec.split("/")
-    if spec.startswith("analysis/track_kinematics_runs/") and len(parts) >= 4:
+    if parts[:2] == ["analysis", "track_kinematics_runs"]:
+        if len(parts) != 4 or not parts[2] or not parts[3]:
+            raise ValueError(
+                f"Track kinematics run path {run_name!r} must exactly equal "
+                "analysis/track_kinematics_runs/<scope>/<run>."
+            )
         scope = parts[2]
         resolved = parts[3]
-    elif len(parts) == 2 and parts[0] in parent:
+    elif len(parts) == 2:
         scope = parts[0]
         resolved = parts[1]
+        if not scope or not resolved:
+            raise ValueError(
+                f"Track kinematics run selector {run_name!r} is invalid."
+            )
+    elif len(parts) > 1:
+        raise ValueError(
+            f"Track kinematics run selector {run_name!r} must be a bare run, "
+            "<scope>/<run>, or an exact canonical path."
+        )
     else:
-        scope = str(track_scope)
-        if scope not in parent:
+        scope = str(track_scope).strip()
+        if not scope or "/" in scope:
+            raise ValueError(f"Track kinematics scope {track_scope!r} is invalid.")
+        if scope not in parent or not isinstance(parent[scope], zarr.Group):
             raise ValueError(f"Track kinematics scope {scope!r} not found.")
         resolved = parent[scope].attrs.get("latest") if spec == "latest" else spec
-    if not resolved or scope not in parent or resolved not in parent[scope]:
+    if scope not in parent or not isinstance(parent[scope], zarr.Group):
+        raise ValueError(f"Track kinematics scope {scope!r} not found.")
+    if (
+        not isinstance(resolved, str)
+        or not resolved
+        or "/" in resolved
+        or resolved not in parent[scope]
+    ):
         raise ValueError(f"Track kinematics run {run_name!r} not found under scope {scope!r}.")
+    if not isinstance(parent[scope][resolved], zarr.Group):
+        raise ValueError(
+            f"Track kinematics run {run_name!r} does not name a Zarr group."
+        )
     path = f"analysis/track_kinematics_runs/{scope}/{resolved}"
     return parent[scope][resolved], str(resolved), path, str(scope)
 
 
-def _frame_to_index(frames: np.ndarray) -> dict[int, int]:
+def _unique_frame_to_index(frames: np.ndarray, *, label: str) -> dict[int, int]:
+    values = np.asarray(frames, dtype=np.int64)
+    if values.ndim != 1:
+        raise ValueError(f"{label} must be one-dimensional, got {values.shape}.")
     mapping: dict[int, int] = {}
-    for idx, frame in enumerate(np.asarray(frames, dtype=np.int64).tolist()):
-        mapping.setdefault(int(frame), int(idx))
+    for idx, frame in enumerate(values.tolist()):
+        value = int(frame)
+        if value in mapping:
+            raise ValueError(
+                f"{label} contains duplicate acquisition frame {value}; "
+                "track-row selection would be ambiguous."
+            )
+        mapping[value] = int(idx)
     return mapping
+
+
+def _frame_to_index(frames: np.ndarray) -> dict[int, int]:
+    """Compatibility helper for dense, necessarily unique frame axes."""
+
+    return _unique_frame_to_index(frames, label="dense frame axis")
+
+
+def _require_posture_instance_keys(
+    posture: zarr.Group,
+    *,
+    row_count: int,
+) -> np.ndarray:
+    values = np.asarray(_require_array(posture, "instance_key")[:])
+    if values.dtype != np.dtype("uint64") or values.shape != (int(row_count),):
+        raise ValueError(
+            f"{posture.name}/instance_key must be canonical uint64 shape "
+            f"({int(row_count)},), got dtype={values.dtype}, shape={values.shape}."
+        )
+    if np.unique(values).size != values.size:
+        raise ValueError(
+            f"{posture.name}/instance_key must contain unique observation identities."
+        )
+    return values
+
+
+def _require_track_source_instance_keys(
+    values: object,
+    *,
+    row_count: int,
+    track_path: str,
+) -> np.ndarray:
+    if values is None:
+        raise ValueError(
+            f"{track_path} has no verified source_instance_key identity lineage."
+        )
+    keys = np.asarray(values)
+    if (
+        keys.dtype != TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE
+        or keys.shape != (int(row_count),)
+    ):
+        raise ValueError(
+            f"{track_path}/source_instance_key must use canonical nullable "
+            f"dtype {TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE} and shape "
+            f"({int(row_count)},), got dtype={keys.dtype}, shape={keys.shape}."
+        )
+    if np.any(~keys["valid"] & (keys["instance_key"] != 0)):
+        raise ValueError(
+            f"{track_path}/source_instance_key contains noncanonical null values."
+        )
+    valid_keys = keys["instance_key"][keys["valid"]]
+    if np.unique(valid_keys).size != valid_keys.size:
+        raise ValueError(
+            f"{track_path}/source_instance_key contains duplicate valid identities."
+        )
+    return keys
+
+
+def _join_posture_rows_to_track_sources(
+    *,
+    posture_instance_keys: np.ndarray,
+    posture_frames: np.ndarray,
+    track_source_instance_keys: np.ndarray,
+    track_frames: np.ndarray,
+) -> np.ndarray:
+    """Bind each track row to one posture row through observation identity.
+
+    Missing observations remain ``-1`` and therefore invalidate only that tail
+    sample. A matching identity with a different acquisition frame indicates
+    corrupt lineage and aborts the entire input pack.
+    """
+
+    posture_lookup = {
+        int(instance_key): int(row_index)
+        for row_index, instance_key in enumerate(posture_instance_keys.tolist())
+    }
+    joined = np.full((int(track_frames.shape[0]),), -1, dtype=np.int64)
+    for track_index in range(int(track_frames.shape[0])):
+        if not bool(track_source_instance_keys["valid"][track_index]):
+            continue
+        instance_key = int(
+            track_source_instance_keys["instance_key"][track_index]
+        )
+        posture_index = posture_lookup.get(instance_key)
+        if posture_index is None:
+            continue
+        posture_frame = int(posture_frames[posture_index])
+        track_frame = int(track_frames[track_index])
+        if posture_frame != track_frame:
+            raise ValueError(
+                "Tail-posture/track source_instance_key acquisition-frame "
+                f"mismatch for instance_key={instance_key}: posture={posture_frame}, "
+                f"track={track_frame}."
+            )
+        joined[track_index] = posture_index
+    return joined
+
+
+def _require_swim_bout_track_lineage(
+    swim_payload: object,
+    track_tables: object,
+) -> None:
+    candidate = swim_payload.candidate
+    source_run = candidate.source_track_kinematics_run
+    expected_run = str(track_tables.run_name)
+    if not source_run:
+        raise ValueError(
+            "Selected swim-bout candidate lacks source_track_kinematics_run."
+        )
+    if str(source_run) != expected_run:
+        raise ValueError(
+            "Selected swim-bout candidate source_track_kinematics_run mismatch: "
+            f"bout={source_run!r}, track={expected_run!r}."
+        )
+
+    source_track_id = candidate.track_id
+    expected_track_id = int(track_tables.track_id)
+    if source_track_id is None:
+        raise ValueError("Selected swim-bout candidate lacks track_id lineage.")
+    if int(source_track_id) != expected_track_id:
+        raise ValueError(
+            "Selected swim-bout candidate track_id mismatch: "
+            f"bout={int(source_track_id)}, track={expected_track_id}."
+        )
+
+    run_attrs = swim_payload.run_attrs
+    raw_digest = run_attrs.get("source_track_motion_manifest_sha256")
+    source_digest = str(raw_digest).strip() if raw_digest is not None else ""
+    expected_raw_digest = track_tables.motion_manifest_sha256
+    expected_digest = (
+        str(expected_raw_digest).strip()
+        if expected_raw_digest is not None
+        else ""
+    )
+    if not source_digest:
+        raise ValueError(
+            "Selected swim-bout run lacks source_track_motion_manifest_sha256."
+        )
+    if not expected_digest:
+        raise ValueError("Verified track input lacks a motion-manifest digest.")
+    if source_digest != expected_digest:
+        raise ValueError(
+            "Selected swim-bout source_track_motion_manifest_sha256 mismatch: "
+            f"bout={source_digest!r}, track={expected_digest!r}."
+        )
 
 
 def _max_consecutive_false(mask: np.ndarray) -> int:
@@ -237,46 +560,74 @@ def _resolve_bout_ids(bouts: np.ndarray) -> np.ndarray:
 
 
 def _load_track_arrays(
-    track_run: zarr.Group,
-    track_path: str,
+    root: zarr.Group,
     *,
+    run_name: str,
+    track_scope: str,
     track_id: int,
     heading_source: str,
-) -> tuple[zarr.Group, dict[str, np.ndarray], dict[str, str], float]:
-    tracks = _require_group(track_run, "tracks")
-    track_name = f"id_{int(track_id)}"
-    if track_name not in tracks:
-        raise ValueError(f"Track {track_name!r} not found in {track_path}/tracks.")
-    track = tracks[track_name]
-    track_path_full = f"{track_path}/tracks/{track_name}"
-    frames = np.asarray(_require_array(track, "frame_indices")[:], dtype=np.int64)
-    positions_mm = np.asarray(_require_array(track, "positions_mm")[:], dtype=np.float32)
-    heading = np.asarray(_require_array(track, heading_source)[:], dtype=np.float32)
+) -> tuple[object, dict[str, np.ndarray], dict[str, str], float]:
+    tables = load_track_kinematics_track(
+        root,
+        run_name=run_name,
+        scope=track_scope,
+        track_id=int(track_id),
+        required_speed_levels=(),
+    )
+    frames = np.asarray(tables.source_acquisition_frame_index, dtype=np.int64)
+    if tables.positions_mm is None:
+        raise ValueError(
+            f"{tables.track_path} has no verified physical positions_mm surface."
+        )
+    positions_mm = np.asarray(tables.positions_mm, dtype=np.float32)
+    headings = {
+        "heading_degrees": tables.heading_degrees,
+        "heading_radians": tables.heading_radians,
+        "smoothed_heading_degrees": tables.smoothed_heading_degrees,
+        "smoothed_heading_radians": tables.smoothed_heading_radians,
+    }
+    if heading_source not in headings or headings[heading_source] is None:
+        raise ValueError(
+            f"Unsupported or unavailable verified heading source {heading_source!r}."
+        )
+    heading = np.asarray(headings[heading_source], dtype=np.float32)
     if positions_mm.shape != (frames.shape[0], 2):
         raise ValueError(f"positions_mm shape {positions_mm.shape} does not match frames length {frames.shape[0]}.")
     if heading.shape[0] != frames.shape[0]:
         raise ValueError(f"{heading_source} length {heading.shape[0]} does not match frames length {frames.shape[0]}.")
-    if "sample_valid" in track:
-        sample_valid = np.asarray(track["sample_valid"][:], dtype=bool)
-    else:
-        sample_valid = np.ones((frames.shape[0],), dtype=bool)
+    if tables.sample_valid is None:
+        raise ValueError(f"{tables.track_path} has no verified sample_valid surface.")
+    sample_valid = np.asarray(tables.sample_valid, dtype=bool)
     if sample_valid.shape[0] != frames.shape[0]:
         raise ValueError(f"sample_valid length {sample_valid.shape[0]} does not match frames length {frames.shape[0]}.")
-    fps = float(track_run.attrs.get("fps", 0.0))
+    source_instance_key = _require_track_source_instance_keys(
+        tables.source_instance_key,
+        row_count=int(frames.shape[0]),
+        track_path=str(tables.track_path),
+    )
+    fps = float(tables.run_attrs.get("fps", 0.0))
     arrays = {
         "frame_indices": frames,
+        "source_instance_key": source_instance_key,
         "positions_mm": positions_mm,
         "heading": heading,
         "sample_valid": sample_valid,
     }
     refs = {
-        "track_group": track_path_full,
-        "track_frame_indices": f"{track_path_full}/frame_indices",
-        "positions_mm": f"{track_path_full}/positions_mm",
-        "heading": f"{track_path_full}/{heading_source}",
-        "sample_valid": f"{track_path_full}/sample_valid" if "sample_valid" in track else "implicit_all_true",
+        "track_group": tables.track_path,
+        "track_frame_indices": (
+            f"{tables.track_path}/source_acquisition_frame_index"
+        ),
+        "track_source_instance_key": f"{tables.track_path}/source_instance_key",
+        "positions_mm": f"{tables.track_path}/positions_mm",
+        "positions_mm_coordinate_descriptor_sha256": str(
+            tables.positions_mm_descriptor_sha256
+        ),
+        "heading": f"{tables.track_path}/{heading_source}",
+        "sample_valid": f"{tables.track_path}/sample_valid",
+        "track_motion_manifest_sha256": str(tables.motion_manifest_sha256),
     }
-    return track, arrays, refs, fps
+    return tables, arrays, refs, fps
 
 
 def build_megabouts_classifier_input_pack(
@@ -309,8 +660,20 @@ def build_megabouts_classifier_input_pack(
       Megabouts' classifier-facing trajectory extraction.
     """
 
-    posture, posture_name, posture_path = _resolve_tail_posture_view_run(root, tail_posture_view_run)
-    track_run, track_name, track_path, resolved_scope = _resolve_track_run(
+    (
+        posture,
+        posture_name,
+        posture_path,
+        posture_publication,
+    ) = _resolve_tail_posture_view_run(root, tail_posture_view_run)
+    posture_manifest_ref = posture_publication.manifest.record_ref
+    posture_manifest_sha256 = posture_publication.manifest.record_sha256
+    posture_source_run_path = posture_publication.source.run_path
+    posture_source_manifest_ref = posture_publication.source.manifest.record_ref
+    posture_source_manifest_sha256 = (
+        posture_publication.source.manifest.record_sha256
+    )
+    _track_run, track_name, track_path, resolved_scope = _resolve_track_run(
         root,
         track_kinematics_run,
         track_scope=track_scope,
@@ -325,12 +688,14 @@ def build_megabouts_classifier_input_pack(
     resolved_level = swim_payload.signal.speed_level
     bout_level_path = swim_payload.level_path
 
-    track_group, track_arrays, track_refs, fps = _load_track_arrays(
-        track_run,
-        track_path,
+    track_tables, track_arrays, track_refs, fps = _load_track_arrays(
+        root,
+        run_name=track_name,
+        track_scope=resolved_scope,
         track_id=int(track_id),
         heading_source=str(heading_source),
     )
+    _require_swim_bout_track_lineage(swim_payload, track_tables)
     if fps <= 0.0:
         fps = float(swim_payload.signal_attrs.get("fps") or swim_payload.run_attrs.get("fps", 0.0))
     if fps <= 0.0:
@@ -348,13 +713,23 @@ def build_megabouts_classifier_input_pack(
             f"{MEGABOUTS_MAX_CLASSIFIER_WINDOW_FRAMES} frames, got {window_frames}."
         )
 
-    posture_frames = np.asarray(_require_array(posture, "frame_index")[:], dtype=np.int64)
+    posture_frames = np.asarray(
+        _require_array(posture, "source_acquisition_frame_index")[:],
+        dtype=np.int64,
+    )
     posture_valid = np.asarray(_require_array(posture, "valid")[:], dtype=bool)
     tail_angle = np.asarray(_require_array(posture, "tail_angle_rad")[:], dtype=np.float32)
     if tail_angle.ndim != 2:
         raise ValueError(f"tail_angle_rad must be 2D, got shape {tail_angle.shape}.")
     if posture_frames.shape[0] != tail_angle.shape[0] or posture_valid.shape[0] != tail_angle.shape[0]:
-        raise ValueError("Tail posture frame_index, valid, and tail_angle_rad row counts must match.")
+        raise ValueError(
+            "Tail posture source_acquisition_frame_index, valid, and "
+            "tail_angle_rad row counts must match."
+        )
+    posture_instance_keys = _require_posture_instance_keys(
+        posture,
+        row_count=int(tail_angle.shape[0]),
+    )
     angle_count = int(tail_angle.shape[1])
     if angle_count != MEGABOUTS_TAIL_SEGMENT_COUNT:
         raise ValueError(
@@ -375,20 +750,33 @@ def build_megabouts_classifier_input_pack(
     window_start = np.asarray(start_frames, dtype=np.int64)
     window_end = window_start + int(window_frames) - 1
 
-    posture_lookup = _frame_to_index(posture_frames)
-    track_lookup = _frame_to_index(track_arrays["frame_indices"])
+    track_frames = track_arrays["frame_indices"]
+    track_lookup = _unique_frame_to_index(
+        track_frames,
+        label=f"{track_refs['track_group']}/source_acquisition_frame_index",
+    )
+    posture_row_by_track_index = _join_posture_rows_to_track_sources(
+        posture_instance_keys=posture_instance_keys,
+        posture_frames=posture_frames,
+        track_source_instance_keys=track_arrays["source_instance_key"],
+        track_frames=track_frames,
+    )
 
     for bout_idx, start in enumerate(window_start.tolist()):
         frames = np.arange(int(start), int(start) + int(window_frames), dtype=np.int64)
         for sample_idx, frame in enumerate(frames.tolist()):
-            posture_idx = posture_lookup.get(int(frame))
-            if posture_idx is not None and bool(posture_valid[posture_idx]):
+            track_idx = track_lookup.get(int(frame))
+            posture_idx = (
+                int(posture_row_by_track_index[track_idx])
+                if track_idx is not None
+                else -1
+            )
+            if posture_idx >= 0 and bool(posture_valid[posture_idx]):
                 values = tail_angle[posture_idx]
                 if np.all(np.isfinite(values)):
                     tail_array[bout_idx, :, sample_idx] = values
                     tail_valid[bout_idx, sample_idx] = True
 
-            track_idx = track_lookup.get(int(frame))
             if track_idx is not None and bool(track_arrays["sample_valid"][track_idx]):
                 x_mm, y_mm = track_arrays["positions_mm"][track_idx]
                 yaw = track_arrays["heading"][track_idx]
@@ -444,13 +832,27 @@ def build_megabouts_classifier_input_pack(
 
     source_refs = {
         "tail_posture_view_run": posture_path,
+        "tail_frame_indices": f"{posture_path}/source_acquisition_frame_index",
+        "tail_instance_key": f"{posture_path}/instance_key",
         "tail_angle_rad": f"{posture_path}/tail_angle_rad",
         "tail_valid": f"{posture_path}/valid",
+        "tail_posture_publication_manifest_ref": posture_manifest_ref,
+        "tail_posture_publication_manifest_sha256": posture_manifest_sha256,
+        "tail_posture_source_subject_shape_run": posture_source_run_path,
+        "tail_posture_source_subject_shape_publication_manifest_ref": (
+            posture_source_manifest_ref
+        ),
+        "tail_posture_source_subject_shape_publication_manifest_sha256": (
+            posture_source_manifest_sha256
+        ),
         "track_kinematics_run": track_path,
         **track_refs,
         "swim_bout_run": swim_payload.run_path,
         "swim_bout_level": bout_level_path,
         "bouts": f"{bout_level_path}/bouts",
+        "swim_bout_source_track_motion_manifest_sha256": str(
+            swim_payload.run_attrs["source_track_motion_manifest_sha256"]
+        ),
     }
     parameters = {
         "adapter_method": "palette_megabouts_classifier_input_dry_run",
@@ -468,6 +870,10 @@ def build_megabouts_classifier_input_pack(
         "bout_duration_s": float(window_frames) / float(fps),
         "bout_duration_frames": int(window_frames),
         "window_policy": "start_frame_fixed_duration",
+        "tail_track_join_policy": (
+            "posture_instance_key_to_track_source_instance_key_then_exact_"
+            "acquisition_frame_v1"
+        ),
         "traj_alignment": "onset_translation_rotation" if bool(align_traj_to_onset) else "none",
         "traj_reference_index": int(traj_reference_index),
         "requires_traj_reference_valid": True,
@@ -479,7 +885,7 @@ def build_megabouts_classifier_input_pack(
         "mutates_archive": False,
         "calls_megabouts": False,
     }
-    return MegaboutsClassifierInputPack(
+    pack = MegaboutsClassifierInputPack(
         tail_array=tail_array,
         traj_array=traj_array,
         tail_valid=tail_valid,
@@ -499,6 +905,20 @@ def build_megabouts_classifier_input_pack(
         source_refs=source_refs,
         parameters=parameters,
     )
+    _require_unchanged_tail_posture_publication(
+        root,
+        posture_path,
+        expected_manifest_ref=posture_manifest_ref,
+        expected_manifest_sha256=posture_manifest_sha256,
+        expected_source_run_path=posture_source_run_path,
+        expected_source_manifest_ref=posture_source_manifest_ref,
+        expected_source_manifest_sha256=posture_source_manifest_sha256,
+        error_message=(
+            "Tail posture or its source subject-shape publication changed while "
+            "Megabouts inputs were copied."
+        ),
+    )
+    return pack
 
 
 def summarize_input_pack(pack: MegaboutsClassifierInputPack) -> dict[str, object]:
@@ -541,24 +961,108 @@ def diagnose_input_pack_invalid_windows(
 ) -> dict[str, object]:
     """Explain invalid classifier windows without mutating the archive."""
 
+    _require_input_pack_tail_posture_publication(
+        root,
+        pack.source_refs,
+        error_message=(
+            "Megabouts diagnostic source tail-posture publication changed since "
+            "the input pack was built."
+        ),
+    )
     posture = root[pack.source_refs["tail_posture_view_run"]]
-    posture_frames = np.asarray(_require_array(posture, "frame_index")[:], dtype=np.int64)
+    posture_frames = np.asarray(
+        _require_array(posture, "source_acquisition_frame_index")[:],
+        dtype=np.int64,
+    )
     posture_valid = np.asarray(_require_array(posture, "valid")[:], dtype=bool)
     tail_angle = np.asarray(_require_array(posture, "tail_angle_rad")[:], dtype=np.float32)
     posture_reasons = _load_reason_array(posture, ("failure_reason_bytes", "reason_bytes"))
-    posture_lookup = _frame_to_index(posture_frames)
+    posture_instance_keys = _require_posture_instance_keys(
+        posture,
+        row_count=int(tail_angle.shape[0]),
+    )
 
-    track = root[pack.source_refs["track_group"]]
-    track_frames = np.asarray(_require_array(track, "frame_indices")[:], dtype=np.int64)
-    positions_mm = np.asarray(_require_array(track, "positions_mm")[:], dtype=np.float32)
+    track_tables = load_track_kinematics_track(
+        root,
+        run_name=str(pack.parameters["track_kinematics_run"]),
+        scope=str(pack.parameters["track_kinematics_scope"]),
+        track_id=int(pack.parameters["track_id"]),
+        required_speed_levels=(),
+    )
+    if track_tables.motion_manifest_sha256 != pack.source_refs.get(
+        "track_motion_manifest_sha256"
+    ):
+        raise ValueError(
+            "Megabouts diagnostic source track-motion manifest changed since "
+            "the input pack was built."
+        )
+    track_frames = np.asarray(
+        track_tables.source_acquisition_frame_index,
+        dtype=np.int64,
+    )
+    if track_tables.positions_mm is None:
+        raise ValueError("Verified track input has no physical positions_mm.")
+    positions_mm = np.asarray(track_tables.positions_mm, dtype=np.float32)
     heading_path = pack.source_refs["heading"].split("/")[-1]
-    heading = np.asarray(_require_array(track, heading_path)[:], dtype=np.float32)
-    if "sample_valid" in track:
-        track_valid = np.asarray(track["sample_valid"][:], dtype=bool)
-    else:
-        track_valid = np.ones((track_frames.shape[0],), dtype=bool)
-    track_reasons = _load_reason_array(track, ("failure_reason_bytes", "reason_bytes"))
-    track_lookup = _frame_to_index(track_frames)
+    heading_sources = {
+        "heading_degrees": track_tables.heading_degrees,
+        "heading_radians": track_tables.heading_radians,
+        "smoothed_heading_degrees": track_tables.smoothed_heading_degrees,
+        "smoothed_heading_radians": track_tables.smoothed_heading_radians,
+    }
+    if heading_path not in heading_sources or heading_sources[heading_path] is None:
+        raise ValueError(f"Verified heading source {heading_path!r} is unavailable.")
+    heading = np.asarray(heading_sources[heading_path], dtype=np.float32)
+    if track_tables.sample_valid is None:
+        raise ValueError("Verified track input has no sample_valid surface.")
+    track_valid = np.asarray(track_tables.sample_valid, dtype=bool)
+    track_source_instance_keys = _require_track_source_instance_keys(
+        track_tables.source_instance_key,
+        row_count=int(track_frames.shape[0]),
+        track_path=str(track_tables.track_path),
+    )
+    track_reasons = None
+    if track_tables.sample_reason_code is not None:
+        raw_reason_codes = track_tables.track_attrs.get("sample_reason_codes")
+        if not isinstance(raw_reason_codes, Mapping):
+            raise ValueError(
+                "Verified track input has sample_reason_code values but no "
+                "controlled sample_reason_codes codebook."
+            )
+        reason_codebook: dict[int, str] = {}
+        for raw_code, raw_label in raw_reason_codes.items():
+            try:
+                code = int(raw_code)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Verified track sample_reason_codes contains a non-integer key."
+                ) from exc
+            label = str(raw_label).strip()
+            if not label:
+                raise ValueError(
+                    f"Verified track sample_reason_codes[{code}] has an empty label."
+                )
+            reason_codebook[code] = label
+        decoded_reasons: list[str] = []
+        for raw_code in np.asarray(track_tables.sample_reason_code).tolist():
+            code = int(raw_code)
+            if code not in reason_codebook:
+                raise ValueError(
+                    "Verified track sample_reason_code contains an unknown "
+                    f"controlled value: {code}."
+                )
+            decoded_reasons.append(reason_codebook[code])
+        track_reasons = np.asarray(decoded_reasons, dtype=object)
+    track_lookup = _unique_frame_to_index(
+        track_frames,
+        label=f"{track_tables.track_path}/source_acquisition_frame_index",
+    )
+    posture_row_by_track_index = _join_posture_rows_to_track_sources(
+        posture_instance_keys=posture_instance_keys,
+        posture_frames=posture_frames,
+        track_source_instance_keys=track_source_instance_keys,
+        track_frames=track_frames,
+    )
 
     invalid_idxs = np.flatnonzero(~pack.valid_bout)
     failure_reason_counts = Counter(str(pack.failure_reason[idx]) for idx in invalid_idxs.tolist())
@@ -580,10 +1084,21 @@ def diagnose_input_pack_invalid_windows(
         valid_traj_frames: list[int] = []
 
         for frame in window_frames:
-            posture_idx = posture_lookup.get(int(frame))
-            if posture_idx is None:
+            track_idx = track_lookup.get(int(frame))
+            posture_idx = (
+                int(posture_row_by_track_index[track_idx])
+                if track_idx is not None
+                else -1
+            )
+            if track_idx is None:
                 missing_posture_frames.append(int(frame))
-                tail_issue_counts["missing_posture_frame"] += 1
+                tail_issue_counts["missing_track_row_for_posture_join"] += 1
+            elif not bool(track_source_instance_keys["valid"][track_idx]):
+                missing_posture_frames.append(int(frame))
+                tail_issue_counts["track_source_instance_key_null"] += 1
+            elif posture_idx < 0:
+                missing_posture_frames.append(int(frame))
+                tail_issue_counts["missing_posture_instance_key"] += 1
             elif not bool(posture_valid[posture_idx]):
                 invalid_posture_frames.append(int(frame))
                 tail_issue_counts["posture_valid_false"] += 1
@@ -595,7 +1110,6 @@ def diagnose_input_pack_invalid_windows(
             else:
                 valid_tail_frames.append(int(frame))
 
-            track_idx = track_lookup.get(int(frame))
             if track_idx is None:
                 missing_track_frames.append(int(frame))
                 traj_issue_counts["missing_track_frame"] += 1
@@ -674,7 +1188,16 @@ def diagnose_input_pack_invalid_windows(
         "parameters": pack.parameters,
         "examples": examples,
     }
-    return dict(_json_safe(result))
+    safe_result = dict(_json_safe(result))
+    _require_input_pack_tail_posture_publication(
+        root,
+        pack.source_refs,
+        error_message=(
+            "Tail posture or its source subject-shape publication changed while "
+            "Megabouts diagnostics were copied."
+        ),
+    )
+    return safe_result
 
 
 def build_megabouts_classifier_input_pack_from_zarr(

@@ -181,6 +181,37 @@ _TEST_RUN_PROVENANCE = {
     "fisheye_version": None,
 }
 
+_TEST_MODEL_ARTIFACT = {
+    "role": "detect_model",
+    "path": "/models/test.pt",
+    "fingerprint_scheme": "content_v1",
+    "sha256": "2" * 64,
+    "size_bytes": 123,
+    "mtime_ns": 456,
+    "source": "computed",
+}
+
+
+def _canonical_backend_result_attrs(*, height: int, width: int, count: int):
+    return {
+        "model_path": _TEST_MODEL_ARTIFACT["path"],
+        "model_name": "test.pt",
+        "inference_height": height,
+        "inference_width": width,
+        "validated_backend_result_count": count,
+        "validated_backend_result_orig_shape_hw": [height, width],
+        "decode_backend_effective": "opencv",
+        "video_reader_type": "opencv",
+        "parameters": {
+            "decode_backend_effective": "opencv",
+            "resize_dims": None,
+            "pre_resize_dims": None,
+            "effective_input_resize_dims": None,
+            "tensor_resize_dims": None,
+            "imgsz_applied": None,
+        },
+    }
+
 
 class _FakeVideoCapture:
     def __init__(self) -> None:
@@ -346,6 +377,17 @@ def _install_detect_yolo_producer_harness(
         return object()
 
     monkeypatch.setattr(mod, "_publish_detection_acquisition_mapping", publish_mapping)
+    monkeypatch.setattr(
+        mod,
+        "publish_detection_backend_result_projection",
+        lambda run_group, *_args, **_kwargs: (
+            run_group.attrs.__setitem__(
+                mod.DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
+                {"test": True},
+            )
+            or object()
+        ),
+    )
     monkeypatch.setattr(
         mod,
         "publish_detection_instance_key_derivation",
@@ -530,6 +572,13 @@ def test_organized_archive_auto_builds_full_acquisition_detection_evidence(
         run,
         acquisition_frame=acquisition,
     )
+    assert evidence.source_camera_frame.record.frame_id == (
+        f"{acquisition.record.camera_id}_source_camera"
+    )
+    assert evidence.source_camera_frame.pixel_convention == "continuous"
+    assert evidence.bbox_source_camera_frame.pixel_convention == (
+        "pixel_edge_half_open"
+    )
     frame_indices = np.asarray([0, 1], dtype=np.int32)
     run.create_array(
         "frame_indices",
@@ -569,6 +618,7 @@ def test_organized_archive_auto_builds_full_acquisition_detection_evidence(
     dense_mapping = np.arange(2, dtype=np.int64)
     run.attrs.update(
         {
+            **_canonical_backend_result_attrs(height=80, width=100, count=2),
             **instance_key_attrs(
                 acquisition.record.recording_id,
                 frame_domain="recording_parent_frame_index",
@@ -600,6 +650,12 @@ def test_organized_archive_auto_builds_full_acquisition_detection_evidence(
             },
         }
     )
+    backend_result_projection = mod.publish_detection_backend_result_projection(
+        run,
+        run["bbox_norm_coords"],
+        frame_evidence=evidence,
+        model_artifact=_TEST_MODEL_ARTIFACT,
+    )
     instance_key_derivation = mod.publish_detection_instance_key_derivation(
         run,
         run["instance_key"],
@@ -621,7 +677,11 @@ def test_organized_archive_auto_builds_full_acquisition_detection_evidence(
         run["bbox_img_xyxy"],
         run["centers_img_xy"],
         frame_evidence=evidence,
-        source_lineage_records=(mapping, instance_key_derivation),
+        source_lineage_records=(
+            mapping,
+            backend_result_projection,
+            instance_key_derivation,
+        ),
     )
     run.attrs["coordinate_contract"] = "canonical_v2"
     run.attrs["palette_run_completion_contract"] = "palette.zarr_run_completion.v1"
@@ -784,6 +844,7 @@ def _complete_canonical_detection_observation(
             },
             "detect_row_shard_rows": None,
             "detect_shard_write": None,
+            **_canonical_backend_result_attrs(height=80, width=100, count=2),
             "decode_backend_effective": "opencv",
             "decode_domain_proof": "opencv_stream_eof_and_exact_count_v1",
             "timing_summary": {
@@ -806,6 +867,12 @@ def _complete_canonical_detection_observation(
         run,
         acquisition_frame=acquisition,
     )
+    backend_result_projection = mod.publish_detection_backend_result_projection(
+        run,
+        run["bbox_norm_coords"],
+        frame_evidence=evidence,
+        model_artifact=_TEST_MODEL_ARTIFACT,
+    )
     instance_key_derivation = mod.publish_detection_instance_key_derivation(
         run,
         run["instance_key"],
@@ -827,7 +894,11 @@ def _complete_canonical_detection_observation(
         run["bbox_img_xyxy"],
         run["centers_img_xy"],
         frame_evidence=evidence,
-        source_lineage_records=(mapping, instance_key_derivation),
+        source_lineage_records=(
+            mapping,
+            backend_result_projection,
+            instance_key_derivation,
+        ),
     )
     declaration = None
     if row_count == 0:
@@ -1138,6 +1209,11 @@ def test_detection_failure_rolls_back_coordinate_attrs_and_selectors(
     assert "coordinate_contract" not in run.attrs
     assert "detection_bbox_projection" not in run.attrs
     assert "detection_bbox_projection_sha256" not in run.attrs
+    assert mod.DETECTION_BACKEND_RESULT_PROJECTION_ATTR not in run.attrs
+    assert (
+        f"{mod.DETECTION_BACKEND_RESULT_PROJECTION_ATTR}_sha256"
+        not in run.attrs
+    )
     assert "row_identity_key" not in run.attrs
     assert "palette_run_completed_at_utc" not in run.attrs
     assert run.attrs["stage_selector_eligible"] is False
@@ -1586,6 +1662,10 @@ def test_detection_frame_evidence_keyboard_interrupt_restores_shared_attrs(
 
     camera = root["analysis/coordinate_frames/source_camera/camera-a/continuous"]
     assert dict(camera.attrs) == {}
+    bbox_camera = root[
+        "analysis/coordinate_frames/source_camera/camera-a/pixel_edge_half_open"
+    ]
+    assert dict(bbox_camera.attrs) == {}
 
 
 def test_decord_short_batch_fails_transaction_and_closes_reader(

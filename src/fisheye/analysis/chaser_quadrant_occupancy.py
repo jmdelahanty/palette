@@ -23,6 +23,11 @@ from fisheye.analysis.chaser_distance_runs import (
     _bytes_array,
     _write_array,
 )
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.analysis.chaser_behavior import (
     BEHAVIOR_CLASS_LABELS,
     canonical_behavior_label,
@@ -36,7 +41,6 @@ from fisheye.analysis.chaser_profiles import (
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
-from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.shared.system_metadata import get_git_info
 
 SCHEMA_ID = "palette.chaser.quadrant_occupancy.v1"
@@ -222,16 +226,15 @@ def _read_windows(run_group: zarr.Group, *, fps: float) -> tuple[ChaserDistanceW
     )
 
 
-def _resolve_chaser_distance_run(root: zarr.Group, run_name: str) -> tuple[zarr.Group, str, str]:
-    parent = root.get("analysis/chaser_distance_runs")
-    if parent is None:
-        raise ValueError("Archive has no analysis/chaser_distance_runs group.")
-    resolved = str(run_name).strip()
-    if not resolved or resolved == "latest":
-        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
-    return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"
+def _resolve_chaser_distance_run(
+    root: zarr.Group,
+    run_name: str,
+) -> tuple[ChaserDistanceReadSnapshot, str, str]:
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(run_name).strip() or "latest",
+    )
+    return snapshot, snapshot.run_name, snapshot.run_path
 
 
 def _stimulus_group_from_run(root: zarr.Group, run_group: zarr.Group) -> tuple[zarr.Group | None, str | None, str | None]:
@@ -829,7 +832,16 @@ def build_chaser_quadrant_occupancy_result(
     protocol_profile: str | Path | None = None,
 ) -> ChaserQuadrantOccupancyResult:
     root = _open_root(zarr_path, mode="r")
-    run_group, distance_run_name, distance_run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    distance, distance_run_name, distance_run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    # This endpoint assigns scientific meaning to aggressive/inert role labels,
+    # colors, and role intervals.  Those protocol-derived arrays are present in
+    # the current writer but are not yet protected by the canonical publication
+    # seal.  Do not silently recover them from mutable protocol_json.
+    distance.require_behavior_authority()
+    run_group = root[distance_run_path]
     coordinate_frame = str(run_group.attrs.get("coordinate_frame") or "")
     coordinate_origin = str(run_group.attrs.get("coordinate_origin") or "")
     if coordinate_frame != "arena_relative_canvas_px":
@@ -1118,6 +1130,12 @@ def write_chaser_quadrant_occupancy_component(
     mirror_run_level_interactive_spec: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name

@@ -27,6 +27,7 @@ from fisheye.shared.coordinate_descriptor import (
     CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
     COORDINATE_DESCRIPTOR_ATTR,
     CanonicalCoordinateDescriptor,
+    CanonicalCollectionAxis,
     CanonicalFrameRecord,
     CoordinateDescriptorError,
     CoordinateIssue,
@@ -435,6 +436,7 @@ def _verify_bound_canonical_coordinate_descriptor(
         if (
             descriptor.space_id == pixel_frame.space_id
             and descriptor.pixel_convention != pixel_frame.pixel_convention
+            and descriptor.pixel_convention != "not_applicable"
         ):
             _fail(
                 "coordinate_pixel_frame_convention_mismatch",
@@ -730,6 +732,7 @@ def build_bound_canonical_coordinate_descriptor(
     source_camera_overlay_status: str,
     transform_chain: BoundDirectedTransformChain | None = None,
     lineage_records: Sequence[BoundCoordinateRecord] = (),
+    collection_axis: CanonicalCollectionAxis | None = None,
     frame_record: Any = None,
 ) -> BoundCanonicalCoordinateDescriptor:
     """Build one descriptor solely from exact persisted evidence objects."""
@@ -959,6 +962,24 @@ def build_bound_canonical_coordinate_descriptor(
         record_ref=authority_ref,
         record_sha256=authority_digest,
     )
+    if collection_axis is not None:
+        if type(collection_axis) is not CanonicalCollectionAxis:
+            _fail(
+                "coordinate_collection_axis_unverified",
+                "$.collection_axis",
+                "Bound publication requires one exact controlled collection axis.",
+            )
+        label_authority = collection_axis.label_authority
+        if not any(
+            item.record_ref == label_authority.record_ref
+            and item.record_sha256 == label_authority.record_sha256
+            for item in verified_lineage
+        ):
+            _fail(
+                "coordinate_collection_axis_unverified",
+                "$.collection_axis.label_authority",
+                "Collection labels must equal one sealed persisted lineage record.",
+            )
     descriptor = build_canonical_coordinate_descriptor(
         profile_id=profile_id,
         geometry_type=geometry_type,
@@ -981,6 +1002,7 @@ def build_bound_canonical_coordinate_descriptor(
             )
             for item in verified_lineage
         ),
+        collection_axis=collection_axis,
     )
     bound = BoundCanonicalCoordinateDescriptor(
         descriptor=descriptor,

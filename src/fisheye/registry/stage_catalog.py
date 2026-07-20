@@ -185,10 +185,14 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(
         id="track_kinematics_visualization",
         depends_on=("track_kinematics", "swim_bouts"),
-        artifact_families=("analysis/track_kinematics_runs/*/*/visualizations",),
+        artifact_families=(
+            "analysis/track_kinematics_visualization_runs/"
+            "*/*/tracks/id_*/*/visualizations",
+        ),
         category=DERIVED_ANALYSIS,
         description=(
-            "Interactive core-behavior contract embedded in a track-kinematics run."
+            "Immutable interactive core-behavior render bound to a sealed "
+            "track-motion run."
         ),
     ),
     StageSpec(

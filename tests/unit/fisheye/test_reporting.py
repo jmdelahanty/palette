@@ -29,8 +29,10 @@ from fisheye.reporting import (
     resolve_analytics_export_binding,
 )
 from fisheye.registry.db import Registry
+from fisheye.reporting import discovery as reporting_discovery
 from fisheye.reporting import execution as reporting_execution
 from fisheye.reporting import montage as reporting_montage
+from fisheye.reporting.catalog import ANALYSIS_FAMILIES
 from fisheye.reporting.models import SelectedRecording
 from fisheye.reporting.models import ReportPlan
 
@@ -62,6 +64,7 @@ def _artifact(
     contract: str | None,
     renderer: str | None,
     renderer_version: str | None,
+    track_motion_authority: dict[str, object] | None = None,
 ) -> None:
     parts = relative_path.split("/")
     parent = run
@@ -85,14 +88,76 @@ def _artifact(
         array.attrs["renderer"] = renderer
     if renderer_version is not None:
         array.attrs["renderer_version"] = renderer_version
+    if track_motion_authority is not None:
+        array.attrs["track_motion_authority"] = track_motion_authority
 
 
 def _track_run(root: zarr.Group, track_ids: tuple[int, ...]) -> zarr.Group:
     run = _run(root, "analysis/track_kinematics_runs/offline", "tk")
+    run.attrs.update(
+        {
+            "coordinate_binding_status": "bound_canonical_v2",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "track_motion_publication_manifest_sha256": "a" * 64,
+        }
+    )
     tracks = run.require_group("tracks")
     for track_id in track_ids:
-        tracks.require_group(f"id_{track_id}")
+        track = tracks.require_group(f"id_{track_id}")
+        positions = track.create_array(
+            "positions_px",
+            data=np.zeros((1, 2), dtype=np.float32),
+            overwrite=True,
+        )
+        positions.attrs["coordinate_descriptor_sha256"] = "b" * 64
     return run
+
+
+def _track_motion_authority(track_id: int) -> dict[str, object]:
+    run_ref = "/analysis/track_kinematics_runs/offline/tk"
+    return {
+        "schema_id": "palette.track_motion_read_authority",
+        "schema_version": 1,
+        "run_ref": run_ref,
+        "track_ref": f"{run_ref}/tracks/id_{track_id}",
+        "track_id": track_id,
+        "motion_manifest_ref": f"{run_ref}@track_motion_publication_manifest",
+        "motion_manifest_sha256": "a" * 64,
+        "positions_px_ref": f"{run_ref}/tracks/id_{track_id}/positions_px",
+        "positions_px_coordinate_descriptor_sha256": "b" * 64,
+        "positions_mm_ref": None,
+        "positions_mm_coordinate_descriptor_sha256": None,
+        "track_sample_key_ref": f"{run_ref}/tracks/id_{track_id}/track_sample_key",
+        "source_acquisition_frame_index_ref": (
+            f"{run_ref}/tracks/id_{track_id}/source_acquisition_frame_index"
+        ),
+    }
+
+
+def _track_visualization_run(
+    root: zarr.Group,
+    *,
+    track_id: int,
+    render_id: str = "render",
+) -> tuple[zarr.Group, dict[str, object]]:
+    parent_path = (
+        "analysis/track_kinematics_visualization_runs/offline/tk/"
+        f"tracks/id_{track_id}"
+    )
+    render = _run(root, parent_path, render_id)
+    parent = root[parent_path]
+    parent.attrs["latest_complete"] = render_id
+    authority = _track_motion_authority(track_id)
+    render.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_track_motion_authority": authority,
+            "track_id": track_id,
+        }
+    )
+    return render, authority
 
 
 def _stimulus_run(root: zarr.Group, modes: tuple[str, ...]) -> zarr.Group:
@@ -143,13 +208,15 @@ def _item(plan, visualization_id: str, entity_id: str | None = None):
 
 def test_no_stimulus_plan_uses_core_provider_and_full_track_cardinality() -> None:
     root = _root()
-    track = _track_run(root, (0, 1))
+    _track_run(root, (0, 1))
+    render, authority = _track_visualization_run(root, track_id=0)
     _artifact(
-        track,
+        render,
         "visualizations/track_kinematics_summary_track_0_png",
         contract="palette.core.track_kinematics.summary.v1",
         renderer="palette-track-kinematics-summary-v1",
         renderer_version="1",
+        track_motion_authority=authority,
     )
 
     plan = plan_recording_report(_recording(), root_opener=lambda _path: root)
@@ -168,7 +235,7 @@ def test_no_stimulus_plan_uses_core_provider_and_full_track_cardinality() -> Non
     )
 
 
-def test_historical_core_artifact_is_reported_as_contract_mismatch() -> None:
+def test_historical_run_local_core_artifact_is_not_a_future_read_surface() -> None:
     root = _root()
     track = _track_run(root, (0,))
     _artifact(
@@ -182,9 +249,71 @@ def test_historical_core_artifact_is_reported_as_contract_mismatch() -> None:
     plan = plan_recording_report(_recording(), root_opener=lambda _path: root)
     item = _item(plan, "core.track_kinematics.overview", "0")
 
-    assert item.status == PlanStatus.CONTRACT_MISMATCH
-    assert "expected 'palette.core.track_kinematics.summary.v1'" in item.reason
+    assert item.status == PlanStatus.NEEDS_RENDER
+    assert "has no artifact matching" in item.reason
     assert item.proposed_actions == ("render:core.track_kinematics.overview",)
+
+
+def test_track_artifacts_are_selected_independently_per_track() -> None:
+    root = _root()
+    _track_run(root, (0, 1))
+    for track_id in (0, 1):
+        render, authority = _track_visualization_run(root, track_id=track_id)
+        _artifact(
+            render,
+            f"visualizations/track_kinematics_summary_track_{track_id}_png",
+            contract="palette.core.track_kinematics.summary.v1",
+            renderer="palette-track-kinematics-summary-v1",
+            renderer_version="1",
+            track_motion_authority=authority,
+        )
+
+    plan = plan_recording_report(_recording(), root_opener=lambda _path: root)
+
+    assert _item(plan, "core.track_kinematics.overview", "0").status == PlanStatus.READY
+    assert _item(plan, "core.track_kinematics.overview", "1").status == PlanStatus.READY
+
+
+def test_track_artifact_with_wrong_track_authority_fails_closed() -> None:
+    root = _root()
+    _track_run(root, (0,))
+    render, authority = _track_visualization_run(root, track_id=0)
+    wrong_authority = {**authority, "track_id": 1}
+    _artifact(
+        render,
+        "visualizations/track_kinematics_summary_track_0_png",
+        contract="palette.core.track_kinematics.summary.v1",
+        renderer="palette-track-kinematics-summary-v1",
+        renderer_version="1",
+        track_motion_authority=wrong_authority,
+    )
+
+    plan = plan_recording_report(_recording(), root_opener=lambda _path: root)
+
+    assert _item(plan, "core.track_kinematics.overview", "0").status == (
+        PlanStatus.NEEDS_RENDER
+    )
+
+
+def test_track_artifact_with_stale_source_manifest_fails_closed() -> None:
+    root = _root()
+    track_run = _track_run(root, (0,))
+    render, authority = _track_visualization_run(root, track_id=0)
+    _artifact(
+        render,
+        "visualizations/track_kinematics_summary_track_0_png",
+        contract="palette.core.track_kinematics.summary.v1",
+        renderer="palette-track-kinematics-summary-v1",
+        renderer_version="1",
+        track_motion_authority=authority,
+    )
+    track_run.attrs["track_motion_publication_manifest_sha256"] = "c" * 64
+
+    plan = plan_recording_report(_recording(), root_opener=lambda _path: root)
+
+    assert _item(plan, "core.track_kinematics.overview", "0").status == (
+        PlanStatus.NEEDS_RENDER
+    )
 
 
 def test_mixed_protocol_activates_only_registered_matching_stimulus_pack() -> None:
@@ -237,7 +366,7 @@ def test_requested_nonapplicable_provider_emits_not_applicable_items() -> None:
     assert {item.status for item in plan.items} == {PlanStatus.NOT_APPLICABLE.value}
 
 
-def test_chaser_provider_discovers_nested_contracted_bearing_artifact() -> None:
+def test_chaser_provider_refuses_unsealed_nested_bearing_artifact() -> None:
     root = _root()
     _track_run(root, (0,))
     stimulus = _stimulus_run(root, ("CHASER",))
@@ -254,14 +383,34 @@ def test_chaser_provider_discovers_nested_contracted_bearing_artifact() -> None:
     plan = plan_recording_report(_recording(), root_opener=lambda _path: root)
     bearing = _item(plan, "stimulus.chaser.egocentric_bearing")
 
-    assert bearing.status == PlanStatus.READY
-    assert bearing.artifact is not None
-    assert "/egocentric_bearing/component/" in bearing.artifact.path
-    assert [(chaser.chaser_index, chaser.behavior_class) for chaser in plan.chasers] == [
-        (0, "aggressive"),
-        (1, "random_non_chasing"),
-        (2, "inert"),
-    ]
+    assert bearing.status == PlanStatus.NEEDS_ANALYSIS
+    assert bearing.artifact is None
+    assert plan.chasers == ()
+
+
+def test_chaser_reporting_preflights_canonical_base_without_raw_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_navigation_trap = object()
+    calls: list[tuple[object, str]] = []
+
+    def strict_load(root, *, run_name: str):
+        calls.append((root, run_name))
+        return object()
+
+    monkeypatch.setattr(
+        reporting_discovery,
+        "load_chaser_distance_run",
+        strict_load,
+    )
+
+    handles = reporting_discovery.list_family_runs(
+        raw_navigation_trap,
+        ANALYSIS_FAMILIES["stimulus.chaser_distance"],
+    )
+
+    assert handles == ()
+    assert calls == [(raw_navigation_trap, "latest")]
 
 
 def test_missing_eye_geometry_is_blocked_as_missing_source() -> None:
@@ -426,11 +575,12 @@ def test_semantic_montage_uses_ready_contracted_artifact(
 ) -> None:
     zarr_path = tmp_path / "recording.zarr"
     root = zarr.open_group(zarr_path, mode="w")
-    track = _track_run(root, (0,))
+    _track_run(root, (0,))
+    render, authority = _track_visualization_run(root, track_id=0)
     image = Image.new("RGB", (400, 200), (20, 80, 140))
     buffer = BytesIO()
     image.save(buffer, format="PNG")
-    artifact = track.require_group("visualizations").create_array(
+    artifact = render.require_group("visualizations").create_array(
         "track_kinematics_summary_track_0_png",
         data=np.frombuffer(buffer.getvalue(), dtype=np.uint8),
     )
@@ -442,6 +592,7 @@ def test_semantic_montage_uses_ready_contracted_artifact(
             "renderer": "palette-track-kinematics-summary-v1",
             "renderer_version": "1",
             "content_sha256": "fixture",
+            "track_motion_authority": authority,
         }
     )
     selected = SelectedRecording(
@@ -519,13 +670,14 @@ def test_report_export_is_immutable_and_content_addressed(
 ) -> None:
     zarr_path = tmp_path / "export_source.zarr"
     root = zarr.open_group(zarr_path, mode="w")
-    track = _track_run(root, (0,))
+    _track_run(root, (0,))
+    render, authority = _track_visualization_run(root, track_id=0)
     image = Image.new("RGB", (30, 18), (140, 60, 30))
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     png_bytes = buffer.getvalue()
     content_sha256 = hashlib.sha256(png_bytes).hexdigest()
-    artifact = track.require_group("visualizations").create_array(
+    artifact = render.require_group("visualizations").create_array(
         "track_kinematics_summary_track_0_png",
         data=np.frombuffer(png_bytes, dtype=np.uint8),
     )
@@ -537,6 +689,7 @@ def test_report_export_is_immutable_and_content_addressed(
             "renderer": "palette-track-kinematics-summary-v1",
             "renderer_version": "1",
             "content_sha256": content_sha256,
+            "track_motion_authority": authority,
         }
     )
     selected = SelectedRecording(

@@ -615,7 +615,10 @@ def _publication_fixture() -> tuple[Any, Any, Any, Any]:
     run.create_array("roi_coordinates_full", data=np.asarray([[3, 3]], dtype=np.int32))
     run.create_array("roi_images", data=np.zeros((1, 4, 4), dtype=np.uint8))
     geometry = SimpleNamespace(
-        frame_evidence=SimpleNamespace(source_camera_frame=object()),
+        frame_evidence=SimpleNamespace(
+            source_camera_frame=object(),
+            bbox_source_camera_frame=object(),
+        ),
     )
     preflight = crop_module._CanonicalCropPreflight(
         source_path="detect_runs/d1",
@@ -653,6 +656,11 @@ def _stub_coordinate_publication(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(crop_module, "stamp_crop_placement_ownership", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(crop_module, "bind_array_reference_extent", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        crop_module,
+        "publish_crop_roi_bbox_edge_reference_extent",
+        lambda *_args, **_kwargs: object(),
+    )
     monkeypatch.setattr(crop_module, "stamp_roi_pixel_frame_authority", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         crop_module,

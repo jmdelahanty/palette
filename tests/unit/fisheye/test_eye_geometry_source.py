@@ -134,16 +134,20 @@ def _add_refined_subject_run(root: _FakeGroup, run_name: str = "refined_subject_
     return run
 
 
-def test_resolver_prefers_latest_refined_subject_geometry() -> None:
+def test_explicit_historical_compatibility_reads_legacy_refined_subject_geometry() -> None:
     root = _FakeGroup()
     _add_refined_eye_run(root)
     _add_refined_subject_run(root)
 
-    source = resolve_eye_geometry_source(root)
+    source = resolve_eye_geometry_source(
+        root,
+        historical_refined_subject_compatibility=True,
+    )
 
     assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
     assert source.run_name == "refined_subject_001"
     assert source.source_refined_eye_run == "refined_eye_001"
+    assert source.coordinate_authority_status == "historical_compatibility_noncanonical"
     expected_masks = np.stack(
         [
             np.pad(np.ones((3, 2), dtype=np.uint8), ((0, 0), (0, 2))),
@@ -170,7 +174,10 @@ def test_resolver_reads_refined_subject_eye_masks_from_compact_store() -> None:
         encode_row_chunk_size=1,
     )
 
-    source = resolve_eye_geometry_source(root)
+    source = resolve_eye_geometry_source(
+        root,
+        historical_refined_subject_compatibility=True,
+    )
 
     assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
     assert source.run_name == "refined_subject_001"
@@ -181,17 +188,33 @@ def test_resolver_reads_refined_subject_eye_masks_from_compact_store() -> None:
     np.testing.assert_array_equal(np.asarray(source.masks_roi[:, 1, 0, 3]), np.asarray([1, 1], dtype=np.uint8))
 
 
-def test_explicit_refined_subject_run_resolves_canonical_subject() -> None:
+def test_explicit_historical_refined_subject_run_is_marked_noncanonical() -> None:
     root = _FakeGroup()
     eye = _add_refined_eye_run(root)
     eye.attrs["source_refined_subject_masks_run"] = "refined_subject_001"
     _add_refined_subject_run(root)
 
-    source = resolve_eye_geometry_source(root, refined_subject_run="refined_subject_001")
+    source = resolve_eye_geometry_source(
+        root,
+        refined_subject_run="refined_subject_001",
+        historical_refined_subject_compatibility=True,
+    )
 
     assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
     assert source.run_name == "refined_subject_001"
     assert source.source_refined_eye_run == "refined_eye_001"
+    assert source.coordinate_authority_status == "historical_compatibility_noncanonical"
+
+
+def test_normal_resolver_rejects_legacy_refined_subject_geometry() -> None:
+    root = _FakeGroup()
+    _add_refined_subject_run(root)
+
+    with pytest.raises(
+        ValueError,
+        match="No canonical subject-shape or refined-subject eye geometry found",
+    ):
+        resolve_eye_geometry_source(root)
 
 
 def test_resolver_rejects_legacy_only_refined_eye_masks() -> None:

@@ -67,6 +67,10 @@ from fisheye.analytics_exports.baseline import (
 )
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.analysis.chaser_quadrant_occupancy import (
     QUADRANT_LABELS,
     quadrant_code_for_xy,
@@ -114,6 +118,41 @@ _SOURCE_TABLE_BY_V2 = {
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE: "goodcopbadcop_egocentric_distance_bearing_histogram",
 }
 _V2_TABLE_BY_SOURCE = {source: target for target, source in _SOURCE_TABLE_BY_V2.items()}
+
+# These tables are read from persisted chaser-distance summaries or nested
+# derived components.  The canonical chaser-distance seal does not currently
+# protect those derived semantics.  Normal cohort export must therefore report
+# them unavailable instead of reopening the selected child as a raw Zarr group.
+# The spatial occupancy table is intentionally absent: it is sourced from the
+# separately selected detection-occupancy family, not chaser-distance data.
+_UNSEALED_CHASER_EXPORT_V2_TABLES = frozenset(
+    {
+        CHASER_DISTANCE_SUMMARY_TABLE,
+        CHASER_EPOCH_BEHAVIOR_TABLE,
+        CHASER_BOUT_EVENTS_TABLE,
+        CHASER_BOUT_HISTOGRAM_TABLE,
+        CHASER_IBI_HISTOGRAM_TABLE,
+        CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+        CHASER_SPEED_DISTANCE_TABLE,
+        CHASER_DISTANCE_HISTOGRAM_TABLE,
+        CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+        CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+        CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+        CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+        CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+        CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+        CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+        CHASER_EGOCENTRIC_SUMMARY_TABLE,
+        CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+    }
+)
+_UNSEALED_CHASER_EXPORT_SOURCE_TABLES = frozenset(
+    _SOURCE_TABLE_BY_V2[table] for table in _UNSEALED_CHASER_EXPORT_V2_TABLES
+)
+_UNSEALED_CHASER_EXPORT_REASON = (
+    "requested chaser-distance summary/component has no independently verified "
+    "sealed semantic authority; raw Zarr export is unavailable"
+)
 
 CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT = "chaser_quadrant_occupancy"
 CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES = {"computed", "complete"}
@@ -571,6 +610,23 @@ def _array_mapping_rows(mapping: Mapping[str, np.ndarray]) -> list[dict[str, Any
 
 
 def _latest_run(root: Any, parent_path: str, requested: str | None = None) -> tuple[Any | None, str | None, str | None]:
+    if str(parent_path).strip("/") == "analysis/chaser_distance_runs":
+        # This compatibility-shaped helper must never return a raw canonical
+        # chaser-distance child.  Direct callers still cross the exact typed
+        # selector boundary, then receive an explicit unavailability result for
+        # the unsealed derived surface they were about to inspect.
+        try:
+            snapshot = load_chaser_distance_run(
+                root,
+                run_name=str(requested or "latest").strip() or "latest",
+            )
+        except ChaserDistanceReadError as exc:
+            return None, None, f"canonical chaser-distance preflight failed closed: {exc}"
+        return (
+            None,
+            snapshot.run_name,
+            f"{_UNSEALED_CHASER_EXPORT_REASON} ({snapshot.run_path})",
+        )
     try:
         group, name = resolve_zarr_run(
             root,
@@ -582,6 +638,41 @@ def _latest_run(root: Any, parent_path: str, requested: str | None = None) -> tu
         return group, name, None
     except Exception as exc:
         return None, None, str(exc)
+
+
+def _preflight_unsealed_chaser_exports(
+    root: Any,
+    *,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> set[str]:
+    """Remove unsupported chaser-derived exports after one exact preflight."""
+
+    requested = sorted(tables & _UNSEALED_CHASER_EXPORT_SOURCE_TABLES)
+    if not requested:
+        return tables
+    run_name: str | None = None
+    run_path: str | None = None
+    try:
+        snapshot = load_chaser_distance_run(root, run_name="latest")
+    except ChaserDistanceReadError as exc:
+        reason = f"canonical chaser-distance preflight failed closed: {exc}"
+    else:
+        run_name = snapshot.run_name
+        run_path = snapshot.run_path
+        reason = f"{_UNSEALED_CHASER_EXPORT_REASON} ({run_path})"
+    for table in requested:
+        diagnostic: dict[str, Any] = {
+            "table": table,
+            "status": "unavailable",
+            "reason": reason,
+        }
+        if run_name is not None:
+            diagnostic["chaser_distance_run"] = run_name
+        if run_path is not None:
+            diagnostic["chaser_distance_path"] = run_path
+        diagnostics.append(diagnostic)
+    return tables - _UNSEALED_CHASER_EXPORT_SOURCE_TABLES
 
 
 def _common_row(
@@ -4940,6 +5031,17 @@ def export_one_zarr(
     for baseline_table, baseline_rows in baseline_rows_by_table.items():
         if baseline_rows:
             result.rows_by_table.setdefault(baseline_table, []).extend(baseline_rows)
+
+    # Canonical chaser selection is verified once per source.  Until each
+    # persisted summary/component publishes its own sealed semantic authority,
+    # remove those requests before the legacy extraction helpers can navigate
+    # the selected child as raw Zarr.  Each requested table receives an explicit
+    # unavailable diagnostic above.
+    table_set = _preflight_unsealed_chaser_exports(
+        root,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
 
     goodcopbadcop_spatial_rows = _load_goodcopbadcop_spatial_occupancy_zones(
         root,

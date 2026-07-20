@@ -1,6 +1,6 @@
 # Crimson Track Motion Read Contract
 
-Date anchored: 2026-05-02
+Date anchored: 2026-07-19
 
 Purpose: define the Palette-side read contract Crimson should use for current
 motion traces, swim-bout overlays, and per-bout metrics. This is the current
@@ -12,15 +12,16 @@ Use these run families for new Crimson readers:
 
 | Need | Preferred Palette source |
 | --- | --- |
-| Per-track positions with coordinate/identity authority | `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` through the typed position-binding loader |
-| Heading, speed, path distance, acceleration, and time-series validity | same physical run, but not a canonical read surface until its all-array payload/derivation seal is implemented and validated |
+| Per-track positions with coordinate/identity authority | `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` through the strict full-motion loader |
+| Heading, speed, path distance, acceleration, and time-series validity | same verified full-motion publication; consume logical manifest surfaces, never paths or aliases alone |
 | Swim-bout event windows and detector traces | `analysis/swim_bout_runs/<run>/` through the logical candidate/signal resolver |
 | Per-bout physical movement, heading, eye-gaze summaries | `analysis/bout_kinematics_runs/<run>/` |
 | Body frame, snout/tail landmarks, B-spline, subject-shape QC | `analysis/subject_shape_runs/<run>/` |
 | Protocol step timing and stimulus geometry | `analysis/stimulus_runs/<run>/steps/step_<i>/` |
 
-Legacy `analysis/movement_runs` may remain a compatibility path for old
-archives, but it is not the current Palette motion source.
+Legacy `analysis/movement_runs` is available only to explicitly selected
+historical inspection or migration tooling. It is not a normal future-recording
+read path.
 
 Stimulus step details are specified in
 [`crimson_stimulus_step_read_contract.md`](./crimson_stimulus_step_read_contract.md).
@@ -29,11 +30,8 @@ Stimulus step details are specified in
 
 `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` stores
 positions plus gap-aware speed, distance, heading, and validity values. The
-current typed canonical boundary authorizes only the row-bound
-`positions_px`/optional `positions_mm` surfaces. The other persisted values are
-numerically useful but are not yet a canonical read surface because the run
-does not persist and freshly validate one exact all-array payload/derivation
-seal.
+strict typed boundary authorizes them only through one closed, freshly
+reconstructed full-motion publication seal.
 
 For canonical future runs, Crimson must freshly validate all three gates:
 
@@ -46,9 +44,42 @@ run.attrs["stage_selector_eligible"] is True
 An incomplete, staged, publishing, selector-ineligible, unsupported, or
 ambiguously labelled run is not selectable. Convenience `latest*` attrs are
 discovery hints only and do not override these gates. After resolving a pointer,
-the reader must reopen the exact child and revalidate its live position
-payloads, descriptors, identity/time records, and digests before reading
-positions. These gates alone do not authorize derived motion arrays.
+the reader must reopen the exact child and reconstruct its live full-motion
+manifest before copying values. It must revalidate the exact child after the
+copy as well; lifecycle gates alone do not authorize any array.
+
+Implicit selection additionally requires one stable cross-parent selector
+state. For scope `<scope>` and child `<run>`, all four values must agree:
+
+```text
+analysis/track_kinematics_runs.attrs["latest"]          == "<scope>/<run>"
+analysis/track_kinematics_runs.attrs["latest_complete"] == "<scope>/<run>"
+analysis/track_kinematics_runs.attrs["latest_<scope>"]  == "<run>"
+analysis/track_kinematics_runs/<scope>.attrs["latest"]  == "<run>"
+```
+
+Any mismatch is an in-progress or invalid selector handoff and must return a
+retry/fail-closed result. It is not permission to read the older child named by
+one surviving pointer. Explicit selection accepts only a bare direct-child name
+or the exact path
+`analysis/track_kinematics_runs/<scope>/<run>`; path normalization must never
+turn a malformed request into a different valid child.
+
+Canonical runs require:
+
+```text
+track_motion_publication_manifest
+track_motion_publication_manifest_sha256
+track_motion_publication_commit
+```
+
+The closed manifest binds the exact run/track/group/array inventories; every
+array payload, dtype, shape, attrs, axis-0 domain, identity key, logical
+operation, and resolved input; all coordinate, time, source-row, calibration,
+and transform records; and the exact run derivation parameters and inputs.
+Unknown children, unresolved references, stale attrs, or changed payloads fail
+closed. A caller-supplied detached handle is never trusted: the reader rebinds
+the authoritative child and then rejects any changed or mixed detached payload.
 
 Required canonical identity and position fields:
 
@@ -118,10 +149,10 @@ movement/speed/<raw|filtered|smoothed|averaged>/
 ```
 
 This list describes physical discovery only; it is not coordinate or
-derivation authority. Normal Crimson readers must currently fail closed for
-these derived arrays. Once Palette publishes an exact all-array
-payload/derivation manifest and the public reader freshly validates it, the
-physical-layout resolution order will be:
+derivation authority. The strict logical reader resolves these paths through
+the freshly verified manifest. Sealed compatibility aliases can remain inside
+the closed publication, but a normal reader never falls back to an unsealed
+array. The physical-layout resolution order inside that verified reader is:
 
 1. Prefer `movement/speed/<level>/...`.
 2. Fall back to flat `speed_<level>_px`, `speed_<level>_mm`,

@@ -210,14 +210,43 @@ def publish_swim_bout_run(
                 fallback_command="swim_bout_materializer",
             ),
         )
+        parent.attrs["latest_complete"] = plan.run_name
+        parent.attrs["latest"] = plan.run_name
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/swim_bout_runs"]
+        run_group = parent[plan.run_name]
         if (
             str(parent.attrs.get("latest")) != plan.run_name
             or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
         ):
-            raise RuntimeError("Swim-bout parent pointers were not updated.")
+            raise RuntimeError(
+                "Swim-bout run was not persisted complete and ineligible behind "
+                "its parent pointers."
+            )
+
+    def activate(
+        _root: zarr.Group,
+        parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if (
+            str(parent.attrs.get("latest")) != plan.run_name
+            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Swim-bout activation requires one complete, ineligible run."
+            )
+        try:
+            run_group.attrs["stage_selector_eligible"] = True
+        except BaseException:
+            if run_group.attrs.get("stage_selector_eligible") is True:
+                return
+            raise
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -228,16 +257,21 @@ def publish_swim_bout_run(
             lock_suffix="swim-bout-publish",
             publish_schema_id=PUBLISH_SCHEMA_ID,
             policy="node_local_compute_atomic_run_group_publish",
-            rollback_policy="remove_new_target_and_restore_parent_attrs_on_any_failure",
+            rollback_policy=(
+                "retain_failed_public_tombstone_leave_unleased_parent_state_untouched"
+            ),
         ),
         copy_backend=copy_backend,
         validate_run=validate,
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
         payload_metadata={
             "copy_backend": copy_backend,
-            "promotion_policy": "completion_last_then_latest_pointer_update",
+            "promotion_policy": (
+                "complete_ineligible_then_pointers_then_eligibility_final"
+            ),
             "materialization": json_attr_safe(materialization_payload),
         },
     )

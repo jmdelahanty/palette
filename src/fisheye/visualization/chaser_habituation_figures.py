@@ -37,8 +37,7 @@ import argparse
 from io import BytesIO
 import math
 from pathlib import Path
-import sqlite3
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 import warnings
 
 import matplotlib
@@ -48,8 +47,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
+from fisheye.analysis.chaser_distance_io import load_chaser_distance_run  # noqa: E402
 from fisheye.shared.arena_geometry import resolve_arena_geometry  # noqa: E402
-from fisheye.visualization.chaser_analysis_figures import _cohort_records, _latest, _text  # noqa: E402
+from fisheye.visualization.chaser_analysis_figures import (  # noqa: E402
+    _cohort_records,
+    _latest_unsealed_inspection_child,
+    _text,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -76,43 +80,15 @@ class HabituationData:
         self.path = Path(zarr_path)
         root = zarr.open_group(str(self.path), mode="r", use_consolidated=False)
         self.root = root
-        self.recording_id = str(
-            root.attrs.get("recording_id") or root.attrs.get("recording_name") or self.path.stem
-        )
-        runs = root.get("analysis/chaser_distance_runs")
-        run = _latest(runs)
-        if run is None:
-            raise ValueError(f"No chaser_distance_run in {self.path.name}")
-        self.run = run
-
-        events = _latest(run.get("chaser_escape_events"))
-        if events is None:
-            raise ValueError("No chaser_escape_events component; run it first.")
-        if "trials" not in events or int(np.asarray(events["trials/ordinal"][:]).size) == 0:
-            raise ValueError("chaser_escape_events has no trials (recording has no chase_trial_id).")
-        self.events = events
-
-        t = events["trials"]
-        self.ordinal = np.asarray(t["ordinal"][:], dtype=np.int64)
-        self.rate = np.asarray(t["escape_rate_per_valid_s"][:], dtype=np.float64)
-        self.any_escape = np.asarray(t["any_escape"][:], dtype=bool)
-        self.escape_count = np.asarray(t["escape_count"][:], dtype=np.int64)
-        self.wall_mm = np.asarray(t["wall_distance_at_trigger_mm"][:], dtype=np.float64)
-        self.dropout = np.asarray(t["dropout_fraction"][:], dtype=np.float64)
-        self.latency = np.asarray(t["first_escape_latency_s"][:], dtype=np.float64)
-        self.trial_start = np.asarray(t["start_frame"][:], dtype=np.int64)
-        self.trial_end = np.asarray(t["end_frame"][:], dtype=np.int64)
-        self.trigger = np.asarray(t["trigger_frame"][:], dtype=np.int64)
-        self.event_frames = np.asarray(events["events/start_frame"][:], dtype=np.int64)
-        self.fps = float(run.attrs.get("fps") or 100.0)
-
-        self.clean = self.dropout < CLEAN_DROPOUT
-        self.freeze = self._freeze_per_trial()
+        self.distance = load_chaser_distance_run(root)
+        self.distance.require_derived_surface_authority("chaser_escape_events")
 
     # -- freeze comes from the sibling canary, which already scores it per trial ----------
     def _freeze_per_trial(self) -> np.ndarray:
         out = np.full(self.ordinal.size, np.nan)
-        ef = _latest(self.run.get("chaser_escape_freeze"))
+        ef = _latest_unsealed_inspection_child(
+            self.run.get("chaser_escape_freeze")
+        )
         if ef is None or "trial_metrics" not in ef:
             return out
         m = ef["trial_metrics"]
@@ -134,7 +110,9 @@ class HabituationData:
         geometric trap.
         """
 
-        bc = _latest(self.run.get("chaser_bout_response"))
+        bc = _latest_unsealed_inspection_child(
+            self.run.get("chaser_bout_response")
+        )
         if bc is None:
             return math.nan, math.nan
         eps = _text(bc["epochs/label_bytes"][:])
@@ -163,12 +141,15 @@ class HabituationData:
         return n_near / t_near * 60.0, n_far / t_far * 60.0
 
     def _wall_trace(self) -> np.ndarray:
-        ppm = float(self.run.attrs["pixels_per_mm_projector"])
+        ppm = float(self.distance.pixels_per_mm_projector)
         geo, _notes = resolve_arena_geometry(self.root, self.run, pixels_per_mm=ppm)
         if geo.radius_px is None or geo.center_x_px is None:
             raise ValueError("No circular arena geometry; cannot compute wall distance.")
-        fish = np.asarray(self.run["positions/fish_centroid_arena_xy"][:], dtype=np.float64)
-        fv = np.asarray(self.run["positions/fish_valid"][:], dtype=bool)
+        fish = np.asarray(
+            self.distance.fish_centroid_arena_xy,
+            dtype=np.float64,
+        )
+        fv = np.asarray(self.distance.fish_valid, dtype=bool)
         r = np.hypot(fish[:, 0] - geo.center_x_px, fish[:, 1] - geo.center_y_px)
         wall = (geo.radius_px - r) / ppm
         wall[~fv] = np.nan

@@ -36,7 +36,6 @@ import json
 import zarr
 from typing import Any, Callable, Dict, Mapping, Optional
 
-from ..pose.schema import resolve_keypoint_labels_from_attrs
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from .config import PoseConfig
 from .export_shared import (
@@ -330,7 +329,12 @@ class ZarrPoseTrainer(PoseTrainer):
             raise
 
 
-def get_zarr_metadata(zarr_paths, console=None):
+def get_zarr_metadata(
+    zarr_paths,
+    console=None,
+    *,
+    keypoint_run_resolver: Optional[Callable[[str], Optional[str]]] = None,
+):
     """
     Extract comprehensive metadata from zarr files including crop and tracking info.
     
@@ -346,31 +350,123 @@ def get_zarr_metadata(zarr_paths, console=None):
     def _resolve_tracking_labels(kp_group: zarr.Group) -> Optional[list[str]]:
         if "keypoints_roi" not in kp_group:
             return None
-        labels = resolve_keypoint_labels_from_attrs(
-            dict(kp_group.attrs),
-            keypoint_count=int(kp_group["keypoints_roi"].shape[1]),
-        )
-        return list(labels) if labels else None
+        keypoint_count = int(kp_group["keypoints_roi"].shape[1])
+        candidates: list[list[str]] = []
+        raw_candidates: list[Any] = [kp_group.attrs.get("keypoint_labels")]
+        pose_schema = kp_group.attrs.get("pose_schema")
+        if isinstance(pose_schema, Mapping):
+            raw_candidates.append(pose_schema.get("keypoint_labels"))
+            nodes = pose_schema.get("nodes")
+            if isinstance(nodes, (list, tuple)):
+                raw_candidates.append(
+                    [
+                        node.get("name") if isinstance(node, Mapping) else node
+                        for node in nodes
+                    ]
+                )
+        for raw in raw_candidates:
+            if raw is None:
+                continue
+            if not isinstance(raw, (list, tuple)) or len(raw) != keypoint_count:
+                raise ValueError(
+                    "Populated live keypoint labels do not match runtime cardinality."
+                )
+            labels = []
+            for item in raw:
+                if type(item) is not str or not item or item.strip() != item:
+                    raise ValueError(
+                        "Populated live keypoint labels contain a noncanonical label."
+                    )
+                labels.append(item)
+            if len(set(labels)) != len(labels):
+                raise ValueError("Populated live keypoint labels are not unique.")
+            candidates.append(labels)
+        if any(candidate != candidates[0] for candidate in candidates[1:]):
+            raise ValueError(
+                "Populated live ordered keypoint labels disagree within the selected run."
+            )
+        return candidates[0] if candidates else None
 
     def _resolve_tracking_skeleton(kp_group: zarr.Group) -> Optional[list[list[int]]]:
-        raw_skeleton = kp_group.attrs.get("keypoint_skeleton")
-        if not isinstance(raw_skeleton, (list, tuple)):
-            pose_schema = kp_group.attrs.get("pose_schema")
-            if isinstance(pose_schema, Mapping):
-                raw_skeleton = pose_schema.get("edges")
-                if raw_skeleton is None:
-                    raw_skeleton = pose_schema.get("skeleton")
-        if not isinstance(raw_skeleton, (list, tuple)):
-            return None
-        edges: list[list[int]] = []
-        for edge in raw_skeleton:
-            if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+        keypoint_count = (
+            int(kp_group["keypoints_roi"].shape[1])
+            if "keypoints_roi" in kp_group
+            else None
+        )
+        raw_candidates: list[Any] = [kp_group.attrs.get("keypoint_skeleton")]
+        pose_schema = kp_group.attrs.get("pose_schema")
+        if isinstance(pose_schema, Mapping):
+            raw_candidates.extend(
+                [pose_schema.get("edges"), pose_schema.get("skeleton")]
+            )
+        candidates: list[list[list[int]]] = []
+        for raw_skeleton in raw_candidates:
+            if raw_skeleton is None:
                 continue
-            try:
-                edges.append([int(edge[0]), int(edge[1])])
-            except Exception:
+            if not isinstance(raw_skeleton, (list, tuple)):
+                raise ValueError("Populated live keypoint skeleton is not an edge list.")
+            edges: list[list[int]] = []
+            for edge in raw_skeleton:
+                if (
+                    not isinstance(edge, (list, tuple))
+                    or len(edge) != 2
+                    or any(type(item) is not int for item in edge)
+                ):
+                    raise ValueError("Populated live keypoint skeleton contains an invalid edge.")
+                src, dst = int(edge[0]), int(edge[1])
+                if (
+                    src == dst
+                    or src < 0
+                    or dst < 0
+                    or (
+                        keypoint_count is not None
+                        and (src >= keypoint_count or dst >= keypoint_count)
+                    )
+                ):
+                    raise ValueError("Populated live keypoint skeleton contains an invalid edge.")
+                edges.append([src, dst])
+            candidates.append(edges)
+        if any(candidate != candidates[0] for candidate in candidates[1:]):
+            raise ValueError(
+                "Populated live keypoint skeletons disagree within the selected run."
+            )
+        return candidates[0] if candidates else None
+
+    def _resolve_tracking_model_kpt_shape(kp_group: zarr.Group) -> Optional[list[int]]:
+        candidates: list[list[int]] = []
+        raw_candidates: list[Any] = [kp_group.attrs.get("model_kpt_shape")]
+        pose_schema = kp_group.attrs.get("pose_schema")
+        if isinstance(pose_schema, Mapping):
+            metadata = pose_schema.get("metadata")
+            if isinstance(metadata, Mapping):
+                raw_candidates.append(metadata.get("model_kpt_shape"))
+        for raw in raw_candidates:
+            if raw is None:
                 continue
-        return edges or None
+            candidates.append(
+                _strict_pose_shape(raw, field="live model_kpt_shape")
+            )
+        if any(candidate != candidates[0] for candidate in candidates[1:]):
+            raise ValueError(
+                "Populated live model_kpt_shape values disagree within the selected run."
+            )
+        return candidates[0] if candidates else None
+
+    def _resolve_tracking_skeleton_id(kp_group: zarr.Group) -> Optional[str]:
+        values: list[str] = []
+        top_level = kp_group.attrs.get("skeleton_id")
+        if isinstance(top_level, str) and top_level.strip():
+            values.append(top_level.strip())
+        pose_schema = kp_group.attrs.get("pose_schema")
+        if isinstance(pose_schema, Mapping):
+            nested = pose_schema.get("skeleton_id")
+            if isinstance(nested, str) and nested.strip():
+                values.append(nested.strip())
+        if len(set(values)) > 1:
+            raise ValueError(
+                "Populated live keypoint skeleton identities disagree within the selected run."
+            )
+        return values[0] if values else None
 
     def _summarize_source_video_metadata(source_paths: list[str]) -> tuple[int, Any]:
         total_frames = 0
@@ -458,7 +554,36 @@ def get_zarr_metadata(zarr_paths, console=None):
             
             # Get keypoint detection info if available
             if 'keypoints_runs' in root:
-                latest_kp = resolve_authoritative_run_name(root['keypoints_runs'])
+                requested_keypoint_run = (
+                    keypoint_run_resolver(str(path))
+                    if keypoint_run_resolver is not None
+                    else None
+                )
+                requested_text = (
+                    str(requested_keypoint_run).strip()
+                    if requested_keypoint_run is not None
+                    else ""
+                )
+                if requested_text.lower() in {
+                    "latest_traditional",
+                    "latest:traditional",
+                    "traditional",
+                    "latest_yolo",
+                    "latest:yolo",
+                    "yolo",
+                }:
+                    raise ValueError(
+                        "Hash-bound pose-schema preflight requires the exact selected "
+                        "keypoint run name, not a method-relative selector."
+                    )
+                if requested_text and requested_text.lower() != "latest":
+                    if requested_text not in root['keypoints_runs']:
+                        raise ValueError(
+                            f"Selected keypoint run {requested_text!r} is absent."
+                        )
+                    latest_kp = requested_text
+                else:
+                    latest_kp = resolve_authoritative_run_name(root['keypoints_runs'])
                 if latest_kp:
                     kp_group = root[f'keypoints_runs/{latest_kp}']
                     usable_keypoints = None
@@ -513,6 +638,11 @@ def get_zarr_metadata(zarr_paths, console=None):
 
                     keypoint_labels = _resolve_tracking_labels(kp_group)
                     keypoint_skeleton = _resolve_tracking_skeleton(kp_group)
+                    keypoint_count = (
+                        int(kp_group["keypoints_roi"].shape[1])
+                        if "keypoints_roi" in kp_group
+                        else None
+                    )
                     zarr_meta['tracking_info'] = {
                         'run_name': latest_kp,
                         'refined_run': refined_run_name,
@@ -523,6 +653,9 @@ def get_zarr_metadata(zarr_paths, console=None):
                         'usable_keypoints_rate': usable_keypoints_rate,
                         'keypoint_labels': keypoint_labels,
                         'keypoint_skeleton': keypoint_skeleton,
+                        'keypoint_count': keypoint_count,
+                        'model_kpt_shape': _resolve_tracking_model_kpt_shape(kp_group),
+                        'skeleton_id': _resolve_tracking_skeleton_id(kp_group),
                     }
             else:
                 zarr_meta['tracking_info'] = {'warning': 'keypoints_runs not found; proceeding without precomputed keypoints metadata'}
@@ -535,7 +668,187 @@ def get_zarr_metadata(zarr_paths, console=None):
     return metadata
 
 
-def _infer_pose_schema(kpt_shape: Optional[tuple], zarr_metadata: dict) -> dict:
+def _strict_pose_shape(value: Any, *, field: str) -> list[int]:
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 2
+        or any(type(item) is not int or item <= 0 for item in value)
+    ):
+        raise ValueError(f"{field} must be an exact positive [keypoints, dimensions] pair.")
+    return [int(value[0]), int(value[1])]
+
+
+def _strict_pose_labels(value: Any, *, keypoint_count: int, field: str) -> list[str]:
+    if not isinstance(value, list) or len(value) != keypoint_count:
+        raise ValueError(f"{field} must contain exactly {keypoint_count} ordered labels.")
+    labels: list[str] = []
+    for item in value:
+        if type(item) is not str or not item or item.strip() != item:
+            raise ValueError(f"{field} must contain canonical nonempty strings.")
+        labels.append(item)
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"{field} must contain unique ordered labels.")
+    return labels
+
+
+def _strict_pose_skeleton(value: Any, *, keypoint_count: int, field: str) -> list[list[int]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an exact edge list.")
+    edges: list[list[int]] = []
+    for edge in value:
+        if (
+            not isinstance(edge, list)
+            or len(edge) != 2
+            or any(type(item) is not int for item in edge)
+            or edge[0] == edge[1]
+            or any(item < 0 or item >= keypoint_count for item in edge)
+        ):
+            raise ValueError(f"{field} contains an invalid keypoint edge.")
+        edges.append([int(edge[0]), int(edge[1])])
+    return edges
+
+
+def _normalize_manifest_pose_schema(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Hash-verified pose training manifest lacks pose_schema.")
+    shape = _strict_pose_shape(
+        value.get("kpt_shape"),
+        field="manifest pose_schema.kpt_shape",
+    )
+    keypoint_count = shape[0]
+    labels = _strict_pose_labels(
+        value.get("keypoint_labels"),
+        keypoint_count=keypoint_count,
+        field="manifest pose_schema.keypoint_labels",
+    )
+    skeleton = _strict_pose_skeleton(
+        value.get("skeleton"),
+        keypoint_count=keypoint_count,
+        field="manifest pose_schema.skeleton",
+    )
+    skeleton_id = value.get("skeleton_id")
+    if type(skeleton_id) is not str or not skeleton_id or skeleton_id.strip() != skeleton_id:
+        raise ValueError(
+            "manifest pose_schema.skeleton_id must be one nonempty canonical string."
+        )
+    return {
+        "skeleton_id": skeleton_id,
+        "kpt_shape": shape,
+        "keypoint_labels": labels,
+        "skeleton": skeleton,
+    }
+
+
+def _load_pose_manifest_authority(manifest_path: Optional[Path]) -> Optional[dict[str, Any]]:
+    if manifest_path is None:
+        return None
+    try:
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Unable to read exact pose training manifest {manifest_path}: {exc}.") from exc
+    if not isinstance(payload, Mapping) or payload.get("task") != "pose":
+        raise ValueError("Hash-verified training manifest is not a pose manifest.")
+    set_id = payload.get("set_id")
+    if set_id is not None and (
+        type(set_id) is not str or not set_id or set_id.strip() != set_id
+    ):
+        raise ValueError("Pose training manifest set_id must be null or a canonical string.")
+    return {
+        "manifest_path": str(manifest_path.resolve()),
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "set_id": set_id,
+        "pose_schema": _normalize_manifest_pose_schema(payload.get("pose_schema")),
+    }
+
+
+def _infer_pose_schema(
+    kpt_shape: Optional[tuple],
+    zarr_metadata: dict,
+    *,
+    manifest_pose_schema: Optional[Mapping[str, Any]] = None,
+) -> dict:
+    if manifest_pose_schema is not None:
+        authority = _normalize_manifest_pose_schema(manifest_pose_schema)
+        config_shape = _strict_pose_shape(kpt_shape, field="configured kpt_shape")
+        if config_shape != authority["kpt_shape"]:
+            raise ValueError(
+                "Configured kpt_shape disagrees with the hash-verified training manifest."
+            )
+
+        for source_name, meta in zarr_metadata.items():
+            if not isinstance(meta, dict):
+                raise ValueError(f"{source_name}: live source metadata is not a mapping.")
+            if "error" in meta:
+                raise ValueError(
+                    f"{source_name}: live source pose-schema inspection failed: {meta['error']}"
+                )
+            tracking_info = (
+                meta.get("tracking_info")
+                if isinstance(meta.get("tracking_info"), dict)
+                else {}
+            )
+            source_labels = tracking_info.get("keypoint_labels")
+            if source_labels:
+                normalized_labels = _strict_pose_labels(
+                    source_labels,
+                    keypoint_count=authority["kpt_shape"][0],
+                    field=f"{source_name} live keypoint labels",
+                )
+                if normalized_labels != authority["keypoint_labels"]:
+                    raise ValueError(
+                        f"{source_name}: populated live ordered keypoint labels disagree "
+                        "with the hash-verified training manifest."
+                    )
+            source_skeleton = tracking_info.get("keypoint_skeleton")
+            if source_skeleton is not None:
+                normalized_skeleton = _strict_pose_skeleton(
+                    source_skeleton,
+                    keypoint_count=authority["kpt_shape"][0],
+                    field=f"{source_name} live keypoint skeleton",
+                )
+                if normalized_skeleton != authority["skeleton"]:
+                    raise ValueError(
+                        f"{source_name}: populated live keypoint skeleton disagrees "
+                        "with the hash-verified training manifest."
+                    )
+            source_skeleton_id = tracking_info.get("skeleton_id")
+            if source_skeleton_id is not None:
+                if (
+                    type(source_skeleton_id) is not str
+                    or not source_skeleton_id
+                    or source_skeleton_id.strip() != source_skeleton_id
+                ):
+                    raise ValueError(
+                        f"{source_name}: populated live skeleton_id is not canonical."
+                    )
+                if source_skeleton_id != authority["skeleton_id"]:
+                    raise ValueError(
+                        f"{source_name}: populated live skeleton_id disagrees with "
+                        "the hash-verified training manifest."
+                    )
+            source_count = tracking_info.get("keypoint_count")
+            if source_count is not None and (
+                type(source_count) is not int
+                or source_count != authority["kpt_shape"][0]
+            ):
+                raise ValueError(
+                    f"{source_name}: live keypoint cardinality disagrees with the "
+                    "hash-verified training manifest."
+                )
+            source_model_shape = tracking_info.get("model_kpt_shape")
+            if source_model_shape is not None:
+                normalized_model_shape = _strict_pose_shape(
+                    source_model_shape,
+                    field=f"{source_name} live model_kpt_shape",
+                )
+                if normalized_model_shape != authority["kpt_shape"]:
+                    raise ValueError(
+                        f"{source_name}: populated live model_kpt_shape disagrees "
+                        "with the hash-verified training manifest."
+                    )
+        return authority
+
     labels = None
     skeleton = None
     for meta in zarr_metadata.values():
@@ -1112,6 +1425,7 @@ def _record_registry_training_run(
     final_metrics: Optional[Dict[str, Any]],
     pose_schema: Optional[Dict[str, Any]] = None,
     export_artifacts: Optional[Dict[str, Any]] = None,
+    expected_manifest_sha256: Optional[str] = None,
 ) -> None:
     _shared_record_registry_training_run(
         args=args,
@@ -1127,6 +1441,7 @@ def _record_registry_training_run(
         final_metrics=final_metrics,
         pose_schema=pose_schema,
         export_artifacts=export_artifacts,
+        expected_manifest_sha256=expected_manifest_sha256,
     )
 
 
@@ -1155,11 +1470,25 @@ def main(args) -> int:
         else None
     )
     pose_schema: Optional[Dict[str, Any]] = None
+    manifest_authority: Optional[dict[str, Any]] = None
+    manifest_authority_sha256: Optional[str] = None
 
     # Load and validate config
     global config
     try:
+        if args.log_registry and manifest_path is None:
+            raise ValueError(
+                "Registry-backed pose training requires a hash-verifiable training manifest."
+            )
         full_config = PoseConfig.from_yaml(args.config_path)
+        manifest_authority = _load_pose_manifest_authority(manifest_path)
+        if manifest_authority is not None:
+            manifest_authority_sha256 = manifest_authority["manifest_sha256"]
+            authority_set_id = manifest_authority.get("set_id")
+            if authority_set_id is not None and authority_set_id != effective_set_id:
+                raise ValueError(
+                    "Pose training manifest set_id disagrees with the selected training set."
+                )
 
         datasets_dict = {}
         for name, ds_cfg in full_config.datasets.items():
@@ -1192,9 +1521,17 @@ def main(args) -> int:
             split_ratio=default_split,
             allow_source_mismatch=bool(full_config.allow_source_mismatch),
         )
-        # Seed schema from config so registry in_progress rows can carry skeleton_id
-        # before dataset metadata is loaded.
-        pose_schema = _infer_pose_schema(tuple(full_config.kpt_shape), {})
+        # Seed from the exact manifest so every registry lifecycle row binds the
+        # same ordered schema before live-source consistency checks run.
+        pose_schema = _infer_pose_schema(
+            tuple(full_config.kpt_shape),
+            {},
+            manifest_pose_schema=(
+                manifest_authority["pose_schema"]
+                if manifest_authority is not None
+                else None
+            ),
+        )
         console.print(f"[bold green]✓ Loaded configuration:[/bold green] {args.config_path}\n")
     except Exception as e:
         console.print(f"[bold red]✗ Error loading config:[/bold red] {e}")
@@ -1217,6 +1554,7 @@ def main(args) -> int:
                     "error_message": str(e),
                 },
                 pose_schema=pose_schema,
+                expected_manifest_sha256=manifest_authority_sha256,
             )
         return 1
     
@@ -1237,16 +1575,53 @@ def main(args) -> int:
                 "status_detail": "training_started",
             },
             pose_schema=pose_schema,
+            expected_manifest_sha256=manifest_authority_sha256,
         )
 
-    # Get zarr metadata
-    zarr_paths = config.get_zarr_paths()
-    zarr_metadata = get_zarr_metadata(zarr_paths, console)
-    
+    # The hash-bound manifest is authoritative; selected live sources are
+    # independent consistency evidence and cannot replace it.
+    try:
+        zarr_paths = config.get_zarr_paths()
+        zarr_metadata = get_zarr_metadata(
+            zarr_paths,
+            console,
+            keypoint_run_resolver=config.get_keypoint_run,
+        )
+        pose_schema = _infer_pose_schema(
+            tuple(full_config.kpt_shape),
+            zarr_metadata,
+            manifest_pose_schema=(
+                manifest_authority["pose_schema"]
+                if manifest_authority is not None
+                else None
+            ),
+        )
+    except Exception as exc:
+        console.print(f"[bold red]✗ Pose-schema source preflight failed:[/bold red] {exc}")
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "pose_schema_source_preflight",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                pose_schema=pose_schema,
+                expected_manifest_sha256=manifest_authority_sha256,
+            )
+        return 1
+
     # Display dataset info
     print_section_header(console, "Dataset Information")
-    
-    pose_schema = _infer_pose_schema(tuple(full_config.kpt_shape), zarr_metadata)
     print_dataset_details(console, zarr_metadata, task="pose", pose_schema=pose_schema)
     
     # Verify all datasets have tracking data
@@ -1300,6 +1675,7 @@ def main(args) -> int:
                     "error_message": str(exc),
                 },
                 pose_schema=pose_schema,
+                expected_manifest_sha256=manifest_authority_sha256,
             )
         raise
     
@@ -1383,6 +1759,7 @@ def main(args) -> int:
                     "error_message": "training_interrupted_by_user",
                 },
                 pose_schema=pose_schema,
+                expected_manifest_sha256=manifest_authority_sha256,
             )
         return 130
     except Exception as e:
@@ -1406,6 +1783,7 @@ def main(args) -> int:
                     "error_message": str(e),
                 },
                 pose_schema=pose_schema,
+                expected_manifest_sha256=manifest_authority_sha256,
             )
         return 1
     
@@ -1511,6 +1889,7 @@ def main(args) -> int:
             status="in_progress",
             final_metrics=trained_metrics_payload,
             pose_schema=pose_schema,
+            expected_manifest_sha256=manifest_authority_sha256,
         )
 
     def _export_checkpoint(stage_name: str, artifacts: Dict[str, Any]) -> None:
@@ -1540,6 +1919,7 @@ def main(args) -> int:
             final_metrics=checkpoint_metrics_payload,
             pose_schema=pose_schema,
             export_artifacts=artifacts,
+            expected_manifest_sha256=manifest_authority_sha256,
         )
 
     if (args.export_onnx or args.export_trt) and model_path.exists():
@@ -1593,6 +1973,7 @@ def main(args) -> int:
             final_metrics=final_metrics_payload,
             pose_schema=pose_schema,
             export_artifacts=export_artifacts,
+            expected_manifest_sha256=manifest_authority_sha256,
         )
 
     console.print("[bold green]✓ Training Complete![/bold green]")
@@ -1634,7 +2015,10 @@ Examples:
     parser.add_argument(
         "--manifest",
         type=str,
-        help="Optional manifest JSON path to record in the registry.",
+        help=(
+            "Pose training manifest JSON. Required when registry logging is enabled; "
+            "its ordered pose schema is authoritative."
+        ),
     )
     parser.add_argument(
         "--set-id",

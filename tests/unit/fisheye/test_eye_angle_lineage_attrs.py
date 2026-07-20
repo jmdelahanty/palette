@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import fisheye.analysis.eye_angle_analysis as eye_angle_analysis
+import fisheye.shared.eye_geometry_source as eye_geometry_source_mod
 from fisheye.analysis.eye_angle_analysis import _eye_angle_definition_attrs, _process_chunk
 from fisheye.analysis.eye_angle_analysis import (
     _resolve_keypoint_run_name as resolve_eye_angle_keypoint_run,
@@ -338,6 +339,7 @@ def _add_subject_shape_eye_geometry(root):
 
 def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods(
     tmp_path,
+    monkeypatch,
 ) -> None:
     import zarr
 
@@ -393,6 +395,11 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
     )
     raw.create_array("detection_success", data=np.ones(2, dtype=bool), overwrite=True)
     raw.create_array("frame_indices", data=np.asarray([4, 5], dtype=np.int64), overwrite=True)
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda _root, _path: object(),
+    )
 
     context = eye_angle_analysis._resolve_eye_angle_inputs(
         root,
@@ -493,12 +500,17 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
     }
 
 
-def test_eye_geometry_resolution_prefers_latest_subject_shape_when_enabled() -> None:
+def test_eye_geometry_resolution_prefers_latest_subject_shape_when_enabled(monkeypatch) -> None:
     import zarr
 
     root = zarr.group()
     _add_refined_subject_eye_geometry(root)
     _add_subject_shape_eye_geometry(root)
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda _root, _path: object(),
+    )
 
     source = resolve_eye_geometry_source(root, prefer_subject_shape=True)
 
@@ -519,11 +531,15 @@ def test_eye_geometry_resolution_default_keeps_mask_capable_source() -> None:
     _add_refined_subject_eye_geometry(root)
     _add_subject_shape_eye_geometry(root)
 
-    source = resolve_eye_geometry_source(root)
+    source = resolve_eye_geometry_source(
+        root,
+        historical_refined_subject_compatibility=True,
+    )
 
     assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
     assert source.run_name == "refined_001"
     assert source.masks_roi is not None
+    assert source.coordinate_authority_status == "historical_compatibility_noncanonical"
 
 
 def test_eye_geometry_resolution_honors_explicit_refined_subject_run() -> None:
@@ -533,11 +549,16 @@ def test_eye_geometry_resolution_honors_explicit_refined_subject_run() -> None:
     _add_refined_subject_eye_geometry(root)
     _add_subject_shape_eye_geometry(root)
 
-    source = resolve_eye_geometry_source(root, refined_subject_run="refined_001")
+    source = resolve_eye_geometry_source(
+        root,
+        refined_subject_run="refined_001",
+        historical_refined_subject_compatibility=True,
+    )
 
     assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
     assert source.run_name == "refined_001"
     assert source.source_subject_shape_run is None
+    assert source.coordinate_authority_status == "historical_compatibility_noncanonical"
 
 
 def test_eye_angle_keypoint_resolution_prefers_explicit() -> None:
@@ -726,12 +747,22 @@ def test_eye_angle_dashboard_zarr_artifact_manifest(tmp_path) -> None:
     assert manifest["eye_angle_dashboard_ellipse_png"]["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
 
 
-def test_eye_angle_overlay_draws_vectors_from_actual_subject_shape_geometry() -> None:
+def test_eye_angle_overlay_draws_vectors_from_actual_subject_shape_geometry(monkeypatch) -> None:
     import zarr
 
     root = zarr.group()
     _add_refined_subject_eye_geometry(root)
     _add_subject_shape_eye_geometry(root)
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda _root, _path: object(),
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_refined_subject_mask_coordinate_surfaces",
+        lambda _root, _path: object(),
+    )
 
     masks, ellipse_params = _load_display_masks_and_geometry(
         root,

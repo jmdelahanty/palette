@@ -287,11 +287,42 @@ def test_visualization_availability_is_tied_to_selected_track_run(
 
     assert missing.available is False
     assert missing.run_name == "track_a"
-    assert "interactive track-kinematics contract is missing" in missing.reason
+    assert "sibling track-kinematics visualization parent is missing" in missing.reason
 
-    artifact = (
-        parent
+    visualization_parent = (
+        tmp_path
+        / "analysis"
+        / "track_kinematics_visualization_runs"
+        / "offline"
         / "track_a"
+        / "tracks"
+        / "id_0"
+    )
+    _write_zarr_metadata(
+        visualization_parent,
+        {"latest_complete": "render_a"},
+    )
+    motion_authority = {
+        "run_ref": "/analysis/track_kinematics_runs/offline/track_a",
+        "track_ref": (
+            "/analysis/track_kinematics_runs/offline/track_a/tracks/id_0"
+        ),
+        "track_id": 0,
+        "motion_manifest_sha256": "a" * 64,
+        "positions_px_coordinate_descriptor_sha256": "b" * 64,
+    }
+    render = visualization_parent / "render_a"
+    _write_zarr_metadata(
+        render,
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_track_motion_authority": motion_authority,
+            "track_id": 0,
+        },
+    )
+    artifact = (
+        render
         / "visualizations"
         / "track_kinematics_summary_track_0_interactive"
     )
@@ -301,6 +332,7 @@ def test_visualization_availability_is_tied_to_selected_track_run(
             "renderer": "palette-track-kinematics-summary-v1",
             "source_runs": {"track_kinematics": "offline/track_a"},
             "parameters": {"swim_bout_run": "swim_a"},
+            "track_motion_authority": motion_authority,
         },
     )
     _write_zarr_metadata(artifact / "spec_json")
@@ -318,7 +350,8 @@ def test_visualization_availability_is_tied_to_selected_track_run(
     assert available.available is True
     assert available.run_name == "track_a"
     assert available.artifact_path == (
-        "analysis/track_kinematics_runs/offline/track_a/visualizations/"
+        "analysis/track_kinematics_visualization_runs/offline/track_a/"
+        "tracks/id_0/render_a/visualizations/"
         "track_kinematics_summary_track_0_interactive"
     )
 

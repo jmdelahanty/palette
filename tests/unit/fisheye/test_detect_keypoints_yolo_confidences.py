@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -25,6 +26,10 @@ from fisheye.shared.keypoint_coordinate_publication import (
     load_persisted_keypoint_coordinate_surfaces,
 )
 from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.pose.schema import schema_payload_from_package
+from fisheye.shared.pose_model_schema_binding import (
+    build_explicit_pose_model_schema_binding,
+)
 from tests.unit.fisheye.test_keypoint_coordinate_publication import (
     _real_canonical_archive,
 )
@@ -33,6 +38,18 @@ from tests.unit.fisheye.test_keypoint_coordinate_publication import (
 class _KeypointsWithConf:
     def __init__(self, conf: torch.Tensor | None) -> None:
         self.conf = conf
+
+
+def _canonical_binding(model_path) -> dict[str, object]:
+    _schema, attrs = schema_payload_from_package("traditional_v3")
+    return build_explicit_pose_model_schema_binding(
+        model_sha256=hashlib.sha256(model_path.read_bytes()).hexdigest(),
+        assertion_id="unit-reviewed-traditional-v3-model",
+        skeleton_id=str(attrs["skeleton_id"]),
+        model_kpt_shape=[10, 3],
+        keypoint_labels=list(attrs["keypoint_labels"]),
+        edges=list(attrs["edges"]),
+    )
 
 
 class _BoxesWithXyxy:
@@ -124,6 +141,7 @@ class _FakeYOLO:
 class _CanonicalFakeYOLO(_FakeYOLO):
     def __init__(self, path: str) -> None:
         super().__init__(path)
+        self.model.kpt_shape = [10, 3]
         for result in self._results:
             result.orig_shape = (40, 40)
 
@@ -132,6 +150,50 @@ class _SecondBatchWrongShapeCanonicalFakeYOLO(_CanonicalFakeYOLO):
     def __init__(self, path: str) -> None:
         super().__init__(path)
         self._results[1].orig_shape = (39, 40)
+
+
+class _WrongKeypointCountCanonicalFakeYOLO(_CanonicalFakeYOLO):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        points = torch.arange(22, dtype=torch.float32).reshape(1, 11, 2)
+        self._results[0].keypoints.xy = points
+        self._results[0].keypoints.conf = torch.full(
+            (1, 11),
+            0.8,
+            dtype=torch.float32,
+        )
+
+
+class _MissingKeypointShapeCanonicalFakeYOLO(_CanonicalFakeYOLO):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        del self.model.kpt_shape
+
+
+class _LoadDriftCanonicalFakeYOLO(_CanonicalFakeYOLO):
+    predict_called = False
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        Path(path).write_bytes(b"replaced-during-load")
+
+    def predict(self, inputs, **kwargs):
+        type(self).predict_called = True
+        return super().predict(inputs, **kwargs)
+
+
+class _InferenceDriftCanonicalFakeYOLO(_CanonicalFakeYOLO):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self._artifact_path = Path(path)
+        self._drifted = False
+
+    def predict(self, inputs, **kwargs):
+        results = super().predict(inputs, **kwargs)
+        if not self._drifted:
+            self._artifact_path.write_bytes(b"replaced-during-inference")
+            self._drifted = True
+        return results
 
 
 def test_extract_keypoint_confidences_returns_values_when_present() -> None:
@@ -258,6 +320,7 @@ def test_failure_boundary_does_not_publish_failed_until_writer_is_quiescent(
     boundary = yolo_mod._KeypointAttemptFailureBoundary()
     boundary.prepare(root=root, parent=parent)
     run = parent.create_group("attempt")
+    run.attrs[yolo_mod.KEYPOINT_PUBLICATION_OWNER_ATTR] = boundary.owner_token
     boundary.bind_run(run, "attempt")
     yolo_mod.mark_run_started(run, run_name="attempt", stage="keypoints")
     yolo_mod.note_pending_latest(parent, "attempt")
@@ -318,6 +381,7 @@ def test_keypoint_attempt_keyboard_interrupt_quiesces_and_restores_selectors(
         assert boundary is not None
         boundary.prepare(root=root, parent=parent)
         run = parent.create_group("attempt")
+        run.attrs[yolo_mod.KEYPOINT_PUBLICATION_OWNER_ATTR] = boundary.owner_token
         boundary.bind_run(run, "attempt")
         yolo_mod.mark_run_started(run, run_name="attempt", stage="keypoints")
         yolo_mod.note_pending_latest(parent, "attempt")
@@ -597,6 +661,12 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
     parent.attrs["latest"] = "k1"
     parent.attrs["latest_complete"] = "k1"
     root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
+    # This same-named source-crop array describes the crop's own upstream
+    # lineage.  It must not be copied as the new keypoint-to-crop row mapping.
+    root["crop_runs/c1"].create_array(
+        "source_crop_row_ids",
+        data=np.asarray([1, 0], dtype="<i8"),
+    )
     model_path = tmp_path / "canonical.pt"
     telemetry_attempts: list[str] = []
     activation_observation: dict[str, object] = {}
@@ -623,7 +693,14 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
         patch.setattr(yolo_mod, "_write_keypoint_progress_jsonl", _progress_telemetry)
         original_activate = yolo_mod._activate_validated_keypoint_coordinate_surfaces
 
-        def _record_activation(root_node, run_parent, surfaces, *, run_name):
+        def _record_activation(
+            root_node,
+            run_parent,
+            surfaces,
+            *,
+            run_name,
+            **activation_kwargs,
+        ):
             activation_observation.update(
                 {
                     "latest": run_parent.attrs.get("latest"),
@@ -640,6 +717,7 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
                 run_parent,
                 surfaces,
                 run_name=run_name,
+                **activation_kwargs,
             )
 
         patch.setattr(
@@ -650,6 +728,7 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
         run_name = detect_keypoints_yolo(
             tmp_path / "canonical.zarr",
             model_path,
+            model_pose_schema_binding=_canonical_binding(model_path),
             run_provenance=build_writer_run_provenance(
                 command="unit-canonical-keypoint-writer",
                 params={"model_path": model_path},
@@ -673,6 +752,11 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
     assert run.attrs["palette_run_completion_status"] == "complete"
     assert run.attrs["coordinate_contract"] == "canonical_v2"
     assert run.attrs["stage_selector_eligible"] is True
+    assert (
+        run.attrs["model_pose_schema_binding_kind"]
+        == "explicit_digest_bound_assertion_v1"
+    )
+    assert run.attrs["model_sha256"] == hashlib.sha256(b"fake").hexdigest()
     assert activation_observation == {
         "latest": "k1",
         "latest_complete": "k1",
@@ -686,16 +770,128 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
     assert reopened.attrs["current_keypoint_group_path"] == (
         f"keypoints_runs/{run_name}"
     )
+    np.testing.assert_array_equal(
+        reopened["keypoints_runs"][run_name]["source_crop_row_ids"][:],
+        np.asarray([0, 1], dtype="<i8"),
+    )
     surfaces = load_persisted_keypoint_coordinate_surfaces(
         reopened,
         f"keypoints_runs/{run_name}",
     )
     assert surfaces.keypoints_img.descriptor.space_id == "source_camera_image_px"
+    assert (
+        surfaces.context.model_artifact["pose_schema_binding"]["binding_sha256"]
+        == run.attrs["model_pose_schema_binding_sha256"]
+    )
 
 
+def test_detect_keypoints_yolo_rejects_model_replacement_during_load_before_inference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root, _prior_run = _real_canonical_archive(tmp_path)
+    parent = root["keypoints_runs"]
+    parent.attrs["latest"] = "k1"
+    parent.attrs["latest_complete"] = "k1"
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
+    model_path = tmp_path / "load-drift.pt"
+    _LoadDriftCanonicalFakeYOLO.predict_called = False
+
+    with monkeypatch.context() as patch:
+        _patch_canonical_writer_dependencies(
+            patch,
+            model_path,
+            model_class=_LoadDriftCanonicalFakeYOLO,
+        )
+        with pytest.raises(
+            ValueError,
+            match="changed after YOLO load and before inference",
+        ):
+            detect_keypoints_yolo(
+                tmp_path / "canonical.zarr",
+                model_path,
+                model_pose_schema_binding=_canonical_binding(model_path),
+                run_name="load_drift",
+                crop_run="c1",
+                pose_schema="traditional_v3",
+                batch_size=2,
+                imgsz=40,
+                input_mode="numpy-list",
+                keypoint_roi_shard_rows=None,
+                registry=None,
+            )
+
+    assert _LoadDriftCanonicalFakeYOLO.predict_called is False
+    reopened = zarr.open_group(
+        store=str(tmp_path / "canonical.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    assert "load_drift" not in reopened["keypoints_runs"]
+    assert reopened["keypoints_runs"].attrs["latest"] == "k1"
+    assert reopened.attrs["current_keypoint_group_path"] == "keypoints_runs/k1"
+
+
+def test_detect_keypoints_yolo_rejects_model_drift_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root, _prior_run = _real_canonical_archive(tmp_path)
+    parent = root["keypoints_runs"]
+    parent.attrs["latest"] = "k1"
+    parent.attrs["latest_complete"] = "k1"
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
+    model_path = tmp_path / "inference-drift.pt"
+
+    with monkeypatch.context() as patch:
+        _patch_canonical_writer_dependencies(
+            patch,
+            model_path,
+            model_class=_InferenceDriftCanonicalFakeYOLO,
+        )
+        with pytest.raises(
+            ValueError,
+            match="changed after inference and before publication",
+        ):
+            detect_keypoints_yolo(
+                tmp_path / "canonical.zarr",
+                model_path,
+                model_pose_schema_binding=_canonical_binding(model_path),
+                run_name="inference_drift",
+                crop_run="c1",
+                pose_schema="traditional_v3",
+                batch_size=2,
+                imgsz=40,
+                input_mode="numpy-list",
+                keypoint_roi_shard_rows=None,
+                registry=None,
+            )
+
+    reopened = zarr.open_group(
+        store=str(tmp_path / "canonical.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    failed = reopened["keypoints_runs/inference_drift"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert reopened["keypoints_runs"].attrs["latest"] == "k1"
+    assert reopened["keypoints_runs"].attrs["latest_complete"] == "k1"
+    assert reopened.attrs["current_keypoint_group_path"] == "keypoints_runs/k1"
+
+
+@pytest.mark.parametrize(
+    ("model_class", "message"),
+    [
+        (_SecondBatchWrongShapeCanonicalFakeYOLO, "orig_shape"),
+        (_WrongKeypointCountCanonicalFakeYOLO, "keypoint count 11"),
+    ],
+)
 def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selectors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    model_class: type[_FakeYOLO],
+    message: str,
 ) -> None:
     root, _prior_run = _real_canonical_archive(tmp_path)
     parent = root["keypoints_runs"]
@@ -710,7 +906,7 @@ def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selector
         _patch_canonical_writer_dependencies(
             patch,
             model_path,
-            model_class=_SecondBatchWrongShapeCanonicalFakeYOLO,
+            model_class=model_class,
         )
         writer_class = yolo_mod._AlignedKeypointShardWriter
 
@@ -720,10 +916,11 @@ def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selector
                 writers.append(self)
 
         patch.setattr(yolo_mod, "_AlignedKeypointShardWriter", _CapturedShardWriter)
-        with pytest.raises(ValueError, match="orig_shape"):
+        with pytest.raises(ValueError, match=message):
             detect_keypoints_yolo(
                 tmp_path / "canonical.zarr",
                 model_path,
+                model_pose_schema_binding=_canonical_binding(model_path),
                 run_provenance=build_writer_run_provenance(
                     command="unit-failed-canonical-keypoint-writer",
                     params={"model_path": model_path},
@@ -758,6 +955,57 @@ def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selector
     assert reopened.attrs["current_keypoint_group_path"] == "keypoints_runs/k1"
 
 
+def test_detect_keypoints_yolo_canonical_model_requires_static_keypoint_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root, _prior_run = _real_canonical_archive(tmp_path)
+    parent = root["keypoints_runs"]
+    parent.attrs["latest"] = "k1"
+    parent.attrs["latest_complete"] = "k1"
+    parent.attrs["latest_pending"] = "prior_pending_attempt"
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
+    model_path = tmp_path / "missing-kpt-shape.pt"
+
+    with monkeypatch.context() as patch:
+        _patch_canonical_writer_dependencies(
+            patch,
+            model_path,
+            model_class=_MissingKeypointShapeCanonicalFakeYOLO,
+        )
+        with pytest.raises(ValueError, match="requires an explicit model kpt_shape"):
+            detect_keypoints_yolo(
+                tmp_path / "canonical.zarr",
+                model_path,
+                model_pose_schema_binding=_canonical_binding(model_path),
+                run_provenance=build_writer_run_provenance(
+                    command="unit-missing-model-keypoint-shape",
+                    params={"model_path": model_path},
+                ),
+                run_name="missing_model_keypoint_shape",
+                crop_run="c1",
+                pose_schema="traditional_v3",
+                batch_size=1,
+                imgsz=40,
+                input_mode="numpy-list",
+                keypoint_roi_shard_rows=1,
+                keypoint_frame_shard_rows=1,
+                registry=None,
+            )
+
+    reopened = zarr.open_group(
+        store=str(tmp_path / "canonical.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    parent = reopened["keypoints_runs"]
+    assert "missing_model_keypoint_shape" not in parent
+    assert parent.attrs["latest"] == "k1"
+    assert parent.attrs["latest_complete"] == "k1"
+    assert parent.attrs["latest_pending"] == "prior_pending_attempt"
+    assert reopened.attrs["current_keypoint_group_path"] == "keypoints_runs/k1"
+
+
 def test_detect_keypoints_yolo_late_activation_interrupt_restores_prior_selectors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -777,7 +1025,14 @@ def test_detect_keypoints_yolo_late_activation_interrupt_restores_prior_selector
             model_class=_CanonicalFakeYOLO,
         )
 
-        def _interrupt_activation(root_node, run_parent, surfaces, *, run_name):
+        def _interrupt_activation(
+            root_node,
+            run_parent,
+            surfaces,
+            *,
+            run_name,
+            **_activation_kwargs,
+        ):
             assert surfaces.context.completion_status == "complete"
             assert surfaces.context.selector_eligible is False
             assert (
@@ -803,6 +1058,7 @@ def test_detect_keypoints_yolo_late_activation_interrupt_restores_prior_selector
             detect_keypoints_yolo(
                 tmp_path / "canonical.zarr",
                 model_path,
+                model_pose_schema_binding=_canonical_binding(model_path),
                 run_provenance=build_writer_run_provenance(
                     command="unit-interrupted-keypoint-activation",
                     params={"model_path": model_path},

@@ -18,9 +18,15 @@ from fisheye.detection.detect_yolo import (
 )
 from fisheye.shared.coordinate_descriptor import COORDINATE_DESCRIPTOR_ATTR
 from fisheye.shared.keypoint_coordinate_publication import (
+    KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR,
     KEYPOINT_COORDINATE_DERIVATION_ATTR,
+    KEYPOINT_LABEL_AUTHORITY_ATTR,
+    KEYPOINT_PUBLICATION_GENERATION_ATTR,
+    KEYPOINT_PUBLICATION_OWNER_ATTR,
+    KEYPOINT_PUBLICATION_POLICY_ATTR,
     KeypointCoordinatePublicationError,
     capture_keypoint_coordinate_publication_checkpoint,
+    derive_keypoint_coordinate_batch,
     load_persisted_keypoint_coordinate_context,
     load_persisted_keypoint_coordinate_surfaces,
     load_persisted_keypoint_crop_source,
@@ -31,11 +37,16 @@ from fisheye.shared.keypoint_coordinate_publication import (
     rollback_keypoint_coordinate_publication,
 )
 from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.shared.pose_model_schema_binding import (
+    build_explicit_pose_model_schema_binding,
+)
 from fisheye.shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from fisheye.shared.observation_coordinate_publication import (
     OBSERVATION_ROW_COUNT_ATTR,
     derive_detection_source_camera_geometry,
     publish_crop_observation_geometry,
+    publish_crop_roi_bbox_edge_reference_extent,
+    publish_detection_backend_result_projection,
     publish_detection_instance_key_derivation,
     publish_detection_observation_cardinality,
     publish_crop_roi_geometry,
@@ -46,6 +57,7 @@ from fisheye.shared.instance_keys import (
     mint_detection_instance_keys,
 )
 from fisheye.shared.pixel_frame_authority import (
+    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     stamp_crop_placement_ownership,
     stamp_roi_pixel_frame_authority,
     stamp_acquisition_camera_frame,
@@ -54,8 +66,12 @@ from fisheye.shared.pixel_frame_authority import (
 )
 from fisheye.shared.coordinate_reference import bind_array_reference_extent
 from fisheye.shared.directed_transform_chain import resolve_bound_directed_transform_chain
-from fisheye.shared.directed_transform_v2 import stamp_directed_transform_v2
+from fisheye.shared.directed_transform_v2 import (
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+    stamp_directed_transform_v2,
+)
 from fisheye.shared.transform_authority import (
+    TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     stamp_crop_placement_transform_authority,
 )
 from fisheye.shared.zarr_run_completion import (
@@ -143,6 +159,14 @@ def _attach(group: FakeGroup, node: Any) -> None:
 
 
 def _artifact() -> dict[str, Any]:
+    binding = build_explicit_pose_model_schema_binding(
+        model_sha256="a" * 64,
+        assertion_id="fixture-reviewed-pose-model",
+        skeleton_id="pose_skel_fixture_v1",
+        model_kpt_shape=[2, 3],
+        keypoint_labels=["swim_bladder", "eye_left"],
+        edges=[[0, 1]],
+    )
     return {
         "role": "keypoint_model",
         "path": "/models/pose.pt",
@@ -151,6 +175,7 @@ def _artifact() -> dict[str, Any]:
         "size_bytes": 123,
         "mtime_ns": 456,
         "source": "computed",
+        "pose_schema_binding": binding,
     }
 
 
@@ -201,7 +226,11 @@ def _external_world(token: object) -> dict[str, Any]:
         pixel_convention="continuous",
         acquisition_frame=acquisition,
     )
-    return {"archive_token": token, "camera_frame": camera_frame}
+    return {
+        "archive_token": token,
+        "acquisition_frame": acquisition,
+        "camera_frame": camera_frame,
+    }
 
 
 def _fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[_RootRegistry, _MutableGroup, Any, FakeArray]:
@@ -210,7 +239,10 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[_RootRegistry, _MutableGr
     source = _published_detection(world)
     crop_nodes = _crop_copy(world, source)
     crop = publish_crop_observation_geometry(*crop_nodes, source_geometry=source)
-    placements, bbox_roi, ownership, roi_frame, chain = _crop_roi(world, crop)
+    placements, bbox_roi, ownership, roi_frame, chain, _point_ownership = _crop_roi(
+        world,
+        crop,
+    )
     publish_crop_roi_geometry(
         placements,
         bbox_roi,
@@ -222,7 +254,8 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[_RootRegistry, _MutableGr
     crop_rowset = crop._rowset_node
     for node in crop_nodes[1:]:
         _attach(crop_rowset, node)
-    roi_images = roi_frame._authority_node
+    roi_images = crop_rowset["roi_images"]
+    bbox_frame_node = roi_frame._authority_node
     for node in (placements, bbox_roi, roi_images):
         _attach(crop_rowset, node)
     crop_rowset.attrs["coordinate_contract"] = "canonical_v2"
@@ -234,10 +267,24 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[_RootRegistry, _MutableGr
     root = _RootRegistry(token)
     root.register(crop_rowset)
     root.register(roi_images)
+    root.register(bbox_frame_node)
     run_parent = _MutableGroup(path="keypoints_runs", root=root, token=token)
     run = run_parent.create_group("k1")
+    run.attrs[KEYPOINT_PUBLICATION_OWNER_ATTR] = "a" * 32
     run.attrs["stage_selector_eligible"] = False
     mark_run_started(run, run_name="k1", stage="keypoints")
+    labels = ["swim_bladder", "eye_left"]
+    pose_schema = _artifact()["pose_schema_binding"]["pose_schema"]
+    run.attrs.update(
+        {
+            "keypoint_labels": list(labels),
+            "keypoint_confidence_labels": list(labels),
+            "skeleton_id": "pose_skel_fixture_v1",
+            "kpt_shape": [2, 2],
+            "model_kpt_shape": [2, 3],
+            "pose_schema": pose_schema,
+        }
+    )
 
     selected_rows = np.asarray([1, 0], dtype="<i8")
     crop_keys = np.asarray(crop._key_node[:])
@@ -281,6 +328,11 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[_RootRegistry, _MutableGr
     }
     for name, values in coordinate_values.items():
         run.create_array(name, data=values, chunks=values.shape)
+    run.create_array(
+        "keypoint_confidences",
+        data=np.full((2, 2), 0.5, dtype="<f8"),
+        chunks=(2, 2),
+    )
 
     monkeypatch.setattr(
         publication_module,
@@ -298,6 +350,12 @@ def test_canonical_keypoint_publication_binds_exact_crop_preprocessing_and_surfa
     source = load_persisted_keypoint_crop_source(root, "crop_runs/c1")
     assert source.roi_frame.endpoint.width == 40
     assert source.roi_frame.endpoint.height == 40
+    assert source.roi_frame.pixel_convention == "continuous"
+    assert source.roi_frame.record_ref == "/crop_runs/c1/roi_images@pixel_frame_authority"
+    assert source.bbox_roi_frame.pixel_convention == "pixel_edge_half_open"
+    assert source.bbox_roi_frame.record_ref == (
+        "/crop_runs/c1/coordinate_frames/roi_bbox_edge@pixel_frame_authority"
+    )
     assert roi_images.read_count == 0
 
     transform = resolve_model_input_transform(
@@ -337,6 +395,16 @@ def test_canonical_keypoint_publication_binds_exact_crop_preprocessing_and_surfa
     pending_surfaces = publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
     with pytest.raises(KeypointCoordinatePublicationError, match="status='complete'"):
         load_persisted_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
+    parent = root["keypoints_runs"]
+    parent_snapshot = keypoint_writer_module._snapshot_selected_attrs(
+        parent,
+        keypoint_writer_module._KEYPOINT_PARENT_SELECTOR_ATTRS,
+    )
+    root_snapshot = keypoint_writer_module._snapshot_selected_attrs(
+        root,
+        ("current_keypoint_group_path",),
+    )
+    parent.attrs["latest_pending"] = "k1"
     mark_run_complete(run)
     with pytest.raises(
         KeypointCoordinatePublicationError,
@@ -354,6 +422,9 @@ def test_canonical_keypoint_publication_binds_exact_crop_preprocessing_and_surfa
         root["keypoints_runs"],
         fresh_surfaces,
         run_name="k1",
+        publication_owner_token="a" * 32,
+        parent_selector_snapshot=parent_snapshot,
+        root_pointer_snapshot=root_snapshot,
     )
     loaded_context = load_persisted_keypoint_coordinate_context(
         root,
@@ -368,7 +439,26 @@ def test_canonical_keypoint_publication_binds_exact_crop_preprocessing_and_surfa
     assert loaded_context.model_input_transform == transform
     assert loaded_context.model_artifact == _artifact()
     assert run.attrs["coordinate_contract"] == "canonical_v2"
+    assert parent.attrs[KEYPOINT_PUBLICATION_GENERATION_ATTR] == 1
+    assert parent.attrs[KEYPOINT_PUBLICATION_POLICY_ATTR] == (
+        "owner_generation_guarded_selectors_then_eligibility_v1"
+    )
+    assert parent.attrs[KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR][
+        "publication_owner"
+    ] == "a" * 32
     assert surfaces.keypoints_roi.descriptor.space_id == "roi_local_px"
+    assert surfaces.keypoints_roi.descriptor.geometry_type == "point_xy"
+    assert surfaces.keypoints_roi.descriptor.collection_axis is not None
+    assert surfaces.keypoints_roi.descriptor.collection_axis.role == "keypoint"
+    assert surfaces.keypoints_roi.descriptor.collection_axis.cardinality == 2
+    assert loaded_context.keypoint_labels == ("swim_bladder", "eye_left")
+    assert (
+        surfaces.keypoints_roi.descriptor.collection_axis.label_authority.record_ref
+        == loaded_context.keypoint_label_authority.record_ref
+    )
+    assert run.attrs[KEYPOINT_LABEL_AUTHORITY_ATTR]["axis0"]["role"] == (
+        "observation_instance"
+    )
     assert surfaces.keypoints_roi.descriptor.source_camera_overlay.status == (
         "requires_transform"
     )
@@ -378,6 +468,28 @@ def test_canonical_keypoint_publication_binds_exact_crop_preprocessing_and_surfa
         "source_camera_normalized_xy"
     )
     assert surfaces.pose_bbox_xyxy_img.descriptor.geometry_type == "bbox_xyxy"
+    assert surfaces.keypoints_roi.descriptor.pixel_convention == "continuous"
+    assert surfaces.keypoints_img.descriptor.pixel_convention == "continuous"
+    assert (
+        surfaces.pose_bbox_xyxy_roi.descriptor.pixel_convention
+        == "pixel_edge_half_open"
+    )
+    assert (
+        surfaces.pose_bbox_xyxy_img.descriptor.pixel_convention
+        == "pixel_edge_half_open"
+    )
+    assert (
+        surfaces.pose_bbox_xyxy_norm.descriptor.pixel_convention
+        == "continuous"
+    )
+    assert (
+        surfaces.keypoints_norm.descriptor.frame_record.record_ref
+        == loaded_context.point_normalized_frame.record_ref
+    )
+    assert (
+        surfaces.pose_bbox_xyxy_norm.descriptor.frame_record.record_ref
+        != loaded_context.point_normalized_frame.record_ref
+    )
     assert surfaces.keypoints_img.descriptor.row_identity.record_ref == (
         surfaces.context.row_identity.record_ref
     )
@@ -411,6 +523,116 @@ def test_keypoint_staging_requires_explicit_selector_ineligibility(
             preprocessing_input_mode="numpy-list",
             model_artifact=_artifact(),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "keypoint_confidence_labels",
+            ["eye_left", "swim_bladder"],
+            "keypoint_confidence_labels",
+        ),
+        ("skeleton_id", "pose_skel_decoy", "pose_schema"),
+        ("kpt_shape", [3, 2], "kpt_shape"),
+        ("model_kpt_shape", [3, 2], "model_kpt_shape"),
+        ("model_kpt_shape", [2, 2, 1], "model_kpt_shape"),
+    ],
+)
+def test_keypoint_preflight_rejects_inconsistent_collection_axis_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    root, run, _crop, _roi_images = _fixture(monkeypatch)
+    run.attrs[field] = value
+
+    with pytest.raises(KeypointCoordinatePublicationError, match=message):
+        prepare_keypoint_coordinate_context(
+            root,
+            "keypoints_runs/k1",
+            crop_path="crop_runs/c1",
+            model_input_transform=resolve_model_input_transform((40, 40)),
+            preprocessing_input_mode="numpy-list",
+            model_artifact=_artifact(),
+        )
+
+    assert KEYPOINT_LABEL_AUTHORITY_ATTR not in run.attrs
+
+
+def test_keypoint_preflight_rejects_conflicting_nested_skeleton_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _crop, _roi_images = _fixture(monkeypatch)
+    pose_schema = dict(run.attrs["pose_schema"])
+    pose_schema["metadata"] = {
+        **dict(pose_schema["metadata"]),
+        "skeleton_id": "pose_skel_decoy",
+    }
+    run.attrs["pose_schema"] = pose_schema
+
+    with pytest.raises(
+        KeypointCoordinatePublicationError,
+        match="metadata skeleton_id",
+    ):
+        prepare_keypoint_coordinate_context(
+            root,
+            "keypoints_runs/k1",
+            crop_path="crop_runs/c1",
+            model_input_transform=resolve_model_input_transform((40, 40)),
+            preprocessing_input_mode="numpy-list",
+            model_artifact=_artifact(),
+        )
+
+    assert KEYPOINT_LABEL_AUTHORITY_ATTR not in run.attrs
+
+
+def test_keypoint_batch_derivation_requires_exact_label_axis_cardinality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _run, _crop, _roi_images = _fixture(monkeypatch)
+    context = prepare_keypoint_coordinate_context(
+        root,
+        "keypoints_runs/k1",
+        crop_path="crop_runs/c1",
+        model_input_transform=resolve_model_input_transform((40, 40)),
+        preprocessing_input_mode="numpy-list",
+        model_artifact=_artifact(),
+    )
+
+    with pytest.raises(
+        KeypointCoordinatePublicationError,
+        match="geometry shapes",
+    ):
+        derive_keypoint_coordinate_batch(
+            context=context,
+            row_start=0,
+            row_stop=1,
+            keypoints_roi=np.zeros((1, 3, 2), dtype=np.float64),
+            pose_bbox_xyxy_roi=np.zeros((1, 4), dtype=np.float32),
+        )
+
+
+def test_keypoint_publication_rejects_pose_labels_changed_after_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _crop, _roi_images = _fixture(monkeypatch)
+    prepare_keypoint_coordinate_context(
+        root,
+        "keypoints_runs/k1",
+        crop_path="crop_runs/c1",
+        model_input_transform=resolve_model_input_transform((40, 40)),
+        preprocessing_input_mode="numpy-list",
+        model_artifact=_artifact(),
+    )
+    run.attrs["keypoint_labels"] = ["eye_left", "swim_bladder"]
+
+    with pytest.raises(
+        KeypointCoordinatePublicationError,
+        match="pose_schema|keypoint_confidence_labels",
+    ):
+        publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
 
 
 def test_keypoint_surface_publication_rejects_roi_image_mixing_transactionally(
@@ -525,10 +747,143 @@ def test_keypoint_eligibility_flip_is_literal_final_activation_action() -> None:
     assert isinstance(final_action, ast.Assign)
     target = final_action.targets[0]
     assert isinstance(target, ast.Subscript)
-    assert ast.unparse(target.value) == "context._run_group.attrs"
+    assert ast.unparse(target.value) == "activation_run.attrs"
     assert ast.literal_eval(target.slice) == "stage_selector_eligible"
     assert isinstance(final_action.value, ast.Constant)
     assert final_action.value.value is True
+
+
+def test_keypoint_activation_rechecks_lease_before_selector_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _crop, _roi_images = _fixture(monkeypatch)
+    prepare_keypoint_coordinate_context(
+        root,
+        "keypoints_runs/k1",
+        crop_path="crop_runs/c1",
+        model_input_transform=resolve_model_input_transform((40, 40)),
+        preprocessing_input_mode="numpy-list",
+        model_artifact=_artifact(),
+    )
+    publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
+    parent = root["keypoints_runs"]
+    parent_snapshot = keypoint_writer_module._snapshot_selected_attrs(
+        parent,
+        keypoint_writer_module._KEYPOINT_PARENT_SELECTOR_ATTRS,
+    )
+    root_snapshot = keypoint_writer_module._snapshot_selected_attrs(
+        root,
+        ("current_keypoint_group_path",),
+    )
+    parent.attrs["latest_pending"] = "k1"
+    mark_run_complete(run)
+    surfaces = (
+        publication_module._load_completed_ineligible_keypoint_coordinate_surfaces(
+            root,
+            "keypoints_runs/k1",
+        )
+    )
+    acquire = publication_module._acquire_keypoint_parent_publication_lease
+
+    def replace_after_acquire(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        lease = acquire(*args, **kwargs)
+        parent.attrs[KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR] = {
+            **lease,
+            "publication_owner": "e" * 32,
+        }
+        return lease
+
+    monkeypatch.setattr(
+        publication_module,
+        "_acquire_keypoint_parent_publication_lease",
+        replace_after_acquire,
+    )
+
+    with pytest.raises(
+        KeypointCoordinatePublicationError,
+        match="lease was replaced",
+    ):
+        publication_module._activate_validated_keypoint_coordinate_surfaces(
+            root,
+            parent,
+            surfaces,
+            run_name="k1",
+            publication_owner_token="a" * 32,
+            parent_selector_snapshot=parent_snapshot,
+            root_pointer_snapshot=root_snapshot,
+        )
+
+    assert "latest_complete" not in parent.attrs
+    assert "latest" not in parent.attrs
+    assert "current_keypoint_group_path" not in root.attrs
+    assert run.attrs["stage_selector_eligible"] is False
+
+
+@pytest.mark.parametrize("takeover", ["foreign_lease", "advanced_generation"])
+def test_keypoint_attempt_rollback_preserves_concurrent_selector_takeover(
+    monkeypatch: pytest.MonkeyPatch,
+    takeover: str,
+) -> None:
+    root, run, _crop, _roi_images = _fixture(monkeypatch)
+    parent = root["keypoints_runs"]
+    parent.attrs.update({"latest": "prior", "latest_complete": "prior"})
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/prior"
+    prepare_keypoint_coordinate_context(
+        root,
+        "keypoints_runs/k1",
+        crop_path="crop_runs/c1",
+        model_input_transform=resolve_model_input_transform((40, 40)),
+        preprocessing_input_mode="numpy-list",
+        model_artifact=_artifact(),
+    )
+    boundary = keypoint_writer_module._KeypointAttemptFailureBoundary()
+    boundary.prepare(root=root, parent=parent)
+    assert boundary.owner_token is not None
+    run.attrs[KEYPOINT_PUBLICATION_OWNER_ATTR] = boundary.owner_token
+    boundary.bind_run(run, "k1")
+    parent.attrs["latest_pending"] = "k1"
+    checkpoint = capture_keypoint_coordinate_publication_checkpoint(
+        root,
+        "keypoints_runs/k1",
+        expected_publication_owner=boundary.owner_token,
+    )
+    boundary.bind_coordinate_checkpoint(checkpoint)
+    publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
+
+    lease = publication_module._keypoint_publication_lease_record(
+        run_path="keypoints_runs/k1",
+        publication_owner=boundary.owner_token,
+        base_generation=0,
+    )
+    if takeover == "foreign_lease":
+        lease["run_path"] = "keypoints_runs/winner"
+        lease["publication_owner"] = "e" * 32
+        generation = 1
+    else:
+        generation = 2
+    parent.attrs.update(
+        {
+            KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR: lease,
+            KEYPOINT_PUBLICATION_POLICY_ATTR: (
+                "owner_generation_guarded_selectors_then_eligibility_v1"
+            ),
+            KEYPOINT_PUBLICATION_GENERATION_ATTR: generation,
+            "latest": "winner",
+            "latest_complete": "winner",
+            "latest_pending": "winner",
+        }
+    )
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/winner"
+
+    boundary.fail(RuntimeError("synthetic concurrent takeover"))
+
+    assert parent.attrs["latest"] == "winner"
+    assert parent.attrs["latest_complete"] == "winner"
+    assert parent.attrs["latest_pending"] == "winner"
+    assert root.attrs["current_keypoint_group_path"] == "keypoints_runs/winner"
+    assert parent.attrs[KEYPOINT_PUBLICATION_GENERATION_ATTR] == generation
+    assert run.attrs[RUN_COMPLETION_STATUS_ATTR] == "failed"
+    assert run.attrs["stage_selector_eligible"] is False
 
 
 def test_keypoint_loaders_reject_incomplete_or_failed_coordinate_runs(
@@ -634,14 +989,13 @@ def test_keypoint_attempt_boundary_rolls_back_late_descriptor_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, run, _crop, _roi_images = _fixture(monkeypatch)
-    parent = FakeGroup(
-        path="keypoints_runs",
-        archive_token=run._coordinate_archive_token,
-        attrs={
+    parent = root["keypoints_runs"]
+    parent.attrs.update(
+        {
             "latest": "prior",
             "latest_complete": "prior",
             "latest_pending": "prior_pending",
-        },
+        }
     )
     root.attrs["current_keypoint_group_path"] = "keypoints_runs/prior"
     prepare_keypoint_coordinate_context(
@@ -654,6 +1008,7 @@ def test_keypoint_attempt_boundary_rolls_back_late_descriptor_publication(
     )
     boundary = keypoint_writer_module._KeypointAttemptFailureBoundary()
     boundary.prepare(root=root, parent=parent)
+    run.attrs[KEYPOINT_PUBLICATION_OWNER_ATTR] = boundary.owner_token
     boundary.bind_run(run, "k1")
     parent.attrs["latest_pending"] = "k1"
     boundary.bind_coordinate_checkpoint(
@@ -750,7 +1105,7 @@ def test_keypoint_surface_publication_keyboard_interrupt_rolls_back_partial_stam
         np.asarray([1.0, 2.0, 41.0, 12.0], dtype="<f4"),
     ),
 )
-def test_keypoint_publication_rejects_invalid_continuous_bbox_edges(
+def test_keypoint_publication_rejects_invalid_half_open_bbox_edges(
     monkeypatch: pytest.MonkeyPatch,
     bbox: np.ndarray,
 ) -> None:
@@ -766,12 +1121,45 @@ def test_keypoint_publication_rejects_invalid_continuous_bbox_edges(
     run["pose_bbox_xyxy_roi"].data[0] = bbox
     with pytest.raises(
         KeypointCoordinatePublicationError,
-        match="positive continuous edge boxes",
+        match="positive half-open edge boxes",
     ):
         publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
 
 
-def test_keypoint_publication_accepts_exact_continuous_bbox_extent_edges(
+@pytest.mark.parametrize("invalid_x", (-0.01, 40.0))
+def test_keypoint_publication_rejects_points_outside_continuous_roi_domain(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_x: float,
+) -> None:
+    root, run, _crop, _roi_images = _fixture(monkeypatch)
+    prepare_keypoint_coordinate_context(
+        root,
+        "keypoints_runs/k1",
+        crop_path="crop_runs/c1",
+        model_input_transform=resolve_model_input_transform((40, 40)),
+        preprocessing_input_mode="numpy-list",
+        model_artifact=_artifact(),
+    )
+    run["keypoints_roi"].data[0, 0] = np.asarray(
+        [invalid_x, 2.0],
+        dtype="<f8",
+    )
+    placement = np.asarray(run["source_crop_xywh"].data[0, :2], dtype="<f8")
+    image_point = run["keypoints_roi"].data[0, 0] + placement
+    run["keypoints_img"].data[0, 0] = image_point
+    run["keypoints_norm"].data[0, 0] = image_point / np.asarray(
+        [100.0, 80.0],
+        dtype="<f8",
+    )
+
+    with pytest.raises(
+        KeypointCoordinatePublicationError,
+        match="continuous ROI point domain",
+    ):
+        publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
+
+
+def test_keypoint_publication_accepts_exact_half_open_bbox_extent_edges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, run, _crop, _roi_images = _fixture(monkeypatch)
@@ -795,7 +1183,10 @@ def test_keypoint_publication_accepts_exact_continuous_bbox_extent_edges(
 
     surfaces = publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
 
-    assert surfaces.pose_bbox_xyxy_roi.descriptor.pixel_convention == "continuous"
+    assert (
+        surfaces.pose_bbox_xyxy_roi.descriptor.pixel_convention
+        == "pixel_edge_half_open"
+    )
 
 
 def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
@@ -913,6 +1304,22 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
             "detect_row_shard_rows": None,
             "detect_frame_shard_rows": None,
             "detect_shard_write": None,
+            "model_path": "/models/detect.pt",
+            "model_name": "detect.pt",
+            "inference_height": 80,
+            "inference_width": 100,
+            "validated_backend_result_count": 2,
+            "validated_backend_result_orig_shape_hw": [80, 100],
+            "decode_backend_effective": "opencv",
+            "video_reader_type": "opencv",
+            "parameters": {
+                "decode_backend_effective": "opencv",
+                "resize_dims": [80, 100],
+                "pre_resize_dims": [80, 100],
+                "effective_input_resize_dims": [80, 100],
+                "tensor_resize_dims": None,
+                "imgsz_applied": [80, 100],
+            },
         }
     )
     validate_immutable_yolo_storage(
@@ -930,6 +1337,20 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         acquisition_frame=acquisition,
         acquisition_mapping=mapping,
     )
+    backend_projection = publish_detection_backend_result_projection(
+        detect,
+        bbox_norm,
+        frame_evidence=evidence,
+        model_artifact={
+            "role": "detect_model",
+            "path": "/models/detect.pt",
+            "fingerprint_scheme": "content_v1",
+            "sha256": "b" * 64,
+            "size_bytes": 321,
+            "mtime_ns": 654,
+            "source": "computed",
+        },
+    )
     publish_detection_observation_cardinality(
         detect,
         acquisition_frame=acquisition,
@@ -942,7 +1363,11 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         bbox_img,
         centers,
         frame_evidence=evidence,
-        source_lineage_records=(mapping, instance_key_derivation),
+        source_lineage_records=(
+            mapping,
+            backend_projection,
+            instance_key_derivation,
+        ),
     )
     detect.attrs["coordinate_contract"] = "canonical_v2"
     detect.attrs["stage_selector_eligible"] = True
@@ -999,30 +1424,64 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         "roi_images",
         data=np.zeros((2, 40, 40), dtype="u1"),
     )
-    ownership = stamp_crop_placement_ownership(
+    point_ownership = stamp_crop_placement_ownership(
         placement,
         row_identity=crop_geometry.row_identity,
         source_camera_frame=evidence.source_camera_frame,
     )
-    roi_frame = stamp_roi_pixel_frame_authority(
+    point_roi_frame = stamp_roi_pixel_frame_authority(
         bind_array_reference_extent(roi_images, units="px"),
-        frame_id="c1_roi",
+        frame_id="c1_roi_continuous",
         pixel_convention="continuous",
+        crop_placement_ownership=point_ownership,
+    )
+    point_authority = stamp_crop_placement_transform_authority(
+        placement,
+        authority_id="c1_roi_continuous_to_source_camera",
+        source_frame=point_roi_frame,
+        target_frame=evidence.source_camera_frame,
+    )
+    stamp_directed_transform_v2(
+        placement,
+        transform_id="c1_roi_continuous_to_source_camera",
+        authority=point_authority,
+        source_frame=point_roi_frame,
+        target_frame=evidence.source_camera_frame,
+        row_identity=crop_geometry.row_identity,
+    )
+    ownership = stamp_crop_placement_ownership(
+        placement,
+        row_identity=crop_geometry.row_identity,
+        source_camera_frame=evidence.bbox_source_camera_frame,
+        attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    )
+    bbox_frame_node = crop.require_group("coordinate_frames").require_group(
+        "roi_bbox_edge"
+    )
+    roi_frame = stamp_roi_pixel_frame_authority(
+        publish_crop_roi_bbox_edge_reference_extent(
+            bbox_frame_node,
+            roi_images,
+        ),
+        frame_id="c1_roi_bbox_edge",
+        pixel_convention="pixel_edge_half_open",
         crop_placement_ownership=ownership,
     )
     authority = stamp_crop_placement_transform_authority(
         placement,
         authority_id="c1_roi_to_source_camera",
         source_frame=roi_frame,
-        target_frame=evidence.source_camera_frame,
+        target_frame=evidence.bbox_source_camera_frame,
+        attr_name=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     )
     link = stamp_directed_transform_v2(
         placement,
         transform_id="c1_roi_to_source_camera",
         authority=authority,
         source_frame=roi_frame,
-        target_frame=evidence.source_camera_frame,
+        target_frame=evidence.bbox_source_camera_frame,
         row_identity=crop_geometry.row_identity,
+        attr_name=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
     )
     offsets = np.column_stack(
         (
@@ -1056,8 +1515,21 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
 
     run_parent = root.require_group("keypoints_runs")
     run = run_parent.create_group("k1")
+    run.attrs[KEYPOINT_PUBLICATION_OWNER_ATTR] = "a" * 32
     run.attrs["stage_selector_eligible"] = False
     mark_run_started(run, run_name="k1", stage="keypoints")
+    labels = ["swim_bladder", "eye_left"]
+    pose_schema = _artifact()["pose_schema_binding"]["pose_schema"]
+    run.attrs.update(
+        {
+            "keypoint_labels": list(labels),
+            "keypoint_confidence_labels": list(labels),
+            "skeleton_id": "pose_skel_fixture_v1",
+            "kpt_shape": [2, 2],
+            "model_kpt_shape": [2, 3],
+            "pose_schema": pose_schema,
+        }
+    )
     selected = np.asarray([1, 0], dtype="<i8")
     run.create_array("source_crop_row_ids", data=selected)
     run.create_array("instance_key", data=np.asarray(crop_key[:])[selected])
@@ -1098,6 +1570,10 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
     }
     for name, value in values.items():
         run.create_array(name, data=value)
+    run.create_array(
+        "keypoint_confidences",
+        data=np.full((2, 2), 0.5, dtype="<f8"),
+    )
     prepare_keypoint_coordinate_context(
         root,
         "keypoints_runs/k1",
@@ -1108,6 +1584,15 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
     )
     publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
     run = root["keypoints_runs/k1"]
+    parent_snapshot = keypoint_writer_module._snapshot_selected_attrs(
+        run_parent,
+        keypoint_writer_module._KEYPOINT_PARENT_SELECTOR_ATTRS,
+    )
+    root_snapshot = keypoint_writer_module._snapshot_selected_attrs(
+        root,
+        ("current_keypoint_group_path",),
+    )
+    run_parent.attrs["latest_pending"] = "k1"
     mark_run_complete(run)
     fresh = publication_module._load_completed_ineligible_keypoint_coordinate_surfaces(
         root,
@@ -1118,6 +1603,9 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         run_parent,
         fresh,
         run_name="k1",
+        publication_owner_token="a" * 32,
+        parent_selector_snapshot=parent_snapshot,
+        root_pointer_snapshot=root_snapshot,
     )
     return root, run
 

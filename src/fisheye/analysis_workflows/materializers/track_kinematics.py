@@ -335,6 +335,10 @@ def _validate_track_run(
             f"expected={expected_selector_eligible!r}, "
             f"observed={group.attrs.get('stage_selector_eligible')!r}"
         )
+    try:
+        track_writer._track_publication_owner_uuid(group)
+    except RuntimeError as exc:
+        errors.append(str(exc))
     observed_binding = str(group.attrs.get(COORDINATE_BINDING_STATUS_ATTR))
     if observed_binding != expected_binding_status:
         errors.append(
@@ -502,7 +506,26 @@ def publish_track_kinematics_run(
 ) -> dict[str, Any]:
     """Publish, bind final-path coordinates, validate, then update pointers."""
 
-    transaction = {"binding_complete": False, "completion_published": False}
+    transaction = {
+        "binding_complete": False,
+        "completion_published": False,
+        "publication_owner_uuid": None,
+    }
+    deferred_activation: list[Any] = []
+
+    def retain_deferred_activation(activation: Any) -> None:
+        if not isinstance(
+            activation,
+            track_writer.DeferredTrackKinematicsSelectorActivation,
+        ):
+            raise RuntimeError(
+                "Track completion produced an invalid deferred activation receipt."
+            )
+        if deferred_activation:
+            raise RuntimeError(
+                "Track completion attempted to retain more than one activation receipt."
+            )
+        deferred_activation.append(activation)
 
     def validate(path: Path) -> dict[str, Any]:
         if not transaction["binding_complete"]:
@@ -528,7 +551,7 @@ def publish_track_kinematics_run(
             require_sharded=True,
             expected_binding_status=BOUND_CANONICAL_STATUS,
             require_complete=transaction["completion_published"],
-            expected_selector_eligible=transaction["completion_published"],
+            expected_selector_eligible=False,
         )
         if not structural["valid"]:
             return structural
@@ -538,21 +561,19 @@ def publish_track_kinematics_run(
                 f"analysis/track_kinematics_runs/offline/{plan.run_name}"
             ]
             if transaction["completion_published"]:
-                bound_positions = track_writer.validate_bound_track_position_bindings(
-                    authoritative_root,
-                    run_group,
-                )
-                if bound_positions.run_name != plan.run_name:
-                    raise RuntimeError(
-                        "Canonical track-position loader returned a different run name."
+                canonical = (
+                    track_writer._validate_bound_offline_track_kinematics_run_before_selection(
+                        authoritative_root,
+                        run_group,
+                        expected_keypoint_run=plan.keypoint_run,
+                        expected_run_name=plan.run_name,
+                        require_complete=True,
                     )
-                canonical_summary = {
-                    "valid": True,
-                    "status": BOUND_CANONICAL_STATUS,
-                    "run_name": bound_positions.run_name,
-                    "track_count": len(bound_positions.track_positions),
-                    "authority_scope": "position_coordinate_bindings_only",
-                }
+                )
+                canonical_summary = _writer_result_summary(
+                    canonical,
+                    label="Completed ineligible canonical track validation",
+                )
             else:
                 canonical = (
                     track_writer._validate_bound_offline_track_kinematics_run_before_selection(
@@ -598,6 +619,9 @@ def publish_track_kinematics_run(
             raise RuntimeError(
                 "Final-path binder requires a generically incomplete run."
             )
+        transaction["publication_owner_uuid"] = (
+            track_writer._track_publication_owner_uuid(run)
+        )
         result = track_writer.bind_staged_offline_track_kinematics_run(
             root,
             run,
@@ -628,22 +652,80 @@ def publish_track_kinematics_run(
             raise RuntimeError(
                 "Track completion requires exactly one successful final-path binding."
             )
-        track_writer.mark_track_kinematics_run_complete(
+        publication_owner_uuid = transaction["publication_owner_uuid"]
+        if not isinstance(publication_owner_uuid, str):
+            raise RuntimeError(
+                "Track completion lacks its exact materializer publication owner."
+            )
+        activation = track_writer.mark_track_kinematics_run_complete(
             root,
             run,
             run_name=plan.run_name,
             run_type="offline",
-            validate_complete_run=lambda: (
+            publication_owner_uuid=publication_owner_uuid,
+            validate_complete_run=lambda fresh_run: (
                 track_writer._validate_bound_offline_track_kinematics_run_before_selection(
                     root,
-                    run,
+                    fresh_run,
                     expected_keypoint_run=plan.keypoint_run,
                     expected_run_name=plan.run_name,
                     require_complete=True,
                 )
             ),
+            defer_selector_eligibility=True,
+            deferred_activation_sink=retain_deferred_activation,
         )
+        if (
+            not callable(activation)
+            or len(deferred_activation) != 1
+            or deferred_activation[0] is not activation
+        ):
+            raise RuntimeError(
+                "Track completion did not retain and return one exact deferred "
+                "eligibility receipt."
+            )
         transaction["completion_published"] = True
+
+    def activate(
+        root: zarr.Group,
+        parent: zarr.Group,
+        run: zarr.Group,
+    ) -> None:
+        if len(deferred_activation) != 1:
+            raise RuntimeError(
+                "Track publication lacks one deferred eligibility commit."
+            )
+        final_publisher_payload = run.attrs.get("cluster_output_staging")
+        if not isinstance(final_publisher_payload, Mapping):
+            raise RuntimeError(
+                "Track publication lacks final cluster-output metadata before "
+                "eligibility commit."
+            )
+        deferred_activation[0](
+            root,
+            parent,
+            run,
+            validate_fresh_complete_run=lambda fresh_run: (
+                track_writer._validate_bound_offline_track_kinematics_run_before_selection(
+                    root,
+                    fresh_run,
+                    expected_keypoint_run=plan.keypoint_run,
+                    expected_run_name=plan.run_name,
+                    require_complete=True,
+                )
+            ),
+            expected_cluster_output_staging=json_attr_safe(
+                dict(final_publisher_payload)
+            ),
+        )
+
+    def rollback_activation() -> None:
+        if deferred_activation:
+            rollback_root = open_zarr_root(plan.source_zarr, mode="a")
+            track_writer.rollback_deferred_track_kinematics_selector_activation(
+                deferred_activation[0],
+                root=rollback_root,
+            )
 
     def verify(root: zarr.Group) -> None:
         pointer_parent = root["analysis/track_kinematics_runs"]
@@ -668,7 +750,7 @@ def publish_track_kinematics_run(
             or pointer_offline[plan.run_name].attrs.get(
                 "stage_selector_eligible"
             )
-            is not True
+            is not False
         ):
             raise RuntimeError("Track-kinematics parent pointers were not updated consistently.")
 
@@ -684,15 +766,20 @@ def publish_track_kinematics_run(
                 "read_only_compute_unbound_stage_shard_final_path_bind_then_publish"
             ),
             rollback_policy=(
-                "remove_incomplete_or_bound_target_and_restore_both_parent_attr_sets"
+                "retain_owner_bound_failed_public_tombstone_and_restore_owned_selector_attrs"
             ),
             content_checksum=True,
+            publication_owner_attr=(
+                track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR
+            ),
         ),
         copy_backend=copy_backend,
         validate_run=validate,
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
+        rollback_activation=rollback_activation,
         after_rename=after_rename,
         payload_metadata={
             "local_run_path": str(plan.local_run_path),

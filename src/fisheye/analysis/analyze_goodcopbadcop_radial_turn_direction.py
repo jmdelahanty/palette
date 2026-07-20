@@ -42,10 +42,11 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
-    latest,
-    nav,
     resolve_cohort,
-    resolve_object_roles,
+)
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
@@ -177,34 +178,8 @@ def near_shell_prepost(fish, shell, min_bouts):
 
 def load_rows(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
-    if "chaser_bout_response" not in list(cd.group_keys()):
-        return None
-    b = latest(cd["chaser_bout_response"])
-    bt = b["bouts"]; bpr = b["bouts_per_reference"]
-    roles = resolve_object_roles(r); agg = roles["aggressive"]
-    ref = b["references"]
-    ci = np.asarray(ref["chaser_index"][:]); parent = np.asarray(ref["parent_chaser_index"][:])
-    hits = np.where(ci == agg)[0]
-    if hits.size == 0:
-        return None
-    agg_ref = int(hits[0]); virt_refs = list(np.where(parent == agg)[0])
-    if not virt_refs:
-        return None
-    valid = np.asarray(bt["valid"][:], bool)
-    epoch = np.asarray(bt["epoch_index"][:], int)
-    dist = np.asarray(bpr["distance_at_onset_mm"][:], float)
-    ahead = np.asarray(bpr["approaching_at_onset"][:], bool)  # object-ahead / approaching gate
-    vid = np.asarray(bpr["visit_id"][:], int)
-
-    def cols(metric):
-        arr = np.asarray(bpr[metric][:])
-        # role -> list of (ref_col, dist_col, val_col, visit_col, ahead_col)
-        obj = [(agg_ref, dist[:, agg_ref], arr[:, agg_ref], vid[:, agg_ref], ahead[:, agg_ref])]
-        vir = [(c, dist[:, c], arr[:, c], vid[:, c], ahead[:, c]) for c in virt_refs]
-        return obj, vir
-
-    return {"valid": valid, "epoch": epoch, "cols": cols}
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_bout_response")
 
 
 def main() -> None:
@@ -224,6 +199,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             row = load_rows(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], type(ex).__name__, ex)
             continue

@@ -396,7 +396,7 @@ def _legacy_canonical_root(
         build_bound_canonical_coordinate_descriptor(
             point_node,
             profile_id="arena_relative_canvas_px.top_left_y_down.v1",
-            geometry_type="points_xy",
+            geometry_type="point_xy",
             components=("x", "y"),
             component_units=("px", "px"),
             pixel_convention="continuous",

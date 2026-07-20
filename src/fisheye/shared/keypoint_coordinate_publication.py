@@ -28,6 +28,10 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.shared.pose_model_schema_binding import (
+    validate_pose_model_schema_binding,
+)
+
 from fisheye.shared.archive_identity import archive_identity
 from fisheye.shared.canonical_coordinate_publication import (
     BoundCanonicalCoordinateDescriptor,
@@ -38,6 +42,8 @@ from fisheye.shared.canonical_coordinate_publication import (
 from fisheye.shared.coordinate_descriptor import (
     CANONICAL_OVERLAY_DIRECT,
     CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
+    CanonicalCollectionAxis,
+    DigestBoundCoordinateRecordRef,
 )
 from fisheye.shared.coordinate_identity import (
     BoundRowIdentityContract,
@@ -65,6 +71,8 @@ from fisheye.shared.directed_transform_chain import (
     resolve_bound_directed_transform_chain,
 )
 from fisheye.shared.directed_transform_v2 import (
+    DIRECTED_TRANSFORM_V2_ATTR,
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
     BoundDirectedTransformV2,
     load_bound_directed_transform_v2,
     stamp_directed_transform_v2,
@@ -72,27 +80,39 @@ from fisheye.shared.directed_transform_v2 import (
 from fisheye.shared.model_input_transform import ModelInputTransform
 from fisheye.shared.observation_coordinate_publication import (
     BoundCropObservationGeometry,
+    CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH,
     CropRoiGeometryPublicationResult,
+    SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+    SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+    load_crop_roi_bbox_edge_reference_extent,
     load_crop_roi_geometry,
     load_persisted_crop_observation_geometry,
     require_bound_crop_observation_geometry,
 )
 from fisheye.shared.pixel_frame_authority import (
+    CROP_PLACEMENT_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     BoundCropPlacementOwnership,
     BoundPixelFrameAuthority,
     array_values_sha256,
     load_crop_placement_ownership,
     load_model_input_pixel_frame_authority,
+    load_normalized_pixel_frame_authority,
     load_roi_pixel_frame_authority,
     model_input_to_roi_matrix,
+    normalized_to_pixel_matrix,
     stamp_crop_placement_ownership,
     stamp_model_input_pixel_frame_authority,
+    stamp_normalized_pixel_frame_authority,
     stamp_roi_pixel_frame_authority,
 )
 from fisheye.shared.transform_authority import (
+    TRANSFORM_AUTHORITY_ATTR,
+    TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     load_bound_transform_authority,
     stamp_crop_placement_transform_authority,
     stamp_model_input_transform_authority,
+    stamp_normalized_to_pixel_transform_authority,
 )
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
@@ -105,13 +125,20 @@ from fisheye.shared.zarr_run_completion import (
 
 KEYPOINT_COORDINATE_CONTEXT_ATTR = "keypoint_coordinate_context"
 KEYPOINT_COORDINATE_DERIVATION_ATTR = "keypoint_coordinate_derivation"
+KEYPOINT_LABEL_AUTHORITY_ATTR = "keypoint_label_authority"
 KEYPOINT_ROI_REFERENCE_EXTENT_ATTR = "keypoint_roi_reference_extent"
 KEYPOINT_MODEL_REFERENCE_EXTENT_ATTR = "keypoint_model_reference_extent"
+KEYPOINT_PUBLICATION_OWNER_ATTR = "keypoint_publication_owner"
+KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR = "keypoint_publication_lease"
+KEYPOINT_PUBLICATION_GENERATION_ATTR = "publication_generation"
+KEYPOINT_PUBLICATION_POLICY_ATTR = "publication_policy"
 
 KEYPOINT_COORDINATE_CONTEXT_SCHEMA_ID = "palette.keypoint_coordinate_context"
-KEYPOINT_COORDINATE_CONTEXT_SCHEMA_VERSION = 1
+KEYPOINT_COORDINATE_CONTEXT_SCHEMA_VERSION = 2
 KEYPOINT_COORDINATE_DERIVATION_SCHEMA_ID = "palette.keypoint_coordinate_derivation"
-KEYPOINT_COORDINATE_DERIVATION_SCHEMA_VERSION = 1
+KEYPOINT_COORDINATE_DERIVATION_SCHEMA_VERSION = 2
+KEYPOINT_LABEL_AUTHORITY_SCHEMA_ID = "palette.keypoint_label_authority"
+KEYPOINT_LABEL_AUTHORITY_SCHEMA_VERSION = 1
 KEYPOINT_REFERENCE_EXTENT_SCHEMA_ID = "palette.keypoint_reference_extent"
 KEYPOINT_REFERENCE_EXTENT_SCHEMA_VERSION = 1
 
@@ -129,6 +156,12 @@ _BOUND_SOURCE_SEAL = object()
 _BOUND_CONTEXT_SEAL = object()
 _BOUND_SURFACES_SEAL = object()
 _PUBLICATION_CHECKPOINT_SEAL = object()
+_PUBLICATION_OWNER_RE = re.compile(r"^[0-9a-f]{32}$")
+_KEYPOINT_PUBLICATION_POLICY = (
+    "owner_generation_guarded_selectors_then_eligibility_v1"
+)
+_KEYPOINT_GUARDED_PARENT_SELECTORS = ("latest", "latest_complete")
+_KEYPOINT_GUARDED_ROOT_SELECTORS = ("current_keypoint_group_path",)
 
 
 class KeypointCoordinatePublicationError(ValueError):
@@ -137,6 +170,154 @@ class KeypointCoordinatePublicationError(ValueError):
 
 def _fail(message: str) -> None:
     raise KeypointCoordinatePublicationError(message)
+
+
+def _publication_owner(run: Any, *, expected: str | None = None) -> str:
+    value = getattr(run, "attrs", {}).get(KEYPOINT_PUBLICATION_OWNER_ATTR)
+    if not isinstance(value, str) or _PUBLICATION_OWNER_RE.fullmatch(value) is None:
+        _fail("Canonical keypoint run lacks one unguessable publication owner.")
+    if expected is not None and value != expected:
+        _fail("Canonical keypoint run was replaced by another publication owner.")
+    return value
+
+
+def _snapshot_value(
+    snapshot: Mapping[str, tuple[bool, Any]],
+    name: str,
+) -> tuple[bool, Any]:
+    value = snapshot.get(name)
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or type(value[0]) is not bool
+    ):
+        _fail(f"Keypoint selector snapshot lacks exact {name!r} state.")
+    return value
+
+
+def _require_snapshot_unchanged(
+    node: Any,
+    snapshot: Mapping[str, tuple[bool, Any]],
+    names: tuple[str, ...],
+    *,
+    label: str,
+) -> None:
+    attrs = getattr(node, "attrs", {})
+    for name in names:
+        present, value = _snapshot_value(snapshot, name)
+        if (name in attrs) is not present or (
+            present and attrs.get(name) != value
+        ):
+            _fail(
+                "Canonical keypoint activation observed concurrent mutation "
+                f"of {label} {name!r}."
+            )
+
+
+def _publication_generation_from_snapshot(
+    snapshot: Mapping[str, tuple[bool, Any]],
+) -> int:
+    present, value = _snapshot_value(
+        snapshot,
+        KEYPOINT_PUBLICATION_GENERATION_ATTR,
+    )
+    if not present:
+        return 0
+    if type(value) is not int or value < 0:
+        _fail("Keypoint publication generation must be one nonnegative integer.")
+    return value
+
+
+def _keypoint_publication_lease_record(
+    *,
+    run_path: str,
+    publication_owner: str,
+    base_generation: int,
+) -> dict[str, Any]:
+    return {
+        "schema_id": "palette.keypoint_publication_lease",
+        "schema_version": 1,
+        "policy": _KEYPOINT_PUBLICATION_POLICY,
+        "run_path": run_path,
+        "publication_owner": publication_owner,
+        "base_generation": base_generation,
+        "next_generation": base_generation + 1,
+    }
+
+
+def _acquire_keypoint_parent_publication_lease(
+    parent: Any,
+    snapshot: Mapping[str, tuple[bool, Any]],
+    *,
+    run_path: str,
+    publication_owner: str,
+) -> dict[str, Any]:
+    publication_attrs = (
+        KEYPOINT_PUBLICATION_GENERATION_ATTR,
+        KEYPOINT_PUBLICATION_POLICY_ATTR,
+        KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR,
+    )
+    _require_snapshot_unchanged(
+        parent,
+        snapshot,
+        publication_attrs,
+        label="parent publication state",
+    )
+    base_generation = _publication_generation_from_snapshot(snapshot)
+    policy_present, policy = _snapshot_value(
+        snapshot,
+        KEYPOINT_PUBLICATION_POLICY_ATTR,
+    )
+    lease_present, previous_lease = _snapshot_value(
+        snapshot,
+        KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR,
+    )
+    if policy_present and policy != _KEYPOINT_PUBLICATION_POLICY:
+        _fail("Keypoint parent uses an unsupported publication policy.")
+    if base_generation > 0 and not policy_present:
+        _fail("Keypoint parent generation lacks its publication policy.")
+    if lease_present:
+        if (
+            type(previous_lease) is not dict
+            or previous_lease.get("schema_id")
+            != "palette.keypoint_publication_lease"
+            or previous_lease.get("schema_version") != 1
+            or previous_lease.get("policy") != _KEYPOINT_PUBLICATION_POLICY
+            or previous_lease.get("next_generation") != base_generation
+            or previous_lease.get("base_generation") != base_generation - 1
+        ):
+            _fail("Keypoint parent has an active or invalid publication lease.")
+    elif base_generation > 0:
+        _fail("Keypoint parent generation lacks its committed publication lease.")
+    lease = _keypoint_publication_lease_record(
+        run_path=run_path,
+        publication_owner=publication_owner,
+        base_generation=base_generation,
+    )
+    parent.attrs[KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR] = copy.deepcopy(lease)
+    if parent.attrs.get(KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR) != lease:
+        _fail("Keypoint parent publication lease did not persist exactly.")
+    return lease
+
+
+def _require_keypoint_parent_publication_lease(
+    parent: Any,
+    lease: Mapping[str, Any],
+    *,
+    expected_generation: int,
+) -> None:
+    attrs = getattr(parent, "attrs", {})
+    if attrs.get(KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR) != dict(lease):
+        _fail("Keypoint parent publication lease was replaced.")
+    generation = attrs.get(KEYPOINT_PUBLICATION_GENERATION_ATTR, 0)
+    if type(generation) is not int or generation != expected_generation:
+        _fail("Keypoint parent publication generation changed concurrently.")
+    policy = attrs.get(KEYPOINT_PUBLICATION_POLICY_ATTR)
+    if expected_generation == 0:
+        if policy not in (None, _KEYPOINT_PUBLICATION_POLICY):
+            _fail("Keypoint parent publication policy changed concurrently.")
+    elif policy != _KEYPOINT_PUBLICATION_POLICY:
+        _fail("Keypoint parent publication policy changed concurrently.")
 
 
 def _array(node: Any, *, label: str) -> np.ndarray:
@@ -223,6 +404,179 @@ def _child(group: Any, name: str, *, label: str) -> Any:
     if canonical_node_path(result) != f"{base}/{name}":
         _fail(f"{label} resolved outside its canonical rowset.")
     return result
+
+
+def _exact_label_list(value: Any, *, label: str) -> list[str]:
+    if type(value) is not list or not value:
+        _fail(f"{label} must be one nonempty exact JSON string list.")
+    result: list[str] = []
+    for item in value:
+        if type(item) is not str or not item or item.strip() != item:
+            _fail(f"{label} contains a missing or noncanonical label.")
+        result.append(item)
+    if len(set(result)) != len(result):
+        _fail(f"{label} must contain unique ordered labels.")
+    return result
+
+
+def _keypoint_label_authority_record(
+    run_group: Any,
+    identity: BoundRowIdentityContract,
+) -> dict[str, Any]:
+    """Build the exact axis-1 authority from mutually consistent live metadata."""
+
+    labels = _exact_label_list(
+        getattr(run_group, "attrs", {}).get("keypoint_labels"),
+        label="keypoint_labels",
+    )
+    confidence_labels = _exact_label_list(
+        run_group.attrs.get("keypoint_confidence_labels"),
+        label="keypoint_confidence_labels",
+    )
+    if confidence_labels != labels:
+        _fail(
+            "keypoint_confidence_labels must exactly equal the ordered "
+            "keypoint_labels authority."
+        )
+    cardinality = len(labels)
+    skeleton_id = run_group.attrs.get("skeleton_id")
+    if (
+        type(skeleton_id) is not str
+        or not skeleton_id
+        or skeleton_id.strip() != skeleton_id
+    ):
+        _fail("skeleton_id must be one nonempty canonical string.")
+    kpt_shape = run_group.attrs.get("kpt_shape")
+    if (
+        type(kpt_shape) is not list
+        or len(kpt_shape) != 2
+        or any(type(item) is not int for item in kpt_shape)
+        or kpt_shape != [cardinality, 2]
+    ):
+        _fail("kpt_shape must exactly equal [keypoint cardinality, 2].")
+    model_kpt_shape = run_group.attrs.get("model_kpt_shape")
+    if model_kpt_shape is not None and (
+        type(model_kpt_shape) is not list
+        or len(model_kpt_shape) != 2
+        or any(type(item) is not int for item in model_kpt_shape)
+        or model_kpt_shape[0] != cardinality
+        or model_kpt_shape[1] <= 0
+    ):
+        _fail("model_kpt_shape conflicts with canonical keypoint cardinality.")
+
+    pose_schema = run_group.attrs.get("pose_schema")
+    expected_pose_fields = {
+        "name",
+        "skeleton_id",
+        "kpt_shape",
+        "keypoint_labels",
+        "nodes",
+        "edges",
+        "metadata",
+        "source",
+    }
+    if type(pose_schema) is not dict or set(pose_schema) != expected_pose_fields:
+        _fail("pose_schema must use the complete controlled future schema payload.")
+    if (
+        type(pose_schema.get("name")) is not str
+        or not pose_schema["name"]
+        or pose_schema.get("skeleton_id") != skeleton_id
+        or pose_schema.get("kpt_shape") != kpt_shape
+        or pose_schema.get("keypoint_labels") != labels
+        or type(pose_schema.get("metadata")) is not dict
+        or type(pose_schema.get("source")) is not str
+        or not pose_schema["source"]
+    ):
+        _fail(
+            "pose_schema name, skeleton_id, kpt_shape, labels, metadata, or "
+            "source conflicts with the canonical keypoint axis."
+        )
+    metadata_skeleton_id = pose_schema["metadata"].get("skeleton_id")
+    if metadata_skeleton_id is not None and metadata_skeleton_id != skeleton_id:
+        _fail(
+            "pose_schema metadata skeleton_id conflicts with the canonical "
+            "keypoint axis."
+        )
+    nodes = pose_schema.get("nodes")
+    if type(nodes) is not list or len(nodes) != cardinality:
+        _fail("pose_schema nodes do not match keypoint cardinality.")
+    for index, node in enumerate(nodes):
+        if (
+            type(node) is not dict
+            or set(node) != {"id", "name"}
+            or type(node.get("id")) is not int
+            or node.get("id") != index
+            or node.get("name") != labels[index]
+        ):
+            _fail("pose_schema nodes must exactly enumerate the ordered labels.")
+    edges = pose_schema.get("edges")
+    if type(edges) is not list:
+        _fail("pose_schema edges must be one exact JSON list.")
+    for edge in edges:
+        if (
+            type(edge) is not list
+            or len(edge) != 2
+            or any(type(item) is not int for item in edge)
+            or any(item < 0 or item >= cardinality for item in edge)
+        ):
+            _fail("pose_schema edges must reference exact in-range keypoint IDs.")
+
+    row_count = identity.leading_dimension
+    arrays: dict[str, dict[str, Any]] = {}
+    for name in (
+        "keypoints_roi",
+        "keypoints_img",
+        "keypoints_norm",
+        "keypoint_confidences",
+    ):
+        node = _child(run_group, name, label=name)
+        shape = tuple(int(item) for item in getattr(node, "shape", ()))
+        expected_shape = (
+            (row_count, cardinality, 2)
+            if name != "keypoint_confidences"
+            else (row_count, cardinality)
+        )
+        if shape != expected_shape:
+            _fail(
+                f"{name} physical shape does not match row identity and the "
+                "canonical keypoint axis."
+            )
+        dtype = np.dtype(getattr(node, "dtype", None))
+        if dtype.kind != "f":
+            _fail(f"{name} must use a floating dtype.")
+        arrays[name] = {
+            "array_ref": f"/{canonical_node_path(node)}",
+            "shape": [int(item) for item in shape],
+            "dtype": dtype.str,
+            "keypoint_axis": 1,
+        }
+
+    return {
+        "schema_id": KEYPOINT_LABEL_AUTHORITY_SCHEMA_ID,
+        "schema_version": KEYPOINT_LABEL_AUTHORITY_SCHEMA_VERSION,
+        "axis0": {
+            "role": "observation_instance",
+            "row_identity_ref": identity.record_ref,
+            "row_identity_sha256": identity.record_sha256,
+        },
+        "axis1": {
+            "role": "keypoint",
+            "cardinality": cardinality,
+            "labels": list(labels),
+        },
+        "coordinate_component_axis": {
+            "axis": 2,
+            "components": ["x", "y"],
+        },
+        "confidence_labels": list(confidence_labels),
+        "skeleton_id": skeleton_id,
+        "kpt_shape": list(kpt_shape),
+        "model_kpt_shape": (
+            list(model_kpt_shape) if model_kpt_shape is not None else None
+        ),
+        "pose_schema": copy.deepcopy(pose_schema),
+        "arrays": arrays,
+    }
 
 
 def _require_explicit_run_status(
@@ -347,6 +701,13 @@ def _strict_model_artifact(value: Any) -> dict[str, Any]:
     for name in ("size_bytes", "mtime_ns"):
         if type(artifact.get(name)) is not int or artifact[name] < 0:
             _fail(f"Canonical model artifact field {name!r} must be an exact nonnegative int.")
+    try:
+        artifact["pose_schema_binding"] = validate_pose_model_schema_binding(
+            artifact.get("pose_schema_binding"),
+            expected_model_sha256=artifact["sha256"],
+        )
+    except ValueError as exc:
+        _fail(f"Canonical model artifact lacks exact ordered pose identity: {exc}")
     return artifact
 
 
@@ -428,6 +789,9 @@ class BoundKeypointCropSource:
     crop_placement_ownership: BoundCropPlacementOwnership = field(repr=False)
     roi_frame: BoundPixelFrameAuthority = field(repr=False)
     roi_to_source_camera: BoundDirectedTransformChain = field(repr=False)
+    bbox_crop_placement_ownership: BoundCropPlacementOwnership = field(repr=False)
+    bbox_roi_frame: BoundPixelFrameAuthority = field(repr=False)
+    bbox_roi_to_source_camera: BoundDirectedTransformChain = field(repr=False)
     crop_path: str
     _root: Any = field(repr=False, compare=False)
     _rowset_node: Any = field(repr=False, compare=False)
@@ -443,6 +807,9 @@ class BoundKeypointCropSource:
         crop_placement_ownership: BoundCropPlacementOwnership,
         roi_frame: BoundPixelFrameAuthority,
         roi_to_source_camera: BoundDirectedTransformChain,
+        bbox_crop_placement_ownership: BoundCropPlacementOwnership,
+        bbox_roi_frame: BoundPixelFrameAuthority,
+        bbox_roi_to_source_camera: BoundDirectedTransformChain,
         crop_path: str,
         root: Any,
         rowset_node: Any,
@@ -457,6 +824,17 @@ class BoundKeypointCropSource:
         object.__setattr__(self, "crop_placement_ownership", crop_placement_ownership)
         object.__setattr__(self, "roi_frame", roi_frame)
         object.__setattr__(self, "roi_to_source_camera", roi_to_source_camera)
+        object.__setattr__(
+            self,
+            "bbox_crop_placement_ownership",
+            bbox_crop_placement_ownership,
+        )
+        object.__setattr__(self, "bbox_roi_frame", bbox_roi_frame)
+        object.__setattr__(
+            self,
+            "bbox_roi_to_source_camera",
+            bbox_roi_to_source_camera,
+        )
         object.__setattr__(self, "crop_path", crop_path)
         object.__setattr__(self, "_root", root)
         object.__setattr__(self, "_rowset_node", rowset_node)
@@ -512,45 +890,96 @@ def load_persisted_keypoint_crop_source(root_node: Any, crop_path: str) -> Bound
         or roi_shape[0] != crop.row_identity.leading_dimension
     ):
         _fail("Canonical base keypoints require row-aligned materialized uint8 ROI pixels.")
-    extent = bind_array_reference_extent(roi_images, units="px")
-    ownership = load_crop_placement_ownership(
+    point_camera = crop.source_geometry.frame_evidence.source_camera_frame
+    point_ownership = load_crop_placement_ownership(
         placement,
         row_identity=crop.row_identity,
-        source_camera_frame=crop.source_geometry.frame_evidence.source_camera_frame,
+        source_camera_frame=point_camera,
+        attr_name=CROP_PLACEMENT_OWNERSHIP_ATTR,
     )
-    roi_frame = load_roi_pixel_frame_authority(
+    point_extent = bind_array_reference_extent(roi_images, units="px")
+    point_roi_frame = load_roi_pixel_frame_authority(
         roi_images,
-        reference_extent=extent,
-        crop_placement_ownership=ownership,
+        reference_extent=point_extent,
+        crop_placement_ownership=point_ownership,
     )
-    camera = crop.source_geometry.frame_evidence.source_camera_frame
-    authority = load_bound_transform_authority(
+    point_authority = load_bound_transform_authority(
         placement,
         payload_node=placement,
-        source_frame=roi_frame,
-        target_frame=camera,
+        source_frame=point_roi_frame,
+        target_frame=point_camera,
         row_identity=crop.row_identity,
+        attr_name=TRANSFORM_AUTHORITY_ATTR,
     )
-    transform = load_bound_directed_transform_v2(
+    point_transform = load_bound_directed_transform_v2(
         placement,
-        authority=authority,
-        source_frame=roi_frame,
-        target_frame=camera,
+        authority=point_authority,
+        source_frame=point_roi_frame,
+        target_frame=point_camera,
         row_identity=crop.row_identity,
+        attr_name=DIRECTED_TRANSFORM_V2_ATTR,
     )
-    chain = resolve_bound_directed_transform_chain((transform,))
+    point_chain = resolve_bound_directed_transform_chain((point_transform,))
+
+    bbox_ownership = load_crop_placement_ownership(
+        placement,
+        row_identity=crop.row_identity,
+        source_camera_frame=(
+            crop.source_geometry.frame_evidence.bbox_source_camera_frame
+        ),
+        attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+    )
+    bbox_frame_node = _node(
+        root_node,
+        f"{path}/{CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH}",
+        label="canonical crop ROI bbox-edge frame",
+    )
+    bbox_extent = load_crop_roi_bbox_edge_reference_extent(
+        bbox_frame_node,
+        roi_images,
+    )
+    bbox_roi_frame = load_roi_pixel_frame_authority(
+        bbox_frame_node,
+        reference_extent=bbox_extent,
+        crop_placement_ownership=bbox_ownership,
+    )
+    bbox_camera = crop.source_geometry.frame_evidence.bbox_source_camera_frame
+    bbox_authority = load_bound_transform_authority(
+        placement,
+        payload_node=placement,
+        source_frame=bbox_roi_frame,
+        target_frame=bbox_camera,
+        row_identity=crop.row_identity,
+        attr_name=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+    )
+    bbox_transform = load_bound_directed_transform_v2(
+        placement,
+        authority=bbox_authority,
+        source_frame=bbox_roi_frame,
+        target_frame=bbox_camera,
+        row_identity=crop.row_identity,
+        attr_name=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+    )
+    bbox_chain = resolve_bound_directed_transform_chain((bbox_transform,))
     roi_geometry = load_crop_roi_geometry(
         placement,
         bbox_roi,
         crop_geometry=crop,
-        crop_placement_ownership=ownership,
-        roi_frame=roi_frame,
-        roi_to_source_camera=chain,
+        crop_placement_ownership=bbox_ownership,
+        roi_frame=bbox_roi_frame,
+        roi_to_source_camera=bbox_chain,
     )
     placements = _array(placement, label="crop source placement")
-    expected_wh = np.asarray([roi_frame.endpoint.width, roi_frame.endpoint.height])
-    if placements.shape != (crop.row_identity.leading_dimension, 4) or not np.all(
-        placements[:, 2:] == expected_wh
+    point_wh = np.asarray(
+        [point_roi_frame.endpoint.width, point_roi_frame.endpoint.height]
+    )
+    bbox_wh = np.asarray(
+        [bbox_roi_frame.endpoint.width, bbox_roi_frame.endpoint.height]
+    )
+    if (
+        not np.array_equal(point_wh, bbox_wh)
+        or placements.shape != (crop.row_identity.leading_dimension, 4)
+        or not np.all(placements[:, 2:] == point_wh)
     ):
         _fail(
             "Canonical base keypoint inference currently requires one exact constant "
@@ -559,9 +988,12 @@ def load_persisted_keypoint_crop_source(root_node: Any, crop_path: str) -> Bound
     return BoundKeypointCropSource(
         crop_geometry=crop,
         roi_geometry=roi_geometry,
-        crop_placement_ownership=ownership,
-        roi_frame=roi_frame,
-        roi_to_source_camera=chain,
+        crop_placement_ownership=point_ownership,
+        roi_frame=point_roi_frame,
+        roi_to_source_camera=point_chain,
+        bbox_crop_placement_ownership=bbox_ownership,
+        bbox_roi_frame=bbox_roi_frame,
+        bbox_roi_to_source_camera=bbox_chain,
         crop_path=path,
         root=root_node,
         rowset_node=rowset,
@@ -581,6 +1013,24 @@ def require_bound_keypoint_crop_source(value: Any) -> BoundKeypointCropSource:
         or current.roi_geometry.derivation.record_sha256
         != value.roi_geometry.derivation.record_sha256
         or current.roi_frame.record_sha256 != value.roi_frame.record_sha256
+        or current.bbox_roi_frame.record_sha256
+        != value.bbox_roi_frame.record_sha256
+        or tuple(
+            item.record_sha256
+            for item in current.roi_to_source_camera.transform_records
+        )
+        != tuple(
+            item.record_sha256
+            for item in value.roi_to_source_camera.transform_records
+        )
+        or tuple(
+            item.record_sha256
+            for item in current.bbox_roi_to_source_camera.transform_records
+        )
+        != tuple(
+            item.record_sha256
+            for item in value.bbox_roi_to_source_camera.transform_records
+        )
     ):
         _fail("Selected canonical crop changed after binding.")
     return value
@@ -711,12 +1161,35 @@ def _context_record(
     temporal: BoundSourceRowTemporalAuthority,
     roi_frame: BoundPixelFrameAuthority,
     roi_chain: BoundDirectedTransformChain,
+    bbox_roi_frame: BoundPixelFrameAuthority,
+    bbox_roi_chain: BoundDirectedTransformChain,
+    point_normalized_frame: BoundPixelFrameAuthority,
+    point_normalized_chain: BoundDirectedTransformChain,
     model_frame: BoundPixelFrameAuthority,
     model_link: BoundDirectedTransformV2,
     model_transform: ModelInputTransform,
     preprocessing_input_mode: str,
     model_artifact: Mapping[str, Any],
+    label_authority: BoundCoordinateRecord,
 ) -> dict[str, Any]:
+    binding = model_artifact.get("pose_schema_binding")
+    bound_schema = binding.get("pose_schema") if type(binding) is dict else None
+    live_schema = label_authority.record.get("pose_schema")
+    if bound_schema != live_schema:
+        _fail(
+            "Persisted keypoint axis metadata differs from the exact "
+            "model pose-schema binding."
+        )
+    bound_model_shape = (
+        bound_schema.get("metadata", {}).get("model_kpt_shape")
+        if type(bound_schema) is dict
+        else None
+    )
+    if label_authority.record.get("model_kpt_shape") != bound_model_shape:
+        _fail(
+            "Persisted model_kpt_shape differs from the exact model pose-schema "
+            "binding."
+        )
     source_rows = _child(run_group, "source_crop_row_ids", label="keypoint crop rows")
     return {
         "schema_id": KEYPOINT_COORDINATE_CONTEXT_SCHEMA_ID,
@@ -742,7 +1215,14 @@ def _context_record(
                 _child(run_group, "source_acquisition_frame_index", label="keypoint time")
             ),
         },
+        "keypoint_collection_axis": {
+            "axis": 1,
+            "role": "keypoint",
+            "label_authority_ref": label_authority.record_ref,
+            "label_authority_sha256": label_authority.record_sha256,
+        },
         "roi_placement": {
+            "coordinate_role": "continuous_points",
             "source_crop_xywh": _payload(
                 _child(run_group, "source_crop_xywh", label="keypoint placement")
             ),
@@ -755,6 +1235,35 @@ def _context_record(
                     "record_sha256": item.record_sha256,
                 }
                 for item in roi_chain.transform_records
+            ],
+        },
+        "bbox_roi_placement": {
+            "coordinate_role": "pixel_edge_half_open_bboxes",
+            "source_crop_xywh": _payload(
+                _child(run_group, "source_crop_xywh", label="keypoint placement")
+            ),
+            "roi_frame_ref": bbox_roi_frame.record_ref,
+            "roi_frame_sha256": bbox_roi_frame.record_sha256,
+            "direction": "roi_local_bbox_px_to_source_camera_bbox_px",
+            "transform_chain": [
+                {
+                    "record_ref": item.record_ref,
+                    "record_sha256": item.record_sha256,
+                }
+                for item in bbox_roi_chain.transform_records
+            ],
+        },
+        "point_normalization": {
+            "coordinate_role": "continuous_points",
+            "normalized_frame_ref": point_normalized_frame.record_ref,
+            "normalized_frame_sha256": point_normalized_frame.record_sha256,
+            "direction": "source_camera_normalized_point_xy_to_source_camera_point_px",
+            "transform_chain": [
+                {
+                    "record_ref": item.record_ref,
+                    "record_sha256": item.record_sha256,
+                }
+                for item in point_normalized_chain.transform_records
             ],
         },
         "model_preprocessing": {
@@ -801,11 +1310,17 @@ class BoundKeypointCoordinateContext:
     temporal_authority: BoundSourceRowTemporalAuthority = field(repr=False)
     roi_frame: BoundPixelFrameAuthority = field(repr=False)
     roi_to_source_camera: BoundDirectedTransformChain = field(repr=False)
+    bbox_roi_frame: BoundPixelFrameAuthority = field(repr=False)
+    bbox_roi_to_source_camera: BoundDirectedTransformChain = field(repr=False)
+    point_normalized_frame: BoundPixelFrameAuthority = field(repr=False)
+    point_normalized_to_source_camera: BoundDirectedTransformChain = field(repr=False)
     model_input_frame: BoundPixelFrameAuthority = field(repr=False)
     model_input_to_roi: BoundDirectedTransformV2 = field(repr=False)
     model_input_transform: ModelInputTransform
     preprocessing_input_mode: str
     context_record: BoundCoordinateRecord = field(repr=False)
+    keypoint_label_authority: BoundCoordinateRecord = field(repr=False)
+    keypoint_labels: tuple[str, ...]
     model_artifact: Mapping[str, Any] = field(repr=False)
     run_path: str
     completion_status: str
@@ -841,6 +1356,7 @@ class BoundKeypointCoordinateContext:
 def _ensure_evidence_nodes(
     run_group: Any,
     transform: ModelInputTransform,
+    point_camera: BoundPixelFrameAuthority,
     *,
     created: list[str],
 ) -> dict[str, Any]:
@@ -850,6 +1366,15 @@ def _ensure_evidence_nodes(
     roi_node, made = _require_group(frames, "roi_local")
     if made:
         created.append(canonical_node_path(roi_node))
+    bbox_roi_node, made = _require_group(frames, "roi_bbox_pixel_edge_half_open")
+    if made:
+        created.append(canonical_node_path(bbox_roi_node))
+    point_normalized_node, made = _require_group(
+        frames,
+        "source_camera_normalized_points",
+    )
+    if made:
+        created.append(canonical_node_path(point_normalized_node))
     model_node, made = _require_group(frames, "model_input")
     if made:
         created.append(canonical_node_path(model_node))
@@ -866,11 +1391,28 @@ def _ensure_evidence_nodes(
     authority, made = _require_group(transforms, "model_input_to_roi_authority")
     if made:
         created.append(canonical_node_path(authority))
+    point_normalized_matrix, made = _create_matrix(
+        transforms,
+        "source_camera_normalized_points_to_image",
+        normalized_to_pixel_matrix(point_camera),
+    )
+    if made:
+        created.append(canonical_node_path(point_normalized_matrix))
+    point_normalized_authority, made = _require_group(
+        transforms,
+        "source_camera_normalized_points_to_image_authority",
+    )
+    if made:
+        created.append(canonical_node_path(point_normalized_authority))
     return {
         "roi_frame_node": roi_node,
+        "bbox_roi_frame_node": bbox_roi_node,
+        "point_normalized_frame_node": point_normalized_node,
         "model_frame_node": model_node,
         "model_matrix_node": matrix,
         "model_authority_node": authority,
+        "point_normalized_matrix_node": point_normalized_matrix,
+        "point_normalized_authority_node": point_normalized_authority,
     }
 
 
@@ -902,6 +1444,25 @@ def prepare_keypoint_coordinate_context(
         )
     artifact = _strict_model_artifact(model_artifact)
     selected = _validate_output_selection(source, run_group)
+    point_camera = (
+        source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
+    )
+    bbox_camera = (
+        source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame
+    )
+    if (
+        point_camera.pixel_convention != SOURCE_CAMERA_POINT_PIXEL_CONVENTION
+        or bbox_camera.pixel_convention != SOURCE_CAMERA_BBOX_PIXEL_CONVENTION
+        or source.roi_frame.pixel_convention != SOURCE_CAMERA_POINT_PIXEL_CONVENTION
+        or source.bbox_roi_frame.pixel_convention
+        != SOURCE_CAMERA_BBOX_PIXEL_CONVENTION
+        or source.roi_frame.endpoint.width != source.bbox_roi_frame.endpoint.width
+        or source.roi_frame.endpoint.height != source.bbox_roi_frame.endpoint.height
+    ):
+        _fail(
+            "Canonical keypoint publication requires distinct continuous point "
+            "and half-open bbox crop authorities."
+        )
     if transform.native_shape != (
         int(source.roi_frame.endpoint.height),
         int(source.roi_frame.endpoint.width),
@@ -914,6 +1475,7 @@ def prepare_keypoint_coordinate_context(
         evidence = _ensure_evidence_nodes(
             run_group,
             transform,
+            point_camera,
             created=created,
         )
         placement_node = _child(run_group, "source_crop_xywh", label="keypoint placement")
@@ -929,9 +1491,13 @@ def prepare_keypoint_coordinate_context(
             time_node,
             placement_node,
             evidence["roi_frame_node"],
+            evidence["bbox_roi_frame_node"],
+            evidence["point_normalized_frame_node"],
             evidence["model_frame_node"],
             evidence["model_matrix_node"],
             evidence["model_authority_node"],
+            evidence["point_normalized_matrix_node"],
+            evidence["point_normalized_authority_node"],
         )
         identity = stamp_and_bind_row_identity_contract(
             run_group,
@@ -941,16 +1507,28 @@ def prepare_keypoint_coordinate_context(
                 values=selected["instance_key"],
             ),
         )
+        label_authority = stamp_and_bind_persisted_coordinate_record(
+            run_group,
+            _keypoint_label_authority_record(run_group, identity),
+            attr_name=KEYPOINT_LABEL_AUTHORITY_ATTR,
+        )
         temporal = stamp_source_row_temporal_authority(
             run_group,
             time_node,
             source_row_identity=identity,
             acquisition_frame=source.crop_geometry.source_geometry.frame_evidence.acquisition_frame,
         )
-        placement_ownership = stamp_crop_placement_ownership(
+        point_placement_ownership = stamp_crop_placement_ownership(
             placement_node,
             row_identity=identity,
-            source_camera_frame=source.crop_geometry.source_geometry.frame_evidence.source_camera_frame,
+            source_camera_frame=point_camera,
+            attr_name=CROP_PLACEMENT_OWNERSHIP_ATTR,
+        )
+        bbox_placement_ownership = stamp_crop_placement_ownership(
+            placement_node,
+            row_identity=identity,
+            source_camera_frame=bbox_camera,
+            attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
         )
         roi_extent_record = _extent_record(
             role="keypoint_native_roi",
@@ -968,24 +1546,85 @@ def prepare_keypoint_coordinate_context(
         roi_frame = stamp_roi_pixel_frame_authority(
             roi_extent,
             frame_id=f"keypoint_roi_{token}",
-            pixel_convention="continuous",
-            crop_placement_ownership=placement_ownership,
+            pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+            crop_placement_ownership=point_placement_ownership,
         )
         roi_authority = stamp_crop_placement_transform_authority(
             placement_node,
             authority_id=f"keypoint_roi_to_source_camera_{token}",
             source_frame=roi_frame,
-            target_frame=source.crop_geometry.source_geometry.frame_evidence.source_camera_frame,
+            target_frame=point_camera,
+            attr_name=TRANSFORM_AUTHORITY_ATTR,
         )
         roi_link = stamp_directed_transform_v2(
             placement_node,
             transform_id=f"keypoint_roi_to_source_camera_{token}",
             authority=roi_authority,
             source_frame=roi_frame,
-            target_frame=source.crop_geometry.source_geometry.frame_evidence.source_camera_frame,
+            target_frame=point_camera,
             row_identity=identity,
+            attr_name=DIRECTED_TRANSFORM_V2_ATTR,
         )
         roi_chain = resolve_bound_directed_transform_chain((roi_link,))
+
+        bbox_roi_extent_record = _extent_record(
+            role="keypoint_native_roi_bbox",
+            width=int(source.bbox_roi_frame.endpoint.width),
+            height=int(source.bbox_roi_frame.endpoint.height),
+            source_frame=source.bbox_roi_frame,
+            source_rows_node=_child(run_group, "source_crop_row_ids", label="crop rows"),
+        )
+        bbox_roi_extent = _stamp_extent(
+            evidence["bbox_roi_frame_node"],
+            attr_name=KEYPOINT_ROI_REFERENCE_EXTENT_ATTR,
+            record=bbox_roi_extent_record,
+        )
+        bbox_roi_frame = stamp_roi_pixel_frame_authority(
+            bbox_roi_extent,
+            frame_id=f"keypoint_roi_bbox_{token}",
+            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+            crop_placement_ownership=bbox_placement_ownership,
+        )
+        bbox_roi_authority = stamp_crop_placement_transform_authority(
+            placement_node,
+            authority_id=f"keypoint_roi_bbox_to_source_camera_{token}",
+            source_frame=bbox_roi_frame,
+            target_frame=bbox_camera,
+            attr_name=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+        )
+        bbox_roi_link = stamp_directed_transform_v2(
+            placement_node,
+            transform_id=f"keypoint_roi_bbox_to_source_camera_{token}",
+            authority=bbox_roi_authority,
+            source_frame=bbox_roi_frame,
+            target_frame=bbox_camera,
+            row_identity=identity,
+            attr_name=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+        )
+        bbox_roi_chain = resolve_bound_directed_transform_chain((bbox_roi_link,))
+
+        point_normalized_frame = stamp_normalized_pixel_frame_authority(
+            evidence["point_normalized_frame_node"],
+            frame_id=f"keypoint_source_camera_normalized_points_{token}",
+            pixel_frame=point_camera,
+        )
+        point_normalized_authority = stamp_normalized_to_pixel_transform_authority(
+            evidence["point_normalized_authority_node"],
+            authority_id=f"keypoint_source_camera_normalized_points_to_image_{token}",
+            matrix_node=evidence["point_normalized_matrix_node"],
+            source_frame=point_normalized_frame,
+            target_frame=point_camera,
+        )
+        point_normalized_link = stamp_directed_transform_v2(
+            evidence["point_normalized_matrix_node"],
+            transform_id=f"keypoint_source_camera_normalized_points_to_image_{token}",
+            authority=point_normalized_authority,
+            source_frame=point_normalized_frame,
+            target_frame=point_camera,
+        )
+        point_normalized_chain = resolve_bound_directed_transform_chain(
+            (point_normalized_link,)
+        )
 
         model_extent_record = _extent_record(
             role="keypoint_detector_model_input",
@@ -1029,11 +1668,16 @@ def prepare_keypoint_coordinate_context(
             temporal=temporal,
             roi_frame=roi_frame,
             roi_chain=roi_chain,
+            bbox_roi_frame=bbox_roi_frame,
+            bbox_roi_chain=bbox_roi_chain,
+            point_normalized_frame=point_normalized_frame,
+            point_normalized_chain=point_normalized_chain,
             model_frame=model_frame,
             model_link=model_link,
             model_transform=transform,
             preprocessing_input_mode=preprocessing_input_mode,
             model_artifact=artifact,
+            label_authority=label_authority,
         )
         stamp_and_bind_persisted_coordinate_record(
             run_group,
@@ -1097,6 +1741,19 @@ def _load_persisted_keypoint_coordinate_context(
         run_group,
         _child(run_group, "instance_key", label="keypoint identity"),
     )
+    label_authority = bind_persisted_coordinate_record(
+        run_group,
+        attr_name=KEYPOINT_LABEL_AUTHORITY_ATTR,
+    )
+    expected_label_authority = _keypoint_label_authority_record(
+        run_group,
+        identity,
+    )
+    if label_authority.record != expected_label_authority:
+        _fail(
+            "Persisted keypoint label authority differs from live pose metadata "
+            "or collection-axis shapes."
+        )
     temporal = load_bound_source_row_temporal_authority(
         run_group,
         _child(run_group, "source_acquisition_frame_index", label="keypoint time"),
@@ -1104,10 +1761,23 @@ def _load_persisted_keypoint_coordinate_context(
         acquisition_frame=source.crop_geometry.source_geometry.frame_evidence.acquisition_frame,
     )
     placement = _child(run_group, "source_crop_xywh", label="keypoint placement")
-    ownership = load_crop_placement_ownership(
+    point_camera = (
+        source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
+    )
+    bbox_camera = (
+        source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame
+    )
+    point_ownership = load_crop_placement_ownership(
         placement,
         row_identity=identity,
-        source_camera_frame=source.crop_geometry.source_geometry.frame_evidence.source_camera_frame,
+        source_camera_frame=point_camera,
+        attr_name=CROP_PLACEMENT_OWNERSHIP_ATTR,
+    )
+    bbox_ownership = load_crop_placement_ownership(
+        placement,
+        row_identity=identity,
+        source_camera_frame=bbox_camera,
+        attr_name=CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     )
     roi_frame_node = _node(root_node, f"{path}/coordinate_frames/roi_local", label="keypoint ROI frame")
     roi_extent = bind_persisted_record_reference_extent(
@@ -1137,24 +1807,112 @@ def _load_persisted_keypoint_coordinate_context(
     roi_frame = load_roi_pixel_frame_authority(
         roi_frame_node,
         reference_extent=roi_extent,
-        crop_placement_ownership=ownership,
+        crop_placement_ownership=point_ownership,
     )
-    camera = source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
     roi_authority = load_bound_transform_authority(
         placement,
         payload_node=placement,
         source_frame=roi_frame,
-        target_frame=camera,
+        target_frame=point_camera,
         row_identity=identity,
+        attr_name=TRANSFORM_AUTHORITY_ATTR,
     )
     roi_link = load_bound_directed_transform_v2(
         placement,
         authority=roi_authority,
         source_frame=roi_frame,
-        target_frame=camera,
+        target_frame=point_camera,
         row_identity=identity,
+        attr_name=DIRECTED_TRANSFORM_V2_ATTR,
     )
     roi_chain = resolve_bound_directed_transform_chain((roi_link,))
+
+    bbox_roi_frame_node = _node(
+        root_node,
+        f"{path}/coordinate_frames/roi_bbox_pixel_edge_half_open",
+        label="keypoint bbox ROI frame",
+    )
+    bbox_roi_extent = bind_persisted_record_reference_extent(
+        bbox_roi_frame_node,
+        record_attr=KEYPOINT_ROI_REFERENCE_EXTENT_ATTR,
+        digest_attr=f"{KEYPOINT_ROI_REFERENCE_EXTENT_ATTR}_sha256",
+        width_field="width",
+        height_field="height",
+        units_field="units",
+    )
+    expected_bbox_roi_extent = _extent_record(
+        role="keypoint_native_roi_bbox",
+        width=int(source.bbox_roi_frame.endpoint.width),
+        height=int(source.bbox_roi_frame.endpoint.height),
+        source_frame=source.bbox_roi_frame,
+        source_rows_node=_child(run_group, "source_crop_row_ids", label="crop rows"),
+    )
+    if bbox_roi_extent.authority_record != {
+        **expected_bbox_roi_extent,
+        "bound_record_attr": KEYPOINT_ROI_REFERENCE_EXTENT_ATTR,
+        "bound_digest_attr": f"{KEYPOINT_ROI_REFERENCE_EXTENT_ATTR}_sha256",
+        "bound_width_field": "width",
+        "bound_height_field": "height",
+        "bound_units_field": "units",
+    }:
+        _fail("Persisted keypoint bbox ROI extent differs from the selected crop frame.")
+    bbox_roi_frame = load_roi_pixel_frame_authority(
+        bbox_roi_frame_node,
+        reference_extent=bbox_roi_extent,
+        crop_placement_ownership=bbox_ownership,
+    )
+    bbox_roi_authority = load_bound_transform_authority(
+        placement,
+        payload_node=placement,
+        source_frame=bbox_roi_frame,
+        target_frame=bbox_camera,
+        row_identity=identity,
+        attr_name=TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+    )
+    bbox_roi_link = load_bound_directed_transform_v2(
+        placement,
+        authority=bbox_roi_authority,
+        source_frame=bbox_roi_frame,
+        target_frame=bbox_camera,
+        row_identity=identity,
+        attr_name=DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
+    )
+    bbox_roi_chain = resolve_bound_directed_transform_chain((bbox_roi_link,))
+
+    point_normalized_frame_node = _node(
+        root_node,
+        f"{path}/coordinate_frames/source_camera_normalized_points",
+        label="keypoint normalized point frame",
+    )
+    point_normalized_frame = load_normalized_pixel_frame_authority(
+        point_normalized_frame_node,
+        pixel_frame=point_camera,
+    )
+    point_normalized_matrix = _node(
+        root_node,
+        f"{path}/coordinate_transforms/source_camera_normalized_points_to_image",
+        label="normalized point-to-camera matrix",
+    )
+    point_normalized_authority_node = _node(
+        root_node,
+        f"{path}/coordinate_transforms/source_camera_normalized_points_to_image_authority",
+        label="normalized point transform authority",
+    )
+    point_normalized_authority = load_bound_transform_authority(
+        point_normalized_authority_node,
+        payload_node=point_normalized_matrix,
+        source_frame=point_normalized_frame,
+        target_frame=point_camera,
+    )
+    point_normalized_link = load_bound_directed_transform_v2(
+        point_normalized_matrix,
+        authority=point_normalized_authority,
+        source_frame=point_normalized_frame,
+        target_frame=point_camera,
+    )
+    point_normalized_chain = resolve_bound_directed_transform_chain(
+        (point_normalized_link,)
+    )
 
     model_payload = raw.get("model_preprocessing")
     if type(model_payload) is not dict:
@@ -1229,11 +1987,16 @@ def _load_persisted_keypoint_coordinate_context(
         temporal=temporal,
         roi_frame=roi_frame,
         roi_chain=roi_chain,
+        bbox_roi_frame=bbox_roi_frame,
+        bbox_roi_chain=bbox_roi_chain,
+        point_normalized_frame=point_normalized_frame,
+        point_normalized_chain=point_normalized_chain,
         model_frame=model_frame,
         model_link=model_link,
         model_transform=transform,
         preprocessing_input_mode=preprocessing_input_mode,
         model_artifact=artifact,
+        label_authority=label_authority,
     )
     if context.record != expected_context:
         _fail("Persisted keypoint context differs from exact live source/transform evidence.")
@@ -1244,9 +2007,13 @@ def _load_persisted_keypoint_coordinate_context(
         _child(run_group, "source_acquisition_frame_index", label="keypoint time"),
         placement,
         roi_frame_node,
+        bbox_roi_frame_node,
+        point_normalized_frame_node,
         model_frame_node,
         matrix,
         authority_node,
+        point_normalized_matrix,
+        point_normalized_authority_node,
         source._rowset_node,
         _child(source._rowset_node, "instance_key", label="crop identity"),
         _child(
@@ -1263,11 +2030,20 @@ def _load_persisted_keypoint_coordinate_context(
         temporal_authority=temporal,
         roi_frame=roi_frame,
         roi_to_source_camera=roi_chain,
+        bbox_roi_frame=bbox_roi_frame,
+        bbox_roi_to_source_camera=bbox_roi_chain,
+        point_normalized_frame=point_normalized_frame,
+        point_normalized_to_source_camera=point_normalized_chain,
         model_input_frame=model_frame,
         model_input_to_roi=model_link,
         model_input_transform=transform,
         preprocessing_input_mode=preprocessing_input_mode,
         context_record=context,
+        keypoint_label_authority=label_authority,
+        keypoint_labels=tuple(
+            str(item)
+            for item in label_authority.record["axis1"]["labels"]
+        ),
         model_artifact=artifact,
         run_path=path,
         completion_status=(
@@ -1452,7 +2228,11 @@ def _roi_to_image(
     if row_slice is None:
         transformed = apply_bound_directed_transform_chain(
             filled,
-            bound.roi_to_source_camera,
+            (
+                bound.bbox_roi_to_source_camera
+                if bbox
+                else bound.roi_to_source_camera
+            ),
             row_identity=bound.row_identity,
         )
     else:
@@ -1460,7 +2240,18 @@ def _roi_to_image(
         if filled.shape[0] != placements.shape[0]:
             _fail("Keypoint batch rows do not match the exact placement slice.")
         scales = placements[:, 2:] / np.asarray(
-            [bound.roi_frame.endpoint.width, bound.roi_frame.endpoint.height],
+            [
+                (
+                    bound.bbox_roi_frame.endpoint.width
+                    if bbox
+                    else bound.roi_frame.endpoint.width
+                ),
+                (
+                    bound.bbox_roi_frame.endpoint.height
+                    if bbox
+                    else bound.roi_frame.endpoint.height
+                ),
+            ],
             dtype=np.float64,
         )
         shape = (placements.shape[0],) + (1,) * (filled.ndim - 2) + (2,)
@@ -1475,10 +2266,25 @@ def _roi_to_image(
 
 def _image_to_normalized(values: np.ndarray, *, context: BoundKeypointCoordinateContext) -> np.ndarray:
     bound = require_bound_keypoint_coordinate_context(context)
-    camera = bound.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
+    if values.ndim == 0 or values.shape[-1] not in {2, 4}:
+        _fail("Image-to-normalized geometry must end in point XY or bbox XYXY.")
+    frame_evidence = bound.source.crop_geometry.source_geometry.frame_evidence
+    bbox = values.shape[-1] == 4
+    camera = (
+        frame_evidence.bbox_source_camera_frame
+        if bbox
+        else frame_evidence.source_camera_frame
+    )
+    expected_convention = "pixel_edge_half_open" if bbox else "continuous"
+    if camera.pixel_convention != expected_convention:
+        _fail(
+            "Image-to-normalized geometry is cross-wired to a source-camera "
+            f"endpoint with convention {camera.pixel_convention!r}; expected "
+            f"{expected_convention!r}."
+        )
     dtype = values.dtype
     factor = np.asarray([camera.endpoint.width, camera.endpoint.height], dtype=np.float64)
-    if values.shape[-1] == 4:
+    if bbox:
         factor = np.tile(factor, 2)
     output = np.asarray(values.astype(np.float64) / factor, dtype=dtype)
     output[np.isnan(values)] = np.nan
@@ -1506,6 +2312,7 @@ def derive_keypoint_coordinate_batch(
     if (
         keypoints.ndim != 3
         or keypoints.shape[0] != expected_rows
+        or keypoints.shape[1] != len(bound.keypoint_labels)
         or keypoints.shape[-1] != 2
         or bbox.shape != (expected_rows, 4)
     ):
@@ -1526,7 +2333,12 @@ def _validate_geometry(context: BoundKeypointCoordinateContext) -> dict[str, np.
     arrays = {name: _array(_child(run, name, label=name), label=name) for name in KEYPOINT_ARRAY_NAMES}
     n = context.row_identity.leading_dimension
     key_shape = arrays["keypoints_roi"].shape
-    if len(key_shape) != 3 or key_shape[0] != n or key_shape[-1] != 2:
+    if (
+        len(key_shape) != 3
+        or key_shape[0] != n
+        or key_shape[1] != len(context.keypoint_labels)
+        or key_shape[-1] != 2
+    ):
         _fail("Canonical keypoints must have shape (N,K,2).")
     if any(arrays[name].shape != key_shape for name in ("keypoints_img", "keypoints_norm")):
         _fail("Keypoint ROI/image/normalized surfaces have different shapes.")
@@ -1542,14 +2354,29 @@ def _validate_geometry(context: BoundKeypointCoordinateContext) -> dict[str, np.
     keypoint_nan = np.isnan(arrays["keypoints_roi"])
     if np.any(keypoint_nan[..., 0] != keypoint_nan[..., 1]):
         _fail("Each canonical keypoint must be wholly finite or wholly NaN.")
+    finite_keypoints = ~keypoint_nan[..., 0]
+    if np.any(finite_keypoints):
+        points = arrays["keypoints_roi"][finite_keypoints]
+        width = float(context.roi_frame.endpoint.width)
+        height = float(context.roi_frame.endpoint.height)
+        if (
+            np.any(points[:, 0] < 0.0)
+            or np.any(points[:, 1] < 0.0)
+            or np.any(points[:, 0] >= width)
+            or np.any(points[:, 1] >= height)
+        ):
+            _fail(
+                "Finite canonical keypoints must lie inside the continuous ROI "
+                "point domain [0,roi_width) x [0,roi_height)."
+            )
     bbox_nan = np.isnan(arrays["pose_bbox_xyxy_roi"])
     if np.any(np.any(bbox_nan, axis=1) != np.all(bbox_nan, axis=1)):
         _fail("Each canonical pose bbox must be wholly finite or wholly NaN.")
     finite_bbox = ~np.all(bbox_nan, axis=1)
     if np.any(finite_bbox):
         boxes = arrays["pose_bbox_xyxy_roi"][finite_bbox]
-        width = float(context.roi_frame.endpoint.width)
-        height = float(context.roi_frame.endpoint.height)
+        width = float(context.bbox_roi_frame.endpoint.width)
+        height = float(context.bbox_roi_frame.endpoint.height)
         if (
             np.any(boxes[:, 0] < 0.0)
             or np.any(boxes[:, 1] < 0.0)
@@ -1559,7 +2386,7 @@ def _validate_geometry(context: BoundKeypointCoordinateContext) -> dict[str, np.
             or np.any(boxes[:, 3] <= boxes[:, 1])
         ):
             _fail(
-                "Finite canonical pose bboxes must be positive continuous edge "
+                "Finite canonical pose bboxes must be positive half-open edge "
                 "boxes inside [0,roi_width] x [0,roi_height]."
             )
     expected_key_img = _roi_to_image(arrays["keypoints_roi"], context=context)
@@ -1585,14 +2412,28 @@ def _derivation_record(
     arrays: Mapping[str, np.ndarray],
 ) -> dict[str, Any]:
     run = context._run_group
-    camera = context.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
-    normalized = context.source.crop_geometry.source_geometry.frame_evidence.normalized_frame
+    point_camera = (
+        context.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
+    )
+    bbox_camera = (
+        context.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame
+    )
+    bbox_normalized = (
+        context.source.crop_geometry.source_geometry.frame_evidence.normalized_frame
+    )
     return {
         "schema_id": KEYPOINT_COORDINATE_DERIVATION_SCHEMA_ID,
         "schema_version": KEYPOINT_COORDINATE_DERIVATION_SCHEMA_VERSION,
         "coordinate_context": {
             "record_ref": context.context_record.record_ref,
             "record_sha256": context.context_record.record_sha256,
+        },
+        "keypoint_label_authority": {
+            "record_ref": context.keypoint_label_authority.record_ref,
+            "record_sha256": context.keypoint_label_authority.record_sha256,
+            "axis": 1,
+            "role": "keypoint",
+            "cardinality": len(context.keypoint_labels),
         },
         "row_identity": {
             "record_ref": context.row_identity.record_ref,
@@ -1610,8 +2451,8 @@ def _derivation_record(
                 "transform_sha256": context.model_input_to_roi.transform_sha256,
             },
             {
-                "operation": "roi_xy_to_source_camera_via_exact_row_placement_v1",
-                "direction": "roi_local_px_to_source_camera_image_px",
+                "operation": "roi_point_xy_to_source_camera_via_exact_row_placement_v1",
+                "direction": "roi_local_point_px_to_source_camera_point_px",
                 "transform_refs": [
                     {
                         "record_ref": item.record_ref,
@@ -1621,18 +2462,44 @@ def _derivation_record(
                 ],
             },
             {
-                "operation": "source_camera_image_to_normalized_edge_extent_v1",
-                "direction": "source_camera_image_px_to_source_camera_normalized_xy",
+                "operation": "roi_bbox_xyxy_to_source_camera_via_exact_row_placement_v1",
+                "direction": "roi_local_bbox_px_to_source_camera_bbox_px",
+                "transform_refs": [
+                    {
+                        "record_ref": item.record_ref,
+                        "record_sha256": item.record_sha256,
+                    }
+                    for item in context.bbox_roi_to_source_camera.transform_records
+                ],
+            },
+            {
+                "operation": "source_camera_point_to_normalized_extent_v1",
+                "direction": "source_camera_point_px_to_source_camera_normalized_point_xy",
                 "formula": "normalized_xy=image_xy/[reference_width_px,reference_height_px]",
-                "reference_width_px": int(camera.endpoint.width),
-                "reference_height_px": int(camera.endpoint.height),
+                "reference_width_px": int(point_camera.endpoint.width),
+                "reference_height_px": int(point_camera.endpoint.height),
                 "source_camera_frame": {
-                    "record_ref": camera.record_ref,
-                    "record_sha256": camera.record_sha256,
+                    "record_ref": point_camera.record_ref,
+                    "record_sha256": point_camera.record_sha256,
                 },
                 "normalized_frame": {
-                    "record_ref": normalized.record_ref,
-                    "record_sha256": normalized.record_sha256,
+                    "record_ref": context.point_normalized_frame.record_ref,
+                    "record_sha256": context.point_normalized_frame.record_sha256,
+                },
+            },
+            {
+                "operation": "source_camera_bbox_to_normalized_extent_v1",
+                "direction": "source_camera_bbox_px_to_source_camera_normalized_bbox_xy",
+                "formula": "normalized_xy=image_xy/[reference_width_px,reference_height_px]",
+                "reference_width_px": int(bbox_camera.endpoint.width),
+                "reference_height_px": int(bbox_camera.endpoint.height),
+                "source_camera_frame": {
+                    "record_ref": bbox_camera.record_ref,
+                    "record_sha256": bbox_camera.record_sha256,
+                },
+                "normalized_frame": {
+                    "record_ref": bbox_normalized.record_ref,
+                    "record_sha256": bbox_normalized.record_sha256,
                 },
             },
         ],
@@ -1674,7 +2541,9 @@ class BoundKeypointCoordinateSurfaces:
 @dataclass(frozen=True, init=False)
 class KeypointCoordinatePublicationCheckpoint:
     run_path: str
-    _nodes: tuple[Any, ...] = field(repr=False, compare=False)
+    publication_owner: str
+    _root: Any = field(repr=False, compare=False)
+    _paths: tuple[str, ...] = field(repr=False, compare=False)
     _attrs: tuple[dict[str, Any], ...] = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
@@ -1682,14 +2551,18 @@ class KeypointCoordinatePublicationCheckpoint:
         self,
         *,
         run_path: str,
-        nodes: tuple[Any, ...],
+        publication_owner: str,
+        root: Any,
+        paths: tuple[str, ...],
         attrs: tuple[dict[str, Any], ...],
         _verification_seal: object | None = None,
     ) -> None:
         if _verification_seal is not _PUBLICATION_CHECKPOINT_SEAL:
             _fail("Keypoint publication checkpoints cannot be constructed directly.")
         object.__setattr__(self, "run_path", run_path)
-        object.__setattr__(self, "_nodes", nodes)
+        object.__setattr__(self, "publication_owner", publication_owner)
+        object.__setattr__(self, "_root", root)
+        object.__setattr__(self, "_paths", paths)
         object.__setattr__(self, "_attrs", attrs)
         object.__setattr__(self, "_seal", _verification_seal)
 
@@ -1697,11 +2570,17 @@ class KeypointCoordinatePublicationCheckpoint:
 def capture_keypoint_coordinate_publication_checkpoint(
     root_node: Any,
     run_path: str,
+    *,
+    expected_publication_owner: str | None = None,
 ) -> KeypointCoordinatePublicationCheckpoint:
     """Capture every attrs surface that canonical publication may mutate."""
 
     path = _canonical_path(run_path, prefix="keypoints_runs/", label="keypoint rowset")
     run = _node(root_node, path, label="keypoint rowset")
+    publication_owner = _publication_owner(
+        run,
+        expected=expected_publication_owner,
+    )
     _require_explicit_run_status(
         run,
         status=RUN_STATUS_RUNNING,
@@ -1713,7 +2592,9 @@ def capture_keypoint_coordinate_publication_checkpoint(
     nodes, attrs = _attrs_snapshot(run, placement, *geometry)
     return KeypointCoordinatePublicationCheckpoint(
         run_path=path,
-        nodes=nodes,
+        publication_owner=publication_owner,
+        root=root_node,
+        paths=tuple(canonical_node_path(node) for node in nodes),
         attrs=attrs,
         _verification_seal=_PUBLICATION_CHECKPOINT_SEAL,
     )
@@ -1729,7 +2610,27 @@ def rollback_keypoint_coordinate_publication(
         or checkpoint._seal is not _PUBLICATION_CHECKPOINT_SEAL
     ):
         _fail("A sealed keypoint publication checkpoint is required for rollback.")
-    _restore_attrs(checkpoint._nodes, checkpoint._attrs)
+    try:
+        run = _node(
+            checkpoint._root,
+            checkpoint.run_path,
+            label="keypoint rollback rowset",
+        )
+    except KeypointCoordinatePublicationError:
+        return
+    if run.attrs.get(KEYPOINT_PUBLICATION_OWNER_ATTR) != checkpoint.publication_owner:
+        return
+    nodes = tuple(
+        _node(checkpoint._root, path, label="keypoint rollback target")
+        for path in checkpoint._paths
+    )
+    if any(
+        not canonical_node_path(node).startswith(f"{checkpoint.run_path}/")
+        and canonical_node_path(node) != checkpoint.run_path
+        for node in nodes
+    ):
+        _fail("Keypoint rollback target escaped its attempt-owned child.")
+    _restore_attrs(nodes, checkpoint._attrs)
 
 
 def _bindings(
@@ -1739,10 +2640,31 @@ def _bindings(
     load: bool,
 ) -> dict[str, BoundCanonicalCoordinateDescriptor]:
     run = context._run_group
-    lineage = (context.context_record, derivation)
-    camera = context.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
-    normalized = context.source.crop_geometry.source_geometry.frame_evidence.normalized_frame
-    normalized_chain = (
+    base_lineage = (context.context_record, derivation)
+    keypoint_lineage = (
+        context.keypoint_label_authority,
+        context.context_record,
+        derivation,
+    )
+    collection = CanonicalCollectionAxis(
+        axis=1,
+        role="keypoint",
+        cardinality=len(context.keypoint_labels),
+        label_authority=DigestBoundCoordinateRecordRef(
+            record_ref=context.keypoint_label_authority.record_ref,
+            record_sha256=context.keypoint_label_authority.record_sha256,
+        ),
+    )
+    point_camera = (
+        context.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
+    )
+    bbox_camera = (
+        context.source.crop_geometry.source_geometry.frame_evidence.bbox_source_camera_frame
+    )
+    bbox_normalized = (
+        context.source.crop_geometry.source_geometry.frame_evidence.normalized_frame
+    )
+    bbox_normalized_chain = (
         context.source.crop_geometry.source_geometry.frame_evidence.normalized_to_source_camera
     )
     specs: dict[str, dict[str, Any]] = {
@@ -1751,50 +2673,59 @@ def _bindings(
             "geometry_type": "bbox_xywh",
             "components": ("x", "y", "width", "height"),
             "component_units": ("px", "px", "px", "px"),
-            "reference_frame_authority": camera,
+            "reference_frame_authority": bbox_camera,
+            "pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
             "source_camera_overlay_status": CANONICAL_OVERLAY_DIRECT,
         },
         "keypoints_roi": {
             "profile_id": "roi_local_px.top_left_y_down.v1",
-            "geometry_type": "points_xy",
+            "geometry_type": "point_xy",
             "components": ("x", "y"),
             "component_units": ("px", "px"),
             "reference_frame_authority": context.roi_frame,
+            "pixel_convention": SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
             "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
             "transform_chain": context.roi_to_source_camera,
+            "collection_axis": True,
         },
         "keypoints_img": {
             "profile_id": "source_camera_image_px.top_left_y_down.v1",
-            "geometry_type": "points_xy",
+            "geometry_type": "point_xy",
             "components": ("x", "y"),
             "component_units": ("px", "px"),
-            "reference_frame_authority": camera,
+            "reference_frame_authority": point_camera,
+            "pixel_convention": SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
             "source_camera_overlay_status": CANONICAL_OVERLAY_DIRECT,
+            "collection_axis": True,
         },
         "keypoints_norm": {
             "profile_id": "source_camera_normalized_xy.top_left_y_down.v1",
-            "geometry_type": "points_xy",
+            "geometry_type": "point_xy",
             "components": ("x", "y"),
             "component_units": ("normalized", "normalized"),
-            "reference_frame_authority": normalized,
+            "reference_frame_authority": context.point_normalized_frame,
+            "pixel_convention": "continuous",
             "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
-            "transform_chain": normalized_chain,
+            "transform_chain": context.point_normalized_to_source_camera,
+            "collection_axis": True,
         },
         "pose_bbox_xyxy_roi": {
             "profile_id": "roi_local_px.top_left_y_down.v1",
             "geometry_type": "bbox_xyxy",
             "components": ("x_min", "y_min", "x_max", "y_max"),
             "component_units": ("px", "px", "px", "px"),
-            "reference_frame_authority": context.roi_frame,
+            "reference_frame_authority": context.bbox_roi_frame,
+            "pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
             "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
-            "transform_chain": context.roi_to_source_camera,
+            "transform_chain": context.bbox_roi_to_source_camera,
         },
         "pose_bbox_xyxy_img": {
             "profile_id": "source_camera_image_px.top_left_y_down.v1",
             "geometry_type": "bbox_xyxy",
             "components": ("x_min", "y_min", "x_max", "y_max"),
             "component_units": ("px", "px", "px", "px"),
-            "reference_frame_authority": camera,
+            "reference_frame_authority": bbox_camera,
+            "pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
             "source_camera_overlay_status": CANONICAL_OVERLAY_DIRECT,
         },
         "pose_bbox_xyxy_norm": {
@@ -1807,14 +2738,16 @@ def _bindings(
                 "normalized",
                 "normalized",
             ),
-            "reference_frame_authority": normalized,
+            "reference_frame_authority": bbox_normalized,
+            "pixel_convention": "continuous",
             "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
-            "transform_chain": normalized_chain,
+            "transform_chain": bbox_normalized_chain,
         },
     }
     result: dict[str, BoundCanonicalCoordinateDescriptor] = {}
     for name, spec in specs.items():
         node = _child(run, name, label=name)
+        lineage = keypoint_lineage if spec.get("collection_axis") else base_lineage
         evidence_kwargs = {
             "row_identity": context.row_identity,
             "lineage_records": lineage,
@@ -1830,12 +2763,35 @@ def _bindings(
             if load
             else build_bound_canonical_coordinate_descriptor(
                 node,
-                **spec,
-                pixel_convention="continuous",
+                **{
+                    key: value
+                    for key, value in spec.items()
+                    if key not in {"collection_axis", "pixel_convention"}
+                },
+                pixel_convention=spec["pixel_convention"],
                 row_identity=context.row_identity,
                 lineage_records=lineage,
+                collection_axis=(
+                    collection if spec.get("collection_axis") else None
+                ),
             )
         )
+        descriptor = result[name].descriptor
+        if (
+            descriptor.profile_id != spec["profile_id"]
+            or descriptor.geometry_type != spec["geometry_type"]
+            or descriptor.components != tuple(spec["components"])
+            or descriptor.component_units != tuple(spec["component_units"])
+            or descriptor.pixel_convention != spec["pixel_convention"]
+            or descriptor.source_camera_overlay.status
+            != spec["source_camera_overlay_status"]
+            or descriptor.collection_axis
+            != (collection if spec.get("collection_axis") else None)
+        ):
+            _fail(
+                f"Persisted {name} descriptor differs from the controlled "
+                "keypoint coordinate and collection-axis contract."
+            )
     return result
 
 
@@ -1958,13 +2914,20 @@ def _activate_validated_keypoint_coordinate_surfaces(
     value: BoundKeypointCoordinateSurfaces,
     *,
     run_name: str,
+    publication_owner_token: str,
+    parent_selector_snapshot: Mapping[str, tuple[bool, Any]],
+    root_pointer_snapshot: Mapping[str, tuple[bool, Any]],
 ) -> None:
-    """Activate one freshly validated complete publication, eligibility last."""
+    """Advance owned selectors under one generation lease, eligibility last."""
 
     if type(value) is not BoundKeypointCoordinateSurfaces or value._seal is not _BOUND_SURFACES_SEAL:
         _fail("Keypoint activation requires sealed coordinate surfaces.")
     context = value.context
     expected_path = f"keypoints_runs/{run_name}"
+    _publication_owner(
+        context._run_group,
+        expected=publication_owner_token,
+    )
     if (
         context.completion_status != RUN_STATUS_COMPLETE
         or context.selector_eligible is not False
@@ -1978,27 +2941,197 @@ def _activate_validated_keypoint_coordinate_surfaces(
             "Keypoint activation requires the exact complete, ineligible, "
             "freshly validated canonical child."
         )
+
+    def fresh_parent() -> Any:
+        parent = _node(root_node, "keypoints_runs", label="keypoint parent")
+        if archive_identity(parent) != archive_identity(run_parent):
+            _fail("Keypoint parent changed archives during activation.")
+        return parent
+
+    active_parent = fresh_parent()
+    _require_snapshot_unchanged(
+        active_parent,
+        parent_selector_snapshot,
+        _KEYPOINT_GUARDED_PARENT_SELECTORS,
+        label="parent selector",
+    )
+    _require_snapshot_unchanged(
+        root_node,
+        root_pointer_snapshot,
+        _KEYPOINT_GUARDED_ROOT_SELECTORS,
+        label="root selector",
+    )
+    if active_parent.attrs.get("latest_pending") != str(run_name):
+        _fail(
+            "Canonical keypoint activation requires the attempt-owned "
+            "latest_pending selector."
+        )
     current = _load_completed_ineligible_keypoint_coordinate_surfaces(
         root_node,
         expected_path,
     )
+    _publication_owner(
+        current.context._run_group,
+        expected=publication_owner_token,
+    )
     if current.derivation.record_sha256 != value.derivation.record_sha256:
         _fail("Keypoint coordinate publication changed before activation.")
 
-    # Resolvers skip the complete child while it remains explicitly
-    # ineligible. Write every parent/root selector first, then make the child
-    # eligible with the final metadata mutation.
+    active_parent = fresh_parent()
+    _require_snapshot_unchanged(
+        active_parent,
+        parent_selector_snapshot,
+        _KEYPOINT_GUARDED_PARENT_SELECTORS,
+        label="parent selector",
+    )
+    _require_snapshot_unchanged(
+        root_node,
+        root_pointer_snapshot,
+        _KEYPOINT_GUARDED_ROOT_SELECTORS,
+        label="root selector",
+    )
+    if active_parent.attrs.get("latest_pending") != str(run_name):
+        _fail("Keypoint pending selector changed before activation.")
+    lease = _acquire_keypoint_parent_publication_lease(
+        active_parent,
+        parent_selector_snapshot,
+        run_path=expected_path,
+        publication_owner=publication_owner_token,
+    )
+    base_generation = int(lease["base_generation"])
+    next_generation = int(lease["next_generation"])
+
+    active_parent = fresh_parent()
+    _require_keypoint_parent_publication_lease(
+        active_parent,
+        lease,
+        expected_generation=base_generation,
+    )
+    _require_snapshot_unchanged(
+        active_parent,
+        parent_selector_snapshot,
+        _KEYPOINT_GUARDED_PARENT_SELECTORS,
+        label="parent selector",
+    )
+    _require_snapshot_unchanged(
+        root_node,
+        root_pointer_snapshot,
+        _KEYPOINT_GUARDED_ROOT_SELECTORS,
+        label="root selector",
+    )
+    if active_parent.attrs.get("latest_pending") != str(run_name):
+        _fail("Keypoint pending selector changed after lease acquisition.")
+
+    active_parent.attrs["latest_complete"] = str(run_name)
+    active_parent = fresh_parent()
+    _require_keypoint_parent_publication_lease(
+        active_parent,
+        lease,
+        expected_generation=base_generation,
+    )
+    _require_snapshot_unchanged(
+        active_parent,
+        parent_selector_snapshot,
+        ("latest",),
+        label="parent selector",
+    )
+    _require_snapshot_unchanged(
+        root_node,
+        root_pointer_snapshot,
+        _KEYPOINT_GUARDED_ROOT_SELECTORS,
+        label="root selector",
+    )
+    if (
+        active_parent.attrs.get("latest_complete") != str(run_name)
+        or active_parent.attrs.get("latest_pending") != str(run_name)
+    ):
+        _fail("Keypoint latest_complete or pending selector changed in activation.")
+
+    active_parent.attrs["latest"] = str(run_name)
+    active_parent = fresh_parent()
+    _require_keypoint_parent_publication_lease(
+        active_parent,
+        lease,
+        expected_generation=base_generation,
+    )
+    _require_snapshot_unchanged(
+        root_node,
+        root_pointer_snapshot,
+        _KEYPOINT_GUARDED_ROOT_SELECTORS,
+        label="root selector",
+    )
+    if (
+        active_parent.attrs.get("latest_complete") != str(run_name)
+        or active_parent.attrs.get("latest") != str(run_name)
+        or active_parent.attrs.get("latest_pending") != str(run_name)
+    ):
+        _fail("Keypoint parent selectors changed during activation.")
+
     root_node.attrs["current_keypoint_group_path"] = expected_path
-    run_parent.attrs["latest_complete"] = str(run_name)
-    run_parent.attrs["latest"] = str(run_name)
+    active_parent = fresh_parent()
+    _require_keypoint_parent_publication_lease(
+        active_parent,
+        lease,
+        expected_generation=base_generation,
+    )
     if (
         root_node.attrs.get("current_keypoint_group_path") != expected_path
-        or run_parent.attrs.get("latest_complete") != str(run_name)
-        or run_parent.attrs.get("latest") != str(run_name)
-        or context._run_group.attrs.get("stage_selector_eligible") is not False
+        or active_parent.attrs.get("latest_complete") != str(run_name)
+        or active_parent.attrs.get("latest") != str(run_name)
+        or active_parent.attrs.get("latest_pending") != str(run_name)
+    ):
+        _fail("Keypoint root or parent selectors changed during activation.")
+
+    del active_parent.attrs["latest_pending"]
+    active_parent = fresh_parent()
+    _require_keypoint_parent_publication_lease(
+        active_parent,
+        lease,
+        expected_generation=base_generation,
+    )
+    activation_run = _node(root_node, expected_path, label="keypoint child")
+    _publication_owner(activation_run, expected=publication_owner_token)
+    if (
+        root_node.attrs.get("current_keypoint_group_path") != expected_path
+        or active_parent.attrs.get("latest_complete") != str(run_name)
+        or active_parent.attrs.get("latest") != str(run_name)
+        or "latest_pending" in active_parent.attrs
+        or activation_run.attrs.get("stage_selector_eligible") is not False
     ):
         _fail("Canonical keypoint selectors did not persist before activation.")
-    context._run_group.attrs["stage_selector_eligible"] = True
+
+    active_parent.attrs[KEYPOINT_PUBLICATION_POLICY_ATTR] = (
+        _KEYPOINT_PUBLICATION_POLICY
+    )
+    active_parent = fresh_parent()
+    _require_keypoint_parent_publication_lease(
+        active_parent,
+        lease,
+        expected_generation=base_generation,
+    )
+    if (
+        active_parent.attrs.get(KEYPOINT_PUBLICATION_POLICY_ATTR)
+        != _KEYPOINT_PUBLICATION_POLICY
+    ):
+        _fail("Keypoint publication policy did not persist exactly.")
+    active_parent.attrs[KEYPOINT_PUBLICATION_GENERATION_ATTR] = next_generation
+    active_parent = fresh_parent()
+    _require_keypoint_parent_publication_lease(
+        active_parent,
+        lease,
+        expected_generation=next_generation,
+    )
+    activation_run = _node(root_node, expected_path, label="keypoint child")
+    _publication_owner(activation_run, expected=publication_owner_token)
+    if (
+        root_node.attrs.get("current_keypoint_group_path") != expected_path
+        or active_parent.attrs.get("latest_complete") != str(run_name)
+        or active_parent.attrs.get("latest") != str(run_name)
+        or "latest_pending" in active_parent.attrs
+        or activation_run.attrs.get("stage_selector_eligible") is not False
+    ):
+        _fail("Keypoint publication epoch did not persist before eligibility.")
+    activation_run.attrs["stage_selector_eligible"] = True
 
 
 def require_bound_keypoint_coordinate_surfaces(value: Any) -> BoundKeypointCoordinateSurfaces:
@@ -2014,6 +3147,11 @@ __all__ = [
     "KEYPOINT_ARRAY_NAMES",
     "KEYPOINT_COORDINATE_CONTEXT_ATTR",
     "KEYPOINT_COORDINATE_DERIVATION_ATTR",
+    "KEYPOINT_LABEL_AUTHORITY_ATTR",
+    "KEYPOINT_PARENT_PUBLICATION_LEASE_ATTR",
+    "KEYPOINT_PUBLICATION_GENERATION_ATTR",
+    "KEYPOINT_PUBLICATION_OWNER_ATTR",
+    "KEYPOINT_PUBLICATION_POLICY_ATTR",
     "BoundKeypointCoordinateContext",
     "BoundKeypointCoordinateSurfaces",
     "BoundKeypointCropSource",

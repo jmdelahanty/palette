@@ -446,7 +446,7 @@ def _write_stimulus_h5_with_arena_relative_chaser_states(
     )
     descriptor = build_canonical_coordinate_descriptor(
         profile_id="arena_relative_canvas_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         reference_width=344,
@@ -1086,7 +1086,7 @@ def test_import_materializes_canonical_array_specific_chaser_surfaces(tmp_path: 
         np.testing.assert_allclose(node[:], values)
         descriptor = _load_output_coordinate_descriptor(chaser_group, node)
         assert descriptor.space_id == "arena_relative_canvas_px"
-        assert descriptor.geometry_type == "points_xy"
+        assert descriptor.geometry_type == "point_xy"
         assert descriptor.components == ("x", "y")
         assert descriptor.reference_extent.width == 344
         assert descriptor.reference_extent.height == 344
@@ -1703,11 +1703,64 @@ def test_import_rejects_overwrite_of_published_latest_run(tmp_path: Path) -> Non
     assert runs.attrs["latest_complete"] == run_name
     assert run_group.attrs["palette_run_completion_status"] == "complete"
     assert run_group.attrs["stage_selector_eligible"] is True
+    assert run_group.attrs[mod.STIMULUS_PUBLICATION_OWNER_ATTR]
+    assert (
+        runs.attrs[mod.STIMULUS_PUBLICATION_POLICY_ATTR]
+        == mod.STIMULUS_PUBLICATION_POLICY
+    )
+    assert runs.attrs[mod.STIMULUS_PUBLICATION_GENERATION_ATTR] == 1
+    assert runs.attrs[mod.STIMULUS_PARENT_PUBLICATION_LEASE_ATTR]["run_path"] == (
+        f"analysis/stimulus_runs/{run_name}"
+    )
     assert run_group.attrs["created_at_utc"] == created_at
     np.testing.assert_array_equal(
         run_group["tracking_data"]["chaser_states"]["target_position_xy"][:],
         target_values,
     )
+
+
+def test_import_preserves_hostile_concurrent_selector_takeover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h5_path = tmp_path / "concurrent_takeover.h5"
+    zarr_path = tmp_path / "concurrent_takeover.zarr"
+    run_name = "stimulus_concurrent_takeover"
+    _write_stimulus_h5_with_arena_relative_chaser_states(h5_path)
+    _prepare_acquisition_authority(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    runs = root["analysis"].require_group("stimulus_runs")
+    runs.attrs["latest"] = "prior"
+    runs.attrs["latest_complete"] = "prior"
+    original_write = mod._write_stimulus_activation_attr
+    takeover_injected = False
+
+    def hostile_write(attrs, name, value):
+        nonlocal takeover_injected
+        original_write(attrs, name, value)
+        if name == "latest_complete" and not takeover_injected:
+            takeover_injected = True
+            runs.attrs["latest"] = "alien-concurrent-run"
+
+    monkeypatch.setattr(mod, "_write_stimulus_activation_attr", hostile_write)
+
+    with pytest.raises(RuntimeError, match="lost exact ownership"):
+        mod.import_stimulus_to_zarr(
+            stimulus_h5=h5_path,
+            zarr_path=zarr_path,
+            run_name=run_name,
+            overwrite=False,
+            verbose=False,
+            repair_chaser_gaps=False,
+        )
+
+    reloaded = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    reloaded_runs = reloaded["analysis/stimulus_runs"]
+    failed = reloaded_runs[run_name]
+    assert reloaded_runs.attrs["latest"] == "alien-concurrent-run"
+    assert reloaded_runs.attrs["latest_complete"] == "prior"
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
 
 
 def test_import_rejects_overwrite_of_historical_complete_run(tmp_path: Path) -> None:
@@ -1742,6 +1795,48 @@ def test_import_rejects_overwrite_of_historical_complete_run(tmp_path: Path) -> 
     assert runs.attrs["latest"] == latest_run
     assert runs[historical_run].attrs["palette_run_completion_status"] == "complete"
     assert runs[latest_run].attrs["palette_run_completion_status"] == "complete"
+
+
+def test_import_never_reuses_failed_public_tombstone(tmp_path: Path) -> None:
+    h5_path = tmp_path / "failed_retry.h5"
+    zarr_path = tmp_path / "failed_retry.zarr"
+    run_name = "failed_stimulus_tombstone"
+    _write_minimal_stimulus_h5(h5_path)
+    root = zarr.open_group(str(zarr_path), mode="w", use_consolidated=False)
+    runs = root.require_group("analysis").require_group("stimulus_runs")
+    failed = runs.create_group(
+        run_name,
+        attributes={
+            "palette_run_completion_status": "failed",
+            "stage_selector_eligible": False,
+            mod.STIMULUS_PUBLICATION_OWNER_ATTR: "existing-owner",
+            "sentinel": "preserve",
+        },
+    )
+
+    with pytest.raises(ValueError, match="failed public children are immutable"):
+        mod.import_stimulus_to_zarr(
+            stimulus_h5=h5_path,
+            zarr_path=zarr_path,
+            run_name=run_name,
+            overwrite=True,
+            verbose=False,
+            repair_chaser_gaps=False,
+        )
+
+    assert runs[run_name].attrs["sentinel"] == "preserve"
+    assert runs[run_name].attrs[mod.STIMULUS_PUBLICATION_OWNER_ATTR] == (
+        "existing-owner"
+    )
+    assert failed.path == runs[run_name].path
+
+
+def test_postcommit_stimulus_log_is_nonthrowing() -> None:
+    class HostileConsole:
+        def log(self, _message: str) -> None:
+            raise RuntimeError("injected postcommit logger failure")
+
+    mod._log_after_commit(HostileConsole(), "committed")
 
 
 def test_import_marks_arbitrary_post_start_exception_failed(
@@ -1792,6 +1887,10 @@ def test_import_marks_arbitrary_post_start_exception_failed(
     assert failed.attrs["palette_run_completion_status"] == "failed"
     assert failed.attrs["stage_selector_eligible"] is False
     assert failed.attrs["palette_run_error"] == "synthetic post-start failure"
+    assert failed.attrs[mod.STIMULUS_PUBLICATION_OWNER_ATTR]
+    tombstone = failed.attrs[mod.STIMULUS_PUBLICATION_TOMBSTONE_ATTR]
+    assert tombstone["public_path_retained"] is True
+    assert tombstone["retry_policy"] == "new_immutable_run_name_required"
     assert runs.attrs.get("latest") != run_name
     assert runs.attrs.get("latest_complete") != run_name
     assert runs.attrs.get("authoritative_run") != run_name
@@ -1803,6 +1902,115 @@ def test_import_marks_arbitrary_post_start_exception_failed(
         "experimental_chamber": "root_chamber",
         "dish_design": "root_dish",
     }
+
+
+def test_import_persist_then_raise_create_recovers_owned_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h5_path = tmp_path / "stimulus_create_ambiguous.h5"
+    zarr_path = tmp_path / "stimulus_create_ambiguous.zarr"
+    run_name = "stimulus_create_ambiguous"
+    _write_minimal_stimulus_h5(h5_path)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    runs = root.require_group("analysis/stimulus_runs")
+    runs.attrs["latest_pending"] = run_name
+    original_create = mod._create_stimulus_public_candidate
+
+    def persist_then_raise(parent, *, run_name, publication_owner_uuid):
+        original_create(
+            parent,
+            run_name=run_name,
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        raise RuntimeError("injected stimulus create acknowledgement loss")
+
+    monkeypatch.setattr(
+        mod,
+        "_create_stimulus_public_candidate",
+        persist_then_raise,
+    )
+
+    with pytest.raises(RuntimeError, match="create acknowledgement loss"):
+        mod.import_stimulus_to_zarr(
+            stimulus_h5=h5_path,
+            zarr_path=zarr_path,
+            run_name=run_name,
+            overwrite=False,
+            verbose=False,
+            repair_chaser_gaps=False,
+        )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    failed = root[f"analysis/stimulus_runs/{run_name}"]
+    owner = failed.attrs[mod.STIMULUS_PUBLICATION_OWNER_ATTR]
+    tombstone = failed.attrs[mod.STIMULUS_PUBLICATION_TOMBSTONE_ATTR]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert tombstone["publication_owner_uuid"] == owner
+    assert tombstone["run_name"] == run_name
+    assert root["analysis/stimulus_runs"].attrs["latest_pending"] == run_name
+
+
+def test_import_failure_cleanup_never_clobbers_recreated_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h5_path = tmp_path / "stimulus_cleanup_takeover.h5"
+    zarr_path = tmp_path / "stimulus_cleanup_takeover.zarr"
+    run_name = "stimulus_cleanup_takeover"
+    _write_minimal_stimulus_h5(h5_path)
+    root = zarr.open_group(str(zarr_path), mode="w", use_consolidated=False)
+    parent = root.require_group("analysis/stimulus_runs")
+    original_write = mod._write_stimulus_failure_attr
+    takeover_injected = False
+
+    monkeypatch.setattr(
+        mod,
+        "_materialize_selected_calibration_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected stimulus source failure")
+        ),
+    )
+
+    def hostile_write(attrs, name, value):
+        nonlocal takeover_injected
+        original_write(attrs, name, value)
+        if name == "stage_selector_eligible" and not takeover_injected:
+            takeover_injected = True
+            del parent[run_name]
+            parent.create_group(
+                run_name,
+                attributes={
+                    mod.STIMULUS_PUBLICATION_OWNER_ATTR: "alien-stimulus-owner",
+                    "palette_run_completion_status": "complete",
+                    "stage_selector_eligible": True,
+                    "sentinel": "successor-preserved",
+                },
+            )
+
+    monkeypatch.setattr(mod, "_write_stimulus_failure_attr", hostile_write)
+
+    with pytest.raises(RuntimeError, match="injected stimulus source failure"):
+        mod.import_stimulus_to_zarr(
+            stimulus_h5=h5_path,
+            zarr_path=zarr_path,
+            run_name=run_name,
+            overwrite=False,
+            verbose=False,
+            repair_chaser_gaps=False,
+        )
+
+    reloaded = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    successor = reloaded[f"analysis/stimulus_runs/{run_name}"]
+    assert takeover_injected is True
+    assert successor.attrs[mod.STIMULUS_PUBLICATION_OWNER_ATTR] == (
+        "alien-stimulus-owner"
+    )
+    assert successor.attrs["palette_run_completion_status"] == "complete"
+    assert successor.attrs["stage_selector_eligible"] is True
+    assert successor.attrs["sentinel"] == "successor-preserved"
+    assert mod.STIMULUS_PUBLICATION_TOMBSTONE_ATTR not in successor.attrs
 
 
 def test_import_invalidates_physical_authority_when_final_h5_reverify_fails(

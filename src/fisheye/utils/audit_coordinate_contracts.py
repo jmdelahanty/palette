@@ -109,7 +109,10 @@ from fisheye.shared.directed_transform_v2 import (
     AFFINE_2D_CONSTANT_KIND,
     AFFINE_2D_ROWWISE_KIND,
     DIRECTED_TRANSFORM_V2_ATTR,
+    DIRECTED_TRANSFORM_V2_ATTRS,
     DIRECTED_TRANSFORM_V2_DIGEST_ATTR,
+    DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR,
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR,
     HOMOGRAPHY_KIND,
     DirectedTransformV2Error,
     parse_directed_transform_v2,
@@ -145,7 +148,9 @@ from fisheye.shared.pixel_frame_authority import (
     ARENA_RELATIVE_CANVAS_FRAME_KIND,
     CROP_PLACEMENT_WINDOW_POLICY,
     CROP_PLACEMENT_OWNERSHIP_ATTR,
-    CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR,
+    CROP_PLACEMENT_OWNERSHIP_ATTRS,
+    CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+    CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
     DETECTOR_NORMALIZED_FRAME_KIND,
     MODEL_INPUT_FRAME_KIND,
     NORMALIZED_TO_PIXEL_CENTER_INDEX_V1,
@@ -154,6 +159,8 @@ from fisheye.shared.pixel_frame_authority import (
     PIXEL_FRAME_AUTHORITY_CANONICALIZATION,
     PIXEL_FRAME_AUTHORITY_DIGEST_ATTR,
     ROI_FRAME_KIND,
+    SCALE_XY_EDGE_ALIGNED_V1,
+    SCALE_XY_PIXEL_CENTER_V1,
     SELECTED_CANVAS_FRAME_KIND,
     SOURCE_CAMERA_IMAGE_SPACE_ID,
     SOURCE_CAMERA_FRAME_KIND,
@@ -173,6 +180,10 @@ from fisheye.shared.observation_coordinate_publication import (
     CROP_GEOMETRY_SELECTION_OPERATION,
     CROP_GEOMETRY_SELECTION_SCHEMA_ID,
     CROP_GEOMETRY_SELECTION_SCHEMA_VERSION,
+    CROP_ROI_BBOX_EDGE_EXTENT_ATTR,
+    CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_ID,
+    CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_VERSION,
+    CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH,
     CROP_ROI_GEOMETRY_DERIVATION_ATTR,
     CROP_ROI_GEOMETRY_DERIVATION_OPERATION,
     CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID,
@@ -180,6 +191,10 @@ from fisheye.shared.observation_coordinate_publication import (
     DETECTION_ACQUISITION_MAPPING_ATTR,
     DETECTION_ACQUISITION_MAPPING_SCHEMA_ID,
     DETECTION_ACQUISITION_MAPPING_SCHEMA_VERSION,
+    DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
+    DETECTION_BACKEND_RESULT_PROJECTION_OPERATION,
+    DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID,
+    DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_VERSION,
     DETECTION_BBOX_PROJECTION_ATTR,
     DETECTION_BBOX_PROJECTION_OPERATION,
     DETECTION_BBOX_PROJECTION_SCHEMA_ID,
@@ -209,7 +224,9 @@ from fisheye.shared.transform_authority import (
     NORMALIZED_TO_PIXEL_AUTHORITY_KIND,
     SELECTED_CALIBRATION_AUTHORITY_KIND,
     TRANSFORM_AUTHORITY_ATTR,
-    TRANSFORM_AUTHORITY_DIGEST_ATTR,
+    TRANSFORM_AUTHORITY_ATTRS,
+    TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR,
+    TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     TransformAuthorityError,
     parse_transform_authority,
 )
@@ -221,7 +238,28 @@ CHECKPOINT_SCHEMA_ID = "palette.coordinate_contract_inventory.dataset_checkpoint
 CHECKPOINT_SCHEMA_VERSION = 12
 ARTIFACT_SCHEMA_VERSION = 12
 AUDIT_RULESET_ID = "palette.coordinate_contract_inventory.rules"
-AUDIT_RULESET_VERSION = 12
+AUDIT_RULESET_VERSION = 13
+
+_CROP_OWNERSHIP_ATTR_BY_PIXEL_CONVENTION = {
+    "continuous": CROP_PLACEMENT_OWNERSHIP_ATTR,
+    "pixel_center": CROP_PLACEMENT_PIXEL_CENTER_OWNERSHIP_ATTR,
+    "pixel_edge_half_open": CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR,
+}
+_TRANSFORM_AUTHORITY_ATTR_BY_TRANSFORM_ATTR = {
+    DIRECTED_TRANSFORM_V2_ATTR: TRANSFORM_AUTHORITY_ATTR,
+    DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR: TRANSFORM_AUTHORITY_PIXEL_CENTER_ATTR,
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR: TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
+}
+_SPECIALIZED_TRANSFORM_CONVENTION = {
+    DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR: (
+        "pixel_center",
+        SCALE_XY_PIXEL_CENTER_V1,
+    ),
+    DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR: (
+        "pixel_edge_half_open",
+        SCALE_XY_EDGE_ALIGNED_V1,
+    ),
+}
 
 _MAX_METADATA_PHYSICAL_CHUNK_GRID_ENTRIES = 1_000_000
 
@@ -229,6 +267,11 @@ _REGISTERED_OBSERVATION_COORDINATE_RECORDS = {
     DETECTION_ACQUISITION_MAPPING_SCHEMA_ID: {
         "attribute": DETECTION_ACQUISITION_MAPPING_ATTR,
         "schema_version": DETECTION_ACQUISITION_MAPPING_SCHEMA_VERSION,
+        "owner_family": "detect_runs",
+    },
+    DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID: {
+        "attribute": DETECTION_BACKEND_RESULT_PROJECTION_ATTR,
+        "schema_version": DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_VERSION,
         "owner_family": "detect_runs",
     },
     DETECTION_BBOX_PROJECTION_SCHEMA_ID: {
@@ -2595,13 +2638,10 @@ def _collect_attr_declarations(
             or lowered in _REGISTERED_OBSERVATION_RECORDS_BY_ATTR
             or lowered.removesuffix("_sha256")
             in _REGISTERED_OBSERVATION_RECORDS_BY_ATTR
-            or lowered
-            in {
-                DIRECTED_TRANSFORM_V2_ATTR,
-                DIRECTED_TRANSFORM_V2_DIGEST_ATTR,
-                TRANSFORM_AUTHORITY_ATTR,
-                TRANSFORM_AUTHORITY_DIGEST_ATTR,
-            }
+            or lowered in DIRECTED_TRANSFORM_V2_ATTRS
+            or lowered.removesuffix("_sha256") in DIRECTED_TRANSFORM_V2_ATTRS
+            or lowered in TRANSFORM_AUTHORITY_ATTRS
+            or lowered.removesuffix("_sha256") in TRANSFORM_AUTHORITY_ATTRS
         ):
             continue
         location = f"{prefix}.{key}" if prefix else key
@@ -8067,13 +8107,15 @@ def _pixel_frame_record_metadata(
             )
             ownership_node = nodes.get(ownership_path or "")
             ownership = None
+            expected_ownership_attr = _CROP_OWNERSHIP_ATTR_BY_PIXEL_CONVENTION.get(
+                frame.pixel_convention
+            )
             if (
                 ownership_node is not None
-                and ownership_attr == CROP_PLACEMENT_OWNERSHIP_ATTR
+                and ownership_attr in CROP_PLACEMENT_OWNERSHIP_ATTRS
+                and ownership_attr == expected_ownership_attr
             ):
-                raw_ownership = ownership_node.attributes.get(
-                    CROP_PLACEMENT_OWNERSHIP_ATTR
-                )
+                raw_ownership = ownership_node.attributes.get(ownership_attr)
                 try:
                     ownership = parse_crop_placement_ownership(raw_ownership)
                 except PixelFrameAuthorityError:
@@ -8082,7 +8124,7 @@ def _pixel_frame_record_metadata(
                     if (
                         not _exact_json_equal(raw_ownership, ownership.to_dict())
                         or ownership_node.attributes.get(
-                            CROP_PLACEMENT_OWNERSHIP_DIGEST_ATTR
+                            f"{ownership_attr}_sha256"
                         )
                         != ownership.digest()
                         or ownership_pointer.get("record_sha256")
@@ -8773,16 +8815,16 @@ def _parse_directed_transform_v2_node(
 
     issues: list[dict[str, Any]] = []
     _node_path, attr_name = _canonical_v2_record_target(record_ref)
-    if attr_name != DIRECTED_TRANSFORM_V2_ATTR:
+    if attr_name not in DIRECTED_TRANSFORM_V2_ATTRS:
         return None, [
             _issue(
                 "DIRECTED_TRANSFORM_V2_REF_INVALID",
                 "error",
-                "Canonical transform refs must name an exact @directed_transform_v2 record.",
+                "Canonical transform refs must name one exact controlled directed-transform-v2 attr.",
                 record_ref=record_ref,
             )
         ]
-    raw = target.attributes.get(DIRECTED_TRANSFORM_V2_ATTR)
+    raw = target.attributes.get(attr_name)
     try:
         transform = parse_directed_transform_v2(raw)
     except DirectedTransformV2Error as exc:
@@ -8804,7 +8846,7 @@ def _parse_directed_transform_v2_node(
                 record_ref=record_ref,
             )
         )
-    stored = target.attributes.get(DIRECTED_TRANSFORM_V2_DIGEST_ATTR)
+    stored = target.attributes.get(f"{attr_name}_sha256")
     if stored != transform.digest():
         issues.append(
             _issue(
@@ -8814,6 +8856,23 @@ def _parse_directed_transform_v2_node(
                 record_ref=record_ref,
                 declared_sha256=stored,
                 actual_sha256=transform.digest(),
+            )
+        )
+    specialized = _SPECIALIZED_TRANSFORM_CONVENTION.get(attr_name)
+    if specialized is not None and (
+        transform.kind != AFFINE_2D_ROWWISE_KIND
+        or transform.source.pixel_convention != specialized[0]
+        or transform.sampling_formula != specialized[1]
+    ):
+        issues.append(
+            _issue(
+                "DIRECTED_TRANSFORM_V2_SPECIALIZED_ATTR_MISMATCH",
+                "error",
+                "A specialized crop-placement transform attr must match its exact source pixel convention and sampling formula.",
+                record_ref=record_ref,
+                transform_attr=attr_name,
+                expected_pixel_convention=specialized[0],
+                expected_sampling_formula=specialized[1],
             )
         )
     expected_shape = (
@@ -8889,17 +8948,20 @@ def _parse_directed_transform_v2_node(
         transform.transform_authority.record_ref
     )
     authority = None
-    if authority_node is not None and authority_attr != TRANSFORM_AUTHORITY_ATTR:
+    expected_authority_attr = _TRANSFORM_AUTHORITY_ATTR_BY_TRANSFORM_ATTR[attr_name]
+    if authority_node is not None and authority_attr != expected_authority_attr:
         issues.append(
             _issue(
                 "DIRECTED_TRANSFORM_V2_AUTHORITY_REF_INVALID",
                 "error",
-                "Transform authority must name an exact @transform_authority record.",
+                "Transform authority must name the exact convention-matched controlled authority attr.",
                 record_ref=transform.transform_authority.record_ref,
+                transform_attr=attr_name,
+                expected_authority_attr=expected_authority_attr,
             )
         )
     elif authority_node is not None:
-        raw_authority = authority_node.attributes.get(TRANSFORM_AUTHORITY_ATTR)
+        raw_authority = authority_node.attributes.get(authority_attr)
         try:
             authority = parse_transform_authority(raw_authority)
         except TransformAuthorityError as exc:
@@ -8923,7 +8985,7 @@ def _parse_directed_transform_v2_node(
                     )
                 )
             authority_digest = authority_node.attributes.get(
-                TRANSFORM_AUTHORITY_DIGEST_ATTR
+                f"{authority_attr}_sha256"
             )
             if (
                 authority_digest != authority.digest()
@@ -9600,6 +9662,354 @@ def _detection_acquisition_mapping_issues(
     return issues
 
 
+def _detection_backend_result_projection_issues(
+    *,
+    target: MetadataNode,
+    record: Mapping[str, Any],
+    contract: Any,
+    nodes: Mapping[str, MetadataNode],
+) -> list[dict[str, Any]]:
+    """Validate the exact detector-result coordinate proof from metadata."""
+
+    rowset_path = target.relative_path
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "operation",
+        "direction",
+        "backend_result_space",
+        "source_camera_normalized_frame",
+        "source_camera_bbox_frame",
+        "acquisition_camera_frame",
+        "published_bbox_normalized",
+        "result_px_to_source_camera_normalized_matrix",
+        "result_px_to_source_camera_bbox_matrix",
+        "runtime_result_validation",
+        "model_artifact",
+        "proof",
+    }
+    issues: list[dict[str, Any]] = []
+    bbox_node, bbox_issues = _observation_array_payload_metadata(
+        record.get("published_bbox_normalized"),
+        role=(
+            "detection_backend_result_projection."
+            "published_bbox_normalized"
+        ),
+        nodes=nodes,
+        expected_path=f"{rowset_path}/bbox_norm_coords",
+        expected_shape=(contract.leading_dimension, 4),
+        dtype_kind="f",
+    )
+    issues.extend(bbox_issues)
+
+    normalized_pointer = _as_mapping(
+        record.get("source_camera_normalized_frame")
+    )
+    normalized_frame, _normalized_node, normalized_issues = (
+        _pixel_frame_record_metadata(
+            record_ref=normalized_pointer.get("record_ref"),
+            record_sha256=normalized_pointer.get("record_sha256"),
+            role=(
+                "detection_backend_result_projection."
+                "source_camera_normalized_frame"
+            ),
+            nodes=nodes,
+        )
+    )
+    issues.extend(normalized_issues)
+    bbox_pointer = _as_mapping(record.get("source_camera_bbox_frame"))
+    bbox_frame, _bbox_frame_node, bbox_frame_issues = (
+        _pixel_frame_record_metadata(
+            record_ref=bbox_pointer.get("record_ref"),
+            record_sha256=bbox_pointer.get("record_sha256"),
+            role=(
+                "detection_backend_result_projection."
+                "source_camera_bbox_frame"
+            ),
+            nodes=nodes,
+        )
+    )
+    issues.extend(bbox_frame_issues)
+
+    acquisition_pointer = _as_mapping(record.get("acquisition_camera_frame"))
+    acquisition_path, acquisition_attr = _canonical_v2_record_target(
+        acquisition_pointer.get("record_ref")
+    )
+    acquisition_node = nodes.get(acquisition_path or "")
+    acquisition = None
+    try:
+        if (
+            type(record.get("acquisition_camera_frame")) is not dict
+            or set(acquisition_pointer) != {"record_ref", "record_sha256"}
+            or acquisition_node is None
+            or acquisition_attr != ACQUISITION_CAMERA_FRAME_ATTR
+        ):
+            raise PixelFrameAuthorityError("invalid acquisition pointer")
+        acquisition = parse_acquisition_camera_frame(
+            acquisition_node.attributes.get(ACQUISITION_CAMERA_FRAME_ATTR)
+        )
+        if (
+            acquisition_pointer.get("record_sha256") != acquisition.digest()
+            or acquisition_node.attributes.get(
+                ACQUISITION_CAMERA_FRAME_DIGEST_ATTR
+            )
+            != acquisition.digest()
+        ):
+            raise PixelFrameAuthorityError("stale acquisition digest")
+    except PixelFrameAuthorityError as exc:
+        issues.append(
+            _issue(
+                "DETECTION_BACKEND_RESULT_PROJECTION_INVALID",
+                "error",
+                "Detection backend projection has no exact acquisition-camera authority.",
+                rowset_path=rowset_path,
+                error=str(exc),
+            )
+        )
+
+    def optional_hw(value: Any) -> tuple[bool, list[int] | None]:
+        if value is None:
+            return True, None
+        if (
+            type(value) is not list
+            or len(value) != 2
+            or any(type(item) is not int or item <= 0 for item in value)
+        ):
+            return False, None
+        return True, [int(value[0]), int(value[1])]
+
+    attrs = target.attributes
+    parameters = attrs.get("parameters")
+    backend = attrs.get("decode_backend_effective")
+    reader = attrs.get("video_reader_type")
+    height = attrs.get("inference_height")
+    width = attrs.get("inference_width")
+    result_count = attrs.get("validated_backend_result_count")
+    result_shape_valid, result_shape = optional_hw(
+        attrs.get("validated_backend_result_orig_shape_hw")
+    )
+    requested_valid, requested = optional_hw(
+        parameters.get("resize_dims") if type(parameters) is dict else object()
+    )
+    pre_resize_valid, pre_resize = optional_hw(
+        parameters.get("pre_resize_dims")
+        if type(parameters) is dict
+        else object()
+    )
+    effective_valid, effective = optional_hw(
+        parameters.get("effective_input_resize_dims")
+        if type(parameters) is dict
+        else object()
+    )
+    tensor_valid, tensor_resize = optional_hw(
+        parameters.get("tensor_resize_dims")
+        if type(parameters) is dict
+        else object()
+    )
+    imgsz = parameters.get("imgsz_applied") if type(parameters) is dict else None
+    imgsz_valid = imgsz is None or (
+        type(imgsz) is int
+        and imgsz > 0
+        or type(imgsz) is list
+        and len(imgsz) == 2
+        and all(type(item) is int and item > 0 for item in imgsz)
+    )
+    runtime_valid = bool(
+        type(parameters) is dict
+        and isinstance(backend, str)
+        and bool(backend)
+        and backend == backend.strip()
+        and isinstance(reader, str)
+        and bool(reader)
+        and reader == reader.strip()
+        and type(height) is int
+        and height > 0
+        and type(width) is int
+        and width > 0
+        and type(result_count) is int
+        and acquisition is not None
+        and result_count == acquisition.source_total_frames
+        and result_shape_valid
+        and result_shape == [height, width]
+        and parameters.get("decode_backend_effective") == backend
+        and requested_valid
+        and pre_resize_valid
+        and effective_valid
+        and tensor_valid
+        and imgsz_valid
+    )
+    expected_runtime = (
+        {
+            "decode_backend_effective": backend,
+            "video_reader_type": reader,
+            "validated_result_count": result_count,
+            "validated_result_orig_shape_hw": result_shape,
+            "requested_resize_dims_hw": requested,
+            "pre_resize_dims_hw": pre_resize,
+            "effective_runtime_input_resize_dims_hw": effective,
+            "tensor_resize_dims_hw": tensor_resize,
+            "ultralytics_imgsz_applied": _json_safe(imgsz),
+            "result_coordinate_contract": (
+                "ultralytics_boxes_xyxy_in_validated_result_orig_shape_px"
+            ),
+            "network_preprocessing_authority": (
+                "not_persisted_not_used_as_coordinate_projection_authority"
+            ),
+        }
+        if runtime_valid
+        else None
+    )
+
+    artifact = _as_mapping(record.get("model_artifact"))
+    artifact_path = artifact.get("path")
+    artifact_digest = artifact.get("sha256")
+    artifact_valid = bool(
+        type(record.get("model_artifact")) is dict
+        and set(artifact)
+        == {
+            "role",
+            "path",
+            "fingerprint_scheme",
+            "sha256",
+            "size_bytes",
+            "mtime_ns",
+            "source",
+        }
+        and artifact.get("role") == "detect_model"
+        and artifact.get("fingerprint_scheme") == "content_v1"
+        and isinstance(artifact_path, str)
+        and artifact_path.startswith("/")
+        and bool(artifact_path.strip())
+        and artifact_path == artifact_path.strip()
+        and isinstance(artifact_digest, str)
+        and _SHA256_HEX_RE.fullmatch(artifact_digest) is not None
+        and type(artifact.get("size_bytes")) is int
+        and artifact.get("size_bytes") >= 0
+        and type(artifact.get("mtime_ns")) is int
+        and artifact.get("mtime_ns") >= 0
+        and artifact.get("source") in {"computed", "sidecar", "registry"}
+        and attrs.get("model_path") == artifact_path
+        and attrs.get("model_name") == artifact_path.rsplit("/", 1)[-1]
+    )
+
+    normalized_lineage = (
+        _as_mapping(normalized_frame.lineage)
+        if normalized_frame is not None
+        else {}
+    )
+    bbox_lineage = (
+        _as_mapping(bbox_frame.lineage) if bbox_frame is not None else {}
+    )
+    bbox_acquisition = _as_mapping(
+        bbox_lineage.get("acquisition_camera_frame")
+    )
+    source_width = (
+        bbox_frame.reference_extent.get("width")
+        if bbox_frame is not None
+        else None
+    )
+    source_height = (
+        bbox_frame.reference_extent.get("height")
+        if bbox_frame is not None
+        else None
+    )
+    expected_backend_space = (
+        {
+            "space_id": "detector_backend_result_image_px",
+            "geometry_type": "bbox_xyxy",
+            "pixel_convention": "pixel_edge_half_open",
+            "reference_width_px": width,
+            "reference_height_px": height,
+        }
+        if runtime_valid
+        else None
+    )
+    expected_normalized_matrix = (
+        [
+            [1.0 / float(width), 0.0, 0.0],
+            [0.0, 1.0 / float(height), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+        if runtime_valid
+        else None
+    )
+    expected_bbox_matrix = (
+        [
+            [float(source_width) / float(width), 0.0, 0.0],
+            [0.0, float(source_height) / float(height), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+        if runtime_valid
+        and type(source_width) is int
+        and source_width > 0
+        and type(source_height) is int
+        and source_height > 0
+        else None
+    )
+    semantic_valid = bool(
+        set(record) == expected_fields
+        and record.get("schema_id")
+        == DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID
+        and record.get("schema_version")
+        == DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_VERSION
+        and record.get("operation")
+        == DETECTION_BACKEND_RESULT_PROJECTION_OPERATION
+        and record.get("direction")
+        == "detector_backend_result_image_px_to_source_camera_normalized_xy"
+        and record.get("proof")
+        == (
+            "every_backend_result_orig_shape_equaled_its_exact_runtime_input_"
+            "shape_before_bbox_normalization_v1"
+        )
+        and bbox_node is not None
+        and not bbox_issues
+        and set(normalized_pointer) == {"record_ref", "record_sha256"}
+        and set(bbox_pointer) == {"record_ref", "record_sha256"}
+        and normalized_frame is not None
+        and normalized_frame.kind == SOURCE_CAMERA_NORMALIZED_FRAME_KIND
+        and normalized_frame.pixel_convention == "continuous"
+        and normalized_lineage.get("pixel_frame") == bbox_pointer
+        and bbox_frame is not None
+        and bbox_frame.kind == SOURCE_CAMERA_FRAME_KIND
+        and bbox_frame.pixel_convention == "pixel_edge_half_open"
+        and bbox_acquisition.get("record_ref")
+        == acquisition_pointer.get("record_ref")
+        and bbox_acquisition.get("record_sha256")
+        == acquisition_pointer.get("record_sha256")
+        and acquisition is not None
+        and source_width == acquisition.width_px
+        and source_height == acquisition.height_px
+        and runtime_valid
+        and artifact_valid
+        and _exact_json_equal(
+            record.get("backend_result_space"),
+            expected_backend_space,
+        )
+        and _exact_json_equal(
+            record.get("runtime_result_validation"),
+            expected_runtime,
+        )
+        and _exact_json_equal(
+            record.get("result_px_to_source_camera_normalized_matrix"),
+            expected_normalized_matrix,
+        )
+        and _exact_json_equal(
+            record.get("result_px_to_source_camera_bbox_matrix"),
+            expected_bbox_matrix,
+        )
+    )
+    if not semantic_valid:
+        issues.append(
+            _issue(
+                "DETECTION_BACKEND_RESULT_PROJECTION_INVALID",
+                "error",
+                "Detection backend-result projection must bind its exact normalized bbox payload, typed frame topology, acquisition extent, runtime result shape, directed matrices, and model artifact.",
+                rowset_path=rowset_path,
+            )
+        )
+    return issues
+
+
 def _detection_bbox_projection_issues(
     *,
     target: MetadataNode,
@@ -9619,6 +10029,7 @@ def _detection_bbox_projection_issues(
         "destination_frame",
         "direction",
         "transform_chain",
+        "destination_pixel_convention",
         "reference_width_px",
         "reference_height_px",
         "formula",
@@ -9728,8 +10139,10 @@ def _detection_bbox_projection_issues(
         or record.get("operation") != DETECTION_BBOX_PROJECTION_OPERATION
         or record.get("direction")
         != "source_camera_normalized_xy_to_source_camera_image_px"
+        or record.get("destination_pixel_convention")
+        != "pixel_edge_half_open"
         or record.get("formula")
-        != "cxcywh_normalized_to_xyxy_edges_using_exact_reference_extent_v1"
+        != "cxcywh_normalized_to_xyxy_half_open_edges_using_exact_reference_extent_v2"
         or not _observation_pointer_matches(
             record.get("row_identity"),
             expected_ref=identity_ref,
@@ -9747,8 +10160,12 @@ def _detection_bbox_projection_issues(
         != _metadata_dtype(destination_node.data_type)
         or source_frame is None
         or source_frame.kind != SOURCE_CAMERA_NORMALIZED_FRAME_KIND
+        or source_frame.pixel_convention != "continuous"
+        or _as_mapping(source_frame.lineage).get("pixel_frame")
+        != destination_frame_pointer
         or destination_frame is None
         or destination_frame.kind != SOURCE_CAMERA_FRAME_KIND
+        or destination_frame.pixel_convention != "pixel_edge_half_open"
         or record.get("reference_width_px")
         != destination_frame.reference_extent.get("width")
         or record.get("reference_height_px")
@@ -9793,14 +10210,24 @@ def _bbox_center_derivation_issues(
     )
     issues.extend(source_issues)
     issues.extend(output_issues)
-    frame_pointer = _as_mapping(record.get("coordinate_frame"))
-    frame, _frame_node, frame_issues = _pixel_frame_record_metadata(
-        record_ref=frame_pointer.get("record_ref"),
-        record_sha256=frame_pointer.get("record_sha256"),
-        role="bbox_center_derivation.coordinate_frame",
+    source_frame_pointer = _as_mapping(record.get("source_frame"))
+    source_frame, _source_frame_node, source_frame_issues = _pixel_frame_record_metadata(
+        record_ref=source_frame_pointer.get("record_ref"),
+        record_sha256=source_frame_pointer.get("record_sha256"),
+        role="bbox_center_derivation.source_frame",
         nodes=nodes,
     )
-    issues.extend(frame_issues)
+    destination_frame_pointer = _as_mapping(record.get("destination_frame"))
+    destination_frame, _destination_frame_node, destination_frame_issues = (
+        _pixel_frame_record_metadata(
+            record_ref=destination_frame_pointer.get("record_ref"),
+            record_sha256=destination_frame_pointer.get("record_sha256"),
+            role="bbox_center_derivation.destination_frame",
+            nodes=nodes,
+        )
+    )
+    issues.extend(source_frame_issues)
+    issues.extend(destination_frame_issues)
     if (
         set(record)
         != {
@@ -9809,7 +10236,9 @@ def _bbox_center_derivation_issues(
             "operation",
             "source_bbox",
             "output_centers",
-            "coordinate_frame",
+            "source_frame",
+            "destination_frame",
+            "direction",
             "formula",
             "row_identity",
         }
@@ -9824,8 +10253,18 @@ def _bbox_center_derivation_issues(
         or source is None
         or output is None
         or _metadata_dtype(source.data_type) != _metadata_dtype(output.data_type)
-        or frame is None
-        or frame.kind != SOURCE_CAMERA_FRAME_KIND
+        or record.get("direction")
+        != (
+            "source_camera_bbox_pixel_edge_half_open_to_"
+            "source_camera_point_continuous"
+        )
+        or source_frame is None
+        or source_frame.kind != SOURCE_CAMERA_FRAME_KIND
+        or source_frame.pixel_convention != "pixel_edge_half_open"
+        or destination_frame is None
+        or destination_frame.kind != SOURCE_CAMERA_FRAME_KIND
+        or destination_frame.pixel_convention != "continuous"
+        or source_frame.reference_extent != destination_frame.reference_extent
     ):
         issues.append(
             _issue(
@@ -10006,6 +10445,108 @@ def _crop_geometry_selection_issues(
     return issues
 
 
+def _crop_roi_bbox_edge_frame_issues(
+    *,
+    rowset_path: str,
+    roi_frame: Any | None,
+    roi_node: MetadataNode | None,
+    nodes: Mapping[str, MetadataNode],
+) -> list[dict[str, Any]]:
+    """Validate the run-local bbox-edge frame against exact ROI image metadata."""
+
+    issues: list[dict[str, Any]] = []
+    frame_path = f"{rowset_path}/{CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH}"
+    roi_images_path = f"{rowset_path}/roi_images"
+    roi_images = nodes.get(roi_images_path)
+    if (
+        roi_frame is None
+        or roi_node is None
+        or roi_node.relative_path != frame_path
+        or roi_frame.pixel_convention != "pixel_edge_half_open"
+        or roi_images is None
+        or roi_images.node_type != "array"
+        or not isinstance(roi_images.shape, (list, tuple))
+        or len(roi_images.shape) < 2
+    ):
+        return [
+            _issue(
+                "CROP_ROI_BBOX_EDGE_FRAME_INVALID",
+                "error",
+                "Crop bbox geometry requires its exact run-local half-open ROI frame and live roi_images metadata.",
+                rowset_path=rowset_path,
+                expected_frame_path=frame_path,
+                expected_roi_images_path=roi_images_path,
+            )
+        ]
+    dtype = _metadata_dtype(roi_images.data_type)
+    if dtype is None:
+        return [
+            _issue(
+                "CROP_ROI_BBOX_EDGE_FRAME_INVALID",
+                "error",
+                "Crop bbox-edge extent cannot bind invalid roi_images dtype metadata.",
+                roi_images_path=roi_images_path,
+                data_type=roi_images.data_type,
+            )
+        ]
+    width = int(roi_images.shape[-1])
+    height = int(roi_images.shape[-2])
+    source_extent_record = {
+        "schema_id": ARRAY_REFERENCE_EXTENT_SCHEMA_ID,
+        "schema_version": REFERENCE_EXTENT_SCHEMA_VERSION,
+        "array_path": f"/{roi_images_path}",
+        "shape": [int(item) for item in roi_images.shape],
+        "dtype": dtype.str,
+        "selector": "shape[-2:]",
+        "width": width,
+        "height": height,
+        "units": "px",
+        "canonicalization": REFERENCE_EXTENT_CANONICALIZATION,
+    }
+    expected_record = {
+        "schema_id": CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_ID,
+        "schema_version": CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_VERSION,
+        "width_px": width,
+        "height_px": height,
+        "units": "px",
+        "source_roi_images_extent": {
+            "record_ref": f"/{roi_images_path}@zarr_metadata",
+            "record_sha256": _fingerprint(source_extent_record),
+            "selector": "shape[-2:]",
+        },
+        "purpose": "half_open_bbox_edge_frame_extent_only",
+    }
+    expected_digest = _fingerprint(expected_record)
+    expected_extent = {
+        "record_ref": f"/{frame_path}@{CROP_ROI_BBOX_EDGE_EXTENT_ATTR}",
+        "record_sha256": expected_digest,
+        "selector": "attrs[width_px,height_px]",
+        "width": width,
+        "height": height,
+        "units": "px",
+    }
+    if (
+        not _exact_json_equal(
+            roi_node.attributes.get(CROP_ROI_BBOX_EDGE_EXTENT_ATTR),
+            expected_record,
+        )
+        or roi_node.attributes.get(f"{CROP_ROI_BBOX_EDGE_EXTENT_ATTR}_sha256")
+        != expected_digest
+        or not _exact_json_equal(roi_frame.reference_extent, expected_extent)
+    ):
+        issues.append(
+            _issue(
+                "CROP_ROI_BBOX_EDGE_FRAME_INVALID",
+                "error",
+                "Crop bbox-edge frame extent must be an exact record-bound copy of the run-local roi_images shape.",
+                rowset_path=rowset_path,
+                frame_path=frame_path,
+                roi_images_path=roi_images_path,
+            )
+        )
+    return issues
+
+
 def _crop_roi_geometry_derivation_issues(
     *,
     target: MetadataNode,
@@ -10054,10 +10595,13 @@ def _crop_roi_geometry_derivation_issues(
     _ownership_path, ownership_attr = _canonical_v2_record_target(
         ownership_pointer.get("record_ref")
     )
-    if ownership_target is not None and ownership_attr == CROP_PLACEMENT_OWNERSHIP_ATTR:
+    if (
+        ownership_target is not None
+        and ownership_attr == CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR
+    ):
         try:
             ownership = parse_crop_placement_ownership(
-                ownership_target.attributes.get(CROP_PLACEMENT_OWNERSHIP_ATTR)
+                ownership_target.attributes.get(ownership_attr)
             )
         except PixelFrameAuthorityError as exc:
             issues.append(
@@ -10070,13 +10614,21 @@ def _crop_roi_geometry_derivation_issues(
             )
 
     roi_pointer = _as_mapping(record.get("roi_frame"))
-    roi_frame, _roi_node, roi_issues = _pixel_frame_record_metadata(
+    roi_frame, roi_node, roi_issues = _pixel_frame_record_metadata(
         record_ref=roi_pointer.get("record_ref"),
         record_sha256=roi_pointer.get("record_sha256"),
         role="crop_roi_geometry_derivation.roi_frame",
         nodes=nodes,
     )
     issues.extend(roi_issues)
+    issues.extend(
+        _crop_roi_bbox_edge_frame_issues(
+            rowset_path=rowset_path,
+            roi_frame=roi_frame,
+            roi_node=roi_node,
+            nodes=nodes,
+        )
+    )
     transforms: list[Any] = []
     raw_chain = record.get("transform_chain")
     if type(raw_chain) is list:
@@ -10084,7 +10636,10 @@ def _crop_roi_geometry_derivation_issues(
             pointer = _as_mapping(raw_pointer)
             path, attr = _canonical_v2_record_target(pointer.get("record_ref"))
             transform_node = nodes.get(path or "")
-            if transform_node is None or attr != DIRECTED_TRANSFORM_V2_ATTR:
+            if (
+                transform_node is None
+                or attr != DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR
+            ):
                 continue
             transform, transform_issues = _parse_directed_transform_v2_node(
                 transform_node,
@@ -10095,7 +10650,17 @@ def _crop_roi_geometry_derivation_issues(
             if transform is not None and pointer.get("record_sha256") == transform.digest():
                 transforms.append(transform)
     transform_valid = (
-        len(transforms) == 1
+        type(raw_chain) is list
+        and len(raw_chain) == 1
+        and len(transforms) == 1
+        and set(_as_mapping(raw_chain[0])) == {"record_ref", "record_sha256"}
+        and _as_mapping(raw_chain[0]).get("record_ref")
+        == (
+            f"/{rowset_path}/source_crop_xywh@"
+            f"{DIRECTED_TRANSFORM_V2_PIXEL_EDGE_ATTR}"
+        )
+        and _as_mapping(raw_chain[0]).get("record_sha256")
+        == transforms[0].digest()
         and transforms[0].kind == AFFINE_2D_ROWWISE_KIND
         and transforms[0].row_identity is not None
         and transforms[0].row_identity.record_ref
@@ -10104,6 +10669,13 @@ def _crop_roi_geometry_derivation_issues(
         and roi_frame is not None
         and transforms[0].source.record_ref == roi_pointer.get("record_ref")
         and transforms[0].target.space_id == SOURCE_CAMERA_IMAGE_SPACE_ID
+        and transforms[0].source.pixel_convention == "pixel_edge_half_open"
+        and transforms[0].target.pixel_convention == "pixel_edge_half_open"
+        and transforms[0].transform_authority.record_ref
+        == (
+            f"/{rowset_path}/source_crop_xywh@"
+            f"{TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR}"
+        )
     )
     if (
         set(record)
@@ -10137,9 +10709,17 @@ def _crop_roi_geometry_derivation_issues(
         or ownership is None
         or ownership_pointer.get("record_sha256") != ownership.digest()
         or ownership_pointer.get("record_ref")
-        != f"/{rowset_path}/source_crop_xywh@{CROP_PLACEMENT_OWNERSHIP_ATTR}"
+        != (
+            f"/{rowset_path}/source_crop_xywh@"
+            f"{CROP_PLACEMENT_PIXEL_EDGE_OWNERSHIP_ATTR}"
+        )
         or roi_frame is None
         or roi_frame.kind != ROI_FRAME_KIND
+        or roi_pointer.get("record_ref")
+        != (
+            f"/{rowset_path}/{CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH}@"
+            f"{PIXEL_FRAME_AUTHORITY_ATTR}"
+        )
         or not transform_valid
     ):
         issues.append(
@@ -10258,6 +10838,32 @@ def _observation_coordinate_record_semantic_issues(
                         nodes=nodes,
                     )
                 )
+            elif schema_id == DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID:
+                try:
+                    target_contract = (
+                        contract
+                        if target.relative_path == rowset_path
+                        else load_row_identity_contract_attrs(target.attributes)
+                    )
+                except RowIdentityContractError as exc:
+                    issues.append(
+                        _issue(
+                            "DETECTION_BACKEND_RESULT_PROJECTION_INVALID",
+                            "error",
+                            "Detection backend-projection owner row identity is invalid.",
+                            record_ref=pointer.get("record_ref"),
+                            error=str(exc),
+                        )
+                    )
+                    continue
+                issues.extend(
+                    _detection_backend_result_projection_issues(
+                        target=target,
+                        record=record,
+                        contract=target_contract,
+                        nodes=nodes,
+                    )
+                )
             elif schema_id == DETECTION_BBOX_PROJECTION_SCHEMA_ID:
                 try:
                     target_contract = (
@@ -10342,6 +10948,7 @@ def _observation_coordinate_record_semantic_issues(
     if family == "detect_runs":
         required = {
             DETECTION_ACQUISITION_MAPPING_SCHEMA_ID,
+            DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID,
             DETECTION_BBOX_PROJECTION_SCHEMA_ID,
         }
         if leaf == "centers_img_xy":
@@ -10354,6 +10961,7 @@ def _observation_coordinate_record_semantic_issues(
             required.update(
                 {
                     DETECTION_ACQUISITION_MAPPING_SCHEMA_ID,
+                    DETECTION_BACKEND_RESULT_PROJECTION_SCHEMA_ID,
                     DETECTION_BBOX_PROJECTION_SCHEMA_ID,
                 }
             )
@@ -15706,6 +16314,9 @@ def build_coverage(
     return {
         "schema_id": "palette.coordinate_contract_audit.coverage",
         "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "audit_ruleset_id": AUDIT_RULESET_ID,
+        "audit_ruleset_version": AUDIT_RULESET_VERSION,
+        "ruleset_content_sha256": _ruleset_content_sha256(),
         "scan_scope": _json_safe(snapshot.get("scan_scope") or {}),
         "registry_recording_row_count": total_recording_rows,
         "registry_recording_ids": _json_safe(snapshot.get("recording_row_ids") or []),
@@ -16060,6 +16671,9 @@ def write_normalized_artifacts(
     generation_payload = {
         "schema_id": "palette.coordinate_contract_audit.artifact_generation",
         "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "audit_ruleset_id": AUDIT_RULESET_ID,
+        "audit_ruleset_version": AUDIT_RULESET_VERSION,
+        "ruleset_content_sha256": _ruleset_content_sha256(),
         "complete": generation_complete,
         "integrity_manifest_complete": True,
         "declared_output_files": sorted(
@@ -16096,6 +16710,14 @@ def verify_normalized_artifact_generation(output_dir: Path) -> dict[str, Any]:
         raise ValueError("artifact generation manifest has an unsupported schema_id")
     if payload.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
         raise ValueError("artifact generation manifest has an unsupported schema_version")
+    if (
+        payload.get("audit_ruleset_id") != AUDIT_RULESET_ID
+        or payload.get("audit_ruleset_version") != AUDIT_RULESET_VERSION
+        or payload.get("ruleset_content_sha256") != _ruleset_content_sha256()
+    ):
+        raise ValueError(
+            "artifact generation manifest has an unsupported audit ruleset binding"
+        )
     if payload.get("integrity_manifest_complete") is not True:
         raise ValueError("artifact integrity manifest is not marked complete")
     declared_outputs = payload.get("declared_output_files")

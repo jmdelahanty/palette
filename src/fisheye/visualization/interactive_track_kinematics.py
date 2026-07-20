@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -12,6 +13,10 @@ import pandas as pd
 import zarr
 
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
+from fisheye.analysis.track_kinematics_io import (
+    TrackKinematicsTrackTables,
+    load_track_kinematics_track,
+)
 from fisheye.analysis.eye_angle_io import (
     EYE_ANGLE_TIMESERIES_COLUMNS,
     EyeAngleRunOption,
@@ -33,6 +38,9 @@ from fisheye.shared.zarr_io import open_zarr_root
 
 TRACK_KINEMATICS_SPEC_SCHEMA_ID = "palette.plot_spec.track_kinematics_summary.v1"
 DEFAULT_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
+TRACK_KINEMATICS_VISUALIZATION_RUNS_PATH = (
+    "analysis/track_kinematics_visualization_runs"
+)
 
 
 @dataclass(frozen=True)
@@ -157,8 +165,11 @@ def _join_path(*parts: str) -> str:
 
 
 def _json_from_uint8_array(array: zarr.Array) -> Mapping[str, Any]:
-    payload = np.asarray(array[:], dtype=np.uint8).tobytes().decode("utf-8")
-    parsed = json.loads(payload)
+    payload = np.asarray(array[:], dtype=np.uint8).tobytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if array.attrs.get("content_sha256") != digest:
+        raise ValueError("interactive spec_json payload failed digest validation")
+    parsed = json.loads(payload.decode("utf-8"))
     if not isinstance(parsed, Mapping):
         raise ValueError("interactive spec payload must be a JSON object")
     return parsed
@@ -180,13 +191,67 @@ def _group_keys(group: object) -> list[str]:
         return []
 
 
+def _track_id_from_interactive_artifact_name(artifact_name: str) -> int:
+    prefix = "track_kinematics_summary_track_"
+    suffix = "_interactive"
+    if not artifact_name.startswith(prefix) or not artifact_name.endswith(suffix):
+        raise ValueError(
+            "Track interactive artifact names must encode their track id as "
+            f"{prefix}<nonnegative integer>{suffix}."
+        )
+    track_id = _safe_int(artifact_name[len(prefix) : -len(suffix)])
+    if track_id is None or track_id < 0:
+        raise ValueError("Track interactive artifact name has an invalid track id.")
+    return int(track_id)
+
+
 def _resolve_interactive_artifact(
     root: zarr.Group,
     *,
     run_path: str,
     artifact_name: str,
 ) -> zarr.Group:
-    artifact_path = _join_path(run_path, "visualizations", artifact_name)
+    parts = _normalize_path(run_path).split("/")
+    if (
+        len(parts) != 4
+        or parts[:2] != ["analysis", "track_kinematics_runs"]
+        or parts[2] not in {"online", "offline"}
+    ):
+        raise ValueError(
+            "Interactive track-motion reads require the canonical source run "
+            "path analysis/track_kinematics_runs/<scope>/<run>."
+        )
+    track_id = _track_id_from_interactive_artifact_name(artifact_name)
+    visualization_parent_path = _join_path(
+        TRACK_KINEMATICS_VISUALIZATION_RUNS_PATH,
+        parts[2],
+        parts[3],
+        "tracks",
+        f"id_{track_id}",
+    )
+    try:
+        visualization_parent = root[visualization_parent_path]
+    except Exception as exc:
+        raise ValueError(
+            f"No sibling visualization runs found for {run_path}."
+        ) from exc
+    render_name = visualization_parent.attrs.get("latest_complete")
+    if (
+        not isinstance(render_name, str)
+        or render_name not in visualization_parent
+    ):
+        raise ValueError(
+            f"No selected complete visualization run found for {run_path}."
+        )
+    render = visualization_parent[render_name]
+    if (
+        render.attrs.get("palette_run_completion_status") != "complete"
+        or render.attrs.get("stage_selector_eligible") is not True
+    ):
+        raise ValueError(
+            f"Selected visualization run {render.path!r} is not complete and eligible."
+        )
+    artifact_path = _join_path(render.path, "visualizations", artifact_name)
     try:
         artifact = root[artifact_path]
     except Exception as exc:
@@ -208,6 +273,58 @@ def _try_resolve_interactive_artifact(
         return _resolve_interactive_artifact(root, run_path=run_path, artifact_name=artifact_name)
     except ValueError:
         return None
+
+
+def _load_verified_track_for_spec(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    artifact: zarr.Group,
+    spec: Mapping[str, Any],
+) -> TrackKinematicsTrackTables:
+    parts = _normalize_path(run_path).split("/")
+    if (
+        len(parts) != 4
+        or parts[:2] != ["analysis", "track_kinematics_runs"]
+        or parts[2] not in {"online", "offline"}
+    ):
+        raise ValueError("Track interactive spec source run path is not canonical.")
+    track_id = _safe_int(spec.get("track_id"))
+    if track_id is None:
+        raise ValueError("Track interactive spec omits an exact track_id.")
+    tables = load_track_kinematics_track(
+        root,
+        run_name=parts[3],
+        scope=parts[2],
+        track_id=track_id,
+        required_speed_levels=("raw", "smoothed"),
+    )
+    authority = tables.authority_record()
+    if (
+        artifact.attrs.get("content_sha256")
+        != artifact["spec_json"].attrs.get("content_sha256")
+    ):
+        raise ValueError("Interactive artifact and spec_json digests disagree.")
+    if (
+        spec.get("track_motion_authority") != authority
+        or artifact.attrs.get("track_motion_authority") != authority
+    ):
+        raise ValueError(
+            "Interactive artifact does not bind the freshly verified "
+            "track-motion authority."
+        )
+    from fisheye.analysis.plot_track_kinematics import _track_source_paths
+
+    expected_paths = _track_source_paths(
+        f"{parts[2]}/{parts[3]}",
+        tables,
+    )
+    if _as_str_mapping(spec.get("source_paths")) != expected_paths:
+        raise ValueError(
+            "Interactive artifact source paths differ from the manifest-authorized "
+            "track-motion surfaces."
+        )
+    return tables
 
 
 def _load_array(root: zarr.Group, source_paths: Mapping[str, str], key: str) -> Optional[np.ndarray]:
@@ -896,7 +1013,16 @@ def discover_track_kinematics_run_options(
                 continue
             track_id = _safe_int(spec.get("track_id"))
             if track_id is None:
-                track_id = 0
+                continue
+            try:
+                _load_verified_track_for_spec(
+                    root,
+                    run_path=run_path,
+                    artifact=artifact,
+                    spec=spec,
+                )
+            except ValueError:
+                continue
             run_group = scope_group[run_name]
             is_latest = str(latest) == str(run_name)
             options.append(
@@ -1365,6 +1491,145 @@ def _collect_series(
     return series
 
 
+def _collect_verified_track_series(
+    tables: TrackKinematicsTrackTables,
+) -> dict[str, np.ndarray]:
+    """Build UI series only from arrays copied through the strict reader."""
+
+    series: dict[str, np.ndarray] = {}
+    prefix_by_level = {
+        "raw": "speed_raw",
+        "filtered": "speed_filtered",
+        "smoothed": "speed_smoothed",
+        "averaged": "speed_averaged",
+    }
+    for level, prefix in prefix_by_level.items():
+        for unit, speeds, accelerations, smoothed_accelerations, distances in (
+            (
+                "px",
+                tables.speed_px_by_level,
+                tables.acceleration_px_by_level,
+                tables.smoothed_acceleration_px_by_level,
+                tables.frame_path_distance_px_by_level,
+            ),
+            (
+                "mm",
+                tables.speed_mm_by_level,
+                tables.acceleration_mm_by_level,
+                tables.smoothed_acceleration_mm_by_level,
+                tables.frame_path_distance_mm_by_level,
+            ),
+        ):
+            if level in speeds:
+                series[f"{prefix}_{unit}"] = np.asarray(
+                    speeds[level], dtype=np.float64
+                )
+            if level in accelerations:
+                key = f"acceleration_{unit}"
+                series[f"{prefix}_{key}"] = np.asarray(
+                    accelerations[level], dtype=np.float64
+                )
+                if level == "smoothed":
+                    series[key] = series[f"{prefix}_{key}"]
+            if level in smoothed_accelerations:
+                key = f"smoothed_acceleration_{unit}"
+                series[f"{prefix}_{key}"] = np.asarray(
+                    smoothed_accelerations[level], dtype=np.float64
+                )
+                if level == "smoothed":
+                    series[key] = series[f"{prefix}_{key}"]
+            if level in distances:
+                series[f"{prefix}_frame_path_distance_{unit}"] = np.asarray(
+                    distances[level], dtype=np.float64
+                )
+
+    optional = {
+        "delta_heading_degrees": tables.delta_heading_degrees,
+        "angular_velocity_deg_s": tables.angular_velocity_deg_s,
+        "angular_speed_raw_deg_s": tables.angular_speed_raw_deg_s,
+        "delta_heading_smoothed_degrees": (
+            tables.delta_heading_smoothed_degrees
+        ),
+        "angular_velocity_smoothed_deg_s": (
+            tables.angular_velocity_smoothed_deg_s
+        ),
+        "angular_speed_smoothed_deg_s": tables.angular_speed_smoothed_deg_s,
+        "smoothed_heading_degrees": tables.smoothed_heading_degrees,
+        "cumulative_path_distance_mm": tables.cumulative_path_distance_mm,
+        "cumulative_path_distance_px": tables.cumulative_path_distance_px,
+    }
+    for name, values in optional.items():
+        if values is not None:
+            series[name] = np.asarray(values, dtype=np.float64)
+    return series
+
+
+def _verified_validity_spans(
+    tables: TrackKinematicsTrackTables,
+    time_seconds: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, Optional[str]]:
+    rows: list[tuple[float, float, str]] = []
+    n_time = int(time_seconds.shape[0])
+    transition_valid = tables.transition_valid
+    transition_reason = tables.transition_reason_code
+    sample_valid = tables.sample_valid
+    sample_reason = tables.sample_reason_code
+    transition_map = tables.track_attrs.get("transition_reason_codes", {})
+    sample_map = tables.track_attrs.get("sample_reason_codes", {})
+
+    if transition_valid is None or transition_reason is None:
+        raise ValueError("Verified track tables omit transition validity semantics.")
+    if sample_valid is None or sample_reason is None:
+        raise ValueError("Verified track tables omit sample validity semantics.")
+    if (
+        np.asarray(transition_valid).shape != (n_time,)
+        or np.asarray(transition_reason).shape != (n_time,)
+        or np.asarray(sample_valid).shape != (n_time,)
+        or np.asarray(sample_reason).shape != (n_time,)
+    ):
+        raise ValueError("Verified track validity arrays disagree with the time axis.")
+
+    for index in range(1, n_time):
+        if bool(transition_valid[index]):
+            continue
+        start = float(time_seconds[index - 1])
+        stop = float(time_seconds[index])
+        if not (np.isfinite(start) and np.isfinite(stop)):
+            continue
+        if stop < start:
+            start, stop = stop, start
+        if stop <= start:
+            continue
+        reason = _reason_name(
+            transition_map,
+            transition_reason[index],
+            prefix="transition",
+        )
+        if reason != "first_sample":
+            rows.append((start, stop, f"transition:{reason}"))
+
+    for index, valid in enumerate(np.asarray(sample_valid, dtype=bool)):
+        if bool(valid):
+            continue
+        interval = _row_interval(time_seconds, index)
+        if interval is None:
+            continue
+        reason = _reason_name(
+            sample_map,
+            sample_reason[index],
+            prefix="sample",
+        )
+        rows.append((interval[0], interval[1], f"sample:{reason}"))
+
+    if not rows:
+        return _empty_spans(), _empty_labels(), None
+    return (
+        np.asarray([(start, stop) for start, stop, _ in rows], dtype=np.float64),
+        np.asarray([label for _, _, label in rows], dtype=object),
+        "track_validity",
+    )
+
+
 def load_track_kinematics_interactive_data(
     zarr_path: Path | str,
     *,
@@ -1387,25 +1652,39 @@ def load_track_kinematics_interactive_data(
         )
 
     source_paths = _as_str_mapping(spec.get("source_paths"))
-    track_id = _safe_int(spec.get("track_id"))
-    if track_id is None:
-        track_id = 0
-    time_seconds = _load_array(root, source_paths, "time_seconds")
-    if time_seconds is None:
-        raise ValueError("Interactive spec does not resolve a time_seconds source array")
-    time_seconds = time_seconds.astype(np.float64, copy=False)
+    tables = _load_verified_track_for_spec(
+        root,
+        run_path=run_path,
+        artifact=artifact,
+        spec=spec,
+    )
+    track_id = int(tables.track_id)
+    if tables.time_seconds is None:
+        raise ValueError("Verified track-motion publication omits time_seconds.")
+    time_seconds = np.asarray(tables.time_seconds, dtype=np.float64)
+    if tables.source_acquisition_frame_index is None:
+        raise ValueError(
+            "Verified track-motion publication omits acquisition-frame identity."
+        )
+    frame_indices = np.asarray(
+        tables.source_acquisition_frame_index,
+        dtype=np.int64,
+    )
 
-    frame_indices = _load_array(root, source_paths, "frame_indices")
-    if frame_indices is not None:
-        frame_indices = frame_indices.astype(np.int64, copy=False)
+    from fisheye.analysis.plot_track_kinematics import pick_units
 
-    positions = _load_array(root, source_paths, "positions_mm")
-    position_unit = "mm"
-    if positions is None:
-        positions = _load_array(root, source_paths, "positions_px")
-        position_unit = "px"
-    if positions is not None:
-        positions = positions.astype(np.float64, copy=False)
+    position_unit, position_x, position_y = pick_units(tables)
+    positions = np.column_stack([position_x, position_y]).astype(
+        np.float64,
+        copy=False,
+    )
+    if tables.sample_valid is None:
+        raise ValueError("Verified track-motion publication omits sample validity.")
+    sample_valid = np.asarray(tables.sample_valid, dtype=bool)
+    if sample_valid.shape != (positions.shape[0],):
+        raise ValueError("Track positions and sample validity disagree.")
+    positions = np.array(positions, copy=True)
+    positions[~sample_valid] = np.nan
 
     swim_bout_payload = _load_swim_bout_payload(
         root,
@@ -1413,20 +1692,25 @@ def load_track_kinematics_interactive_data(
         requested_run=swim_bout_run,
         speed_level=speed_level,
     )
-    validity_spans, validity_labels, validity_source = _load_validity_spans(
-        root,
-        run_path=_normalize_path(run_path),
-        track_id=track_id,
-        source_paths=source_paths,
-        time_seconds=time_seconds,
+    validity_spans, validity_labels, validity_source = _verified_validity_spans(
+        tables,
+        time_seconds,
     )
-    series = _collect_series(
-        root,
-        source_paths,
-        run_path=_normalize_path(run_path),
-        track_id=track_id,
-    )
+    series = _collect_verified_track_series(tables)
     series.update(swim_bout_payload.series)
+
+    parts = _normalize_path(run_path).split("/")
+    current = load_track_kinematics_track(
+        root,
+        run_name=parts[3],
+        scope=parts[2],
+        track_id=track_id,
+        required_speed_levels=("raw", "smoothed"),
+    )
+    if current.authority_record() != tables.authority_record():
+        raise ValueError(
+            "Track-motion authority changed while loading interactive data."
+        )
 
     return TrackKinematicsInteractiveData(
         zarr_path=archive,
