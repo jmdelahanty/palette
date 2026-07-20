@@ -3,7 +3,7 @@ set -euo pipefail
 
 ZARR_PATH=""
 CONFIG=""
-SOURCE_TYPE="refined"
+SOURCE_TYPE="detect"
 SOURCE_PATH=""
 SELECTION_POLICY=""
 FORCE_NEW=0
@@ -40,19 +40,19 @@ usage() {
 Usage: submit_crop_flat_roi_cache_bsub.sh --zarr PATH [options]
 
 Submit a two-job LSF workflow:
-  1. Create/update a geometry-only crop run in the Zarr.
+  1. Create/update a future-canonical materialized crop run in the Zarr.
   2. After the crop job succeeds, build a flat_bin_v1 ROI cache on node-local
      scratch and publish the completed .bin/.json pair to shared workflow cache.
 
-The crop stage writes canonical ROI geometry. The flat ROI cache is disposable
-workflow data for downstream pose/segmentation jobs.
+The crop stage writes canonical ROI pixels and geometry. The flat ROI cache is
+disposable workflow data for downstream pose/segmentation jobs.
 
 Required:
   --zarr PATH                       Analysis Zarr archive
 
 Crop options:
   --config PATH                     Optional crop config YAML
-  --source-type TYPE                Detection source type (default: refined; use auto to allow fallback)
+  --source-type TYPE                Detection source type (default: detect)
   --source-path PATH                Explicit detection source path
   --selection-policy POLICY         Selection policy passed to crop_batch
   --force-new                       Force a new crop run even if a matching one exists
@@ -64,7 +64,8 @@ Crop options:
   --crop-walltime H:MM              Wall time for crop job (default: 1:00)
 
 Cache options:
-  --cache-crop-run NAME             Explicit crop run for cache; default: latest_any after crop job
+  --cache-crop-run NAME             Exact materialized crop run to validate/use; default:
+                                    exact committed/reused run reported by crop_batch
   --public-cache-root PATH          Shared cache root (default: /nrs/johnson/palette_staging/flat_roi_cache)
   --public-cache-dir PATH           Explicit publish dir; overrides root/workflow_id/roi_cache
   --workflow-id ID                  Workflow namespace under public-cache-root
@@ -75,7 +76,7 @@ Cache options:
   --cache-walltime H:MM             Wall time for cache job (default: 2:00)
   --cache-batch-size N              ROI rows per cache-builder batch (default: 1024)
   --cache-decode-backend NAME       auto|pynvvc_luma|read_slice (default: auto; fast sequential PyNv when available)
-  --roi-live-acceleration NAME      cpu|gpu|auto for geometry-only live ROI reads (default: cpu)
+  --roi-live-acceleration NAME      cpu|gpu|auto for ROI cache reads (default: cpu)
   --roi-live-gpu-chunk-frames N     GPU live-read frame chunk size (default: 32)
   --sha256                          Record payload sha256 in manifest
   --overwrite                       Overwrite existing published cache files
@@ -132,7 +133,7 @@ if [[ -z "$ZARR_PATH" ]]; then
   exit 2
 fi
 
-if [[ "$DRY_RUN" != "1" && ! -e "$ZARR_PATH" ]]; then
+if [[ ! -e "$ZARR_PATH" ]]; then
   echo "Zarr path not found: $ZARR_PATH" >&2
   exit 2
 fi
@@ -184,18 +185,25 @@ reject_recordings_cache_dir "$PUBLIC_CACHE_DIR"
 
 mkdir -p "$RUN_DIR"
 
-CROP_ARGS=(
+CROP_COMMON_ARGS=(
   "$ZARR_PATH"
-  --apply
   --zarr-use analysis
-  --crop-storage-mode geometry_only
+  --crop-storage-mode materialized
 )
-if [[ -n "$CONFIG" ]]; then CROP_ARGS+=(--config "$CONFIG"); fi
-if [[ -n "$SOURCE_TYPE" ]]; then CROP_ARGS+=(--source-type "$SOURCE_TYPE"); fi
-if [[ -n "$SOURCE_PATH" ]]; then CROP_ARGS+=(--source-path "$SOURCE_PATH"); fi
-if [[ -n "$SELECTION_POLICY" ]]; then CROP_ARGS+=(--selection-policy "$SELECTION_POLICY"); fi
-if [[ "$FORCE_NEW" == "1" ]]; then CROP_ARGS+=(--force-new); fi
+if [[ -n "$CONFIG" ]]; then CROP_COMMON_ARGS+=(--config "$CONFIG"); fi
+if [[ -n "$SOURCE_TYPE" ]]; then CROP_COMMON_ARGS+=(--source-type "$SOURCE_TYPE"); fi
+if [[ -n "$SOURCE_PATH" ]]; then CROP_COMMON_ARGS+=(--source-path "$SOURCE_PATH"); fi
+if [[ -n "$SELECTION_POLICY" ]]; then CROP_COMMON_ARGS+=(--selection-policy "$SELECTION_POLICY"); fi
+if [[ "$FORCE_NEW" == "1" ]]; then CROP_COMMON_ARGS+=(--force-new); fi
+CROP_ARGS=("${CROP_COMMON_ARGS[@]}" --apply)
 printf -v CROP_ARGS_SHELL '%q ' "${CROP_ARGS[@]}"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "Running canonical crop preflight for dry-run planning:"
+  scripts/py -m fisheye.utils.crop_batch \
+    "${CROP_COMMON_ARGS[@]}" \
+    --fail-on-invalid-plan
+fi
 
 BUILDER_ARGS=(
   "$ZARR_PATH"
@@ -204,12 +212,11 @@ BUILDER_ARGS=(
   --roi-live-acceleration "$ROI_LIVE_ACCELERATION"
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
 )
-if [[ -n "$CACHE_CROP_RUN" ]]; then BUILDER_ARGS+=(--crop-run "$CACHE_CROP_RUN"); fi
 if [[ "$SHA256" == "1" ]]; then BUILDER_ARGS+=(--sha256); fi
 if [[ "$OVERWRITE" == "1" ]]; then BUILDER_ARGS+=(--overwrite); fi
 printf -v BUILDER_ARGS_SHELL '%q ' "${BUILDER_ARGS[@]}"
 
-CROP_SCRIPT="${RUN_DIR}/run_crop_geometry.sh"
+CROP_SCRIPT="${RUN_DIR}/run_crop_materialized.sh"
 CACHE_SCRIPT="${RUN_DIR}/run_flat_roi_cache_publish.sh"
 RUN_DIR_Q="$(printf '%q' "$RUN_DIR")"
 PUBLIC_CACHE_DIR_Q="$(printf '%q' "$PUBLIC_CACHE_DIR")"
@@ -217,6 +224,7 @@ SAFE_LABEL_Q="$(printf '%q' "$SAFE_LABEL")"
 OVERWRITE_Q="$(printf '%q' "$OVERWRITE")"
 DEFER_REGISTRY_Q="$(printf '%q' "$DEFER_REGISTRY")"
 ZARR_PATH_Q="$(printf '%q' "$ZARR_PATH")"
+CACHE_CROP_RUN_Q="$(printf '%q' "$CACHE_CROP_RUN")"
 
 cat > "$CROP_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -228,14 +236,16 @@ RUN_DIR=${RUN_DIR_Q}
 RUN_LABEL=${SAFE_LABEL_Q}
 DEFER_REGISTRY=${DEFER_REGISTRY_Q}
 ZARR_PATH=${ZARR_PATH_Q}
+CACHE_CROP_RUN=${CACHE_CROP_RUN_Q}
 JOB_ID="\${LSB_JOBID:-manual_crop}"
 STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.crop.\${JOB_ID}.json"
+CROP_RESULT_JSON="\${RUN_DIR}/\${RUN_LABEL}.crop.\${JOB_ID}.result.json"
 
 scratch_user="\${USER:-\$(id -un)}"
 if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" && -x "/scratch/\${scratch_user}" ]]; then
   export PALETTE_JOB_CACHE="/scratch/\${scratch_user}/\${LSB_JOBID}/palette_cache"
 else
-  export PALETTE_JOB_CACHE="\${TMPDIR:-/tmp}/palette_crop_geometry_\${JOB_ID}/palette_cache"
+  export PALETTE_JOB_CACHE="\${TMPDIR:-/tmp}/palette_crop_materialized_\${JOB_ID}/palette_cache"
 fi
 export MPLBACKEND=Agg
 if [[ "\${DEFER_REGISTRY}" == "1" ]]; then
@@ -250,42 +260,62 @@ echo "zarr=\$ZARR_PATH"
 echo "palette_job_cache=\$PALETTE_JOB_CACHE"
 echo "defer_registry=\$DEFER_REGISTRY"
 echo "status_json=\$STATUS_JSON"
+echo "crop_result_json=\$CROP_RESULT_JSON"
 
-scripts/py -m fisheye.utils.crop_batch ${CROP_ARGS_SHELL}
+scripts/py -m fisheye.utils.crop_batch ${CROP_ARGS_SHELL}--result-json "\$CROP_RESULT_JSON"
 
 scripts/py -c 'import json, os, socket, sys; from datetime import datetime, timezone; from pathlib import Path; import zarr
+from fisheye.shared.observation_coordinate_publication import load_persisted_ordinary_crop_observation_geometry
 zarr_path = Path(sys.argv[1]).expanduser().resolve()
 status_json = Path(sys.argv[2])
+requested_crop_run = sys.argv[3].strip()
+crop_result_json = Path(sys.argv[4])
 root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
 crop_parent = root.get("crop_runs")
-latest_any = crop_parent.attrs.get("latest_any") if crop_parent is not None else None
-latest = crop_parent.attrs.get("latest") if crop_parent is not None else None
-latest_materialized = crop_parent.attrs.get("latest_materialized") if crop_parent is not None else None
-crop_attrs = {}
-if crop_parent is not None and latest_any in crop_parent:
-    group = crop_parent[latest_any]
-    crop_attrs = {
-        "crop_storage_mode": group.attrs.get("crop_storage_mode"),
-        "crop_signature": group.attrs.get("crop_signature"),
-        "detection_source_type": group.attrs.get("detection_source_type"),
-        "detection_source_path": group.attrs.get("detection_source_path"),
-        "total_detections": group.attrs.get("total_detections"),
-    }
+batch_result = json.loads(crop_result_json.read_text(encoding="utf-8"))
+if batch_result.get("schema") != "palette.crop_batch_result.v1":
+    raise RuntimeError("Unsupported or missing crop_batch result schema")
+outcomes = batch_result.get("outcomes")
+if not isinstance(outcomes, list) or len(outcomes) != 1:
+    raise RuntimeError(f"Expected one exact crop_batch outcome; found {outcomes!r}")
+outcome = outcomes[0]
+if not isinstance(outcome, dict):
+    raise RuntimeError("Crop batch outcome is not a mapping")
+outcome_path = Path(str(outcome.get("zarr_path", ""))).expanduser().resolve()
+if outcome_path != zarr_path or outcome.get("status") not in {"ok", "skipped"}:
+    raise RuntimeError(f"Crop batch outcome does not authorize cache work: {outcome!r}")
+if requested_crop_run:
+    crop_run = requested_crop_run
+    crop_run_selection = "explicit"
+else:
+    crop_run = str(outcome.get("crop_run") or "").strip()
+    crop_run_selection = "crop_batch_result"
+if crop_parent is None or not crop_run or crop_run not in crop_parent:
+    raise RuntimeError(f"Exact materialized crop run is unavailable: {crop_run!r}")
+load_persisted_ordinary_crop_observation_geometry(root, f"crop_runs/{crop_run}")
+group = crop_parent[crop_run]
+crop_attrs = {
+    "crop_storage_mode": group.attrs.get("crop_storage_mode"),
+    "crop_signature": group.attrs.get("crop_signature"),
+    "detection_source_type": group.attrs.get("detection_source_type"),
+    "detection_source_path": group.attrs.get("detection_source_path"),
+    "total_detections": group.attrs.get("total_detections"),
+}
 payload = {
     "status": "ok",
-    "stage": "crop_geometry",
+    "stage": "crop_materialized",
     "job_id": os.environ.get("LSB_JOBID"),
     "host": socket.gethostname(),
     "finished_at_utc": datetime.now(timezone.utc).isoformat(),
     "zarr_path": str(zarr_path),
-    "latest_any": latest_any,
-    "latest": latest,
-    "latest_materialized": latest_materialized,
-    "latest_any_attrs": crop_attrs,
+    "crop_run": crop_run,
+    "crop_run_selection": crop_run_selection,
+    "crop_batch_result_json": str(crop_result_json),
+    "crop_run_attrs": crop_attrs,
 }
 status_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(f"status_json={status_json}")
-' "\$ZARR_PATH" "\$STATUS_JSON"
+' "\$ZARR_PATH" "\$STATUS_JSON" "\$CACHE_CROP_RUN" "\$CROP_RESULT_JSON"
 JOBSCRIPT
 chmod +x "$CROP_SCRIPT"
 
@@ -295,6 +325,7 @@ set -euo pipefail
 
 cd "$(pwd)"
 
+CROP_JOB_ID="\${1:?crop job id is required}"
 RUN_DIR=${RUN_DIR_Q}
 PUBLIC_CACHE_DIR=${PUBLIC_CACHE_DIR_Q}
 RUN_LABEL=${SAFE_LABEL_Q}
@@ -303,6 +334,18 @@ JOB_ID="\${LSB_JOBID:-manual_cache}"
 HOST="\$(hostname)"
 STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.json"
 PROGRESS_JSONL="\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.progress.jsonl"
+CROP_STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.crop.\${CROP_JOB_ID}.json"
+CROP_RUN="\$(scripts/py -c 'import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+if payload.get("status") != "ok" or payload.get("stage") != "crop_materialized":
+    raise RuntimeError(f"Crop status is not a completed materialized publication: {payload!r}")
+crop_run = payload.get("crop_run")
+if not isinstance(crop_run, str) or not crop_run.strip():
+    raise RuntimeError("Crop status does not contain one exact crop_run")
+print(crop_run.strip())
+' "\${CROP_STATUS_JSON}")"
 
 scratch_user="\${USER:-\$(id -un)}"
 if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" && -x "/scratch/\${scratch_user}" ]]; then
@@ -331,6 +374,9 @@ mkdir -p "\${LOCAL_CACHE_DIR}" "\${RUN_DIR}" "\${PUBLIC_CACHE_DIR}"
 echo "repo=\$(pwd)"
 echo "host=\${HOST}"
 echo "job_id=\${JOB_ID}"
+echo "crop_job_id=\${CROP_JOB_ID}"
+echo "crop_status_json=\${CROP_STATUS_JSON}"
+echo "crop_run=\${CROP_RUN}"
 echo "palette_job_cache=\${PALETTE_JOB_CACHE}"
 echo "local_manifest=\${LOCAL_MANIFEST}"
 echo "public_manifest=\${FINAL_MANIFEST}"
@@ -344,7 +390,7 @@ if [[ "\${OVERWRITE}" != "1" && ( -e "\${FINAL_MANIFEST}" || -e "\${FINAL_BIN}" 
   exit 2
 fi
 
-scripts/py -m fisheye.utils.build_flat_roi_cache ${BUILDER_ARGS_SHELL}--manifest-path "\${LOCAL_MANIFEST}" --progress-jsonl "\${PROGRESS_JSONL}" --progress-stderr --progress-interval-s 30 --json > "\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.manifest.build.json"
+scripts/py -m fisheye.utils.build_flat_roi_cache ${BUILDER_ARGS_SHELL}--crop-run "\${CROP_RUN}" --manifest-path "\${LOCAL_MANIFEST}" --progress-jsonl "\${PROGRESS_JSONL}" --progress-stderr --progress-interval-s 30 --json > "\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.manifest.build.json"
 
 if [[ ! -s "\${LOCAL_MANIFEST}" ]]; then
   echo "Local manifest was not created: \${LOCAL_MANIFEST}" >&2
@@ -428,7 +474,7 @@ JOBSCRIPT
 chmod +x "$CACHE_SCRIPT"
 
 CROP_BSUB_ARGS=(
-  -J "crop_geometry_${SAFE_LABEL}"
+  -J "crop_materialized_${SAFE_LABEL}"
   -n "$CROP_NCORES"
   -W "$CROP_WALLTIME"
   -R "rusage[mem=${CROP_MEM_GB}G]"
@@ -457,7 +503,7 @@ fi
 printf -v CROP_BSUB_ARGS_SHELL '%q ' "${CROP_BSUB_ARGS[@]}"
 printf -v CACHE_BSUB_ARGS_BASE_SHELL '%q ' "${CACHE_BSUB_ARGS_BASE[@]}"
 CROP_CMD="bsub ${CROP_BSUB_ARGS_SHELL}bash $(printf '%q' "$CROP_SCRIPT")"
-CACHE_CMD_TEMPLATE="bsub ${CACHE_BSUB_ARGS_BASE_SHELL}-w done\\(<crop_jobid>\\) bash $(printf '%q' "$CACHE_SCRIPT")"
+CACHE_CMD_TEMPLATE="bsub ${CACHE_BSUB_ARGS_BASE_SHELL}-w done\\(<crop_jobid>\\) bash $(printf '%q' "$CACHE_SCRIPT") <crop_jobid>"
 
 echo "Run dir: $RUN_DIR"
 echo "Crop script: $CROP_SCRIPT"
@@ -469,7 +515,7 @@ echo "Defer registry writes: $DEFER_REGISTRY"
 echo "Expected manifest: ${PUBLIC_CACHE_DIR}/${SAFE_LABEL}.flat_roi_cache.json"
 echo "Expected payload: ${PUBLIC_CACHE_DIR}/${SAFE_LABEL}.flat_roi_cache.bin"
 echo "Crop command: scripts/py -m fisheye.utils.crop_batch ${CROP_ARGS_SHELL}"
-echo "Cache builder command: scripts/py -m fisheye.utils.build_flat_roi_cache ${BUILDER_ARGS_SHELL}--manifest-path <scratch manifest> --json"
+echo "Cache builder command: scripts/py -m fisheye.utils.build_flat_roi_cache ${BUILDER_ARGS_SHELL}--crop-run <exact validated crop_run> --manifest-path <scratch manifest> --json"
 echo "Submit crop command: $CROP_CMD"
 echo "Submit cache command template: $CACHE_CMD_TEMPLATE"
 
@@ -492,7 +538,7 @@ if [[ -z "$crop_jobid" ]]; then
 fi
 
 CACHE_BSUB_ARGS=("${CACHE_BSUB_ARGS_BASE[@]}" -w "done(${crop_jobid})")
-cache_submit_output="$(bsub "${CACHE_BSUB_ARGS[@]}" bash "$CACHE_SCRIPT")"
+cache_submit_output="$(bsub "${CACHE_BSUB_ARGS[@]}" bash "$CACHE_SCRIPT" "$crop_jobid")"
 echo "$cache_submit_output"
 cache_jobid="$(printf '%s\n' "$cache_submit_output" | sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' | head -1)"
 

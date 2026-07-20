@@ -15,11 +15,14 @@ from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.tracking.incremental_crop import (
     DEFAULT_SIGNATURE_BATCH_ROWS,
     DEFAULT_TABULAR_SHARD_ROWS,
+    HISTORICAL_COMPOSITE_COORDINATE_CONTRACT_MODE,
     IncrementalCropError,
     build_incremental_crop_plan,
     capture_crop_source_snapshot,
     materialize_composite_incremental_crop_run,
     materialize_incremental_crop_run,
+    resolve_historical_composite_coordinate_context,
+    resolve_incremental_crop_coordinate_context,
 )
 
 
@@ -58,6 +61,8 @@ def plan_or_materialize_incremental_crop(
     command: str,
     payload_strategy: str = "standalone",
     promote_composite: bool = False,
+    historical_composite: bool = False,
+    coordinate_contract_mode: str | None = None,
 ) -> dict[str, Any]:
     archive_path = zarr_path.expanduser().resolve()
     source_path = _normalize_group_path(source_rowset_path)
@@ -67,7 +72,6 @@ def plan_or_materialize_incremental_crop(
     if "raw_video/images_full" not in root:
         raise IncrementalCropError("Archive is missing raw_video/images_full.")
     frame_source = root["raw_video/images_full"]
-    frame_shape = tuple(int(value) for value in frame_source.shape[1:])
     strategy = str(payload_strategy).strip().lower()
     if strategy not in PAYLOAD_STRATEGIES:
         raise IncrementalCropError(
@@ -75,9 +79,46 @@ def plan_or_materialize_incremental_crop(
         )
     if strategy == "composite" and not base_crop_run:
         raise IncrementalCropError("Composite crop output requires --base-crop-run.")
-    if strategy != "composite" and promote_composite:
-        raise IncrementalCropError("--promote-composite requires --payload-strategy=composite.")
-    source_group = root[source_path]
+    if promote_composite:
+        raise IncrementalCropError(
+            "Historical composite crops cannot be promoted or update selectors."
+        )
+    if strategy == "composite" and not historical_composite:
+        raise IncrementalCropError(
+            "Composite crop output requires explicit --historical-composite."
+        )
+    if strategy != "composite" and historical_composite:
+        raise IncrementalCropError(
+            "--historical-composite requires --payload-strategy=composite."
+        )
+    expected_coordinate_mode = (
+        HISTORICAL_COMPOSITE_COORDINATE_CONTRACT_MODE
+        if strategy == "composite"
+        else "canonical"
+    )
+    if coordinate_contract_mode not in {None, expected_coordinate_mode}:
+        raise IncrementalCropError(
+            f"{strategy} output requires coordinate mode "
+            f"{expected_coordinate_mode!r}; got {coordinate_contract_mode!r}."
+        )
+    coordinate_contract_mode = expected_coordinate_mode
+    resolver = (
+        resolve_historical_composite_coordinate_context
+        if strategy == "composite"
+        else resolve_incremental_crop_coordinate_context
+    )
+    coordinate_context = resolver(
+        root,
+        source_group=root[source_path],
+        source_path=source_path,
+        frame_source=frame_source,
+        source_pixel_fingerprint=source_pixel_fingerprint,
+        coordinate_contract_mode=coordinate_contract_mode,
+    )
+    source_group = coordinate_context.source_group
+    frame_source = coordinate_context.frame_source
+    source_pixel_fingerprint = coordinate_context.source_pixel_fingerprint
+    frame_shape = tuple(int(value) for value in frame_source.shape[1:])
     snapshot = capture_crop_source_snapshot(
         source_group,
         source_path=source_path,
@@ -112,6 +153,8 @@ def plan_or_materialize_incremental_crop(
         "output_run": output_run,
         "payload_strategy": strategy,
         "promote_composite": bool(promote_composite),
+        "historical_composite": bool(historical_composite),
+        "coordinate_contract_mode": coordinate_contract_mode,
         "roi_size": list(roi_size),
         "roi_chunk_rows": int(roi_chunk_rows),
         "signature_batch_rows": int(signature_batch_rows),
@@ -148,6 +191,8 @@ def plan_or_materialize_incremental_crop(
             "tabular_shard_rows": int(tabular_shard_rows),
             "payload_strategy": strategy,
             "promote_composite": bool(promote_composite),
+            "historical_composite": bool(historical_composite),
+            "coordinate_contract_mode": coordinate_contract_mode,
         },
         input_run_ids={
             "source_rowset": source_path,
@@ -166,6 +211,7 @@ def plan_or_materialize_incremental_crop(
         "roi_chunk_rows": roi_chunk_rows,
         "signature_batch_rows": signature_batch_rows,
         "tabular_shard_rows": tabular_shard_rows,
+        "coordinate_contract_mode": coordinate_contract_mode,
     }
     if strategy == "composite":
         assert base_crop_run is not None
@@ -202,7 +248,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-pixel-fingerprint",
         required=True,
-        help="Stable fingerprint of the exact raw_video/images_full pixel source",
+        help=(
+            "Exact acquisition materialization id for canonical output; historical "
+            "fingerprints are accepted only with --historical-composite"
+        ),
     )
     parser.add_argument(
         "--roi-size",
@@ -227,11 +276,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--promote-composite",
+        "--historical-composite",
         action="store_true",
         help=(
-            "Explicitly select a completed composite through latest_any/latest_complete; "
-            "latest and latest_materialized remain on the standalone base"
+            "Explicitly write a complete but non-selector historical composite. "
+            "It can never update latest or authoritative crop pointers."
         ),
     )
     parser.add_argument(
@@ -277,7 +326,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             tabular_shard_rows=args.tabular_shard_rows,
             command=command,
             payload_strategy=args.payload_strategy,
-            promote_composite=args.promote_composite,
+            promote_composite=False,
+            historical_composite=args.historical_composite,
         )
     except Exception as exc:
         parser.error(str(exc))

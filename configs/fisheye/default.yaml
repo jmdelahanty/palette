@@ -55,7 +55,7 @@ crop:
   - 512
   - 512
   scheduler: distributed
-  source_type: auto                # detect | filtered | interpolated | manual | refined | auto
+  source_type: detect              # future-canonical ordinary crops require detect_runs/<run>
   num_workers: 5
   # External-video crop write path (analysis zarrs without imported raw frames)
   external_write_backend: kvikio

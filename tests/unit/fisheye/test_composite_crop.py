@@ -16,7 +16,6 @@ from fisheye.shared.composite_crop import (
 )
 from fisheye.shared.crop_image_source import (
     CropImageSource,
-    resolve_materialized_crop_run,
 )
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -24,10 +23,12 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STATUS_FAILED,
 )
 from fisheye.tracking.incremental_crop import (
+    HISTORICAL_COMPOSITE_COORDINATE_CONTRACT,
+    HISTORICAL_COMPOSITE_COORDINATE_CONTRACT_MODE,
     IncrementalCropError,
     materialize_composite_incremental_crop_run,
-    materialize_incremental_crop_run,
 )
+from tests.unit.fisheye.test_incremental_crop import _run as _canonical_test_run
 from fisheye.utils.materialize_incremental_crop import (
     plan_or_materialize_incremental_crop,
 )
@@ -83,18 +84,12 @@ def _standalone(
     run_name: str,
     base_run_name: str | None = None,
 ) -> Any:
-    return materialize_incremental_crop_run(
+    return _canonical_test_run(
         root,
-        source_group=source,
+        source,
         source_path=f"refined_detect_runs/{source_name}",
-        frame_source=root["raw_video/images_full"],
-        source_pixel_fingerprint="test-video-sha256",
-        roi_size=(4, 4),
         run_name=run_name,
-        run_provenance=PROVENANCE,
         base_run_name=base_run_name,
-        roi_chunk_rows=2,
-        signature_batch_rows=2,
     )
 
 
@@ -122,6 +117,7 @@ def _composite(
         signature_batch_rows=2,
         promote=promote,
         before_publish=before_publish,
+        coordinate_contract_mode=HISTORICAL_COMPOSITE_COORDINATE_CONTRACT_MODE,
     )
 
 
@@ -174,6 +170,10 @@ def test_composite_writes_only_delta_and_reads_with_standalone_parity() -> None:
     assert parent.attrs["latest_any"] == "crop_base"
     assert parent.attrs["latest_complete"] == "crop_base"
     assert composite.attrs[RUN_COMPLETION_STATUS_ATTR] == RUN_STATUS_COMPLETE
+    assert composite.attrs["stage_selector_eligible"] is False
+    assert composite.attrs["coordinate_contract"] == (
+        HISTORICAL_COMPOSITE_COORDINATE_CONTRACT
+    )
 
     source = CropImageSource.open(root, crop_run="crop_composite")
     assert source.storage_mode == "composite"
@@ -192,26 +192,26 @@ def test_composite_writes_only_delta_and_reads_with_standalone_parity() -> None:
     np.testing.assert_array_equal(source.read_slice(0, 3), expected)
 
 
-def test_composite_explicit_promotion_preserves_standalone_pointers() -> None:
+def test_composite_promotion_is_rejected_and_preserves_all_pointers() -> None:
     root, source_b = _base_and_target()
 
-    _composite(
-        root,
-        source_b,
-        source_name="source_b",
-        run_name="crop_composite",
-        base_run_name="crop_base",
-        promote=True,
-    )
+    with pytest.raises(IncrementalCropError, match="promotion is forbidden"):
+        _composite(
+            root,
+            source_b,
+            source_name="source_b",
+            run_name="crop_composite",
+            base_run_name="crop_base",
+            promote=True,
+        )
 
     attrs = root["crop_runs"].attrs
     assert attrs["latest"] == "crop_base"
     assert attrs["latest_materialized"] == "crop_base"
-    assert attrs["latest_any"] == "crop_composite"
-    assert attrs["latest_complete"] == "crop_composite"
-    assert attrs["latest_composite"] == "crop_composite"
-    with pytest.raises(ValueError, match="resolved through CropImageSource"):
-        resolve_materialized_crop_run(root, crop_run="crop_composite")
+    assert attrs["latest_any"] == "crop_base"
+    assert attrs["latest_complete"] == "crop_base"
+    assert "latest_composite" not in attrs
+    assert "crop_composite" not in root["crop_runs"]
 
 
 def test_pure_reorder_composite_has_empty_delta_and_no_frame_reads() -> None:
@@ -325,7 +325,6 @@ def test_source_mutation_fails_without_selecting_composite() -> None:
             source_name="source_b",
             run_name="crop_failed",
             base_run_name="crop_base",
-            promote=True,
             before_publish=mutate_source,
         )
     parent = root["crop_runs"]
@@ -400,6 +399,7 @@ def test_cli_composite_dry_run_reports_delta_bytes_without_mutation(
         tabular_shard_rows=131_072,
         command="test composite dry run",
         payload_strategy="composite",
+        historical_composite=True,
     )
 
     assert report["payload_strategy"] == "composite"

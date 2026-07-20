@@ -332,14 +332,20 @@ cropped ROI tensors needed by downstream consumers.
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `roi_images` *(conditional)* | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches. Present for `crop_storage_mode=materialized`; may be omitted for `geometry_only` runs. |
-| `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Top-left (x, y) in full-res pixels |
-| `roi_coordinates_ds` | `(n_rois, 2)` | `int32` | Same offsets in downsampled space |
-| `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes (`[cx, cy, w, h]`) |
-| `frame_indices` | `(n_rois,)` | `int32` | Frame index per ROI |
+| `roi_images` | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches. Required for future ordinary runs; absent only on historical `geometry_only` compatibility runs. |
+| `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Source-camera `points_xy` compatibility surface for each ROI top-left. Canonical ordinary runs bind it to the observation `instance_key` rows and exact `source_crop_xywh[:, :2]` payload with a digest-checked derivation; it is directly suitable for source-camera overlay. |
+| `roi_coordinates_ds` *(historical only)* | `(n_rois, 2)` | `int32` | Ambiguous downsampled offsets retained only for legacy reads; future ordinary writers do not reconstruct them from a resolution ratio. |
+| `instance_key` | `(n_rois,)` | `uint64` | Exact observation identity copied from the selected canonical detection rowset. |
+| `source_acquisition_frame_index` | `(n_rois,)` | `int64` | Exact source-acquisition frame identity. |
+| `bbox_norm_coords` | `(n_rois, 4)` | source floating dtype | Exact normalized detector geometry (`[cx, cy, w, h]`) copied from the source. |
+| `bbox_img_xyxy` | `(n_rois, 4)` | source floating dtype | Exact source-camera bounding box. |
+| `centers_img_xy` | `(n_rois, 2)` | source floating dtype | Exact source-camera center. |
+| `source_crop_xywh` | `(n_rois, 4)` | source floating dtype | Source-camera placement of each materialized ROI. |
+| `bbox_roi_xyxy` | `(n_rois, 4)` | source floating dtype | ROI-local bbox with an explicit ROI-to-source-camera transform. |
+| `frame_indices` | `(n_rois,)` | `int64` | Decode index; exactly equal to `source_acquisition_frame_index` for admitted sources. |
 | `frame_counts` | `(n_frames,)` | `int32` | Count of ROIs per frame |
-| `detection_source` | `(n_rois,)` | `int8` | Legacy/support crop label: 0 = accepted detection, 1 = historical interpolated row |
-| `detection_indices` | `(n_rois,)` | `int32` | Physical row index into the resolved `detection_source_path` rowset |
+| `detection_source` *(historical only)* | `(n_rois,)` | `int8` | Legacy/support label for sparse/refined rows. |
+| `detection_indices` | `(n_rois,)` | `int64` | Exact physical row index into the admitted `detect_runs/<run>` rowset. |
 | `source_refined_row_ids` *(optional)* | `(n_rois,)` | `int64` | Stable logical refined-detection row IDs copied from `refined_detect_runs/<run>/instances/refined_row_ids` |
 | `source_detect_row_index` *(optional)* | `(n_rois,)` | `int32` | Raw detect row lineage copied from refined instances when available; `-1` for manual rows |
 
@@ -367,7 +373,7 @@ Attributes:
 - `summary_statistics` (frames with crops, total ROIs, percentage coverage).
 - GPU/environment provenance.
 
-Parent-group pointer semantics during mixed-mode migration:
+Parent-group pointer semantics for historical mixed-mode archives:
 
 - `crop_runs.attrs["latest"]` remains materialized-compatible for backward
   compatibility.
@@ -375,14 +381,21 @@ Parent-group pointer semantics during mixed-mode migration:
 - `crop_runs.attrs["latest_any"]` tracks the latest run regardless of storage
   mode.
 
-Current policy note:
+Future ordinary-writer policy:
 
-- Direct crop writer defaults remain materialized unless a caller passes an
-  explicit storage mode.
-- `crop_batch` defaults analysis archives to `geometry_only` when neither CLI
-  nor config specifies `crop_storage_mode`.
-- Training archives should reject geometry-only crop writes; canonical training
-  crop runs are expected to persist `roi_images`.
+- Direct, batch, Palette CLI, launcher, and flat-cache workflows default to
+  materialized output from an exact `detect_runs/<run>` source.
+- New ordinary crop runs reject `geometry_only` before run creation. Historical
+  geometry-only groups remain explicit read-compatibility surfaces.
+- New ordinary crop runs reject refined and legacy sparse sources until those
+  producers publish an exact canonical row-selection contract.
+- Canonical ordinary crop runs persist `roi_images`, instance identity,
+  acquisition-frame identity, source-camera geometry, ROI-local geometry, and
+  a direction-labelled ROI-to-source-camera transform.
+- A new run remains selector-ineligible while it is written and marked
+  complete. Palette freshly reloads the full persisted ordinary-crop contract,
+  publishes parent selectors while the candidate is still ineligible, and
+  flips eligibility only as the final publication mutation.
 - Many traditional/training/export consumers still require materialized
   `roi_images` even though mixed-mode readers now exist for some ROI-model
   workflows.
@@ -391,15 +404,11 @@ Current policy note:
   `refined_detect_runs/<run>/instances`; crop-run label arrays remain
   compatibility/support surfaces for per-recording and historical stores.
 
-Cropping resolves the ROI source via `crop.source_type` (`detect`, `refined`,
-`filtered`, `interpolated`, `manual`, `auto`) or an explicit
-`crop.source_path` override such as `detect_runs/<run>` or the canonical
-refined path `refined_detect_runs/<run>/instances`. Legacy sparse
-subgroup overrides such as `refined_detect_runs/<run>/manual` remain
-compatibility-only for historical archives. The chosen path is recorded in
-`detection_source_path`.
-`auto` resolves to the canonical curated refined surface when it exists, then
-falls back to the legacy sparse chain only for historical archives.
+Source-resolution helpers can still inspect `refined`, `filtered`,
+`interpolated`, `manual`, and `auto` surfaces for historical tooling. The
+future ordinary writer admits only an exact `detect_runs/<run>` source and
+records it in `detection_source_path`; it does not adapt a refined/sparse rowset
+or silently fall back.
 
 For `geometry_only` crop runs, `source_video_path` or embedded
 `raw_video/images_full` must remain readable from the environment where ROI

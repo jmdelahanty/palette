@@ -1830,7 +1830,7 @@ def crop(request: CropRequest) -> dict[str, Any]:
     resolved_command = _resolved_palette_command("crop", dataset, request, apply=apply)
     spec = _stage_spec("crop")
     config = _load_config(request.config)
-    source_type = request.source_type or "auto"
+    source_type = request.source_type or "detect"
     source_path = _normalize_path(request.source_path)
     params = {
         **_arg_params(request),
@@ -2117,9 +2117,24 @@ def _add_crop_args(sub: argparse.ArgumentParser) -> None:
     _add_common_run_args(sub)
     sub.add_argument("--config", type=Path, default=None, help="Optional crop config YAML.")
     sub.add_argument("--force-new", action="store_true", help="Always create a new crop run on apply.")
-    sub.add_argument("--crop-storage-mode", choices=["materialized", "geometry_only"], default=None)
-    sub.add_argument("--source-type", choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"], default=None)
-    sub.add_argument("--source-path", type=str, default=None)
+    sub.add_argument(
+        "--crop-storage-mode",
+        choices=["materialized", "geometry_only"],
+        default=None,
+        help="Future ordinary crop writes require materialized; geometry_only fails closed.",
+    )
+    sub.add_argument(
+        "--source-type",
+        choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
+        default=None,
+        help="Future ordinary crop writes default to and require exact detect sources.",
+    )
+    sub.add_argument(
+        "--source-path",
+        type=str,
+        default=None,
+        help="Explicit canonical source path: detect_runs/<run>.",
+    )
     sub.add_argument("--selection-policy", choices=["training", "full_recording"], default=None)
     sub.add_argument("--scheduler", choices=["processes", "threads", "distributed"], default=None)
     sub.add_argument("--num-workers", type=int, default=None)

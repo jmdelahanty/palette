@@ -2,11 +2,10 @@
 """
 Predict what the crop stage would do without actually writing ROIs.
 
-This diagnostic mirrors the crop stage's detection-source resolution logic and
-reports the detection run, frame counts, and interpolated metadata that would
-be used. It is helpful for confirming that the pipeline will consume the
-canonical refined detect surface when available, with legacy sparse fallback
-only on historical archives.
+This diagnostic reports the detection run and frame counts that source
+resolution finds, then applies the future ordinary-writer admission rule. Only
+an exact ``detect_runs/<run>`` source is currently eligible for a new normal
+crop run.
 """
 
 from __future__ import annotations
@@ -22,10 +21,11 @@ from rich.console import Console
 from rich.table import Table
 
 from fisheye.tracking.crop import (
+    _preflight_ordinary_crop_coordinates,
     infer_detection_source_type,
     get_detection_source_info,
+    get_video_source,
 )
-from fisheye.shared.metadata import get_total_frames
 
 
 def _load_config(path: Optional[Path]) -> Dict:
@@ -87,15 +87,43 @@ def simulate_crop(
         console.print(f"[red]Unable to resolve detection source: {exc}[/red]")
         return
 
-    frame_indices = source_group["frame_indices"][:]
-    total_detections = int(frame_indices.shape[0])
-    if total_detections == 0:
-        console.print("[yellow]Selected detection source has zero detections.[/yellow]")
+    source_parts = str(resolved_path).strip().strip("/").split("/")
+    if resolved_type != "detect" or len(source_parts) != 2 or source_parts[0] != "detect_runs":
+        console.print(
+            "[red]Unsupported future ordinary crop source:[/red] "
+            f"{resolved_type} [{resolved_path}]. Select an exact detect_runs/<run> source."
+        )
         return
 
-    total_frames = get_total_frames(root, source_group)
-    if total_frames is None:
-        total_frames = int(frame_indices.max(initial=0) + 1)
+    roi_sz = tuple(crop_params.get("roi_sz", [256, 256]))
+    try:
+        video_source_type, video_path = get_video_source(root, console=None)
+        canonical_preflight = _preflight_ordinary_crop_coordinates(
+            root,
+            zarr_path=str(zarr_path),
+            source_path=resolved_path,
+            source_group=source_group,
+            video_source_type=video_source_type,
+            video_path=video_path,
+            roi_size=roi_sz,
+        )
+    except Exception as exc:
+        console.print(
+            "[red]Canonical ordinary-crop preflight failed:[/red] "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    frame_indices = canonical_preflight.frame_indices
+    total_detections = canonical_preflight.row_count
+    if total_detections == 0:
+        console.print(
+            "[yellow]Selected source is canonically valid but contains zero "
+            "detections; no crop run would be created.[/yellow]"
+        )
+        return
+
+    total_frames = canonical_preflight.total_frames
     unique_frames = np.unique(frame_indices)
     frames_with_detections = int(unique_frames.size)
     coverage = (frames_with_detections / total_frames) * 100 if total_frames else 0.0
@@ -109,7 +137,6 @@ def simulate_crop(
             "interp": int(np.sum(detection_source == 1)),
         }
 
-    roi_sz = tuple(crop_params.get("roi_sz", [256, 256]))
     scheduler = crop_params.get("scheduler", "processes")
     num_workers = crop_params.get("num_workers", "auto")
 
@@ -153,19 +180,14 @@ def main() -> None:
         "--crop-source",
         choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         help=(
-            "Override crop source type. 'auto' prefers the canonical current "
-            "refined surface and falls back to raw detect; 'refined' requires "
-            "the canonical curated refined surface. "
-            "'manual'/'filtered'/'interpolated' are legacy sparse "
-            "compatibility modes."
+            "Override crop source type. Future ordinary crop publication "
+            "supports detect; legacy/refined resolutions are reported as unsupported."
         ),
     )
     parser.add_argument(
         "--crop-source-path",
         help=(
-            "Explicit detection source path (detect_runs/<run> or the "
-            "canonical refined path "
-            "refined_detect_runs/<run>/instances)."
+            "Explicit future-canonical detection source path: detect_runs/<run>."
         ),
     )
     parser.add_argument(
