@@ -15,7 +15,10 @@ from fisheye.shared.directed_transform_chain import (
 from fisheye.shared.directed_transform_v2 import stamp_directed_transform_v2
 from fisheye.shared.observation_coordinate_publication import (
     BBOX_CENTER_DERIVATION_ATTR,
+    COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR,
     DETECTION_BBOX_PROJECTION_ATTR,
+    MERGED_COLLECTION_PROXY_SCHEMA,
+    MERGED_COLLECTION_PROXY_SOURCE_KIND,
     ObservationCoordinatePublicationError,
     build_bound_detection_frame_evidence,
     capture_observation_coordinate_publication_checkpoint,
@@ -25,6 +28,7 @@ from fisheye.shared.observation_coordinate_publication import (
     load_detection_observation_geometry,
     publish_crop_observation_geometry,
     publish_crop_roi_geometry,
+    publish_collection_proxy_acquisition_mapping,
     publish_detection_observation_geometry,
     require_bound_source_camera_position_surface,
     restore_observation_coordinate_publication_checkpoint,
@@ -301,6 +305,63 @@ def test_detection_geometry_publishes_exact_identity_time_and_v2_descriptors() -
         frame_evidence=evidence,
     )
     assert loaded.centers_image.descriptor == result.centers_image.descriptor
+
+
+def test_collection_proxy_mapping_seals_exact_row_and_acquisition_lineage() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    token = world["archive_token"]
+    rowset = FakeGroup(
+        path="crop_runs/merged_1",
+        attrs={
+            "schema": MERGED_COLLECTION_PROXY_SCHEMA,
+            "crop_proxy_schema": MERGED_COLLECTION_PROXY_SCHEMA,
+            "source_kind": MERGED_COLLECTION_PROXY_SOURCE_KIND,
+            "source_proxy_crop_runs": ["proxy_1"],
+            "source_refined_run_paths": ["refined_1"],
+            "source_collection_id": "collection_1",
+        },
+        archive_token=token,
+    )
+    arrays = {
+        "frame_indices": np.asarray([0, 1], dtype=np.int64),
+        "source_frame_indices": np.asarray([0, 1], dtype=np.int64),
+        "source_acquisition_frame_index": np.asarray([0, 1], dtype=np.int64),
+        "source_proxy_crop_run_index": np.asarray([0, 0], dtype=np.int16),
+        "source_proxy_crop_row_ids": np.asarray([5, 9], dtype=np.int64),
+    }
+    for name, values in arrays.items():
+        rowset[name] = FakeArray(
+            values,
+            path=f"{rowset.path}/{name}",
+            archive_token=token,
+        )
+
+    mapping = publish_collection_proxy_acquisition_mapping(
+        rowset,
+        acquisition_frame=world["acquisition_frame"],
+    )
+
+    assert mapping.record["operation"] == (
+        "exact_merged_proxy_rows_to_source_acquisition_frames_v1"
+    )
+    assert mapping.record["source_proxy_crop_runs"] == ["proxy_1"]
+    assert COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR in rowset.attrs
+    observation_publication._require_collection_proxy_acquisition_mapping(
+        rowset,
+        mapping,
+        acquisition=world["acquisition_frame"],
+    )
+
+    rowset["source_proxy_crop_row_ids"].data[0] += 1
+    with pytest.raises(
+        ObservationCoordinatePublicationError,
+        match="differs from the exact live row",
+    ):
+        observation_publication._require_collection_proxy_acquisition_mapping(
+            rowset,
+            mapping,
+            acquisition=world["acquisition_frame"],
+        )
 
 
 def test_detection_geometry_rejects_inexact_bbox_center_before_attrs_mutation() -> None:

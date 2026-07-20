@@ -153,6 +153,19 @@ CROP_GEOMETRY_SELECTION_SCHEMA_ID = "palette.crop_geometry_selection"
 CROP_GEOMETRY_SELECTION_SCHEMA_VERSION = 1
 CROP_GEOMETRY_SELECTION_OPERATION = "exact_instance_key_subset_reorder_v1"
 
+COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR = (
+    "collection_proxy_acquisition_frame_mapping"
+)
+COLLECTION_PROXY_ACQUISITION_MAPPING_SCHEMA_ID = (
+    "palette.collection_proxy_acquisition_frame_mapping"
+)
+COLLECTION_PROXY_ACQUISITION_MAPPING_SCHEMA_VERSION = 1
+COLLECTION_PROXY_ACQUISITION_MAPPING_OPERATION = (
+    "exact_merged_proxy_rows_to_source_acquisition_frames_v1"
+)
+MERGED_COLLECTION_PROXY_SCHEMA = "palette_clipped_collection_merged_proxy_crop_run_v1"
+MERGED_COLLECTION_PROXY_SOURCE_KIND = "merged_clipped_collection_proxy_crop_run"
+
 CROP_ROI_GEOMETRY_DERIVATION_ATTR = "crop_roi_geometry_derivation"
 CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID = "palette.crop_roi_geometry_derivation"
 CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_VERSION = 1
@@ -2912,6 +2925,134 @@ def _require_detection_acquisition_mapping(
         )
 
 
+def _collection_proxy_acquisition_mapping_record(
+    rowset: Any,
+    *,
+    acquisition: BoundAcquisitionCameraFrame,
+) -> dict[str, Any]:
+    acquisition = require_bound_acquisition_camera_frame(acquisition)
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Merged collection-proxy rowset",
+    )
+    if (
+        attrs.get("schema") != MERGED_COLLECTION_PROXY_SCHEMA
+        or attrs.get("crop_proxy_schema") != MERGED_COLLECTION_PROXY_SCHEMA
+        or attrs.get("source_kind") != MERGED_COLLECTION_PROXY_SOURCE_KIND
+    ):
+        _fail("Collection-proxy mapping requires the exact merged proxy schema.")
+    source_runs = attrs.get("source_proxy_crop_runs")
+    source_paths = attrs.get("source_refined_run_paths")
+    collection_id = attrs.get("source_collection_id")
+    if (
+        type(source_runs) is not list
+        or not source_runs
+        or any(not isinstance(item, str) or not item for item in source_runs)
+        or len(set(source_runs)) != len(source_runs)
+        or type(source_paths) is not list
+        or not source_paths
+        or any(not isinstance(item, str) or not item for item in source_paths)
+        or not isinstance(collection_id, str)
+        or not collection_id
+    ):
+        _fail("Merged collection-proxy source identities are incomplete or ambiguous.")
+    try:
+        frame_node = rowset["frame_indices"]
+        source_frame_node = rowset["source_frame_indices"]
+        acquisition_node = rowset["source_acquisition_frame_index"]
+        run_index_node = rowset["source_proxy_crop_run_index"]
+        row_index_node = rowset["source_proxy_crop_row_ids"]
+    except Exception as exc:
+        _fail(f"Merged collection-proxy mapping arrays are unavailable: {exc}.")
+    frames = _array(frame_node, label="merged proxy frame index")
+    source_frames = _array(source_frame_node, label="merged proxy source frame index")
+    acquisition_frames = _array(
+        acquisition_node,
+        label="merged proxy acquisition frame index",
+    )
+    run_indices = _array(run_index_node, label="merged proxy source-run index")
+    row_indices = _array(row_index_node, label="merged proxy source-row index")
+    row_count = int(frames.shape[0]) if frames.ndim == 1 else -1
+    if (
+        row_count < 0
+        or source_frames.shape != (row_count,)
+        or acquisition_frames.shape != (row_count,)
+        or run_indices.shape != (row_count,)
+        or row_indices.shape != (row_count,)
+        or frames.dtype.kind not in "iu"
+        or source_frames.dtype.kind not in "iu"
+        or acquisition_frames.dtype != np.dtype("<i8")
+        or run_indices.dtype.kind not in "iu"
+        or row_indices.dtype.kind not in "iu"
+        or not np.array_equal(frames.astype(np.int64), source_frames.astype(np.int64))
+        or not np.array_equal(frames.astype(np.int64), acquisition_frames)
+        or np.any(acquisition_frames < 0)
+        or np.any(acquisition_frames >= acquisition.record.source_total_frames)
+        or np.any(run_indices < 0)
+        or np.any(run_indices >= len(source_runs))
+        or np.any(row_indices < 0)
+    ):
+        _fail("Merged collection-proxy row mapping is not exact and acquisition-bounded.")
+    return {
+        "schema_id": COLLECTION_PROXY_ACQUISITION_MAPPING_SCHEMA_ID,
+        "schema_version": COLLECTION_PROXY_ACQUISITION_MAPPING_SCHEMA_VERSION,
+        "operation": COLLECTION_PROXY_ACQUISITION_MAPPING_OPERATION,
+        "direction": "merged_proxy_row_to_source_acquisition_frame",
+        "frame_indices": _payload(frame_node, frames),
+        "source_frame_indices": _payload(source_frame_node, source_frames),
+        "source_acquisition_frame_index": _payload(
+            acquisition_node,
+            acquisition_frames,
+        ),
+        "source_proxy_crop_run_index": _payload(run_index_node, run_indices),
+        "source_proxy_crop_row_ids": _payload(row_index_node, row_indices),
+        "source_proxy_crop_runs": list(source_runs),
+        "source_refined_run_paths": list(source_paths),
+        "source_collection_id": collection_id,
+        "acquisition_camera_frame": {
+            "record_ref": acquisition.record_ref,
+            "record_sha256": acquisition.record_sha256,
+        },
+        "source_total_frames": int(acquisition.record.source_total_frames),
+        "proof": "exact_source_proxy_and_refined_row_value_validation_v1",
+    }
+
+
+def publish_collection_proxy_acquisition_mapping(
+    rowset: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> BoundCoordinateRecord:
+    """Publish exact merged-proxy row and acquisition-frame lineage."""
+
+    record = _collection_proxy_acquisition_mapping_record(
+        rowset,
+        acquisition=acquisition_frame,
+    )
+    return stamp_and_bind_persisted_coordinate_record(
+        rowset,
+        record,
+        attr_name=COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR,
+    )
+
+
+def _require_collection_proxy_acquisition_mapping(
+    rowset: Any,
+    mapping: BoundCoordinateRecord,
+    *,
+    acquisition: BoundAcquisitionCameraFrame,
+) -> None:
+    expected = _collection_proxy_acquisition_mapping_record(
+        rowset,
+        acquisition=acquisition,
+    )
+    if mapping.record != expected:
+        _fail(
+            "Persisted merged collection-proxy mapping differs from the exact "
+            "live row, source-proxy, refined-run, or acquisition evidence."
+        )
+
+
 def _load_persisted_detection_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -3246,26 +3387,136 @@ def load_persisted_ordinary_crop_observation_geometry(
     )
 
 
+def load_persisted_collection_proxy_observation_geometry(
+    root_node: Any,
+    rowset_path: str,
+) -> BoundDetectionObservationGeometry:
+    """Load a canonical selector-ineligible merged collection-proxy rowset."""
+
+    rowset = _persisted_node(root_node, rowset_path, label="collection-proxy rowset")
+    path = canonical_node_path(rowset)
+    parts = path.split("/")
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Merged collection-proxy rowset",
+    )
+    if (
+        len(parts) != 2
+        or parts[0] != "crop_runs"
+        or not parts[1]
+        or attrs.get("schema") != MERGED_COLLECTION_PROXY_SCHEMA
+        or attrs.get("crop_proxy_schema") != MERGED_COLLECTION_PROXY_SCHEMA
+        or attrs.get("source_kind") != MERGED_COLLECTION_PROXY_SOURCE_KIND
+        or attrs.get("coordinate_contract") != "canonical_v2"
+        or attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT
+        or attrs.get(RUN_COMPLETION_STATUS_ATTR) != "auxiliary"
+        or attrs.get("stage_selector_eligible") is not False
+    ):
+        _fail(
+            "Merged collection-proxy position publication requires one exact "
+            "canonical_v2 selector-ineligible auxiliary crop_runs/<run> rowset."
+        )
+    _, acquisition = load_persisted_acquisition_camera_authority(root_node)
+    camera_id = acquisition.record.camera_id
+    camera_node = _persisted_node(
+        root_node,
+        f"analysis/coordinate_frames/source_camera/{camera_id}/continuous",
+        label="source-camera frame authority",
+    )
+    camera = load_source_camera_pixel_frame_authority(
+        camera_node,
+        acquisition_frame=acquisition,
+    )
+    normalized_node = _persisted_node(
+        root_node,
+        f"{path}/coordinate_frames/source_camera_normalized",
+        label="collection-proxy normalized frame",
+    )
+    normalized = load_normalized_pixel_frame_authority(
+        normalized_node,
+        pixel_frame=camera,
+    )
+    matrix_node = _persisted_node(
+        root_node,
+        f"{path}/coordinate_transforms/source_camera_normalized_to_image",
+        label="collection-proxy normalized-to-camera transform",
+    )
+    authority_node = _persisted_node(
+        root_node,
+        (
+            f"{path}/coordinate_transforms/"
+            "source_camera_normalized_to_image_authority"
+        ),
+        label="collection-proxy normalized-to-camera transform authority",
+    )
+    authority = load_bound_transform_authority(
+        authority_node,
+        payload_node=matrix_node,
+        source_frame=normalized,
+        target_frame=camera,
+    )
+    transform = load_bound_directed_transform_v2(
+        matrix_node,
+        authority=authority,
+        source_frame=normalized,
+        target_frame=camera,
+    )
+    evidence = build_bound_detection_frame_evidence(
+        source_camera_frame=camera,
+        normalized_frame=normalized,
+        normalized_to_source_camera=resolve_bound_directed_transform_chain(
+            (transform,)
+        ),
+    )
+    mapping = bind_persisted_coordinate_record(
+        rowset,
+        attr_name=COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR,
+    )
+    _require_collection_proxy_acquisition_mapping(
+        rowset,
+        mapping,
+        acquisition=acquisition,
+    )
+    return load_detection_observation_geometry(
+        rowset,
+        rowset["instance_key"],
+        rowset["source_acquisition_frame_index"],
+        rowset["bbox_norm_coords"],
+        rowset["bbox_img_xyxy"],
+        rowset["centers_img_xy"],
+        frame_evidence=evidence,
+        source_lineage_records=(mapping,),
+    )
+
+
 def load_persisted_source_camera_position_surface(
     root_node: Any,
     rowset_path: str,
 ) -> BoundSourceCameraPositionSurface:
-    """Track-facing resolver for one canonical detection or crop rowset."""
+    """Track-facing resolver for one canonical observation position rowset."""
 
     rowset = _persisted_node(root_node, rowset_path, label="position rowset")
     attrs = require_trusted_coordinate_attrs(rowset, label="Position rowset")
     has_mapping = DETECTION_ACQUISITION_MAPPING_ATTR in attrs
     has_selection = CROP_GEOMETRY_SELECTION_ATTR in attrs
-    if has_mapping == has_selection:
+    has_collection_mapping = COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR in attrs
+    if sum((has_mapping, has_selection, has_collection_mapping)) != 1:
         _fail(
-            "Canonical position rowset must declare exactly one detection-mapping "
-            "or crop-selection lineage."
+            "Canonical position rowset must declare exactly one detection, crop, "
+            "or merged collection-proxy lineage."
         )
-    geometry = (
-        load_persisted_detection_observation_geometry(root_node, rowset_path)
-        if has_mapping
-        else load_persisted_crop_observation_geometry(root_node, rowset_path)
-    )
+    if has_mapping:
+        geometry = load_persisted_detection_observation_geometry(
+            root_node,
+            rowset_path,
+        )
+    elif has_selection:
+        geometry = load_persisted_crop_observation_geometry(root_node, rowset_path)
+    else:
+        geometry = load_persisted_collection_proxy_observation_geometry(
+            root_node,
+            rowset_path,
+        )
     return require_bound_source_camera_position_surface(geometry.position_surface)
 
 
@@ -3296,6 +3547,12 @@ __all__ = [
     "CROP_GEOMETRY_SELECTION_OPERATION",
     "CROP_GEOMETRY_SELECTION_SCHEMA_ID",
     "CROP_GEOMETRY_SELECTION_SCHEMA_VERSION",
+    "COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR",
+    "COLLECTION_PROXY_ACQUISITION_MAPPING_OPERATION",
+    "COLLECTION_PROXY_ACQUISITION_MAPPING_SCHEMA_ID",
+    "COLLECTION_PROXY_ACQUISITION_MAPPING_SCHEMA_VERSION",
+    "MERGED_COLLECTION_PROXY_SCHEMA",
+    "MERGED_COLLECTION_PROXY_SOURCE_KIND",
     "CROP_ROI_GEOMETRY_DERIVATION_ATTR",
     "CROP_ROI_GEOMETRY_DERIVATION_OPERATION",
     "CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID",
@@ -3319,10 +3576,12 @@ __all__ = [
     "load_crop_roi_geometry",
     "load_detection_observation_geometry",
     "load_persisted_crop_observation_geometry",
+    "load_persisted_collection_proxy_observation_geometry",
     "load_persisted_detection_observation_geometry",
     "load_persisted_ordinary_crop_observation_geometry",
     "load_persisted_source_camera_position_surface",
     "publish_crop_observation_geometry",
+    "publish_collection_proxy_acquisition_mapping",
     "publish_crop_roi_geometry",
     "publish_detection_observation_geometry",
     "publish_detection_observation_cardinality",
