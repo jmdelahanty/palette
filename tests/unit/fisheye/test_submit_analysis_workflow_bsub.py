@@ -16,11 +16,23 @@ def _build_clean_palette_checkout(path: Path) -> None:
     scripts_dir = path / "scripts"
     scripts_dir.mkdir(parents=True)
     scripts_py = scripts_dir / "py"
-    scripts_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    scripts_py.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-c\" ]]; then\n"
+        "  repo=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"\n"
+        "  printf '%s\\n' \"$repo/src/fisheye/__init__.py\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
     scripts_py.chmod(0o755)
     module = path / "src" / "fisheye" / "utils" / "execute_analysis_workflow.py"
     module.parent.mkdir(parents=True)
     module.write_text("# fixture\n", encoding="utf-8")
+    (path / "src" / "fisheye" / "__init__.py").write_text(
+        "# fixture\n",
+        encoding="utf-8",
+    )
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     subprocess.run(["git", "-C", str(path), "add", "."], check=True)
     subprocess.run(
@@ -122,6 +134,7 @@ def test_submit_analysis_workflow_records_requested_and_runtime_resources(
     assert "allocated_slots=5" in runtime
     assert "cpu_model=" in runtime
     assert "cpu_model=unknown" not in runtime
+    assert f"fisheye_source={palette_repo / 'src/fisheye/__init__.py'}" in runtime
 
     status = (run_dir / "status.txt").read_text(encoding="utf-8")
     assert "status=complete" in status
@@ -221,3 +234,5 @@ def test_submit_analysis_workflow_accepts_git_worktree_checkout(
         / "run_analysis_workflow.sh"
     ).read_text(encoding="utf-8")
     assert f"PALETTE_REPO={palette_worktree}" in job_script
+    assert 'export PYTHONPATH="${PALETTE_REPO}/src' in job_script
+    assert "Palette import path mismatch" in job_script

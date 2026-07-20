@@ -173,6 +173,18 @@ if [[ -n "\$(git status --porcelain)" ]]; then
   printf 'Refusing dirty Palette checkout on the execution host.\n' >&2
   exit 2
 fi
+export PYTHONPATH="\${PALETTE_REPO}/src\${PYTHONPATH:+:\${PYTHONPATH}}"
+EXPECTED_FISHEYE_SOURCE="\${PALETTE_REPO}/src/fisheye/__init__.py"
+ACTUAL_FISHEYE_SOURCE="\$(scripts/py -c '
+from pathlib import Path
+import fisheye
+print(Path(fisheye.__file__).resolve())
+')"
+if [[ "\${ACTUAL_FISHEYE_SOURCE}" != "\${EXPECTED_FISHEYE_SOURCE}" ]]; then
+  printf 'Palette import path mismatch: expected %s, found %s\n' \
+    "\${EXPECTED_FISHEYE_SOURCE}" "\${ACTUAL_FISHEYE_SOURCE}" >&2
+  exit 2
+fi
 [[ -n "\${LSB_JOBID:-}" ]] || {
   printf 'Refusing analysis execution outside an LSF allocation.\n' >&2
   exit 2
@@ -226,6 +238,7 @@ runtime_environment_tmp="\${RUNTIME_ENVIRONMENT_FILE}.tmp.\$\$"
   printf 'cpu_architecture=%s\n' "\$(uname -m)"
   printf 'cpu_logical_count=%s\n' "\${CPU_LOGICAL_COUNT}"
   printf 'kernel_release=%s\n' "\$(uname -r)"
+  printf 'fisheye_source=%s\n' "\${ACTUAL_FISHEYE_SOURCE}"
 } >"\${runtime_environment_tmp}"
 mv "\${runtime_environment_tmp}" "\${RUNTIME_ENVIRONMENT_FILE}"
 
