@@ -208,11 +208,11 @@ After import, check:
 - the registry has one `datasets` row with `zarr_use = "training"` if
   `--register` was used.
 
-For detection-label seeding, compare the trained model input dimensions against
-the arrays stored in `raw_video`. Model dimensions are queryable from the
-registry through `model_input_shapes`. If a sampled Zarr already has a
-downsampled frame array matching the model size, use that representation for
-initial detection seeding. The helper command is:
+For unbound detection-prediction seeding, compare the trained model input
+dimensions against the arrays stored in `raw_video`. Model dimensions are
+queryable from the registry through `model_input_shapes`. If a sampled Zarr
+already has a downsampled frame array matching the model size, use that
+representation for initial detection seeding. The helper command is:
 
 ```bash
 scripts/py -m fisheye.utils.predict_training_detections /path/to/training.zarr \
@@ -222,16 +222,16 @@ scripts/py -m fisheye.utils.predict_training_detections /path/to/training.zarr \
   --apply
 ```
 
-Then initialize the curated refined-detect surface for review:
+The helper writes immutable `detection_artifact_runs/<run>` numeric evidence.
+It never writes or selects `detect_runs/<run>`, and its training/model-frame
+boxes are not source-camera coordinate authority. Do not pass this artifact to
+`refine_detect --detect-run`, copy it under `detect_runs`, or infer a conversion
+from resolution ratios. An explicit canonical binding/promotion path must first
+validate the frame-source lineage and publish a distinct canonical detect run;
+if that path is unavailable, stop before refinement.
 
-```bash
-scripts/py -m fisheye.refinement.refine_detect /path/to/training.zarr \
-  --detect-run detect_seed_<model_or_date> \
-  --per-frame-top-k 1
-```
-
-For sampled training imports, `refine_detect` runs in passthrough mode: it does
-not require `detect_quality`, disables artifact filters, and writes
+After canonical binding, sampled-import passthrough refinement does not require
+`detect_quality`, disables artifact filters, and writes
 `refined_detect_runs/<run>/instances` for manual review/approval. The normal
 refinement dish-mask gate still applies when
 `analysis_metadata.attrs["dish_mask"]` is present: raw out-of-dish candidates

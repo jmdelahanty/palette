@@ -195,7 +195,7 @@ scripts/py -m fisheye.diagnostics.compare_realtime_offline_detections \
   --apply
 ```
 
-## Acquisition Boxes as a Detect Run
+## Acquisition Boxes as a Nonselector Detection Artifact
 
 Implemented module:
 
@@ -203,14 +203,17 @@ Implemented module:
 scripts/py -m fisheye.utils.import_acquisition_detections_to_detect_run \
   /path/to/recording/zarr/recording_analysis.zarr \
   --run-name detect_acquisition_crop_meta_<label> \
+  --artifact-only \
   --apply
 ```
 
-This imports `derived/external_crop_recorder/*_crop_meta.csv` into the standard
-raw detection surface:
+This retains `derived/external_crop_recorder/*_crop_meta.csv` as explicit
+unbound numeric evidence. It does not publish or select a standard raw detect
+run:
 
 ```text
-detect_runs/<run>/
+detection_artifact_runs/<run>/
+  artifact_row_id
   frame_indices
   bbox_norm_coords
   bbox_img_xyxy
@@ -220,8 +223,8 @@ detect_runs/<run>/
   n_detections
 ```
 
-It also writes acquisition-specific provenance arrays that do not change the
-downstream detection contract:
+It also writes acquisition-specific provenance arrays. These remain artifact
+semantics and are not a downstream canonical detection contract:
 
 ```text
 source_crop_xywh
@@ -232,14 +235,17 @@ source_recording_frame_ids
 The intended chain is:
 
 ```text
-detect_runs/<acquisition_import>
-  -> detect_runs/<acquisition_import>/quality_reports/<quality_run>
+detection_artifact_runs/<acquisition_import>
+  -> explicit canonical identity/coordinate binding and promotion (not yet implemented)
+  -> new detect_runs/<canonical_import>
+  -> detect_runs/<canonical_import>/quality_reports/<quality_run>
   -> refined_detect_runs/<runtime_refined>/instances
   -> crop/keypoint/mask consumers
 ```
 
-Missing acquisition detections are represented through the normal detect
-contract as `frame_counts == 0`. Blank crop-recorder frames and no-detection
+Until that promotion boundary exists, the chain stops at the artifact. Missing
+acquisition detections are represented in its exact full-domain proof and count
+arrays as `frame_counts == 0`. Blank crop-recorder frames and no-detection
 frames are preserved in run attrs, while row-level crop provenance remains
 available through `source_crop_xywh` and `source_crop_meta_row_indices`.
 
