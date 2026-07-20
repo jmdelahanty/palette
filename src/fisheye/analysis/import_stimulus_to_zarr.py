@@ -133,6 +133,9 @@ from fisheye.shared.stimulus_physical_coordinate import (
     invalidate_stimulus_physical_coordinate_publication,
     publish_stimulus_physical_coordinate_authority,
 )
+from fisheye.shared.source_camera_physical_authority import (
+    publish_source_camera_physical_authority,
+)
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -1797,7 +1800,6 @@ def _import_stimulus_from_open_h5(
             stimulus_run=run_name,
             selected_calibration=selected_calibration,
         )
-
         run_attrs = {
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_h5": str(resolved_h5),
@@ -1813,6 +1815,18 @@ def _import_stimulus_from_open_h5(
             h5,
             preflight=coordinate_preflight,
         )
+        if physical_authority is not None:
+            publish_source_camera_physical_authority(
+                root,
+                source_camera_evidence=(
+                    coordinate_preflight.selected_calibration.source_camera
+                ),
+                source_kind="stimulus_h5_calibration_snapshot",
+                provenance={
+                    "source_h5": str(resolved_h5),
+                    "import_version": STIMULUS_IMPORT_VERSION,
+                },
+            )
         mark_run_complete(
             run_group,
             parent_group=runs_parent,

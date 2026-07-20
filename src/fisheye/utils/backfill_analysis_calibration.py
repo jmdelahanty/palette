@@ -22,14 +22,25 @@ from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+import re
+from typing import Any, Optional, Sequence
 
 import h5py
 import numpy as np
 import zarr
 
-from fisheye.analysis.import_stimulus_to_zarr import _materialize_analysis_calibration
+from fisheye.shared.pixel_frame_authority import (
+    load_persisted_acquisition_camera_authority,
+)
+from fisheye.shared.selected_calibration import (
+    VerifiedSelectedCameraSourceEvidence,
+    build_selected_camera_source_evidence_from_h5_values,
+)
+from fisheye.shared.source_camera_physical_authority import (
+    publish_source_camera_physical_authority,
+)
 
 
 LEGACY_CALIBRATION_ATTRS = (
@@ -158,6 +169,44 @@ def _source_label_for_calibration(root: zarr.Group, calibration: zarr.Group) -> 
     return "; ".join(parts)
 
 
+def _donor_source_camera_evidence(
+    donor_calibration: zarr.Group,
+) -> VerifiedSelectedCameraSourceEvidence:
+    source_h5_raw = donor_calibration.attrs.get("source_h5")
+    camera_id_raw = (
+        donor_calibration.attrs.get("active_camera_id")
+        or donor_calibration.attrs.get("primary_camera_id")
+    )
+    if source_h5_raw in (None, "") or camera_id_raw in (None, ""):
+        raise ValueError(
+            "Donor calibration lacks source_h5 or active/primary camera identity."
+        )
+    source_h5 = Path(str(source_h5_raw)).expanduser().resolve()
+    camera_id = str(camera_id_raw).strip()
+    camera_path = f"/calibration_snapshot/{camera_id}"
+    if not source_h5.is_file():
+        raise FileNotFoundError(f"Donor calibration source H5 not found: {source_h5}")
+    with h5py.File(source_h5, "r") as h5:
+        arena_path = "/calibration_snapshot/arena_config_json"
+        if arena_path not in h5 or camera_path not in h5:
+            raise ValueError(
+                "Donor source H5 lacks exact arena-config or selected-camera nodes."
+            )
+        arena_node = h5[arena_path]
+        camera_node = h5[camera_path]
+        if not isinstance(arena_node, h5py.Dataset) or not isinstance(
+            camera_node, h5py.Group
+        ):
+            raise ValueError("Donor source H5 calibration nodes have invalid types.")
+        return build_selected_camera_source_evidence_from_h5_values(
+            source_h5_path=str(source_h5),
+            arena_config_raw=arena_node[()],
+            camera_group_path=camera_path,
+            camera_group_attrs=dict(camera_node.attrs),
+            expected_camera_id=camera_id,
+        )
+
+
 def _donor_calibration_plan(
     zarr_path: Path,
     *,
@@ -185,6 +234,45 @@ def _donor_calibration_plan(
             zarr_path=zarr_path,
             status="donor_calibration_missing_scale",
             donor_zarr_path=donor_zarr_path,
+        )
+    if not isinstance(operator_note, str) or not operator_note.strip():
+        return BackfillPlan(
+            zarr_path=zarr_path,
+            status="donor_operator_verification_required",
+            donor_zarr_path=donor_zarr_path,
+            message=(
+                "A nonempty --donor-note is required to attest that camera, "
+                "optics, resolution, and physical configuration match."
+            ),
+        )
+    try:
+        donor_evidence = _donor_source_camera_evidence(donor_calibration)
+        donor_ppm_raw = donor_calibration.attrs.get("pixels_per_mm_camera")
+        if donor_ppm_raw is None:
+            pixel_to_mm_raw = donor_calibration.attrs.get("pixel_to_mm")
+            donor_ppm_raw = (
+                None
+                if pixel_to_mm_raw is None
+                else 1.0 / float(pixel_to_mm_raw)
+            )
+        if (
+            donor_evidence.pixels_per_mm_camera is None
+            or donor_ppm_raw is None
+            or float(donor_ppm_raw) != donor_evidence.pixels_per_mm_camera
+        ):
+            raise ValueError(
+                "Donor normalized scale differs from exact source-H5 camera evidence."
+            )
+        load_persisted_acquisition_camera_authority(
+            root,
+            expected_camera_id=donor_evidence.active_camera_id,
+        )
+    except Exception as exc:
+        return BackfillPlan(
+            zarr_path=zarr_path,
+            status="donor_physical_authority_unavailable",
+            donor_zarr_path=donor_zarr_path,
+            message=str(exc),
         )
 
     planned_status = "would_copy_donor_overwrite" if existing_complete else "would_copy_donor"
@@ -215,6 +303,17 @@ def _donor_calibration_plan(
     target_calibration.attrs["donor_backfill_timestamp_utc"] = datetime.now(timezone.utc).isoformat()
     if operator_note:
         target_calibration.attrs["donor_backfill_note"] = str(operator_note)
+    publish_source_camera_physical_authority(
+        root,
+        source_camera_evidence=donor_evidence,
+        source_kind="operator_verified_donor_h5_calibration",
+        provenance={
+            "operator_verified": True,
+            "donor_zarr": str(donor_zarr_path.expanduser().resolve()),
+            "donor_source_h5": donor_evidence.source_h5_path,
+            "operator_note": str(operator_note or ""),
+        },
+    )
     if consolidate_metadata:
         consolidate_metadata_capture_expected_warnings(zarr_path)
 
@@ -354,6 +453,105 @@ def _h5_has_calibration_snapshot(h5_path: Path) -> bool:
         return "calibration_snapshot" in h5
 
 
+def _materialize_analysis_calibration(
+    root: zarr.Group,
+    h5: h5py.File,
+    *,
+    source_h5: Path,
+    run_name: str,
+) -> None:
+    """Write the legacy normalized calibration surface used by this repair CLI."""
+
+    arena_node = h5["/calibration_snapshot/arena_config_json"]
+    raw = arena_node[()]
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    arena = json.loads(str(raw))
+    if not isinstance(arena, dict):
+        raise ValueError("Calibration arena config is not a JSON object.")
+    camera_id = str(arena.get("active_camera_id") or "").strip()
+    camera_records = arena.get("camera_calibrations")
+    matches = [
+        item
+        for item in camera_records or []
+        if isinstance(item, dict) and str(item.get("camera_id")) == camera_id
+    ]
+    if not camera_id or len(matches) != 1:
+        raise ValueError("Calibration snapshot lacks one exact active-camera record.")
+    camera_record = matches[0]
+    camera_group = h5[f"/calibration_snapshot/{camera_id}"]
+
+    analysis = root.require_group("analysis")
+    calibration = analysis.require_group("calibration")
+    calibration.attrs.update(
+        {
+            "schema_version": 1,
+            "source": "h5_calibration_snapshot",
+            "source_h5": str(source_h5.resolve()),
+            "source_stimulus_run": run_name,
+            "active_camera_id": camera_id,
+            "primary_camera_id": camera_id,
+        }
+    )
+    for name in (
+        "pixels_per_mm_camera",
+        "pixels_per_mm_projector",
+        "real_world_ref_mm",
+        "native_width_px",
+        "native_height_px",
+    ):
+        value = camera_record.get(name, camera_group.attrs.get(name))
+        if value is not None:
+            calibration.attrs[name] = value
+    ppm = calibration.attrs.get("pixels_per_mm_camera")
+    if ppm is not None and float(ppm) > 0:
+        calibration.attrs["pixel_to_mm"] = 1.0 / float(ppm)
+    for name in (
+        "experimental_area_center_x_px",
+        "experimental_area_center_y_px",
+        "experimental_area_radius_px",
+        "experimental_area_radius_mm",
+        "experimental_area_width_px",
+        "experimental_area_height_px",
+        "sub_arena_x_px",
+        "sub_arena_y_px",
+        "sub_arena_width_px",
+        "sub_arena_height_px",
+        "sub_arena_width_mm",
+        "sub_arena_height_mm",
+        "calculated_z_eff_mm",
+        "experimental_area_shape",
+    ):
+        if arena.get(name) is not None:
+            calibration.attrs[name] = arena[name]
+
+    yaml_node = camera_group.get("homography_matrix_yml")
+    if not isinstance(yaml_node, h5py.Dataset):
+        calibration.attrs["homography_status"] = "missing_numeric_matrix"
+        return
+    yaml_raw = yaml_node[()]
+    text = yaml_raw.decode("utf-8") if isinstance(yaml_raw, bytes) else str(yaml_raw)
+    match = re.search(r"data\s*:\s*\[([^\]]+)\]", text, flags=re.DOTALL)
+    if match is None:
+        calibration.attrs["homography_status"] = "missing_numeric_matrix"
+        return
+    values = np.asarray(
+        [float(item.strip()) for item in match.group(1).split(",")],
+        dtype=np.float64,
+    )
+    if values.size != 9:
+        raise ValueError("Calibration homography YAML does not contain nine values.")
+    calibration.create_array(
+        "homography_matrix",
+        data=values.reshape(3, 3),
+        chunks=(3, 3),
+        overwrite=True,
+    )
+    calibration.attrs["homography_source"] = (
+        f"calibration_snapshot/{camera_id}/homography_matrix_yml"
+    )
+
+
 def _copy_legacy_calibration_attrs(root: zarr.Group, *, overwrite_existing: bool) -> None:
     analysis_calibration = _get_analysis_calibration(root)
     legacy_calibration = root.get("calibration")
@@ -450,7 +648,6 @@ def plan_or_backfill_one(
             h5,
             source_h5=h5_path,
             run_name=source_run_name,
-            console=None,
         )
     _copy_legacy_calibration_attrs(root, overwrite_existing=overwrite_existing)
     if consolidate_metadata:
@@ -479,6 +676,8 @@ def _print_result(result: BackfillPlan, *, verbose: bool) -> None:
         "missing_calibration_snapshot",
         "missing_donor_calibration",
         "donor_calibration_missing_scale",
+        "donor_operator_verification_required",
+        "donor_physical_authority_unavailable",
         "h5_error",
         "missing_stimulus_run",
     }
@@ -513,8 +712,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--donor-zarr",
         type=Path,
         help=(
-            "Copy calibration from a known-matching donor Zarr. Operator is responsible "
-            "for verifying physical rig/camera configuration."
+            "Copy calibration from a known-matching donor Zarr and publish sealed "
+            "recording physical authority. Requires --donor-note."
         ),
     )
     parser.add_argument(
@@ -568,7 +767,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             continue
 
         counts[result.status] = counts.get(result.status, 0) + 1
-        if result.status in {"h5_error"}:
+        if result.status in {
+            "h5_error",
+            "donor_operator_verification_required",
+            "donor_physical_authority_unavailable",
+        }:
             counts["errors"] += 1
         _print_result(result, verbose=bool(args.verbose))
 
@@ -595,6 +798,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "missing_calibration_snapshot",
         "missing_donor_calibration",
         "donor_calibration_missing_scale",
+        "donor_operator_verification_required",
+        "donor_physical_authority_unavailable",
         "h5_error",
         "errors",
     ]

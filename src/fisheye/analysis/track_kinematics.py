@@ -123,9 +123,20 @@ from fisheye.shared.stimulus_physical_coordinate import (
     load_stimulus_physical_coordinate_authority,
     require_bound_stimulus_physical_coordinate_authority,
 )
+from fisheye.shared.source_camera_physical_authority import (
+    BoundSourceCameraPhysicalAuthority,
+    load_source_camera_physical_authority,
+    require_bound_source_camera_physical_authority,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
+
+
+TrackPhysicalAuthority = (
+    BoundStimulusPhysicalCoordinateAuthority
+    | BoundSourceCameraPhysicalAuthority
+)
 
 
 SAMPLE_REASON_OK = 0
@@ -224,7 +235,7 @@ class BoundTrackPositionBindings:
     run_name: str
     source_positions: BoundCanonicalCoordinateDescriptor
     source_temporal_authority: BoundSourceRowTemporalAuthority
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None
+    physical_authority: TrackPhysicalAuthority | None
     track_positions: tuple[tuple[int, TrackPositionPublicationResult], ...]
     run_group: zarr.Group
 
@@ -1281,6 +1292,37 @@ def resolve_canonical_track_physical_authority(
     }
 
 
+def resolve_track_physical_authority(
+    root: zarr.Group,
+    *,
+    stimulus_run: str | None,
+) -> tuple[TrackPhysicalAuthority | None, Dict[str, Any]]:
+    """Resolve stimulus or recording calibration to one downstream contract."""
+
+    stimulus, info = resolve_canonical_track_physical_authority(
+        root,
+        stimulus_run=stimulus_run,
+    )
+    if stimulus is not None:
+        return stimulus, info
+    try:
+        recording = load_source_camera_physical_authority(root)
+    except KeyError:
+        return None, info
+    recording = require_bound_source_camera_physical_authority(recording)
+    return recording, {
+        "status": "bound_typed_source_camera_mm_v1",
+        "reason_code": "NONE",
+        "authority_kind": "recording_calibration",
+        "camera_id": recording.camera_id,
+        "mm_per_pixel": recording.mm_per_pixel,
+        "authority_manifest_ref": recording.manifest.record_ref,
+        "authority_manifest_sha256": recording.manifest.record_sha256,
+        "physical_frame_ref": recording.physical_frame.record_ref,
+        "physical_frame_sha256": recording.physical_frame.record_sha256,
+    }
+
+
 def ensure_track_kinematics_run_group(
     root: zarr.Group,
     run_name: Optional[str],
@@ -2313,7 +2355,7 @@ def _validate_in_memory_track_physical_arrays(
     data: Mapping[str, Any],
     *,
     track_id: int,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority,
+    physical_authority: TrackPhysicalAuthority,
 ) -> None:
     """Validate every prospective mm array before mutating the destination."""
 
@@ -2366,7 +2408,7 @@ def _validate_in_memory_track_physical_arrays(
         if not np.array_equal(physical_values, expected, equal_nan=True):
             raise ValueError(
                 f"Track {track_id} physical array {relative_path!r} does not use "
-                "the exact selected-stimulus mm_per_pixel authority."
+                "the exact source-camera mm_per_pixel authority."
             )
 
 
@@ -2409,14 +2451,14 @@ def _validate_scaled_scalar_pair(
         )
     if physical != pixel * float(mm_per_pixel):
         raise ValueError(
-            f"{label} does not use the exact selected-stimulus mm_per_pixel authority."
+            f"{label} does not use the exact source-camera mm_per_pixel authority."
         )
 
 
 def _validate_track_summary_physical_fields(
     summary: Mapping[str, Any],
     *,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     label: str,
 ) -> None:
     mm_fields = {str(name) for name in summary if _is_mm_summary_field(name)}
@@ -2519,14 +2561,22 @@ def _validate_no_run_root_coordinate_arrays(run_group: Any) -> None:
 
 
 def _physical_authority_manifest_record(
-    value: BoundStimulusPhysicalCoordinateAuthority | None,
+    value: TrackPhysicalAuthority | None,
 ) -> dict[str, Any] | None:
     if value is None:
         return None
-    authority = require_bound_stimulus_physical_coordinate_authority(value)
+    if type(value) is BoundStimulusPhysicalCoordinateAuthority:
+        authority = require_bound_stimulus_physical_coordinate_authority(value)
+        selector = {"stimulus_run": authority.stimulus_run}
+    else:
+        authority = require_bound_source_camera_physical_authority(value)
+        selector = {
+            "authority_kind": "recording_calibration",
+            "recording_calibration": True,
+        }
     physical = authority.physical_frame
     return {
-        "stimulus_run": authority.stimulus_run,
+        **selector,
         "camera_id": authority.camera_id,
         "authority_manifest_ref": authority.manifest.record_ref,
         "authority_manifest_sha256": authority.manifest.record_sha256,
@@ -2607,7 +2657,7 @@ def _build_track_staging_manifest(
     ordered_ids: List[int],
     source_positions: BoundCanonicalCoordinateDescriptor,
     source_temporal_authority: Any,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     physical_omission_reason_code: str,
     keypoint_run: str,
     run_name: str,
@@ -2712,7 +2762,7 @@ def save_track_kinematics_tracks(
     source_temporal_authority: Any,
     positions_px_source: BoundCanonicalCoordinateDescriptor,
     physical_frame: BoundPhysicalFrameCalibration | None = None,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None = None,
+    physical_authority: TrackPhysicalAuthority | None = None,
     physical_omission_reason_code: str = "NO_COMPATIBLE_TYPED_PHYSICAL_FRAME",
     track_id_to_arena_id: Optional[Dict[int, int]] = None,
     defer_coordinate_binding: bool = False,
@@ -2732,13 +2782,16 @@ def save_track_kinematics_tracks(
     if physical_frame is not None:
         raise ValueError(
             "Detached physical_frame values cannot authorize canonical track mm "
-            "outputs; supply a sealed selected-stimulus physical_authority."
+            "outputs; supply a sealed source-camera physical authority."
         )
-    if physical_authority is not None:
-        physical_authority = (
-            require_bound_stimulus_physical_coordinate_authority(
-                physical_authority
-            )
+    if type(physical_authority) is BoundStimulusPhysicalCoordinateAuthority:
+        physical_authority = require_bound_stimulus_physical_coordinate_authority(
+            physical_authority
+        )
+        physical_frame = physical_authority.physical_frame
+    elif physical_authority is not None:
+        physical_authority = require_bound_source_camera_physical_authority(
+            physical_authority
         )
         physical_frame = physical_authority.physical_frame
     if defer_coordinate_binding:
@@ -3378,7 +3431,7 @@ def _validate_run_track_physical_surfaces(
     run_group: Any,
     *,
     groups: list[tuple[int, Any]],
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     physical_omission_reason_code: str,
     binding_status: str,
     expected_track_records: Mapping[str, Any] | None = None,
@@ -3633,7 +3686,7 @@ def _require_stage_source_surface(
 def _require_stage_physical_authority(
     authoritative_root: zarr.Group,
     manifest: Mapping[str, Any],
-) -> BoundStimulusPhysicalCoordinateAuthority | None:
+) -> TrackPhysicalAuthority | None:
     record = manifest.get("physical_authority")
     reason = manifest.get("physical_omission_reason_code")
     if record is None:
@@ -3647,8 +3700,7 @@ def _require_stage_physical_authority(
                 "Track staging omission requires one stable physical reason code."
             )
         return None
-    if type(record) is not dict or set(record) != {
-        "stimulus_run",
+    common_fields = {
         "camera_id",
         "authority_manifest_ref",
         "authority_manifest_sha256",
@@ -3659,7 +3711,16 @@ def _require_stage_physical_authority(
         "source_camera_frame_ref",
         "source_camera_frame_sha256",
         "mm_per_pixel",
-    }:
+    }
+    authority_kind = record.get("authority_kind") if type(record) is dict else None
+    selector_fields = (
+        {"stimulus_run"}
+        if authority_kind is None and type(record) is dict and "stimulus_run" in record
+        else {"authority_kind", "recording_calibration"}
+        if authority_kind == "recording_calibration"
+        else set()
+    )
+    if type(record) is not dict or set(record) != common_fields | selector_fields:
         raise ValueError(
             "Track staging physical authority record is absent or not closed."
         )
@@ -3667,21 +3728,28 @@ def _require_stage_physical_authority(
         raise ValueError(
             "A staged physical authority cannot carry an omission reason."
         )
-    stimulus_run = record.get("stimulus_run")
-    if not isinstance(stimulus_run, str) or not stimulus_run:
-        raise ValueError("Track staging physical stimulus run is invalid.")
-    authority = load_stimulus_physical_coordinate_authority(
-        authoritative_root,
-        stimulus_run=stimulus_run,
-    )
-    if authority is None:
-        raise ValueError(
-            "Selected stimulus no longer provides the staged physical authority."
+    if authority_kind is None:
+        stimulus_run = record.get("stimulus_run")
+        if not isinstance(stimulus_run, str) or not stimulus_run:
+            raise ValueError("Track staging physical stimulus run is invalid.")
+        authority = load_stimulus_physical_coordinate_authority(
+            authoritative_root,
+            stimulus_run=stimulus_run,
         )
-    authority = require_bound_stimulus_physical_coordinate_authority(authority)
+        if authority is None:
+            raise ValueError(
+                "Selected stimulus no longer provides the staged physical authority."
+            )
+        authority = require_bound_stimulus_physical_coordinate_authority(authority)
+    else:
+        if record.get("recording_calibration") is not True:
+            raise ValueError("Track staging recording calibration selector is invalid.")
+        authority = require_bound_source_camera_physical_authority(
+            load_source_camera_physical_authority(authoritative_root)
+        )
     if _physical_authority_manifest_record(authority) != record:
         raise ValueError(
-            "Selected stimulus physical authority, frame, calibration, scale, or "
+            "Source-camera physical authority, frame, calibration, scale, or "
             "digest changed after numerical staging."
         )
     return authority
@@ -3713,7 +3781,7 @@ def _validate_track_physical_arrays(
     subgroup: Any,
     *,
     expected_records: Mapping[str, Any] | None,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     binding_status: str,
 ) -> None:
     live = _track_physical_array_nodes(subgroup)
@@ -4066,7 +4134,7 @@ def _load_bound_track_publication(
     subgroup: zarr.Group,
     *,
     surface: BoundSourceCameraPositionSurface,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
 ) -> TrackPositionPublicationResult:
     return _load_bound_track_publication_from_source(
         subgroup,
@@ -4081,7 +4149,7 @@ def _load_bound_track_publication_from_source(
     *,
     source_positions: BoundCanonicalCoordinateDescriptor,
     source_temporal_authority: BoundSourceRowTemporalAuthority,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
 ) -> TrackPositionPublicationResult:
     time_lineage = load_bound_track_sample_time_lineage(
         subgroup,
@@ -4264,22 +4332,30 @@ def _resolve_track_source_authority(
 def _resolve_track_physical_authority(
     authoritative_root: zarr.Group,
     run_group: zarr.Group,
-) -> BoundStimulusPhysicalCoordinateAuthority | None:
+) -> TrackPhysicalAuthority | None:
     expected = run_group.attrs.get("physical_coordinate_authority")
     if expected is None:
         return None
     if not isinstance(expected, Mapping):
         raise ValueError("Track run physical authority record is not an object.")
-    stimulus_run = expected.get("stimulus_run")
-    if not isinstance(stimulus_run, str) or not stimulus_run:
-        raise ValueError("Track run physical authority lacks one stimulus run.")
-    authority = load_stimulus_physical_coordinate_authority(
-        authoritative_root,
-        stimulus_run=stimulus_run,
-    )
-    if authority is None:
-        raise ValueError("Track run declares unavailable stimulus physical authority.")
-    authority = require_bound_stimulus_physical_coordinate_authority(authority)
+    authority_kind = expected.get("authority_kind")
+    if authority_kind is None and "stimulus_run" in expected:
+        stimulus_run = expected.get("stimulus_run")
+        if not isinstance(stimulus_run, str) or not stimulus_run:
+            raise ValueError("Track run physical authority lacks one stimulus run.")
+        authority = load_stimulus_physical_coordinate_authority(
+            authoritative_root,
+            stimulus_run=stimulus_run,
+        )
+        if authority is None:
+            raise ValueError("Track run declares unavailable stimulus physical authority.")
+        authority = require_bound_stimulus_physical_coordinate_authority(authority)
+    elif authority_kind == "recording_calibration":
+        authority = require_bound_source_camera_physical_authority(
+            load_source_camera_physical_authority(authoritative_root)
+        )
+    else:
+        raise ValueError("Track run physical authority kind is unsupported.")
     if _physical_authority_manifest_record(authority) != dict(expected):
         raise ValueError("Track run physical authority changed after publication.")
     return authority
@@ -4404,7 +4480,7 @@ def _validate_direct_track_kinematics_run_before_selection(
     run_type: str,
     source_positions: BoundCanonicalCoordinateDescriptor,
     source_temporal_authority: Any,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
 ) -> Mapping[str, Any]:
     """Freshly validate one direct writer output while it remains ineligible."""
 
@@ -4506,6 +4582,25 @@ def stage_offline_track_kinematics_run(
     if forbidden:
         raise ValueError(
             "Track staging owns these writer arguments: " + ", ".join(forbidden)
+        )
+    stimulus_selector: str | None = None
+    for index, item in enumerate(forwarded):
+        if item.startswith("--stimulus-run="):
+            stimulus_selector = item.split("=", 1)[1]
+        elif item == "--stimulus-run":
+            if index + 1 >= len(forwarded) or forwarded[index + 1].startswith("--"):
+                raise ValueError("--stimulus-run requires one nonempty run name.")
+            stimulus_selector = forwarded[index + 1]
+    source_root = open_zarr_root(source_path, mode="r")
+    stage_physical_authority, stage_physical_info = resolve_track_physical_authority(
+        source_root,
+        stimulus_run=stimulus_selector,
+    )
+    if stage_physical_authority is None:
+        raise ValueError(
+            "Offline track-kinematics publication requires sealed source-camera "
+            "physical calibration authority; none was available "
+            f"(reason_code={stage_physical_info.get('reason_code')!r})."
         )
     main(
         [
@@ -6038,10 +6133,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         (
             offline_physical_authority,
             offline_physical_calibration_info,
-        ) = resolve_canonical_track_physical_authority(
+        ) = resolve_track_physical_authority(
             root,
             stimulus_run=args.stimulus_run,
         )
+        if offline_physical_authority is None and not args.no_write:
+            raise ValueError(
+                "Offline track-kinematics publication requires sealed source-camera "
+                "physical calibration authority; none was available "
+                "(reason_code="
+                f"{offline_physical_calibration_info.get('reason_code')!r})."
+            )
         offline_mm_per_pixel = (
             offline_physical_authority.mm_per_pixel
             if offline_physical_authority is not None
@@ -6457,6 +6559,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 __all__ = [
     "BoundTrackPositionBindings",
+    "TrackPhysicalAuthority",
     "TrackSpeeds",
     "_ordered_track_arena_ids",
     "bind_staged_offline_track_kinematics_run",
@@ -6466,6 +6569,7 @@ __all__ = [
     "load_arena_ids",
     "load_bound_track_position_bindings",
     "resolve_dimensions",
+    "resolve_track_physical_authority",
     "stage_offline_track_kinematics_run",
     "validate_bound_track_position_bindings",
     "main",

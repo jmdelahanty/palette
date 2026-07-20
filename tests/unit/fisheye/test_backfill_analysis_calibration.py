@@ -7,6 +7,19 @@ import h5py
 import numpy as np
 import zarr
 
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+    stamp_acquisition_authority_publication_status,
+)
+from fisheye.shared.pixel_frame_authority import (
+    stamp_acquisition_camera_frame,
+    stamp_acquisition_import_ownership,
+)
+from fisheye.shared.source_camera_physical_authority import (
+    load_source_camera_physical_authority,
+)
 from fisheye.utils import backfill_analysis_calibration as mod
 
 
@@ -54,6 +67,7 @@ homography_matrix:
         cam = calib.create_group(camera_id)
         cam.attrs["pixels_per_mm_camera"] = 50.0
         cam.attrs["pixels_per_mm_projector"] = 5.0
+        cam.attrs["real_world_ref_mm"] = 10.0
         cam.create_dataset("homography_matrix_yml", data=homography_yml.encode("utf-8"))
 
 
@@ -68,19 +82,67 @@ def _seed_analysis_zarr(zarr_path: Path, *, source_h5: Path | None, zarr_purpose
     runs_parent.attrs["latest"] = "stimulus_001"
 
 
-def _seed_donor_calibration(zarr_path: Path, *, with_scale: bool = True) -> None:
+def _prepare_acquisition_authority(zarr_path: Path, *, camera_id: str) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root.attrs.update(
+        {
+            "recording_id": "target-recording",
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "camera_id": camera_id,
+                "source_path": "/recording/camera.mp4",
+                "width": 4512,
+                "height": 4512,
+                "total_frames": 2,
+                "locator": {
+                    "kind": "recording_relative",
+                    "relative_path": "camera.mp4",
+                },
+                "file_fingerprint": {
+                    "strategy": "size_mtime_sha256_v1",
+                    "value": "a" * 64,
+                    "size_bytes": 1234,
+                    "mtime_ns": 5678,
+                    "relocation_stable": False,
+                },
+            },
+        }
+    )
+    camera = root.require_group("analysis").require_group(
+        "acquisition_camera_frames"
+    ).create_group(camera_id)
+    ownership = stamp_acquisition_import_ownership(root, camera)
+    stamp_acquisition_camera_frame(root, camera, import_ownership=ownership)
+    raw_video = root.require_group("raw_video")
+    stamp_acquisition_authority_publication_status(
+        root,
+        raw_video,
+        status=ACQUISITION_AUTHORITY_PUBLISHED,
+        reason_code=EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+        authority_mode=EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        authority_path=f"analysis/acquisition_camera_frames/{camera_id}",
+    )
+
+
+def _seed_donor_calibration(
+    zarr_path: Path,
+    *,
+    with_scale: bool = True,
+    source_h5: Path | None = None,
+) -> None:
     root = zarr.open_group(str(zarr_path), mode="w")
     root.attrs["zarr_purpose"] = "analysis"
     root.attrs["recording_id"] = "donor_recording"
     calib = root.require_group("analysis").require_group("calibration")
     calib.attrs["schema_version"] = 1
     calib.attrs["source"] = "h5_calibration_snapshot"
-    calib.attrs["source_h5"] = "/example/donor.h5"
+    calib.attrs["source_h5"] = str(source_h5 or "/example/donor.h5")
     calib.attrs["source_stimulus_run"] = "stimulus_donor"
     calib.attrs["primary_camera_id"] = "2010095"
     if with_scale:
-        calib.attrs["pixels_per_mm_camera"] = 53.4031982421875
-        calib.attrs["pixel_to_mm"] = 0.018725470251143482
+        calib.attrs["pixels_per_mm_camera"] = 50.0
+        calib.attrs["pixel_to_mm"] = 0.02
     calib.create_array("homography_matrix", data=HOMOGRAPHY, chunks=(3, 3), overwrite=True)
 
 
@@ -127,10 +189,13 @@ def test_plan_or_backfill_one_skips_complete_calibration_without_overwrite(tmp_p
 
 
 def test_plan_or_backfill_one_copies_calibration_from_donor_zarr(tmp_path: Path) -> None:
+    donor_h5 = tmp_path / "donor.h5"
     donor_zarr = tmp_path / "donor_analysis.zarr"
     target_zarr = tmp_path / "target_analysis.zarr"
-    _seed_donor_calibration(donor_zarr)
+    _write_stimulus_h5(donor_h5, camera_id="2010095")
+    _seed_donor_calibration(donor_zarr, source_h5=donor_h5)
     _seed_analysis_zarr(target_zarr, source_h5=None)
+    _prepare_acquisition_authority(target_zarr, camera_id="2010095")
 
     dry = mod.plan_or_backfill_one(
         target_zarr,
@@ -141,7 +206,7 @@ def test_plan_or_backfill_one_copies_calibration_from_donor_zarr(tmp_path: Path)
     )
     assert dry.status == "would_copy_donor"
     assert dry.donor_zarr_path == donor_zarr
-    assert "source_h5=/example/donor.h5" in dry.message
+    assert f"source_h5={donor_h5}" in dry.message
 
     result = mod.plan_or_backfill_one(
         target_zarr,
@@ -160,8 +225,12 @@ def test_plan_or_backfill_one_copies_calibration_from_donor_zarr(tmp_path: Path)
     assert calib.attrs["donor_configuration_verified_by_operator"] is True
     assert calib.attrs["donor_backfill_note"] == "same camera/rig configuration verified"
     assert calib.attrs["primary_camera_id"] == "2010095"
-    assert calib.attrs["pixel_to_mm"] == 0.018725470251143482
+    assert calib.attrs["pixel_to_mm"] == 0.02
     np.testing.assert_allclose(calib["homography_matrix"][:], HOMOGRAPHY)
+    authority = load_source_camera_physical_authority(root)
+    assert authority.camera_id == "2010095"
+    assert authority.source_kind == "operator_verified_donor_h5_calibration"
+    assert authority.mm_per_pixel == 1.0 / 50.0
 
 
 def test_plan_or_backfill_one_rejects_donor_without_usable_scale(tmp_path: Path) -> None:
@@ -177,6 +246,48 @@ def test_plan_or_backfill_one_rejects_donor_without_usable_scale(tmp_path: Path)
         donor_zarr_path=donor_zarr,
     )
     assert result.status == "donor_calibration_missing_scale"
+
+
+def test_donor_backfill_requires_explicit_operator_attestation(tmp_path: Path) -> None:
+    donor_h5 = tmp_path / "donor.h5"
+    donor_zarr = tmp_path / "donor_analysis.zarr"
+    target_zarr = tmp_path / "target_analysis.zarr"
+    _write_stimulus_h5(donor_h5, camera_id="2010095")
+    _seed_donor_calibration(donor_zarr, source_h5=donor_h5)
+    _seed_analysis_zarr(target_zarr, source_h5=None)
+    _prepare_acquisition_authority(target_zarr, camera_id="2010095")
+
+    result = mod.plan_or_backfill_one(
+        target_zarr,
+        apply=False,
+        overwrite_existing=False,
+        donor_zarr_path=donor_zarr,
+    )
+
+    assert result.status == "donor_operator_verification_required"
+
+
+def test_donor_backfill_fails_closed_without_target_acquisition_authority(
+    tmp_path: Path,
+) -> None:
+    donor_h5 = tmp_path / "donor.h5"
+    donor_zarr = tmp_path / "donor_analysis.zarr"
+    target_zarr = tmp_path / "target_analysis.zarr"
+    _write_stimulus_h5(donor_h5, camera_id="2010095")
+    _seed_donor_calibration(donor_zarr, source_h5=donor_h5)
+    _seed_analysis_zarr(target_zarr, source_h5=None)
+
+    result = mod.plan_or_backfill_one(
+        target_zarr,
+        apply=True,
+        overwrite_existing=False,
+        donor_zarr_path=donor_zarr,
+        donor_note="same camera and optics verified",
+    )
+
+    assert result.status == "donor_physical_authority_unavailable"
+    root = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)
+    assert "calibration" not in root["analysis"]
 
 
 def test_source_h5_falls_back_to_recording_raw_directory(tmp_path: Path) -> None:
