@@ -503,10 +503,7 @@ def _completion_from_track_kinematics_visualization(root: Any) -> CompletionInfo
             latest_complete_run=source.latest_complete_run,
             run_resolution=source.run_resolution,
         )
-    render = _completion_from_parent(
-        visualization_parent,
-        visualization_parent_path,
-    )
+    render = _completion_from_parent(visualization_parent, visualization_parent_path)
     if render.run is None:
         return CompletionInfo(
             complete=False,
@@ -515,10 +512,7 @@ def _completion_from_track_kinematics_visualization(root: Any) -> CompletionInfo
             latest_complete_run=source.latest_complete_run,
             run_resolution=source.run_resolution,
         )
-    render_group = _get_group(
-        root,
-        f"{visualization_parent_path}/{render.run}",
-    )
+    render_group = _get_group(root, f"{visualization_parent_path}/{render.run}")
     if (
         render_group is None
         or getattr(render_group, "attrs", {}).get("stage_selector_eligible")
