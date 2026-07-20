@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import ast
+import hashlib
+import inspect
+import textwrap
 from typing import Any
 
 import numpy as np
@@ -27,11 +31,19 @@ from fisheye.shared.keypoint_coordinate_publication import (
     rollback_keypoint_coordinate_publication,
 )
 from fisheye.shared.model_input_transform import resolve_model_input_transform
+from fisheye.shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from fisheye.shared.observation_coordinate_publication import (
+    OBSERVATION_ROW_COUNT_ATTR,
     derive_detection_source_camera_geometry,
     publish_crop_observation_geometry,
+    publish_detection_instance_key_derivation,
+    publish_detection_observation_cardinality,
     publish_crop_roi_geometry,
     publish_detection_observation_geometry,
+)
+from fisheye.shared.instance_keys import (
+    instance_key_attrs,
+    mint_detection_instance_keys,
 )
 from fisheye.shared.pixel_frame_authority import (
     stamp_crop_placement_ownership,
@@ -222,8 +234,9 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[_RootRegistry, _MutableGr
     root = _RootRegistry(token)
     root.register(crop_rowset)
     root.register(roi_images)
-    run = _MutableGroup(path="keypoints_runs/k1", root=root, token=token)
-    run.attrs["stage_selector_eligible"] = True
+    run_parent = _MutableGroup(path="keypoints_runs", root=root, token=token)
+    run = run_parent.create_group("k1")
+    run.attrs["stage_selector_eligible"] = False
     mark_run_started(run, run_name="k1", stage="keypoints")
 
     selected_rows = np.asarray([1, 0], dtype="<i8")
@@ -325,6 +338,23 @@ def test_canonical_keypoint_publication_binds_exact_crop_preprocessing_and_surfa
     with pytest.raises(KeypointCoordinatePublicationError, match="status='complete'"):
         load_persisted_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
     mark_run_complete(run)
+    with pytest.raises(
+        KeypointCoordinatePublicationError,
+        match="selector eligibility True",
+    ):
+        load_persisted_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
+    fresh_surfaces = (
+        publication_module._load_completed_ineligible_keypoint_coordinate_surfaces(
+            root,
+            "keypoints_runs/k1",
+        )
+    )
+    publication_module._activate_validated_keypoint_coordinate_surfaces(
+        root,
+        root["keypoints_runs"],
+        fresh_surfaces,
+        run_name="k1",
+    )
     loaded_context = load_persisted_keypoint_coordinate_context(
         root,
         "keypoints_runs/k1",
@@ -354,8 +384,8 @@ def test_canonical_keypoint_publication_binds_exact_crop_preprocessing_and_surfa
     assert run["keypoints_img"].attrs[COORDINATE_DESCRIPTOR_ATTR]["schema_version"] == 2
 
 
-@pytest.mark.parametrize("marker", [False, None])
-def test_keypoint_context_requires_explicit_normal_selector_eligibility(
+@pytest.mark.parametrize("marker", [True, None])
+def test_keypoint_staging_requires_explicit_selector_ineligibility(
     monkeypatch: pytest.MonkeyPatch,
     marker: bool | None,
 ) -> None:
@@ -367,7 +397,7 @@ def test_keypoint_context_requires_explicit_normal_selector_eligibility(
 
     with pytest.raises(
         KeypointCoordinatePublicationError,
-        match="explicit normal-selector eligibility",
+        match="selector eligibility False",
     ):
         prepare_keypoint_coordinate_context(
             root,
@@ -436,6 +466,7 @@ def test_fresh_keypoint_loader_rejects_persisted_payload_or_transform_tampering(
     run["source_crop_xywh"].data[0, 0] -= 1.0
     publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
     mark_run_complete(run)
+    run.attrs["stage_selector_eligible"] = True
 
     run["keypoints_img"].data[0, 0, 0] += 1.0
     with pytest.raises(KeypointCoordinatePublicationError):
@@ -480,6 +511,24 @@ def test_keypoint_context_rejects_mixed_crop_identity_and_reference_extent(
             preprocessing_input_mode="numpy-list",
             model_artifact=_artifact(),
         )
+
+
+def test_keypoint_eligibility_flip_is_literal_final_activation_action() -> None:
+    source = textwrap.dedent(
+        inspect.getsource(
+            publication_module._activate_validated_keypoint_coordinate_surfaces
+        )
+    )
+    function = ast.parse(source).body[0]
+    final_action = function.body[-1]
+
+    assert isinstance(final_action, ast.Assign)
+    target = final_action.targets[0]
+    assert isinstance(target, ast.Subscript)
+    assert ast.unparse(target.value) == "context._run_group.attrs"
+    assert ast.literal_eval(target.slice) == "stage_selector_eligible"
+    assert isinstance(final_action.value, ast.Constant)
+    assert final_action.value.value is True
 
 
 def test_keypoint_loaders_reject_incomplete_or_failed_coordinate_runs(
@@ -800,11 +849,9 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         if isinstance(evidence_result, tuple)
         else evidence_result
     )
-    instance_key = detect.create_array(
-        "instance_key", data=np.asarray([101, 202], dtype="<u8")
-    )
+    frame_indices = np.asarray([0, 1], dtype="<i4")
     detect.create_array(
-        "frame_indices", data=np.asarray([0, 1], dtype="<i8")
+        "frame_indices", data=frame_indices
     )
     source_frames = detect.create_array(
         "source_acquisition_frame_index",
@@ -818,10 +865,72 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         normalized_values,
         frame_evidence=evidence,
     )
+    class_ids_values = np.zeros((2,), dtype="<i4")
+    instance_key = detect.create_array(
+        "instance_key",
+        data=mint_detection_instance_keys(
+            recording_identity=acquisition.record.recording_id,
+            frame_indices=np.asarray(source_frames[:], dtype="<i8"),
+            bbox_norm_coords=normalized_values,
+            class_ids=class_ids_values,
+        ),
+    )
     bbox_norm = detect.create_array("bbox_norm_coords", data=normalized_values)
     bbox_img = detect.create_array("bbox_img_xyxy", data=bbox_values)
     centers = detect.create_array("centers_img_xy", data=center_values)
+    class_ids = detect.create_array("class_ids", data=class_ids_values)
+    detect.create_array("scores", data=np.ones((2,), dtype="<f4"))
+    frame_counts = np.ones((2,), dtype="<i4")
+    detect.create_array("frame_counts", data=frame_counts)
+    detect.create_array("n_detections", data=frame_counts)
     mapping = _publish_detection_acquisition_mapping(
+        detect,
+        acquisition_frame=acquisition,
+    )
+    dense_mapping = np.arange(2, dtype="<i8")
+    detect.attrs.update(
+        {
+            **instance_key_attrs(
+                acquisition.record.recording_id,
+                frame_domain="recording_parent_frame_index",
+                frame_mapping_source=(
+                    f"{acquisition.record_ref}#"
+                    "full_untrimmed_video_decode_identity_v1"
+                ),
+                frame_mapping_sha256=hashlib.sha256(
+                    np.ascontiguousarray(dense_mapping).view(np.uint8)
+                ).hexdigest(),
+            ),
+            OBSERVATION_ROW_COUNT_ATTR: 2,
+            "summary_statistics": {
+                "total_detections": 2,
+                "frames_with_detections": 2,
+                "frames_with_zero_detections": 0,
+                "frames_with_multiple_detections": 0,
+            },
+            "detect_storage_layout": "regular_chunks_v1",
+            "detect_storage_policy": "explicit_regular_chunks_override",
+            "detect_row_shard_rows": None,
+            "detect_frame_shard_rows": None,
+            "detect_shard_write": None,
+        }
+    )
+    validate_immutable_yolo_storage(
+        detect,
+        stage="detect",
+        row_shard_rows=None,
+        frame_shard_rows=None,
+    )
+    instance_key_derivation = publish_detection_instance_key_derivation(
+        detect,
+        instance_key,
+        source_frames,
+        bbox_norm,
+        class_ids,
+        acquisition_frame=acquisition,
+        acquisition_mapping=mapping,
+    )
+    publish_detection_observation_cardinality(
         detect,
         acquisition_frame=acquisition,
     )
@@ -833,7 +942,7 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         bbox_img,
         centers,
         frame_evidence=evidence,
-        source_lineage_records=(mapping,),
+        source_lineage_records=(mapping, instance_key_derivation),
     )
     detect.attrs["coordinate_contract"] = "canonical_v2"
     detect.attrs["stage_selector_eligible"] = True
@@ -945,8 +1054,9 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
     mark_run_started(crop, run_name="c1", stage="crop")
     mark_run_complete(crop)
 
-    run = root.require_group("keypoints_runs").create_group("k1")
-    run.attrs["stage_selector_eligible"] = True
+    run_parent = root.require_group("keypoints_runs")
+    run = run_parent.create_group("k1")
+    run.attrs["stage_selector_eligible"] = False
     mark_run_started(run, run_name="k1", stage="keypoints")
     selected = np.asarray([1, 0], dtype="<i8")
     run.create_array("source_crop_row_ids", data=selected)
@@ -997,7 +1107,18 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         model_artifact=_artifact(),
     )
     publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
+    run = root["keypoints_runs/k1"]
     mark_run_complete(run)
+    fresh = publication_module._load_completed_ineligible_keypoint_coordinate_surfaces(
+        root,
+        "keypoints_runs/k1",
+    )
+    publication_module._activate_validated_keypoint_coordinate_surfaces(
+        root,
+        run_parent,
+        fresh,
+        run_name="k1",
+    )
     return root, run
 
 

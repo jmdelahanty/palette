@@ -599,6 +599,7 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
     root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
     model_path = tmp_path / "canonical.pt"
     telemetry_attempts: list[str] = []
+    activation_observation: dict[str, object] = {}
 
     with monkeypatch.context() as patch:
         _patch_canonical_writer_dependencies(
@@ -620,6 +621,32 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
                 raise OSError("synthetic post-commit progress failure")
 
         patch.setattr(yolo_mod, "_write_keypoint_progress_jsonl", _progress_telemetry)
+        original_activate = yolo_mod._activate_validated_keypoint_coordinate_surfaces
+
+        def _record_activation(root_node, run_parent, surfaces, *, run_name):
+            activation_observation.update(
+                {
+                    "latest": run_parent.attrs.get("latest"),
+                    "latest_complete": run_parent.attrs.get("latest_complete"),
+                    "completion_status": surfaces.context.completion_status,
+                    "selector_eligible": surfaces.context.selector_eligible,
+                    "live_selector_eligible": surfaces.context._run_group.attrs.get(
+                        "stage_selector_eligible"
+                    ),
+                }
+            )
+            return original_activate(
+                root_node,
+                run_parent,
+                surfaces,
+                run_name=run_name,
+            )
+
+        patch.setattr(
+            yolo_mod,
+            "_activate_validated_keypoint_coordinate_surfaces",
+            _record_activation,
+        )
         run_name = detect_keypoints_yolo(
             tmp_path / "canonical.zarr",
             model_path,
@@ -646,6 +673,13 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
     assert run.attrs["palette_run_completion_status"] == "complete"
     assert run.attrs["coordinate_contract"] == "canonical_v2"
     assert run.attrs["stage_selector_eligible"] is True
+    assert activation_observation == {
+        "latest": "k1",
+        "latest_complete": "k1",
+        "completion_status": "complete",
+        "selector_eligible": False,
+        "live_selector_eligible": False,
+    }
     assert telemetry_attempts[-1] == "complete"
     assert reopened["keypoints_runs"].attrs["latest"] == run_name
     assert reopened["keypoints_runs"].attrs["latest_complete"] == run_name
@@ -717,6 +751,81 @@ def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selector
     parent = reopened["keypoints_runs"]
     failed = parent["failed_canonical_writer"]
     assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert "coordinate_contract" not in failed.attrs
+    assert parent.attrs["latest"] == "k1"
+    assert parent.attrs["latest_complete"] == "k1"
+    assert parent.attrs["latest_pending"] == "prior_pending_attempt"
+    assert reopened.attrs["current_keypoint_group_path"] == "keypoints_runs/k1"
+
+
+def test_detect_keypoints_yolo_late_activation_interrupt_restores_prior_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root, _prior_run = _real_canonical_archive(tmp_path)
+    parent = root["keypoints_runs"]
+    parent.attrs["latest"] = "k1"
+    parent.attrs["latest_complete"] = "k1"
+    parent.attrs["latest_pending"] = "prior_pending_attempt"
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
+    model_path = tmp_path / "activation-interrupt.pt"
+
+    with monkeypatch.context() as patch:
+        _patch_canonical_writer_dependencies(
+            patch,
+            model_path,
+            model_class=_CanonicalFakeYOLO,
+        )
+
+        def _interrupt_activation(root_node, run_parent, surfaces, *, run_name):
+            assert surfaces.context.completion_status == "complete"
+            assert surfaces.context.selector_eligible is False
+            assert (
+                surfaces.context._run_group.attrs["stage_selector_eligible"]
+                is False
+            )
+            root_node.attrs["current_keypoint_group_path"] = (
+                f"keypoints_runs/{run_name}"
+            )
+            run_parent.attrs["latest_complete"] = run_name
+            run_parent.attrs["latest"] = run_name
+            raise SystemExit("synthetic keypoint activation interruption")
+
+        patch.setattr(
+            yolo_mod,
+            "_activate_validated_keypoint_coordinate_surfaces",
+            _interrupt_activation,
+        )
+        with pytest.raises(
+            SystemExit,
+            match="synthetic keypoint activation interruption",
+        ):
+            detect_keypoints_yolo(
+                tmp_path / "canonical.zarr",
+                model_path,
+                run_provenance=build_writer_run_provenance(
+                    command="unit-interrupted-keypoint-activation",
+                    params={"model_path": model_path},
+                ),
+                run_name="interrupted_activation",
+                crop_run="c1",
+                pose_schema="traditional_v3",
+                batch_size=2,
+                imgsz=40,
+                input_mode="numpy-list",
+                keypoint_roi_shard_rows=None,
+                registry=None,
+            )
+
+    reopened = zarr.open_group(
+        store=str(tmp_path / "canonical.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    parent = reopened["keypoints_runs"]
+    failed = parent["interrupted_activation"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
     assert "coordinate_contract" not in failed.attrs
     assert parent.attrs["latest"] == "k1"
     assert parent.attrs["latest_complete"] == "k1"

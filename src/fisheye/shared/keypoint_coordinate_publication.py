@@ -225,16 +225,24 @@ def _child(group: Any, name: str, *, label: str) -> Any:
     return result
 
 
-def _require_explicit_run_status(group: Any, *, status: str, label: str) -> None:
+def _require_explicit_run_status(
+    group: Any,
+    *,
+    status: str,
+    label: str,
+    expected_selector_eligible: bool = True,
+) -> None:
     attrs = getattr(group, "attrs", {})
     if (
         attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT
         or attrs.get(RUN_COMPLETION_STATUS_ATTR) != status
-        or attrs.get("stage_selector_eligible") is not True
+        or attrs.get("stage_selector_eligible")
+        is not expected_selector_eligible
     ):
         _fail(
             f"{label} must carry the exact Palette completion contract with "
-            f"status={status!r} and explicit normal-selector eligibility."
+            f"status={status!r} and selector eligibility "
+            f"{expected_selector_eligible!r}."
         )
 
 
@@ -800,6 +808,8 @@ class BoundKeypointCoordinateContext:
     context_record: BoundCoordinateRecord = field(repr=False)
     model_artifact: Mapping[str, Any] = field(repr=False)
     run_path: str
+    completion_status: str
+    selector_eligible: bool
     source_crop_row_ids: np.ndarray = field(repr=False, compare=False)
     instance_key: np.ndarray = field(repr=False, compare=False)
     source_acquisition_frame_index: np.ndarray = field(repr=False, compare=False)
@@ -881,6 +891,7 @@ def prepare_keypoint_coordinate_context(
         run_group,
         status=RUN_STATUS_RUNNING,
         label="Keypoint coordinate preflight target",
+        expected_selector_eligible=False,
     )
     source = load_persisted_keypoint_crop_source(root_node, crop_path)
     transform = _model_transform_from_payload(_model_transform_payload(model_input_transform))
@@ -1033,6 +1044,7 @@ def prepare_keypoint_coordinate_context(
             root_node,
             path,
             require_complete=False,
+            expected_selector_eligible=False,
         )
     except BaseException as exc:
         rollback_failures: list[str] = []
@@ -1057,6 +1069,7 @@ def _load_persisted_keypoint_coordinate_context(
     run_path: str,
     *,
     require_complete: bool,
+    expected_selector_eligible: bool,
 ) -> BoundKeypointCoordinateContext:
     """Freshly reconstruct a persisted context with an explicit status policy."""
 
@@ -1066,6 +1079,7 @@ def _load_persisted_keypoint_coordinate_context(
         run_group,
         status=RUN_STATUS_COMPLETE if require_complete else RUN_STATUS_RUNNING,
         label="Canonical keypoint rowset",
+        expected_selector_eligible=expected_selector_eligible,
     )
     if require_complete and getattr(run_group, "attrs", {}).get(
         "coordinate_contract"
@@ -1256,6 +1270,10 @@ def _load_persisted_keypoint_coordinate_context(
         context_record=context,
         model_artifact=artifact,
         run_path=path,
+        completion_status=(
+            RUN_STATUS_COMPLETE if require_complete else RUN_STATUS_RUNNING
+        ),
+        selector_eligible=expected_selector_eligible,
         source_crop_row_ids=selected["source_crop_row_ids"],
         instance_key=selected["instance_key"],
         source_acquisition_frame_index=selected[
@@ -1284,6 +1302,7 @@ def load_persisted_keypoint_coordinate_context(
         root_node,
         run_path,
         require_complete=True,
+        expected_selector_eligible=True,
     )
 
 
@@ -1687,6 +1706,7 @@ def capture_keypoint_coordinate_publication_checkpoint(
         run,
         status=RUN_STATUS_RUNNING,
         label="Keypoint publication checkpoint target",
+        expected_selector_eligible=False,
     )
     placement = _child(run, "source_crop_xywh", label="keypoint placement")
     geometry = tuple(_child(run, name, label=name) for name in KEYPOINT_ARRAY_NAMES)
@@ -1829,6 +1849,7 @@ def publish_keypoint_coordinate_surfaces(
         root_node,
         run_path,
         require_complete=False,
+        expected_selector_eligible=False,
     )
     arrays = _validate_geometry(context)
     run = context._run_group
@@ -1850,6 +1871,7 @@ def publish_keypoint_coordinate_surfaces(
             root_node,
             context.run_path,
             require_complete=False,
+            expected_selector_eligible=False,
         )
     except BaseException as exc:
         try:
@@ -1866,6 +1888,7 @@ def _load_persisted_keypoint_coordinate_surfaces(
     run_path: str,
     *,
     require_complete: bool,
+    expected_selector_eligible: bool,
 ) -> BoundKeypointCoordinateSurfaces:
     """Freshly verify a graph under an explicit completion-state policy."""
 
@@ -1873,6 +1896,7 @@ def _load_persisted_keypoint_coordinate_surfaces(
         root_node,
         run_path,
         require_complete=require_complete,
+        expected_selector_eligible=expected_selector_eligible,
     )
     run = context._run_group
     if getattr(run, "attrs", {}).get("coordinate_contract") != "canonical_v2":
@@ -1910,7 +1934,71 @@ def load_persisted_keypoint_coordinate_surfaces(
         root_node,
         run_path,
         require_complete=True,
+        expected_selector_eligible=True,
     )
+
+
+def _load_completed_ineligible_keypoint_coordinate_surfaces(
+    root_node: Any,
+    run_path: str,
+) -> BoundKeypointCoordinateSurfaces:
+    """Producer-only fresh validation immediately before selector activation."""
+
+    return _load_persisted_keypoint_coordinate_surfaces(
+        root_node,
+        run_path,
+        require_complete=True,
+        expected_selector_eligible=False,
+    )
+
+
+def _activate_validated_keypoint_coordinate_surfaces(
+    root_node: Any,
+    run_parent: Any,
+    value: BoundKeypointCoordinateSurfaces,
+    *,
+    run_name: str,
+) -> None:
+    """Activate one freshly validated complete publication, eligibility last."""
+
+    if type(value) is not BoundKeypointCoordinateSurfaces or value._seal is not _BOUND_SURFACES_SEAL:
+        _fail("Keypoint activation requires sealed coordinate surfaces.")
+    context = value.context
+    expected_path = f"keypoints_runs/{run_name}"
+    if (
+        context.completion_status != RUN_STATUS_COMPLETE
+        or context.selector_eligible is not False
+        or context.run_path != expected_path
+        or canonical_node_path(run_parent) != "keypoints_runs"
+        or canonical_node_path(context._run_group) != expected_path
+        or archive_identity(root_node) != archive_identity(run_parent)
+        or archive_identity(root_node) != archive_identity(context._run_group)
+    ):
+        _fail(
+            "Keypoint activation requires the exact complete, ineligible, "
+            "freshly validated canonical child."
+        )
+    current = _load_completed_ineligible_keypoint_coordinate_surfaces(
+        root_node,
+        expected_path,
+    )
+    if current.derivation.record_sha256 != value.derivation.record_sha256:
+        _fail("Keypoint coordinate publication changed before activation.")
+
+    # Resolvers skip the complete child while it remains explicitly
+    # ineligible. Write every parent/root selector first, then make the child
+    # eligible with the final metadata mutation.
+    root_node.attrs["current_keypoint_group_path"] = expected_path
+    run_parent.attrs["latest_complete"] = str(run_name)
+    run_parent.attrs["latest"] = str(run_name)
+    if (
+        root_node.attrs.get("current_keypoint_group_path") != expected_path
+        or run_parent.attrs.get("latest_complete") != str(run_name)
+        or run_parent.attrs.get("latest") != str(run_name)
+        or context._run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        _fail("Canonical keypoint selectors did not persist before activation.")
+    context._run_group.attrs["stage_selector_eligible"] = True
 
 
 def require_bound_keypoint_coordinate_surfaces(value: Any) -> BoundKeypointCoordinateSurfaces:

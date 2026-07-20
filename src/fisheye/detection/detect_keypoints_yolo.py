@@ -39,9 +39,10 @@ from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.keypoint_coordinate_publication import (
+    _activate_validated_keypoint_coordinate_surfaces,
+    _load_completed_ineligible_keypoint_coordinate_surfaces,
     capture_keypoint_coordinate_publication_checkpoint,
     derive_keypoint_coordinate_batch,
-    load_persisted_keypoint_coordinate_surfaces,
     load_persisted_keypoint_crop_source,
     model_input_batch_to_roi,
     model_input_bbox_batch_to_roi,
@@ -1675,9 +1676,10 @@ def detect_keypoints_yolo(
     )
     run_group.attrs["output_parent"] = output_parent_name
     run_group.attrs["run_group_parent"] = output_parent_name
-    run_group.attrs["stage_selector_eligible"] = (
-        output_parent_name == DEFAULT_KEYPOINT_OUTPUT_PARENT
-    )
+    # Every child remains ineligible through complete-path revalidation. Normal
+    # canonical runs are activated only after selectors have been written;
+    # collection shards remain permanently ineligible.
+    run_group.attrs["stage_selector_eligible"] = False
     if output_parent_name != DEFAULT_KEYPOINT_OUTPUT_PARENT:
         run_group.attrs["is_collection_shard"] = True
     run_group.attrs["keypoint_labels"] = list(pose_schema_obj.node_names)
@@ -2593,12 +2595,16 @@ def detect_keypoints_yolo(
         run_provenance=effective_run_provenance,
     )
     if keypoint_coordinate_context is not None:
-        load_persisted_keypoint_coordinate_surfaces(root, run_path)
-        root.attrs["current_keypoint_group_path"] = run_path
-        if root.attrs.get("current_keypoint_group_path") != run_path:
-            raise RuntimeError(
-                "Canonical keypoint compatibility pointer did not persist exactly."
-            )
+        fresh_surfaces = _load_completed_ineligible_keypoint_coordinate_surfaces(
+            root,
+            run_path,
+        )
+        _activate_validated_keypoint_coordinate_surfaces(
+            root,
+            run_parent,
+            fresh_surfaces,
+            run_name=resolved_run_name,
+        )
     if boundary is not None:
         boundary.mark_finalized()
 
