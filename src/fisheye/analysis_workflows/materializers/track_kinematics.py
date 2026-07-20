@@ -29,7 +29,10 @@ from ...analysis import track_kinematics as track_writer
 from ...shared.json_safety import json_attr_safe
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import require_runs_parent
-from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
+from ...shared.zarr_sharded_copy import (
+    STRUCTURED_DTYPE_SINGLE_CHUNK_LAYOUT,
+    copy_completed_run_to_sharded,
+)
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 
@@ -428,8 +431,10 @@ def _validate_track_run(
         if isinstance(sample_key, zarr.Array) and tuple(sample_key.shape) != (row_count, 2):
             errors.append(f"{name}: track_sample_key must have shape (N, 2)")
 
+    layout = group.attrs.get("physical_storage_layout")
     array_count = 0
     sharded_count = 0
+    structured_single_chunk_count = 0
     for array_path, array in _iter_arrays(group):
         array_count += 1
         shards = getattr(array, "shards", None)
@@ -440,8 +445,26 @@ def _validate_track_run(
             if any(outer[i] % chunks[i] for i in range(len(chunks))):
                 errors.append(f"{array_path}: shard grid is not chunk aligned")
         elif require_sharded and int(array.ndim) >= 1:
-            errors.append(f"{array_path}: expected indexed sharding")
-    layout = group.attrs.get("physical_storage_layout")
+            overrides = (
+                layout.get("effective_overridden_array_layouts")
+                if isinstance(layout, dict)
+                else None
+            )
+            record = overrides.get(array_path) if isinstance(overrides, dict) else None
+            expected_chunks = tuple(max(1, int(value)) for value in array.shape)
+            if (
+                np.dtype(array.dtype).kind == "V"
+                and isinstance(record, dict)
+                and record.get("layout_profile")
+                == STRUCTURED_DTYPE_SINGLE_CHUNK_LAYOUT
+                and record.get("effective_outer_shards") is None
+                and tuple(record.get("effective_inner_chunks") or ())
+                == expected_chunks
+                and tuple(int(value) for value in array.chunks) == expected_chunks
+            ):
+                structured_single_chunk_count += 1
+            else:
+                errors.append(f"{array_path}: expected indexed sharding")
     if require_sharded and not isinstance(layout, dict):
         errors.append("missing physical_storage_layout")
     elif require_sharded and layout.get("exact_decoded_validation") is not True:
@@ -454,6 +477,7 @@ def _validate_track_run(
         "track_rows": track_rows,
         "array_count": array_count,
         "sharded_array_count": sharded_count,
+        "structured_single_chunk_array_count": structured_single_chunk_count,
         "require_sharded": bool(require_sharded),
         "require_complete": bool(require_complete),
         "expected_binding_status": expected_binding_status,
