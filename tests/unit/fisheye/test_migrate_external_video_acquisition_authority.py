@@ -46,6 +46,7 @@ def _probe(source: Path) -> dict[str, object]:
         "duration_seconds": 39_600.0,
         "codec": "hevc",
         "pix_fmt": "gray",
+        "imageio_metadata": {"nframes": float("inf")},
     }
 
 
@@ -68,6 +69,7 @@ def test_apply_migrates_missing_locator_and_seals_authority(
     root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     assert root.attrs["camera_id"] == "2010093"
     assert root.attrs["source_video_metadata"]["camera_id"] == "2010093"
+    assert "imageio_metadata" not in root.attrs["source_video_metadata"]
     assert root.attrs["source_video_metadata"]["file_fingerprint"]["size_bytes"] > 0
     ownership, frame = load_persisted_acquisition_camera_authority(
         root,
