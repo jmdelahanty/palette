@@ -91,6 +91,8 @@ from fisheye.shared.directed_transform_chain import (
 from fisheye.shared.directed_transform_v2 import stamp_directed_transform_v2
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
 from fisheye.shared.pixel_frame_authority import (
+    PIXEL_FRAME_AUTHORITY_ATTR,
+    load_source_camera_pixel_frame_authority,
     load_persisted_acquisition_camera_authority,
     normalized_to_pixel_matrix,
     stamp_normalized_pixel_frame_authority,
@@ -740,12 +742,23 @@ def _publish_detection_frame_evidence(
         # Source-camera stamping is included in the same transaction as the
         # run-local normalized frame and transform.  It is commonly idempotent,
         # but its exact pre-publication attrs are still rollback authority.
-        source_camera = stamp_source_camera_pixel_frame_authority(
-            camera_node,
-            frame_id=f"{camera_id}_source_camera_continuous",
-            pixel_convention="continuous",
-            acquisition_frame=acquisition_frame,
-        )
+        if PIXEL_FRAME_AUTHORITY_ATTR in camera_node.attrs:
+            source_camera = load_source_camera_pixel_frame_authority(
+                camera_node,
+                acquisition_frame=acquisition_frame,
+            )
+            if source_camera.record.pixel_convention != "continuous":
+                raise ValueError(
+                    "Detection geometry requires an existing continuous "
+                    "source-camera pixel-frame authority."
+                )
+        else:
+            source_camera = stamp_source_camera_pixel_frame_authority(
+                camera_node,
+                frame_id=f"{camera_id}_source_camera_continuous",
+                pixel_convention="continuous",
+                acquisition_frame=acquisition_frame,
+            )
         frame_group = run_group.require_group("coordinate_frames")
         normalized_node = frame_group.require_group("source_camera_normalized")
         checkpoints.append(

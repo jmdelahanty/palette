@@ -34,6 +34,9 @@ from fisheye.shared.observation_coordinate_publication import (
     publish_crop_observation_geometry,
     publish_detection_observation_geometry,
 )
+from fisheye.shared.pixel_frame_authority import (
+    stamp_source_camera_pixel_frame_authority,
+)
 from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
 from fisheye.shared.coordinate_identity import (
     resolve_source_acquisition_frame_indices,
@@ -704,6 +707,38 @@ def test_organized_archive_auto_builds_full_acquisition_detection_evidence(
             decoded_width=100,
             decoded_height=80,
         )
+
+
+def test_detection_frame_evidence_reuses_existing_source_camera_identity(
+    tmp_path,
+) -> None:
+    root, zarr_path, video = _canonical_acquisition_root(tmp_path)
+    acquisition = mod._load_full_acquisition_video_source(  # noqa: SLF001
+        root,
+        video_path=video,
+        output_zarr=zarr_path,
+        decoded_frame_count=2,
+        decoded_width=100,
+        decoded_height=80,
+    )
+    camera_node = root.require_group(
+        "analysis/coordinate_frames/source_camera/camera-a/continuous"
+    )
+    expected = stamp_source_camera_pixel_frame_authority(
+        camera_node,
+        frame_id="recording_import_source_camera",
+        pixel_convention="continuous",
+        acquisition_frame=acquisition,
+    )
+    run = root.require_group("detect_runs").create_group("existing_camera_frame")
+
+    evidence, _checkpoints = mod._publish_detection_frame_evidence(  # noqa: SLF001
+        root,
+        run,
+        acquisition_frame=acquisition,
+    )
+
+    assert evidence.source_camera_frame.record.frame_id == expected.record.frame_id
 
 
 def _complete_canonical_detection_observation(
