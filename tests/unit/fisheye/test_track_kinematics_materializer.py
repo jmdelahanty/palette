@@ -100,14 +100,32 @@ def _populate_unbound_stage(
             data=frames,
             chunks=(chunk_rows,),
         )
+        interpolation = np.zeros(
+            row_count,
+            dtype=np.dtype(
+                [
+                    ("left_source_frame_index", "<i8"),
+                    ("right_source_frame_index", "<i8"),
+                    ("right_weight", "<f8"),
+                ]
+            ),
+        )
+        interpolation["left_source_frame_index"] = frames
+        interpolation["right_source_frame_index"] = frames
         track.create_array(
             "source_frame_interpolation",
-            data=np.zeros(row_count, dtype=np.int8),
+            data=interpolation,
             chunks=(chunk_rows,),
         )
+        source_instances = np.zeros(
+            row_count,
+            dtype=np.dtype([("valid", "?"), ("instance_key", "<u8")]),
+        )
+        source_instances["valid"] = True
+        source_instances["instance_key"] = np.arange(row_count, dtype=np.uint64)
         track.create_array(
             "source_instance_key",
-            data=np.arange(row_count, dtype=np.uint64),
+            data=source_instances,
             chunks=(chunk_rows,),
         )
         track.create_array(
@@ -480,6 +498,16 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     assert run.attrs["stage_selector_eligible"] is True
     assert tuple(run["tracks/id_0/speed_raw_px"].shards) == (6,)
     assert tuple(run["tracks/id_1/speed_raw_px"].shards) == (6,)
+    assert run["tracks/id_0/source_frame_interpolation"].shards is None
+    assert run["tracks/id_0/source_instance_key"].shards is None
+    assert tuple(run["tracks/id_0/source_frame_interpolation"].chunks) == (11,)
+    assert tuple(run["tracks/id_0/source_instance_key"].chunks) == (11,)
+    layouts = run.attrs["physical_storage_layout"][
+        "effective_overridden_array_layouts"
+    ]
+    assert layouts["tracks/id_0/source_frame_interpolation"]["layout_profile"] == (
+        "structured_dtype_single_chunk_zarr_v3_sharding_codec_workaround_v1"
+    )
     position = run["tracks/id_0/positions_px"]
     assert position.attrs["coordinate_descriptor"]["node_ref"] == f"/{position.path}"
     staging = run.attrs["cluster_output_staging"]
