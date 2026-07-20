@@ -30,6 +30,9 @@ from fisheye.shared.stimulus_physical_coordinate import (
     publish_stimulus_physical_coordinate_authority,
     require_bound_stimulus_physical_coordinate_authority,
 )
+from fisheye.shared.source_camera_physical_authority import (
+    publish_source_camera_physical_authority,
+)
 from tests.unit.fisheye.test_directed_transform_chain import (
     FakeArray,
     FakeGroup,
@@ -457,6 +460,98 @@ def _selected_stimulus_physical_authority(world):
     return reloaded
 
 
+def _recording_physical_authority(world):
+    _selected_stimulus_physical_authority(world)
+    return publish_source_camera_physical_authority(
+        world["root"],
+        source_camera_evidence=world["camera_evidence"],
+        source_kind="operator_verified_donor",
+        provenance={"operator_verified": True, "donor_zarr": "/donor.zarr"},
+    )
+
+
+def test_writer_accepts_recording_physical_authority_without_stimulus_selector() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _recording_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    run = _WritableGroup(
+        path="analysis/track_kinematics_runs/offline/tk_recording_physical",
+        archive_token=world["archive_token"],
+    )
+
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        physical_authority=physical,
+    )
+
+    manifest = run.attrs["physical_coordinate_authority"]
+    assert manifest["authority_kind"] == "recording_calibration"
+    assert manifest["recording_calibration"] is True
+    assert "stimulus_run" not in manifest
+    assert run["tracks/id_7/positions_mm"].shape == (2, 2)
+
+
+def test_track_resolver_falls_back_to_recording_physical_authority() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    physical = _recording_physical_authority(world)
+
+    resolved, info = mod.resolve_track_physical_authority(
+        world["root"],
+        stimulus_run=None,
+    )
+
+    assert resolved is not None
+    assert resolved.manifest.record_sha256 == physical.manifest.record_sha256
+    assert info["authority_kind"] == "recording_calibration"
+    assert info["reason_code"] == "NONE"
+
+
+def test_track_stage_fails_before_compute_without_physical_authority(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.zarr"
+    source.mkdir()
+    staging = tmp_path / "staging.zarr"
+    called = False
+
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mod,
+        "resolve_track_physical_authority",
+        lambda *_args, **_kwargs: (
+            None,
+            {"reason_code": "NO_RECORDING_PHYSICAL_AUTHORITY"},
+        ),
+    )
+
+    def _unexpected_main(_argv):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mod, "main", _unexpected_main)
+
+    with pytest.raises(ValueError, match="requires sealed source-camera"):
+        mod.stage_offline_track_kinematics_run(
+            source,
+            staging,
+            keypoint_run="keypoints",
+            run_name="track",
+        )
+
+    assert called is False
+    assert not staging.exists()
+
+
 def test_writer_publishes_all_mm_surfaces_with_selected_stimulus_authority() -> None:
     world = _world(convention="continuous", archive_token=object())
     surface = _canonical_crop_position_surface(world)
@@ -521,7 +616,7 @@ def test_direct_physical_writer_rejects_unsealed_mm_payload_before_mutation(
         archive_token=world["archive_token"],
     )
 
-    with pytest.raises(ValueError, match="exact selected-stimulus mm_per_pixel"):
+    with pytest.raises(ValueError, match="exact source-camera mm_per_pixel"):
         mod.save_track_kinematics_tracks(
             run,
             tracks,
