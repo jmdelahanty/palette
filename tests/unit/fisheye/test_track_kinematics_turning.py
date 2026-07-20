@@ -18,11 +18,11 @@ from fisheye.analysis.compute_speed import (
 )
 from tests.unit.fisheye.test_directed_transform_chain import _world
 from tests.unit.fisheye.test_track_coordinate_publication import (
-    _physical,
     _source,
 )
 from tests.unit.fisheye.test_track_kinematics_coordinate_contract import (
     _WritableGroup,
+    _selected_stimulus_physical_authority,
 )
 
 
@@ -487,7 +487,7 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
 def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> None:
     world = _world(convention="pixel_center", archive_token=object())
     _, _, source, temporal = _source(world)
-    physical = _physical(world)
+    physical_authority = _selected_stimulus_physical_authority(world)
     track_ids = np.array([7, 7], dtype=np.int64)
     frames = np.array([0, 1], dtype=np.int64)
     positions_px = np.asarray(source.coordinate_node[:])
@@ -503,7 +503,7 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
         detection_source=None,
         fps=1.0,
         smooth_seconds=1.0,
-        pixel_to_mm=physical.record.mm_per_pixel,
+        pixel_to_mm=physical_authority.mm_per_pixel,
         source_row_index=np.asarray([0, 1], dtype=np.int64),
         source_temporal_authority=temporal,
     )
@@ -518,7 +518,7 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
         summaries,
         source_temporal_authority=temporal,
         positions_px_source=source,
-        physical_frame=physical,
+        physical_authority=physical_authority,
     )
 
     subgroup = run_group["tracks"]["id_7"]

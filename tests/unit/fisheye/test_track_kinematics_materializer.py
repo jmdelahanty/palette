@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -57,6 +58,7 @@ def _populate_unbound_stage(
             "parameters": {"smoothing_seconds": 0.05},
             "palette_run_completion_contract": "palette.zarr_run_completion.v1",
             "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
             mod.COORDINATE_BINDING_STATUS_ATTR: mod.UNBOUND_STAGE_STATUS,
             mod.STAGING_MANIFEST_ATTR: staging_manifest,
             mod.STAGING_MANIFEST_DIGEST_ATTR: mod._canonical_mapping_sha256(
@@ -196,6 +198,7 @@ def _install_writer_api(
             == mod.PUBLISHING_BINDING_STATUS
         )
         assert str(final_run_group.attrs["palette_run_completion_status"]) == "running"
+        assert final_run_group.attrs["stage_selector_eligible"] is False
         assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
         events.append(
             (
@@ -230,7 +233,7 @@ def _install_writer_api(
             "binding_manifest_sha256": "d" * 64,
         }
 
-    def validate(
+    def validate_before_selection(
         authoritative_root,
         final_run_group,
         *,
@@ -249,19 +252,35 @@ def _install_writer_api(
             str(final_run_group.attrs[mod.COORDINATE_BINDING_STATUS_ATTR])
             == mod.BOUND_CANONICAL_STATUS
         )
+        assert final_run_group.attrs["stage_selector_eligible"] is False
         assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
         for track_name in final_run_group["tracks"].group_keys():
             position = final_run_group[f"tracks/{track_name}/positions_px"]
             assert position.attrs["coordinate_descriptor"]["node_ref"] == (
                 f"/{position.path}"
             )
-        events.append(("validate", bool(require_complete), expected_completion))
+        events.append(
+            ("validate_before", bool(require_complete), expected_completion)
+        )
         return {
             "valid": True,
             "status": "canonical_track_run_valid",
             "track_count": 2,
             "binding_manifest_sha256": "d" * 64,
         }
+
+    def validate_public(
+        authoritative_root,
+        final_run_group,
+    ):
+        assert final_run_group.attrs["palette_run_completion_status"] == "complete"
+        assert final_run_group.attrs["stage_selector_eligible"] is True
+        assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
+        events.append(("validate_public", True, "complete"))
+        return SimpleNamespace(
+            run_name="track_1",
+            track_positions=((0, object()), (1, object())),
+        )
 
     monkeypatch.setattr(
         mod.track_writer,
@@ -277,8 +296,14 @@ def _install_writer_api(
     )
     monkeypatch.setattr(
         mod.track_writer,
-        "validate_bound_offline_track_kinematics_run",
-        validate,
+        "_validate_bound_offline_track_kinematics_run_before_selection",
+        validate_before_selection,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mod.track_writer,
+        "validate_bound_track_position_bindings",
+        validate_public,
         raising=False,
     )
 
@@ -377,8 +402,9 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         "running",
     )
     assert events[2:] == [
-        ("validate", False, "running"),
-        ("validate", True, "complete"),
+        ("validate_before", False, "running"),
+        ("validate_before", True, "complete"),
+        ("validate_public", True, "complete"),
     ]
 
     local_run = zarr.open_group(
@@ -390,6 +416,7 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         mod.UNBOUND_STAGE_STATUS
     )
     assert local_run.attrs["palette_run_completion_status"] == "complete"
+    assert local_run.attrs["stage_selector_eligible"] is False
     assert "coordinate_descriptor" not in local_run["tracks/id_0/positions_px"].attrs
 
     sharded = zarr.open_group(
@@ -401,6 +428,7 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         mod.PUBLISHING_BINDING_STATUS
     )
     assert sharded.attrs["palette_run_completion_status"] == "running"
+    assert sharded.attrs["stage_selector_eligible"] is False
     assert "coordinate_descriptor" not in sharded["tracks/id_0/positions_px"].attrs
 
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
@@ -413,6 +441,7 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     assert offline.attrs["latest"] == "track_1"
     assert run.attrs[mod.COORDINATE_BINDING_STATUS_ATTR] == mod.BOUND_CANONICAL_STATUS
     assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["stage_selector_eligible"] is True
     assert tuple(run["tracks/id_0/speed_raw_px"].shards) == (6,)
     assert tuple(run["tracks/id_1/speed_raw_px"].shards) == (6,)
     position = run["tracks/id_0/positions_px"]
@@ -518,7 +547,7 @@ def test_post_bind_canonical_validation_failure_rolls_back(
 
     monkeypatch.setattr(
         mod.track_writer,
-        "validate_bound_offline_track_kinematics_run",
+        "_validate_bound_offline_track_kinematics_run_before_selection",
         invalid_binding,
     )
 

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import numpy as np
 import pytest
 
 from fisheye.analysis import track_kinematics as mod
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+    MATERIALIZED_ACQUISITION_PUBLISHED_REASON,
+    stamp_acquisition_authority_publication_status,
+)
 from fisheye.shared.coordinate_descriptor import COORDINATE_DESCRIPTOR_ATTR
 from fisheye.shared.coordinate_identity import (
     TRACK_SAMPLE_KEY_MODE,
@@ -16,6 +23,12 @@ from fisheye.shared.coordinate_identity import (
 )
 from fisheye.shared.observation_coordinate_publication import (
     publish_crop_observation_geometry,
+)
+from fisheye.shared.stimulus_physical_coordinate import (
+    BoundStimulusPhysicalCoordinateAuthority,
+    load_stimulus_physical_coordinate_authority,
+    publish_stimulus_physical_coordinate_authority,
+    require_bound_stimulus_physical_coordinate_authority,
 )
 from tests.unit.fisheye.test_directed_transform_chain import (
     FakeArray,
@@ -33,6 +46,12 @@ from tests.unit.fisheye.test_observation_coordinate_publication import (
 
 
 class _WritableGroup(FakeGroup):
+    def __init__(self, *, path: str, archive_token: object) -> None:
+        super().__init__(path=path, archive_token=archive_token)
+        parts = path.split("/")
+        if parts[:2] == ["analysis", "track_kinematics_runs"] and len(parts) == 4:
+            self.attrs["stage_selector_eligible"] = False
+
     def create_group(self, name: str) -> "_WritableGroup":
         child = _WritableGroup(
             path=f"{self.path}/{name}",
@@ -266,9 +285,28 @@ def test_writer_publishes_v2_track_coordinates_and_omits_unframed_mm() -> None:
         "omitted_no_compatible_typed_physical_frame"
     )
     assert not any("_mm" in name for name in track.attrs["summary"])
+    assert not mod._track_physical_array_nodes(track)
+    assert "total_distance_mm" not in run.attrs
+    assert not any(name.endswith("_mm") for name in run.attrs)
+    assert not any(
+        name.endswith("_mm")
+        for summary in run.attrs["summary"]
+        for name in summary
+    )
+    assert not any(
+        name.endswith("_mm")
+        for entry in run.attrs["track_manifest"]
+        for name in entry
+    )
+    for _, node in mod._iter_track_array_nodes(track):
+        descriptor = node.attrs.get(COORDINATE_DESCRIPTOR_ATTR)
+        assert not (
+            isinstance(descriptor, dict)
+            and str(descriptor.get("profile_id", "")).startswith("physical_mm.")
+        )
 
 
-def test_writer_publishes_positions_mm_only_with_exact_physical_frame() -> None:
+def test_writer_rejects_detached_physical_frame_before_mutation() -> None:
     world = _world(convention="pixel_center", archive_token=object())
     _, _, source, temporal = _source(world)
     physical = _physical(world)
@@ -282,23 +320,20 @@ def test_writer_publishes_positions_mm_only_with_exact_physical_frame() -> None:
         archive_token=world["archive_token"],
     )
 
-    mod.save_track_kinematics_tracks(
-        run,
-        tracks,
-        summaries,
-        source_temporal_authority=temporal,
-        positions_px_source=source,
-        physical_frame=physical,
-    )
+    with pytest.raises(
+        ValueError,
+        match="Detached physical_frame values cannot authorize",
+    ):
+        mod.save_track_kinematics_tracks(
+            run,
+            tracks,
+            summaries,
+            source_temporal_authority=temporal,
+            positions_px_source=source,
+            physical_frame=physical,
+        )
 
-    track = run["tracks/id_7"]
-    assert track["positions_mm"].attrs[COORDINATE_DESCRIPTOR_ATTR][
-        "profile_id"
-    ] == "physical_mm.source_camera_y_down.v1"
-    assert track.attrs["physical_outputs_status"] == (
-        "available_typed_source_camera_frame"
-    )
-    assert "speed_smoothed_mm" in track
+    assert "tracks" not in run
 
 
 def test_writer_preserves_float64_source_position_payload_exactly() -> None:
@@ -332,6 +367,195 @@ def _canonical_crop_position_surface(world):
         source_geometry=detection,
     )
     return crop.position_surface
+
+
+def _selected_stimulus_physical_authority(world):
+    token = world["archive_token"]
+    root = world["root"]
+    root.get = root.children.get
+    stamp_acquisition_authority_publication_status(
+        root,
+        root["raw_video"],
+        status=ACQUISITION_AUTHORITY_PUBLISHED,
+        reason_code=MATERIALIZED_ACQUISITION_PUBLISHED_REASON,
+        authority_mode=MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+        authority_path="analysis/acquisition_camera_frames/camera-a",
+    )
+    analysis = root["analysis"]
+    analysis.get = analysis.children.get
+    analysis["stimulus_runs"].get = analysis["stimulus_runs"].children.get
+    coordinate_frames = FakeGroup(
+        path="analysis/coordinate_frames",
+        archive_token=token,
+    )
+    source_camera = FakeGroup(
+        path="analysis/coordinate_frames/source_camera",
+        archive_token=token,
+    )
+    camera = FakeGroup(
+        path="analysis/coordinate_frames/source_camera/camera-a",
+        archive_token=token,
+    )
+    camera.children["continuous"] = world["camera_frame_node"]
+    source_camera.children["camera-a"] = camera
+    coordinate_frames.children["source_camera"] = source_camera
+    analysis.children["coordinate_frames"] = coordinate_frames
+
+    run = analysis["stimulus_runs"]["stim_1"]
+    calibration_camera = run["calibration"]["camera-a"]
+    run_frames = FakeGroup(
+        path=(
+            "analysis/stimulus_runs/stim_1/calibration/camera-a/"
+            "coordinate_frames"
+        ),
+        archive_token=token,
+    )
+    run_frames.children["selected_camera_evidence"] = FakeGroup(
+        path=f"{run_frames.path}/selected_camera_evidence",
+        archive_token=token,
+    )
+    run_frames.children["source_camera_physical_mm"] = FakeGroup(
+        path=f"{run_frames.path}/source_camera_physical_mm",
+        archive_token=token,
+    )
+    calibration_camera.children["coordinate_frames"] = run_frames
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs["stage_selector_eligible"] = False
+    authority = publish_stimulus_physical_coordinate_authority(
+        root,
+        run,
+        stimulus_run="stim_1",
+        selected_calibration=world["selected_snapshot"],
+    )
+    assert authority is not None
+    run.attrs["palette_run_completion_status"] = "complete"
+    run.attrs["stage_selector_eligible"] = True
+    reloaded = load_stimulus_physical_coordinate_authority(
+        root,
+        stimulus_run="stim_1",
+    )
+    assert reloaded is not None
+    return reloaded
+
+
+def test_writer_publishes_all_mm_surfaces_with_selected_stimulus_authority() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _selected_stimulus_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    run = _WritableGroup(
+        path="analysis/track_kinematics_runs/offline/tk_physical",
+        archive_token=world["archive_token"],
+    )
+
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        physical_authority=physical,
+    )
+
+    track = run["tracks/id_7"]
+    assert track["positions_mm"].attrs[COORDINATE_DESCRIPTOR_ATTR][
+        "profile_id"
+    ] == "physical_mm.source_camera_y_down.v1"
+    assert track.attrs["physical_outputs_status"] == (
+        "available_typed_source_camera_frame"
+    )
+    assert "speed_smoothed_mm" in track
+    assert run.attrs["physical_coordinate_authority"][
+        "authority_manifest_sha256"
+    ] == physical.manifest.record_sha256
+    assert run.attrs["total_distance_mm"] == (
+        run.attrs["total_distance_px"] * physical.mm_per_pixel
+    )
+    assert run.attrs["summary"] == [track.attrs["summary"]]
+    assert run.attrs["track_manifest"][0]["total_distance_mm"] == (
+        track.attrs["summary"]["total_distance_mm"]
+    )
+
+
+@pytest.mark.parametrize("tamper_kind", ["array", "summary"])
+def test_direct_physical_writer_rejects_unsealed_mm_payload_before_mutation(
+    tamper_kind: str,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _selected_stimulus_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    if tamper_kind == "array":
+        tracks[7]["cumulative_path_distance_mm"][0] += 1.0
+    else:
+        summaries[0]["total_distance_mm"] += 1.0
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/tk_tamper_{tamper_kind}",
+        archive_token=world["archive_token"],
+    )
+
+    with pytest.raises(ValueError, match="exact selected-stimulus mm_per_pixel"):
+        mod.save_track_kinematics_tracks(
+            run,
+            tracks,
+            summaries,
+            source_temporal_authority=surface.temporal_authority,
+            positions_px_source=surface.coordinates,
+            physical_authority=physical,
+        )
+
+    assert "tracks" not in run
+
+
+def test_track_physical_selector_rejects_failed_explicit_stimulus_run() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    _selected_stimulus_physical_authority(world)
+    run = world["root"]["analysis"]["stimulus_runs"]["stim_1"]
+    run.attrs["palette_run_completion_status"] = "failed"
+
+    with pytest.raises(ValueError, match="requires parent run status 'complete'"):
+        mod.resolve_canonical_track_physical_authority(
+            world["root"],
+            stimulus_run="stim_1",
+        )
+
+
+def test_stimulus_physical_authority_cannot_be_constructed_or_forged() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    authority = _selected_stimulus_physical_authority(world)
+
+    with pytest.raises(
+        ValueError,
+        match="cannot be constructed directly",
+    ):
+        BoundStimulusPhysicalCoordinateAuthority(
+            stimulus_run=authority.stimulus_run,
+            camera_id=authority.camera_id,
+            archive_identity=authority.archive_identity,
+            selected_calibration=authority.selected_calibration,
+            acquisition_frame=authority.acquisition_frame,
+            source_camera_frame=authority.source_camera_frame,
+            selected_camera_evidence=authority.selected_camera_evidence,
+            physical_frame=authority.physical_frame,
+            manifest=authority.manifest,
+            root_node=world["root"],
+        )
+
+    forged = object.__new__(BoundStimulusPhysicalCoordinateAuthority)
+    for name in BoundStimulusPhysicalCoordinateAuthority.__dataclass_fields__:
+        if name != "_seal":
+            object.__setattr__(forged, name, getattr(authority, name))
+    object.__setattr__(forged, "_seal", object())
+    with pytest.raises(ValueError, match="freshly loader-minted"):
+        require_bound_stimulus_physical_coordinate_authority(forged)
 
 
 def test_deferred_track_stage_binds_only_at_authoritative_final_path(
@@ -393,7 +617,7 @@ def test_deferred_track_stage_binds_only_at_authoritative_final_path(
     assert track["positions_px"].attrs[COORDINATE_DESCRIPTOR_ATTR][
         "space_id"
     ] == "source_camera_image_px"
-    assert mod.validate_bound_offline_track_kinematics_run(
+    assert mod._validate_bound_offline_track_kinematics_run_before_selection(
         root,
         run,
         expected_keypoint_run="kp_1",
@@ -401,13 +625,274 @@ def test_deferred_track_stage_binds_only_at_authoritative_final_path(
         require_complete=False,
     )["valid"] is True
     run.attrs["palette_run_completion_status"] = "complete"
-    assert mod.validate_bound_offline_track_kinematics_run(
+    assert mod._validate_bound_offline_track_kinematics_run_before_selection(
         root,
         run,
         expected_keypoint_run="kp_1",
         expected_run_name=run_name,
         require_complete=True,
     )["valid"] is True
+    run.attrs["stage_selector_eligible"] = True
+    published = mod.load_bound_track_position_bindings(root, run)
+    assert isinstance(published, mod.BoundTrackPositionBindings)
+    assert published.run_type == "offline"
+    assert published.run_name == run_name
+    assert published.source_positions.descriptor.space_id == (
+        "source_camera_image_px"
+    )
+    track_position = published.position_for_track(7)
+    assert track_position.positions_px.coordinate_node is track["positions_px"]
+    assert track_position.positions_mm is None
+
+
+def test_deferred_physical_payload_is_unbound_until_final_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _selected_stimulus_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    run_name = "tk_staged_physical"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        physical_authority=physical,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    track = run["tracks/id_7"]
+    physical_manifest = run.attrs[
+        mod.TRACK_KINEMATICS_STAGING_MANIFEST_ATTR
+    ]["physical_authority"]
+    assert physical_manifest["authority_manifest_ref"] == (
+        physical.manifest.record_ref
+    )
+    assert physical_manifest["authority_manifest_sha256"] == (
+        physical.manifest.record_sha256
+    )
+    assert "positions_mm" in track
+    assert COORDINATE_DESCRIPTOR_ATTR not in track["positions_mm"].attrs
+    assert run.attrs["physical_outputs_reason_code"] == "NONE"
+
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, path: surface if path == "crop_runs/c1" else None,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    bound = mod.bind_staged_offline_track_kinematics_run(
+        world["root"],
+        run,
+        expected_keypoint_run="kp_1",
+        expected_run_name=run_name,
+    )
+
+    assert bound["valid"] is True
+    assert track["positions_mm"].attrs[COORDINATE_DESCRIPTOR_ATTR][
+        "profile_id"
+    ] == "physical_mm.source_camera_y_down.v1"
+    assert mod._validate_bound_offline_track_kinematics_run_before_selection(
+        world["root"],
+        run,
+        expected_keypoint_run="kp_1",
+        expected_run_name=run_name,
+        require_complete=False,
+    )["valid"] is True
+
+
+def test_deferred_physical_binding_rejects_selected_calibration_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _selected_stimulus_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    run_name = "tk_staged_physical_drift"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        physical_authority=physical,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, _path: surface,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    selected_camera = world["root"]["analysis"]["stimulus_runs"]["stim_1"][
+        "calibration"
+    ]["camera-a"]
+    selected_camera.attrs["pixels_per_mm_camera"] = 12.5
+
+    with pytest.raises(ValueError, match="freshly rebound"):
+        mod.bind_staged_offline_track_kinematics_run(
+            world["root"],
+            run,
+            expected_keypoint_run="kp_1",
+            expected_run_name=run_name,
+        )
+
+    track = run["tracks/id_7"]
+    assert COORDINATE_DESCRIPTOR_ATTR not in track["positions_px"].attrs
+    assert COORDINATE_DESCRIPTOR_ATTR not in track["positions_mm"].attrs
+
+
+def test_deferred_physical_binding_rejects_mm_payload_drift_without_partial_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _selected_stimulus_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    run_name = "tk_staged_physical_payload_drift"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        physical_authority=physical,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, _path: surface,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    track = run["tracks/id_7"]
+    track["cumulative_path_distance_mm"].data[0] += 1.0
+
+    with pytest.raises(ValueError, match="changed after physical staging"):
+        mod.bind_staged_offline_track_kinematics_run(
+            world["root"],
+            run,
+            expected_keypoint_run="kp_1",
+            expected_run_name=run_name,
+        )
+
+    assert run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] == (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    assert COORDINATE_DESCRIPTOR_ATTR not in track["positions_px"].attrs
+    assert COORDINATE_DESCRIPTOR_ATTR not in track["positions_mm"].attrs
+
+
+@pytest.mark.parametrize(
+    "tamper_kind",
+    ["track_summary", "run_summary", "track_manifest", "aggregate"],
+)
+def test_deferred_physical_binding_rejects_unsealed_mm_metadata_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+    tamper_kind: str,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _selected_stimulus_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    run_name = f"tk_staged_physical_{tamper_kind}"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        physical_authority=physical,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    track = run["tracks/id_7"]
+    if tamper_kind == "track_summary":
+        payload = copy.deepcopy(track.attrs["summary"])
+        payload["total_distance_mm"] += 1.0
+        track.attrs["summary"] = payload
+    elif tamper_kind == "run_summary":
+        payload = copy.deepcopy(run.attrs["summary"])
+        payload[0]["total_distance_mm"] += 1.0
+        run.attrs["summary"] = payload
+    elif tamper_kind == "track_manifest":
+        payload = copy.deepcopy(run.attrs["track_manifest"])
+        payload[0]["total_distance_mm"] += 1.0
+        run.attrs["track_manifest"] = payload
+    else:
+        run.attrs["total_distance_mm"] += 1.0
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, _path: surface,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+
+    with pytest.raises(ValueError):
+        mod.bind_staged_offline_track_kinematics_run(
+            world["root"],
+            run,
+            expected_keypoint_run="kp_1",
+            expected_run_name=run_name,
+        )
+
+    assert run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] == (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    assert COORDINATE_DESCRIPTOR_ATTR not in track["positions_px"].attrs
+    assert COORDINATE_DESCRIPTOR_ATTR not in track["positions_mm"].attrs
 
 
 def test_deferred_track_binding_rejects_source_drift_without_partial_claims(

@@ -315,6 +315,7 @@ def _validate_track_run(
     require_sharded: bool,
     expected_binding_status: str,
     require_complete: bool,
+    expected_selector_eligible: bool,
 ) -> dict[str, Any]:
     errors: list[str] = []
     group = open_zarr_root(path, mode="r")
@@ -324,6 +325,15 @@ def _validate_track_run(
         errors.append(
             "generic completion status mismatch: "
             f"expected={expected_completion!r}, observed={observed_completion!r}"
+        )
+    if (
+        group.attrs.get("stage_selector_eligible")
+        is not expected_selector_eligible
+    ):
+        errors.append(
+            "stage selector eligibility mismatch: "
+            f"expected={expected_selector_eligible!r}, "
+            f"observed={group.attrs.get('stage_selector_eligible')!r}"
         )
     observed_binding = str(group.attrs.get(COORDINATE_BINDING_STATUS_ATTR))
     if observed_binding != expected_binding_status:
@@ -501,6 +511,7 @@ def publish_track_kinematics_run(
                 require_sharded=True,
                 expected_binding_status=PUBLISHING_BINDING_STATUS,
                 require_complete=False,
+                expected_selector_eligible=False,
             )
         if path.resolve() != plan.target_run_path.resolve():
             return {
@@ -517,6 +528,7 @@ def publish_track_kinematics_run(
             require_sharded=True,
             expected_binding_status=BOUND_CANONICAL_STATUS,
             require_complete=transaction["completion_published"],
+            expected_selector_eligible=transaction["completion_published"],
         )
         if not structural["valid"]:
             return structural
@@ -525,17 +537,36 @@ def publish_track_kinematics_run(
             run_group = authoritative_root[
                 f"analysis/track_kinematics_runs/offline/{plan.run_name}"
             ]
-            canonical = track_writer.validate_bound_offline_track_kinematics_run(
-                authoritative_root,
-                run_group,
-                expected_keypoint_run=plan.keypoint_run,
-                expected_run_name=plan.run_name,
-                require_complete=transaction["completion_published"],
-            )
-            canonical_summary = _writer_result_summary(
-                canonical,
-                label="Canonical track validation",
-            )
+            if transaction["completion_published"]:
+                bound_positions = track_writer.validate_bound_track_position_bindings(
+                    authoritative_root,
+                    run_group,
+                )
+                if bound_positions.run_name != plan.run_name:
+                    raise RuntimeError(
+                        "Canonical track-position loader returned a different run name."
+                    )
+                canonical_summary = {
+                    "valid": True,
+                    "status": BOUND_CANONICAL_STATUS,
+                    "run_name": bound_positions.run_name,
+                    "track_count": len(bound_positions.track_positions),
+                    "authority_scope": "position_coordinate_bindings_only",
+                }
+            else:
+                canonical = (
+                    track_writer._validate_bound_offline_track_kinematics_run_before_selection(
+                        authoritative_root,
+                        run_group,
+                        expected_keypoint_run=plan.keypoint_run,
+                        expected_run_name=plan.run_name,
+                        require_complete=False,
+                    )
+                )
+                canonical_summary = _writer_result_summary(
+                    canonical,
+                    label="Canonical track validation",
+                )
         except Exception as exc:
             canonical_summary = {"valid": False, "errors": [str(exc)]}
         structural["canonical_validation"] = canonical_summary
@@ -602,6 +633,15 @@ def publish_track_kinematics_run(
             run,
             run_name=plan.run_name,
             run_type="offline",
+            validate_complete_run=lambda: (
+                track_writer._validate_bound_offline_track_kinematics_run_before_selection(
+                    root,
+                    run,
+                    expected_keypoint_run=plan.keypoint_run,
+                    expected_run_name=plan.run_name,
+                    require_complete=True,
+                )
+            ),
         )
         transaction["completion_published"] = True
 
@@ -625,6 +665,10 @@ def publish_track_kinematics_run(
                 )
             )
             != "complete"
+            or pointer_offline[plan.run_name].attrs.get(
+                "stage_selector_eligible"
+            )
+            is not True
         ):
             raise RuntimeError("Track-kinematics parent pointers were not updated consistently.")
 
@@ -716,6 +760,7 @@ def materialize_track_kinematics(
             require_sharded=False,
             expected_binding_status=UNBOUND_STAGE_STATUS,
             require_complete=True,
+            expected_selector_eligible=False,
         )
         if not regular_validation["valid"]:
             raise RuntimeError(
@@ -760,6 +805,7 @@ def materialize_track_kinematics(
             require_sharded=True,
             expected_binding_status=PUBLISHING_BINDING_STATUS,
             require_complete=False,
+            expected_selector_eligible=False,
         )
         if not publishing_validation["valid"]:
             raise RuntimeError(

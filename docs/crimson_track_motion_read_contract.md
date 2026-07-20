@@ -12,7 +12,8 @@ Use these run families for new Crimson readers:
 
 | Need | Preferred Palette source |
 | --- | --- |
-| Per-track position, heading, speed, path distance, acceleration | `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` |
+| Per-track positions with coordinate/identity authority | `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` through the typed position-binding loader |
+| Heading, speed, path distance, acceleration, and time-series validity | same physical run, but not a canonical read surface until its all-array payload/derivation seal is implemented and validated |
 | Swim-bout event windows and detector traces | `analysis/swim_bout_runs/<run>/` through the logical candidate/signal resolver |
 | Per-bout physical movement, heading, eye-gaze summaries | `analysis/bout_kinematics_runs/<run>/` |
 | Body frame, snout/tail landmarks, B-spline, subject-shape QC | `analysis/subject_shape_runs/<run>/` |
@@ -26,19 +27,28 @@ Stimulus step details are specified in
 
 ## Track Kinematics
 
-`analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` is the
-analysis-grade motion source. It owns gap-aware speed, distance, heading, and
-validity semantics.
+`analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` stores
+positions plus gap-aware speed, distance, heading, and validity values. The
+current typed canonical boundary authorizes only the row-bound
+`positions_px`/optional `positions_mm` surfaces. The other persisted values are
+numerically useful but are not yet a canonical read surface because the run
+does not persist and freshly validate one exact all-array payload/derivation
+seal.
 
-For canonical future runs, Crimson must require both:
+For canonical future runs, Crimson must freshly validate all three gates:
 
 ```text
 run.attrs["coordinate_binding_status"] == "bound_canonical_v2"
 run.attrs["palette_run_completion_status"] == "complete"
+run.attrs["stage_selector_eligible"] is True
 ```
 
-An incomplete, staged, publishing, unsupported, or ambiguously labelled run is
-not selectable. Convenience `latest*` attrs do not override these gates.
+An incomplete, staged, publishing, selector-ineligible, unsupported, or
+ambiguously labelled run is not selectable. Convenience `latest*` attrs are
+discovery hints only and do not override these gates. After resolving a pointer,
+the reader must reopen the exact child and revalidate its live position
+payloads, descriptors, identity/time records, and digests before reading
+positions. These gates alone do not authorize derived motion arrays.
 
 Required canonical identity and position fields:
 
@@ -48,13 +58,7 @@ source_acquisition_frame_index         # authoritative camera-frame mapping
 source_frame_interpolation             # exact acquisition-time lineage
 source_instance_key                    # nullable observation lineage
 source_row_index                       # exact selected immediate-source row
-time_seconds
 positions_px
-heading_degrees
-smoothed_heading_degrees
-sample_valid
-transition_valid
-detection_source
 ```
 
 `frame_indices` remains a compatibility alias of
@@ -99,7 +103,7 @@ Crimson paths do not use that adapter.
 Renderer viewport/display coordinates remain ephemeral Crimson state. They are
 not written back as Palette coordinate metadata.
 
-Speed and distance fields may be exposed through the preferred grouped layout:
+The existing grouped speed/distance layout is:
 
 ```text
 movement/speed/<raw|filtered|smoothed|averaged>/
@@ -113,14 +117,19 @@ movement/speed/<raw|filtered|smoothed|averaged>/
   smoothed_acceleration_mm
 ```
 
-Reader fallback order:
+This list describes physical discovery only; it is not coordinate or
+derivation authority. Normal Crimson readers must currently fail closed for
+these derived arrays. Once Palette publishes an exact all-array
+payload/derivation manifest and the public reader freshly validates it, the
+physical-layout resolution order will be:
 
 1. Prefer `movement/speed/<level>/...`.
 2. Fall back to flat `speed_<level>_px`, `speed_<level>_mm`,
    `frame_path_distance_<level>_px`, and `frame_path_distance_<level>_mm`.
 3. For derivatives, fall back to `speed_derivatives/speed_<level>/...`.
-4. Use historical flat `acceleration_*` arrays only for older archives that
-   predate source-scoped acceleration.
+4. Historical flat `acceleration_*` arrays are available only through an
+   explicitly requested historical compatibility path; they are not a normal
+   future-recording fallback.
 
 `source_acquisition_frame_index` is the authoritative sparse row-to-camera-frame
 lineage. Crimson must not assume track row index equals video frame index. Build
@@ -298,7 +307,8 @@ kinematics is a linked measurement layer, not a replacement segmentation layer.
 
 `analysis/subject_shape_runs/<run>` is the geometry/QC surface for body axes,
 B-splines, snout/tail landmarks, and body-frame overlays. It is not the default
-source for speed or path distance when a compatible track-kinematics run exists.
+source for speed or path distance and must not be used to bypass a missing
+track-motion payload seal.
 
 Subject-shape fallback motion labels are acceptable only as a preview/debug path
 for archives missing `analysis/track_kinematics_runs`. If used, label them as
@@ -306,11 +316,14 @@ derived preview values.
 
 ## Recommended Crimson UI Slice
 
-1. Discover `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/`.
-2. Let the user select track and speed level.
+1. Discover `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/`
+   and validate its typed position binding.
+2. Let the user select a track. Expose speed-level selection only after the
+   exact derived-motion payload/derivation seal is supported and validates.
 3. Build a sparse frame-to-track-row lookup from
    `source_acquisition_frame_index`, cross-checked against `track_sample_key`.
-4. Draw per-frame motion labels near the fish:
+4. Draw the validated position in its declared overlay frame. After the
+   derived-motion seal exists and validates, draw per-frame motion labels:
    - heading from `heading_degrees` or `smoothed_heading_degrees`
    - speed from selected `movement/speed/<level>/mm` or fallback flat arrays
    - px/s fallback only when mm/s is unavailable, with honest units

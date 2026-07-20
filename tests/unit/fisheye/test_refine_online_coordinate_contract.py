@@ -1,366 +1,575 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from datetime import datetime as RealDatetime
 from io import StringIO
-import json
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from rich.console import Console
 import zarr
-from zarr.storage import MemoryStore
 
 from fisheye.refinement import refine_online_detect as mod
 from fisheye.shared.coordinate_descriptor import (
-    CoordinateDescriptorError,
-    build_coordinate_descriptor,
-    coordinate_descriptor_attrs,
-    load_coordinate_descriptor_attrs,
+    CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
+    COORDINATE_DESCRIPTOR_ATTR,
+    COORDINATE_DESCRIPTOR_DIGEST_SUFFIX,
+    canonical_coordinate_descriptor_v2_digest,
 )
+from fisheye.shared.coordinate_identity import (
+    STIMULUS_STATE_DOMAIN,
+    STIMULUS_STATE_KEY_ARRAY_REF,
+    STIMULUS_STATE_KEY_MODE,
+    load_bound_row_identity_contract,
+)
+from fisheye.shared.stimulus_coordinate_contract import (
+    SOURCE_ACQUISITION_FRAME_INDEX_ARRAY,
+)
+from tests.unit.fisheye.test_chaser_metrics_loader import _canonical_root
 
 
-SOURCE_PATH = "analysis/stimulus_runs/stim_1/tracking_data/chaser_states"
-STIMULUS_PATH = "analysis/stimulus_runs/stim_1"
+def _console() -> Console:
+    return Console(file=StringIO(), force_terminal=False)
 
 
-def _arena_source_attrs() -> dict[str, object]:
-    return {
-        "coordinate_frame": "arena_relative_canvas_px",
-        "coordinate_units": "px",
-        "coordinate_origin": "top_left_of_active_arena",
-        "position_fields": (
-            "chaser_pos_x,chaser_pos_y,target_pos_x,target_pos_y,"
-            "target_clamped_pos_x,target_clamped_pos_y"
-        ),
-        "x_axis_direction": "right",
-        "y_axis_direction": "down",
-    }
-
-
-def _texture_source_attrs() -> dict[str, object]:
-    attrs = _arena_source_attrs()
-    attrs.update(
-        {
-            "coordinate_frame": "texture",
-            "coordinate_origin": "top_left_of_texture",
-        }
-    )
-    return attrs
-
-
-def _source_metadata(attrs: dict[str, object]) -> dict[str, object]:
-    return {"source_path": SOURCE_PATH, "source_attrs": attrs}
-
-
-def _canonical_source_descriptor():
-    return build_coordinate_descriptor(
-        space_id="arena_relative_canvas_px",
-        geometry_type="points_xy",
-        components=("x", "y"),
-        component_units=("px", "px"),
-        origin="arena_top_left",
-        positive_x="right",
-        positive_y="down",
-        reference_width=720,
-        reference_height=640,
-        reference_units="px",
-        reference_authority=(
-            f"{STIMULUS_PATH}/calibration/arena_geometry.attrs"
-            "[arena_region_width_px,arena_region_height_px]"
-        ),
-        pixel_convention="continuous",
-        row_identity_mode="sample_indices",
-        row_identity_array_ref=f"{SOURCE_PATH}#rows",
-        source_camera_overlay="requires_transform",
-    )
-
-
-def _resolve(
-    attrs: dict[str, object],
+def _canonical_fixture(
+    monkeypatch: pytest.MonkeyPatch,
     *,
-    run_attrs: dict[str, object] | None = None,
-    arena_attrs: dict[str, object] | None = None,
-):
-    return mod.resolve_online_coordinate_descriptor(
-        _source_metadata(attrs),
-        stimulus_run_path=STIMULUS_PATH,
-        stimulus_run_attrs=run_attrs or {},
-        arena_geometry_attrs=arena_attrs,
-    )
-
-
-def test_resolver_accepts_an_intact_canonical_descriptor() -> None:
-    descriptor = _canonical_source_descriptor()
-    attrs = coordinate_descriptor_attrs(descriptor)
-
-    resolved = _resolve(attrs)
-
-    assert resolved == descriptor
-
-    attrs["coordinate_descriptor"]["reference_extent"]["width"] = 999
-    with pytest.raises(CoordinateDescriptorError) as exc_info:
-        _resolve(attrs)
-    assert {issue.code for issue in exc_info.value.issues} == {
-        "descriptor_digest_mismatch"
-    }
-
-
-def test_resolver_rejects_valid_nonpixel_descriptor_for_positions_px() -> None:
-    descriptor = build_coordinate_descriptor(
-        space_id="detector_normalized_xy",
-        geometry_type="points_xy",
-        components=("x", "y"),
-        component_units=("normalized", "normalized"),
-        origin="top_left",
-        positive_x="right",
-        positive_y="down",
-        reference_width=640,
-        reference_height=640,
-        reference_units="px",
-        reference_authority="/raw_video/images_ds.shape[-2:]",
-        pixel_convention="continuous",
-        row_identity_mode="sample_indices",
-        row_identity_array_ref=f"{SOURCE_PATH}#rows",
-        source_camera_overlay="requires_transform",
-    )
-
-    with pytest.raises(CoordinateDescriptorError) as exc_info:
-        _resolve(coordinate_descriptor_attrs(descriptor))
-    assert {issue.code for issue in exc_info.value.issues} == {
-        "online_pixel_space_required"
-    }
-
-
-def test_resolver_maps_arena_relative_only_from_complete_source_and_extent() -> None:
-    descriptor = _resolve(
-        _arena_source_attrs(),
-        arena_attrs={
-            "arena_region_width_px": 720,
-            "arena_region_height_px": 640,
-        },
-    )
-
-    assert descriptor.space_id == "arena_relative_canvas_px"
-    assert descriptor.reference_extent.width == 720
-    assert descriptor.reference_extent.height == 640
-    assert descriptor.reference_extent.authority.startswith(
-        f"{STIMULUS_PATH}/calibration/arena_geometry.attrs"
-    )
-    assert descriptor.legacy_space_label is None
-    assert [ref.ref for ref in descriptor.lineage_refs] == [SOURCE_PATH]
-
-
-@pytest.mark.parametrize(
-    ("missing_key", "expected_code"),
-    (
-        ("coordinate_units", "online_source_units_missing"),
-        ("coordinate_origin", "online_source_coordinate_attr_missing"),
-        ("x_axis_direction", "online_source_coordinate_attr_missing"),
-        ("y_axis_direction", "online_source_coordinate_attr_missing"),
-        ("position_fields", "online_source_position_fields_missing"),
-    ),
-)
-def test_arena_relative_legacy_metadata_fails_closed_when_incomplete(
-    missing_key: str,
-    expected_code: str,
-) -> None:
-    attrs = _arena_source_attrs()
-    del attrs[missing_key]
-
-    with pytest.raises(CoordinateDescriptorError) as exc_info:
-        _resolve(
-            attrs,
-            arena_attrs={
-                "arena_region_width_px": 720,
-                "arena_region_height_px": 640,
-            },
-        )
-    assert expected_code in {issue.code for issue in exc_info.value.issues}
-
-
-def test_arena_relative_requires_selected_run_arena_dimensions() -> None:
-    with pytest.raises(CoordinateDescriptorError) as exc_info:
-        _resolve(_arena_source_attrs(), arena_attrs=None)
-    assert {issue.code for issue in exc_info.value.issues} == {
-        "online_arena_geometry_missing"
-    }
-
-    with pytest.raises(CoordinateDescriptorError) as exc_info:
-        _resolve(
-            _arena_source_attrs(),
-            arena_attrs={"arena_region_width_px": 720},
-        )
-    assert "online_reference_extent_invalid" in {
-        issue.code for issue in exc_info.value.issues
-    }
-
-
-def test_explicit_legacy_texture_requires_exact_consistent_transform_evidence() -> None:
-    transform = {
-        "scope": "run_level_legacy_texture_space",
-        "texture_dimensions": [358, 358],
-        "camera_dimensions": [4512, 4512],
-        "texture_to_camera_scale": 4512 / 358,
-    }
-    run_attrs = {
-        "coordinate_transform_status": "legacy_run_level_texture_to_camera",
-        "coordinate_transform": json.dumps(transform, sort_keys=True),
-    }
-
-    descriptor = _resolve(
-        _texture_source_attrs(),
-        run_attrs=run_attrs,
-    )
-
-    assert descriptor.space_id == "stimulus_texture_px"
-    assert descriptor.legacy_space_label == "texture"
-    assert descriptor.reference_extent.width == 358
-    assert descriptor.reference_extent.height == 358
-    assert len(descriptor.transform_refs) == 1
-    assert descriptor.transform_refs[0].sha256 is not None
-
-    bad_transform = dict(transform)
-    bad_transform["camera_dimensions"] = [4512, 4000]
-    run_attrs["coordinate_transform"] = bad_transform
-    with pytest.raises(CoordinateDescriptorError) as exc_info:
-        _resolve(_texture_source_attrs(), run_attrs=run_attrs)
-    assert "online_legacy_texture_scale_inconsistent" in {
-        issue.code for issue in exc_info.value.issues
-    }
-
-
-def test_explicit_legacy_texture_without_evidence_fails_closed() -> None:
-    with pytest.raises(CoordinateDescriptorError) as exc_info:
-        _resolve(_texture_source_attrs())
-    assert {issue.code for issue in exc_info.value.issues} == {
-        "online_legacy_texture_evidence_missing"
-    }
-
-
-def test_load_online_positions_keeps_tuple_shape_and_exposes_descriptor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = zarr.open_group(store=MemoryStore(), mode="w", zarr_format=3)
-    stimulus = root.require_group("analysis").require_group("stimulus_runs").create_group("stim_1")
-    arena = stimulus.require_group("calibration").create_group("arena_geometry")
-    arena.attrs.update(
-        {
-            "arena_region_width_px": 720,
-            "arena_region_height_px": 640,
-        }
-    )
-    bundle = SimpleNamespace(
-        online={
-            "target_pos_x": np.asarray([10.0, 11.0]),
-            "target_pos_y": np.asarray([20.0, 21.0]),
-        },
-        camera_frame_ids=np.asarray([100, 101], dtype=np.int64),
-        provenance={"stimulus_run": "stim_1"},
-        online_coordinate_metadata=_source_metadata(_arena_source_attrs()),
-    )
-    monkeypatch.setattr(mod, "load_chaser_metrics", lambda *args, **kwargs: bundle)
+    multi_chaser: bool = False,
+) -> tuple[zarr.Group, zarr.Group]:
+    root, chaser = _canonical_root(multi_chaser=multi_chaser)
     monkeypatch.setattr(mod.zarr, "open", lambda *args, **kwargs: root)
-    monkeypatch.setattr(
-        mod,
-        "load_run_calibration",
-        lambda *args, **kwargs: SimpleNamespace(
-            texture_to_camera_scale=1.0,
-            pixels_per_mm_projector=None,
-            source="test",
-        ),
-    )
-
-    result = mod.load_online_positions(
-        "unused.zarr",
-        console=Console(file=StringIO(), force_terminal=False),
-    )
-
-    assert len(result) == 6
-    frames, positions, valid, scale, pixels_per_mm, metadata = result
-    np.testing.assert_array_equal(frames, [100, 101])
-    np.testing.assert_allclose(positions, [[10.0, 20.0], [11.0, 21.0]])
-    np.testing.assert_array_equal(valid, [True, True])
-    assert scale == 1.0
-    assert pixels_per_mm is None
-    descriptor = load_coordinate_descriptor_attrs(
-        {
-            "coordinate_descriptor": metadata["coordinate_descriptor"],
-            "coordinate_descriptor_sha256": metadata[
-                "coordinate_descriptor_sha256"
-            ],
-        }
-    )
-    assert descriptor.space_id == "arena_relative_canvas_px"
-    assert descriptor.row_identity.array_ref == "camera_frame_ids"
+    monkeypatch.setattr(mod, "get_git_info", lambda: {})
+    monkeypatch.setattr(mod, "get_environment_info", lambda: {"platform": {}})
+    return root, chaser
 
 
-def test_refined_outputs_preserve_native_descriptor_and_bind_output_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = zarr.open_group(store=MemoryStore(), mode="w", zarr_format=3)
-    descriptor = _canonical_source_descriptor()
-    source_metadata = _source_metadata(_arena_source_attrs())
-    frames = np.arange(100, 105, dtype=np.int64)
-    positions = np.column_stack(
-        [np.linspace(10.0, 14.0, 5), np.linspace(20.0, 24.0, 5)]
-    )
-    metadata = {
-        "stimulus_run": "stim_1",
-        "chaser_index": 0,
-        "total_frames": 5,
-        "valid_frames": 5,
-        "coverage_percent": 100.0,
-        "texture_to_camera_scale": 1.0,
-        "pixels_per_mm_projector": None,
-        "coordinate_space": descriptor.space_id,
-        "coordinate_descriptor": descriptor.to_dict(),
-        "coordinate_descriptor_sha256": descriptor.digest(),
-        "online_coordinate_source": source_metadata,
-    }
-    monkeypatch.setattr(
-        mod,
-        "load_online_positions",
-        lambda *args, **kwargs: (
-            frames,
-            positions,
-            np.ones(5, dtype=bool),
-            1.0,
-            None,
-            metadata,
-        ),
-    )
-    monkeypatch.setattr(mod.zarr, "open", lambda *args, **kwargs: root)
-    monkeypatch.setattr(mod, "get_git_info", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        mod,
-        "get_environment_info",
-        lambda *args, **kwargs: {"platform": {}},
-    )
-
+def _run_refinement(root: zarr.Group, *, chaser_index: int = 0) -> tuple[str, zarr.Group]:
     run_name = mod.refine_online_positions(
-        "unused.zarr",
+        "ignored.zarr",
+        chaser_index=chaser_index,
         window_length=3,
         polyorder=1,
-        displacement_threshold=1000.0,
+        displacement_threshold=10_000.0,
         max_gap=2,
-        console=Console(file=StringIO(), force_terminal=False),
-        created_at_utc="2026-07-18T12:00:00+00:00",
+        console=_console(),
+        created_at_utc="2026-07-19T12:00:00+00:00",
+    )
+    return run_name, root[mod.REFINED_ONLINE_GROUP][run_name]
+
+
+def _replace_descriptor(node: zarr.Array, payload: dict[str, object]) -> None:
+    node.attrs[COORDINATE_DESCRIPTOR_ATTR] = payload
+    node.attrs[f"{COORDINATE_DESCRIPTOR_ATTR}{COORDINATE_DESCRIPTOR_DIGEST_SUFFIX}"] = (
+        canonical_coordinate_descriptor_v2_digest(payload)
     )
 
-    run = root[mod.REFINED_ONLINE_GROUP][run_name]
-    assert run.attrs["coordinate_space"] == "arena_relative_canvas_px"
-    assert "legacy_space_label" not in run.attrs
-    assert run.attrs["positions_coordinate_descriptor_refs"] == [
-        "filtered/positions_px",
-        "interpolated/positions_px",
-    ]
-    for subgroup_name in ("filtered", "interpolated"):
-        subgroup = run[subgroup_name]
-        output_descriptor = load_coordinate_descriptor_attrs(
-            subgroup["positions_px"].attrs
+
+def test_load_uses_exact_child_surface_and_stimulus_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+
+    loaded = mod.load_online_positions("ignored.zarr", console=_console())
+
+    np.testing.assert_array_equal(loaded.camera_frame_ids, [10, 11, 12])
+    np.testing.assert_array_equal(
+        loaded.source_acquisition_frame_index,
+        [0, 1, 2],
+    )
+    np.testing.assert_array_equal(loaded.source_row_indices, [0, 1, 2])
+    np.testing.assert_array_equal(loaded.stimulus_state_key, [0, 1, 2])
+    assert loaded.stimulus_state_key_components == ("stimulus_frame_num",)
+    np.testing.assert_allclose(
+        loaded.positions,
+        [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]],
+    )
+    assert loaded.source_descriptor.profile_id == mod.CANONICAL_ARENA_PROFILE
+    assert (
+        loaded.source_descriptor.source_camera_overlay.status
+        == CANONICAL_OVERLAY_REQUIRES_TRANSFORM
+    )
+    assert loaded.source_descriptor.source_camera_overlay.transform_refs
+    loaded.bound_source_handoff.assert_verified()
+    assert mod.REFINED_ONLINE_GROUP not in root
+
+
+def test_load_selects_chaser_by_stimulus_key_not_external_camera_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = _canonical_fixture(monkeypatch, multi_chaser=True)
+
+    loaded = mod.load_online_positions(
+        "ignored.zarr",
+        chaser_index=1,
+        console=_console(),
+    )
+
+    np.testing.assert_array_equal(
+        loaded.stimulus_state_key,
+        [[1, 0], [1, 1], [1, 2]],
+    )
+    np.testing.assert_array_equal(loaded.source_row_indices, [1, 3, 5])
+    np.testing.assert_array_equal(
+        loaded.source_acquisition_frame_index,
+        [0, 1, 2],
+    )
+    np.testing.assert_array_equal(loaded.camera_frame_ids, [10, 11, 12])
+    np.testing.assert_allclose(
+        loaded.positions,
+        [[101.0, 104.0], [102.0, 105.0], [103.0, 106.0]],
+    )
+
+
+def test_smoothing_never_crosses_nonconsecutive_acquisition_frames() -> None:
+    positions = np.asarray(
+        [[0.0, 0.0], [100.0, 100.0], [0.0, 0.0]],
+        dtype=np.float64,
+    )
+    acquisition_frames = np.asarray([100, 103, 104], dtype=np.int64)
+
+    smoothed, mask = mod.smooth_positions(
+        positions,
+        acquisition_frames,
+        np.ones(3, dtype=bool),
+        window_length=3,
+        polyorder=1,
+    )
+
+    np.testing.assert_array_equal(smoothed, positions)
+    np.testing.assert_array_equal(mask, [True, True, True])
+
+
+def test_stimulus_rows_are_ordered_by_acquisition_not_external_camera_id() -> None:
+    rows, acquisition, camera = mod._select_stimulus_rows_for_refinement(
+        source_keys=np.asarray(
+            [[0, 100], [1, 100], [0, 101], [1, 101], [0, 102], [1, 102]],
+            dtype=np.int64,
+        ),
+        components=("chaser_index", "stimulus_frame_num"),
+        source_acquisition_frame_index=np.asarray(
+            [8, 9, 4, 5, 6, 7],
+            dtype=np.int64,
+        ),
+        camera_frame_ids=np.asarray(
+            [500, 42, 499, 42, 498, 42],
+            dtype=np.int64,
+        ),
+        chaser_index=1,
+    )
+
+    np.testing.assert_array_equal(rows, [3, 5, 1])
+    np.testing.assert_array_equal(acquisition, [5, 7, 9])
+    # Duplicate, non-ordering external IDs remain exact provenance.
+    np.testing.assert_array_equal(camera, [42, 42, 42])
+
+
+def test_duplicate_acquisition_time_fails_even_when_camera_ids_are_unique() -> None:
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="one-to-one",
+    ):
+        mod._select_stimulus_rows_for_refinement(
+            source_keys=np.asarray([100, 101], dtype=np.int64),
+            components=("stimulus_frame_num",),
+            source_acquisition_frame_index=np.asarray([4, 4], dtype=np.int64),
+            camera_frame_ids=np.asarray([900, 901], dtype=np.int64),
+            chaser_index=0,
         )
-        assert output_descriptor.space_id == "arena_relative_canvas_px"
-        assert output_descriptor.row_identity.mode == "frame_indices"
-        assert output_descriptor.row_identity.array_ref == "camera_frame_ids"
-        assert SOURCE_PATH in {ref.ref for ref in output_descriptor.lineage_refs}
-        np.testing.assert_array_equal(subgroup["camera_frame_ids"][:], frames)
+
+
+def test_normal_path_rejects_noncanonical_archive_without_legacy_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(store=zarr.storage.MemoryStore(), mode="w")
+    monkeypatch.setattr(mod.zarr, "open", lambda *args, **kwargs: root)
+
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="lacks canonical analysis/stimulus_runs",
+    ):
+        mod.load_online_positions("ignored.zarr", console=_console())
+
+    assert not hasattr(mod, "resolve_online_coordinate_descriptor")
+
+
+def test_refinement_publishes_stimulus_identity_temporal_authority_and_v2_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    parent = root.create_group(mod.REFINED_ONLINE_GROUP)
+    parent.create_group("prior")
+    parent.attrs["latest"] = "prior"
+    original_private_loader = mod._load_bound_refined_online_coordinate_evidence
+    observed_latest: list[object] = []
+    observed_status: list[object] = []
+    observed_eligibility: list[object] = []
+
+    def record_call(args):
+        observed_latest.append(
+            args[0][mod.REFINED_ONLINE_GROUP].attrs.get("latest")
+        )
+        observed_status.append(args[1].attrs.get("publication_status"))
+        observed_eligibility.append(
+            args[1].attrs.get("stage_selector_eligible")
+        )
+
+    def recording_private_loader(*args, **kwargs):
+        record_call(args)
+        return original_private_loader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "_load_bound_refined_online_coordinate_evidence",
+        recording_private_loader,
+    )
+
+    run_name, run = _run_refinement(root)
+
+    assert observed_latest == ["prior", "prior", "prior"]
+    assert observed_status == ["staging", "complete", "complete"]
+    assert observed_eligibility == [False, False, False]
+    assert root[mod.REFINED_ONLINE_GROUP].attrs["latest"] == run_name
+    assert root[mod.REFINED_ONLINE_GROUP].attrs[mod.RUN_LATEST_COMPLETE_ATTR] == run_name
+    assert mod.RUN_LATEST_PENDING_ATTR not in root[mod.REFINED_ONLINE_GROUP].attrs
+    assert run.attrs["publication_status"] == "complete"
+    assert run.attrs[mod.RUN_COMPLETION_STATUS_ATTR] == mod.RUN_STATUS_COMPLETE
+    assert run.attrs[mod.RUN_NAME_ATTR] == run_name
+    assert run.attrs[mod.RUN_STAGE_ATTR] == "refine_online_detect"
+    assert run.attrs["stage_selector_eligible"] is True
+    assert "run_provenance" in run.attrs
+    assert run.attrs["coordinate_contract_epoch"] == mod.COORDINATE_CONTRACT_EPOCH
+    assert "instance_key" not in run
+    assert "camera_frame_ids" not in run["filtered"]
+    assert "camera_frame_ids" not in run["interpolated"]
+    for legacy_attr in (
+        "coordinate_space",
+        "texture_to_camera_scale",
+        "pixels_per_mm_projector",
+        "legacy_space_label",
+    ):
+        assert legacy_attr not in run.attrs
+
+    output_key = run[STIMULUS_STATE_KEY_ARRAY_REF]
+    output_identity = load_bound_row_identity_contract(run, output_key)
+    assert output_identity.contract.domain == STIMULUS_STATE_DOMAIN
+    assert output_identity.contract.mode == STIMULUS_STATE_KEY_MODE
+    np.testing.assert_array_equal(output_key[:], [0, 1, 2])
+    np.testing.assert_array_equal(run["camera_frame_ids"][:], [10, 11, 12])
+    np.testing.assert_array_equal(
+        run[SOURCE_ACQUISITION_FRAME_INDEX_ARRAY][:],
+        [0, 1, 2],
+    )
+    np.testing.assert_array_equal(run["source_row_indices"][:], [0, 1, 2])
+
+    evidence = mod.load_bound_refined_online_coordinate_evidence(
+        root,
+        run,
+    )
+    filtered = evidence.descriptor_for("filtered").descriptor
+    interpolated = evidence.descriptor_for("interpolated").descriptor
+    assert filtered == interpolated
+    assert filtered.source_camera_overlay.status == (
+        CANONICAL_OVERLAY_REQUIRES_TRANSFORM
+    )
+    assert len(filtered.source_camera_overlay.transform_refs) == 2
+    assert filtered.row_identity.record_ref == (
+        f"/{run.path}@row_identity_contract"
+    )
+    assert evidence.source_temporal_authority.record_ref == (
+        f"/{run.path}@source_row_temporal_authority"
+    )
+    np.testing.assert_array_equal(
+        evidence.source_acquisition_frame_index,
+        [0, 1, 2],
+    )
+    mapping = evidence.source_mapping.record
+    assert mapping["row_identity_preserved_during_interpolation"] is True
+    assert mapping["source_row_identity_contract_ref"].endswith(
+        "/chaser_states@row_identity_contract"
+    )
+    assert mapping["source_transform_chain"] == [
+        item.to_dict()
+        for item in filtered.source_camera_overlay.transform_refs
+    ]
+    evidence.assert_verified()
+    run.attrs["stage_selector_eligible"] = False
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="canonical lifecycle identity",
+    ):
+        mod.load_bound_refined_online_coordinate_evidence(root, run)
+
+
+def test_completion_rejects_identity_acquisition_and_surface_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    _, run = _run_refinement(root)
+
+    original_key = np.asarray(run[STIMULUS_STATE_KEY_ARRAY_REF][:]).copy()
+    run[STIMULUS_STATE_KEY_ARRAY_REF][0] = 999
+    with pytest.raises(mod.CanonicalOnlineRefinementError, match="identity is invalid"):
+        mod.load_bound_refined_online_coordinate_evidence(root, run)
+    run[STIMULUS_STATE_KEY_ARRAY_REF][:] = original_key
+
+    acquisition = run[SOURCE_ACQUISITION_FRAME_INDEX_ARRAY]
+    original_acquisition = np.asarray(acquisition[:]).copy()
+    acquisition[1] = 2
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="acquisition-frame uniqueness|temporal authority",
+    ):
+        mod.load_bound_refined_online_coordinate_evidence(root, run)
+    acquisition[:] = original_acquisition
+
+    position = run["filtered/positions_px"]
+    original_position = float(position[0, 0])
+    position[0, 0] = original_position + 1.0
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="manifest is incomplete or stale",
+    ):
+        mod.load_bound_refined_online_coordinate_evidence(root, run)
+
+
+def test_completion_rejects_wrong_transform_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    _, run = _run_refinement(root)
+    node = run["filtered/positions_px"]
+    payload = deepcopy(node.attrs[COORDINATE_DESCRIPTOR_ATTR])
+    overlay = payload["source_camera_overlay"]
+    overlay["transform_refs"] = list(reversed(overlay["transform_refs"]))
+    _replace_descriptor(node, payload)
+
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="descriptor cannot be rebound exactly",
+    ):
+        mod.load_bound_refined_online_coordinate_evidence(root, run)
+
+
+@pytest.mark.parametrize("mutation", ["missing_lineage", "unsupported_space"])
+def test_completion_rejects_missing_lineage_or_unsupported_space(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    _, run = _run_refinement(root)
+    node = run["filtered/positions_px"]
+    payload = deepcopy(node.attrs[COORDINATE_DESCRIPTOR_ATTR])
+    if mutation == "missing_lineage":
+        payload["lineage_refs"] = payload["lineage_refs"][:-1]
+    else:
+        payload["profile_id"] = "stimulus_canvas_px.top_left_y_down.v1"
+        payload["space_id"] = "stimulus_canvas_px"
+        payload["origin"] = "top_left"
+    _replace_descriptor(node, payload)
+
+    with pytest.raises(mod.CanonicalOnlineRefinementError):
+        mod.load_bound_refined_online_coordinate_evidence(root, run)
+
+
+def test_failed_staging_is_deleted_and_prior_latest_is_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    parent = root.create_group(mod.REFINED_ONLINE_GROUP)
+    parent.create_group("prior")
+    parent.attrs["latest"] = "prior"
+    parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior-complete"
+    parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "prior-pending"
+
+    def fail_validation(*args, **kwargs):
+        raise RuntimeError("injected completion validation failure")
+
+    monkeypatch.setattr(mod, "_validate_refined_online_run", fail_validation)
+
+    with pytest.raises(RuntimeError, match="injected completion validation failure"):
+        _run_refinement(root)
+
+    assert list(parent.keys()) == ["prior"]
+    assert parent.attrs["latest"] == "prior"
+    assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior-complete"
+    assert parent.attrs[mod.RUN_LATEST_PENDING_ATTR] == "prior-pending"
+
+
+def test_failed_fresh_complete_load_rolls_back_run_and_all_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    parent = root.create_group(mod.REFINED_ONLINE_GROUP)
+    parent.create_group("prior")
+    parent.attrs["latest"] = "prior"
+    parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior"
+    parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "older-pending"
+    original_private_loader = mod._load_bound_refined_online_coordinate_evidence
+
+    def fail_complete_load(*args, **kwargs):
+        if kwargs.get("require_complete") is True:
+            raise RuntimeError("injected fresh complete-load failure")
+        return original_private_loader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "_load_bound_refined_online_coordinate_evidence",
+        fail_complete_load,
+    )
+
+    with pytest.raises(RuntimeError, match="injected fresh complete-load failure"):
+        _run_refinement(root)
+
+    assert list(parent.keys()) == ["prior"]
+    assert parent.attrs["latest"] == "prior"
+    assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior"
+    assert parent.attrs[mod.RUN_LATEST_PENDING_ATTR] == "older-pending"
+
+
+def test_public_coordinate_loaders_cannot_read_staging_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    _, run = _run_refinement(root)
+
+    with pytest.raises(TypeError, match="require_complete"):
+        mod.load_bound_refined_online_coordinate_evidence(
+            root,
+            run,
+            require_complete=False,
+        )
+    with pytest.raises(TypeError, match="require_complete"):
+        mod.validate_refined_online_run(
+            root,
+            run,
+            require_complete=False,
+        )
+
+
+def test_keyboard_interrupt_during_fresh_load_rolls_back_run_and_all_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    parent = root.create_group(mod.REFINED_ONLINE_GROUP)
+    parent.create_group("prior")
+    parent.attrs["latest"] = "prior"
+    parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior-complete"
+    parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "prior-pending"
+
+    original_private_loader = mod._load_bound_refined_online_coordinate_evidence
+
+    def interrupt_complete_load(*args, **kwargs):
+        if kwargs.get("require_complete") is True:
+            raise KeyboardInterrupt("injected fresh complete-load interruption")
+        return original_private_loader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "_load_bound_refined_online_coordinate_evidence",
+        interrupt_complete_load,
+    )
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="injected fresh complete-load interruption",
+    ):
+        _run_refinement(root)
+
+    assert list(parent.keys()) == ["prior"]
+    assert parent.attrs["latest"] == "prior"
+    assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior-complete"
+    assert parent.attrs[mod.RUN_LATEST_PENDING_ATTR] == "prior-pending"
+
+
+def test_interrupt_between_selector_updates_and_eligibility_restores_prior_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    parent = root.create_group(mod.REFINED_ONLINE_GROUP)
+    parent.create_group("prior")
+    parent.attrs["latest"] = "prior"
+    parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = "prior-complete"
+    parent.attrs[mod.RUN_LATEST_PENDING_ATTR] = "prior-pending"
+
+    def interrupt_activation(refined_runs, refined_group, *, run_name):
+        assert refined_group.attrs["stage_selector_eligible"] is False
+        refined_runs.attrs[mod.RUN_LATEST_COMPLETE_ATTR] = run_name
+        refined_runs.attrs["latest"] = run_name
+        raise SystemExit("injected pre-eligibility interruption")
+
+    monkeypatch.setattr(
+        mod,
+        "_activate_refined_online_run",
+        interrupt_activation,
+    )
+
+    with pytest.raises(SystemExit, match="injected pre-eligibility interruption"):
+        _run_refinement(root)
+
+    assert list(parent.keys()) == ["prior"]
+    assert parent.attrs["latest"] == "prior"
+    assert parent.attrs[mod.RUN_LATEST_COMPLETE_ATTR] == "prior-complete"
+    assert parent.attrs[mod.RUN_LATEST_PENDING_ATTR] == "prior-pending"
+
+
+def test_run_name_collision_never_deletes_a_preexisting_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            value = RealDatetime(2026, 7, 19, 12, 34, 56)
+            return value if tz is None else value.replace(tzinfo=tz)
+
+    monkeypatch.setattr(mod, "datetime", FixedDatetime)
+    parent = root.create_group(mod.REFINED_ONLINE_GROUP)
+    colliding_name = "refined_online_2026-07-19_12-34-56"
+    existing = parent.create_group(colliding_name)
+    existing.attrs["sentinel"] = "preserve"
+    parent.attrs["latest"] = colliding_name
+
+    with pytest.raises(Exception):
+        _run_refinement(root)
+
+    preserved = root[mod.REFINED_ONLINE_GROUP][colliding_name]
+    assert preserved.attrs["sentinel"] == "preserve"
+    assert parent.attrs["latest"] == colliding_name
+
+
+def test_source_authority_tamper_fails_before_output_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    arena = root["analysis/stimulus_runs/stim_1/calibration/arena_geometry"]
+    arena.attrs["arena_region_width_px"] = 999
+
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="evidence is invalid|authority cannot be verified exactly",
+    ):
+        mod.refine_online_positions("ignored.zarr", console=_console())
+
+    assert mod.REFINED_ONLINE_GROUP not in root
+
+
+def test_completion_rejects_processing_lineage_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _canonical_fixture(monkeypatch)
+    _, run = _run_refinement(root)
+
+    processing = deepcopy(run.attrs[mod.PROCESSING_RECORD_ATTR])
+    processing["parameters"]["max_gap"] += 1
+    run.attrs[mod.PROCESSING_RECORD_ATTR] = processing
+    run.attrs[mod.PROCESSING_RECORD_DIGEST_ATTR] = mod._canonical_mapping_digest(
+        processing
+    )
+
+    with pytest.raises(
+        mod.CanonicalOnlineRefinementError,
+        match="processing record is stale or inconsistent",
+    ):
+        mod.load_bound_refined_online_coordinate_evidence(root, run)

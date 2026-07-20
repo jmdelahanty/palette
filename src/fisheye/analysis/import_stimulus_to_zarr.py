@@ -5,9 +5,10 @@ Import stimulus H5 data into a Palette detection Zarr archive.
 This script mirrors the functionality of ``create_analysis_h5.py`` but writes the
 output directly inside the Zarr hierarchy under ``analysis/stimulus_runs``.
 
-It copies frame metadata (with interpolation), chaser states, events, protocol
-snapshots, and calibration information so downstream tooling no longer relies on
-a separate analysis H5.
+It copies frame metadata (with interpolation), canonical coordinate-signed chaser
+states, events, and a run-local calibration snapshot so downstream tooling no
+longer relies on a separate analysis H5. Coordinate-bearing source surfaces that
+do not yet have an exact resolver fail closed during the read-only H5 preflight.
 
 Data Architecture & Design Philosophy
 --------------------------------------
@@ -78,6 +79,8 @@ Data Architecture & Design Philosophy
 from __future__ import annotations
 
 import argparse
+import copy
+from contextlib import contextmanager
 import json
 import re
 from hashlib import sha256
@@ -89,11 +92,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import h5py
 import numpy as np
 from numpy.lib import recfunctions as rfn
-import yaml
 import zarr
 from rich.console import Console
 
-from .calibration_manager import CalibrationManager
 from .chaser_state_interpolator import (
     analyze_frame_gaps,
     interpolate_metadata,
@@ -113,8 +114,32 @@ from fisheye.shared.citrus_enums import (
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_provenance import build_writer_run_provenance
+from fisheye.shared.selected_calibration import (
+    SelectedCalibrationSnapshot,
+    stamp_selected_calibration_snapshot,
+)
+from fisheye.shared.stimulus_coordinate_contract import (
+    COORDINATE_CONTRACT_EPOCH,
+    STIMULUS_IMPORT_VERSION,
+    StimulusCoordinatePreflight,
+    _load_bound_stimulus_coordinate_evidence_before_selection,
+    materialize_stimulus_coordinate_contract,
+    preflight_stimulus_coordinate_contract,
+    reverify_stimulus_coordinate_contract,
+    validate_stimulus_destination_acquisition_authority,
+)
+from fisheye.shared.stimulus_physical_coordinate import (
+    _load_stimulus_physical_coordinate_authority_before_selection,
+    invalidate_stimulus_physical_coordinate_publication,
+    publish_stimulus_physical_coordinate_authority,
+)
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
+    require_runs_parent,
+)
 
 
 def _log(console: Optional[Console], message: str) -> None:
@@ -185,40 +210,6 @@ def _decode_h5_text(raw: object) -> Optional[str]:
     return None
 
 
-def _parse_homography_matrix_yml(raw: object) -> Optional[np.ndarray]:
-    """Parse Citrus/OpenCV homography YAML into a numeric 3x3 matrix."""
-    text = _decode_h5_text(raw)
-    if not text:
-        return None
-
-    cleaned_lines = []
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("%YAML") or (stripped == "---" and not cleaned_lines):
-            continue
-        cleaned_lines.append(line)
-
-    try:
-        parsed = yaml.safe_load("\n".join(cleaned_lines)) or {}
-    except Exception:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-
-    matrix_meta = parsed.get("homography_matrix")
-    if isinstance(matrix_meta, dict):
-        rows = int(matrix_meta.get("rows", 0) or 0)
-        cols = int(matrix_meta.get("cols", 0) or 0)
-        data = matrix_meta.get("data")
-        if rows == 3 and cols == 3 and isinstance(data, (list, tuple)):
-            return np.asarray(data, dtype=np.float64).reshape(3, 3)
-
-    data = parsed.get("data")
-    if isinstance(data, (list, tuple)) and len(data) == 9:
-        return np.asarray(data, dtype=np.float64).reshape(3, 3)
-    return None
-
-
 def _find_default_h5_for_zarr_path(zarr_path: Path) -> Optional[Path]:
     """Locate a likely stimulus H5 alongside a zarr path without opening zarr."""
 
@@ -248,42 +239,6 @@ def _find_default_h5_for_zarr_path(zarr_path: Path) -> Optional[Path]:
         return candidates[0]
 
 
-def _first_camera_config(arena_config: Dict[str, object]) -> Dict[str, object]:
-    camera_configs = arena_config.get("camera_calibrations")
-    if not isinstance(camera_configs, list) or not camera_configs:
-        return {}
-    active_camera_id = arena_config.get("active_camera_id")
-    for item in camera_configs:
-        if isinstance(item, dict) and str(item.get("camera_id")) == str(active_camera_id):
-            return item
-    first = camera_configs[0]
-    return first if isinstance(first, dict) else {}
-
-
-def _set_optional_float_attr(group: zarr.Group, name: str, value: object) -> None:
-    if value is None:
-        return
-    try:
-        group.attrs[name] = float(value)
-    except (TypeError, ValueError):
-        return
-
-
-def _set_optional_int_attr(group: zarr.Group, name: str, value: object) -> None:
-    if value is None:
-        return
-    try:
-        group.attrs[name] = int(value)
-    except (TypeError, ValueError):
-        return
-
-
-def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
-    if name in group:
-        del group[name]
-    group.create_array(name, data=data, chunks=data.shape, overwrite=True)
-
-
 def _copy_h5_attrs_to_zarr_attrs(src: h5py.Group | h5py.Dataset, dst: zarr.Group) -> None:
     for attr_name, attr_value in src.attrs.items():
         dst.attrs[attr_name] = _normalize_attr_value(attr_value)
@@ -291,10 +246,16 @@ def _copy_h5_attrs_to_zarr_attrs(src: h5py.Group | h5py.Dataset, dst: zarr.Group
 
 def _copy_h5_dataset_to_zarr_mirror(src: h5py.Dataset, dst: zarr.Group, name: str) -> None:
     data = src[()]
+    source_attrs = {
+        str(attr_name): _normalize_attr_value(attr_value)
+        for attr_name, attr_value in src.attrs.items()
+    }
     if isinstance(data, bytes):
         dst.attrs[name] = data.decode("utf-8", "ignore")
+        dst.attrs[f"{name}__h5_dataset_attrs"] = source_attrs
     elif np.isscalar(data) or (isinstance(data, np.ndarray) and data.ndim == 0):
         dst.attrs[name] = data.item() if hasattr(data, "item") else data
+        dst.attrs[f"{name}__h5_dataset_attrs"] = source_attrs
     else:
         arr = np.asarray(data)
         if name in dst:
@@ -305,6 +266,7 @@ def _copy_h5_dataset_to_zarr_mirror(src: h5py.Dataset, dst: zarr.Group, name: st
             chunks=arr.shape,
             overwrite=True,
         )
+        dst[name].attrs.update(source_attrs)
 
 
 def _copy_h5_group_to_zarr_mirror(src: h5py.Group, dst: zarr.Group) -> None:
@@ -332,111 +294,63 @@ def _copy_h5_group_to_zarr_mirror(src: h5py.Group, dst: zarr.Group) -> None:
             _copy_h5_dataset_to_zarr_mirror(child, dst, child_name)
 
 
-def _materialize_analysis_calibration(
-    root: zarr.Group,
+def _materialize_selected_calibration_snapshot(
+    run_group: zarr.Group,
     h5: h5py.File,
     *,
-    source_h5: Path,
+    root_node: zarr.Group,
     run_name: str,
-    console: Optional[Console],
-) -> None:
-    """Normalize H5 calibration snapshot into analysis/calibration.
+    preflight: StimulusCoordinatePreflight,
+) -> SelectedCalibrationSnapshot:
+    """Persist only the exact preflight-selected camera and display evidence."""
 
-    The stimulus run still keeps the raw/mirrored H5 snapshot. This canonical
-    group is the machine-readable analysis surface used by downstream metrics.
-    """
-    if "/calibration_snapshot" not in h5:
-        return
+    selected = preflight.selected_calibration
+    camera_id = selected.active_camera_id
+    source_camera_path = f"/calibration_snapshot/{camera_id}"
+    source_camera = h5[source_camera_path]
+    if not isinstance(source_camera, h5py.Group):
+        raise ValueError(f"Selected source camera group {source_camera_path!r} vanished.")
 
-    calib_src = h5["/calibration_snapshot"]
-    arena_config = _read_h5_arena_config(h5) or {}
-    camera_config = _first_camera_config(arena_config)
+    calibration = run_group.require_group("calibration")
+    camera = calibration.require_group(camera_id)
+    _copy_h5_group_to_zarr_mirror(source_camera, camera)
 
-    analysis = root.require_group("analysis")
-    calib_dst = analysis.require_group("calibration")
-    calib_dst.attrs["schema_version"] = 1
-    calib_dst.attrs["source"] = "h5_calibration_snapshot"
-    calib_dst.attrs["source_h5"] = str(source_h5.resolve())
-    calib_dst.attrs["source_stimulus_run"] = run_name
+    source_arena_path = "/calibration_snapshot/arena_geometry"
+    if source_arena_path in h5:
+        source_arena = h5[source_arena_path]
+        if not isinstance(source_arena, h5py.Group):
+            raise ValueError(f"{source_arena_path} must remain an H5 group.")
+        arena = calibration.require_group("arena_geometry")
+        _copy_h5_group_to_zarr_mirror(source_arena, arena)
 
-    active_camera_id = arena_config.get("active_camera_id") or camera_config.get("camera_id")
-    if active_camera_id is not None:
-        calib_dst.attrs["active_camera_id"] = str(active_camera_id)
-        calib_dst.attrs["primary_camera_id"] = str(active_camera_id)
-
-    ppm_camera = camera_config.get("pixels_per_mm_camera")
-    if ppm_camera is None and isinstance(active_camera_id, (str, int)) and str(active_camera_id) in calib_src:
-        ppm_camera = calib_src[str(active_camera_id)].attrs.get("pixels_per_mm_camera")
-    _set_optional_float_attr(calib_dst, "pixels_per_mm_camera", ppm_camera)
-    if ppm_camera is not None:
-        try:
-            ppm_camera_f = float(ppm_camera)
-            if ppm_camera_f > 0:
-                calib_dst.attrs["pixel_to_mm"] = 1.0 / ppm_camera_f
-        except (TypeError, ValueError):
-            pass
-
-    ppm_projector = camera_config.get("pixels_per_mm_projector")
-    if ppm_projector is None and isinstance(active_camera_id, (str, int)) and str(active_camera_id) in calib_src:
-        ppm_projector = calib_src[str(active_camera_id)].attrs.get("pixels_per_mm_projector")
-    _set_optional_float_attr(calib_dst, "pixels_per_mm_projector", ppm_projector)
-
-    _set_optional_float_attr(calib_dst, "real_world_ref_mm", camera_config.get("real_world_ref_mm"))
-    _set_optional_int_attr(calib_dst, "native_width_px", camera_config.get("native_width_px"))
-    _set_optional_int_attr(calib_dst, "native_height_px", camera_config.get("native_height_px"))
-
-    # Preserve Citrus arena config values with explicit coordinate-space names.
-    for key in (
-        "experimental_area_center_x_px",
-        "experimental_area_center_y_px",
-        "experimental_area_radius_px",
-        "experimental_area_radius_mm",
-        "experimental_area_width_px",
-        "experimental_area_height_px",
-        "sub_arena_x_px",
-        "sub_arena_y_px",
-        "sub_arena_width_px",
-        "sub_arena_height_px",
-        "sub_arena_width_mm",
-        "sub_arena_height_mm",
-        "calculated_z_eff_mm",
+    matrix_node = camera.get("homography_matrix")
+    if matrix_node is None or isinstance(matrix_node, zarr.Group):
+        raise ValueError("Selected numeric homography was not copied as an array.")
+    if not np.array_equal(
+        np.asarray(matrix_node[:], dtype=np.float64),
+        selected.homography_matrix,
     ):
-        _set_optional_float_attr(calib_dst, key, arena_config.get(key))
-    if "experimental_area_shape" in arena_config:
-        calib_dst.attrs["experimental_area_shape"] = str(arena_config["experimental_area_shape"])
+        raise ValueError(
+            "Copied selected homography differs from verified source evidence."
+        )
 
-    z_eff = arena_config.get("calculated_z_eff_mm")
-    try:
-        z_eff_f = float(z_eff) if z_eff is not None else None
-    except (TypeError, ValueError):
-        z_eff_f = None
-    if z_eff_f is not None and z_eff_f > 0:
-        calib_dst.attrs["z_eff_mm"] = z_eff_f
-        calib_dst.attrs["z_eff_source"] = "calibration_snapshot.arena_config_json.calculated_z_eff_mm"
-    elif z_eff is not None:
-        calib_dst.attrs["z_eff_status"] = "unusable_nonpositive"
-
-    camera_ids = [
-        key for key in calib_src.keys()
-        if key != "arena_config_json" and isinstance(calib_src.get(key), h5py.Group)
-    ]
-    homography_written = False
-    for camera_id in camera_ids:
-        cam_src = calib_src[camera_id]
-        if "homography_matrix_yml" not in cam_src:
-            continue
-        matrix = _parse_homography_matrix_yml(cam_src["homography_matrix_yml"][()])
-        if matrix is None:
-            continue
-        _write_array(calib_dst, "homography_matrix", matrix)
-        calib_dst.attrs["homography_source"] = f"calibration_snapshot/{camera_id}/homography_matrix_yml"
-        homography_written = True
-        break
-
-    if not homography_written:
-        calib_dst.attrs["homography_status"] = "missing_numeric_matrix"
-
-    _log(console, "[green]✓ Normalized H5 calibration to analysis/calibration[/green]")
+    source_display = h5["/display_snapshot"]
+    if not isinstance(source_display, h5py.Group):
+        raise ValueError("Selected source display snapshot vanished.")
+    display = run_group.require_group("display_snapshot")
+    _copy_h5_group_to_zarr_mirror(source_display, display)
+    return stamp_selected_calibration_snapshot(
+        calibration,
+        camera,
+        display,
+        matrix_node,
+        root_node=root_node,
+        stimulus_run=run_name,
+        camera_id=camera_id,
+        source_camera=selected.source_camera,
+        source_display=selected.source_display,
+        source_homography=selected.source_homography,
+    )
 
 
 def _filter_camera_metadata(payload: Dict[str, object]) -> Dict[str, object]:
@@ -727,81 +641,6 @@ def _ensure_utf8_column(values: np.ndarray) -> np.ndarray:
 
 
 COLUMNAR_DATASETS = {"chaser_states", "bounding_boxes"}
-POSITION_COORDINATE_GROUPS = ("tracking_data/chaser_states", "tracking_data/bounding_boxes")
-POSITION_COORDINATE_ATTRS = (
-    "coordinate_frame",
-    "coordinate_origin",
-    "position_fields",
-    "x_axis_direction",
-    "y_axis_direction",
-)
-
-
-def _build_legacy_texture_to_camera_transform(arena_config: Dict[str, Any]) -> Dict[str, Any]:
-    coord_info: Dict[str, Any] = {
-        "texture_dimensions": [358, 358],
-        "camera_dimensions": [4512, 4512],
-        "texture_to_camera_scale": 4512 / 358,
-        "coordinate_note": "Legacy texture-to-camera scale for older texture-space stimulus coordinates.",
-    }
-    try:
-        cam_calib = arena_config.get("camera_calibrations", [{}])[0]
-        width = cam_calib.get("native_width_px")
-        height = cam_calib.get("native_height_px")
-        if width and height:
-            coord_info["camera_dimensions"] = [int(width), int(height)]
-            coord_info["texture_to_camera_scale"] = float(width) / 358.0
-    except Exception:
-        pass
-    return coord_info
-
-
-def _position_coordinate_metadata(run_group: zarr.Group) -> List[Dict[str, Any]]:
-    metadata: List[Dict[str, Any]] = []
-    for relative_path in POSITION_COORDINATE_GROUPS:
-        try:
-            group = run_group[relative_path]
-        except Exception:
-            continue
-        attrs = dict(group.attrs)
-        coordinate_frame = attrs.get("coordinate_frame")
-        if not coordinate_frame:
-            continue
-        entry: Dict[str, Any] = {"path": relative_path}
-        for attr_name in POSITION_COORDINATE_ATTRS:
-            value = attrs.get(attr_name)
-            if value is not None:
-                entry[attr_name] = value
-        metadata.append(entry)
-    return metadata
-
-
-def _write_run_coordinate_metadata(run_group: zarr.Group, arena_config: Dict[str, Any]) -> None:
-    """Write run-level coordinate metadata without overriding child group contracts."""
-
-    coord_info = _build_legacy_texture_to_camera_transform(arena_config)
-    position_groups = _position_coordinate_metadata(run_group)
-    if position_groups:
-        coord_info["scope"] = "legacy_texture_space_fallback"
-        coord_info[
-            "coordinate_note"
-        ] = (
-            "Legacy texture-to-camera scale retained for older texture-space consumers. "
-            "Position-bearing child groups with coordinate_frame attrs define their own "
-            "coordinate contracts and take precedence."
-        )
-        run_group.attrs["legacy_texture_to_camera_transform"] = json.dumps(coord_info, sort_keys=True)
-        run_group.attrs[
-            "coordinate_transform_status"
-        ] = "suppressed_child_group_coordinate_metadata_authoritative"
-        run_group.attrs["position_coordinate_groups"] = json.dumps(position_groups, sort_keys=True)
-        if "coordinate_transform" in run_group.attrs:
-            del run_group.attrs["coordinate_transform"]
-        return
-
-    coord_info["scope"] = "run_level_legacy_texture_space"
-    run_group.attrs["coordinate_transform"] = json.dumps(coord_info, sort_keys=True)
-    run_group.attrs["coordinate_transform_status"] = "legacy_run_level_texture_to_camera"
 
 
 def _copy_h5_dataset(
@@ -1090,110 +929,6 @@ def _copy_stimulus_coordinates(h5: h5py.File, run_group: zarr.Group, console: Op
     _log(console, "[green]✓ Copied H5 stimulus_coordinates into stimulus run[/green]")
 
 
-def _projector_pixels_per_mm(h5: h5py.File, arena_config: Dict[str, Any]) -> Optional[float]:
-    camera_config = _first_camera_config(arena_config)
-    ppm = _first_float(camera_config.get("pixels_per_mm_projector"))
-    if ppm is not None:
-        return ppm
-    active_camera_id = arena_config.get("active_camera_id") or camera_config.get("camera_id")
-    if active_camera_id is not None and f"/calibration_snapshot/{active_camera_id}" in h5:
-        return _first_float(h5[f"/calibration_snapshot/{active_camera_id}"].attrs.get("pixels_per_mm_projector"))
-    return None
-
-
-def _stimulus_coordinates_center(h5: h5py.File) -> Tuple[Optional[float], Optional[float], Optional[str]]:
-    if "/stimulus_coordinates" not in h5:
-        return None, None, None
-    parent = h5["/stimulus_coordinates"]
-    for arena_name in parent.keys():
-        arena = parent[arena_name]
-        if not isinstance(arena, h5py.Group):
-            continue
-        custom = arena.get("custom_coordinates")
-        if custom is None or not hasattr(custom, "attrs"):
-            continue
-        cx = _first_float(custom.attrs.get("texture_center_x"), custom.attrs.get("texture_center_x_px"))
-        cy = _first_float(custom.attrs.get("texture_center_y"), custom.attrs.get("texture_center_y_px"))
-        if cx is not None and cy is not None:
-            return cx, cy, f"stimulus_coordinates/{arena_name}/custom_coordinates.texture_center"
-    return None, None, None
-
-
-def _resolve_concentric_center_attrs(
-    h5: h5py.File,
-    flat_params: Dict[str, Any],
-    arena_config: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Resolve source-derived concentric grating center metadata for step attrs."""
-
-    ppm_projector = _projector_pixels_per_mm(h5, arena_config)
-    cx_mm = _first_float(flat_params.get("center_x_mm"))
-    cy_mm = _first_float(flat_params.get("center_y_mm"))
-    if cx_mm is not None and cy_mm is not None:
-        return {
-            "center_x_mm": cx_mm,
-            "center_y_mm": cy_mm,
-            "center_source": "protocol_parameters.center_mm",
-            "center_coordinate_frame": "stimulus_mm",
-        }
-
-    cx_px = _first_float(flat_params.get("center_x_px"), flat_params.get("center_x_texture_px"))
-    cy_px = _first_float(flat_params.get("center_y_px"), flat_params.get("center_y_texture_px"))
-    center_source = "protocol_parameters.center_px" if cx_px is not None and cy_px is not None else ""
-    center_frame = "arena_texture_px"
-
-    if cx_px is None or cy_px is None:
-        cx_px, cy_px, center_source = _stimulus_coordinates_center(h5)
-        center_frame = "arena_texture_px"
-
-    if cx_px is None or cy_px is None:
-        cx_px = _first_float(
-            arena_config.get("arena_region_center_in_canvas_x_px"),
-            arena_config.get("experimental_area_center_x_px"),
-        )
-        cy_px = _first_float(
-            arena_config.get("arena_region_center_in_canvas_y_px"),
-            arena_config.get("experimental_area_center_y_px"),
-        )
-        if cx_px is not None and cy_px is not None:
-            center_source = "calibration_snapshot.arena_config_json.experimental_area_center_px"
-            center_frame = "projector_canvas_px"
-
-    if cx_px is None or cy_px is None:
-        width_px = _first_float(
-            arena_config.get("arena_region_width_px"),
-            arena_config.get("sub_arena_width_px"),
-            arena_config.get("experimental_area_width_px"),
-        )
-        height_px = _first_float(
-            arena_config.get("arena_region_height_px"),
-            arena_config.get("sub_arena_height_px"),
-            arena_config.get("experimental_area_height_px"),
-        )
-        if width_px is not None and height_px is not None:
-            cx_px = width_px * 0.5
-            cy_px = height_px * 0.5
-            center_source = "calibration_snapshot.arena_config_json.arena_size_half"
-            center_frame = "arena_texture_px"
-
-    attrs: Dict[str, Any] = {}
-    if cx_px is not None and cy_px is not None:
-        attrs.update({
-            "center_x_px": cx_px,
-            "center_y_px": cy_px,
-            "center_source": center_source or "unknown",
-            "center_coordinate_frame": center_frame,
-        })
-        if ppm_projector is not None and ppm_projector > 0:
-            attrs["center_x_mm"] = cx_px / ppm_projector
-            attrs["center_y_mm"] = cy_px / ppm_projector
-            attrs["center_mm_source"] = f"{attrs['center_source']} / pixels_per_mm_projector"
-            attrs["center_mm_coordinate_frame"] = "projector_relative_mm"
-    if ppm_projector is not None:
-        attrs["pixels_per_mm_projector"] = ppm_projector
-    return attrs
-
-
 def _write_moving_grating_step_metadata(
     step_group: zarr.Group,
     step_params: Dict[str, Any],
@@ -1272,8 +1007,10 @@ def _write_concentric_grating_step_metadata(
         "target_radius_max_mm": _first_float(flat.get("target_radius_max_mm")),
         "target_radius_source": flat.get("target_radius_source"),
         "centering_success_fraction_threshold": _first_float(flat.get("centering_success_fraction_threshold")),
+        "coordinate_geometry_status": (
+            "not_materialized_missing_exact_protocol_coordinate_contract"
+        ),
     }
-    attrs.update(_resolve_concentric_center_attrs(h5, flat, arena_config))
     group = step_group.require_group("concentric_grating")
     _update_attrs_json_safe(group, attrs)
 
@@ -1667,6 +1404,77 @@ def backfill_stimulus_step_metadata(
     return summary
 
 
+@contextmanager
+def _staged_run_failure_guard(
+    run_group: zarr.Group,
+    *,
+    runs_parent: zarr.Group,
+    run_name: str,
+):
+    """Mark every post-start failure and ensure no failed run remains published."""
+
+    pointer_names = (
+        "latest",
+        "latest_complete",
+        "latest_pending",
+        "authoritative_run",
+        "authoritative_run_provenance",
+    )
+    pointer_snapshot = {
+        name: (name in runs_parent.attrs, copy.deepcopy(runs_parent.attrs.get(name)))
+        for name in pointer_names
+    }
+    try:
+        yield
+    except BaseException as exc:
+        rollback_errors: list[str] = []
+        try:
+            run_group.attrs["stage_selector_eligible"] = False
+        except BaseException as rollback_exc:  # pragma: no cover - hostile store
+            rollback_errors.append(f"disarm selector eligibility: {rollback_exc}")
+        try:
+            mark_run_failed(
+                run_group,
+                parent_group=runs_parent,
+                run_name=run_name,
+                error=str(exc),
+            )
+        except BaseException as rollback_exc:  # pragma: no cover - hostile store
+            rollback_errors.append(f"mark failed: {rollback_exc}")
+        try:
+            invalidate_stimulus_physical_coordinate_publication(run_group)
+        except BaseException as rollback_exc:  # pragma: no cover - hostile store
+            rollback_errors.append(f"invalidate physical authority: {rollback_exc}")
+        for attr_name, (was_present, value) in pointer_snapshot.items():
+            try:
+                if was_present:
+                    runs_parent.attrs[attr_name] = copy.deepcopy(value)
+                elif attr_name in runs_parent.attrs:
+                    del runs_parent.attrs[attr_name]
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(
+                    f"restore stimulus-runs pointer {attr_name}: {rollback_exc}"
+                )
+        for attr_name, (was_present, value) in pointer_snapshot.items():
+            try:
+                if (attr_name in runs_parent.attrs) != was_present or (
+                    was_present and runs_parent.attrs.get(attr_name) != value
+                ):
+                    rollback_errors.append(
+                        f"verify stimulus-runs pointer {attr_name}: persisted value differs"
+                    )
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(
+                    f"verify stimulus-runs pointer {attr_name}: {rollback_exc}"
+                )
+        if rollback_errors:
+            raise RuntimeError(
+                "Stimulus import failed and publication rollback was incomplete: "
+                f"{rollback_errors!r}."
+            ) from exc
+        raise
+
+
 def import_stimulus_to_zarr(
     stimulus_h5: Optional[Path],
     zarr_path: Path,
@@ -1691,25 +1499,44 @@ def import_stimulus_to_zarr(
             "Provide one explicitly."
         )
 
+    # Keep this exact read-only handle alive through the final publication
+    # recheck. No path reopen or cached preflight evidence is accepted.
+    with h5py.File(resolved_h5.expanduser().resolve(), "r") as h5:
+        coordinate_preflight = preflight_stimulus_coordinate_contract(
+            h5,
+            source_h5=resolved_h5,
+        )
+        return _import_stimulus_from_open_h5(
+            h5,
+            zarr_path=zarr_path,
+            run_name=run_name,
+            overwrite=overwrite,
+            repair_chaser_gaps=repair_chaser_gaps,
+            console=console,
+            coordinate_preflight=coordinate_preflight,
+        )
+
+
+def _import_stimulus_from_open_h5(
+    h5: h5py.File,
+    *,
+    zarr_path: Path,
+    run_name: Optional[str],
+    overwrite: bool,
+    repair_chaser_gaps: bool,
+    console: Optional[Console],
+    coordinate_preflight: StimulusCoordinatePreflight,
+) -> str:
+    """Stage and publish one run while its verified source handle remains open."""
+
+    resolved_h5 = coordinate_preflight.source_h5
+
     zarr_path.parent.mkdir(parents=True, exist_ok=True)
-    zarr.open_group(str(zarr_path), mode="a")
-    calib_manager = CalibrationManager(str(zarr_path), verbose=verbose, console=console)
-
-    # Ensure calibration metadata is populated before ingesting stimulus data
-    try:
-        existing_calib = calib_manager.get_calibration()
-        if existing_calib:
-            _log(console, "[dim]Calibration already present in zarr; skipping auto-import.[/dim]")
-        else:
-            calib_data = calib_manager.extract_from_h5(str(resolved_h5))
-            if calib_data:
-                saved = calib_manager.save_calibration(calib_data, overwrite=False)
-                if saved:
-                    _log(console, "[green]✓ Imported calibration metadata from stimulus H5[/green]")
-    except Exception as exc:
-        _log(console, f"[yellow]Warning:[/yellow] Unable to import calibration automatically ({exc})")
-
     root = zarr.open(zarr_path, mode="a")
+    validate_stimulus_destination_acquisition_authority(
+        root,
+        preflight=coordinate_preflight,
+    )
     analysis = root.require_group("analysis")
     runs_parent = require_runs_parent(analysis, "stimulus_runs")
 
@@ -1717,45 +1544,64 @@ def import_stimulus_to_zarr(
         run_name = datetime.now(timezone.utc).strftime("stimulus_%Y%m%d_%H%M%S")
 
     if run_name in runs_parent:
+        published_names = {
+            str(value)
+            for value in (
+                runs_parent.attrs.get("latest"),
+                runs_parent.attrs.get("latest_complete"),
+                runs_parent.attrs.get("latest_pending"),
+                runs_parent.attrs.get("authoritative_run"),
+            )
+            if value not in (None, "")
+        }
+        if run_name in published_names:
+            raise ValueError(
+                f"Refusing to overwrite published stimulus run {run_name!r}; "
+                "use a new immutable run name."
+            )
         if not overwrite:
             raise ValueError(
                 f"analysis/stimulus_runs/{run_name} already exists. "
                 "Use --overwrite to replace the existing run."
             )
+        existing_status = runs_parent[run_name].attrs.get(
+            "palette_run_completion_status"
+        )
+        if existing_status != "failed":
+            raise ValueError(
+                f"Refusing to overwrite non-failed stimulus run {run_name!r} "
+                f"(status={existing_status!r}); use a new immutable run name."
+            )
         del runs_parent[run_name]
 
-    run_group = runs_parent.create_group(run_name)
-    mark_run_started(run_group, run_name=run_name, stage="stimulus")
-    with h5py.File(resolved_h5, "r") as h5:
-        _materialize_analysis_calibration(
-            root,
-            h5,
-            source_h5=resolved_h5,
-            run_name=run_name,
-            console=console,
-        )
-
-        analysis_meta = root.require_group("analysis_metadata")
+    run_group = runs_parent.create_group(
+        run_name,
+        attributes={"stage_selector_eligible": False},
+    )
+    with _staged_run_failure_guard(
+        run_group,
+        runs_parent=runs_parent,
+        run_name=run_name,
+    ):
+        mark_run_started(run_group, run_name=run_name, stage="stimulus")
+        if run_group.attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError(
+                "Stimulus run did not persist fail-closed selector eligibility at "
+                "creation."
+            )
+        analysis_meta = run_group.require_group("source_metadata")
         subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
         if subject_meta:
             analysis_meta.attrs["subject_metadata"] = json.dumps(subject_meta, sort_keys=True)
-            if "experiment_setup" not in root.attrs:
-                experiment_setup = _derive_experiment_setup(subject_meta)
-                if experiment_setup:
-                    root.attrs["experiment_setup"] = experiment_setup
-                    _log(
-                        console,
-                        "[green]✓ Auto-set experiment setup from subject_metadata "
-                        f"(subject_count={experiment_setup.get('subject_count')})[/green]",
-                    )
-                else:
-                    _log(
-                        console,
-                        "[yellow]No valid subject_count in subject_metadata; "
-                        "experiment_setup not set.[/yellow]",
-                    )
+            experiment_setup = _derive_experiment_setup(subject_meta)
+            if experiment_setup:
+                analysis_meta.attrs["experiment_setup"] = experiment_setup
             else:
-                _log(console, "[dim]experiment_setup already present; leaving as-is.[/dim]")
+                _log(
+                    console,
+                    "[yellow]No valid subject_count in subject_metadata; "
+                    "run-local experiment_setup not set.[/yellow]",
+                )
         camera_meta = _read_h5_camera_metadata(h5)
         if camera_meta:
             analysis_meta.attrs["camera_metadata"] = json.dumps(camera_meta, sort_keys=True)
@@ -1766,22 +1612,16 @@ def import_stimulus_to_zarr(
         session_uuid = h5.attrs.get("session_uuid")
         if session_uuid:
             analysis_meta.attrs["session_uuid"] = _normalize_attr_value(session_uuid)
-        if "experimental_chamber" not in root.attrs:
-            chamber = _read_experimental_chamber_from_h5(h5)
-            if chamber:
-                root.attrs["experimental_chamber"] = chamber
-                _log(console, f"[green]✓ Set experimental_chamber: {chamber}[/green]")
-            else:
-                _log(console, "[dim]experimental_chamber not found in H5.[/dim]")
-        if "dish_design" not in root.attrs:
-            arena_config = _read_h5_arena_config(h5)
-            if isinstance(arena_config, dict):
-                dish_name = _normalize_attr_value(arena_config.get("selected_dish_type_name"))
-                if isinstance(dish_name, str) and dish_name:
-                    root.attrs["dish_design"] = dish_name
-                    _log(console, f"[green]✓ Set dish_design: {dish_name}[/green]")
+        chamber = _read_experimental_chamber_from_h5(h5)
+        if chamber:
+            analysis_meta.attrs["experimental_chamber"] = chamber
+        arena_config = _read_h5_arena_config(h5)
+        if isinstance(arena_config, dict):
+            dish_name = _normalize_attr_value(arena_config.get("selected_dish_type_name"))
+            if isinstance(dish_name, str) and dish_name:
+                analysis_meta.attrs["dish_design"] = dish_name
 
-        _copy_enums(h5, analysis, console)
+        _copy_enums(h5, run_group, console)
         if "/video_metadata/frame_metadata" not in h5:
             raise ValueError("Stimulus H5 missing /video_metadata/frame_metadata dataset.")
 
@@ -1894,12 +1734,8 @@ def import_stimulus_to_zarr(
                     values = np.asarray(_ensure_utf8_column(values))
                 store_array(events_group, "values", values, {})
 
-        # Protocol snapshot
-        protocol_text, protocol_payload = _read_protocol_snapshot(h5)
-        if protocol_text is not None:
-            run_group.attrs["protocol_json"] = protocol_text
-
-        # Calibration snapshot
+        # Keep the exact arena-config payload run-local for inspection. The
+        # selected calibration helper below is the interpretation authority.
         if "/calibration_snapshot/arena_config_json" in h5:
             calib_bytes = h5["/calibration_snapshot/arena_config_json"][()]
             try:
@@ -1908,109 +1744,149 @@ def import_stimulus_to_zarr(
                 calib_json = str(calib_bytes)
             run_group.attrs["arena_config_json"] = calib_json
 
-            try:
-                arena_config = json.loads(calib_json)
-            except json.JSONDecodeError:
-                arena_config = {}
-
-            _write_run_coordinate_metadata(run_group, arena_config)
-
-        if "/calibration_snapshot" in h5:
-            calib_src = h5["/calibration_snapshot"]
-            calib_dst = run_group.require_group("calibration")
-
-            existing = set(getattr(calib_dst, "group_keys", lambda: [])())
-            source_cameras = {
-                key for key in calib_src.keys() if key != "arena_config_json"
-            }
-            for leftover in existing - source_cameras:
-                del calib_dst[leftover]
-
-            for cam_id in source_cameras:
-                cam_src = calib_src[cam_id]
-                if not isinstance(cam_src, h5py.Group):
-                    continue
-                cam_dst = calib_dst.require_group(cam_id)
-                _copy_h5_group_to_zarr_mirror(cam_src, cam_dst)
-
-                if "homography_matrix_yml" in cam_src and "homography_matrix" not in cam_dst:
-                    matrix = _parse_homography_matrix_yml(cam_src["homography_matrix_yml"][()])
-                    if matrix is not None:
-                        _write_array(cam_dst, "homography_matrix", matrix)
-                        cam_dst.attrs["homography_matrix_source"] = "homography_matrix_yml"
-
-        _copy_stimulus_coordinates(h5, run_group, console)
-        _materialize_stimulus_steps(
+        selected_calibration = _materialize_selected_calibration_snapshot(
             run_group,
-            h5=h5,
-            events_data=events_data,
-            protocol=protocol_payload,
-            arena_config=_read_h5_arena_config(h5) or {},
-            metadata=combined_metadata,
-            moving_grating_camera_offset_deg=0.0,
-            console=console,
+            h5,
+            root_node=root,
+            run_name=run_name,
+            preflight=coordinate_preflight,
         )
 
         if stats:
             run_group.attrs.update(asdict(stats))
 
         if repair_chaser_gaps and stats and stats.missing_frames:
-            _log(console, "[cyan]Detected chaser stimulus gaps; interpolating chaser states...[/cyan]")
-            try:
-                interpolate_run(
-                    zarr_path=zarr_path,
-                    run_name=run_name,
-                    update_metadata=False,
-                    update_chaser=True,
-                    verbose=False,
-                    console=console,
-                )
-            except KeyError as exc:
-                # Some recordings legitimately lack tracking_data/chaser_states.
-                # In that case we keep imported metadata and skip chaser-gap repair.
-                msg = str(exc)
-                if "tracking_data/chaser_states" in msg or "lacks tracking_data group" in msg:
-                    reason = "missing tracking_data/chaser_states"
-                    run_group.attrs["chaser_interpolation_skipped"] = True
-                    run_group.attrs["chaser_interpolation_skipped_reason"] = reason
-                    _log(
-                        console,
-                        "[yellow]Skipping chaser interpolation repair:[/yellow] "
-                        "run lacks tracking_data/chaser_states",
+            if coordinate_preflight.has_chaser_states:
+                run_group.attrs["chaser_interpolation_skipped"] = True
+                run_group.attrs[
+                    "chaser_interpolation_skipped_reason"
+                ] = "canonical_coordinate_rows_must_copy_source_identity"
+            else:
+                try:
+                    interpolate_run(
+                        zarr_path=zarr_path,
+                        run_name=run_name,
+                        update_metadata=False,
+                        update_chaser=True,
+                        verbose=False,
+                        console=console,
                     )
-                else:
-                    raise
+                except KeyError as exc:
+                    # A run without chaser geometry has nothing to repair.
+                    msg = str(exc)
+                    if (
+                        "tracking_data/chaser_states" in msg
+                        or "lacks tracking_data group" in msg
+                    ):
+                        run_group.attrs["chaser_interpolation_skipped"] = True
+                        run_group.attrs[
+                            "chaser_interpolation_skipped_reason"
+                        ] = "missing tracking_data/chaser_states"
+                    else:
+                        raise
 
-    run_attrs = {
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "source_h5": str(resolved_h5),
-        "import_version": "1.0.0",
-    }
-    rendered_video = _resolve_stimulus_video_path(resolved_h5)
-    if rendered_video is not None:
-        run_attrs["source_stimulus_video_path"] = str(rendered_video)
-    run_group.attrs.update(run_attrs)
+        materialize_stimulus_coordinate_contract(
+            run_group,
+            root_node=root,
+            preflight=coordinate_preflight,
+            selected_calibration=selected_calibration,
+        )
+        physical_authority = publish_stimulus_physical_coordinate_authority(
+            root,
+            run_group,
+            stimulus_run=run_name,
+            selected_calibration=selected_calibration,
+        )
 
-    mark_run_complete(
-        run_group,
-        parent_group=runs_parent,
-        run_name=run_name,
-        run_provenance=build_writer_run_provenance(
-            command="fisheye.analysis.import_stimulus_to_zarr",
-            params={
-                "import_version": run_attrs["import_version"],
-                "repair_chaser_gaps": bool(repair_chaser_gaps),
-            },
-            input_run_ids={
-                "source_h5": str(resolved_h5),
-                "source_stimulus_video_path": (
-                    str(rendered_video) if rendered_video is not None else None
-                ),
-            },
-        ),
-    )
-    _log(console, f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]")
-    return run_name
+        run_attrs = {
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source_h5": str(resolved_h5),
+            "import_version": STIMULUS_IMPORT_VERSION,
+            "coordinate_contract_epoch": COORDINATE_CONTRACT_EPOCH,
+        }
+        rendered_video = _resolve_stimulus_video_path(resolved_h5)
+        if rendered_video is not None:
+            run_attrs["source_stimulus_video_path"] = str(rendered_video)
+        run_group.attrs.update(run_attrs)
+
+        reverify_stimulus_coordinate_contract(
+            h5,
+            preflight=coordinate_preflight,
+        )
+        mark_run_complete(
+            run_group,
+            parent_group=runs_parent,
+            run_name=run_name,
+            run_provenance=build_writer_run_provenance(
+                command="fisheye.analysis.import_stimulus_to_zarr",
+                params={
+                    "import_version": run_attrs["import_version"],
+                    "repair_chaser_gaps": bool(repair_chaser_gaps),
+                    "coordinate_contract_epoch": COORDINATE_CONTRACT_EPOCH,
+                    "active_camera_id": (
+                        coordinate_preflight.selected_calibration.active_camera_id
+                    ),
+                    "selected_calibration_source_evidence_sha256": (
+                        coordinate_preflight.selected_calibration.source_evidence_sha256
+                    ),
+                },
+                input_run_ids={
+                    "source_h5": str(resolved_h5),
+                    "source_stimulus_video_path": (
+                        str(rendered_video) if rendered_video is not None else None
+                    ),
+                },
+            ),
+        )
+        if run_group.attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError(
+                "Stimulus run became selector-eligible before final validation."
+            )
+        if coordinate_preflight.surfaces:
+            chaser_group = run_group["tracking_data"]["chaser_states"]
+            _load_bound_stimulus_coordinate_evidence_before_selection(
+                run_group,
+                chaser_group,
+                root_node=root,
+                require_complete=True,
+            )
+        reloaded_physical_authority = (
+            _load_stimulus_physical_coordinate_authority_before_selection(
+                root,
+                stimulus_run=run_name,
+                require_complete=True,
+            )
+        )
+        if (physical_authority is None) != (reloaded_physical_authority is None):
+            raise ValueError(
+                "Stimulus physical-coordinate publication did not reload exactly."
+            )
+        if (
+            physical_authority is not None
+            and reloaded_physical_authority is not None
+            and (
+                physical_authority.manifest.record_ref
+                != reloaded_physical_authority.manifest.record_ref
+                or physical_authority.manifest.record_sha256
+                != reloaded_physical_authority.manifest.record_sha256
+                or physical_authority.physical_frame.record_ref
+                != reloaded_physical_authority.physical_frame.record_ref
+                or physical_authority.physical_frame.record_sha256
+                != reloaded_physical_authority.physical_frame.record_sha256
+            )
+        ):
+            raise ValueError(
+                "Stimulus physical-coordinate authority changed during import."
+            )
+        runs_parent.attrs["latest_complete"] = run_name
+        runs_parent.attrs["latest"] = run_name
+        # Persistent publication commit point: no fallible store mutation follows.
+        run_group.attrs["stage_selector_eligible"] = True
+        _log(
+            console,
+            f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]",
+        )
+        return run_name
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -2028,7 +1904,11 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Allow replacing an existing stimulus run with the same name.",
+        help=(
+            "Allow replacing an existing failed, non-selected stimulus run with the "
+            "same name. Complete, running, legacy-unmarked, latest, pending, and "
+            "authoritative runs are immutable."
+        ),
     )
     parser.add_argument(
         "--skip-chaser-repair",
