@@ -258,9 +258,14 @@ def plan_migration(zarr_path: Path, crop_run: str) -> MigrationPlan:
     row_count, source_count, refined_count = _validate_source_rows(root, rowset)
     _, acquisition = load_persisted_acquisition_camera_authority(root)
     status = "would_publish_canonical_coordinates"
-    if COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR in rowset.attrs:
+    if (
+        COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR in rowset.attrs
+        and rowset.attrs.get("coordinate_contract") == "canonical_v2"
+    ):
         load_persisted_collection_proxy_observation_geometry(root, rowset_path)
         status = "already_canonical"
+    elif COLLECTION_PROXY_ACQUISITION_MAPPING_ATTR in rowset.attrs:
+        status = "would_resume_partial_coordinate_publication"
     return MigrationPlan(
         zarr_path=str(path),
         crop_run=crop_run,
