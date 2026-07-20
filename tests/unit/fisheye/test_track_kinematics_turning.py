@@ -581,6 +581,31 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
     )
 
 
+def test_speed_derivative_mm_arrays_are_exact_scaled_float32_pairs() -> None:
+    scale = 0.018846914829982055
+    derivative = mod._compute_speed_derivative(  # noqa: SLF001
+        np.asarray([0.0, 1.234567, 5.678901, 2.345678], dtype=np.float64),
+        np.asarray([0.0, 1.0 / 30.0, 1.0 / 30.0, 1.0 / 30.0]),
+        pixel_to_mm=scale,
+        smooth_seconds=0.05,
+        fps=30.0,
+    )
+
+    for pixel_name, physical_name in (
+        ("acceleration_px", "acceleration_mm"),
+        ("smoothed_acceleration_px", "smoothed_acceleration_mm"),
+    ):
+        pixel = np.asarray(derivative[pixel_name])
+        physical = np.asarray(derivative[physical_name])
+        assert pixel.dtype == np.dtype("<f4")
+        assert physical.dtype == pixel.dtype
+        assert np.array_equal(
+            physical,
+            pixel * np.asarray(scale, dtype=pixel.dtype),
+            equal_nan=True,
+        )
+
+
 def _quiet_console() -> Console:
     return Console(file=io.StringIO(), force_terminal=False, width=120)
 

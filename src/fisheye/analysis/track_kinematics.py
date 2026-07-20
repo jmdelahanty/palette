@@ -1721,17 +1721,23 @@ def _compute_speed_derivative(
         accel_vals[valid] = delta_speed_px[valid] / delta_t[valid]
         acceleration_px[1:] = accel_vals
 
-    if pixel_to_mm is not None and np.isfinite(pixel_to_mm):
-        acceleration_mm = acceleration_px * pixel_to_mm
-    else:
-        acceleration_mm = _nan_array(acceleration_px.shape, dtype=np.float64)
-
     post_window = max(1, int(round(fps * smooth_seconds)))
     smoothed_acceleration_px = _smooth_acceleration_trace(acceleration_px, post_window)
+    acceleration_px = _float32(acceleration_px)
+    smoothed_acceleration_px = _float32(smoothed_acceleration_px)
     if pixel_to_mm is not None and np.isfinite(pixel_to_mm):
-        smoothed_acceleration_mm = smoothed_acceleration_px * pixel_to_mm
+        scale = np.asarray(pixel_to_mm, dtype=np.float32)
+        acceleration_mm = np.asarray(acceleration_px * scale, dtype=np.float32)
+        smoothed_acceleration_mm = np.asarray(
+            smoothed_acceleration_px * scale,
+            dtype=np.float32,
+        )
     else:
-        smoothed_acceleration_mm = _nan_array(smoothed_acceleration_px.shape, dtype=np.float64)
+        acceleration_mm = _nan_array(acceleration_px.shape, dtype=np.float32)
+        smoothed_acceleration_mm = _nan_array(
+            smoothed_acceleration_px.shape,
+            dtype=np.float32,
+        )
 
     return {
         "acceleration_px": acceleration_px,
