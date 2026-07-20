@@ -63,13 +63,13 @@ analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/
   positions_mm                           # optional [track_sample, xy]
 
   movement/
-    speed_px_s                           # [track_sample, speed_level]
+    speed_px_s                           # [track_transition_destination_sample, speed_level]
     speed_mm_s                           # optional, same shape
-    frame_path_distance_px               # [track_sample, path_level]
+    frame_path_distance_px               # [track_transition_destination_sample, path_level]
     frame_path_distance_mm               # optional, same shape
-    acceleration_px_s2                   # [track_sample, speed_level]
+    acceleration_px_s2                   # [track_transition_destination_sample, speed_level]
     acceleration_mm_s2                   # optional, same shape
-    smoothed_acceleration_px_s2          # [track_sample, speed_level]
+    smoothed_acceleration_px_s2          # [track_transition_destination_sample, speed_level]
     smoothed_acceleration_mm_s2          # optional, same shape
 ```
 
@@ -101,7 +101,10 @@ from column position, a path name, or an algorithm's defaults.
 Every canonical array still requires:
 
 - exact dtype, rank, shape, and payload digest;
-- axis-0 `track_sample_key` and acquisition-frame identity;
+- an explicit axis-0 domain: positions use `track_sample`, while speed,
+  distance, acceleration, and smoothed acceleration use
+  `track_transition_destination_sample` and bind the destination
+  `track_sample_key`, acquisition-frame identity, and transition validity;
 - axis-1 collection-axis record and digest;
 - units and semantic profile;
 - exact input references and per-level operation/parameter records;

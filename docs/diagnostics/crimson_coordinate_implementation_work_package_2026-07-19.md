@@ -1,11 +1,14 @@
 # Crimson coordinate implementation work package
 
-Date: 2026-07-19
+Date: 2026-07-19; status updated 2026-07-20
 
 Status: implementation handoff draft. This document does not authorize changes
-to Crimson or production archives. The authoritative cross-repository read
-contracts remain normative; this package orders the Crimson work after the
-corresponding Palette publishers and contracts pass final review.
+to Crimson or production archives. Palette's scoped implementation and focused
+validation are recorded in local commit `93177ed5`, but canonical-v2 is not
+released or deployed to current registry archives. The Contracts worktree
+contains uncommitted, unpushed, non-authoritative drafts, and this remediation
+effort made no Crimson changes. This package orders Crimson work after each
+authoritative cross-repository contract is corrected, reviewed, and merged.
 
 ## Outcome
 
@@ -69,29 +72,51 @@ after this boundary succeeds.
 
 ### 1. Track motion
 
-Implement `palette-crimson/track_motion_read.md` first because it is both a
-source-camera overlay and a shared scientific input.
+Implement the current uncommitted `palette-crimson/track_motion_read.md` draft
+first, after its release-blocking corrections are reviewed and merged, because
+track motion is both a source-camera overlay and a shared scientific input.
 
-- Resolve an explicit scope and candidate run. Treat `latest` only as discovery.
+- Restrict scope to `online` or `offline`. For implicit selection require root
+  `latest == latest_complete == "<scope>/<run>"`, root
+  `latest_<scope> == "<run>"`, and scope-parent `latest == "<run>"`; any
+  disagreement fails closed without returning an older run. Explicit specs are
+  a bare direct-child name or the exact full run path after surrounding-
+  whitespace trim only. Four-selector agreement applies only to implicit
+  latest; explicit selection still passes every exact-child gate and seal.
 - Require completion, selector eligibility, canonical binding status, the exact
   full-motion manifest, and publication commit.
 - Build row lookup from `track_sample_key` and
   `source_acquisition_frame_index`; do not use row offset or
   `source_instance_key` as sample identity.
 - Read pixel and optional physical positions from their array descriptors.
-- Expose derived motion only through sealed logical-surface records, including
-  destination-sample transition semantics and gap validity.
+- Expose derived motion only through sealed grouped logical-surface records;
+  never probe flat or derivative fallback paths. Raw, filtered, smoothed, and
+  averaged groups retain acceleration peers, only averaged omits
+  frame-path-distance peers, and every speed/acceleration record uses the
+  destination-anchored `track_transition_destination_sample` domain, including
+  averaged values.
+- Treat current manifest-v1 compatibility aliases as closed seal obligations,
+  not alternate read targets. Normal readers never fall back to them. A future
+  compact no-alias layout is a new manifest/reader schema version, not runtime
+  fallback negotiation.
+- Treat mixed selectors as retry/unavailable and never repair them in Crimson.
+  Palette rollback is conditional on the exact deferred receipt, lease owner,
+  and attempted value, stops on takeover, and never restores a generic pre-copy
+  snapshot.
 - Permit source-video overlay only for direct source-camera coordinates or a
   fully supported persisted chain to that exact camera frame.
 
-Palette's scoped producer/strict-reader review is now `GO` on the remediation
-branch. Do not expose canonical track-motion support until the authoritative
-contract is merged and the same hostile fixtures pass in Crimson.
+Palette's scoped producer/strict-reader review is `GO` at local commit
+`93177ed5`, including the final 101/101 focused release suite. Do not expose
+canonical track-motion support until the corrected authoritative contract is
+merged and the same hostile fixtures pass in Crimson.
 
 ### 2. Detection bounding boxes
 
-Replace bbox-name and dimension inference with the final
-`palette-crimson/detect_bbox_read.md` contract.
+Replace bbox-name and dimension inference only after the uncommitted
+`palette-crimson/detect_bbox_read.md` draft is corrected, reviewed, and merged.
+Its current source-image bbox text still says `continuous`; that must become the
+distinct `pixel_edge_half_open` bbox frame before Crimson implements it.
 
 - Require source-image `bbox_img_xyxy` with `bbox_xyxy` geometry and
   `pixel_edge_half_open` convention for source-camera display.
@@ -218,11 +243,28 @@ copies that change exactly one fact. At minimum cover:
 10. unsupported texture/canvas/projector/arena/body profiles;
 11. exact-child replacement during a read while an unrelated selector change
     leaves an already pinned child valid;
-12. a future recording that succeeds with the legacy module disabled; and
-13. a viewport resize that changes only ephemeral renderer state.
+12. a future recording that succeeds with the legacy module disabled;
+13. a viewport resize that changes only ephemeral renderer state;
+14. every individual four-selector mismatch and each malformed explicit track
+    path fails closed;
+15. normal manifest-v1 reads never fall back from grouped records to intact
+    flat or derivative aliases;
+16. averaged motion retains acceleration peers, omits path-distance peers, and
+    remains destination-transition anchored; and
+17. tampering with any manifest-v1 sealed alias invalidates the v1 seal.
 
 Palette and Crimson should compare canonical descriptor/manifest JSON and
 digests for the same fixtures, not merely compare rendered numerical output.
+Palette-only producer fixtures must additionally cover an intervening
+publication, mid-rollback takeover, and exact-receipt rollback failure; Crimson
+must fail closed on the resulting failed/ineligible or proven-tombstone state
+but does not implement producer rollback.
+
+The compact no-alias schema is deliberately deferred to
+[`future_track_motion_storage_layout.md`](../future_track_motion_storage_layout.md).
+When that schema is defined, add a producer-to-reader no-alias fixture under its
+explicit new version; do not make current manifest-v1 release depend on that
+future fixture or backport runtime negotiation into v1.
 
 ## Historical inspection quarantine
 

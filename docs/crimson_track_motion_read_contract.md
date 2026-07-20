@@ -2,9 +2,16 @@
 
 Date anchored: 2026-07-19
 
-Purpose: define the Palette-side read contract Crimson should use for current
-motion traces, swim-bout overlays, and per-bout metrics. This is the current
-consumer-facing replacement for legacy Crimson `analysis/movement_runs` loading.
+Status: branch-local future-normal contract for Palette commit `93177ed5`. The
+scoped Palette producer/strict reader passed independent review and the 101/101
+focused suite, but canonical-v2 is not deployed to current registry archives,
+no authoritative cross-repository contract is merged, and Crimson is not
+implemented for this future-normal track-motion boundary.
+
+Purpose: define the Palette-side future-normal read contract Crimson should use
+for motion traces, swim-bout overlays, and per-bout metrics. This is the
+Palette-side future-normal replacement for legacy Crimson
+`analysis/movement_runs` loading.
 
 ## Source Map
 
@@ -60,10 +67,24 @@ analysis/track_kinematics_runs/<scope>.attrs["latest"]  == "<run>"
 
 Any mismatch is an in-progress or invalid selector handoff and must return a
 retry/fail-closed result. It is not permission to read the older child named by
-one surviving pointer. Explicit selection accepts only a bare direct-child name
-or the exact path
-`analysis/track_kinematics_runs/<scope>/<run>`; path normalization must never
-turn a malformed request into a different valid child.
+one surviving pointer. After trimming outer whitespace only, explicit selection
+accepts a bare direct-child name or the exact path
+`analysis/track_kinematics_runs/<scope>/<run>`. Wrong-scope paths, qualified
+shorthand, extra descendants, and other malformed forms are rejected.
+Explicit selection does not require the four discovery selectors to agree, but
+the exact child must still pass all three lifecycle gates and the full-motion
+seal.
+
+Crimson never repairs selector state. On Palette publication failure, selector
+restoration is limited to exact mutations in the deferred owner-bound activation
+receipt. Palette re-resolves the archive/selector parents and rechecks both the
+lease owner and attempted value before every write; it stops on takeover or an
+unexpected value. When the exact failed child remains owned, the materialized
+publisher retains it failed and selector-ineligible and must persist and verify
+an owner-bound tombstone. Failure to prove that state is reported as incomplete
+rollback. A takeover or foreign replacement is left untouched. Normal readers
+fail closed in every case; Palette never restores a generic pre-copy snapshot
+or clobbers a successor.
 
 Canonical runs require:
 
@@ -92,10 +113,12 @@ source_row_index                       # exact selected immediate-source row
 positions_px
 ```
 
-`frame_indices` remains a compatibility alias of
-`source_acquisition_frame_index`. Canonical consumers use `track_sample_key`
-and `source_acquisition_frame_index`; row offset and `frame_indices` alone are
-not identity.
+Current publication-manifest schema v1 requires `frame_indices` as a sealed
+exact compatibility alias of `source_acquisition_frame_index`, and the normal
+loader validates equality. It is never primary identity: canonical consumers
+use `track_sample_key` and `source_acquisition_frame_index`; row offset and
+`frame_indices` alone are not identity. A future no-alias schema may omit it
+only through an explicit manifest/reader schema-version change.
 
 `positions_mm` and the `*_mm` motion fields are optional. They are present only
 when Palette bound an exact compatible typed physical-frame calibration. Their
@@ -134,39 +157,50 @@ Crimson paths do not use that adapter.
 Renderer viewport/display coordinates remain ephemeral Crimson state. They are
 not written back as Palette coordinate metadata.
 
-The existing grouped speed/distance layout is:
+The existing grouped motion layout is:
 
 ```text
 movement/speed/<raw|filtered|smoothed|averaged>/
   px
-  mm
-  frame_path_distance_px
-  frame_path_distance_mm
   acceleration_px
-  acceleration_mm
   smoothed_acceleration_px
-  smoothed_acceleration_mm
+  mm                              # optional physical peer
+  acceleration_mm                 # optional physical peer
+  smoothed_acceleration_mm        # optional physical peer
+
+movement/speed/<raw|filtered|smoothed>/
+  frame_path_distance_px
+  frame_path_distance_mm          # optional physical peer
 ```
 
-This list describes physical discovery only; it is not coordinate or
-derivation authority. The strict logical reader resolves these paths through
-the freshly verified manifest. Sealed compatibility aliases can remain inside
-the closed publication, but a normal reader never falls back to an unsealed
-array. The physical-layout resolution order inside that verified reader is:
+All four levels retain acceleration and smoothed-acceleration peers; only
+`averaged` omits frame-path-distance peers. Every listed speed and derivative
+record uses `axis0_domain == "track_transition_destination_sample"`: row `i`
+describes the transition ending at sample `i`. Averaged values remain temporal
+averages of those destination-anchored transition values; they are not ordinary
+`track_sample` values.
 
-1. Prefer `movement/speed/<level>/...`.
-2. Fall back to flat `speed_<level>_px`, `speed_<level>_mm`,
-   `frame_path_distance_<level>_px`, and `frame_path_distance_<level>_mm`.
-3. For derivatives, fall back to `speed_derivatives/speed_<level>/...`.
-4. Historical flat `acceleration_*` arrays are available only through an
-   explicitly requested historical compatibility path; they are not a normal
-   future-recording fallback.
+This list describes current publication-manifest schema v1's physical layout
+only; it is not coordinate or derivation authority. The normal v1 reader
+resolves and copies only exact sealed grouped logical records. It never searches
+flat speed/path arrays or `speed_derivatives` as alternatives. The v1 writer and
+seal still physically require and validate their closed compatibility aliases,
+and some grouped derivative records are themselves digest-bound exact aliases;
+those relationships are seal obligations, not fallback permission. Missing or
+tampered v1 aliases invalidate the seal while Crimson still never reads them as
+alternate logical targets. Only
+`load_legacy_track_kinematics_track_for_inspection` performs physical fallback.
+The deferred
+[`future_track_motion_storage_layout.md`](./future_track_motion_storage_layout.md)
+must version the compact no-alias manifest and reader rather than add runtime
+negotiation to v1.
 
 `source_acquisition_frame_index` is the authoritative sparse row-to-camera-frame
 lineage. Crimson must not assume track row index equals video frame index. Build
 a frame-to-row lookup for interactive seeking and cross-check it against column
-1 of `track_sample_key`. `frame_indices` is accepted only as the declared
-compatibility alias and must be numerically identical.
+1 of `track_sample_key`. Under manifest schema v1, `frame_indices` must exist as
+the sealed compatibility alias and be numerically identical, but Crimson must
+not use it instead of the two authoritative fields.
 
 Missing frames are gaps. Displaying them as zero speed is a UI choice, not the
 stored analysis semantics.
@@ -353,11 +387,13 @@ derived preview values.
    exact derived-motion payload/derivation seal is supported and validates.
 3. Build a sparse frame-to-track-row lookup from
    `source_acquisition_frame_index`, cross-checked against `track_sample_key`.
-4. Draw the validated position in its declared overlay frame. After the
-   derived-motion seal exists and validates, draw per-frame motion labels:
+4. Draw the validated position in its declared overlay frame. After the exact
+   full-motion seal validates, draw per-frame motion labels:
    - heading from `heading_degrees` or `smoothed_heading_degrees`
-   - speed from selected `movement/speed/<level>/mm` or fallback flat arrays
-   - px/s fallback only when mm/s is unavailable, with honest units
+   - speed from the selected sealed logical record; use its validated mm/s peer
+     when present, otherwise report the validated px/s record with honest units
+   - never substitute flat or `speed_derivatives` paths for a missing grouped
+     logical record
 5. Discover matching `analysis/swim_bout_runs` candidates and overlay bout
    windows from logical `bouts/start_frame` and `bouts/end_frame`, regardless
    of whether the run is hierarchical v1 or compact v2.
@@ -365,15 +401,33 @@ derived preview values.
    and histograms when present.
 7. Keep subject-shape overlays independent from motion traces.
 
+## Focused conformance cases
+
+- Independently mismatch each of the four implicit selectors and require
+  retry/fail closed; prove that an explicitly pinned exact child is unaffected
+  by unrelated selector drift.
+- Reject wrong scope, extra suffix, qualified shorthand, repeated/traversal
+  segments, and every normalization trick beyond surrounding-whitespace trim.
+- Leave flat aliases intact while mutating or removing a grouped target and
+  require the normal reader to fail rather than fall back; the explicitly named
+  historical loader remains unverified inspection only.
+- Require averaged acceleration and smoothed-acceleration peers, forbid averaged
+  path-distance peers, and validate destination-transition domain on every
+  averaged logical record.
+- In Palette producer-only fixtures, cover an intervening winner before lease,
+  takeover during rollback, and exact-receipt rollback failure; none may restore
+  a stale pre-copy snapshot or clobber a successor.
+
 ## Canary
 
-Current feeding canary:
+Historical/inspection feeding canary unless independently proven canonical-v2;
+it is not release evidence for this future-normal reader:
 
 ```text
 /nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr
 ```
 
-Useful current sources:
+Useful historical-inspection sources:
 
 ```text
 analysis/track_kinematics_runs/offline/tk_hyst4_low2_s005/tracks/id_0
@@ -382,5 +436,5 @@ analysis/bout_kinematics_runs/<candidate>
 analysis/subject_shape_runs/<candidate>
 ```
 
-The archive has no useful `analysis/movement_runs` path for current Crimson
-motion display.
+The archive has no useful `analysis/movement_runs` path for historical Crimson
+motion inspection.
