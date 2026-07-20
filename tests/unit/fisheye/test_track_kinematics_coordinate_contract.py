@@ -51,6 +51,7 @@ from tests.unit.fisheye.test_observation_coordinate_publication import (
 class _WritableGroup(FakeGroup):
     def __init__(self, *, path: str, archive_token: object) -> None:
         super().__init__(path=path, archive_token=archive_token)
+        self.fresh_array_handle_names: set[str] = set()
         parts = path.split("/")
         if parts[:2] == ["analysis", "track_kinematics_runs"] and len(parts) == 4:
             self.attrs["stage_selector_eligible"] = False
@@ -85,7 +86,20 @@ class _WritableGroup(FakeGroup):
     def __getitem__(self, name: str) -> Any:
         node: Any = self
         for part in name.split("/"):
-            node = node.children[part]
+            child = node.children[part]
+            if (
+                part in getattr(node, "fresh_array_handle_names", ())
+                and isinstance(child, FakeArray)
+            ):
+                child = FakeArray(
+                    child.data,
+                    path=child.path,
+                    attrs=child.attrs,
+                    archive_token=child._coordinate_archive_token,
+                    chunks=child.chunks,
+                    shards=child.shards,
+                )
+            node = child
         return node
 
     def __contains__(self, name: object) -> bool:
@@ -678,6 +692,11 @@ def test_deferred_track_stage_binds_only_at_authoritative_final_path(
         staging_run_name=run_name,
     )
     track = run["tracks/id_7"]
+    # Real Zarr groups may return a distinct Python Array wrapper for every
+    # lookup.  The final-path binder must retain one handle while stamping the
+    # time lineage and the row-identity contract because those two operations
+    # intentionally require exact in-memory authority continuity.
+    track.fresh_array_handle_names.add("track_sample_key")
     assert run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] == (
         mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
     )

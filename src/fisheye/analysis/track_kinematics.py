@@ -4157,24 +4157,31 @@ def _load_bound_track_publication_from_source(
     source_temporal_authority: BoundSourceRowTemporalAuthority,
     physical_authority: TrackPhysicalAuthority | None,
 ) -> TrackPositionPublicationResult:
+    track_sample_key_node = subgroup["track_sample_key"]
+    source_row_index_node = subgroup["source_row_index"]
+    source_acquisition_frame_node = subgroup[
+        "source_acquisition_frame_index"
+    ]
+    source_frame_interpolation_node = subgroup["source_frame_interpolation"]
+    source_instance_key_node = subgroup["source_instance_key"]
     time_lineage = load_bound_track_sample_time_lineage(
         subgroup,
-        subgroup["track_sample_key"],
-        subgroup["source_row_index"],
-        subgroup["source_acquisition_frame_index"],
-        subgroup["source_frame_interpolation"],
-        subgroup["source_instance_key"],
+        track_sample_key_node,
+        source_row_index_node,
+        source_acquisition_frame_node,
+        source_frame_interpolation_node,
+        source_instance_key_node,
         source_temporal_authority=source_temporal_authority,
     )
     identity = load_bound_row_identity_contract(
         subgroup,
-        subgroup["track_sample_key"],
+        track_sample_key_node,
         track_time_lineage=time_lineage,
     )
     return load_track_position_coordinates(
         subgroup,
         subgroup["positions_px"],
-        subgroup["source_row_index"],
+        source_row_index_node,
         track_row_identity=identity,
         source_positions=source_positions,
         source_temporal_authority=source_temporal_authority,
@@ -4689,17 +4696,26 @@ def bind_staged_offline_track_kinematics_run(
     snapshots = [copy.deepcopy(dict(attrs)) for attrs in attrs_targets]
     try:
         for track_id, subgroup in groups:
+            track_sample_key_node = subgroup["track_sample_key"]
+            source_row_index_node = subgroup["source_row_index"]
+            source_acquisition_frame_node = subgroup[
+                "source_acquisition_frame_index"
+            ]
+            source_frame_interpolation_node = subgroup[
+                "source_frame_interpolation"
+            ]
+            source_instance_key_node = subgroup["source_instance_key"]
             time_lineage = stamp_track_sample_time_lineage(
                 subgroup,
-                subgroup["track_sample_key"],
-                subgroup["source_row_index"],
-                subgroup["source_acquisition_frame_index"],
-                subgroup["source_frame_interpolation"],
-                subgroup["source_instance_key"],
+                track_sample_key_node,
+                source_row_index_node,
+                source_acquisition_frame_node,
+                source_frame_interpolation_node,
+                source_instance_key_node,
                 source_temporal_authority=surface.temporal_authority,
             )
             key_values = np.array(
-                subgroup["track_sample_key"][:],
+                track_sample_key_node[:],
                 copy=True,
                 order="C",
             )
@@ -4710,7 +4726,7 @@ def bind_staged_offline_track_kinematics_run(
             )
             identity = stamp_and_bind_row_identity_contract(
                 subgroup,
-                subgroup["track_sample_key"],
+                track_sample_key_node,
                 contract=identity_contract,
                 track_time_lineage=time_lineage,
             )
