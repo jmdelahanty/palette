@@ -22,6 +22,7 @@ can distinguish a genuine persisted derivation from matching-looking numbers.
 from __future__ import annotations
 
 import copy
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -58,7 +59,10 @@ from fisheye.shared.coordinate_record import (
     stamp_and_bind_persisted_coordinate_record,
     verify_bound_coordinate_record,
 )
-from fisheye.shared.coordinate_reference import canonical_node_path
+from fisheye.shared.coordinate_reference import (
+    bind_array_reference_extent,
+    canonical_node_path,
+)
 from fisheye.shared.directed_transform_chain import (
     BoundDirectedTransformChain,
     apply_bound_directed_transform_chain,
@@ -66,6 +70,16 @@ from fisheye.shared.directed_transform_chain import (
     resolve_bound_directed_transform_chain,
 )
 from fisheye.shared.directed_transform_v2 import load_bound_directed_transform_v2
+from fisheye.shared.immutable_yolo_storage import (
+    IMMUTABLE_YOLO_STORAGE_ATTR,
+    IMMUTABLE_YOLO_STORAGE_SCHEMA,
+)
+from fisheye.shared.instance_keys import (
+    INSTANCE_KEY_ALGORITHM,
+    INSTANCE_KEY_BBOX_QUANTIZATION,
+    INSTANCE_KEY_DUPLICATE_POLICY,
+    mint_detection_instance_keys,
+)
 from fisheye.shared.pixel_frame_authority import (
     ROI_FRAME_KIND,
     SOURCE_CAMERA_FRAME_KIND,
@@ -73,8 +87,10 @@ from fisheye.shared.pixel_frame_authority import (
     BoundAcquisitionCameraFrame,
     BoundCropPlacementOwnership,
     BoundPixelFrameAuthority,
+    load_crop_placement_ownership,
     load_normalized_pixel_frame_authority,
     load_persisted_acquisition_camera_authority,
+    load_roi_pixel_frame_authority,
     load_source_camera_pixel_frame_authority,
     require_bound_acquisition_camera_frame,
     require_bound_crop_placement_ownership,
@@ -84,6 +100,12 @@ from fisheye.shared.pixel_frame_authority import (
     require_trusted_coordinate_attrs,
 )
 from fisheye.shared.transform_authority import load_bound_transform_authority
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+)
 
 
 DETECTION_BBOX_PROJECTION_ATTR = "detection_bbox_projection"
@@ -94,6 +116,32 @@ DETECTION_BBOX_PROJECTION_OPERATION = "source_camera_normalized_cxcywh_to_image_
 DETECTION_ACQUISITION_MAPPING_ATTR = "detection_acquisition_frame_mapping"
 DETECTION_ACQUISITION_MAPPING_SCHEMA_ID = "palette.detection_acquisition_frame_mapping"
 DETECTION_ACQUISITION_MAPPING_SCHEMA_VERSION = 1
+
+DETECTION_INSTANCE_KEY_DERIVATION_ATTR = "detection_instance_key_derivation"
+DETECTION_INSTANCE_KEY_DERIVATION_SCHEMA_ID = (
+    "palette.detection_instance_key_derivation"
+)
+DETECTION_INSTANCE_KEY_DERIVATION_SCHEMA_VERSION = 1
+
+DETECTION_OBSERVATION_CARDINALITY_ATTR = "detection_observation_cardinality"
+DETECTION_OBSERVATION_CARDINALITY_SCHEMA_ID = (
+    "palette.detection_observation_cardinality"
+)
+DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION = 1
+
+EMPTY_OBSERVATION_DECLARATION_ATTR = "empty_observation_declaration"
+EMPTY_OBSERVATION_DECLARATION_SCHEMA_ID = (
+    "palette.empty_detection_observation_declaration"
+)
+EMPTY_OBSERVATION_DECLARATION_SCHEMA_VERSION = 1
+OBSERVATION_ROW_COUNT_ATTR = "observation_row_count"
+SUPPORTED_DETECTION_DECODE_DOMAIN_PROOFS = frozenset(
+    {
+        "decord_index_domain_and_exact_batches_v1",
+        "opencv_stream_eof_and_exact_count_v1",
+        "pynvvc_exact_count_and_eof_probe_v1",
+    }
+)
 
 BBOX_CENTER_DERIVATION_ATTR = "bbox_center_derivation"
 BBOX_CENTER_DERIVATION_SCHEMA_ID = "palette.bbox_center_derivation"
@@ -110,6 +158,13 @@ CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID = "palette.crop_roi_geometry_derivation"
 CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_VERSION = 1
 CROP_ROI_GEOMETRY_DERIVATION_OPERATION = (
     "roi_bbox_to_source_camera_via_crop_placement_v1"
+)
+
+CROP_ROI_TOP_LEFT_DERIVATION_ATTR = "crop_roi_top_left_derivation"
+CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_ID = "palette.crop_roi_top_left_derivation"
+CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_VERSION = 1
+CROP_ROI_TOP_LEFT_DERIVATION_OPERATION = (
+    "source_crop_xywh_to_roi_coordinates_full_top_left_v1"
 )
 
 SOURCE_CAMERA_PROFILE_ID = "source_camera_image_px.top_left_y_down.v1"
@@ -237,19 +292,61 @@ def _rollback_attrs(
     attrs_targets: list[Any],
     snapshots: list[dict[str, Any]],
     *,
-    cause: Exception,
+    cause: BaseException,
 ) -> None:
     failures: list[str] = []
     for attrs, snapshot in zip(attrs_targets, snapshots, strict=True):
         try:
             _restore_attrs(attrs, snapshot)
-        except Exception as exc:  # pragma: no cover - hostile persistent mapping
+        except BaseException as exc:  # pragma: no cover - hostile persistent mapping
             failures.append(str(exc))
     if failures:
         raise ObservationCoordinatePublicationError(
             "Observation coordinate publication failed and attrs rollback was "
             f"incomplete: {failures!r}."
         ) from cause
+
+
+@dataclass(frozen=True)
+class ObservationCoordinatePublicationCheckpoint:
+    """Exact attrs checkpoint for a multi-step coordinate publication.
+
+    Writers capture this immediately before publishing coordinate records and
+    descriptors.  If completion or selector publication subsequently fails,
+    restoring the checkpoint removes every partially trusted coordinate attr
+    while preserving the writer's already-validated non-coordinate metadata.
+    """
+
+    _attrs_targets: tuple[Any, ...] = field(repr=False)
+    _snapshots: tuple[dict[str, Any], ...] = field(repr=False)
+
+
+def capture_observation_coordinate_publication_checkpoint(
+    *nodes: Any,
+) -> ObservationCoordinatePublicationCheckpoint:
+    """Capture exact attrs for every coordinate-publication target."""
+
+    attrs_targets, snapshots = _attrs_snapshots(*nodes)
+    return ObservationCoordinatePublicationCheckpoint(
+        _attrs_targets=tuple(attrs_targets),
+        _snapshots=tuple(snapshots),
+    )
+
+
+def restore_observation_coordinate_publication_checkpoint(
+    checkpoint: ObservationCoordinatePublicationCheckpoint,
+    *,
+    cause: BaseException,
+) -> None:
+    """Restore a checkpoint exactly, raising loudly on incomplete rollback."""
+
+    if type(checkpoint) is not ObservationCoordinatePublicationCheckpoint:
+        _fail("An observation coordinate publication checkpoint is required.")
+    _rollback_attrs(
+        list(checkpoint._attrs_targets),
+        list(checkpoint._snapshots),
+        cause=cause,
+    )
 
 
 @dataclass(frozen=True, init=False)
@@ -844,7 +941,7 @@ def publish_detection_observation_geometry(
             frame_evidence=evidence,
             source_lineage_records=source_lineage,
         )
-    except Exception as exc:
+    except BaseException as exc:
         _rollback_attrs(attrs_targets, snapshots, cause=exc)
         raise
 
@@ -1391,7 +1488,7 @@ def publish_crop_observation_geometry(
             centers_img_node,
             source_geometry=source,
         )
-    except Exception as exc:
+    except BaseException as exc:
         _rollback_attrs(attrs_targets, snapshots, cause=exc)
         raise
 
@@ -1562,6 +1659,64 @@ class CropRoiGeometryPublicationResult:
     source_crop_xywh: BoundCanonicalCoordinateDescriptor
     bbox_roi_xyxy: BoundCanonicalCoordinateDescriptor
     derivation: BoundCoordinateRecord
+    roi_top_left_xy: BoundCanonicalCoordinateDescriptor | None = None
+    top_left_derivation: BoundCoordinateRecord | None = None
+
+
+def _validate_crop_roi_top_left(
+    *,
+    crop: BoundCropObservationGeometry,
+    source_crop_xywh_node: Any,
+    placement: np.ndarray,
+    roi_top_left_node: Any,
+) -> np.ndarray:
+    """Require the compatibility top-left surface to equal placement ``x,y``."""
+
+    _require_child_path(roi_top_left_node, crop._rowset_node, "roi_coordinates_full")
+    top_left = _array(roi_top_left_node, label="roi_coordinates_full")
+    if (
+        top_left.dtype != np.dtype("<i4")
+        or top_left.shape != (crop.row_identity.leading_dimension, 2)
+    ):
+        _fail("roi_coordinates_full must be one exact int32 (N,2) points_xy surface.")
+    if not np.array_equal(top_left, placement[:, :2], equal_nan=True):
+        _fail(
+            "roi_coordinates_full is not the exact source-camera top-left "
+            "projection of source_crop_xywh[:, :2]."
+        )
+    if canonical_node_path(source_crop_xywh_node) != (
+        f"{canonical_node_path(crop._rowset_node)}/source_crop_xywh"
+    ):
+        _fail("Crop top-left derivation uses an unexpected placement path.")
+    return top_left
+
+
+def _crop_roi_top_left_record(
+    *,
+    crop: BoundCropObservationGeometry,
+    source_camera_frame: BoundPixelFrameAuthority,
+    source_crop_xywh_node: Any,
+    placement: np.ndarray,
+    roi_top_left_node: Any,
+    top_left: np.ndarray,
+) -> dict[str, Any]:
+    return {
+        "schema_id": CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_ID,
+        "schema_version": CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_VERSION,
+        "operation": CROP_ROI_TOP_LEFT_DERIVATION_OPERATION,
+        "source_crop_xywh": _payload(source_crop_xywh_node, placement),
+        "roi_coordinates_full": _payload(roi_top_left_node, top_left),
+        "row_identity": {
+            "record_ref": crop.row_identity.record_ref,
+            "record_sha256": crop.row_identity.record_sha256,
+        },
+        "reference_frame": {
+            "record_ref": source_camera_frame.record_ref,
+            "record_sha256": source_camera_frame.record_sha256,
+        },
+        "direction": "source_crop_xywh_to_source_camera_top_left_points_xy",
+        "formula": "roi_coordinates_full = source_crop_xywh[:, :2]",
+    }
 
 
 def _validate_crop_roi_evidence(
@@ -1690,6 +1845,7 @@ def publish_crop_roi_geometry(
     crop_placement_ownership: BoundCropPlacementOwnership,
     roi_frame: BoundPixelFrameAuthority,
     roi_to_source_camera: BoundDirectedTransformChain,
+    roi_top_left_node: Any | None = None,
 ) -> CropRoiGeometryPublicationResult:
     """Publish ROI-local geometry only through exact crop-placement lineage."""
 
@@ -1707,6 +1863,7 @@ def publish_crop_roi_geometry(
         crop._rowset_node,
         source_crop_xywh_node,
         bbox_roi_xyxy_node,
+        *((roi_top_left_node,) if roi_top_left_node is not None else ()),
     )
     try:
         record = _crop_roi_record(
@@ -1725,6 +1882,28 @@ def publish_crop_roi_geometry(
             record,
             attr_name=CROP_ROI_GEOMETRY_DERIVATION_ATTR,
         )
+        top_left_derivation = None
+        top_left_binding = None
+        if roi_top_left_node is not None:
+            top_left = _validate_crop_roi_top_left(
+                crop=crop,
+                source_crop_xywh_node=source_crop_xywh_node,
+                placement=placement,
+                roi_top_left_node=roi_top_left_node,
+            )
+            top_left_record = _crop_roi_top_left_record(
+                crop=crop,
+                source_camera_frame=ownership.source_camera_frame,
+                source_crop_xywh_node=source_crop_xywh_node,
+                placement=placement,
+                roi_top_left_node=roi_top_left_node,
+                top_left=top_left,
+            )
+            top_left_derivation = stamp_and_bind_persisted_coordinate_record(
+                crop._rowset_node,
+                top_left_record,
+                attr_name=CROP_ROI_TOP_LEFT_DERIVATION_ATTR,
+            )
         source_crop = build_bound_canonical_coordinate_descriptor(
             source_crop_xywh_node,
             profile_id=SOURCE_CAMERA_PROFILE_ID,
@@ -1750,7 +1929,25 @@ def publish_crop_roi_geometry(
             transform_chain=chain,
             lineage_records=(crop.selection_derivation, derivation),
         )
-        stamp_bound_canonical_coordinate_descriptors((source_crop, bbox_roi_binding))
+        bindings = [source_crop, bbox_roi_binding]
+        if roi_top_left_node is not None and top_left_derivation is not None:
+            top_left_binding = build_bound_canonical_coordinate_descriptor(
+                roi_top_left_node,
+                profile_id=SOURCE_CAMERA_PROFILE_ID,
+                geometry_type="points_xy",
+                components=("x", "y"),
+                component_units=("px", "px"),
+                pixel_convention=SOURCE_CAMERA_PIXEL_CONVENTION,
+                row_identity=crop.row_identity,
+                reference_frame_authority=ownership.source_camera_frame,
+                source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
+                lineage_records=(
+                    crop.selection_derivation,
+                    top_left_derivation,
+                ),
+            )
+            bindings.append(top_left_binding)
+        stamp_bound_canonical_coordinate_descriptors(tuple(bindings))
         return load_crop_roi_geometry(
             source_crop_xywh_node,
             bbox_roi_xyxy_node,
@@ -1758,8 +1955,9 @@ def publish_crop_roi_geometry(
             crop_placement_ownership=ownership,
             roi_frame=roi,
             roi_to_source_camera=chain,
+            roi_top_left_node=roi_top_left_node,
         )
-    except Exception as exc:
+    except BaseException as exc:
         _rollback_attrs(attrs_targets, snapshots, cause=exc)
         raise
 
@@ -1772,6 +1970,7 @@ def load_crop_roi_geometry(
     crop_placement_ownership: BoundCropPlacementOwnership,
     roi_frame: BoundPixelFrameAuthority,
     roi_to_source_camera: BoundDirectedTransformChain,
+    roi_top_left_node: Any | None = None,
 ) -> CropRoiGeometryPublicationResult:
     """Freshly verify source-camera crop placement and ROI-local bbox metadata."""
 
@@ -1815,17 +2014,63 @@ def load_crop_roi_geometry(
         transform_chain=chain,
         lineage_records=(crop.selection_derivation, derivation),
     )
+    top_left_derivation = None
+    top_left_binding = None
+    if roi_top_left_node is not None:
+        top_left = _validate_crop_roi_top_left(
+            crop=crop,
+            source_crop_xywh_node=source_crop_xywh_node,
+            placement=placement,
+            roi_top_left_node=roi_top_left_node,
+        )
+        top_left_derivation = bind_persisted_coordinate_record(
+            crop._rowset_node,
+            attr_name=CROP_ROI_TOP_LEFT_DERIVATION_ATTR,
+        )
+        expected_top_left = _crop_roi_top_left_record(
+            crop=crop,
+            source_camera_frame=ownership.source_camera_frame,
+            source_crop_xywh_node=source_crop_xywh_node,
+            placement=placement,
+            roi_top_left_node=roi_top_left_node,
+            top_left=top_left,
+        )
+        if top_left_derivation.record != expected_top_left:
+            _fail(
+                "Persisted crop top-left derivation differs from exact live "
+                "source_crop_xywh projection."
+            )
+        top_left_binding = load_bound_canonical_coordinate_descriptor(
+            roi_top_left_node,
+            row_identity=crop.row_identity,
+            reference_frame_authority=ownership.source_camera_frame,
+            lineage_records=(
+                crop.selection_derivation,
+                top_left_derivation,
+            ),
+        )
     if (
         source_crop.descriptor.profile_id != SOURCE_CAMERA_PROFILE_ID
         or source_crop.descriptor.geometry_type != "bbox_xywh"
         or bbox_roi_binding.descriptor.profile_id != "roi_local_px.top_left_y_down.v1"
         or bbox_roi_binding.descriptor.geometry_type != "bbox_xyxy"
+        or (
+            top_left_binding is not None
+            and (
+                top_left_binding.descriptor.profile_id != SOURCE_CAMERA_PROFILE_ID
+                or top_left_binding.descriptor.geometry_type != "points_xy"
+                or top_left_binding.descriptor.source_camera_overlay.status
+                != CANONICAL_OVERLAY_DIRECT
+            )
+        )
     ):
         _fail("Crop ROI coordinate descriptors use unsupported profiles.")
     return CropRoiGeometryPublicationResult(
         source_crop_xywh=source_crop,
         bbox_roi_xyxy=bbox_roi_binding,
         derivation=derivation,
+        roi_top_left_xy=top_left_binding,
+        top_left_derivation=top_left_derivation,
     )
 
 
@@ -1840,6 +2085,777 @@ def _persisted_node(root_node: Any, path: str, *, label: str) -> Any:
     if canonical_node_path(node) != normalized:
         _fail(f"Persisted {label} resolved to an unexpected path.")
     return node
+
+
+def _require_complete_canonical_observation_rowset(
+    rowset: Any,
+    *,
+    run_family: str,
+    label: str,
+    require_selector_eligible: bool = True,
+) -> None:
+    """Fail closed unless ``rowset`` is one exact complete canonical stage run."""
+
+    path = canonical_node_path(rowset)
+    parts = path.split("/")
+    if len(parts) != 2 or parts[0] != run_family or not parts[1]:
+        _fail(
+            f"{label} must be an exact {run_family}/<run> rowset; found {path!r}."
+        )
+    attrs = require_trusted_coordinate_attrs(rowset, label=label)
+    if attrs.get("coordinate_contract") != "canonical_v2":
+        _fail(f"{label} is not explicitly canonical_v2.")
+    if attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT:
+        _fail(
+            f"{label} lacks the explicit {RUN_COMPLETION_CONTRACT!r} completion "
+            "contract."
+        )
+    if attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
+        _fail(
+            f"{label} is not explicitly complete; found "
+            f"{attrs.get(RUN_COMPLETION_STATUS_ATTR)!r}."
+        )
+    if type(require_selector_eligible) is not bool:
+        _fail("Selector-eligibility validation mode must be one exact boolean.")
+    expected_eligibility = require_selector_eligible
+    if attrs.get("stage_selector_eligible") is not expected_eligibility:
+        state = "eligible" if expected_eligibility else "selector-ineligible"
+        _fail(f"{label} is not explicitly {state} for this validation phase.")
+
+
+def _require_detection_observation_row_count(
+    rowset: Any,
+    key_node: Any,
+) -> int:
+    """Bind the declared observation count to the exact row-identity dimension."""
+
+    _require_child_path(key_node, rowset, "instance_key")
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Detection observation rowset",
+    )
+    declared = attrs.get(OBSERVATION_ROW_COUNT_ATTR)
+    if type(declared) is not int or declared < 0:
+        _fail(
+            f"Detection {OBSERVATION_ROW_COUNT_ATTR} must be one exact "
+            "nonnegative integer."
+        )
+    try:
+        key_shape = tuple(int(value) for value in key_node.shape)
+    except (AttributeError, TypeError, ValueError) as exc:
+        _fail(f"Detection instance_key has no exact persisted shape: {exc}.")
+    if len(key_shape) != 1:
+        _fail("Detection instance_key must be one exact one-dimensional row key.")
+    if declared != key_shape[0]:
+        _fail(
+            f"Detection {OBSERVATION_ROW_COUNT_ATTR} disagrees with the exact "
+            f"instance_key row dimension: declared={declared}, rows={key_shape[0]}."
+        )
+    return declared
+
+
+def _detection_observation_cardinality_record(
+    rowset: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> dict[str, Any]:
+    """Build an exact all-row/all-frame cardinality and payload seal."""
+
+    acquisition = require_bound_acquisition_camera_frame(acquisition_frame)
+    row_specs = {
+        "frame_indices": (np.dtype("<i4"), ()),
+        "source_acquisition_frame_index": (np.dtype("<i8"), ()),
+        "bbox_norm_coords": (np.dtype("<f8"), (4,)),
+        "bbox_img_xyxy": (np.dtype("<f8"), (4,)),
+        "centers_img_xy": (np.dtype("<f8"), (2,)),
+        "scores": (np.dtype("<f4"), ()),
+        "class_ids": (np.dtype("<i4"), ()),
+        "instance_key": (np.dtype("<u8"), ()),
+    }
+    try:
+        row_nodes = {name: rowset[name] for name in row_specs}
+        frame_counts_node = rowset["frame_counts"]
+        n_detections_node = rowset["n_detections"]
+    except Exception as exc:
+        _fail(f"Detection cardinality arrays are incomplete: {exc}.")
+    for name, node in (
+        *row_nodes.items(),
+        ("frame_counts", frame_counts_node),
+        ("n_detections", n_detections_node),
+    ):
+        _require_child_path(node, rowset, name)
+
+    row_count = _require_detection_observation_row_count(
+        rowset,
+        row_nodes["instance_key"],
+    )
+    row_values: dict[str, np.ndarray] = {}
+    for name, (expected_dtype, trailing_shape) in row_specs.items():
+        values = _array(node=row_nodes[name], label=f"detection cardinality {name}")
+        expected_shape = (row_count, *trailing_shape)
+        if values.dtype != expected_dtype or values.shape != expected_shape:
+            _fail(
+                f"Detection cardinality array {name!r} must have exact "
+                f"shape/dtype {expected_shape}/{expected_dtype}; found "
+                f"{values.shape}/{values.dtype}."
+            )
+        row_values[name] = values
+
+    source_total_frames = int(acquisition.record.source_total_frames)
+    frame_indices = row_values["frame_indices"]
+    source_frames = row_values["source_acquisition_frame_index"]
+    if not np.array_equal(frame_indices.astype(np.int64), source_frames):
+        _fail(
+            "Detection frame_indices and source_acquisition_frame_index must be "
+            "the exact full-video identity mapping."
+        )
+    if np.any(source_frames < 0) or np.any(source_frames >= source_total_frames):
+        _fail(
+            "Detection observation rows contain a frame outside the exact "
+            "acquisition frame domain."
+        )
+
+    frame_counts = _array(
+        frame_counts_node,
+        label="detection cardinality frame_counts",
+    )
+    n_detections = _array(
+        n_detections_node,
+        label="detection cardinality n_detections",
+    )
+    expected_frame_shape = (source_total_frames,)
+    if (
+        frame_counts.dtype != np.dtype("<i4")
+        or frame_counts.shape != expected_frame_shape
+        or n_detections.dtype != np.dtype("<i4")
+        or n_detections.shape != expected_frame_shape
+    ):
+        _fail(
+            "Detection frame_counts and n_detections must be exact int32 arrays "
+            "over the complete acquisition frame domain."
+        )
+    expected_counts = np.bincount(
+        frame_indices.astype(np.int64, copy=False),
+        minlength=source_total_frames,
+    ).astype(np.int32, copy=False)
+    if not np.array_equal(frame_counts, expected_counts):
+        _fail("Detection frame_counts differs from exact frame_indices cardinality.")
+    if not np.array_equal(n_detections, expected_counts):
+        _fail("Detection n_detections differs from exact frame_indices cardinality.")
+    if int(frame_counts.sum(dtype=np.int64)) != row_count:
+        _fail("Detection frame-count arrays do not sum to observation_row_count.")
+
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Detection cardinality rowset",
+    )
+    summary = attrs.get("summary_statistics")
+    expected_summary_counts = {
+        "total_detections": row_count,
+        "frames_with_detections": int(np.count_nonzero(frame_counts)),
+        "frames_with_zero_detections": int(np.count_nonzero(frame_counts == 0)),
+        "frames_with_multiple_detections": int(np.count_nonzero(frame_counts > 1)),
+    }
+    if not isinstance(summary, Mapping) or any(
+        summary.get(name) != value for name, value in expected_summary_counts.items()
+    ):
+        _fail(
+            "Detection summary count authorities disagree with the exact live rowset."
+        )
+
+    storage_validation = attrs.get(IMMUTABLE_YOLO_STORAGE_ATTR)
+    if not isinstance(storage_validation, Mapping) or any(
+        (
+            storage_validation.get("schema_id") != IMMUTABLE_YOLO_STORAGE_SCHEMA,
+            storage_validation.get("status") != "ok",
+            storage_validation.get("stage") != "detect",
+            storage_validation.get("row_count") != row_count,
+            storage_validation.get("frame_count") != source_total_frames,
+            storage_validation.get("instance_key_present") is not True,
+            storage_validation.get("instance_key_unique") is not True,
+        )
+    ):
+        _fail(
+            "Detection immutable-storage count authority is missing or disagrees "
+            "with the exact live rowset."
+        )
+
+    shard_write = attrs.get("detect_shard_write")
+    row_shard_rows = attrs.get("detect_row_shard_rows")
+    if row_shard_rows is None:
+        if shard_write is not None:
+            _fail("Regular-chunk detection must not carry a shard-write claim.")
+    elif (
+        type(row_shard_rows) is not int
+        or row_shard_rows <= 0
+        or not isinstance(shard_write, Mapping)
+        or shard_write.get("status") != "complete"
+        or shard_write.get("exact_match") is not True
+        or shard_write.get("detection_row_count") != row_count
+        or shard_write.get("frame_row_count") != source_total_frames
+        or shard_write.get("source_sha256_by_array")
+        != shard_write.get("destination_sha256_by_array")
+        or set(shard_write.get("destination_sha256_by_array") or {})
+        != {*row_specs, "frame_counts", "n_detections"}
+    ):
+        _fail(
+            "Detection shard-write count authority is missing or disagrees with "
+            "the exact live rowset."
+        )
+
+    return {
+        "schema_id": DETECTION_OBSERVATION_CARDINALITY_SCHEMA_ID,
+        "schema_version": DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION,
+        "observation_row_count": row_count,
+        "source_total_frames": source_total_frames,
+        "row_arrays": {
+            name: _payload(row_nodes[name], values)
+            for name, values in row_values.items()
+        },
+        "frame_count_arrays": {
+            "frame_counts": _payload(frame_counts_node, frame_counts),
+            "n_detections": _payload(n_detections_node, n_detections),
+        },
+        "count_authorities": {
+            OBSERVATION_ROW_COUNT_ATTR: row_count,
+            "summary_statistics": copy.deepcopy(dict(summary)),
+            IMMUTABLE_YOLO_STORAGE_ATTR: copy.deepcopy(dict(storage_validation)),
+            "detect_shard_write": (
+                copy.deepcopy(dict(shard_write))
+                if isinstance(shard_write, Mapping)
+                else None
+            ),
+        },
+        "proof": "exact_live_row_payloads_and_frame_bincount_v1",
+    }
+
+
+def publish_detection_observation_cardinality(
+    rowset: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> BoundCoordinateRecord:
+    """Persist the exact cardinality/payload seal for every detection rowset."""
+
+    record = _detection_observation_cardinality_record(
+        rowset,
+        acquisition_frame=acquisition_frame,
+    )
+    attrs_targets, snapshots = _attrs_snapshots(rowset)
+    try:
+        return stamp_and_bind_persisted_coordinate_record(
+            rowset,
+            record,
+            attr_name=DETECTION_OBSERVATION_CARDINALITY_ATTR,
+        )
+    except BaseException as exc:
+        _rollback_attrs(attrs_targets, snapshots, cause=exc)
+        raise
+
+
+def _require_detection_observation_cardinality(
+    rowset: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> BoundCoordinateRecord:
+    cardinality = bind_persisted_coordinate_record(
+        rowset,
+        attr_name=DETECTION_OBSERVATION_CARDINALITY_ATTR,
+    )
+    expected = _detection_observation_cardinality_record(
+        rowset,
+        acquisition_frame=acquisition_frame,
+    )
+    if not _raw_equal(cardinality.record, expected):
+        _fail(
+            "Persisted detection cardinality seal differs from the exact live "
+            "row arrays, frame-count arrays, or count authorities."
+        )
+    return cardinality
+
+
+def _full_acquisition_identity_mapping_sha256(
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> str:
+    acquisition = require_bound_acquisition_camera_frame(acquisition_frame)
+    mapping = np.arange(
+        int(acquisition.record.source_total_frames),
+        dtype=np.int64,
+    )
+    return hashlib.sha256(
+        np.ascontiguousarray(mapping).view(np.uint8)
+    ).hexdigest()
+
+
+def _detection_instance_key_derivation_record(
+    rowset: Any,
+    key_node: Any,
+    source_frame_index_node: Any,
+    bbox_norm_node: Any,
+    class_id_node: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+    acquisition_mapping: BoundCoordinateRecord,
+) -> dict[str, Any]:
+    """Build and verify the exact detect-origin ``instance_key`` derivation."""
+
+    acquisition = require_bound_acquisition_camera_frame(acquisition_frame)
+    mapping = verify_bound_coordinate_record(acquisition_mapping)
+    if mapping.record.get("schema_id") != DETECTION_ACQUISITION_MAPPING_SCHEMA_ID:
+        _fail("Detection instance-key derivation requires the acquisition mapping.")
+    if mapping.archive_identity != archive_identity(rowset):
+        _fail("Detection instance-key derivation and mapping use different archives.")
+    for node, name in (
+        (key_node, "instance_key"),
+        (source_frame_index_node, "source_acquisition_frame_index"),
+        (bbox_norm_node, "bbox_norm_coords"),
+        (class_id_node, "class_ids"),
+    ):
+        _require_child_path(node, rowset, name)
+        if archive_identity(node) != archive_identity(rowset):
+            _fail(f"Detection {name} and its rowset use different archives.")
+
+    keys = _array(key_node, label="detection instance_key")
+    source_frames = _array(
+        source_frame_index_node,
+        label="detection source acquisition frame index",
+    )
+    bbox_norm = _array(bbox_norm_node, label="detection normalized bbox")
+    class_ids = _array(class_id_node, label="detection class id")
+    row_count = keys.shape[0] if keys.ndim == 1 else -1
+    if keys.dtype != np.dtype("<u8") or keys.ndim != 1:
+        _fail("Detection instance_key must be exact uint64 rank 1.")
+    if (
+        source_frames.dtype != np.dtype("<i8")
+        or source_frames.shape != (row_count,)
+        or np.any(source_frames < 0)
+    ):
+        _fail(
+            "Detection instance-key source frames must be exact nonnegative "
+            "int64 rows."
+        )
+    if bbox_norm.dtype.kind != "f" or bbox_norm.shape != (row_count, 4):
+        _fail("Detection instance-key bboxes must be floating (N,4) rows.")
+    if class_ids.dtype != np.dtype("<i4") or class_ids.shape != (row_count,):
+        _fail("Detection instance-key class IDs must be exact int32 rows.")
+
+    expected_keys = mint_detection_instance_keys(
+        recording_identity=acquisition.record.recording_id,
+        frame_indices=source_frames,
+        bbox_norm_coords=bbox_norm,
+        class_ids=class_ids,
+    )
+    if not np.array_equal(keys, expected_keys):
+        _fail(
+            "Detection instance_key is not the exact detect-origin derivation "
+            "from the sealed acquisition recording, frame, bbox, and class."
+        )
+
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Detection instance-key rowset",
+    )
+    expected_mapping_source = (
+        f"{acquisition.record_ref}#full_untrimmed_video_decode_identity_v1"
+    )
+    expected_mapping_sha256 = _full_acquisition_identity_mapping_sha256(acquisition)
+    expected_attrs = {
+        "instance_key_algorithm": INSTANCE_KEY_ALGORITHM,
+        "instance_key_recording_identity": acquisition.record.recording_id,
+        "instance_key_frame_domain": "recording_parent_frame_index",
+        "instance_key_bbox_quantization": int(INSTANCE_KEY_BBOX_QUANTIZATION),
+        "instance_key_duplicate_policy": INSTANCE_KEY_DUPLICATE_POLICY,
+        "instance_key_frame_mapping_source": expected_mapping_source,
+        "instance_key_frame_mapping_sha256": expected_mapping_sha256,
+    }
+    mismatched_attrs = sorted(
+        name for name, value in expected_attrs.items() if attrs.get(name) != value
+    )
+    if mismatched_attrs:
+        _fail(
+            "Detection instance-key metadata disagrees with the sealed acquisition "
+            f"identity or mapping: fields={mismatched_attrs!r}."
+        )
+
+    return {
+        "schema_id": DETECTION_INSTANCE_KEY_DERIVATION_SCHEMA_ID,
+        "schema_version": DETECTION_INSTANCE_KEY_DERIVATION_SCHEMA_VERSION,
+        "operation": INSTANCE_KEY_ALGORITHM,
+        "recording_id": acquisition.record.recording_id,
+        "acquisition_camera_frame": {
+            "record_ref": acquisition.record_ref,
+            "record_sha256": acquisition.record_sha256,
+        },
+        "acquisition_mapping": {
+            "record_ref": mapping.record_ref,
+            "record_sha256": mapping.record_sha256,
+        },
+        "instance_key_policy": expected_attrs,
+        "source_acquisition_frame_index": _payload(
+            source_frame_index_node,
+            source_frames,
+        ),
+        "bbox_norm_coords": _payload(bbox_norm_node, bbox_norm),
+        "class_ids": _payload(class_id_node, class_ids),
+        "instance_key": _payload(key_node, keys),
+        "proof": "exact_detect_origin_instance_key_recomputation_v1",
+    }
+
+
+def publish_detection_instance_key_derivation(
+    rowset: Any,
+    key_node: Any,
+    source_frame_index_node: Any,
+    bbox_norm_node: Any,
+    class_id_node: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+    acquisition_mapping: BoundCoordinateRecord,
+) -> BoundCoordinateRecord:
+    """Persist the acquisition-bound semantic derivation of detection row keys."""
+
+    record = _detection_instance_key_derivation_record(
+        rowset,
+        key_node,
+        source_frame_index_node,
+        bbox_norm_node,
+        class_id_node,
+        acquisition_frame=acquisition_frame,
+        acquisition_mapping=acquisition_mapping,
+    )
+    attrs_targets, snapshots = _attrs_snapshots(rowset)
+    try:
+        return stamp_and_bind_persisted_coordinate_record(
+            rowset,
+            record,
+            attr_name=DETECTION_INSTANCE_KEY_DERIVATION_ATTR,
+        )
+    except BaseException as exc:
+        _rollback_attrs(attrs_targets, snapshots, cause=exc)
+        raise
+
+
+def _require_detection_instance_key_derivation(
+    rowset: Any,
+    key_node: Any,
+    source_frame_index_node: Any,
+    bbox_norm_node: Any,
+    class_id_node: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+    acquisition_mapping: BoundCoordinateRecord,
+) -> BoundCoordinateRecord:
+    derivation = bind_persisted_coordinate_record(
+        rowset,
+        attr_name=DETECTION_INSTANCE_KEY_DERIVATION_ATTR,
+    )
+    expected = _detection_instance_key_derivation_record(
+        rowset,
+        key_node,
+        source_frame_index_node,
+        bbox_norm_node,
+        class_id_node,
+        acquisition_frame=acquisition_frame,
+        acquisition_mapping=acquisition_mapping,
+    )
+    if derivation.record != expected:
+        _fail(
+            "Persisted detection instance-key derivation differs from the exact "
+            "sealed acquisition identity or live input arrays."
+        )
+    return derivation
+
+
+def _empty_detection_observation_record(
+    rowset: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+    decoded_frame_count: int,
+    decode_domain_proof: str,
+) -> dict[str, Any]:
+    """Build the only supported proof record for a canonical empty detection."""
+
+    row_shapes_and_dtypes = {
+        "frame_indices": ((0,), np.dtype("<i4")),
+        "source_acquisition_frame_index": ((0,), np.dtype("<i8")),
+        "bbox_norm_coords": ((0, 4), np.dtype("<f8")),
+        "bbox_img_xyxy": ((0, 4), np.dtype("<f8")),
+        "centers_img_xy": ((0, 2), np.dtype("<f8")),
+        "scores": ((0,), np.dtype("<f4")),
+        "class_ids": ((0,), np.dtype("<i4")),
+        "instance_key": ((0,), np.dtype("<u8")),
+    }
+    row_names = tuple(row_shapes_and_dtypes)
+    try:
+        row_nodes = {name: rowset[name] for name in row_names}
+        frame_counts_node = rowset["frame_counts"]
+        n_detections_node = rowset["n_detections"]
+    except Exception as exc:
+        _fail(f"Empty detection observation arrays are incomplete: {exc}.")
+    for name, node in (
+        *row_nodes.items(),
+        ("frame_counts", frame_counts_node),
+        ("n_detections", n_detections_node),
+    ):
+        _require_child_path(node, rowset, name)
+
+    observation_count = _require_detection_observation_row_count(
+        rowset,
+        row_nodes["instance_key"],
+    )
+    if observation_count != 0:
+        _fail("An empty-observation declaration requires exactly zero rows.")
+    for name, node in row_nodes.items():
+        values = _array(node, label=f"empty detection {name}")
+        expected_shape, expected_dtype = row_shapes_and_dtypes[name]
+        if values.shape != expected_shape or values.dtype != expected_dtype:
+            _fail(
+                f"Empty detection array {name!r} must have exact shape/dtype "
+                f"{expected_shape}/{expected_dtype}; found "
+                f"{values.shape}/{values.dtype}."
+            )
+
+    source_total_frames = int(acquisition_frame.record.source_total_frames)
+    if type(decoded_frame_count) is not int or decoded_frame_count != source_total_frames:
+        _fail(
+            "Empty-observation declaration requires the complete acquisition "
+            f"frame domain: decoded={decoded_frame_count!r}, "
+            f"source_total={source_total_frames}."
+        )
+    if (
+        type(decode_domain_proof) is not str
+        or decode_domain_proof not in SUPPORTED_DETECTION_DECODE_DOMAIN_PROOFS
+    ):
+        _fail(
+            "Empty-observation declaration requires a supported decode-domain "
+            f"proof; found {decode_domain_proof!r}."
+        )
+
+    frame_counts = _array(
+        frame_counts_node,
+        label="empty detection frame_counts",
+    )
+    n_detections = _array(
+        n_detections_node,
+        label="empty detection n_detections",
+    )
+    if (
+        frame_counts.shape != (source_total_frames,)
+        or frame_counts.dtype != np.dtype("<i4")
+        or np.any(frame_counts != 0)
+        or n_detections.shape != frame_counts.shape
+        or n_detections.dtype != frame_counts.dtype
+        or not np.array_equal(n_detections, frame_counts)
+    ):
+        _fail(
+            "Empty-observation declaration requires matching exact int32 zero "
+            "frame_counts and n_detections arrays for every acquisition frame."
+        )
+
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Empty detection observation rowset",
+    )
+    summary = attrs.get("summary_statistics")
+    if not isinstance(summary, Mapping):
+        _fail("Empty detection summary_statistics must be an exact mapping.")
+    expected_summary_counts = {
+        "total_detections": 0,
+        "frames_with_detections": 0,
+        "frames_with_zero_detections": source_total_frames,
+        "frames_with_multiple_detections": 0,
+    }
+    if any(summary.get(name) != value for name, value in expected_summary_counts.items()):
+        _fail("Empty detection summary count authorities disagree with zero rows.")
+
+    storage_validation = attrs.get(IMMUTABLE_YOLO_STORAGE_ATTR)
+    if not isinstance(storage_validation, Mapping) or any(
+        (
+            storage_validation.get("schema_id") != IMMUTABLE_YOLO_STORAGE_SCHEMA,
+            storage_validation.get("status") != "ok",
+            storage_validation.get("stage") != "detect",
+            storage_validation.get("row_count") != 0,
+            storage_validation.get("frame_count") != source_total_frames,
+            storage_validation.get("instance_key_present") is not True,
+            storage_validation.get("instance_key_unique") is not True,
+        )
+    ):
+        _fail(
+            "Empty detection immutable-storage count authority is missing or "
+            "disagrees with the exact empty rowset."
+        )
+
+    shard_write = attrs.get("detect_shard_write")
+    row_shard_rows = attrs.get("detect_row_shard_rows")
+    if row_shard_rows is None:
+        if shard_write is not None:
+            _fail("Regular-chunk empty detection must not carry a shard-write claim.")
+    elif (
+        type(row_shard_rows) is not int
+        or row_shard_rows <= 0
+        or not isinstance(shard_write, Mapping)
+        or shard_write.get("status") != "complete"
+        or shard_write.get("exact_match") is not True
+        or shard_write.get("detection_row_count") != 0
+        or shard_write.get("frame_row_count") != source_total_frames
+        or shard_write.get("source_sha256_by_array")
+        != shard_write.get("destination_sha256_by_array")
+    ):
+        _fail(
+            "Empty detection shard-write count authority is missing or disagrees "
+            "with the exact empty rowset."
+        )
+
+    run_decode_proof = attrs.get("decode_domain_proof")
+    timing = attrs.get("timing_summary")
+    if (
+        run_decode_proof != decode_domain_proof
+        or not isinstance(timing, Mapping)
+        or timing.get("decode_domain_proof") != decode_domain_proof
+        or timing.get("frames_processed") != source_total_frames
+    ):
+        _fail(
+            "Empty detection decode/count authorities disagree with the exact "
+            "full-domain proof."
+        )
+    backend = attrs.get("decode_backend_effective")
+    supported_backend = (
+        (decode_domain_proof == "opencv_stream_eof_and_exact_count_v1" and backend == "opencv")
+        or (
+            decode_domain_proof == "decord_index_domain_and_exact_batches_v1"
+            and backend in {"decord_cpu", "decord_gpu"}
+        )
+        or (
+            decode_domain_proof == "pynvvc_exact_count_and_eof_probe_v1"
+            and backend in {"pynvvc_luma_rgb", "pynvvc_nv12_rgb"}
+        )
+    )
+    if not supported_backend or timing.get("decode_backend_effective") != backend:
+        _fail("Empty detection decode proof does not match its exact decoder backend.")
+
+    row_payloads = {
+        name: _payload(
+            node,
+            _array(node, label=f"empty detection {name}"),
+        )
+        for name, node in row_nodes.items()
+    }
+    return {
+        "schema_id": EMPTY_OBSERVATION_DECLARATION_SCHEMA_ID,
+        "schema_version": EMPTY_OBSERVATION_DECLARATION_SCHEMA_VERSION,
+        "is_empty": True,
+        "observation_row_count": 0,
+        "decoded_frame_count": source_total_frames,
+        "source_total_frames": source_total_frames,
+        "decode_domain_proof": decode_domain_proof,
+        "model_result_cardinality_proof": "per_batch_exact_v1",
+        "model_result_orig_shape_proof": "per_input_exact_v1",
+        "row_arrays": row_payloads,
+        "frame_count_arrays": {
+            "frame_counts": _payload(frame_counts_node, frame_counts),
+            "n_detections": _payload(n_detections_node, n_detections),
+        },
+        "count_authorities": {
+            OBSERVATION_ROW_COUNT_ATTR: 0,
+            "summary_statistics": copy.deepcopy(dict(summary)),
+            IMMUTABLE_YOLO_STORAGE_ATTR: copy.deepcopy(dict(storage_validation)),
+            "detect_shard_write": (
+                copy.deepcopy(dict(shard_write))
+                if isinstance(shard_write, Mapping)
+                else None
+            ),
+        },
+        "decode_authority": {
+            "decode_backend_effective": backend,
+            "decode_domain_proof": decode_domain_proof,
+            "timing_summary": copy.deepcopy(dict(timing)),
+        },
+        "proof": "full_acquisition_domain_processed_with_zero_observations_v1",
+    }
+
+
+def publish_empty_detection_observation_declaration(
+    rowset: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+    decoded_frame_count: int,
+    decode_domain_proof: str,
+) -> BoundCoordinateRecord:
+    """Persist and bind a full-domain proof for one genuine empty detection run."""
+
+    record = _empty_detection_observation_record(
+        rowset,
+        acquisition_frame=acquisition_frame,
+        decoded_frame_count=decoded_frame_count,
+        decode_domain_proof=decode_domain_proof,
+    )
+    attrs_targets, snapshots = _attrs_snapshots(rowset)
+    try:
+        return stamp_and_bind_persisted_coordinate_record(
+            rowset,
+            record,
+            attr_name=EMPTY_OBSERVATION_DECLARATION_ATTR,
+        )
+    except BaseException as exc:
+        _rollback_attrs(attrs_targets, snapshots, cause=exc)
+        raise
+
+
+def _require_detection_observation_publication(
+    rowset: Any,
+    key_node: Any,
+    *,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> None:
+    """Require exact row cardinality and the zero-row full-domain proof regime."""
+
+    observation_count = _require_detection_observation_row_count(rowset, key_node)
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Detection observation rowset",
+    )
+    digest_attr = f"{EMPTY_OBSERVATION_DECLARATION_ATTR}_sha256"
+    has_record = EMPTY_OBSERVATION_DECLARATION_ATTR in attrs
+    has_digest = digest_attr in attrs
+    if observation_count > 0:
+        if has_record or has_digest:
+            _fail(
+                "A nonempty detection output must not declare an empty-observation "
+                "full-domain proof."
+            )
+        return
+    if not has_record or not has_digest:
+        _fail(
+            "A zero-row detection output requires an exact persisted "
+            "empty-observation declaration and digest."
+        )
+
+    declaration = bind_persisted_coordinate_record(
+        rowset,
+        attr_name=EMPTY_OBSERVATION_DECLARATION_ATTR,
+    )
+    stored_proof = declaration.record.get("decode_domain_proof")
+    expected = _empty_detection_observation_record(
+        rowset,
+        acquisition_frame=acquisition_frame,
+        decoded_frame_count=int(acquisition_frame.record.source_total_frames),
+        decode_domain_proof=stored_proof,
+    )
+    if not _raw_equal(declaration.record, expected):
+        differing = sorted(
+            name
+            for name in set(declaration.record) | set(expected)
+            if name not in declaration.record
+            or name not in expected
+            or not _raw_equal(
+                declaration.record[name],
+                expected[name],
+            )
+        )
+        _fail(
+            "Persisted empty-observation declaration differs from the exact "
+            f"acquisition domain or live zero-row arrays; fields={differing!r}."
+        )
 
 
 def _require_detection_acquisition_mapping(
@@ -1896,16 +2912,21 @@ def _require_detection_acquisition_mapping(
         )
 
 
-def load_persisted_detection_observation_geometry(
+def _load_persisted_detection_observation_geometry(
     root_node: Any,
     rowset_path: str,
+    *,
+    require_selector_eligible: bool,
 ) -> BoundDetectionObservationGeometry:
-    """Resolve a canonical detection geometry from persisted refs and nodes only."""
+    """Internal persisted loader supporting the producer's staged validation."""
 
     rowset = _persisted_node(root_node, rowset_path, label="detection rowset")
-    attrs = require_trusted_coordinate_attrs(rowset, label="Detection rowset")
-    if attrs.get("coordinate_contract") != "canonical_v2":
-        _fail("Selected detection rowset is not explicitly canonical_v2.")
+    _require_complete_canonical_observation_rowset(
+        rowset,
+        run_family="detect_runs",
+        label="Detection rowset",
+        require_selector_eligible=require_selector_eligible,
+    )
     _, acquisition = load_persisted_acquisition_camera_authority(root_node)
     camera_id = acquisition.record.camera_id
     camera_node = _persisted_node(
@@ -1970,48 +2991,96 @@ def load_persisted_detection_observation_geometry(
         mapping,
         acquisition=acquisition,
     )
-    return load_detection_observation_geometry(
+    base = canonical_node_path(rowset)
+    key_node = _persisted_node(
+        root_node,
+        f"{base}/instance_key",
+        label="detection instance_key",
+    )
+    source_frame_index_node = _persisted_node(
+        root_node,
+        f"{base}/source_acquisition_frame_index",
+        label="detection acquisition frame",
+    )
+    bbox_norm_node = _persisted_node(
+        root_node,
+        f"{base}/bbox_norm_coords",
+        label="detection normalized bbox",
+    )
+    class_id_node = _persisted_node(
+        root_node,
+        f"{base}/class_ids",
+        label="detection class IDs",
+    )
+    bbox_img_node = _persisted_node(
+        root_node,
+        f"{base}/bbox_img_xyxy",
+        label="detection image bbox",
+    )
+    centers_img_node = _persisted_node(
+        root_node,
+        f"{base}/centers_img_xy",
+        label="detection image centers",
+    )
+    instance_key_derivation = _require_detection_instance_key_derivation(
         rowset,
-        _persisted_node(
-            root_node,
-            f"{canonical_node_path(rowset)}/instance_key",
-            label="detection instance_key",
-        ),
-        _persisted_node(
-            root_node,
-            f"{canonical_node_path(rowset)}/source_acquisition_frame_index",
-            label="detection acquisition frame",
-        ),
-        _persisted_node(
-            root_node,
-            f"{canonical_node_path(rowset)}/bbox_norm_coords",
-            label="detection normalized bbox",
-        ),
-        _persisted_node(
-            root_node,
-            f"{canonical_node_path(rowset)}/bbox_img_xyxy",
-            label="detection image bbox",
-        ),
-        _persisted_node(
-            root_node,
-            f"{canonical_node_path(rowset)}/centers_img_xy",
-            label="detection image centers",
-        ),
+        key_node,
+        source_frame_index_node,
+        bbox_norm_node,
+        class_id_node,
+        acquisition_frame=acquisition,
+        acquisition_mapping=mapping,
+    )
+    _require_detection_observation_cardinality(
+        rowset,
+        acquisition_frame=acquisition,
+    )
+    _require_detection_observation_publication(
+        rowset,
+        key_node,
+        acquisition_frame=acquisition,
+    )
+    geometry = load_detection_observation_geometry(
+        rowset,
+        key_node,
+        source_frame_index_node,
+        bbox_norm_node,
+        bbox_img_node,
+        centers_img_node,
         frame_evidence=evidence,
-        source_lineage_records=(mapping,),
+        source_lineage_records=(mapping, instance_key_derivation),
+    )
+    return geometry
+
+
+def load_persisted_detection_observation_geometry(
+    root_node: Any,
+    rowset_path: str,
+) -> BoundDetectionObservationGeometry:
+    """Load only a complete, selector-eligible canonical detection run."""
+
+    return _load_persisted_detection_observation_geometry(
+        root_node,
+        rowset_path,
+        require_selector_eligible=True,
     )
 
 
-def load_persisted_crop_observation_geometry(
+def _load_persisted_crop_observation_geometry(
     root_node: Any,
     rowset_path: str,
+    *,
+    require_selector_eligible: bool = True,
 ) -> BoundCropObservationGeometry:
-    """Resolve a canonical crop and its exact selected detection from disk."""
+    """Internal crop loader supporting an explicit staged-validation phase."""
 
     rowset = _persisted_node(root_node, rowset_path, label="crop rowset")
-    attrs = require_trusted_coordinate_attrs(rowset, label="Crop rowset")
-    if attrs.get("coordinate_contract") != "canonical_v2":
-        _fail("Selected crop rowset is not explicitly canonical_v2.")
+    _require_complete_canonical_observation_rowset(
+        rowset,
+        run_family="crop_runs",
+        label="Crop rowset",
+        require_selector_eligible=require_selector_eligible,
+    )
     selection = bind_persisted_coordinate_record(
         rowset,
         attr_name=CROP_GEOMETRY_SELECTION_ATTR,
@@ -2062,6 +3131,121 @@ def load_persisted_crop_observation_geometry(
     )
 
 
+def load_persisted_crop_observation_geometry(
+    root_node: Any,
+    rowset_path: str,
+) -> BoundCropObservationGeometry:
+    """Load only a complete, selector-eligible canonical crop run."""
+
+    return _load_persisted_crop_observation_geometry(
+        root_node,
+        rowset_path,
+        require_selector_eligible=True,
+    )
+
+
+def _load_persisted_ordinary_crop_observation_geometry(
+    root_node: Any,
+    rowset_path: str,
+    *,
+    require_selector_eligible: bool = True,
+) -> BoundCropObservationGeometry:
+    """Resolve and fully validate one materialized ordinary crop run.
+
+    The base crop loader deliberately remains useful to geometry-only and
+    incremental compatibility surfaces.  Ordinary crop publication uses this
+    stricter boundary so selection cannot expose a run whose materialized ROI,
+    source-camera placement, ROI-local bbox, compatibility top-left surface,
+    or direction-labelled transform has drifted.
+    """
+
+    crop = _load_persisted_crop_observation_geometry(
+        root_node,
+        rowset_path,
+        require_selector_eligible=require_selector_eligible,
+    )
+    rowset = crop._rowset_node
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Materialized ordinary crop rowset",
+    )
+    if attrs.get("crop_storage_mode") != "materialized":
+        _fail(
+            "Ordinary crop coordinate publication requires exact "
+            "crop_storage_mode='materialized'."
+        )
+    base = canonical_node_path(rowset)
+    roi_images_node = _persisted_node(
+        root_node,
+        f"{base}/roi_images",
+        label="ordinary crop ROI images",
+    )
+    placement_node = _persisted_node(
+        root_node,
+        f"{base}/source_crop_xywh",
+        label="ordinary crop source-camera placement",
+    )
+    bbox_roi_node = _persisted_node(
+        root_node,
+        f"{base}/bbox_roi_xyxy",
+        label="ordinary crop ROI-local bbox",
+    )
+    top_left_node = _persisted_node(
+        root_node,
+        f"{base}/roi_coordinates_full",
+        label="ordinary crop source-camera top-left compatibility surface",
+    )
+    source_camera = crop.source_geometry.frame_evidence.source_camera_frame
+    ownership = load_crop_placement_ownership(
+        placement_node,
+        row_identity=crop.row_identity,
+        source_camera_frame=source_camera,
+    )
+    roi_extent = bind_array_reference_extent(roi_images_node, units="px")
+    roi_frame = load_roi_pixel_frame_authority(
+        roi_images_node,
+        reference_extent=roi_extent,
+        crop_placement_ownership=ownership,
+    )
+    transform_authority = load_bound_transform_authority(
+        placement_node,
+        payload_node=placement_node,
+        source_frame=roi_frame,
+        target_frame=source_camera,
+        row_identity=crop.row_identity,
+    )
+    transform = load_bound_directed_transform_v2(
+        placement_node,
+        authority=transform_authority,
+        source_frame=roi_frame,
+        target_frame=source_camera,
+        row_identity=crop.row_identity,
+    )
+    load_crop_roi_geometry(
+        placement_node,
+        bbox_roi_node,
+        crop_geometry=crop,
+        crop_placement_ownership=ownership,
+        roi_frame=roi_frame,
+        roi_to_source_camera=resolve_bound_directed_transform_chain((transform,)),
+        roi_top_left_node=top_left_node,
+    )
+    return crop
+
+
+def load_persisted_ordinary_crop_observation_geometry(
+    root_node: Any,
+    rowset_path: str,
+) -> BoundCropObservationGeometry:
+    """Load only a complete, eligible, fully validated ordinary crop run."""
+
+    return _load_persisted_ordinary_crop_observation_geometry(
+        root_node,
+        rowset_path,
+        require_selector_eligible=True,
+    )
+
+
 def load_persisted_source_camera_position_surface(
     root_node: Any,
     rowset_path: str,
@@ -2097,6 +3281,17 @@ __all__ = [
     "DETECTION_ACQUISITION_MAPPING_ATTR",
     "DETECTION_ACQUISITION_MAPPING_SCHEMA_ID",
     "DETECTION_ACQUISITION_MAPPING_SCHEMA_VERSION",
+    "DETECTION_INSTANCE_KEY_DERIVATION_ATTR",
+    "DETECTION_INSTANCE_KEY_DERIVATION_SCHEMA_ID",
+    "DETECTION_INSTANCE_KEY_DERIVATION_SCHEMA_VERSION",
+    "DETECTION_OBSERVATION_CARDINALITY_ATTR",
+    "DETECTION_OBSERVATION_CARDINALITY_SCHEMA_ID",
+    "DETECTION_OBSERVATION_CARDINALITY_SCHEMA_VERSION",
+    "EMPTY_OBSERVATION_DECLARATION_ATTR",
+    "EMPTY_OBSERVATION_DECLARATION_SCHEMA_ID",
+    "EMPTY_OBSERVATION_DECLARATION_SCHEMA_VERSION",
+    "OBSERVATION_ROW_COUNT_ATTR",
+    "SUPPORTED_DETECTION_DECODE_DOMAIN_PROOFS",
     "CROP_GEOMETRY_SELECTION_ATTR",
     "CROP_GEOMETRY_SELECTION_OPERATION",
     "CROP_GEOMETRY_SELECTION_SCHEMA_ID",
@@ -2105,13 +3300,19 @@ __all__ = [
     "CROP_ROI_GEOMETRY_DERIVATION_OPERATION",
     "CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID",
     "CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_VERSION",
+    "CROP_ROI_TOP_LEFT_DERIVATION_ATTR",
+    "CROP_ROI_TOP_LEFT_DERIVATION_OPERATION",
+    "CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_ID",
+    "CROP_ROI_TOP_LEFT_DERIVATION_SCHEMA_VERSION",
     "BoundCropObservationGeometry",
     "BoundDetectionFrameEvidence",
     "BoundDetectionObservationGeometry",
     "BoundSourceCameraPositionSurface",
     "CropRoiGeometryPublicationResult",
     "ObservationCoordinatePublicationError",
+    "ObservationCoordinatePublicationCheckpoint",
     "build_bound_detection_frame_evidence",
+    "capture_observation_coordinate_publication_checkpoint",
     "derive_detection_source_camera_geometry",
     "detection_observation_geometry_values",
     "load_crop_observation_geometry",
@@ -2119,12 +3320,17 @@ __all__ = [
     "load_detection_observation_geometry",
     "load_persisted_crop_observation_geometry",
     "load_persisted_detection_observation_geometry",
+    "load_persisted_ordinary_crop_observation_geometry",
     "load_persisted_source_camera_position_surface",
     "publish_crop_observation_geometry",
     "publish_crop_roi_geometry",
     "publish_detection_observation_geometry",
+    "publish_detection_observation_cardinality",
+    "publish_detection_instance_key_derivation",
+    "publish_empty_detection_observation_declaration",
     "require_bound_crop_observation_geometry",
     "require_bound_detection_frame_evidence",
     "require_bound_detection_observation_geometry",
     "require_bound_source_camera_position_surface",
+    "restore_observation_coordinate_publication_checkpoint",
 ]

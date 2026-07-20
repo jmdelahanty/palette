@@ -2,7 +2,7 @@
 Crop ROIs from full-resolution frames based on detection results.
 Part of the FishEye tracking pipeline.
 
-This version supports multiple detection sources:
+Detection-source resolution can read multiple historical surfaces:
 - 'detect': Original blob/YOLO detections
 - 'filtered': Legacy refined sparse compatibility surface
 - 'interpolated': Legacy refined sparse compatibility surface
@@ -12,10 +12,17 @@ This version supports multiple detection sources:
 - 'auto': Resolve to the canonical refined detect surface first, else fall
   back to the legacy sparse preference chain
 
+Future ordinary crop publication is deliberately narrower: it accepts only an
+exact canonical ``detect_runs/<run>`` rowset and materialized ROI pixels. Other
+resolved source types remain readable for explicit legacy tooling but fail
+closed before an ordinary crop run is created.
+
 Streams work with Dask and writes directly from workers to Zarr
 to avoid accumulating large results in driver memory.
 """
 
+import copy
+import hashlib
 import time
 import json
 import zarr
@@ -24,6 +31,7 @@ import sys
 import subprocess
 from queue import Queue
 import numpy as np
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Mapping
@@ -65,25 +73,68 @@ from ..shared.roi_pixel_contract import (
     crop_run_pixel_contract,
 )
 from ..shared.type_conversions import normalize_attr
+from ..shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+    load_acquisition_authority_publication_status,
+)
+from ..shared.coordinate_reference import bind_array_reference_extent, canonical_node_path
+from ..shared.directed_transform_chain import resolve_bound_directed_transform_chain
+from ..shared.directed_transform_v2 import stamp_directed_transform_v2
+from ..shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from ..shared.observation_coordinate_publication import (
+    BoundDetectionObservationGeometry,
+    _load_persisted_ordinary_crop_observation_geometry,
+    capture_observation_coordinate_publication_checkpoint,
+    detection_observation_geometry_values,
+    load_persisted_detection_observation_geometry,
+    publish_crop_observation_geometry,
+    publish_crop_roi_geometry,
+    restore_observation_coordinate_publication_checkpoint,
+)
+from ..shared.pixel_frame_authority import (
+    load_persisted_acquisition_camera_authority,
+    stamp_crop_placement_ownership,
+    stamp_roi_pixel_frame_authority,
+)
 from ..shared.run_resolution import RunResolution, resolve_run
 from ..shared.run_provenance import (
     CLI_RUN_PROVENANCE_ATTR,
     RUN_PROVENANCE_ATTR,
     build_run_provenance,
+    validate_run_provenance,
 )
 from ..shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    RUN_COMPLETED_AT_ATTR,
+    RUN_LATEST_COMPLETE_ATTR,
+    RUN_LATEST_PENDING_ATTR,
     mark_run_complete,
     mark_run_failed,
     mark_run_started,
     note_pending_latest,
 )
+from ..shared.source_video_metadata import resolve_source_video
+from ..shared.transform_authority import stamp_crop_placement_transform_authority
 from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 _CROP_STATUS_SOURCE = "runtime_crop"
 _DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
+_CROP_SELECTOR_ATTRS = (
+    "latest",
+    RUN_LATEST_COMPLETE_ATTR,
+    RUN_LATEST_PENDING_ATTR,
+    "latest_materialized",
+    "latest_any",
+    "latest_composite",
+    "authoritative_run",
+    "authoritative_run_provenance",
+    "publication_generation",
+    "publication_policy",
+)
 
 # Dask imports
 import dask
@@ -92,9 +143,10 @@ from dask.diagnostics import ProgressBar
 
 # Optional distributed scheduler
 try:
-    from dask.distributed import Client, LocalCluster, as_completed
+    from dask.distributed import Client, LocalCluster, as_completed, wait as distributed_wait
     HAVE_DISTRIBUTED = True
 except Exception:
+    distributed_wait = None  # type: ignore[assignment]
     HAVE_DISTRIBUTED = False
 
 try:
@@ -368,6 +420,570 @@ def _compute_roi_coordinates(
         coords_ds[:, 1] = (coords_full[:, 1].astype(np.float32) * float(scale_factor)).astype(np.int32, copy=False)
 
     return coords_full, coords_ds
+
+
+class OrdinaryCropCoordinateError(RuntimeError):
+    """Raised when an ordinary crop cannot prove canonical coordinate lineage."""
+
+
+@dataclass(frozen=True)
+class _CanonicalCropPreflight:
+    source_path: str
+    source_group: Any
+    source_geometry: BoundDetectionObservationGeometry
+    source_values: Mapping[str, np.ndarray]
+    frame_indices: np.ndarray
+    bbox_norm_coords: np.ndarray
+    roi_coordinates_full: np.ndarray
+    source_crop_xywh: np.ndarray
+    bbox_roi_xyxy: np.ndarray
+    frame_shape: Tuple[int, int]
+    total_frames: int
+    acquisition_mode: str
+
+    @property
+    def row_count(self) -> int:
+        return int(self.frame_indices.shape[0])
+
+
+def _snapshot_crop_selector_attrs(
+    crop_parent: Optional[zarr.Group],
+) -> Dict[str, Tuple[bool, Any]]:
+    attrs = crop_parent.attrs if crop_parent is not None else {}
+    return {
+        name: (name in attrs, copy.deepcopy(attrs.get(name)))
+        for name in _CROP_SELECTOR_ATTRS
+    }
+
+
+def _restore_crop_selector_attrs(
+    crop_parent: zarr.Group,
+    snapshot: Mapping[str, Tuple[bool, Any]],
+) -> None:
+    attrs = crop_parent.attrs
+    for name, (present, value) in snapshot.items():
+        if present:
+            attrs[name] = copy.deepcopy(value)
+        elif name in attrs:
+            del attrs[name]
+    mismatches = {
+        name: (present, value, name in attrs, attrs.get(name))
+        for name, (present, value) in snapshot.items()
+        if (name in attrs) != present or (present and attrs.get(name) != value)
+    }
+    if mismatches:
+        raise OrdinaryCropCoordinateError(
+            "Crop selector rollback was incomplete: " + repr(mismatches)
+        )
+
+
+def _ordinary_crop_top_left_from_bbox(
+    bbox_norm_coords: np.ndarray,
+    *,
+    frame_shape: Tuple[int, int],
+    roi_size: Tuple[int, int],
+) -> np.ndarray:
+    """Reproduce the existing ordinary-writer center rounding exactly."""
+
+    frame_height, frame_width = (int(frame_shape[0]), int(frame_shape[1]))
+    roi_height, roi_width = (int(roi_size[0]), int(roi_size[1]))
+    centers = np.round(
+        np.asarray(bbox_norm_coords[:, :2], dtype=np.float64)
+        * np.asarray([frame_width, frame_height], dtype=np.float64)
+    ).astype(np.int64, copy=False)
+    coordinates = np.empty((centers.shape[0], 2), dtype=np.int32)
+    coordinates[:, 0] = centers[:, 0] - roi_width // 2
+    coordinates[:, 1] = centers[:, 1] - roi_height // 2
+    return coordinates
+
+
+def _canonical_crop_arrays(
+    source_geometry: BoundDetectionObservationGeometry,
+    *,
+    source_path: str,
+    source_group: zarr.Group,
+    frame_shape: Tuple[int, int],
+    roi_size: Tuple[int, int],
+    require_sorted_frames: bool,
+) -> _CanonicalCropPreflight:
+    values = detection_observation_geometry_values(source_geometry)
+    payload = _extract_detection_row_payload(source_group)
+    frame_indices = np.asarray(payload["frame_indices"], dtype=np.int64)
+    bbox_norm_coords = np.asarray(payload["bbox_norm_coords"])
+    instance_key = payload.get("instance_key")
+    if instance_key is None:
+        raise OrdinaryCropCoordinateError(
+            "Future-canonical ordinary crop requires source instance_key identity."
+        )
+    if not np.array_equal(
+        np.asarray(instance_key, dtype=np.uint64),
+        values["instance_key"],
+    ):
+        raise OrdinaryCropCoordinateError(
+            "Selected crop rows do not equal the canonical source instance_key rowset."
+        )
+    if not np.array_equal(
+        frame_indices,
+        values["source_acquisition_frame_index"],
+    ):
+        raise OrdinaryCropCoordinateError(
+            "Ordinary crop frame_indices are not the exact acquisition-frame mapping."
+        )
+    if not np.array_equal(bbox_norm_coords, values["bbox_norm_coords"]):
+        raise OrdinaryCropCoordinateError(
+            "Ordinary crop bbox_norm_coords differ from the selected canonical source."
+        )
+    if require_sorted_frames:
+        _validate_frame_indices_sorted(frame_indices, source_label=source_path)
+
+    frame_height, frame_width = frame_shape
+    roi_height, roi_width = (int(roi_size[0]), int(roi_size[1]))
+    existing_coordinates = _ordinary_crop_top_left_from_bbox(
+        bbox_norm_coords,
+        frame_shape=frame_shape,
+        roi_size=roi_size,
+    )
+    canonical_centers = np.round(values["centers_img_xy"]).astype(np.int64)
+    canonical_coordinates = np.empty(existing_coordinates.shape, dtype=np.int32)
+    canonical_coordinates[:, 0] = canonical_centers[:, 0] - roi_width // 2
+    canonical_coordinates[:, 1] = canonical_centers[:, 1] - roi_height // 2
+    if not np.array_equal(existing_coordinates, canonical_coordinates):
+        raise OrdinaryCropCoordinateError(
+            "Existing ordinary crop placement disagrees with the exact persisted "
+            "source-camera centers; refusing to change crop pixel numerics."
+        )
+
+    padded = np.flatnonzero(
+        (canonical_coordinates[:, 0] < 0)
+        | (canonical_coordinates[:, 1] < 0)
+        | (canonical_coordinates[:, 0] + roi_width > frame_width)
+        | (canonical_coordinates[:, 1] + roi_height > frame_height)
+    )
+    if padded.size:
+        sample = ", ".join(str(int(index)) for index in padded[:8])
+        raise OrdinaryCropCoordinateError(
+            "Future-canonical ordinary crop requires every ROI to be fully contained "
+            "in the exact source-camera frame. Padded crops need an explicit padding "
+            f"lineage contract; affected source rows include: {sample}."
+        )
+
+    bbox_img = values["bbox_img_xyxy"]
+    placement_dtype = bbox_img.dtype
+    source_crop_xywh = np.column_stack(
+        (
+            canonical_coordinates[:, 0],
+            canonical_coordinates[:, 1],
+            np.full(canonical_coordinates.shape[0], roi_width, dtype=np.int64),
+            np.full(canonical_coordinates.shape[0], roi_height, dtype=np.int64),
+        )
+    ).astype(placement_dtype, copy=False)
+    offsets = np.column_stack(
+        (
+            source_crop_xywh[:, 0],
+            source_crop_xywh[:, 1],
+            source_crop_xywh[:, 0],
+            source_crop_xywh[:, 1],
+        )
+    )
+    bbox_roi_xyxy = np.asarray(bbox_img - offsets, dtype=bbox_img.dtype)
+    return _CanonicalCropPreflight(
+        source_path=source_path,
+        source_group=source_group,
+        source_geometry=source_geometry,
+        source_values=values,
+        frame_indices=np.array(frame_indices, copy=True, order="C"),
+        bbox_norm_coords=np.array(bbox_norm_coords, copy=True, order="C"),
+        roi_coordinates_full=np.array(canonical_coordinates, copy=True, order="C"),
+        source_crop_xywh=np.array(source_crop_xywh, copy=True, order="C"),
+        bbox_roi_xyxy=np.array(bbox_roi_xyxy, copy=True, order="C"),
+        frame_shape=(int(frame_height), int(frame_width)),
+        total_frames=int(source_geometry.frame_evidence.acquisition_frame.record.source_total_frames),
+        acquisition_mode="",
+    )
+
+
+def _preflight_ordinary_crop_coordinates(
+    root: zarr.Group,
+    *,
+    zarr_path: str | Path,
+    source_path: str,
+    source_group: zarr.Group,
+    video_source_type: str,
+    video_path: Optional[str],
+    roi_size: Tuple[int, int],
+) -> _CanonicalCropPreflight:
+    """Resolve one exact source/acquisition authority before run creation."""
+
+    normalized_source_path = str(source_path).strip().strip("/")
+    parts = normalized_source_path.split("/")
+    if len(parts) != 2 or parts[0] != "detect_runs":
+        raise OrdinaryCropCoordinateError(
+            "Future-canonical ordinary crop currently supports only exact "
+            "detect_runs/<run> sources. Refined and legacy sparse sources need a "
+            "canonical row-selection publication before they can be cropped."
+        )
+    exact_source_group = root[normalized_source_path]
+    if (
+        canonical_node_path(exact_source_group) != normalized_source_path
+        or canonical_node_path(source_group) != normalized_source_path
+    ):
+        raise OrdinaryCropCoordinateError(
+            "Crop source is not the exact root-owned canonical detection rowset."
+        )
+
+    status = load_acquisition_authority_publication_status(root)
+    if status.status != ACQUISITION_AUTHORITY_PUBLISHED:
+        raise OrdinaryCropCoordinateError(
+            "Future-canonical ordinary crop requires a published acquisition "
+            f"authority; found status={status.status!r}."
+        )
+    ownership, acquisition = load_persisted_acquisition_camera_authority(root)
+    expected_authority_path = (
+        f"analysis/acquisition_camera_frames/{acquisition.record.camera_id}"
+    )
+    if (
+        status.authority_mode != ownership.record.mode
+        or status.authority_path != expected_authority_path
+    ):
+        raise OrdinaryCropCoordinateError(
+            "Published acquisition status disagrees with the exact persisted "
+            "ownership/frame authority."
+        )
+    expected_mode = (
+        MATERIALIZED_ACQUISITION_AUTHORITY_MODE
+        if video_source_type == "zarr"
+        else EXTERNAL_ACQUISITION_AUTHORITY_MODE
+    )
+    if ownership.record.mode != expected_mode:
+        raise OrdinaryCropCoordinateError(
+            "Ordinary crop frame source does not match the acquisition ownership "
+            f"mode: video_source_type={video_source_type!r}, "
+            f"authority_mode={ownership.record.mode!r}."
+        )
+
+    frame_shape = (
+        int(acquisition.record.height_px),
+        int(acquisition.record.width_px),
+    )
+    total_frames = int(acquisition.record.source_total_frames)
+    if video_source_type == "zarr":
+        try:
+            frame_source = root["raw_video/images_full"]
+        except Exception as exc:
+            raise OrdinaryCropCoordinateError(
+                "Materialized canonical crop requires raw_video/images_full."
+            ) from exc
+        shape = tuple(int(value) for value in frame_source.shape)
+        expected_shape = (total_frames, *frame_shape)
+        if shape != expected_shape:
+            raise OrdinaryCropCoordinateError(
+                "Materialized crop frame source shape differs from the exact "
+                f"acquisition authority: {shape} != {expected_shape}."
+            )
+    elif video_source_type == "external":
+        if not video_path:
+            raise OrdinaryCropCoordinateError(
+                "External canonical crop requires an exact source-video path."
+            )
+        resolved = resolve_source_video(
+            root,
+            zarr_path=Path(zarr_path),
+            require_exists=True,
+        )
+        requested = Path(video_path).expanduser().resolve()
+        if resolved.path.expanduser().resolve() != requested:
+            raise OrdinaryCropCoordinateError(
+                "External crop video is not the exact acquisition source-video locator."
+            )
+        metadata = acquisition.record.source_video_metadata
+        fingerprint = metadata.get("file_fingerprint")
+        if not isinstance(fingerprint, Mapping) or fingerprint.get("strategy") != "stat_v1":
+            raise OrdinaryCropCoordinateError(
+                "External canonical crop currently requires exact stat_v1 source-video "
+                "fingerprint evidence."
+            )
+        live = source_stat_fingerprint_attrs(
+            requested,
+            attr_prefix="source_video",
+            extra={
+                "codec": metadata.get("codec"),
+                "pix_fmt": metadata.get("pix_fmt"),
+                "width": metadata.get("width"),
+                "height": metadata.get("height"),
+                "fps": metadata.get("fps"),
+                "frame_count": metadata.get("total_frames"),
+            },
+        )
+        live_fingerprint = {
+            "strategy": live["source_video_fingerprint_strategy"],
+            "value": live["source_video_fingerprint"],
+            "size_bytes": live["source_video_size_bytes"],
+            "mtime_ns": live["source_video_mtime_ns"],
+            "relocation_stable": False,
+        }
+        if dict(fingerprint) != live_fingerprint:
+            raise OrdinaryCropCoordinateError(
+                "External crop video differs from the exact acquisition "
+                "locator/fingerprint."
+            )
+    else:
+        raise OrdinaryCropCoordinateError(
+            f"Unsupported ordinary crop video source type: {video_source_type!r}."
+        )
+
+    source_geometry = load_persisted_detection_observation_geometry(
+        root,
+        normalized_source_path,
+    )
+    source_acquisition = source_geometry.frame_evidence.acquisition_frame
+    if (
+        source_acquisition.record_ref != acquisition.record_ref
+        or source_acquisition.record_sha256 != acquisition.record_sha256
+    ):
+        raise OrdinaryCropCoordinateError(
+            "Selected detection geometry does not bind the exact active acquisition authority."
+        )
+    result = _canonical_crop_arrays(
+        source_geometry,
+        source_path=normalized_source_path,
+        source_group=exact_source_group,
+        frame_shape=frame_shape,
+        roi_size=roi_size,
+        require_sorted_frames=(video_source_type == "zarr"),
+    )
+    _validate_frame_indices_in_bounds(
+        result.frame_indices,
+        total_frames=total_frames,
+        source_label=normalized_source_path,
+    )
+    return _CanonicalCropPreflight(
+        source_path=result.source_path,
+        source_group=result.source_group,
+        source_geometry=result.source_geometry,
+        source_values=result.source_values,
+        frame_indices=result.frame_indices,
+        bbox_norm_coords=result.bbox_norm_coords,
+        roi_coordinates_full=result.roi_coordinates_full,
+        source_crop_xywh=result.source_crop_xywh,
+        bbox_roi_xyxy=result.bbox_roi_xyxy,
+        frame_shape=result.frame_shape,
+        total_frames=total_frames,
+        acquisition_mode=expected_mode,
+    )
+
+
+def _create_or_replace_array(
+    group: zarr.Group,
+    name: str,
+    values: np.ndarray,
+) -> Any:
+    array = np.asarray(values)
+    chunks = (min(1000, int(array.shape[0])), *array.shape[1:])
+    return group.create_array(name, data=array, chunks=chunks, overwrite=True)
+
+
+def _write_canonical_crop_coordinate_arrays(
+    crop_group: zarr.Group,
+    preflight: _CanonicalCropPreflight,
+) -> None:
+    values = preflight.source_values
+    row_count = preflight.row_count
+    _create_or_replace_array(crop_group, "instance_key", values["instance_key"])
+    _create_or_replace_array(
+        crop_group,
+        "detection_indices",
+        np.arange(row_count, dtype=np.int64),
+    )
+    _create_or_replace_array(
+        crop_group,
+        "source_acquisition_frame_index",
+        values["source_acquisition_frame_index"],
+    )
+    _create_or_replace_array(crop_group, "frame_indices", values["source_acquisition_frame_index"])
+    _create_or_replace_array(crop_group, "bbox_norm_coords", values["bbox_norm_coords"])
+    _create_or_replace_array(crop_group, "bbox_img_xyxy", values["bbox_img_xyxy"])
+    _create_or_replace_array(crop_group, "centers_img_xy", values["centers_img_xy"])
+    _create_or_replace_array(crop_group, "source_crop_xywh", preflight.source_crop_xywh)
+    _create_or_replace_array(crop_group, "bbox_roi_xyxy", preflight.bbox_roi_xyxy)
+    crop_group.attrs.update(
+        {
+            "instance_key_available": True,
+            "instance_key_policy": "copied_from_exact_canonical_detection_source",
+            "coordinate_contract_mode": "canonical",
+            "source_acquisition_authority_mode": preflight.acquisition_mode,
+        }
+    )
+
+
+def _publish_ordinary_crop_coordinate_contract(
+    root: zarr.Group,
+    crop_group: zarr.Group,
+    *,
+    crop_parent: zarr.Group,
+    run_name: str,
+    preflight: _CanonicalCropPreflight,
+    run_provenance: Optional[Mapping[str, Any]],
+    selector_snapshot: Mapping[str, Tuple[bool, Any]],
+) -> None:
+    """Publish coordinates and completion as one rollback-aware commit."""
+
+    if "roi_images" not in crop_group:
+        raise OrdinaryCropCoordinateError(
+            "Future-canonical ordinary crop completion requires materialized roi_images."
+        )
+    persisted_coordinates = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32)
+    if not np.array_equal(persisted_coordinates, preflight.roi_coordinates_full):
+        raise OrdinaryCropCoordinateError(
+            "Persisted ROI placement differs from canonical preflight placement."
+        )
+    checkpoint = capture_observation_coordinate_publication_checkpoint(
+        crop_group,
+        crop_group["instance_key"],
+        crop_group["detection_indices"],
+        crop_group["source_acquisition_frame_index"],
+        crop_group["bbox_norm_coords"],
+        crop_group["bbox_img_xyxy"],
+        crop_group["centers_img_xy"],
+        crop_group["source_crop_xywh"],
+        crop_group["bbox_roi_xyxy"],
+        crop_group["roi_coordinates_full"],
+        crop_group["roi_images"],
+    )
+    try:
+        crop_geometry = publish_crop_observation_geometry(
+            crop_group,
+            crop_group["instance_key"],
+            crop_group["detection_indices"],
+            crop_group["source_acquisition_frame_index"],
+            crop_group["bbox_norm_coords"],
+            crop_group["bbox_img_xyxy"],
+            crop_group["centers_img_xy"],
+            source_geometry=preflight.source_geometry,
+        )
+        placement_node = crop_group["source_crop_xywh"]
+        ownership = stamp_crop_placement_ownership(
+            placement_node,
+            row_identity=crop_geometry.row_identity,
+            source_camera_frame=preflight.source_geometry.frame_evidence.source_camera_frame,
+        )
+        token = hashlib.sha256(f"crop_runs/{run_name}".encode("utf-8")).hexdigest()[:16]
+        roi_frame = stamp_roi_pixel_frame_authority(
+            bind_array_reference_extent(crop_group["roi_images"], units="px"),
+            frame_id=f"crop_roi_{token}",
+            pixel_convention="continuous",
+            crop_placement_ownership=ownership,
+        )
+        transform_authority = stamp_crop_placement_transform_authority(
+            placement_node,
+            authority_id=f"crop_roi_to_source_camera_{token}",
+            source_frame=roi_frame,
+            target_frame=preflight.source_geometry.frame_evidence.source_camera_frame,
+        )
+        transform = stamp_directed_transform_v2(
+            placement_node,
+            transform_id=f"crop_roi_to_source_camera_{token}",
+            authority=transform_authority,
+            source_frame=roi_frame,
+            target_frame=preflight.source_geometry.frame_evidence.source_camera_frame,
+            row_identity=crop_geometry.row_identity,
+        )
+        publish_crop_roi_geometry(
+            placement_node,
+            crop_group["bbox_roi_xyxy"],
+            crop_geometry=crop_geometry,
+            crop_placement_ownership=ownership,
+            roi_frame=roi_frame,
+            roi_to_source_camera=resolve_bound_directed_transform_chain((transform,)),
+            roi_top_left_node=crop_group["roi_coordinates_full"],
+        )
+        crop_group.attrs["coordinate_contract"] = "canonical_v2"
+        crop_group.attrs["status"] = "completed"
+        crop_group.attrs["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        crop_group.attrs.pop("error_message", None)
+        crop_group.attrs.pop("failed_at_utc", None)
+        provenance_candidate = (
+            run_provenance
+            if isinstance(run_provenance, Mapping)
+            else crop_group.attrs.get(RUN_PROVENANCE_ATTR)
+        )
+        provenance_validation = validate_run_provenance(
+            provenance_candidate if isinstance(provenance_candidate, Mapping) else None
+        )
+        if not provenance_validation.valid:
+            raise OrdinaryCropCoordinateError(
+                "Refusing ordinary crop completion without exact valid run "
+                "provenance: " + "; ".join(provenance_validation.errors)
+            )
+        normalized_provenance = provenance_validation.normalized
+        crop_group.attrs[RUN_PROVENANCE_ATTR] = normalized_provenance
+        mark_run_complete(
+            crop_group,
+            parent_group=None,
+            run_name=run_name,
+            run_provenance=normalized_provenance,
+        )
+        _load_persisted_ordinary_crop_observation_geometry(
+            root,
+            f"crop_runs/{run_name}",
+            require_selector_eligible=False,
+        )
+        if crop_parent.attrs.get(RUN_LATEST_PENDING_ATTR) == run_name:
+            del crop_parent.attrs[RUN_LATEST_PENDING_ATTR]
+        crop_parent.attrs["latest"] = run_name
+        crop_parent.attrs[RUN_LATEST_COMPLETE_ATTR] = run_name
+        crop_parent.attrs["latest_materialized"] = run_name
+        crop_parent.attrs["latest_any"] = run_name
+        # Eligibility is the commit point.  Every fallible validation and every
+        # selector write must already be durable before this final persisted
+        # action makes the run visible to normal readers.
+        crop_group.attrs["stage_selector_eligible"] = True
+    except BaseException as exc:
+        rollback_failures: List[str] = []
+        try:
+            restore_observation_coordinate_publication_checkpoint(
+                checkpoint,
+                cause=exc,
+            )
+        except Exception as rollback_exc:
+            rollback_failures.append(f"coordinate attrs: {rollback_exc}")
+        try:
+            _restore_crop_selector_attrs(crop_parent, selector_snapshot)
+        except Exception as rollback_exc:
+            rollback_failures.append(f"selectors: {rollback_exc}")
+        if rollback_failures:
+            raise OrdinaryCropCoordinateError(
+                "Crop coordinate completion failed and rollback was incomplete: "
+                + repr(rollback_failures)
+            ) from exc
+        raise
+
+
+def _cancel_wait_close_distributed_crop(
+    client: Any,
+    futures: List[Any],
+) -> None:
+    """Quiesce every worker write before the caller rolls back publication state."""
+
+    failures: List[str] = []
+    try:
+        client.cancel(futures, force=True)
+    except BaseException as exc:
+        failures.append(f"cancel: {exc}")
+    try:
+        if distributed_wait is None:
+            raise RuntimeError("dask.distributed.wait is unavailable")
+        distributed_wait(futures)
+    except BaseException as exc:
+        failures.append(f"wait: {exc}")
+    try:
+        client.close()
+    except BaseException as exc:
+        failures.append(f"close: {exc}")
+    if failures:
+        raise OrdinaryCropCoordinateError(
+            "Distributed crop workers could not be quiesced before rollback: "
+            + repr(failures)
+        )
 
 
 def _build_crop_stage_provenance(
@@ -845,7 +1461,10 @@ def _resolve_detect_review_status(
     ref = f"{parent.path}/{refined_run_name}"
     return status_dict, ref
 
-def get_video_source(root: zarr.Group, console: Console) -> Tuple[str, Optional[str]]:
+def get_video_source(
+    root: zarr.Group,
+    console: Optional[Console] = None,
+) -> Tuple[str, Optional[str]]:
     """
     Determine video source - zarr or external file.
     
@@ -862,7 +1481,8 @@ def get_video_source(root: zarr.Group, console: Console) -> Tuple[str, Optional[
     
     # Try zarr first because it is typically faster.
     if has_raw_video(root):
-        console.print("[green]✓[/green] Video source: zarr (raw_video)")
+        if console is not None:
+            console.print("[green]✓[/green] Video source: zarr (raw_video)")
         return 'zarr', None
     
     # Try external video
@@ -870,11 +1490,15 @@ def get_video_source(root: zarr.Group, console: Console) -> Tuple[str, Optional[
     if video_path:
         video_path = Path(video_path)
         if video_path.exists():
-            console.print(f"[cyan]✓[/cyan] Video source: external file")
-            console.print(f"[dim]  Path: {video_path}[/dim]")
+            if console is not None:
+                console.print("[cyan]✓[/cyan] Video source: external file")
+                console.print(f"[dim]  Path: {video_path}[/dim]")
             return 'external', str(video_path)
         else:
-            console.print(f"[yellow]⚠[/yellow] Video path in metadata not found: {video_path}")
+            if console is not None:
+                console.print(
+                    f"[yellow]⚠[/yellow] Video path in metadata not found: {video_path}"
+                )
     
     # No video source found
     raise ValueError(
@@ -1834,9 +2458,40 @@ def crop_from_external_video(
         detail = fallback_reason or "kvikio_write_path_not_available"
         raise RuntimeError(f"kvikio required for crop writes but unavailable ({detail})")
     if not use_kvikio_writes:
-        root = zarr.open(zarr_path, mode='a')
-    crop_storage_mode = _normalize_crop_storage_mode(crop_storage_mode)
+        root = zarr.open_group(zarr_path, mode='a', use_consolidated=False)
+    try:
+        crop_storage_mode = _normalize_crop_storage_mode(crop_storage_mode)
+        if crop_storage_mode != "materialized":
+            raise OrdinaryCropCoordinateError(
+                "Future-canonical ordinary crop does not publish geometry-only runs. "
+                "Use a materialized run; historical geometry-only data remains readable "
+                "only as an explicit compatibility surface."
+            )
+        source_path = str(source_path).strip().strip("/")
+        source_group = root[source_path]
+        canonical_preflight = _preflight_ordinary_crop_coordinates(
+            root,
+            zarr_path=zarr_path,
+            source_path=source_path,
+            source_group=source_group,
+            video_source_type="external",
+            video_path=video_path,
+            roi_size=roi_sz,
+        )
+        if canonical_preflight.row_count == 0:
+            console.print("[yellow]No detections to crop[/yellow]")
+            if use_kvikio_writes:
+                root.store.close()
+            return {'total_crops': 0}
+    except BaseException:
+        if use_kvikio_writes:
+            try:
+                root.store.close()
+            except Exception:
+                pass
+        raise
     crop_parent_before = root.get("crop_runs")
+    selector_snapshot = _snapshot_crop_selector_attrs(crop_parent_before)
     previous_latest = crop_parent_before.attrs.get("latest") if crop_parent_before is not None else None
     previous_latest_materialized = (
         crop_parent_before.attrs.get("latest_materialized") if crop_parent_before is not None else None
@@ -1856,18 +2511,14 @@ def crop_from_external_video(
     actual_use_gpu = use_gpu
     try:
         # Load detection data
-        frame_indices, bbox_coords = _extract_detection_rows(source_group)
-        total_detections = frame_indices.shape[0]
+        frame_indices = canonical_preflight.frame_indices
+        bbox_coords = canonical_preflight.bbox_norm_coords
+        total_detections = canonical_preflight.row_count
         
-        if total_detections == 0:
-            console.print("[yellow]No detections to crop[/yellow]")
-            return {'total_crops': 0}
-        
-        # Get video dimensions from metadata
-        video_height = root.attrs['height']
-        video_width = root.attrs['width']
+        # Use only the exact acquisition-owned source-camera dimensions.
+        video_height, video_width = canonical_preflight.frame_shape
         video_shape = (video_height, video_width)
-        num_frames = root.attrs['total_frames']
+        num_frames = canonical_preflight.total_frames
         _validate_frame_indices_in_bounds(
             frame_indices,
             total_frames=int(num_frames),
@@ -1888,6 +2539,7 @@ def crop_from_external_video(
         )
         crop_parent = root.get("crop_runs")
         if crop_parent is not None and run_name is not None:
+            crop_group.attrs["stage_selector_eligible"] = False
             mark_run_started(crop_group, run_name=run_name, stage="crop")
             note_pending_latest(crop_parent, run_name)
             _finalize_crop_parent_pointers(
@@ -2059,6 +2711,7 @@ def crop_from_external_video(
             total_detections=total_detections,
             num_frames=num_frames
         )
+        _write_canonical_crop_coordinate_arrays(crop_group, canonical_preflight)
         
         # Geometry-only runs do not decode frames, so avoid touching the video reader.
         if crop_storage_mode != "geometry_only" and actual_use_gpu:
@@ -2368,6 +3021,28 @@ def crop_from_external_video(
         )
         console.print("[dim]Finalizing crop metadata...[/dim]")
 
+        fresh_preflight = _preflight_ordinary_crop_coordinates(
+            root,
+            zarr_path=zarr_path,
+            source_path=source_path,
+            source_group=root[source_path],
+            video_source_type="external",
+            video_path=video_path,
+            roi_size=roi_sz,
+        )
+        if crop_parent is None or run_name is None:
+            raise OrdinaryCropCoordinateError(
+                "Crop run parent/name disappeared before canonical publication."
+            )
+        _publish_ordinary_crop_coordinate_contract(
+            root,
+            crop_group,
+            crop_parent=crop_parent,
+            run_name=run_name,
+            preflight=fresh_preflight,
+            run_provenance=effective_run_provenance,
+            selector_snapshot=selector_snapshot,
+        )
         success = True
         return {
             'total_crops': total_detections,
@@ -2400,61 +3075,52 @@ def crop_from_external_video(
                 if verbose:
                     console.print("[debug] CUDA cache cleared")
 
+        if crop_group is not None:
+            if success:
+                if verbose:
+                    console.print("[debug] Crop run marked as completed")
+            else:
+                timestamp = datetime.now(timezone.utc).isoformat()
+                crop_parent = root.get("crop_runs")
+                elapsed = time.perf_counter() - start_time
+                profile_total = elapsed if elapsed > 0 else 1.0
+                profile_other = max(
+                    0.0,
+                    elapsed - (decode_seconds + compute_seconds + write_seconds),
+                )
+                crop_group.attrs['timing_profile'] = {
+                    'decode_seconds': float(decode_seconds),
+                    'compute_seconds': float(compute_seconds),
+                    'zarr_write_seconds': float(write_seconds),
+                    'other_seconds': float(profile_other),
+                    'decode_percent': float((decode_seconds / profile_total) * 100.0),
+                    'compute_percent': float((compute_seconds / profile_total) * 100.0),
+                    'zarr_write_percent': float((write_seconds / profile_total) * 100.0),
+                    'other_percent': float((profile_other / profile_total) * 100.0),
+                    'complete': False,
+                }
+                crop_group.attrs['status'] = 'failed'
+                crop_group.attrs['failed_at_utc'] = timestamp
+                crop_group.attrs['stage_selector_eligible'] = False
+                crop_group.attrs.pop(RUN_COMPLETED_AT_ATTR, None)
+                if error_message:
+                    crop_group.attrs['error_message'] = error_message
+                mark_run_failed(
+                    crop_group,
+                    parent_group=None,
+                    run_name=run_name,
+                    error=error_message,
+                )
+                if verbose:
+                    console.print("[debug] Crop run marked as failed")
+                if crop_parent is not None and run_name is not None:
+                    _restore_crop_selector_attrs(crop_parent, selector_snapshot)
+
         if use_kvikio_writes:
             try:
                 root.store.close()
             except Exception:
                 pass
-
-        if crop_group is not None:
-            elapsed = time.perf_counter() - start_time
-            profile_total = elapsed if elapsed > 0 else 1.0
-            profile_other = max(0.0, elapsed - (decode_seconds + compute_seconds + write_seconds))
-            crop_group.attrs['timing_profile'] = {
-                'decode_seconds': float(decode_seconds),
-                'compute_seconds': float(compute_seconds),
-                'zarr_write_seconds': float(write_seconds),
-                'other_seconds': float(profile_other),
-                'decode_percent': float((decode_seconds / profile_total) * 100.0),
-                'compute_percent': float((compute_seconds / profile_total) * 100.0),
-                'zarr_write_percent': float((write_seconds / profile_total) * 100.0),
-                'other_percent': float((profile_other / profile_total) * 100.0),
-                'complete': bool(success),
-            }
-            timestamp = datetime.now(timezone.utc).isoformat()
-            crop_parent = root.get("crop_runs")
-            if success:
-                crop_group.attrs['status'] = 'completed'
-                crop_group.attrs['completed_at_utc'] = timestamp
-                crop_group.attrs.pop('error_message', None)
-                crop_group.attrs.pop('failed_at_utc', None)
-                if crop_parent is not None and run_name is not None:
-                    mark_run_complete(
-                        crop_group,
-                        parent_group=crop_parent,
-                        run_name=run_name,
-                        run_provenance=effective_run_provenance,
-                    )
-                if verbose:
-                    console.print("[debug] Crop run marked as completed")
-            else:
-                crop_group.attrs['status'] = 'failed'
-                crop_group.attrs['failed_at_utc'] = timestamp
-                if error_message:
-                    crop_group.attrs['error_message'] = error_message
-                mark_run_failed(crop_group, error=error_message)
-                if verbose:
-                    console.print("[debug] Crop run marked as failed")
-            if crop_parent is not None and run_name is not None:
-                _finalize_crop_parent_pointers(
-                    crop_parent,
-                    run_name=run_name,
-                    crop_storage_mode=crop_storage_mode,
-                    success=bool(success),
-                    previous_latest=previous_latest,
-                    previous_latest_materialized=previous_latest_materialized,
-                    previous_latest_any=previous_latest_any,
-                )
 
 def get_detection_source_info(
     root: zarr.Group,
@@ -2962,7 +3628,7 @@ def crop_and_store_chunk_delayed(
     chunk_slice: slice,
     out_slice: Tuple[int, int],
     roi_sz: Tuple[int, int],
-    scale_factor: float,
+    legacy_scale_factor: Optional[float],
     source_path: str
 ) -> Dict[str, int]:
     """
@@ -2973,7 +3639,8 @@ def crop_and_store_chunk_delayed(
         chunk_slice: frames [start:stop] to process
         out_slice: (start_det, end_det) in the flattened detection space for this chunk
         roi_sz: (H, W) of the crop
-        scale_factor: ds/full scale for coordinates_ds
+        legacy_scale_factor: Ignored compatibility argument. Future-canonical
+            crops never reconstruct downsampled coordinates from a dimension ratio.
         source_path: Path to detection source (e.g., 'detect_runs/latest',
             the canonical refined path
             'refined_detect_runs/latest/instances')
@@ -2981,7 +3648,8 @@ def crop_and_store_chunk_delayed(
     Returns:
         Tiny dict with counts/indices for bookkeeping.
     """
-    root = zarr.open(zarr_path, mode='a')
+    _ = legacy_scale_factor
+    root = zarr.open_group(zarr_path, mode='a', use_consolidated=False)
 
     # Find the target crop group via root attrs (set by driver before dispatch)
     crop_group_path = root.attrs.get('current_crop_group_path')
@@ -3028,7 +3696,6 @@ def crop_and_store_chunk_delayed(
     # Allocate local buffers (live only within the worker)
     rois_buf = np.zeros((count, *roi_sz), dtype='uint8')
     coords_full_buf = np.zeros((count, 2), dtype='i4')
-    coords_ds_buf = np.zeros((count, 2), dtype='i4')
 
     cursor_in = 0
     cursor_out = 0
@@ -3072,23 +3739,17 @@ def crop_and_store_chunk_delayed(
             rois_buf[cursor_out] = roi
             coords_full_buf[cursor_out] = (x1, y1)
 
-            # Downsampled coords (integer)
-            dx = int(x1 * scale_factor)
-            dy = int(y1 * scale_factor)
-            coords_ds_buf[cursor_out] = (dx, dy)
-
             cursor_in += 1
             cursor_out += 1
 
     # Single write per array per worker (targeting non-overlapping slices)
     crop_group['roi_images'][start_det_out:end_det_out] = rois_buf
     crop_group['roi_coordinates_full'][start_det_out:end_det_out] = coords_full_buf
-    crop_group['roi_coordinates_ds'][start_det_out:end_det_out] = coords_ds_buf
 
     return {"frames": int(np.sum(n_per_frame)), "start": start_det_out, "end": end_det_out}
 
 
-def crop_detections(
+def _crop_detections_impl(
     zarr_path: str,
     config: Dict[str, Any],
     source_type: str = 'detect',
@@ -3122,7 +3783,8 @@ def crop_detections(
     Args:
         zarr_path: Path to zarr file
         config: Configuration dictionary
-        source_type: Detection source - 'detect', 'filtered', 'interpolated', 'manual', 'refined', or 'auto'
+        source_type: Detection source hint. Future ordinary publication accepts
+            only an exact canonical ``detect_runs/<run>`` resolution.
         source_path: Explicit detection source path override (optional)
         selection_policy: Optional policy label for auto source selection
         scheduler: Dask scheduler ('processes', 'threads', or 'distributed')
@@ -3136,7 +3798,8 @@ def crop_detections(
         external_roi_shard_size: Detection-axis shard length for ROI arrays
         external_gpu_chunk_frames: Number of decoded frames per GPU crop chunk
         external_require_kvikio: Require kvikIO backend for external writes
-        crop_storage_mode: Crop persistence mode ('materialized' or 'geometry_only')
+        crop_storage_mode: Crop persistence mode. Future ordinary publication
+            requires ``materialized``; ``geometry_only`` fails closed.
         use_gpu_allowed: Whether GPU usage is permitted globally
         force_cpu: Force CPU processing regardless of availability
         verbose: Enable additional logging and disable progress bars
@@ -3213,7 +3876,48 @@ def crop_detections(
     
     # Determine video source
     video_source_type, video_path = get_video_source(root, console)
-    
+
+    if crop_storage_mode_resolved != "materialized":
+        raise OrdinaryCropCoordinateError(
+            "Future-canonical ordinary crop does not publish geometry-only runs. "
+            "Use crop_storage_mode='materialized'."
+        )
+    canonical_preflight = _preflight_ordinary_crop_coordinates(
+        root,
+        zarr_path=zarr_path,
+        source_path=source_path,
+        source_group=source_group,
+        video_source_type=video_source_type,
+        video_path=video_path,
+        roi_size=roi_sz,
+    )
+    source_group = canonical_preflight.source_group
+    if canonical_preflight.row_count == 0:
+        console.print("[yellow]Warning: No detections found. Nothing to crop.[/yellow]")
+        _emit_crop_step_status(
+            root=root,
+            zarr_path=zarr_path,
+            status='missing',
+            run_name=None,
+            method=source_type,
+            coverage_pct=0.0,
+            review_status=None,
+            details={
+                'reason': 'no_detections',
+                'detection_source_type': source_type,
+                'detection_source_path': source_path,
+                'video_source_type': video_source_type,
+            },
+            console=console,
+        )
+        return {
+            'total_crops': 0,
+            'frames_with_crops': 0,
+            'percent_cropped': 0.0,
+            'detection_source_type': source_type,
+            'detection_source_path': source_path,
+            'crop_storage_mode': crop_storage_mode_resolved,
+        }
     # Route to appropriate implementation
     if video_source_type == 'external':
         total_detections = int(_extract_detection_rows(source_group)[0].shape[0])
@@ -3390,17 +4094,29 @@ def crop_detections(
     
     # Determine if we'll use distributed BEFORE building metadata
     use_distributed = (scheduler == "distributed") and HAVE_DISTRIBUTED
+    scheduler_requested = str(scheduler)
+    scheduler_effective = "distributed" if use_distributed else "synchronous"
+    effective_num_workers = (num_workers or os.cpu_count()) if use_distributed else 1
     
     roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))
     chunk_size = config.get('import', {}).get('chunk_size', 32)
 
     console.print(f"ROI size: {roi_sz[0]}×{roi_sz[1]} pixels")
     console.print(f"Chunk size: {chunk_size} frames")
-    console.print(f"Scheduler: {scheduler}, Workers: {num_workers or 'default'}")
+    console.print(
+        f"Scheduler requested: {scheduler_requested}; effective: "
+        f"{scheduler_effective}, workers: {effective_num_workers}"
+    )
 
-    # Create run group
+    num_images = canonical_preflight.total_frames
+    frame_indices = canonical_preflight.frame_indices
+    total_detections = canonical_preflight.row_count
+    full_img_shape = canonical_preflight.frame_shape
+
+    # Create run group only after every canonical source/placement check passes.
     from ..shared.zarr.schema import get_run_group
     crop_parent_before = root.get("crop_runs")
+    selector_snapshot = _snapshot_crop_selector_attrs(crop_parent_before)
     previous_latest = crop_parent_before.attrs.get("latest") if crop_parent_before is not None else None
     previous_latest_materialized = (
         crop_parent_before.attrs.get("latest_materialized") if crop_parent_before is not None else None
@@ -3412,10 +4128,9 @@ def crop_detections(
         console,
         completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     )
-    success = False
-    error_message: Optional[str] = None
     crop_parent = root.get("crop_runs")
     if crop_parent is not None:
+        crop_group.attrs["stage_selector_eligible"] = False
         mark_run_started(crop_group, run_name=run_group_name, stage="crop")
         note_pending_latest(crop_parent, run_group_name)
         _finalize_crop_parent_pointers(
@@ -3428,46 +4143,13 @@ def crop_detections(
             previous_latest_any=previous_latest_any,
         )
 
-    num_images = get_total_frames(root, source_group)
-    if num_images is None:
-        # Fallback to video shape if helper can't determine
-        if 'raw_video/images_ds' in root:
-            num_images = root['raw_video/images_ds'].shape[0]
-        else:
-            raise ValueError("Cannot determine total frames")
-
-    # Get detection info using frame_indices (BEFORE metadata collection)
-    frame_indices, bbox_coords = _extract_detection_rows(source_group)
     source_label = _source_label(source_path, source_group)
-    if crop_storage_mode_resolved == "materialized":
-        _validate_frame_indices_sorted(frame_indices, source_label=source_label)
+    _validate_frame_indices_sorted(frame_indices, source_label=source_label)
     _validate_frame_indices_in_bounds(
         frame_indices,
         total_frames=int(num_images),
         source_label=source_label,
     )
-    total_detections = len(frame_indices)
-    
-    if total_detections == 0:
-        console.print("[yellow]Warning: No detections found. Nothing to crop.[/yellow]")
-        _emit_crop_step_status(
-            root=root,
-            zarr_path=zarr_path,
-            status='missing',
-            run_name=None,
-            method=source_type,
-            coverage_pct=0.0,
-            review_status=None,
-            details={
-                'reason': 'no_detections',
-                'detection_source_type': source_type,
-                'detection_source_path': source_path,
-                'video_source_type': 'zarr',
-            },
-            console=console,
-        )
-        return {'total_crops': 0}
-    
     console.print(f"Total detections to crop: {total_detections:,}")
     console.print(f"Total frames: {num_images:,}")
 
@@ -3501,8 +4183,8 @@ def crop_detections(
         'video_source_path': None,
         'source_video_path': root.attrs.get('source_video_path', 'unknown'),
         'total_frames': num_images,
-        'width': root.attrs.get('width', 0),
-        'height': root.attrs.get('height', 0),
+        'width': full_img_shape[1],
+        'height': full_img_shape[0],
         
         # === Detection Source ===
         'detection_source_type': source_type,
@@ -3516,8 +4198,10 @@ def crop_detections(
         'parameters': crop_params,
         
         # === Dask Configuration ===
-        'scheduler': scheduler,
-        'num_workers': num_workers or os.cpu_count(),
+        'scheduler': scheduler_effective,
+        'scheduler_requested': scheduler_requested,
+        'num_workers': effective_num_workers,
+        'num_workers_requested': num_workers,
         'use_distributed': use_distributed,
         
         # === Git Provenance ===
@@ -3591,8 +4275,10 @@ def crop_detections(
             "method": get_detection_method(source_group),
         },
         scheduler={
-            "dask_scheduler": scheduler,
-            "dask_num_workers": num_workers or os.cpu_count(),
+            "dask_scheduler_requested": scheduler_requested,
+            "dask_scheduler_effective": scheduler_effective,
+            "dask_num_workers_requested": num_workers,
+            "dask_num_workers_effective": effective_num_workers,
             "distributed": use_distributed,
         },
     )
@@ -3609,11 +4295,6 @@ def crop_detections(
             'gpu_driver_version': env_info['gpu'].get('driver_version', 'unknown'),
             'cuda_version': env_info['gpu'].get('cuda_version', 'unknown'),
         })
-
-    # Get video dimensions and scale factor
-    ds_img_shape = root['raw_video/images_ds'].shape[1:]
-    full_img_shape = root['raw_video/images_full'].shape[1:]
-    scale_factor = ds_img_shape[0] / full_img_shape[0]
 
     roi_layout = build_canonical_crop_roi_layout(
         total_rois=total_detections,
@@ -3639,16 +4320,8 @@ def crop_detections(
     if 'roi_shard_len' in crop_group.attrs and not roi_layout.roi_use_sharding:
         del crop_group.attrs['roi_shard_len']
     
-    roi_coordinates_full = crop_group.create_array(
+    crop_group.create_array(
         'roi_coordinates_full',
-        shape=(total_detections, 2),
-        chunks=(min(chunk_size, total_detections), 2),
-        dtype='i4',
-        overwrite=True
-    )
-    
-    roi_coordinates_ds = crop_group.create_array(
-        'roi_coordinates_ds',
         shape=(total_detections, 2),
         chunks=(min(chunk_size, total_detections), 2),
         dtype='i4',
@@ -3666,102 +4339,7 @@ def crop_detections(
         total_detections=total_detections,
         num_frames=num_images
     )
-
-    if crop_storage_mode_resolved == "geometry_only":
-        coords_full, coords_ds = _compute_roi_coordinates(
-            bbox_coords,
-            roi_sz,
-            full_img_shape,
-            scale_factor=scale_factor,
-        )
-        crop_group['roi_coordinates_full'][:] = coords_full
-        if coords_ds is not None:
-            crop_group['roi_coordinates_ds'][:] = coords_ds
-
-        frames_with_crops = int(np.sum(crop_group['frame_counts'][:] > 0))
-        percent_cropped = (frames_with_crops / num_images) * 100 if num_images > 0 else 0
-        duration = time.perf_counter() - start_time
-        summary_stats = {
-            'total_frames': num_images,
-            'frames_with_crops': frames_with_crops,
-            'total_rois_cropped': total_detections,
-            'percent_frames_with_crops': round(percent_cropped, 2),
-            'roi_size': list(roi_sz),
-            'scale_factor': float(scale_factor),
-            'roi_pixels_materialized': False,
-        }
-        crop_group.attrs['summary_statistics'] = summary_stats
-        crop_group.attrs['duration_seconds'] = duration
-
-        completion_text = f"""[green]✓[/green] Geometry-only crop run created
-
-[bold]Performance:[/bold]
-  Time: {duration:.1f}s ({duration/60:.1f} min)
-
-[bold]Output:[/bold]
-  Path: {zarr_path}
-  Detection source: {source_type}
-  Storage mode: {crop_storage_mode_resolved}
-
-[bold]Arrays created:[/bold]
-  - crop_runs/{run_group_name}/roi_coordinates_full: ({total_detections}, 2)
-  - crop_runs/{run_group_name}/roi_coordinates_ds: ({total_detections}, 2)
-  - crop_runs/{run_group_name}/bbox_norm_coords: ({total_detections}, 4)
-  - crop_runs/{run_group_name}/frame_indices: ({total_detections},)
-  - crop_runs/{run_group_name}/frame_counts: ({num_images},)
-  - crop_runs/{run_group_name}/detection_indices: ({total_detections},)"""
-        if 'detection_source' in crop_group:
-            completion_text += f"\n  - crop_runs/{run_group_name}/detection_source: ({total_detections},)"
-
-        console.print(Panel(
-            Align.center(completion_text),
-            title="[bold green]Cropping Complete[/bold green]",
-            border_style="green"
-        ))
-
-        success = True
-        crop_group.attrs['status'] = 'completed'
-        crop_group.attrs['completed_at_utc'] = datetime.now(timezone.utc).isoformat()
-        crop_group.attrs.pop('error_message', None)
-        crop_group.attrs.pop('failed_at_utc', None)
-        if crop_parent is not None:
-            _finalize_crop_parent_pointers(
-                crop_parent,
-                run_name=run_group_name,
-                crop_storage_mode=crop_storage_mode_resolved,
-                success=True,
-                previous_latest=previous_latest,
-                previous_latest_materialized=previous_latest_materialized,
-                previous_latest_any=previous_latest_any,
-            )
-        _emit_crop_step_status(
-            root=root,
-            zarr_path=zarr_path,
-            status='ok',
-            run_name=run_group_name,
-            method=source_type,
-            coverage_pct=percent_cropped,
-            review_status=(crop_group.attrs.get('crop_review_status') if isinstance(crop_group.attrs.get('crop_review_status'), dict) else None),
-            details={
-                'reason': 'present',
-                'run_state': str(crop_group.attrs.get('status')).strip().lower() if crop_group.attrs.get('status') is not None else None,
-                'detection_source_type': source_type,
-                'detection_source_path': source_path,
-                'video_source_type': 'zarr',
-                'crop_storage_mode': crop_storage_mode_resolved,
-            },
-            console=console,
-        )
-        return {
-            'total_crops': total_detections,
-            'frames_with_crops': frames_with_crops,
-            'percent_cropped': percent_cropped,
-            'duration_seconds': duration,
-            'detection_source_type': source_type,
-            'detection_source_path': source_path,
-            'run_name': run_group_name,
-            'crop_storage_mode': crop_storage_mode_resolved,
-        }
+    _write_canonical_crop_coordinate_arrays(crop_group, canonical_preflight)
 
     # Store path to this crop group in root for workers to find
     root.attrs['current_crop_group_path'] = crop_group.path
@@ -3791,10 +4369,18 @@ def crop_detections(
     frames_with_crops = int(np.sum(n_detections_per_frame > 0))
 
     if use_distributed:
-        det_chunk_len = None
-        if getattr(roi_images, "chunks", None):
-            det_chunk_len = int(roi_images.chunks[0])
-        if det_chunk_len:
+        worker_arrays = {
+            "roi_images": roi_images,
+            "roi_coordinates_full": crop_group["roi_coordinates_full"],
+        }
+        for array_name, array in worker_arrays.items():
+            det_chunk_len = None
+            if getattr(array, "chunks", None):
+                det_chunk_len = int(array.chunks[0])
+            if not det_chunk_len:
+                raise ValueError(
+                    f"Distributed cropping cannot prove physical chunks for {array_name}."
+                )
             boundaries = set()
             for _, (start_det, end_det) in chunks:
                 boundaries.add(start_det)
@@ -3807,16 +4393,18 @@ def crop_detections(
                 sample = ", ".join(str(b) for b in sorted(unsafe)[:8])
                 raise ValueError(
                     "Distributed cropping would write to overlapping Zarr chunks. "
-                    f"Detection boundaries must align to chunk size {det_chunk_len}, "
+                    f"{array_name} detection boundaries must align to chunk size "
+                    f"{det_chunk_len}, "
                     f"but found misaligned boundaries at: {sample}. "
-                    "Use --scheduler single-threaded (or processes) to avoid parallel writes, "
+                    "Use a non-distributed scheduler (local writes execute synchronously) "
+                    "to avoid parallel writes, "
                     "or adjust crop chunking so detection boundaries align."
                 )
 
     # Create delayed tasks
     delayed_tasks = [
         crop_and_store_chunk_delayed(
-            zarr_path, frame_slice, out_slice, roi_sz, scale_factor, source_path
+            zarr_path, frame_slice, out_slice, roi_sz, None, source_path
         )
         for frame_slice, out_slice in chunks
     ]
@@ -3836,23 +4424,32 @@ def crop_detections(
         # Distributed execution with Rich progress bar
         client = Client()
         console.print(f"[green]Dask distributed dashboard:[/green] {client.dashboard_link}")
-        
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeRemainingColumn(),
-            console=console
-        ) as progress:
-            task = progress.add_task("[cyan]Cropping chunks (distributed)...", total=len(delayed_tasks))
-            
-            futures = client.compute(delayed_tasks)
-            for future in as_completed(futures):
-                _ = future.result()
-                progress.update(task, advance=1)
-        
-        client.close()
+        futures: List[Any] = []
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeRemainingColumn(),
+                console=console
+            ) as progress:
+                task = progress.add_task("[cyan]Cropping chunks (distributed)...", total=len(delayed_tasks))
+
+                futures = list(client.compute(delayed_tasks))
+                for future in as_completed(futures):
+                    _ = future.result()
+                    progress.update(task, advance=1)
+        except BaseException as exc:
+            try:
+                _cancel_wait_close_distributed_crop(client, futures)
+            except Exception as cleanup_exc:
+                raise OrdinaryCropCoordinateError(
+                    "Distributed crop failed and worker cleanup was incomplete."
+                ) from cleanup_exc
+            raise exc
+        else:
+            client.close()
     
     else:
         # Local execution with Rich progress bar
@@ -3864,10 +4461,16 @@ def crop_detections(
             TimeRemainingColumn(),
             console=console
         ) as progress:
-            task = progress.add_task(f"[cyan]Cropping chunks ({scheduler})...", total=len(delayed_tasks))
+            task = progress.add_task(
+                "[cyan]Cropping chunks (synchronous commit-safe)...",
+                total=len(delayed_tasks),
+            )
             
             for d in delayed_tasks:
-                _ = d.compute()
+                # Keep every local writer in the caller's stack so an interrupt
+                # cannot enter rollback while a thread/process still owns Zarr
+                # chunks. Distributed writers use explicit cancel/wait/close.
+                _ = d.compute(scheduler="synchronous")
                 progress.update(task, advance=1)
 
     # Summary stats and attrs
@@ -3878,7 +4481,7 @@ def crop_detections(
         'total_rois_cropped': total_detections,
         'percent_frames_with_crops': round(percent_cropped, 2),
         'roi_size': list(roi_sz),
-        'scale_factor': float(scale_factor)
+        'roi_pixels_materialized': True,
     }
     crop_group.attrs['summary_statistics'] = summary_stats
     duration = time.perf_counter() - start_time
@@ -3912,41 +4515,43 @@ def crop_detections(
 [bold]Arrays created:[/bold]
   - crop_runs/{run_group_name}/roi_images: ({total_detections}, {roi_sz[0]}, {roi_sz[1]})
   - crop_runs/{run_group_name}/roi_coordinates_full: ({total_detections}, 2)
-  - crop_runs/{run_group_name}/roi_coordinates_ds: ({total_detections}, 2)
+  - crop_runs/{run_group_name}/source_crop_xywh: ({total_detections}, 4)
   - crop_runs/{run_group_name}/bbox_norm_coords: ({total_detections}, 4)
+  - crop_runs/{run_group_name}/bbox_img_xyxy: ({total_detections}, 4)
+  - crop_runs/{run_group_name}/bbox_roi_xyxy: ({total_detections}, 4)
   - crop_runs/{run_group_name}/frame_indices: ({total_detections},)
   - crop_runs/{run_group_name}/frame_counts: ({num_images},)"""
     
     if 'detection_source' in crop_group:
         completion_text += f"\n  - crop_runs/{run_group_name}/detection_source: ({total_detections},)"
 
+    fresh_preflight = _preflight_ordinary_crop_coordinates(
+        root,
+        zarr_path=zarr_path,
+        source_path=source_path,
+        source_group=root[source_path],
+        video_source_type="zarr",
+        video_path=None,
+        roi_size=roi_sz,
+    )
+    if crop_parent is None:
+        raise OrdinaryCropCoordinateError(
+            "Crop parent disappeared before canonical publication."
+        )
+    _publish_ordinary_crop_coordinate_contract(
+        root,
+        crop_group,
+        crop_parent=crop_parent,
+        run_name=run_group_name,
+        preflight=fresh_preflight,
+        run_provenance=effective_run_provenance,
+        selector_snapshot=selector_snapshot,
+    )
     console.print(Panel(
         Align.center(completion_text),
         title="[bold green]Cropping Complete[/bold green]",
         border_style="green"
     ))
-
-    success = True
-    crop_group.attrs['status'] = 'completed'
-    crop_group.attrs['completed_at_utc'] = datetime.now(timezone.utc).isoformat()
-    crop_group.attrs.pop('error_message', None)
-    crop_group.attrs.pop('failed_at_utc', None)
-    if crop_parent is not None:
-        mark_run_complete(
-            crop_group,
-            parent_group=crop_parent,
-            run_name=run_group_name,
-            run_provenance=effective_run_provenance,
-        )
-        _finalize_crop_parent_pointers(
-            crop_parent,
-            run_name=run_group_name,
-            crop_storage_mode=crop_storage_mode_resolved,
-            success=True,
-            previous_latest=previous_latest,
-            previous_latest_materialized=previous_latest_materialized,
-            previous_latest_any=previous_latest_any,
-        )
     _emit_crop_step_status(
         root=root,
         zarr_path=zarr_path,
@@ -3975,6 +4580,133 @@ def crop_detections(
         'run_name': run_group_name,
         'crop_storage_mode': crop_storage_mode_resolved,
     }
+
+
+def crop_detections(
+    zarr_path: str,
+    config: Dict[str, Any],
+    source_type: str = 'detect',
+    source_path: Optional[str] = None,
+    selection_policy: Optional[str] = None,
+    scheduler: str = None,
+    num_workers: Optional[int] = None,
+    console: Optional[Console] = None,
+    acceleration: Optional[str] = None,
+    external_write_backend: Optional[str] = None,
+    external_roi_storage: Optional[str] = None,
+    external_use_sharding: Optional[bool] = None,
+    external_roi_chunk_size: Optional[int] = None,
+    external_roi_shard_size: Optional[int] = None,
+    external_gpu_chunk_frames: Optional[int] = None,
+    external_require_kvikio: Optional[bool] = None,
+    crop_storage_mode: Optional[str] = None,
+    use_gpu_allowed: bool = True,
+    force_cpu: bool = False,
+    verbose: bool = False,
+    cli_provenance: Optional[Mapping[str, Any]] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run ordinary cropping with exact outer rollback on every failed write."""
+
+    transaction_root = zarr.open_group(zarr_path, mode="a", use_consolidated=False)
+    crop_parent_before = transaction_root.get("crop_runs")
+    selector_snapshot = _snapshot_crop_selector_attrs(crop_parent_before)
+    existing_runs = (
+        set(str(name) for name in crop_parent_before.keys())
+        if crop_parent_before is not None
+        else set()
+    )
+    current_path_present = "current_crop_group_path" in transaction_root.attrs
+    current_path_value = copy.deepcopy(
+        transaction_root.attrs.get("current_crop_group_path")
+    )
+
+    try:
+        result = _crop_detections_impl(
+            zarr_path=zarr_path,
+            config=config,
+            source_type=source_type,
+            source_path=source_path,
+            selection_policy=selection_policy,
+            scheduler=scheduler,
+            num_workers=num_workers,
+            console=console,
+            acceleration=acceleration,
+            external_write_backend=external_write_backend,
+            external_roi_storage=external_roi_storage,
+            external_use_sharding=external_use_sharding,
+            external_roi_chunk_size=external_roi_chunk_size,
+            external_roi_shard_size=external_roi_shard_size,
+            external_gpu_chunk_frames=external_gpu_chunk_frames,
+            external_require_kvikio=external_require_kvikio,
+            crop_storage_mode=crop_storage_mode,
+            use_gpu_allowed=use_gpu_allowed,
+            force_cpu=force_cpu,
+            verbose=verbose,
+            cli_provenance=cli_provenance,
+            run_provenance=run_provenance,
+        )
+    except BaseException as exc:
+        rollback_failures: List[str] = []
+        rollback_root = zarr.open_group(
+            zarr_path,
+            mode="a",
+            use_consolidated=False,
+        )
+        rollback_parent = rollback_root.get("crop_runs")
+        if rollback_parent is not None:
+            new_runs = set(str(name) for name in rollback_parent.keys()) - existing_runs
+            for failed_name in sorted(new_runs):
+                failed_group = rollback_parent[failed_name]
+                try:
+                    failed_group.attrs.update(
+                        {
+                            "status": "failed",
+                            "stage_selector_eligible": False,
+                            "failed_at_utc": datetime.now(timezone.utc).isoformat(),
+                            "error_message": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    failed_group.attrs.pop("completed_at_utc", None)
+                    failed_group.attrs.pop(RUN_COMPLETED_AT_ATTR, None)
+                    mark_run_failed(
+                        failed_group,
+                        parent_group=None,
+                        run_name=failed_name,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception as rollback_exc:
+                    rollback_failures.append(
+                        f"failed run {failed_name!r}: {rollback_exc}"
+                    )
+            try:
+                _restore_crop_selector_attrs(rollback_parent, selector_snapshot)
+            except Exception as rollback_exc:
+                rollback_failures.append(f"selectors: {rollback_exc}")
+        try:
+            if current_path_present:
+                rollback_root.attrs["current_crop_group_path"] = copy.deepcopy(
+                    current_path_value
+                )
+            elif "current_crop_group_path" in rollback_root.attrs:
+                del rollback_root.attrs["current_crop_group_path"]
+        except Exception as rollback_exc:
+            rollback_failures.append(f"worker target attr: {rollback_exc}")
+        if rollback_failures:
+            raise OrdinaryCropCoordinateError(
+                "Ordinary crop failed and outer rollback was incomplete: "
+                + repr(rollback_failures)
+            ) from exc
+        raise
+    else:
+        final_root = zarr.open_group(zarr_path, mode="a", use_consolidated=False)
+        if current_path_present:
+            final_root.attrs["current_crop_group_path"] = copy.deepcopy(
+                current_path_value
+            )
+        elif "current_crop_group_path" in final_root.attrs:
+            del final_root.attrs["current_crop_group_path"]
+        return result
 
 
 def _roi_cache_worker_main(argv: Optional[List[str]] = None) -> int:
@@ -4086,18 +4818,16 @@ def main():
         default=None,
         choices=['auto', 'refined', 'detect', 'manual', 'filtered', 'interpolated'],
         help=(
-            "Detection source to use. 'auto' prefers the canonical current "
-            "refined surface and falls back to raw detect; 'refined' requires "
-            "the canonical curated refined surface. "
-            "'manual'/'filtered'/'interpolated' are legacy sparse "
-            "compatibility modes for older archives."
+            "Detection source to use (default: detect). Future ordinary crop "
+            "writes require an exact detect_runs/<run> source; refined and "
+            "legacy sparse sources fail closed until they publish canonical "
+            "row-selection lineage."
         ),
     )
     parser.add_argument("--source-path", type=str, default=None,
                        help=(
-                           "Explicit detection source path (e.g. "
-                           "detect_runs/<run> or the canonical refined path "
-                           "refined_detect_runs/<run>/instances)"
+                           "Explicit canonical detection source path: "
+                           "detect_runs/<run>"
                        ))
     parser.add_argument(
         "--selection-policy",
@@ -4119,7 +4849,10 @@ def main():
         type=str,
         default=None,
         choices=["materialized", "geometry_only"],
-        help="Crop persistence mode for the new run.",
+        help=(
+            "Crop persistence mode. Future ordinary crop writes require "
+            "materialized; geometry_only fails closed."
+        ),
     )
     parser.add_argument(
         "--external-write-backend",
@@ -4236,6 +4969,9 @@ def main():
             force_cpu=args.force_cpu,
             verbose=args.verbose
         )
+        if int(results.get('total_crops', 0) or 0) <= 0 or not results.get('run_name'):
+            console.print("[red]Cropping produced no committed canonical run.[/red]")
+            return 1
         console.print(f"\n[green]Cropping complete![/green]")
         console.print(f"Total ROIs cropped: {results['total_crops']}")
         console.print(f"Detection source: {results['detection_source_type']}")

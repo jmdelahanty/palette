@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 
 import numpy as np
 import pytest
 
+from fisheye.shared import observation_coordinate_publication as observation_publication
 from fisheye.shared.coordinate_descriptor import COORDINATE_DESCRIPTOR_ATTR
 from fisheye.shared.coordinate_reference import bind_array_reference_extent
 from fisheye.shared.directed_transform_chain import (
@@ -16,6 +18,7 @@ from fisheye.shared.observation_coordinate_publication import (
     DETECTION_BBOX_PROJECTION_ATTR,
     ObservationCoordinatePublicationError,
     build_bound_detection_frame_evidence,
+    capture_observation_coordinate_publication_checkpoint,
     derive_detection_source_camera_geometry,
     load_crop_observation_geometry,
     load_crop_roi_geometry,
@@ -24,6 +27,7 @@ from fisheye.shared.observation_coordinate_publication import (
     publish_crop_roi_geometry,
     publish_detection_observation_geometry,
     require_bound_source_camera_position_surface,
+    restore_observation_coordinate_publication_checkpoint,
 )
 from fisheye.shared.pixel_frame_authority import (
     normalized_to_pixel_matrix,
@@ -136,6 +140,121 @@ def _surface(world, *, frames=(0, 1), alter_center: bool = False):
         bbox_img,
         centers,
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "include_contract"),
+    [
+        ("running", True),
+        ("failed", True),
+        (None, True),
+        (None, False),
+    ],
+)
+def test_persisted_observation_rowset_gate_requires_explicit_complete_lifecycle(
+    status: str | None,
+    include_contract: bool,
+) -> None:
+    rowset = FakeGroup(path="detect_runs/d1", archive_token=object())
+    rowset.attrs["coordinate_contract"] = "canonical_v2"
+    if include_contract:
+        rowset.attrs["palette_run_completion_contract"] = (
+            "palette.zarr_run_completion.v1"
+        )
+    if status is not None:
+        rowset.attrs["palette_run_completion_status"] = status
+
+    with pytest.raises(
+        ObservationCoordinatePublicationError,
+        match="completion|complete",
+    ):
+        observation_publication._require_complete_canonical_observation_rowset(
+            rowset,
+            run_family="detect_runs",
+            label="Detection rowset",
+        )
+
+
+def test_persisted_observation_rowset_gate_accepts_only_normal_complete_run() -> None:
+    rowset = FakeGroup(path="crop_runs/c1", archive_token=object())
+    rowset.attrs.update(
+        {
+            "coordinate_contract": "canonical_v2",
+            "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+
+    observation_publication._require_complete_canonical_observation_rowset(
+        rowset,
+        run_family="crop_runs",
+        label="Crop rowset",
+    )
+    for value in (False, None):
+        if value is None:
+            del rowset.attrs["stage_selector_eligible"]
+        else:
+            rowset.attrs["stage_selector_eligible"] = value
+        with pytest.raises(
+            ObservationCoordinatePublicationError,
+            match="not explicitly eligible",
+        ):
+            observation_publication._require_complete_canonical_observation_rowset(
+                rowset,
+                run_family="crop_runs",
+                label="Crop rowset",
+            )
+
+
+def test_persisted_observation_rowset_gate_supports_explicit_staged_validation() -> None:
+    rowset = FakeGroup(path="crop_runs/c1", archive_token=object())
+    rowset.attrs.update(
+        {
+            "coordinate_contract": "canonical_v2",
+            "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        }
+    )
+
+    observation_publication._require_complete_canonical_observation_rowset(
+        rowset,
+        run_family="crop_runs",
+        label="Crop rowset",
+        require_selector_eligible=False,
+    )
+    rowset.attrs["stage_selector_eligible"] = True
+    with pytest.raises(
+        ObservationCoordinatePublicationError,
+        match="selector-ineligible",
+    ):
+        observation_publication._require_complete_canonical_observation_rowset(
+            rowset,
+            run_family="crop_runs",
+            label="Crop rowset",
+            require_selector_eligible=False,
+        )
+
+
+def test_coordinate_publication_checkpoint_restores_exact_attrs() -> None:
+    node = FakeGroup(path="detect_runs/d1", archive_token=object())
+    node.attrs.update({"keep": {"nested": [1, 2]}, "status": "running"})
+    checkpoint = capture_observation_coordinate_publication_checkpoint(node)
+    node.attrs.clear()
+    node.attrs.update(
+        {
+            "coordinate_contract": "canonical_v2",
+            "coordinate_descriptor": {"partial": True},
+        }
+    )
+
+    restore_observation_coordinate_publication_checkpoint(
+        checkpoint,
+        cause=RuntimeError("completion failed"),
+    )
+
+    assert node.attrs == {"keep": {"nested": [1, 2]}, "status": "running"}
 
 
 def test_detection_geometry_publishes_exact_identity_time_and_v2_descriptors() -> None:
@@ -264,6 +383,48 @@ def test_detection_geometry_rolls_back_identity_when_temporal_mapping_is_invalid
     assert bbox_norm.attrs == {}
     assert bbox_img.attrs == {}
     assert centers.attrs == {}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        KeyboardInterrupt("injected coordinate publication interrupt"),
+        SystemExit("injected coordinate publication exit"),
+    ],
+    ids=["keyboard_interrupt", "system_exit"],
+)
+def test_detection_geometry_publication_rolls_back_baseexception(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    values = _surface(world)
+    evidence, rowset, key, source_frames, bbox_norm, bbox_img, centers = values
+    nodes = (rowset, key, source_frames, bbox_norm, bbox_img, centers)
+    snapshots = [dict(node.attrs) for node in nodes]
+
+    def interrupt_temporal(*_args, **_kwargs):
+        source_frames.attrs["source_row_temporal_authority"] = {"partial": True}
+        raise failure
+
+    monkeypatch.setattr(
+        observation_publication,
+        "stamp_source_row_temporal_authority",
+        interrupt_temporal,
+    )
+
+    with pytest.raises(type(failure), match="injected coordinate publication"):
+        publish_detection_observation_geometry(
+            rowset,
+            key,
+            source_frames,
+            bbox_norm,
+            bbox_img,
+            centers,
+            frame_evidence=evidence,
+        )
+
+    assert [dict(node.attrs) for node in nodes] == snapshots
 
 
 def _published_detection(world):
@@ -446,6 +607,68 @@ def test_crop_geometry_copies_exact_instance_key_selection_and_roi_lineage() -> 
     assert loaded_roi.derivation.record_sha256 == roi.derivation.record_sha256
 
 
+def test_crop_top_left_compatibility_surface_is_descriptor_bound_and_drift_checked() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    source = _published_detection(world)
+    crop = publish_crop_observation_geometry(
+        *_crop_copy(world, source),
+        source_geometry=source,
+    )
+    placements, bbox_roi, ownership, roi_frame, chain = _crop_roi(world, crop)
+    top_left = FakeArray(
+        np.asarray(placements[:])[:, :2].astype(np.int32),
+        path=f"{crop._rowset_node.path}/roi_coordinates_full",
+        archive_token=world["archive_token"],
+    )
+
+    published = publish_crop_roi_geometry(
+        placements,
+        bbox_roi,
+        crop_geometry=crop,
+        crop_placement_ownership=ownership,
+        roi_frame=roi_frame,
+        roi_to_source_camera=chain,
+        roi_top_left_node=top_left,
+    )
+
+    assert published.roi_top_left_xy is not None
+    assert published.top_left_derivation is not None
+    descriptor = published.roi_top_left_xy.descriptor
+    assert descriptor.profile_id == "source_camera_image_px.top_left_y_down.v1"
+    assert descriptor.geometry_type == "points_xy"
+    assert descriptor.source_camera_overlay.status == "direct"
+    assert descriptor.row_identity is not None
+    loaded = load_crop_roi_geometry(
+        placements,
+        bbox_roi,
+        crop_geometry=crop,
+        crop_placement_ownership=ownership,
+        roi_frame=roi_frame,
+        roi_to_source_camera=chain,
+        roi_top_left_node=top_left,
+    )
+    assert loaded.top_left_derivation is not None
+    assert (
+        loaded.top_left_derivation.record_sha256
+        == published.top_left_derivation.record_sha256
+    )
+
+    top_left.data[0, 0] += 1
+    with pytest.raises(
+        ObservationCoordinatePublicationError,
+        match="exact source-camera top-left",
+    ):
+        load_crop_roi_geometry(
+            placements,
+            bbox_roi,
+            crop_geometry=crop,
+            crop_placement_ownership=ownership,
+            roi_frame=roi_frame,
+            roi_to_source_camera=chain,
+            roi_top_left_node=top_left,
+        )
+
+
 def test_crop_geometry_rejects_identity_mismatch_before_publication() -> None:
     world = _world(convention="continuous", archive_token=object())
     source = _published_detection(world)
@@ -578,3 +801,21 @@ def test_incremental_crop_preflight_uses_exact_source_geometry_and_placement() -
             roi_coordinates_full=np.asarray([[-1, 30], [65, 10]], dtype=np.int32),
             source_geometry=source,
         )
+
+
+def test_public_persisted_crop_loaders_cannot_bypass_selector_eligibility() -> None:
+    for loader_name in (
+        "load_persisted_crop_observation_geometry",
+        "load_persisted_ordinary_crop_observation_geometry",
+    ):
+        signature = inspect.signature(getattr(observation_publication, loader_name))
+        assert "require_selector_eligible" not in signature.parameters
+
+    for loader_name in (
+        "_load_persisted_crop_observation_geometry",
+        "_load_persisted_ordinary_crop_observation_geometry",
+    ):
+        signature = inspect.signature(getattr(observation_publication, loader_name))
+        parameter = signature.parameters["require_selector_eligible"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is True

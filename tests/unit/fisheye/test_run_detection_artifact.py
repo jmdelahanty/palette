@@ -7,14 +7,21 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from fisheye.utils import run_detection_artifact as mod
 
 
-def _write_group(path: Path) -> None:
+def _write_group(path: Path, *, attributes: dict[str, object] | None = None) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "zarr.json").write_text(
-        json.dumps({"zarr_format": 3, "node_type": "group", "attributes": {}}),
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": attributes or {},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -54,6 +61,33 @@ def test_strict_json_report_rejects_non_finite_json(tmp_path: Path) -> None:
     assert report["bad_files"][0]["path"] == "bad/zarr.json"
 
 
+def test_artifact_reports_reject_canonical_instance_identity(tmp_path: Path) -> None:
+    run = tmp_path / "run_group"
+    _write_group(
+        run,
+        attributes={
+            "coordinate_contract_mode": "artifact_unbound",
+            "coordinate_contract": mod.UNBOUND_DETECTION_ARTIFACT_COORDINATE_CONTRACT,
+            "stage_selector_eligible": False,
+            "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+            "palette_run_completion_status": "complete",
+            "palette_run_stage": "detection_artifact",
+            "instance_key_recording_identity": "forbidden",
+        },
+    )
+    for name in mod.REQUIRED_DETECT_ARRAYS:
+        _write_array(run / name)
+    _write_array(run / "instance_key")
+
+    arrays = mod.required_arrays_report(run)
+    metadata = mod.artifact_run_metadata_report(run)
+
+    assert arrays["status"] == "fail"
+    assert arrays["forbidden_arrays"] == ["instance_key"]
+    assert metadata["status"] == "fail"
+    assert "instance_key_recording_identity" in metadata["errors"][0]
+
+
 def test_build_detection_artifact_packages_detect_run_group(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -81,16 +115,24 @@ def test_build_detection_artifact_packages_detect_run_group(
         detect_kwargs.update(kwargs)
         print("model summary should not contaminate summary stdout")
         scratch_zarr = Path(kwargs["output_zarr"])
-        run_group = scratch_zarr / "detect_runs" / "detect_fake"
-        _write_group(run_group)
+        run_group = scratch_zarr / mod.RUN_FAMILY / "detect_fake"
+        _write_group(
+            run_group,
+            attributes={
+                "coordinate_contract_mode": "artifact_unbound",
+                "coordinate_contract": mod.UNBOUND_DETECTION_ARTIFACT_COORDINATE_CONTRACT,
+                "stage_selector_eligible": False,
+                "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+                "palette_run_completion_status": "complete",
+                "palette_run_stage": "detection_artifact",
+            },
+        )
         for name in mod.REQUIRED_DETECT_ARRAYS:
             _write_array(run_group / name)
         zarr_payload = json.loads((run_group / "zarr.json").read_text(encoding="utf-8"))
-        zarr_payload["attributes"] = {
-            "timing_summary": {
+        zarr_payload["attributes"]["timing_summary"] = {
                 "decode_backend_effective": kwargs["decode_backend"],
                 "frames_processed": 4,
-            }
         }
         (run_group / "zarr.json").write_text(json.dumps(zarr_payload), encoding="utf-8")
         return "detect_fake"
@@ -148,10 +190,10 @@ def test_build_detection_artifact_packages_detect_run_group(
     assert (artifact_dir / "run_group" / "frame_indices" / "zarr.json").exists()
     manifest = json.loads((artifact_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
     assert manifest["artifact_schema"] == mod.ARTIFACT_SCHEMA
-    assert manifest["target_group_path"] == "detect_runs/detect_fake"
+    assert manifest["target_group_path"] == "detection_artifact_runs/detect_fake"
     assert (
         manifest["intended_target_group_path"]
-        == "clips/clip_000003/cameras/2010093/detect_runs/detect_fake"
+        == "clips/clip_000003/cameras/2010093/detection_artifact_runs/detect_fake"
     )
     assert manifest["artifact_scope"] == "clip_camera"
     assert manifest["clip_context"] == {
@@ -164,8 +206,12 @@ def test_build_detection_artifact_packages_detect_run_group(
         "workflow_id": "sleepyfish_detect_smoke",
     }
     assert manifest["latest_policy"] == "do_not_set_latest"
+    assert manifest["selector_policy"] == "never_select_or_promote_v1"
+    assert manifest["stage_selector_eligible"] is False
+    assert manifest["run_family"] == "detection_artifact_runs"
     assert manifest["validation"] == {
         "canonical_write": "not_performed",
+        "artifact_run_metadata": "pass",
         "required_arrays": "pass",
         "strict_json": "pass",
     }
@@ -181,15 +227,14 @@ def test_build_detection_artifact_packages_detect_run_group(
     assert summary["artifact_scope"] == "clip_camera"
     assert (
         summary["intended_target_group_path"]
-        == "clips/clip_000003/cameras/2010093/detect_runs/detect_fake"
+        == "clips/clip_000003/cameras/2010093/detection_artifact_runs/detect_fake"
     )
     assert summary["artifact_timing"]["tarball_seconds_total"] >= 0.0
-    assert detect_kwargs["instance_key_recording_identity"] == "recording_analysis"
-    np.testing.assert_array_equal(
-        detect_kwargs["instance_key_frame_indices"],
-        np.arange(100, 104, dtype=np.int64),
-    )
-    assert detect_kwargs["instance_key_frame_mapping_source"] == str(frame_index.resolve())
+    assert "instance_key_recording_identity" not in detect_kwargs
+    assert "instance_key_frame_indices" not in detect_kwargs
+    assert "instance_key_frame_mapping_source" not in detect_kwargs
+    assert detect_kwargs["coordinate_contract_mode"] == "artifact_unbound"
+    assert detect_kwargs["output_run_family"] == "detection_artifact_runs"
     captured = capsys.readouterr()
     assert "model summary should not contaminate summary stdout" not in captured.out
     assert "model summary should not contaminate summary stdout" in captured.err
@@ -212,8 +257,18 @@ def test_build_detection_artifact_can_request_deterministic_run_name(
     def fake_detect_yolo(**kwargs):
         run_name = kwargs["run_name"]
         scratch_zarr = Path(kwargs["output_zarr"])
-        run_group = scratch_zarr / "detect_runs" / run_name
-        _write_group(run_group)
+        run_group = scratch_zarr / mod.RUN_FAMILY / run_name
+        _write_group(
+            run_group,
+            attributes={
+                "coordinate_contract_mode": "artifact_unbound",
+                "coordinate_contract": mod.UNBOUND_DETECTION_ARTIFACT_COORDINATE_CONTRACT,
+                "stage_selector_eligible": False,
+                "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+                "palette_run_completion_status": "complete",
+                "palette_run_stage": "detection_artifact",
+            },
+        )
         for name in mod.REQUIRED_DETECT_ARRAYS:
             _write_array(run_group / name)
         return run_name
@@ -229,4 +284,21 @@ def test_build_detection_artifact_can_request_deterministic_run_name(
     )
 
     assert summary["run_name"] == "detect_planned_clip_000000_cam2010093"
-    assert summary["target_group_path"] == "detect_runs/detect_planned_clip_000000_cam2010093"
+    assert summary["target_group_path"] == (
+        "detection_artifact_runs/detect_planned_clip_000000_cam2010093"
+    )
+
+
+def test_build_detection_artifact_rejects_selector_promotion(tmp_path: Path) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+
+    with pytest.raises(ValueError, match="promotion policies are forbidden"):
+        mod.build_detection_artifact(
+            video_path=video,
+            target_zarr=target_zarr,
+            artifact_dir=tmp_path / "artifact",
+            latest_policy="set_latest_explicit",
+        )
