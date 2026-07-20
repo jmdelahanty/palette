@@ -165,3 +165,59 @@ def test_submit_analysis_workflow_labels_unspecified_queue_as_cluster_default(
         line for line in result.stdout.splitlines() if line.startswith("bsub_command=")
     )
     assert " -q " not in bsub_line
+
+
+def test_submit_analysis_workflow_accepts_git_worktree_checkout(
+    tmp_path: Path,
+) -> None:
+    source_repo = tmp_path / "palette-source"
+    _build_clean_palette_checkout(source_repo)
+    palette_worktree = tmp_path / "palette-worktree"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "worktree",
+            "add",
+            "--detach",
+            str(palette_worktree),
+            "HEAD",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (palette_worktree / ".git").is_file()
+
+    zarr_path = tmp_path / "recording" / "zarr" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    (zarr_path / "zarr.json").write_text("{}\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--zarr",
+            str(zarr_path),
+            "--execution-id",
+            "worktree_checkout_test",
+            "--target",
+            "track_kinematics",
+            "--palette-repo",
+            str(palette_worktree),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "mode=render-only" in result.stdout
+    job_script = (
+        tmp_path
+        / "logs"
+        / "worktree_checkout_test_analysis.zarr_"
+        / "run_analysis_workflow.sh"
+    ).read_text(encoding="utf-8")
+    assert f"PALETTE_REPO={palette_worktree}" in job_script
