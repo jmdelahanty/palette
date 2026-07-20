@@ -16,8 +16,13 @@ from fisheye.analysis.detect_bouts_multi_level import (
     _json_safe_attr_value,
     SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     detect_and_save_bouts,
+    main,
     normalize_speed_level,
 )
+
+
+def test_main_accepts_explicit_argv() -> None:
+    assert main(["/definitely/missing/recording_analysis.zarr"]) == 1
 
 
 def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:

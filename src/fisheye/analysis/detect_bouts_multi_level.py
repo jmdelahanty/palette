@@ -66,7 +66,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import signal
@@ -3546,7 +3546,7 @@ def detect_and_save_bouts(
     return run_name
 
 
-def main():
+def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Detect swim bouts from speed processing levels",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3810,7 +3810,7 @@ def main():
         ),
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     zarr_path = args.zarr_path
     if not zarr_path.exists():
