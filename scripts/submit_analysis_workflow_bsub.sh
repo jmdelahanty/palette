@@ -93,7 +93,7 @@ done
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be a positive integer"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be a positive integer"
 [[ -f "$ZARR_PATH/zarr.json" ]] || fail "analysis Zarr metadata not found: $ZARR_PATH"
-[[ -d "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
+[[ -e "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable"
 [[ -f "$PALETTE_REPO/src/fisheye/utils/execute_analysis_workflow.py" ]] || \
   fail "Palette checkout does not contain the analysis-workflow executor"
