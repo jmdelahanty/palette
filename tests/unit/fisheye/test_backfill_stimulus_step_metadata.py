@@ -163,7 +163,21 @@ def test_backfill_stimulus_step_metadata_writes_steps_and_coordinates(tmp_path: 
     concentric = step1["concentric_grating"]
     assert concentric.attrs["radial_polarity_authored"] == "contracting"
     assert concentric.attrs["stimulus_role"] == "centering_utility"
-    assert concentric.attrs["center_x_px"] == 172.0
+    assert concentric.attrs["coordinate_geometry_status"] == (
+        "not_materialized_missing_exact_protocol_coordinate_contract"
+    )
+    for attr_name in (
+        "center_x_px",
+        "center_y_px",
+        "center_coordinate_frame",
+        "center_source",
+        "center_x_mm",
+        "center_y_mm",
+        "center_mm_source",
+        "center_mm_coordinate_frame",
+        "pixels_per_mm_projector",
+    ):
+        assert attr_name not in concentric.attrs
     assert concentric.attrs["target_radius_min_mm"] == 8.0
     assert run["stimulus_coordinates"]["arena_1"]["custom_coordinates"].attrs["texture_center_y"] == 173.0
 

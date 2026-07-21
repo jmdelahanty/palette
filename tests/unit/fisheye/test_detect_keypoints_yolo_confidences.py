@@ -337,6 +337,13 @@ def test_failure_boundary_does_not_publish_failed_until_writer_is_quiescent(
     with pytest.raises(RuntimeError, match="rollback was incomplete"):
         boundary.fail(ValueError("synthetic inference failure"))
 
+    root = zarr.open_group(
+        store=str(tmp_path / "nonquiescent.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    parent = root["keypoints_runs"]
+    run = parent["attempt"]
     assert run.attrs["palette_run_completion_status"] == "running"
     assert "palette_run_failed_at_utc" not in run.attrs
     assert parent.attrs["latest"] == "prior"
@@ -393,6 +400,12 @@ def test_keypoint_attempt_keyboard_interrupt_quiesces_and_restores_selectors(
     with pytest.raises(KeyboardInterrupt, match="synthetic interrupt"):
         _interrupted_attempt()
 
+    root = zarr.open_group(
+        store=str(tmp_path / "interrupt.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    parent = root["keypoints_runs"]
     run = parent["attempt"]
     assert writer_state["aborted"] is True
     assert source_state["closed"] is True

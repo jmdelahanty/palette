@@ -2411,7 +2411,10 @@ def test_finalize_subject_masks_records_dense_mask_row_chunk(monkeypatch, tmp_pa
     assert provenance_parameters["dense_mask_storage_chunks"] == [2, 1, 10, 10]
 
 
-def test_refresh_refined_subject_mask_metrics_can_refresh_component_contours(monkeypatch, tmp_path: Path) -> None:
+def test_refresh_refined_subject_mask_metrics_full_refreshes_bbox_and_component_contours(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     zarr_path = tmp_path / "analysis.zarr"
     _build_probability_root(zarr_path)
@@ -2435,20 +2438,28 @@ def test_refresh_refined_subject_mask_metrics_can_refresh_component_contours(mon
     summary = mod.refresh_refined_subject_mask_metrics(
         zarr_path,
         refined_run="refined_subject_masks_smart_001",
-        components=["subject_body"],
+        components=None,
         chunk_size=1,
         metric_level="cheap",
         write_component_contours=True,
     )
 
     assert summary["write_component_contours"] is True
-    assert summary["component_contours"][0]["component"] == "subject_body"
-    assert summary["component_contours"][0]["status"] == "written"
+    contour_summary = {
+        item["component"]: item for item in summary["component_contours"]
+    }
+    assert contour_summary["subject_body"]["status"] == "written"
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
     refreshed_len = np.asarray(run["components/subject_body/contours/len"][:], dtype=np.int32)
     assert int(refreshed_len[0]) != int(original_len[0])
     assert int(refreshed_len[0]) > 0
+    np.testing.assert_array_equal(
+        np.asarray(run["metrics/bbox_xyxy"][0, body_idx], dtype=np.float32),
+        np.asarray([1.0, 1.0, 4.0, 4.0], dtype=np.float32),
+    )
+    assert bool(run["metrics/bbox_valid"][0, body_idx]) is True
+    assert run.attrs["bbox_xyxy_convention"] == "pixel_edge_half_open"
     assert run.attrs["component_contours_status"] == "computed"
 
 

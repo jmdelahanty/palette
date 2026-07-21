@@ -115,7 +115,7 @@ def _direct_binding(
     binding = build_bound_canonical_coordinate_descriptor(
         positions,
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -257,7 +257,7 @@ def test_generic_extent_cannot_authorize_source_camera_coordinates() -> None:
         build_bound_canonical_coordinate_descriptor(
             points,
             profile_id="source_camera_image_px.top_left_y_down.v1",
-            geometry_type="points_xy",
+            geometry_type="point_xy",
             components=("x", "y"),
             component_units=("px", "px"),
             pixel_convention="pixel_center",
@@ -280,7 +280,7 @@ def test_pixel_profile_without_typed_endpoint_authority_fails_closed() -> None:
         build_bound_canonical_coordinate_descriptor(
             points,
             profile_id="stimulus_texture_px.top_left_y_down.v1",
-            geometry_type="points_xy",
+            geometry_type="point_xy",
             components=("x", "y"),
             component_units=("px", "px"),
             pixel_convention="pixel_center",
@@ -306,7 +306,7 @@ def test_arena_relative_canvas_profile_requires_exact_typed_arena_authority() ->
     binding = build_bound_canonical_coordinate_descriptor(
         points,
         profile_id="arena_relative_canvas_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -340,7 +340,7 @@ def test_normalized_camera_coordinates_bind_exact_normalized_frame() -> None:
     binding = build_bound_canonical_coordinate_descriptor(
         points,
         profile_id="source_camera_normalized_xy.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("normalized", "normalized"),
         pixel_convention="continuous",
@@ -383,7 +383,7 @@ def test_source_camera_point_and_bbox_conventions_coexist_without_overwrite() ->
     point_binding = build_bound_canonical_coordinate_descriptor(
         points,
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -537,7 +537,7 @@ def test_wrong_geometry_layout_and_unrelated_rowset_fail_before_attrs_write() ->
         build_bound_canonical_coordinate_descriptor(
             unrelated,
             profile_id="source_camera_image_px.top_left_y_down.v1",
-            geometry_type="points_xy",
+            geometry_type="point_xy",
             components=("x", "y"),
             component_units=("px", "px"),
             pixel_convention="pixel_center",
@@ -565,7 +565,7 @@ def test_transform_required_surface_uses_exact_ordered_resolved_chain() -> None:
     binding = build_bound_canonical_coordinate_descriptor(
         points,
         profile_id="roi_local_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -601,7 +601,7 @@ def test_transform_required_surface_uses_exact_ordered_resolved_chain() -> None:
         build_bound_canonical_coordinate_descriptor(
             other_points,
             profile_id="roi_local_px.top_left_y_down.v1",
-            geometry_type="points_xy",
+            geometry_type="point_xy",
             components=("x", "y"),
             component_units=("px", "px"),
             pixel_convention="pixel_center",
@@ -636,7 +636,7 @@ def test_surface_set_rejects_identity_drift_and_rolls_back_all_attrs() -> None:
     second = build_bound_canonical_coordinate_descriptor(
         second_node,
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -669,7 +669,7 @@ def test_surface_set_rejects_identity_drift_and_rolls_back_all_attrs() -> None:
     same_identity_binding = build_bound_canonical_coordinate_descriptor(
         same_path_second,
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -703,7 +703,7 @@ def test_external_lineage_is_exact_persisted_evidence_and_revalidated() -> None:
     binding = build_bound_canonical_coordinate_descriptor(
         positions,
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -764,7 +764,7 @@ def test_same_paths_from_different_archives_cannot_be_composed() -> None:
         build_bound_canonical_coordinate_descriptor(
             positions,
             profile_id="source_camera_image_px.top_left_y_down.v1",
-            geometry_type="points_xy",
+            geometry_type="point_xy",
             components=("x", "y"),
             component_units=("px", "px"),
             pixel_convention="pixel_center",
@@ -802,7 +802,7 @@ def test_nonthrowing_corrupt_attrs_update_is_reloaded_and_rolled_back() -> None:
     second = build_bound_canonical_coordinate_descriptor(
         second_node,
         profile_id="source_camera_image_px.top_left_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("px", "px"),
         pixel_convention="pixel_center",
@@ -944,7 +944,7 @@ def test_physical_frame_profile_requires_exact_origin_axes_units_and_allowlist()
     accepted = build_bound_canonical_coordinate_descriptor(
         positions,
         profile_id="physical_mm.source_camera_y_down.v1",
-        geometry_type="points_xy",
+        geometry_type="point_xy",
         components=("x", "y"),
         component_units=("mm", "mm"),
         pixel_convention="not_applicable",
@@ -959,7 +959,7 @@ def test_physical_frame_profile_requires_exact_origin_axes_units_and_allowlist()
         build_bound_canonical_coordinate_descriptor(
             positions,
             profile_id="physical_mm.cartesian_y_up.v1",
-            geometry_type="points_xy",
+            geometry_type="point_xy",
             components=("x", "y"),
             component_units=("mm", "mm"),
             pixel_convention="not_applicable",
