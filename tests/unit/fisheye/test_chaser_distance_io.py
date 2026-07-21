@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
+
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.analysis import chaser_distance_io as io_module
 from fisheye.analysis.chaser_distance_io import (
@@ -25,8 +29,31 @@ from tests.unit.fisheye.test_chaser_distance_coordinate_publication import (
 )
 
 
-def test_reader_returns_typed_detached_immutable_snapshot(tmp_path) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+@pytest.fixture(scope="module")
+def published_canonical_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, str]:
+    template_parent = tmp_path_factory.mktemp("chaser-distance-io-template")
+    zarr_path, _root, run = _publish_canonical(template_parent)
+    return zarr_path, run.path
+
+
+@pytest.fixture
+def published_canonical_archive(
+    tmp_path: Path,
+    published_canonical_template: tuple[Path, str],
+) -> tuple[Path, zarr.Group, zarr.Group]:
+    template, run_path = published_canonical_template
+    target = tmp_path / template.name
+    shutil.copytree(template, target)
+    root = zarr.open_group(str(target), mode="a", use_consolidated=False)
+    return target, root, root[run_path]
+
+
+def test_reader_returns_typed_detached_immutable_snapshot(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    _zarr_path, root, run = published_canonical_archive
     run.attrs.update(
         {
             # Normal readers must ignore stale historical aliases even when a
@@ -68,8 +95,10 @@ def test_reader_returns_typed_detached_immutable_snapshot(tmp_path) -> None:
     )
 
 
-def test_latest_uses_exact_lifecycle_pointer_not_latest_or_child_order(tmp_path) -> None:
-    _zarr_path, root, canonical = _publish_canonical(tmp_path)
+def test_latest_uses_exact_lifecycle_pointer_not_latest_or_child_order(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    _zarr_path, root, canonical = published_canonical_archive
     parent = root["analysis/chaser_distance_runs"]
     parent.create_group("zzzz_legacy_or_partial")
     parent.attrs["latest"] = "zzzz_legacy_or_partial"
@@ -86,8 +115,11 @@ def test_latest_uses_exact_lifecycle_pointer_not_latest_or_child_order(tmp_path)
     "pointer",
     ["missing", "nested/run", "", 7],
 )
-def test_authoritative_pointer_fails_closed_without_fallback(tmp_path, pointer) -> None:
-    _zarr_path, root, _run = _publish_canonical(tmp_path)
+def test_authoritative_pointer_fails_closed_without_fallback(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+    pointer: str | int,
+) -> None:
+    _zarr_path, root, _run = published_canonical_archive
     parent = root["analysis/chaser_distance_runs"]
     parent.attrs["authoritative_run"] = pointer
 
@@ -95,8 +127,10 @@ def test_authoritative_pointer_fails_closed_without_fallback(tmp_path, pointer) 
         load_chaser_distance_run(root)
 
 
-def test_explicit_legacy_child_is_not_a_normal_read(tmp_path) -> None:
-    _zarr_path, root, _run = _publish_canonical(tmp_path)
+def test_explicit_legacy_child_is_not_a_normal_read(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    _zarr_path, root, _run = published_canonical_archive
     parent = root["analysis/chaser_distance_runs"]
     legacy = parent.create_group("legacy")
     legacy.attrs.update(
@@ -114,8 +148,11 @@ def test_explicit_legacy_child_is_not_a_normal_read(tmp_path) -> None:
         load_chaser_distance_run(root, run_name="legacy")
 
 
-def test_reader_revalidates_after_copy(tmp_path, monkeypatch) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+def test_reader_revalidates_after_copy(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _zarr_path, root, run = published_canonical_archive
     original = io_module.load_bound_chaser_distance_run
     calls = 0
 
@@ -137,8 +174,10 @@ def test_reader_revalidates_after_copy(tmp_path, monkeypatch) -> None:
     assert calls == 2
 
 
-def test_behavior_roles_fail_until_their_semantic_authority_is_sealed(tmp_path) -> None:
-    _zarr_path, root, _run = _publish_canonical(tmp_path)
+def test_behavior_roles_fail_until_their_semantic_authority_is_sealed(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    _zarr_path, root, _run = published_canonical_archive
     snapshot = load_chaser_distance_run(root)
 
     assert snapshot.behavior_authority_status == UNAVAILABLE_BEHAVIOR_AUTHORITY_STATUS
@@ -146,8 +185,10 @@ def test_behavior_roles_fail_until_their_semantic_authority_is_sealed(tmp_path) 
         snapshot.require_behavior_authority()
 
 
-def test_derived_surface_fails_until_its_payload_authority_is_sealed(tmp_path) -> None:
-    _zarr_path, root, _run = _publish_canonical(tmp_path)
+def test_derived_surface_fails_until_its_payload_authority_is_sealed(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    _zarr_path, root, _run = published_canonical_archive
     snapshot = load_chaser_distance_run(root)
 
     with pytest.raises(
@@ -168,8 +209,10 @@ def test_snapshot_cannot_be_constructed_directly() -> None:
         ChaserDistanceReadSnapshot()
 
 
-def test_goodcopbadcop_common_uses_the_verified_reader_boundary(tmp_path) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+def test_goodcopbadcop_common_uses_the_verified_reader_boundary(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    _zarr_path, root, run = published_canonical_archive
 
     snapshot = open_distance_run(root)
 
@@ -177,8 +220,10 @@ def test_goodcopbadcop_common_uses_the_verified_reader_boundary(tmp_path) -> Non
     assert snapshot.run_path == run.path
 
 
-def test_radial_consumer_uses_typed_snapshot_not_legacy_attrs(tmp_path) -> None:
-    zarr_path, _root, run = _publish_canonical(tmp_path)
+def test_radial_consumer_fails_until_arena_geometry_authority_is_sealed(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    zarr_path, _root, run = published_canonical_archive
     run.attrs.update(
         {
             "coordinate_frame": "texture",
@@ -188,20 +233,23 @@ def test_radial_consumer_uses_typed_snapshot_not_legacy_attrs(tmp_path) -> None:
         }
     )
 
-    result = build_chaser_radial_occupancy_result(
-        zarr_path,
-        chaser_distance_run=run.path.rsplit("/", 1)[-1],
-        settle_trim_s=0.0,
-    )
+    with pytest.raises(
+        ChaserDistanceReadError,
+        match="sealed arena centre/radius geometry",
+    ) as error:
+        build_chaser_radial_occupancy_result(
+            zarr_path,
+            chaser_distance_run=run.path.rsplit("/", 1)[-1],
+            settle_trim_s=0.0,
+        )
 
-    assert result.coordinate_frame == "arena_relative_canvas_px"
-    assert result.coordinate_origin == "arena_top_left"
-    assert result.pixels_per_mm_projector == 5.0
-    assert result.fps == 120.0
+    assert "root attrs and inferred canvas geometry are forbidden" in str(error.value)
 
 
-def test_role_dependent_consumer_fails_until_semantics_are_sealed(tmp_path) -> None:
-    zarr_path, _root, run = _publish_canonical(tmp_path)
+def test_role_dependent_consumer_fails_until_semantics_are_sealed(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    zarr_path, _root, run = published_canonical_archive
 
     with pytest.raises(ChaserDistanceReadError, match="behavior-role/color"):
         build_chaser_quadrant_occupancy_result(

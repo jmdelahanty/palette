@@ -287,6 +287,20 @@ def _publish_canonical_from_sources(
     return path
 
 
+def _publish_canonical(
+    tmp_path: Path,
+) -> tuple[Path, zarr.Group, zarr.Group]:
+    """Build a fresh canonical archive for test modules that need the writer."""
+    zarr_path, detection_path, stimulus_run = _canonical_sources(tmp_path)
+    run_path = _publish_canonical_from_sources(
+        zarr_path,
+        detection_path,
+        stimulus_run,
+    )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    return zarr_path, root, root[run_path]
+
+
 def _copy_zarr_archive(template: Path, target_parent: Path) -> Path:
     target = target_parent / template.name
     shutil.copytree(template, target)
