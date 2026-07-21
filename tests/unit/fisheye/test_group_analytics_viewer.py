@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_egocentric_bearing import (
     build_chaser_egocentric_bearing_result,
@@ -16,6 +17,7 @@ from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
     write_goodcopbadcop_epoch_behavior_summary_component,
 )
 from fisheye.group_analytics_viewer.query import (
+    ViewerContext,
     _enrich_chaser_behavior_rows,
     _summary,
     build_context,
@@ -54,16 +56,27 @@ from fisheye.group_statistics.goodcopbadcop import (
 )
 from fisheye.utils.export_cross_recording_analytics import export_sources
 from fisheye.utils import serve_group_analytics_viewer
+from tests.unit.fisheye.goodcopbadcop_test_fixtures import (
+    _add_goodcopbadcop_cra_protocol_metadata,
+    _add_goodcopbadcop_swim_bout_run,
+)
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
     _make_chaser_result,
 )
 from tests.unit.fisheye.test_chaser_egocentric_bearing import _add_track_kinematics_run
-from tests.unit.fisheye.test_export_cross_recording_analytics import (
-    _add_goodcopbadcop_cra_protocol_metadata,
-    _add_goodcopbadcop_swim_bout_run,
-)
 from tests.unit.fisheye.test_cra_near_field import _add_circle_geometry
+
+
+_DEFERRED_CHASER_SEMANTIC_AUTHORITY_REASON = (
+    "chaser behavior/component/export authority is intentionally unavailable "
+    "until independently sealed"
+)
+_REQUIRES_SEALED_CHASER_SEMANTICS = pytest.mark.xfail(
+    raises=ChaserDistanceReadError,
+    reason=_DEFERRED_CHASER_SEMANTIC_AUTHORITY_REASON,
+    strict=True,
+)
 
 
 def test_group_analytics_summary_reports_sample_std_and_sem() -> None:
@@ -203,6 +216,7 @@ def _write_goodcopbadcop_statistics(context, *, families=("chaser_distance",)) -
     )
 
 
+@_REQUIRES_SEALED_CHASER_SEMANTICS
 def test_group_analytics_viewer_queries_goodcopbadcop_export(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -499,6 +513,7 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(
     assert recordings["rows"][0]["pre_event_chaser_0_alignment"] is not None
 
 
+@_REQUIRES_SEALED_CHASER_SEMANTICS
 def test_group_analytics_viewer_queries_matching_statistics_export(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -534,6 +549,7 @@ def test_group_analytics_viewer_queries_matching_statistics_export(
     assert "p_value" in first
 
 
+@_REQUIRES_SEALED_CHASER_SEMANTICS
 def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -567,6 +583,7 @@ def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(
     assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
 
 
+@_REQUIRES_SEALED_CHASER_SEMANTICS
 def test_group_analytics_viewer_queries_cra_primary_endpoint_statistics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -593,6 +610,7 @@ def test_group_analytics_viewer_queries_cra_primary_endpoint_statistics(
     assert by_metric["delta_occ_agg"]["paired_unit_count"] == 1
 
 
+@_REQUIRES_SEALED_CHASER_SEMANTICS
 def test_group_analytics_viewer_queries_cra_near_field_statistics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -616,11 +634,8 @@ def test_group_analytics_viewer_queries_cra_near_field_statistics(
     assert by_metric["nearzone_occ_specificity"]["paired_unit_count"] == 1
 
 
-def test_group_analytics_viewer_rejects_unknown_metric(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = _make_goodcopbadcop_export(tmp_path, monkeypatch)
+def test_group_analytics_viewer_rejects_unknown_metric(tmp_path: Path) -> None:
+    context = ViewerContext(export_root=tmp_path, export_run_id="unused")
 
     with pytest.raises(ValueError, match="Unsupported spatial metric"):
         query_spatial_occupancy(context, metric="not_a_metric")

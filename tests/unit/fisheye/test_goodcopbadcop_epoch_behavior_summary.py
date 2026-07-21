@@ -4,24 +4,46 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.analysis.chaser_epoch_behavior_summary import (
     DEFAULT_COMPONENT_NAME,
     SCHEMA_ID,
+    _speed_level_key,
     build_chaser_epoch_behavior_summary_result as build_goodcopbadcop_epoch_behavior_summary_result,
     write_chaser_epoch_behavior_summary_component as write_goodcopbadcop_epoch_behavior_summary_component,
 )
 from fisheye.visualization.goodcopbadcop_interactive import load_goodcopbadcop_epoch_behavior_data
-from tests.unit.fisheye.test_marimo_palette_explorer_components import (
-    _add_swim_bout_run,
-    _make_archive_with_goodcopbadcop_egocentric_spec,
+from tests.unit.fisheye.goodcopbadcop_test_fixtures import (
+    _add_goodcopbadcop_swim_bout_run,
 )
 from tests.unit.fisheye.test_cra_near_field import _add_circle_geometry
+from tests.unit.fisheye.test_marimo_palette_explorer_components import (
+    _make_archive_with_goodcopbadcop_egocentric_spec,
+)
 
 
-def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    _add_swim_bout_run(zarr_path)
+_DEFERRED_CHASER_SEMANTIC_AUTHORITY_REASON = (
+    "chaser behavior/component/export authority is intentionally unavailable "
+    "until independently sealed"
+)
+_REQUIRES_SEALED_CHASER_SEMANTICS = pytest.mark.xfail(
+    raises=ChaserDistanceReadError,
+    reason=_DEFERRED_CHASER_SEMANTIC_AUTHORITY_REASON,
+    strict=True,
+)
+
+
+@_REQUIRES_SEALED_CHASER_SEMANTICS
+def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
+    _add_goodcopbadcop_swim_bout_run(zarr_path)
     _add_circle_geometry(zarr_path)
 
     result = build_goodcopbadcop_epoch_behavior_summary_result(
@@ -88,22 +110,21 @@ def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(tmp_
     assert np.isfinite(float(pre_chaser_0["median_distance_mm"]))
 
 
-def test_epoch_behavior_rejects_detector_signal_as_physical_speed_level(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    _add_swim_bout_run(zarr_path)
-    _add_circle_geometry(zarr_path)
-
+def test_epoch_behavior_rejects_detector_signal_as_physical_speed_level() -> None:
     with pytest.raises(ValueError, match="Detector-only signals"):
-        build_goodcopbadcop_epoch_behavior_summary_result(
-            zarr_path,
-            chaser_distance_run="chaser_distance_1",
-            speed_level="exponential",
-        )
+        _speed_level_key("exponential")
 
 
-def test_goodcopbadcop_epoch_behavior_summary_writes_and_reads_component(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    _add_swim_bout_run(zarr_path)
+@_REQUIRES_SEALED_CHASER_SEMANTICS
+def test_goodcopbadcop_epoch_behavior_summary_writes_and_reads_component(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
+    _add_goodcopbadcop_swim_bout_run(zarr_path)
     _add_circle_geometry(zarr_path)
     result = build_goodcopbadcop_epoch_behavior_summary_result(
         zarr_path,

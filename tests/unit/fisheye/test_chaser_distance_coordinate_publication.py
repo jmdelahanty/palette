@@ -35,6 +35,7 @@ from fisheye.shared.coordinate_record import coordinate_record_sha256
 from fisheye.shared.instance_keys import instance_key_attrs, mint_detection_instance_keys
 from fisheye.shared.observation_coordinate_publication import (
     derive_detection_source_camera_geometry,
+    publish_detection_backend_result_projection,
     publish_detection_instance_key_derivation,
     publish_detection_observation_cardinality,
     publish_detection_observation_geometry,
@@ -57,6 +58,17 @@ from tests.unit.fisheye.test_import_stimulus_to_zarr_paths import (
     _prepare_acquisition_authority,
     _write_stimulus_h5_with_arena_relative_chaser_states,
 )
+
+
+_TEST_MODEL_ARTIFACT = {
+    "role": "detect_model",
+    "path": "/models/chaser-distance-test.pt",
+    "fingerprint_scheme": "content_v1",
+    "sha256": "c" * 64,
+    "size_bytes": 123,
+    "mtime_ns": 456,
+    "source": "computed",
+}
 
 
 def _publish_detection(root: zarr.Group) -> str:
@@ -129,6 +141,22 @@ def _publish_detection(root: zarr.Group) -> str:
             },
             "detect_row_shard_rows": None,
             "detect_shard_write": None,
+            "model_path": _TEST_MODEL_ARTIFACT["path"],
+            "model_name": "chaser-distance-test.pt",
+            "inference_height": 4512,
+            "inference_width": 4512,
+            "validated_backend_result_count": 2,
+            "validated_backend_result_orig_shape_hw": [4512, 4512],
+            "decode_backend_effective": "opencv",
+            "video_reader_type": "opencv",
+            "parameters": {
+                "decode_backend_effective": "opencv",
+                "resize_dims": None,
+                "pre_resize_dims": None,
+                "effective_input_resize_dims": None,
+                "tensor_resize_dims": None,
+                "imgsz_applied": None,
+            },
             IMMUTABLE_YOLO_STORAGE_ATTR: {
                 "schema_id": IMMUTABLE_YOLO_STORAGE_SCHEMA,
                 "status": "ok",
@@ -143,6 +171,12 @@ def _publish_detection(root: zarr.Group) -> str:
     mapping = detect_mod._publish_detection_acquisition_mapping(  # noqa: SLF001
         run,
         acquisition_frame=acquisition,
+    )
+    backend_result_projection = publish_detection_backend_result_projection(
+        run,
+        run["bbox_norm_coords"],
+        frame_evidence=evidence,
+        model_artifact=_TEST_MODEL_ARTIFACT,
     )
     instance_derivation = publish_detection_instance_key_derivation(
         run,
@@ -165,7 +199,11 @@ def _publish_detection(root: zarr.Group) -> str:
         run["bbox_img_xyxy"],
         run["centers_img_xy"],
         frame_evidence=evidence,
-        source_lineage_records=(mapping, instance_derivation),
+        source_lineage_records=(
+            mapping,
+            backend_result_projection,
+            instance_derivation,
+        ),
     )
     run.attrs.update(
         {
@@ -434,7 +472,7 @@ def test_activation_accepts_proven_commit_when_store_interrupts_after_final_writ
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+    zarr_path, root, run = _publish_canonical(tmp_path)
     parent = root["analysis/chaser_distance_runs"]
     base_generation = parent.attrs[CHASER_DISTANCE_PUBLICATION_GENERATION_ATTR]
     run.attrs["stage_selector_eligible"] = False
@@ -457,25 +495,32 @@ def test_activation_accepts_proven_commit_when_store_interrupts_after_final_writ
         run_name="canonical_distance",
     )
 
-    assert run.attrs["stage_selector_eligible"] is True
-    assert parent.attrs["latest"] == "canonical_distance"
-    assert parent.attrs["latest_complete"] == "canonical_distance"
-    assert parent.attrs[CHASER_DISTANCE_PUBLICATION_GENERATION_ATTR] == (
+    persisted_root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=False,
+    )
+    persisted_parent = persisted_root["analysis/chaser_distance_runs"]
+    persisted_run = persisted_parent["canonical_distance"]
+    assert persisted_run.attrs["stage_selector_eligible"] is True
+    assert persisted_parent.attrs["latest"] == "canonical_distance"
+    assert persisted_parent.attrs["latest_complete"] == "canonical_distance"
+    assert persisted_parent.attrs[CHASER_DISTANCE_PUBLICATION_GENERATION_ATTR] == (
         base_generation + 1
     )
-    assert parent.attrs[CHASER_DISTANCE_PUBLICATION_POLICY_ATTR] == (
+    assert persisted_parent.attrs[CHASER_DISTANCE_PUBLICATION_POLICY_ATTR] == (
         CHASER_DISTANCE_PUBLICATION_POLICY
     )
-    lease = parent.attrs[CHASER_DISTANCE_PARENT_PUBLICATION_LEASE_ATTR]
+    lease = persisted_parent.attrs[CHASER_DISTANCE_PARENT_PUBLICATION_LEASE_ATTR]
     assert lease["next_generation"] == base_generation + 1
-    assert lease["run_path"] == run.path
+    assert lease["run_path"] == persisted_run.path
 
 
 def test_activation_preserves_concurrent_owner_generation_takeover(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+    zarr_path, root, run = _publish_canonical(tmp_path)
     parent = root["analysis/chaser_distance_runs"]
     run.attrs["stage_selector_eligible"] = False
     original = publication_module._write_activation_attr  # noqa: SLF001
@@ -516,13 +561,23 @@ def test_activation_preserves_concurrent_owner_generation_takeover(
             run_name="canonical_distance",
         )
 
-    assert parent.attrs[CHASER_DISTANCE_PARENT_PUBLICATION_LEASE_ATTR] == winner_lease
-    assert parent.attrs[CHASER_DISTANCE_PUBLICATION_GENERATION_ATTR] == (
+    persisted_root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=False,
+    )
+    persisted_parent = persisted_root["analysis/chaser_distance_runs"]
+    persisted_run = persisted_parent["canonical_distance"]
+    assert (
+        persisted_parent.attrs[CHASER_DISTANCE_PARENT_PUBLICATION_LEASE_ATTR]
+        == winner_lease
+    )
+    assert persisted_parent.attrs[CHASER_DISTANCE_PUBLICATION_GENERATION_ATTR] == (
         winner_lease["next_generation"]
     )
-    assert parent.attrs["latest_complete"] == "concurrent_winner"
-    assert parent.attrs["latest"] == "concurrent_winner"
-    assert run.attrs["stage_selector_eligible"] is False
+    assert persisted_parent.attrs["latest_complete"] == "concurrent_winner"
+    assert persisted_parent.attrs["latest"] == "concurrent_winner"
+    assert persisted_run.attrs["stage_selector_eligible"] is False
 
 
 def test_writer_marks_candidate_failed_on_base_exception(

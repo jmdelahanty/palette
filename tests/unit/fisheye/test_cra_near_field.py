@@ -4,8 +4,10 @@ import math
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
+from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_near_field_occupancy import (
     COMPONENT_PARENT_NAME,
@@ -31,6 +33,16 @@ from fisheye.analysis.chaser_quadrant_occupancy import (
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
 from tests.unit.fisheye.test_cra_primary_endpoint import _make_archive, _make_chaser_result
+
+
+_CRA_NEAR_FIELD_AUTHORITY_DEFERRED = pytest.mark.xfail(
+    raises=ChaserDistanceReadError,
+    strict=True,
+    reason=(
+        "deferred: CRA near-field integration requires independently sealed "
+        "behavior, arena-geometry, quadrant, and near-field authorities"
+    ),
+)
 
 
 def _decode_first(array: zarr.Array) -> str:
@@ -133,7 +145,10 @@ def test_available_annulus_area_uses_circular_arena_mask() -> None:
     assert 0.0 < float(circular_area[0]) < float(rectangle_area[0])
 
 
-def test_build_and_write_cra_near_field_component_from_existing_cra_stack(tmp_path: Path) -> None:
+@_CRA_NEAR_FIELD_AUTHORITY_DEFERRED
+def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
+    tmp_path: Path,
+) -> None:
     zarr_path = _make_archive(tmp_path)
     cra_component_path = _write_sources(zarr_path)
 

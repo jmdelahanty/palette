@@ -253,6 +253,37 @@ def _resolve_swim_bout_run(root: zarr.Group, run_name: str) -> tuple[zarr.Group,
     return parent[resolved], resolved, f"analysis/swim_bout_runs/{resolved}"
 
 
+def _select_bout_row_mask(
+    bout_start: np.ndarray,
+    bout_end: np.ndarray,
+    *,
+    total_frames: int,
+    signal_id: np.ndarray | None,
+    default_signal_id: Any,
+) -> tuple[np.ndarray, int, str]:
+    """Select valid bout rows from one run's default signal level."""
+
+    keep = (bout_start >= 0) & (bout_end < total_frames) & (bout_end >= bout_start)
+    bout_level_note = "single_level_table_no_signal_id"
+    source_signal_id = -1
+    if signal_id is not None:
+        signal_id = np.asarray(signal_id, dtype=np.int64).reshape(-1)
+        if default_signal_id is None:
+            source_signal_id = int(np.min(signal_id))
+            bout_level_note = (
+                "multi_level_table_no_default_signal_id_attr_fell_back_to_"
+                f"{source_signal_id}"
+            )
+        else:
+            source_signal_id = int(default_signal_id)
+            bout_level_note = (
+                "multi_level_table_filtered_to_default_signal_id_"
+                f"{source_signal_id}"
+            )
+        keep &= signal_id == source_signal_id
+    return keep, source_signal_id, bout_level_note
+
+
 def _resolve_heading(run_group: zarr.Group, *, total_frames: int) -> tuple[np.ndarray, np.ndarray, str]:
     """Per-camera-frame fish heading, taken from the egocentric-bearing component.
 
@@ -927,26 +958,25 @@ def build_chaser_bout_response_result(
         raise ValueError(f"Swim-bout run {bout_name} lacks tables/bouts.")
     bout_start = np.asarray(table["start_frame"][:], dtype=np.int64).reshape(-1)
     bout_end = np.asarray(table["end_frame"][:], dtype=np.int64).reshape(-1)
-    keep = (bout_start >= 0) & (bout_end < total_frames) & (bout_end >= bout_start)
     # A multi-level bout table (detect_bouts_multi_level) concatenates bouts from EVERY speed
     # level -- raw, filtered, smoothed, averaged, exponential -- in one table, tagged by
     # signal_id. Ingesting all of them counts each physical bout up to five times (and mixes
     # jittery raw peaks with smoothed ones). Select the run's default level, which it documents
     # as the one downstream consumers should use. A single-level table has no signal_id column
     # and is kept whole.
-    bout_level_note = "single_level_table_no_signal_id"
-    source_signal_id = -1
     source_level_name = str(bout_group.attrs.get("default_level") or "")
-    if "signal_id" in table:
-        signal_id = np.asarray(table["signal_id"][:], dtype=np.int64).reshape(-1)
-        default_sid_raw = bout_group.attrs.get("default_signal_id")
-        if default_sid_raw is None:
-            source_signal_id = int(np.min(signal_id))
-            bout_level_note = f"multi_level_table_no_default_signal_id_attr_fell_back_to_{source_signal_id}"
-        else:
-            source_signal_id = int(default_sid_raw)
-            bout_level_note = f"multi_level_table_filtered_to_default_signal_id_{source_signal_id}"
-        keep &= signal_id == source_signal_id
+    signal_id = (
+        np.asarray(table["signal_id"][:], dtype=np.int64).reshape(-1)
+        if "signal_id" in table
+        else None
+    )
+    keep, source_signal_id, bout_level_note = _select_bout_row_mask(
+        bout_start,
+        bout_end,
+        total_frames=total_frames,
+        signal_id=signal_id,
+        default_signal_id=bout_group.attrs.get("default_signal_id"),
+    )
     if not np.all(keep):
         bout_start, bout_end = bout_start[keep], bout_end[keep]
     take = lambda name, default=np.nan: (  # noqa: E731

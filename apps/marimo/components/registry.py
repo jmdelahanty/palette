@@ -567,7 +567,8 @@ def discover_interactive_spec_options(
         )
     options: list[InteractiveSpecOption] = []
     seen_paths: set[str] = set()
-    for artifact_path in _inventory_interactive_artifact_paths(root):
+    inventory_paths = _inventory_interactive_artifact_paths(root)
+    for artifact_path in inventory_paths:
         normalized_path = normalize_path(artifact_path)
         if not normalized_path or normalized_path in seen_paths:
             continue
@@ -582,7 +583,7 @@ def discover_interactive_spec_options(
         if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
             continue
         options.append(option)
-    if options:
+    if inventory_paths:
         return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
 
     for artifact in iter_visualization_artifacts(root):
