@@ -1250,9 +1250,10 @@ Eye geometry arrays are read through `fisheye.shared.eye_geometry_source`, which
 exposes `eye_left`/`eye_right` component data as legacy-compatible
 `(N, 2, ...)` array-like views for callers that have not moved to
 component-native reads yet. Geometry-only consumers such as eye-angle analysis
-may opt into `analysis/subject_shape_runs` as the preferred source; mask/export
-consumers should continue using refined-subject geometry unless they explicitly
-only need derived shape primitives.
+have consumer-specific authority rules: future-normal eye-angle publication
+requires a canonical `analysis/subject_shape_runs` publication and its nested
+assignment-keypoint proof. Mask/export consumers continue using refined-subject
+geometry unless they explicitly need derived shape primitives.
 
 ---
 
@@ -2117,25 +2118,29 @@ Eye angle analysis results:
   inner chunks and `(131072, 32)` outer shards; consumers resolve named
   channels through `fisheye.analysis.eye_angle_io` rather than persisting
   numeric column positions.
-- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
+- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 6`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
   machine-readable output groups, units, suffixes, derivative arrays, and QA
-  reason-code linkage. Output schema v8 includes
+  reason-code linkage. Output schema v9 includes
   `variant_schema`, mirrored as `eye_angle_variant_schema` in run attrs, for
   UI-selectable angle representations, and links the versioned algorithm
-  contract.
+  contract. Run-schema v6/output-schema v9 additionally make ordered row
+  identity and acquisition time explicit.
 - `eye_angle_algorithm_contract`: versioned computation metadata covering the
   ellipse source/parameter convention, body-frame formulas and resolved
   keypoint indices, axis-ambiguity rule, angle transforms, QA thresholds,
   temporal operators, effective smoothing windows, derivative gap limit, FPS
   source, and unique-detection frame projection.
 - `eye_angle_source_contracts`: exact source paths plus available schema,
-  method, completion, git, and lineage identities for the eye geometry,
-  refined keypoints, and base keypoints. The resolved detection-success and
-  frame-index fallback paths are explicit rather than inferred from run age.
-- Schema v5 exposes canonical major-axis arrays:
+  method, completion, git, and lineage identities for the canonical
+  subject-shape eye geometry and the exact base-keypoint publication sealed by
+  its assignment proof. The canonical authority binds keypoint values,
+  detection success, crop placement, labels, ordered `instance_key`, ordered
+  `source_acquisition_frame_index`, and source frame count. Canonical readers
+  must not reconstruct or select a different keypoint source.
+- The v5 scientific method exposes canonical major-axis arrays:
   `left_major_signed_deg`, `right_major_signed_deg`,
   `vergence_major_signed_deg`, and `version_major_deg`. The major axis is
   resolved into the fish forward half-plane, with `0 deg` aligned to body
@@ -2156,7 +2161,12 @@ Eye angle analysis results:
 - Output schema v8 adds the `eye_angle_algorithm_contract` link and exact
   smoothing, delta, and derivative operator identities without changing the
   v5 scientific method.
-- Schema v5 exposes explicit gaze arrays derived from the resolved major axis:
+- Output schema v9 adds `support/instance_key` and
+  `support/source_acquisition_frame_index`. `support/frame_indices` remains an
+  equality-required compatibility alias of the acquisition-frame array; it is
+  not a second temporal authority.
+- The v5 scientific method exposes explicit gaze arrays derived from the
+  resolved major axis:
   `left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`,
   `right_gaze_signed_deg`, `vergence_gaze_deg`,
   `vergence_gaze_signed_deg`, and `version_gaze_deg`, plus smoothed, delta,
@@ -2164,8 +2174,9 @@ Eye angle analysis results:
   these over legacy `left_deg` / `right_deg` fields for gaze surfaces.
 - `left_gaze_xy` and `right_gaze_xy` are ROI/image-space unit vectors for
   drawing the derived gaze direction.
-- Schema v5 retains `vergence_gaze_deg` as the v3-compatible total/axis
-  separation and adds `left_nasal_gaze_deg`, `right_nasal_gaze_deg`, and
+- The v5 scientific method retains `vergence_gaze_deg` as the v3-compatible
+  total/axis separation and adds `left_nasal_gaze_deg`,
+  `right_nasal_gaze_deg`, and
   `mean_eye_vergence_gaze_deg` for BEAST/Johnson-style mean per-eye vergence.
 - Run attrs include `preferred_angle_family = "gaze"`,
   `preferred_eye_axis = "ellipse_major"`, and
@@ -2174,20 +2185,29 @@ Eye angle analysis results:
   surface; UI selectors should use
   `eye_angle_variant_schema.default_representation` for angle-representation
   defaults.
-- Schema v5 materializes keypoint-derived body-frame support arrays under
+- Run-schema v6 materializes keypoint-derived body-frame support arrays under
   `support/body_frame/` so signed eye angles are anatomical-left-positive and
   convergence polarity is not conflated with ellipse-axis orientation
-  disambiguation.
+  disambiguation. These arrays are recomputed from the exact sealed keypoint
+  payload and success mask; a separately persisted upstream heading is not an
+  input.
 - `qa/roi/*major_axis_marginal` and `qa/frame/major_axis_marginal` are
   non-fatal warning flags for rare cases where the major axis is close to the
   half-plane boundary used for 180 degree ambiguity resolution.
-- Preferred eye geometry source is `analysis/subject_shape_runs/<run>` when it
-  has left/right eye ellipse geometry. Run attrs record
+- Future-normal eye geometry is a complete, selector-eligible
+  `analysis/subject_shape_runs/<run>` publication with left/right eye ellipse
+  geometry and a used assignment-keypoint proof. Run attrs record
   `source_geometry_kind`, `source_subject_shape_run`,
   `source_refined_subject_masks_run`, and `source_refined_eye_run` as
-  applicable.
-- Keypoint lineage uses canonical `source_keypoints_run`; the legacy
-  `source_keypoint_run` alias may be mirrored during migration.
+  applicable. Refined-subject geometry is accepted only on the explicitly
+  requested historical refined-keypoint diagnostic path; that output is
+  permanently `stage_selector_eligible = false` with
+  `publication_scope = "historical_diagnostic_only"`.
+- Canonical keypoint lineage names the exact sealed child in
+  `source_base_keypoints_run` (and canonical `source_keypoints_run`).
+  `source_refined_keypoints_diagnostic_run` is present only for the explicit
+  nonselector diagnostic path. There is no latest-keypoint or refined-keypoint
+  fallback for canonical publication.
 - `source_geometry_kind` normalizes the consumed geometry source as
   `subject_shape_eye_geometry`, `refined_subject_eye_geometry`,
   `legacy_refined_eye_geometry`, or `unknown_eye_geometry`.
@@ -2321,8 +2341,10 @@ Eye geometry in `analysis/subject_shape_runs` is the analysis-facing coherent
 subject-shape surface. Eye contours, ellipse fits, and eye-pair checks may also
 live in `refined_subject_masks_runs` when they are mask-local QC/source
 primitives. `analysis/eye_angle_runs` remains a specialized downstream
-time-series or behavior-facing analysis and should consume subject-shape eye
-geometry when available.
+time-series or behavior-facing analysis. Canonical runs require this
+subject-shape eye geometry and the exact base keypoint child sealed by its
+assignment proof; refined-subject geometry is diagnostic-only for this
+consumer.
 
 Examples that belong here instead of in `refined_subject_masks_runs` as
 canonical outputs:

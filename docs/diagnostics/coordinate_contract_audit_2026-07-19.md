@@ -480,10 +480,18 @@ implementation is released.
 | track motion | `GO`: canonical source subset/reorder, physical authority, full-motion seal, strict reader, lifecycle activation, and scientific/visualization reader cutover reviewed at local commit `93177ed5` | merge authoritative contract, implement Crimson reader, then run shared fixtures |
 | raw/refined subject masks and subject shape | `GO` for the scoped publishers/readers: dense refined masks remain edit authority, collection identity is explicit, shape points are translated through exact placement, and vectors are not translated | merge subject-shape contract and implement external consumer; no production migration yet |
 | raw keypoints and pose-model identity | canonical raw publisher and strict loader bind observation identity, acquisition time, ordered `keypoint` collection axis, exact model digest, and exact pose schema; same-cardinality reordered labels fail closed | refined-keypoint successor publication, authoritative contract review, and Crimson remain pending |
+| eye-angle canonical input and publication | branch-local post-`93177ed5` repair selects only the exact base-keypoint child sealed by the subject-shape assignment; binds ordered `instance_key`, acquisition-frame extent, and exact persisted label authority; keeps refined keypoints diagnostic/nonselector; and makes eligibility the final activation write | commit/release coordination; historical refined-keypoint analyses remain explicit diagnostics rather than future-normal sources |
 | chaser distance | canonical writer and exact reader bind fish/chaser inputs, transform/calibration lineage, positions, and distances; normal scientific consumers were cut over | component/dashboard/export semantics are intentionally unavailable until independently sealed |
 | fleet inventory and migration plan | complete read-only ruleset-13/schema-v12 inventory and dry-run classification produced; both hardened verifiers pass and the supplemental producer aggregate protects all 300 selected dataset roots; no automatic backfill candidate and no write authorization | perform human registry review and value validation before any migration |
 | cross-repository contracts | uncommitted and unpushed track-motion/subject-shape drafts plus modified bbox/keypoint/manual-edit drafts exist in the Contracts worktree; none is authoritative | reconcile final point/edge and model-binding text, review, commit, and merge before release |
 | Crimson | implementation work package drafted only; this remediation made no Crimson changes | each family remains unavailable until its contract and hostile fixtures pass |
+
+The eye-angle row is later branch-local work and is not part of the
+`93177ed5`/101-test release claim above. Its focused materializer, lineage,
+algorithm, IO, workflow, batch, and stage-catalog slice passed 138/138 tests,
+including re-signed label-order and identity-vocabulary attacks plus exact
+alias-label compatibility, and passed an independent read-only review. No
+production archive or registry row was changed.
 
 The principal numerical kernels were not rewritten. Changes concentrate at
 selection, validation, transformation, publication, and reader-preflight
