@@ -1,44 +1,45 @@
 #!/usr/bin/env python3
-"""Backfill normalized ``analysis/calibration`` groups from recording H5 files.
+"""Inventory legacy ``analysis/calibration`` migration candidates.
 
-Default mode is dry-run. Use ``--apply`` to write updates. The intended batch
-target is ``/nvme1/recordings``; each analysis archive is matched to its
-stimulus H5 via ``analysis/stimulus_runs/<run>.attrs["source_h5"]`` when
-available, then by the affiliated ``raw/*.h5`` file under the recording folder.
+This command is read-only.  The former apply path reconstructed one global
+calibration group from incomplete historical evidence and could select camera
+scale and homography values from different cameras.  Applying that result is
+retired; use this command only to identify H5- or donor-backed candidates for an
+explicit, evidence-validated migration.
 
-When an archive has no H5 source but was acquired with a known-matching rig
-configuration, ``--donor-zarr`` can copy an existing calibration group from a
-reference archive. Donor-derived backfills are explicitly stamped in attrs and
-should be used only when the operator has verified the physical configuration.
+Each analysis archive is matched to its stimulus H5 via
+``analysis/stimulus_runs/<run>.attrs["source_h5"]`` when available, then by the
+affiliated ``raw/*.h5`` file under the recording folder.  ``--donor-zarr`` only
+inspects the named donor and never authorizes or performs a copy.
 """
 
 from __future__ import annotations
 
-from fisheye.shared.zarr_helpers import (
-    consolidate_metadata_capture_expected_warnings,
-    infer_zarr_use as _infer_zarr_use,
-)
+from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+import sys
+from typing import Iterable, Optional, Sequence
 
 import h5py
-import numpy as np
 import zarr
 
-from fisheye.analysis.import_stimulus_to_zarr import _materialize_analysis_calibration
-
-
-LEGACY_CALIBRATION_ATTRS = (
-    "measured_stimulus_fps",
-    "measured_fps",
-    "camera_id",
-    "camera_model",
-    "water_depth_mm",
+APPLY_RETIRED_MESSAGE = (
+    "Legacy global analysis/calibration writes are retired because the available "
+    "metadata does not prove one camera, transform direction, reference extent, "
+    "and calibration lineage. Run without --apply for read-only candidate inventory; "
+    "publish any validated migration as a new lineage-bound run."
 )
+H5_CANDIDATE_STATUS = "h5_candidate_requires_explicit_migration"
+H5_OVERWRITE_CANDIDATE_STATUS = "h5_overwrite_candidate_requires_explicit_migration"
+DONOR_CANDIDATE_STATUS = "donor_candidate_requires_explicit_migration"
+DONOR_OVERWRITE_CANDIDATE_STATUS = "donor_overwrite_candidate_requires_explicit_migration"
+
+
+class AnalysisCalibrationApplyRetiredError(RuntimeError):
+    """Raised before any archive open when the retired apply path is requested."""
 
 
 @dataclass(frozen=True)
@@ -110,37 +111,6 @@ def _calibration_has_usable_scale(calibration: zarr.Group) -> bool:
     )
 
 
-def _copy_attrs(source: Any, target: Any) -> None:
-    target.attrs.update({str(key): value for key, value in source.attrs.items()})
-
-
-def _copy_array(source: zarr.Array, target_group: zarr.Group, name: str) -> None:
-    data = np.asarray(source[:])
-    chunks = getattr(source, "chunks", None)
-    kwargs: dict[str, Any] = {
-        "data": data,
-        "overwrite": True,
-    }
-    if chunks is not None:
-        kwargs["chunks"] = chunks
-    target_group.create_array(name, **kwargs)
-
-
-def _copy_calibration_group_recursive(source: zarr.Group, target: zarr.Group) -> None:
-    _copy_attrs(source, target)
-
-    array_names = sorted(str(name) for name in source.array_keys())
-    for name in array_names:
-        _copy_array(source[name], target, name)
-
-    group_names = sorted(str(name) for name in source.group_keys())
-    for name in group_names:
-        if name in target:
-            del target[name]
-        child = target.create_group(name)
-        _copy_calibration_group_recursive(source[name], child)
-
-
 def _source_label_for_calibration(root: zarr.Group, calibration: zarr.Group) -> str:
     source = calibration.attrs.get("source")
     source_h5 = calibration.attrs.get("source_h5")
@@ -163,10 +133,7 @@ def _donor_calibration_plan(
     *,
     root: zarr.Group,
     donor_zarr_path: Path,
-    apply: bool,
     overwrite_existing: bool,
-    operator_note: Optional[str],
-    consolidate_metadata: bool,
 ) -> BackfillPlan:
     existing_complete = _analysis_calibration_complete(root)
     if existing_complete and not overwrite_existing:
@@ -187,40 +154,13 @@ def _donor_calibration_plan(
             donor_zarr_path=donor_zarr_path,
         )
 
-    planned_status = "would_copy_donor_overwrite" if existing_complete else "would_copy_donor"
-    written_status = "copied_donor_overwrite" if existing_complete else "copied_donor"
-    if not apply:
-        return BackfillPlan(
-            zarr_path=zarr_path,
-            status=planned_status,
-            donor_zarr_path=donor_zarr_path,
-            message=_source_label_for_calibration(donor_root, donor_calibration),
-        )
-
-    analysis = root.require_group("analysis")
-    if "calibration" in analysis:
-        del analysis["calibration"]
-    target_calibration = analysis.create_group("calibration")
-    _copy_calibration_group_recursive(donor_calibration, target_calibration)
-    target_calibration.attrs["source"] = "donor_zarr_calibration"
-    target_calibration.attrs["donor_zarr"] = str(donor_zarr_path.expanduser().resolve())
-    target_calibration.attrs["donor_calibration_path"] = (
-        "analysis/calibration" if _get_analysis_calibration(donor_root) is not None else "calibration"
-    )
-    target_calibration.attrs["donor_calibration_source"] = _source_label_for_calibration(
-        donor_root,
-        donor_calibration,
-    )
-    target_calibration.attrs["donor_configuration_verified_by_operator"] = True
-    target_calibration.attrs["donor_backfill_timestamp_utc"] = datetime.now(timezone.utc).isoformat()
-    if operator_note:
-        target_calibration.attrs["donor_backfill_note"] = str(operator_note)
-    if consolidate_metadata:
-        consolidate_metadata_capture_expected_warnings(zarr_path)
-
     return BackfillPlan(
         zarr_path=zarr_path,
-        status=written_status,
+        status=(
+            DONOR_OVERWRITE_CANDIDATE_STATUS
+            if existing_complete
+            else DONOR_CANDIDATE_STATUS
+        ),
         donor_zarr_path=donor_zarr_path,
         message=_source_label_for_calibration(donor_root, donor_calibration),
     )
@@ -354,19 +294,6 @@ def _h5_has_calibration_snapshot(h5_path: Path) -> bool:
         return "calibration_snapshot" in h5
 
 
-def _copy_legacy_calibration_attrs(root: zarr.Group, *, overwrite_existing: bool) -> None:
-    analysis_calibration = _get_analysis_calibration(root)
-    legacy_calibration = root.get("calibration")
-    if analysis_calibration is None or legacy_calibration is None:
-        return
-    for key in LEGACY_CALIBRATION_ATTRS:
-        if key not in legacy_calibration.attrs:
-            continue
-        if not overwrite_existing and key in analysis_calibration.attrs:
-            continue
-        analysis_calibration.attrs[key] = legacy_calibration.attrs[key]
-
-
 def plan_or_backfill_one(
     zarr_path: Path,
     *,
@@ -379,8 +306,15 @@ def plan_or_backfill_one(
     zarr_use: str = "analysis",
     consolidate_metadata: bool = False,
 ) -> BackfillPlan:
-    mode = "a" if apply else "r"
-    root = _open_zarr(zarr_path, mode=mode)
+    """Inspect one archive, rejecting retired writes before any archive open."""
+
+    if apply:
+        raise AnalysisCalibrationApplyRetiredError(APPLY_RETIRED_MESSAGE)
+    # Retain legacy keyword compatibility for read-only callers.  Neither value
+    # authorizes a write or changes candidate classification.
+    del donor_note, consolidate_metadata
+
+    root = _open_zarr(zarr_path, mode="r")
 
     observed_use = _infer_zarr_use(root, zarr_path)
     if zarr_use in {"analysis", "training"} and observed_use != zarr_use:
@@ -391,10 +325,7 @@ def plan_or_backfill_one(
             zarr_path,
             root=root,
             donor_zarr_path=donor_zarr_path,
-            apply=apply,
             overwrite_existing=overwrite_existing,
-            operator_note=donor_note,
-            consolidate_metadata=consolidate_metadata,
         )
 
     existing_complete = _analysis_calibration_complete(root)
@@ -433,32 +364,15 @@ def plan_or_backfill_one(
             run_name=run_name,
         )
 
-    planned_status = "would_overwrite" if existing_complete else "would_backfill"
-    written_status = "overwritten" if existing_complete else "backfilled"
+    planned_status = (
+        H5_OVERWRITE_CANDIDATE_STATUS
+        if existing_complete
+        else H5_CANDIDATE_STATUS
+    )
     source_run_name = run_name or "unknown"
-    if not apply:
-        return BackfillPlan(
-            zarr_path=zarr_path,
-            status=planned_status,
-            h5_path=h5_path,
-            run_name=source_run_name,
-        )
-
-    with h5py.File(h5_path, "r") as h5:
-        _materialize_analysis_calibration(
-            root,
-            h5,
-            source_h5=h5_path,
-            run_name=source_run_name,
-            console=None,
-        )
-    _copy_legacy_calibration_attrs(root, overwrite_existing=overwrite_existing)
-    if consolidate_metadata:
-        consolidate_metadata_capture_expected_warnings(zarr_path)
-
     return BackfillPlan(
         zarr_path=zarr_path,
-        status=written_status,
+        status=planned_status,
         h5_path=h5_path,
         run_name=source_run_name,
     )
@@ -466,14 +380,10 @@ def plan_or_backfill_one(
 
 def _print_result(result: BackfillPlan, *, verbose: bool) -> None:
     noisy_statuses = {
-        "would_backfill",
-        "would_overwrite",
-        "would_copy_donor",
-        "would_copy_donor_overwrite",
-        "backfilled",
-        "overwritten",
-        "copied_donor",
-        "copied_donor_overwrite",
+        H5_CANDIDATE_STATUS,
+        H5_OVERWRITE_CANDIDATE_STATUS,
+        DONOR_CANDIDATE_STATUS,
+        DONOR_OVERWRITE_CANDIDATE_STATUS,
         "ambiguous_h5",
         "missing_h5",
         "missing_calibration_snapshot",
@@ -513,32 +423,43 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--donor-zarr",
         type=Path,
         help=(
-            "Copy calibration from a known-matching donor Zarr. Operator is responsible "
-            "for verifying physical rig/camera configuration."
+            "Inspect calibration from a possible donor Zarr. This read-only inventory "
+            "does not authorize or perform a copy."
         ),
     )
     parser.add_argument(
         "--donor-note",
-        help="Provenance note recorded when --donor-zarr is applied.",
+        help="Legacy compatibility option; retained for read-only donor inventory.",
     )
-    parser.add_argument("--overwrite-existing", action="store_true", help="Rewrite complete analysis/calibration groups.")
-    parser.add_argument("--apply", action="store_true", help="Write updates (default: dry-run).")
+    parser.add_argument(
+        "--overwrite-existing",
+        action="store_true",
+        help="Classify an existing global calibration as requiring replacement; never rewrite it.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Retired: requests fail closed without opening an archive for writing.",
+    )
     parser.add_argument(
         "--consolidate-metadata",
         action="store_true",
-        help="After each write, refresh Zarr consolidated metadata.",
+        help="Retired with the legacy write path.",
     )
     parser.add_argument("--verbose", action="store_true", help="Print skipped archives as well as candidates/errors.")
     args = parser.parse_args(argv)
 
-    if args.consolidate_metadata and not args.apply:
-        parser.error("--consolidate-metadata requires --apply")
     if args.h5_path is not None and len(args.paths) != 1:
         parser.error("--h5-path requires exactly one zarr path")
     if args.h5_path is not None and args.donor_zarr is not None:
         parser.error("--h5-path and --donor-zarr are mutually exclusive")
     if args.donor_note and args.donor_zarr is None:
         parser.error("--donor-note requires --donor-zarr")
+    if args.apply:
+        print(f"error: {APPLY_RETIRED_MESSAGE}", file=sys.stderr)
+        return 2
+    if args.consolidate_metadata:
+        parser.error("--consolidate-metadata belongs to the retired --apply path")
 
     roots = _resolve_roots(args.paths)
     counts: dict[str, int] = {
@@ -576,17 +497,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("No zarr files found.")
         return 1
 
-    mode = "Applied" if args.apply else "Dry run"
     summary_keys = [
         "zarr_scanned",
-        "would_backfill",
-        "would_overwrite",
-        "would_copy_donor",
-        "would_copy_donor_overwrite",
-        "backfilled",
-        "overwritten",
-        "copied_donor",
-        "copied_donor_overwrite",
+        H5_CANDIDATE_STATUS,
+        H5_OVERWRITE_CANDIDATE_STATUS,
+        DONOR_CANDIDATE_STATUS,
+        DONOR_OVERWRITE_CANDIDATE_STATUS,
         "skipped_existing",
         "filtered_zarr_use",
         "missing_h5",
@@ -599,7 +515,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "errors",
     ]
     summary = " ".join(f"{key}={counts.get(key, 0)}" for key in summary_keys)
-    print(f"Analysis calibration backfill {mode}: {summary}")
+    print(f"Analysis calibration read-only inventory: {summary}")
     return 0 if counts["errors"] == 0 else 1
 
 
