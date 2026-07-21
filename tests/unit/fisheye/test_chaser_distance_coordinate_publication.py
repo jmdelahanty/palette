@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
@@ -266,8 +267,11 @@ def _add_epoch_run(zarr_path: Path) -> str:
     return "epoch_1"
 
 
-def _publish_canonical(tmp_path: Path):
-    zarr_path, detection_path, stimulus_run = _canonical_sources(tmp_path)
+def _publish_canonical_from_sources(
+    zarr_path: Path,
+    detection_path: str,
+    stimulus_run: str,
+) -> str:
     result = build_chaser_distance_result(
         zarr_path,
         run_name="canonical_distance",
@@ -280,14 +284,67 @@ def _publish_canonical(tmp_path: Path):
         write_png=False,
         write_interactive_spec=False,
     )
+    return path
+
+
+def _copy_zarr_archive(template: Path, target_parent: Path) -> Path:
+    target = target_parent / template.name
+    shutil.copytree(template, target)
+    return target
+
+
+@pytest.fixture(scope="module")
+def canonical_source_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, str, str]:
+    template_parent = tmp_path_factory.mktemp("chaser-distance-source-template")
+    return _canonical_sources(template_parent)
+
+
+@pytest.fixture
+def canonical_source_archive(
+    tmp_path: Path,
+    canonical_source_template: tuple[Path, str, str],
+) -> tuple[Path, str, str]:
+    template, detection_path, stimulus_run = canonical_source_template
+    return (
+        _copy_zarr_archive(template, tmp_path),
+        detection_path,
+        stimulus_run,
+    )
+
+
+@pytest.fixture(scope="module")
+def published_canonical_template(
+    tmp_path_factory: pytest.TempPathFactory,
+    canonical_source_template: tuple[Path, str, str],
+) -> tuple[Path, str]:
+    source_template, detection_path, stimulus_run = canonical_source_template
+    template_parent = tmp_path_factory.mktemp("chaser-distance-published-template")
+    zarr_path = _copy_zarr_archive(source_template, template_parent)
+    run_path = _publish_canonical_from_sources(
+        zarr_path,
+        detection_path,
+        stimulus_run,
+    )
+    return zarr_path, run_path
+
+
+@pytest.fixture
+def published_canonical_archive(
+    tmp_path: Path,
+    published_canonical_template: tuple[Path, str],
+) -> tuple[Path, zarr.Group, zarr.Group]:
+    template, run_path = published_canonical_template
+    zarr_path = _copy_zarr_archive(template, tmp_path)
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    return zarr_path, root, root[path]
+    return zarr_path, root, root[run_path]
 
 
 def test_canonical_chaser_distance_publishes_exact_coordinate_contract(
-    tmp_path: Path,
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
 ) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+    _zarr_path, root, run = published_canonical_archive
 
     bound = load_bound_chaser_distance_run(root, run.path)
 
@@ -338,9 +395,9 @@ def test_canonical_chaser_distance_publishes_exact_coordinate_contract(
 
 
 def test_epoch_measurements_bind_and_recheck_exact_source_windows(
-    tmp_path: Path,
+    canonical_source_archive: tuple[Path, str, str],
 ) -> None:
-    zarr_path, detection_path, stimulus_run = _canonical_sources(tmp_path)
+    zarr_path, detection_path, stimulus_run = canonical_source_archive
     epoch_run = _add_epoch_run(zarr_path)
     result = build_chaser_distance_result(
         zarr_path,
@@ -375,9 +432,9 @@ def test_epoch_measurements_bind_and_recheck_exact_source_windows(
 
 
 def test_canonical_writer_rechecks_source_before_any_output_mutation(
-    tmp_path: Path,
+    canonical_source_archive: tuple[Path, str, str],
 ) -> None:
-    zarr_path, detection_path, stimulus_run = _canonical_sources(tmp_path)
+    zarr_path, detection_path, stimulus_run = canonical_source_archive
     result = build_chaser_distance_result(
         zarr_path,
         run_name="candidate",
@@ -399,10 +456,10 @@ def test_canonical_writer_rechecks_source_before_any_output_mutation(
 
 
 def test_activation_rolls_back_exact_selectors_on_base_exception(
-    tmp_path: Path,
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+    _zarr_path, root, run = published_canonical_archive
     parent = root["analysis/chaser_distance_runs"]
     parent.attrs["latest"] = "previous_latest"
     parent.attrs["latest_complete"] = "previous_complete"
@@ -429,10 +486,10 @@ def test_activation_rolls_back_exact_selectors_on_base_exception(
 
 
 def test_activation_rolls_back_owned_epoch_on_final_commit_interrupt(
-    tmp_path: Path,
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+    _zarr_path, root, run = published_canonical_archive
     parent = root["analysis/chaser_distance_runs"]
     before = {
         name: (name in parent.attrs, parent.attrs.get(name))
@@ -469,10 +526,10 @@ def test_activation_rolls_back_owned_epoch_on_final_commit_interrupt(
 
 
 def test_activation_accepts_proven_commit_when_store_interrupts_after_final_write(
-    tmp_path: Path,
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    zarr_path, root, run = _publish_canonical(tmp_path)
+    zarr_path, root, run = published_canonical_archive
     parent = root["analysis/chaser_distance_runs"]
     base_generation = parent.attrs[CHASER_DISTANCE_PUBLICATION_GENERATION_ATTR]
     run.attrs["stage_selector_eligible"] = False
@@ -517,10 +574,10 @@ def test_activation_accepts_proven_commit_when_store_interrupts_after_final_writ
 
 
 def test_activation_preserves_concurrent_owner_generation_takeover(
-    tmp_path: Path,
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    zarr_path, root, run = _publish_canonical(tmp_path)
+    zarr_path, root, run = published_canonical_archive
     parent = root["analysis/chaser_distance_runs"]
     run.attrs["stage_selector_eligible"] = False
     original = publication_module._write_activation_attr  # noqa: SLF001
@@ -581,10 +638,10 @@ def test_activation_preserves_concurrent_owner_generation_takeover(
 
 
 def test_writer_marks_candidate_failed_on_base_exception(
-    tmp_path: Path,
+    canonical_source_archive: tuple[Path, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    zarr_path, detection_path, stimulus_run = _canonical_sources(tmp_path)
+    zarr_path, detection_path, stimulus_run = canonical_source_archive
     result = build_chaser_distance_result(
         zarr_path,
         run_name="interrupted_candidate",
@@ -612,8 +669,10 @@ def test_writer_marks_candidate_failed_on_base_exception(
     assert parent.attrs.get("latest_pending") != "interrupted_candidate"
 
 
-def test_canonical_writer_refuses_destructive_overwrite(tmp_path: Path) -> None:
-    zarr_path, root, run = _publish_canonical(tmp_path)
+def test_canonical_writer_refuses_destructive_overwrite(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    zarr_path, root, run = published_canonical_archive
     seal_before = run.attrs[PUBLICATION_SEAL_ATTR]
     result = build_chaser_distance_result(
         zarr_path,
@@ -634,8 +693,10 @@ def test_canonical_writer_refuses_destructive_overwrite(tmp_path: Path) -> None:
     assert root[run.path].attrs[PUBLICATION_SEAL_ATTR] == seal_before
 
 
-def test_strict_reader_rejects_tampered_output_payload(tmp_path: Path) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+def test_strict_reader_rejects_tampered_output_payload(
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+) -> None:
+    _zarr_path, root, run = published_canonical_archive
     run["positions/fish_centroid_arena_xy"][0, 0] += np.float32(1.0)
 
     with pytest.raises(ChaserDistanceCoordinateError, match="exact canonical derivation"):
@@ -643,9 +704,9 @@ def test_strict_reader_rejects_tampered_output_payload(tmp_path: Path) -> None:
 
 
 def test_strict_reader_rejects_direction_relabel_even_with_fresh_record_digest(
-    tmp_path: Path,
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
 ) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+    _zarr_path, root, run = published_canonical_archive
     record = dict(run.attrs[INPUT_AUTHORITY_ATTR])
     record["numeric_transform_direction"] = (
         "arena_relative_canvas_px_to_source_camera_image_px"
@@ -658,9 +719,9 @@ def test_strict_reader_rejects_direction_relabel_even_with_fresh_record_digest(
 
 
 def test_strict_reader_rejects_measurement_relabel_with_fresh_digest(
-    tmp_path: Path,
+    published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
 ) -> None:
-    _zarr_path, root, run = _publish_canonical(tmp_path)
+    _zarr_path, root, run = published_canonical_archive
     node = run["distances/distance_px"]
     record = dict(node.attrs[MEASUREMENT_DESCRIPTOR_ATTR])
     record["units"] = "mm"
@@ -715,9 +776,9 @@ def test_explicit_legacy_writer_never_advances_normal_selectors(
 
 
 def test_canonical_builder_rejects_unsupported_refined_detection_path(
-    tmp_path: Path,
+    canonical_source_archive: tuple[Path, str, str],
 ) -> None:
-    zarr_path, _detection_path, stimulus_run = _canonical_sources(tmp_path)
+    zarr_path, _detection_path, stimulus_run = canonical_source_archive
     with pytest.raises(ChaserDistanceCoordinateError, match="detect_runs/<run>"):
         build_chaser_distance_result(
             zarr_path,
