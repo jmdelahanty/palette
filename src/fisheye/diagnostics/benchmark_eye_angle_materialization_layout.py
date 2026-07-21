@@ -30,6 +30,7 @@ import zarr
 from fisheye.analysis import eye_angle_analysis as eye_writer
 from fisheye.analysis_workflows.materializers.eye_angles import (
     _iter_arrays,
+    _sealed_output_identity_digests,
     _validate_eye_angle_run,
     audit_eye_angle_source_revision,
     build_eye_angle_materialization_plan,
@@ -306,6 +307,9 @@ def run_benchmark(
         shard_workers=shard_workers,
         native_threads=native_threads,
     )
+    sealed_identity = _sealed_output_identity_digests(
+        plan.staged_input_integrity_receipt
+    )
     source_before = audit_eye_angle_source_revision(plan)
     if source_before["status"] != "current":
         raise RuntimeError(f"Source revision is not current: {source_before}")
@@ -377,7 +381,12 @@ def run_benchmark(
 
             writer_cpu_started = _cpu_seconds()
             writer_started = time.perf_counter()
-            eye_writer.main(writer_argv)
+            eye_writer.main(
+                writer_argv,
+                _staged_input_integrity_receipt=(
+                    plan.staged_input_integrity_receipt
+                ),
+            )
             writer_wall_seconds = float(time.perf_counter() - writer_started)
             writer_cpu_seconds = float(_cpu_seconds() - writer_cpu_started)
 
@@ -395,6 +404,10 @@ def run_benchmark(
                 row_count=plan.row_count,
                 frame_count=plan.frame_count,
                 expected_source_contract_sha256=plan.source_contract_sha256,
+                expected_instance_key_sha256=sealed_identity["instance_key"],
+                expected_acquisition_frame_index_sha256=sealed_identity[
+                    "source_acquisition_frame_index"
+                ],
                 require_sharded=False,
                 expected_angle_chunk_rows=variant.angle_chunk_rows,
                 expected_angle_chunk_columns=variant.angle_chunk_columns,
@@ -444,6 +457,10 @@ def run_benchmark(
                 row_count=plan.row_count,
                 frame_count=plan.frame_count,
                 expected_source_contract_sha256=plan.source_contract_sha256,
+                expected_instance_key_sha256=sealed_identity["instance_key"],
+                expected_acquisition_frame_index_sha256=sealed_identity[
+                    "source_acquisition_frame_index"
+                ],
                 require_sharded=True,
                 expected_angle_chunk_rows=variant.angle_chunk_rows,
                 expected_angle_chunk_columns=variant.angle_chunk_columns,

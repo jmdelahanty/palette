@@ -108,7 +108,7 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         id="refined_keypoints",
         aliases=("keypoints_refine",),
         depends_on=("keypoints",),
-        invalidates=("arena_assignment", "track_kinematics", "eye_angles"),
+        invalidates=("arena_assignment", "track_kinematics"),
         artifact_families=("refined_keypoints_runs",),
         description="Curated keypoint instances used downstream.",
     ),
@@ -204,13 +204,13 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         id="eye_angles",
-        depends_on=("refined_keypoints", "subject_shape"),
+        depends_on=("subject_shape",),
         invalidates=("bout_kinematics", "stimulus_response"),
         artifact_families=("analysis/eye_angle_runs",),
         category=DERIVED_ANALYSIS,
         description=(
             "Per-eye angle and vergence measurements from subject-shape eye "
-            "geometry and refined keypoints."
+            "geometry and its sealed canonical base-keypoint authority."
         ),
     ),
     StageSpec(

@@ -1,7 +1,8 @@
 """Stage exact eye-angle inputs, compute locally, shard, and publish atomically.
 
 The production eye-angle path consumes completed subject-shape eye geometry and
-completed refined keypoints.  Only the physical files backing those resolved
+the exact canonical base keypoints sealed by that publication. Only the physical
+files backing those resolved
 arrays are copied to node-local storage.  The existing scientific writer then
 runs entirely against that staged Zarr, its completed output is converted to
 indexed Zarr v3 shards with decoded validation, and the shared atomic publisher
@@ -23,7 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
@@ -108,6 +109,7 @@ class EyeAngleMaterializationPlan:
     source_metadata_sha256: str
     source_contract_sha256: str
     source_contracts: dict[str, Any]
+    staged_input_integrity_receipt: dict[str, Any]
 
     @property
     def files_manifest_path(self) -> Path:
@@ -164,10 +166,16 @@ class EyeAngleMaterializationPlan:
                 "source_metadata_sha256": self.source_metadata_sha256,
                 "source_contract_sha256": self.source_contract_sha256,
                 "source_contracts": self.source_contracts,
-                "full_source_data_content_hash": False,
+                "staged_input_integrity_receipt_sha256": (
+                    self.staged_input_integrity_receipt.get("record_sha256")
+                ),
+                "staged_input_integrity_receipt": (
+                    self.staged_input_integrity_receipt
+                ),
+                "full_selected_scientific_input_content_hash": True,
                 "source_revision_assurance": (
-                    "completed immutable input runs plus logical source contracts, "
-                    "physical path/size/mtime inventory, and selected metadata SHA-256"
+                    "canonical subject-shape authority plus a two-pass, exact, "
+                    "chunked content receipt for every staged worker input"
                 ),
             }
         )
@@ -285,26 +293,35 @@ def _json_digest(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _sealed_output_identity_digests(
+    receipt: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return output-axis digests from the validated canonical keypoint proof."""
+
+    if not isinstance(receipt, Mapping):
+        raise ValueError("Eye-angle materialization lacks its staged input receipt.")
+    authority = eye_writer._canonical_staged_keypoint_authority(
+        receipt.get("canonical_keypoint_authority")
+    )
+    if (
+        receipt.get("canonical_keypoint_authority_sha256")
+        != authority["record_sha256"]
+    ):
+        raise ValueError(
+            "Eye-angle materialization receipt names another keypoint authority."
+        )
+    arrays = authority["arrays"]
+    return {
+        "instance_key": str(arrays["instance_key"]["content_sha256"]),
+        "source_acquisition_frame_index": str(
+            arrays["source_acquisition_frame_index"]["content_sha256"]
+        ),
+    }
+
+
 def _require_complete_source(group: zarr.Group, *, label: str) -> None:
     if str(group.attrs.get("palette_run_completion_status", "")) != "complete":
         raise ValueError(f"{label} must be a completed immutable input run.")
-
-
-def _frame_count(frame_indices: zarr.Array) -> int:
-    """Return max(nonnegative frame index) + 1 with bounded read memory."""
-
-    rows = int(frame_indices.shape[0])
-    chunk_rows = max(1, int(frame_indices.chunks[0]))
-    maximum = -1
-    for start in range(0, rows, chunk_rows):
-        values = np.asarray(
-            frame_indices[start : min(rows, start + chunk_rows)],
-            dtype=np.int64,
-        )
-        nonnegative = values[values >= 0]
-        if nonnegative.size:
-            maximum = max(maximum, int(nonnegative.max()))
-    return maximum + 1
 
 
 def _resolve_source_plan(
@@ -312,6 +329,9 @@ def _resolve_source_plan(
     *,
     subject_shape_run: str | None,
     keypoint_run: str | None,
+    staged_input_integrity_receipt: Mapping[str, Any] | None = None,
+    staged_subject_shape_subset: bool = False,
+    verify_staged_payload: bool = True,
 ) -> tuple[
     Any,
     dict[str, Any],
@@ -321,12 +341,37 @@ def _resolve_source_plan(
     int,
 ]:
     root = open_zarr_root(source_zarr, mode="r")
+    staged_subject_shape_authority = (
+        eye_writer._staged_subject_shape_authority_from_input_receipt(
+            staged_input_integrity_receipt
+        )
+        if staged_input_integrity_receipt is not None
+        and staged_subject_shape_subset
+        else None
+    )
+    staged_keypoint_authority = (
+        eye_writer._staged_keypoint_authority_from_input_receipt(
+            staged_input_integrity_receipt
+        )
+        if staged_input_integrity_receipt is not None
+        and staged_subject_shape_subset
+        else None
+    )
     context = eye_writer._resolve_eye_angle_inputs(
         root,
         subject_shape_run=subject_shape_run,
         refined_subject_run=None,
         keypoint_run=keypoint_run,
+        _staged_subject_shape_authority=staged_subject_shape_authority,
+        _staged_keypoint_authority=staged_keypoint_authority,
+        _verify_staged_payload=verify_staged_payload,
     )
+    if staged_input_integrity_receipt is not None:
+        eye_writer._validate_staged_eye_angle_input_integrity_receipt(
+            context,
+            staged_input_integrity_receipt,
+            verify_payload=verify_staged_payload,
+        )
     geometry = context.eye_geometry
     if geometry.stage_group != EYE_GEOMETRY_STAGE_SUBJECT_SHAPE:
         raise ValueError(
@@ -334,7 +379,11 @@ def _resolve_source_plan(
             "analysis/subject_shape_runs eye geometry."
         )
     _require_complete_source(geometry.group, label="Subject-shape source")
-    _require_complete_source(context.kp_group, label="Refined-keypoint source")
+    if context.keypoint_source_mode != eye_writer.EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL:
+        raise ValueError(
+            "The production eye-angle materializer accepts canonical base keypoints only."
+        )
+    _require_complete_source(context.kp_group, label="Canonical base-keypoint source")
 
     source_contracts = json_attr_safe(eye_writer._eye_angle_source_contracts(context))
     component_contracts = source_contracts["eye_geometry"]["components"]
@@ -366,13 +415,29 @@ def _resolve_source_plan(
     files = _physical_files(source_zarr, selected_files)
     if not files:
         raise RuntimeError(f"No physical eye-angle source files selected from {source_zarr}.")
+    if staged_input_integrity_receipt is not None:
+        verified_frame_indices = eye_writer._load_validated_staged_frame_indices(
+            context,
+            staged_input_integrity_receipt,
+        )
+        if verified_frame_indices.shape[0] != int(
+            context.eye_geometry.ellipse_params.shape[0]
+        ):
+            raise RuntimeError("Verified acquisition-frame row count changed.")
+        resolved_frame_count = int(context.source_total_frames or 0)
+        resolved_metadata_fps = staged_input_integrity_receipt[
+            "scientific_parameters"
+        ]["fps"]
+    else:
+        resolved_frame_count = int(context.source_total_frames or 0)
+        resolved_metadata_fps = get_fps(root)
     return (
         context,
         source_contracts,
         tuple(selected_arrays),
         files,
-        get_fps(root),
-        _frame_count(context.frame_indices_source["frame_indices"]),
+        resolved_metadata_fps,
+        resolved_frame_count,
     )
 
 
@@ -450,7 +515,61 @@ def build_eye_angle_materialization_plan(
     resolved_fps = float(fps) if fps is not None else (
         float(metadata_fps) if metadata_fps is not None and float(metadata_fps) > 0 else None
     )
+    resolved_fps_source = (
+        "cli_override"
+        if fps is not None
+        else "authoritative_recording_metadata"
+        if resolved_fps is not None
+        else "unavailable"
+    )
     row_count = int(context.eye_geometry.ellipse_params.shape[0])
+    staged_subject_shape_authority = context.eye_geometry.source_authority
+    if (
+        context.eye_geometry.source_authority_mode != "canonical_publication"
+        or not isinstance(staged_subject_shape_authority, Mapping)
+        or not isinstance(staged_subject_shape_authority.get("record_sha256"), str)
+    ):
+        raise ValueError(
+            "The production eye-angle materializer requires one digest-bound "
+            "canonical subject-shape source authority."
+        )
+    staged_input_integrity_receipt = dict(
+        json_attr_safe(
+            eye_writer._build_staged_eye_angle_input_integrity_receipt(
+                context,
+                chunk_rows=int(chunk_rows),
+                fps=resolved_fps,
+                fps_source=resolved_fps_source,
+            )
+        )
+    )
+    if staged_input_integrity_receipt.get("source_contract_sha256") != _json_digest(
+        contracts
+    ):
+        raise RuntimeError(
+            "Staged input integrity receipt differs from the resolved source contract."
+        )
+    sealed_frame_indices = eye_writer._load_validated_staged_frame_indices(
+        context,
+        staged_input_integrity_receipt,
+    )
+    if sealed_frame_indices.shape != (row_count,):
+        raise RuntimeError("Sealed acquisition-frame index row count changed.")
+    if context.source_total_frames is None:
+        raise RuntimeError("Canonical eye inputs lack a sealed full-video frame extent.")
+    frame_count = int(context.source_total_frames)
+    if fps is None:
+        confirmed_metadata_fps = get_fps(open_zarr_root(source, mode="r"))
+        confirmed_resolved_fps = (
+            float(confirmed_metadata_fps)
+            if confirmed_metadata_fps is not None
+            and float(confirmed_metadata_fps) > 0
+            else None
+        )
+        if confirmed_resolved_fps != resolved_fps:
+            raise RuntimeError(
+                "Recording FPS changed while the staged input receipt was built."
+            )
     estimated_output_bytes = max(1, row_count + frame_count) * (
         ESTIMATED_OUTPUT_BYTES_PER_DETECTION // 2
     )
@@ -461,7 +580,7 @@ def build_eye_angle_materialization_plan(
         sharded_run=scratch / "eye-angle-sharded-run",
         subject_shape_run=context.eye_geometry.run_name,
         keypoint_run=context.keypoint_run_name,
-        source_keypoint_run=context.source_kp_run_name,
+        source_keypoint_run=context.keypoint_run_name,
         run_name=resolved_name,
         row_count=row_count,
         frame_count=frame_count,
@@ -476,9 +595,7 @@ def build_eye_angle_materialization_plan(
         shard_workers=int(shard_workers),
         native_threads=int(native_threads),
         fps=resolved_fps,
-        fps_source="cli_override" if fps is not None else (
-            "authoritative_recording_metadata" if resolved_fps is not None else "unavailable"
-        ),
+        fps_source=resolved_fps_source,
         smoothing_window=None if smoothing_window is None else int(smoothing_window),
         selected_arrays=selected_arrays,
         physical_files=files,
@@ -489,6 +606,7 @@ def build_eye_angle_materialization_plan(
         source_metadata_sha256=_metadata_content_digest(source, files),
         source_contract_sha256=_json_digest(contracts),
         source_contracts=contracts,
+        staged_input_integrity_receipt=staged_input_integrity_receipt,
     )
 
 
@@ -583,12 +701,15 @@ def audit_eye_angle_source_revision(plan: EyeAngleMaterializationPlan) -> dict[s
             plan.source_zarr,
             subject_shape_run=plan.subject_shape_run,
             keypoint_run=plan.keypoint_run,
+            staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
+            staged_subject_shape_subset=False,
+            verify_staged_payload=True,
         )
         observed_contract_sha256 = _json_digest(contracts)
         if context.eye_geometry.run_name != plan.subject_shape_run:
             errors.append("resolved subject-shape run changed")
         if context.keypoint_run_name != plan.keypoint_run:
-            errors.append("resolved refined-keypoint run changed")
+            errors.append("resolved canonical base-keypoint run changed")
         if int(frame_count) != int(plan.frame_count):
             errors.append("resolved frame count changed")
         if tuple(arrays) != tuple(plan.selected_arrays):
@@ -611,7 +732,7 @@ def audit_eye_angle_source_revision(plan: EyeAngleMaterializationPlan) -> dict[s
             "observed_source_metadata_sha256": observed_metadata_sha256,
             "expected_source_contract_sha256": plan.source_contract_sha256,
             "observed_source_contract_sha256": observed_contract_sha256,
-            "full_source_data_content_hash": False,
+            "full_selected_scientific_input_content_hash": True,
             "errors": errors,
         }
     )
@@ -670,6 +791,9 @@ def stage_eye_angle_sources(
         plan.staged_zarr,
         subject_shape_run=plan.subject_shape_run,
         keypoint_run=plan.keypoint_run,
+        staged_input_integrity_receipt=plan.staged_input_integrity_receipt,
+        staged_subject_shape_subset=True,
+        verify_staged_payload=True,
     )
     if (
         staged_context.eye_geometry.run_name != plan.subject_shape_run
@@ -707,6 +831,13 @@ def stage_eye_angle_sources(
             "selected_arrays": list(plan.selected_arrays),
             "source_contracts": plan.source_contracts,
             "source_contract_sha256": plan.source_contract_sha256,
+            "source_authority_mode": "digest_bound_staged_subset",
+            "staged_input_integrity_receipt_sha256": (
+                plan.staged_input_integrity_receipt.get("record_sha256")
+            ),
+            "staged_input_integrity_receipt": (
+                plan.staged_input_integrity_receipt
+            ),
             "source_metadata_sha256": plan.source_metadata_sha256,
             "inventory": inventory,
             "source_revision_audit": source_revision,
@@ -755,6 +886,8 @@ def _validate_eye_angle_run(
     row_count: int,
     frame_count: int,
     expected_source_contract_sha256: str,
+    expected_instance_key_sha256: str,
+    expected_acquisition_frame_index_sha256: str,
     require_sharded: bool,
     expected_angle_chunk_rows: int,
     expected_angle_chunk_columns: int,
@@ -919,6 +1052,8 @@ def _validate_eye_angle_run(
             errors.append("shape mismatch for roi_vectors")
 
     required_support = {
+        "support/instance_key": (row_count,),
+        "support/source_acquisition_frame_index": (row_count,),
         "support/frame_indices": (row_count,),
         "support/time_seconds": (row_count,),
         "support/body_frame/origin_xy": (row_count, 2),
@@ -933,6 +1068,86 @@ def _validate_eye_angle_run(
             errors.append(f"missing array {array_path}")
         elif tuple(int(value) for value in array.shape) != expected_shape:
             errors.append(f"shape mismatch for {array_path}")
+    instance_key = group.get("support/instance_key")
+    acquisition_index = group.get("support/source_acquisition_frame_index")
+    frame_alias = group.get("support/frame_indices")
+    observed_instance_key_sha256 = None
+    observed_acquisition_frame_index_sha256 = None
+    observed_frame_alias_sha256 = None
+    if isinstance(instance_key, zarr.Array):
+        instance_dtype_valid = np.dtype(instance_key.dtype) == np.dtype("<u8")
+        if not instance_dtype_valid:
+            errors.append("support/instance_key must be exact uint64")
+        if (
+            instance_key.attrs.get("identity_domain") != "observation_instance"
+            or instance_key.attrs.get("identity_mode") != "instance_key"
+            or instance_key.attrs.get("row_axis") != eye_writer.EYE_ANGLE_ROW_AXIS
+        ):
+            errors.append("support/instance_key identity attrs mismatch")
+        if instance_dtype_valid:
+            observed_instance_key_sha256 = eye_writer.array_values_sha256(
+                instance_key
+            )
+            if observed_instance_key_sha256 != expected_instance_key_sha256:
+                errors.append(
+                    "support/instance_key differs from sealed canonical source"
+                )
+    if isinstance(acquisition_index, zarr.Array):
+        acquisition_dtype_valid = np.dtype(acquisition_index.dtype) == np.dtype(
+            "<i8"
+        )
+        if not acquisition_dtype_valid:
+            errors.append(
+                "support/source_acquisition_frame_index must be exact int64"
+            )
+        if (
+            acquisition_index.attrs.get("value_kind")
+            != "source_acquisition_frame_index"
+            or acquisition_index.attrs.get("row_axis")
+            != eye_writer.EYE_ANGLE_ROW_AXIS
+        ):
+            errors.append(
+                "support/source_acquisition_frame_index attrs mismatch"
+            )
+        if acquisition_dtype_valid:
+            observed_acquisition_frame_index_sha256 = (
+                eye_writer.array_values_sha256(acquisition_index)
+            )
+            if (
+                observed_acquisition_frame_index_sha256
+                != expected_acquisition_frame_index_sha256
+            ):
+                errors.append(
+                    "support/source_acquisition_frame_index differs from sealed canonical source"
+                )
+    if isinstance(frame_alias, zarr.Array):
+        alias_dtype_valid = np.dtype(frame_alias.dtype) == np.dtype("<i8")
+        if not alias_dtype_valid:
+            errors.append("support/frame_indices must be exact int64")
+        if (
+            frame_alias.attrs.get("compatibility_alias_of")
+            != "support/source_acquisition_frame_index"
+            or frame_alias.attrs.get("values_must_equal_canonical") is not True
+            or frame_alias.attrs.get("value_kind")
+            != "source_acquisition_frame_index"
+            or frame_alias.attrs.get("row_axis")
+            != eye_writer.EYE_ANGLE_ROW_AXIS
+        ):
+            errors.append("support/frame_indices compatibility attrs mismatch")
+        if alias_dtype_valid:
+            observed_frame_alias_sha256 = eye_writer.array_values_sha256(frame_alias)
+            if observed_frame_alias_sha256 != expected_acquisition_frame_index_sha256:
+                errors.append(
+                    "support/frame_indices differs from sealed canonical acquisition frames"
+                )
+    if (
+        observed_acquisition_frame_index_sha256 is not None
+        and observed_frame_alias_sha256 is not None
+        and observed_acquisition_frame_index_sha256 != observed_frame_alias_sha256
+    ):
+        errors.append(
+            "support/frame_indices differs from canonical source_acquisition_frame_index"
+        )
 
     array_count = 0
     sharded_array_count = 0
@@ -966,6 +1181,10 @@ def _validate_eye_angle_run(
             "sharded_array_count": sharded_array_count,
             "require_sharded": bool(require_sharded),
             "source_contract_sha256": observed_contract_sha256,
+            "instance_key_sha256": observed_instance_key_sha256,
+            "source_acquisition_frame_index_sha256": (
+                observed_acquisition_frame_index_sha256
+            ),
             "algorithm_contract_sha256": (
                 _json_digest(algorithm) if isinstance(algorithm, dict) else None
             ),
@@ -985,12 +1204,20 @@ def publish_eye_angle_run(
 ) -> dict[str, Any]:
     """Validate and publish one completed sharded eye-angle run."""
 
+    sealed_identity = _sealed_output_identity_digests(
+        plan.staged_input_integrity_receipt
+    )
+
     def validate(path: Path) -> dict[str, Any]:
         return _validate_eye_angle_run(
             path,
             row_count=plan.row_count,
             frame_count=plan.frame_count,
             expected_source_contract_sha256=plan.source_contract_sha256,
+            expected_instance_key_sha256=sealed_identity["instance_key"],
+            expected_acquisition_frame_index_sha256=sealed_identity[
+                "source_acquisition_frame_index"
+            ],
             require_sharded=True,
             expected_angle_chunk_rows=plan.angle_chunk_rows,
             expected_angle_chunk_columns=plan.angle_chunk_columns,
@@ -1148,6 +1375,9 @@ def materialize_eye_angles(
         fps=fps,
         smoothing_window=smoothing_window,
     )
+    sealed_identity = _sealed_output_identity_digests(
+        plan.staged_input_integrity_receipt
+    )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
@@ -1194,7 +1424,12 @@ def materialize_eye_angles(
         if plan.smoothing_window is not None:
             writer_argv.extend(("--smoothing-window", str(plan.smoothing_window)))
         compute_started = time.perf_counter()
-        eye_writer.main(writer_argv)
+        eye_writer.main(
+            writer_argv,
+            _staged_input_integrity_receipt=(
+                plan.staged_input_integrity_receipt
+            ),
+        )
         compute_seconds = float(time.perf_counter() - compute_started)
 
         regular_validation = _validate_eye_angle_run(
@@ -1202,6 +1437,10 @@ def materialize_eye_angles(
             row_count=plan.row_count,
             frame_count=plan.frame_count,
             expected_source_contract_sha256=plan.source_contract_sha256,
+            expected_instance_key_sha256=sealed_identity["instance_key"],
+            expected_acquisition_frame_index_sha256=sealed_identity[
+                "source_acquisition_frame_index"
+            ],
             require_sharded=False,
             expected_angle_chunk_rows=plan.angle_chunk_rows,
             expected_angle_chunk_columns=plan.angle_chunk_columns,
@@ -1257,6 +1496,12 @@ def materialize_eye_angles(
                 },
                 "source_contract_sha256": plan.source_contract_sha256,
                 "source_metadata_sha256": plan.source_metadata_sha256,
+                "staged_input_integrity_receipt_sha256": (
+                    plan.staged_input_integrity_receipt.get("record_sha256")
+                ),
+                "staged_input_integrity_receipt": (
+                    plan.staged_input_integrity_receipt
+                ),
                 "algorithm_contract": {
                     "schema_id": eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID,
                     "schema_version": eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION,
@@ -1280,6 +1525,9 @@ def materialize_eye_angles(
             "node_local_staged_zarr": str(plan.staged_zarr),
             "source_contract_sha256": plan.source_contract_sha256,
             "source_metadata_sha256": plan.source_metadata_sha256,
+            "staged_input_integrity_receipt_sha256": (
+                plan.staged_input_integrity_receipt.get("record_sha256")
+            ),
             "selected_arrays": list(plan.selected_arrays),
             "compute_arguments": writer_argv,
         }
@@ -1324,6 +1572,10 @@ def materialize_eye_angles(
             row_count=plan.row_count,
             frame_count=plan.frame_count,
             expected_source_contract_sha256=plan.source_contract_sha256,
+            expected_instance_key_sha256=sealed_identity["instance_key"],
+            expected_acquisition_frame_index_sha256=sealed_identity[
+                "source_acquisition_frame_index"
+            ],
             require_sharded=True,
             expected_angle_chunk_rows=plan.angle_chunk_rows,
             expected_angle_chunk_columns=plan.angle_chunk_columns,
@@ -1371,7 +1623,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--subject-shape-run")
-    parser.add_argument("--keypoint-run")
+    parser.add_argument(
+        "--keypoint-run",
+        help=(
+            "Optional exact base keypoint run assertion. The selected subject-shape "
+            "publication remains the authority; refined keypoints are unsupported."
+        ),
+    )
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_ROWS)

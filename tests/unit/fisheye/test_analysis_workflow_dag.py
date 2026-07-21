@@ -50,10 +50,7 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
         "refined_keypoints",
         "tracks",
     )
-    assert workflow.node_by_id["eye_angles"].depends_on == (
-        "refined_keypoints",
-        "subject_shape",
-    )
+    assert workflow.node_by_id["eye_angles"].depends_on == ("subject_shape",)
     assert workflow.node_by_id["eye_angles"].execution_policy == (
         "exact_source_subset_node_local_compute_shard_publish"
     )
@@ -67,6 +64,43 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
         "track_kinematics_visualization",
         "eye_angles",
     )
+
+
+def test_eye_plan_derives_keypoint_authority_only_through_subject_shape() -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_subject_masks": StageAvailability(
+            stage_id="refined_subject_masks",
+            available=True,
+            artifact_path="refined_subject_masks_runs/masks_a",
+            run_name="masks_a",
+            reason="complete canonical publication",
+        ),
+        "subject_shape": StageAvailability(
+            stage_id="subject_shape",
+            available=True,
+            artifact_path="analysis/subject_shape_runs/shape_a",
+            run_name="shape_a",
+            reason="complete canonical publication",
+        ),
+        "eye_angles": StageAvailability(
+            stage_id="eye_angles",
+            available=False,
+            reason="missing",
+        ),
+    }
+
+    plan = plan_analysis_workflow(workflow, availability, targets=("eye_angles",))
+
+    assert plan.ready is True
+    assert plan.topological_order == (
+        "refined_subject_masks",
+        "subject_shape",
+        "eye_angles",
+    )
+    assert "refined_keypoints" not in plan.node_by_id
+    assert plan.node_by_id["eye_angles"].depends_on == ("subject_shape",)
+    assert plan.execution_order == ("eye_angles",)
 
 
 def test_temporal_policy_allows_numeric_overrides_but_not_trace_downsampling() -> None:

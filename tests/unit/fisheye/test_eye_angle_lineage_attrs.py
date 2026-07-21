@@ -1,14 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 import fisheye.analysis.eye_angle_analysis as eye_angle_analysis
 import fisheye.shared.eye_geometry_source as eye_geometry_source_mod
 from fisheye.analysis.eye_angle_analysis import _eye_angle_definition_attrs, _process_chunk
-from fisheye.analysis.eye_angle_analysis import (
-    _resolve_keypoint_run_name as resolve_eye_angle_keypoint_run,
-)
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
@@ -89,7 +88,7 @@ def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
     schema = eye_angle_analysis._eye_angle_output_schema()
 
     assert schema["schema_id"] == "analysis.eye_angle_output_schema"
-    assert schema["schema_version"] == 8
+    assert schema["schema_version"] == 9
     assert schema["algorithm_contract"] == {
         "schema_id": "analysis.eye_angle_algorithm_contract",
         "schema_version": 1,
@@ -337,6 +336,211 @@ def _add_subject_shape_eye_geometry(root):
     return run
 
 
+def _add_eye_keypoint_sources(root):
+    refined_parent = root.create_group("refined_keypoints_runs")
+    refined_parent.attrs["latest"] = "refined_diag_001"
+    refined = refined_parent.create_group("refined_diag_001")
+    refined.attrs.update(
+        {
+            "schema_id": "refined_keypoints",
+            "schema_version": 4,
+            "method": "manual_plus_model_refinement",
+            "method_version": "refined_keypoints.v4",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+            "coordinate_contract": (
+                "palette.refined_keypoints.legacy_unverified_nonselector.v1"
+            ),
+            "legacy_unverified_diagnostic_output": True,
+            "publication_scope": "historical_diagnostic_only",
+            "source_keypoints_run": "kp_from_shape",
+            "source_lineage_hash": "refined-lineage",
+            "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+        }
+    )
+    keypoints = np.asarray(
+        [
+            [[0.0, 0.0], [2.0, -1.0], [2.0, 1.0]],
+            [[0.0, 0.0], [2.0, -1.0], [2.0, 1.0]],
+        ],
+        dtype=np.float32,
+    )
+    refined.create_array("keypoints_roi", data=keypoints, overwrite=True)
+    refined.create_array("refined_success", data=np.ones(2, dtype=bool), overwrite=True)
+    refined.create_array(
+        "instance_key",
+        data=np.asarray([101, 102], dtype=np.uint64),
+        overwrite=True,
+    )
+    refined.create_array(
+        "frame_indices",
+        data=np.asarray([4, 5], dtype=np.int64),
+        overwrite=True,
+    )
+
+    base_parent = root.create_group("keypoints_runs")
+    base_parent.attrs["latest"] = "unrelated_latest"
+    base = base_parent.create_group("kp_from_shape")
+    base.attrs.update(
+        {
+            "schema_id": "keypoints",
+            "schema_version": 2,
+            "method": "yolo_pose",
+            "method_version": "detector.v2",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "lineage_hash": "base-lineage",
+            "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+        }
+    )
+    base.create_array("keypoints_roi", data=keypoints, overwrite=True)
+    base.create_array("detection_success", data=np.ones(2, dtype=bool), overwrite=True)
+    base.create_array(
+        "instance_key",
+        data=np.asarray([101, 102], dtype=np.uint64),
+        overwrite=True,
+    )
+    base.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([4, 5], dtype=np.int64),
+        overwrite=True,
+    )
+    return refined, base
+
+
+def _install_synthetic_canonical_keypoint_publication(
+    monkeypatch,
+    *,
+    shape,
+    base,
+    source_total_frames: int = 6,
+):
+    instance_digest = eye_angle_analysis.array_values_sha256(base["instance_key"])
+    frame_digest = eye_angle_analysis.array_values_sha256(
+        base["source_acquisition_frame_index"]
+    )
+
+    def row_identity(record_ref):
+        return SimpleNamespace(
+            record_ref=record_ref,
+            record_sha256="1" * 64,
+            contract=SimpleNamespace(
+                domain="observation_instance",
+                mode="instance_key",
+                leading_dimension=2,
+                key_array=SimpleNamespace(
+                    components=("instance_key",),
+                    dtype=np.dtype(np.uint64).str,
+                    shape=(2,),
+                    content_sha256=instance_digest,
+                ),
+            ),
+        )
+
+    def temporal_authority(record_ref):
+        return SimpleNamespace(
+            record_ref=record_ref,
+            record_sha256="2" * 64,
+            record=SimpleNamespace(
+                recording_id="eye-contract-fixture",
+                camera_id="camera_0",
+                source_total_frames=source_total_frames,
+                source_identity_domain="observation_instance",
+                source_identity_mode="instance_key",
+                source_leading_dimension=2,
+                source_acquisition_frame_index=SimpleNamespace(
+                    dtype=np.dtype(np.int64).str,
+                    shape=(2,),
+                    content_sha256=frame_digest,
+                ),
+            ),
+        )
+
+    keypoint_identity = row_identity(
+        "/keypoints_runs/kp_from_shape@row_identity_contract"
+    )
+    keypoint_temporal = temporal_authority(
+        "/keypoints_runs/kp_from_shape@source_row_temporal_authority"
+    )
+    descriptor = SimpleNamespace(digest=lambda: "3" * 64)
+    nested_surfaces = SimpleNamespace(
+        context=SimpleNamespace(
+            run_path="keypoints_runs/kp_from_shape",
+            _run_group=base,
+            context_record=SimpleNamespace(
+                record_ref="/keypoints_runs/kp_from_shape@coordinate_context",
+                record_sha256="4" * 64,
+            ),
+            row_identity=keypoint_identity,
+            temporal_authority=keypoint_temporal,
+            keypoint_label_authority=SimpleNamespace(
+                record_ref="/keypoints_runs/kp_from_shape@keypoint_label_authority",
+                record_sha256="5" * 64,
+            ),
+            keypoint_labels=("swim_bladder", "eye_left", "eye_right"),
+        ),
+        derivation=SimpleNamespace(
+            record_ref="/keypoints_runs/kp_from_shape@coordinate_derivation",
+            record_sha256="6" * 64,
+        ),
+        keypoints_roi=SimpleNamespace(descriptor=descriptor),
+    )
+    assignment_authority = SimpleNamespace(
+        record_ref=(
+            "/analysis/subject_shape_runs/shape_001"
+            "@subject_shape_assignment_keypoint_authority"
+        ),
+        record_sha256="7" * 64,
+        record={
+            "status": "used",
+            "keypoints_roi": {
+                "payload": {
+                    "array_values_sha256": eye_angle_analysis.array_values_sha256(
+                        base["keypoints_roi"]
+                    )
+                }
+            },
+            "success": {
+                "payload": {
+                    "array_values_sha256": eye_angle_analysis.array_values_sha256(
+                        base["detection_success"]
+                    )
+                }
+            },
+        },
+    )
+    publication = SimpleNamespace(
+        run_path="analysis/subject_shape_runs/shape_001",
+        row_identity=row_identity(
+            "/analysis/subject_shape_runs/shape_001@row_identity_contract"
+        ),
+        temporal_authority=temporal_authority(
+            "/analysis/subject_shape_runs/shape_001@source_row_temporal_authority"
+        ),
+        source=SimpleNamespace(
+            context=SimpleNamespace(
+                assignment_keypoint_surfaces=nested_surfaces,
+                assignment_keypoint_authority=assignment_authority,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda _root, _path: publication,
+    )
+    monkeypatch.setattr(
+        eye_angle_analysis,
+        "load_persisted_keypoint_coordinate_surfaces",
+        lambda _root, path: (
+            nested_surfaces
+            if path == "keypoints_runs/kp_from_shape"
+            else pytest.fail(f"unexpected canonical keypoint path: {path}")
+        ),
+    )
+    return publication
+
+
 def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods(
     tmp_path,
     monkeypatch,
@@ -360,45 +564,11 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
             "cv2.fitEllipse_component_contour_v1"
         )
 
-    refined_parent = root.create_group("refined_keypoints_runs")
-    refined_parent.attrs["latest"] = "kp_from_shape"
-    refined = refined_parent.create_group("kp_from_shape")
-    refined.attrs.update(
-        {
-            "schema_id": "refined_keypoints",
-            "schema_version": 4,
-            "method": "manual_plus_model_refinement",
-            "method_version": "refined_keypoints.v4",
-            "source_keypoints_run": "raw_001",
-            "source_lineage_hash": "refined-lineage",
-            "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
-        }
-    )
-    refined.create_array(
-        "keypoints_roi",
-        data=np.zeros((2, 3, 2), dtype=np.float32),
-        overwrite=True,
-    )
-    refined.create_array("heading", data=np.zeros(2, dtype=np.float32), overwrite=True)
-    refined.create_array("refined_success", data=np.ones(2, dtype=bool), overwrite=True)
-
-    raw_parent = root.create_group("keypoints_runs")
-    raw = raw_parent.create_group("raw_001")
-    raw.attrs.update(
-        {
-            "schema_id": "keypoints",
-            "schema_version": 2,
-            "method": "yolo_pose",
-            "method_version": "detector.v2",
-            "lineage_hash": "raw-lineage",
-        }
-    )
-    raw.create_array("detection_success", data=np.ones(2, dtype=bool), overwrite=True)
-    raw.create_array("frame_indices", data=np.asarray([4, 5], dtype=np.int64), overwrite=True)
-    monkeypatch.setattr(
-        eye_geometry_source_mod,
-        "load_persisted_subject_shape_coordinate_publication",
-        lambda _root, _path: object(),
+    _refined, base = _add_eye_keypoint_sources(root)
+    _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
     )
 
     context = eye_angle_analysis._resolve_eye_angle_inputs(
@@ -423,13 +593,18 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
     assert sources["eye_geometry"]["components"][0]["ellipse_source_contract"] == {
         "ellipse_method": "cv2.fitEllipse_component_contour_v1"
     }
-    assert sources["refined_keypoints"]["source_lineage_hash"] == "refined-lineage"
-    assert sources["source_keypoints"]["lineage_hash"] == "raw-lineage"
+    assert sources["keypoints"]["lineage_hash"] == "base-lineage"
+    assert sources["keypoints"]["source_mode"] == (
+        eye_angle_analysis.EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+    )
+    assert sources["diagnostic_base_keypoints"]["run_name"] is None
     assert sources["resolved_arrays"] == {
-        "keypoints_roi": "refined_keypoints_runs/kp_from_shape/keypoints_roi",
-        "heading": "refined_keypoints_runs/kp_from_shape/heading",
-        "detection_success": "refined_keypoints_runs/kp_from_shape/refined_success",
-        "frame_indices": "keypoints_runs/raw_001/frame_indices",
+        "keypoints_roi": "keypoints_runs/kp_from_shape/keypoints_roi",
+        "detection_success": "keypoints_runs/kp_from_shape/detection_success",
+        "instance_key": "keypoints_runs/kp_from_shape/instance_key",
+        "source_acquisition_frame_index": (
+            "keypoints_runs/kp_from_shape/source_acquisition_frame_index"
+        ),
     }
     assert contract["schema_id"] == "analysis.eye_angle_algorithm_contract"
     assert contract["ellipse_input"]["parameter_order"][-1] == "major_axis_angle_deg"
@@ -475,8 +650,12 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
         mode="r",
         use_consolidated=False,
     )
-    persisted = persisted_root["analysis/eye_angle_runs/eye_contract_001"]
-    assert persisted.attrs["eye_angle_output_schema"]["schema_version"] == 8
+    persisted_parent = persisted_root["analysis/eye_angle_runs"]
+    persisted = persisted_parent["eye_contract_001"]
+    assert persisted.attrs["stage_selector_eligible"] is True
+    assert persisted_parent.attrs["latest"] == "eye_contract_001"
+    assert persisted_parent.attrs["latest_complete"] == "eye_contract_001"
+    assert persisted.attrs["eye_angle_output_schema"]["schema_version"] == 9
     assert persisted.attrs["eye_angle_algorithm_contract"]["schema_version"] == 1
     assert persisted.attrs["eye_angle_source_contracts"]["resolved_arrays"] == (
         sources["resolved_arrays"]
@@ -498,6 +677,68 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
         "write_seconds",
         "total_seconds",
     }
+
+
+def test_explicit_refined_keypoint_diagnostic_completes_without_selector_promotion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import zarr
+
+    zarr_path = tmp_path / "eye-diagnostic.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    _add_subject_shape_eye_geometry(root)
+    _add_eye_keypoint_sources(root)
+    monkeypatch.setattr(
+        eye_geometry_source_mod,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda _root, _path: object(),
+    )
+    eye_parent = root["analysis"].create_group("eye_angle_runs")
+    eye_parent.attrs.update(
+        {
+            "latest": "canonical_existing",
+            "latest_complete": "canonical_existing",
+        }
+    )
+    eye_parent.create_group("canonical_existing")
+
+    args = eye_angle_analysis.build_parser().parse_args(
+        [
+            str(zarr_path),
+            "--subject-shape-run",
+            "shape_001",
+            "--diagnostic-refined-keypoint-run",
+            "refined_diag_001",
+            "--run-name",
+            "eye_diagnostic_001",
+            "--fps",
+            "200",
+            "--chunk-size",
+            "2",
+            "--smoothing-window",
+            "3",
+            "--quiet",
+        ]
+    )
+    eye_angle_analysis.run(args)
+
+    persisted_root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=False,
+    )
+    persisted_parent = persisted_root["analysis/eye_angle_runs"]
+    diagnostic = persisted_parent["eye_diagnostic_001"]
+    assert diagnostic.attrs["palette_run_completion_status"] == "complete"
+    assert diagnostic.attrs["stage_selector_eligible"] is False
+    assert diagnostic.attrs["legacy_unverified_diagnostic_output"] is True
+    assert diagnostic.attrs["publication_scope"] == "historical_diagnostic_only"
+    assert diagnostic.attrs["keypoint_source_mode"] == (
+        eye_angle_analysis.EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC
+    )
+    assert persisted_parent.attrs["latest"] == "canonical_existing"
+    assert persisted_parent.attrs["latest_complete"] == "canonical_existing"
 
 
 def test_eye_geometry_resolution_prefers_latest_subject_shape_when_enabled(monkeypatch) -> None:
@@ -561,43 +802,187 @@ def test_eye_geometry_resolution_honors_explicit_refined_subject_run() -> None:
     assert source.coordinate_authority_status == "historical_compatibility_noncanonical"
 
 
-def test_eye_angle_keypoint_resolution_prefers_explicit() -> None:
-    resolved = resolve_eye_angle_keypoint_run(
-        explicit_keypoint_run="kp_explicit",
-        refined_attrs={
-            "source_keypoints_run": "kp_canonical",
-            "source_keypoint_run": "kp_legacy",
-        },
-        parent_latest="kp_latest",
-    )
-    assert resolved == "kp_explicit"
+def test_eye_angle_keypoint_assertion_requires_one_exact_child_name() -> None:
+    assert eye_angle_analysis._exact_child_run_name(
+        "kp_exact",
+        label="Canonical base keypoint run",
+    ) == "kp_exact"
+
+    for ambiguous in ("", ".", "..", "latest", "keypoints_runs/kp_exact"):
+        with pytest.raises(ValueError, match="one exact child run name"):
+            eye_angle_analysis._exact_child_run_name(
+                ambiguous,
+                label="Canonical base keypoint run",
+            )
 
 
-def test_eye_angle_keypoint_resolution_prefers_canonical_over_legacy() -> None:
-    resolved = resolve_eye_angle_keypoint_run(
-        explicit_keypoint_run=None,
-        refined_attrs={
-            "source_keypoints_run": "kp_canonical",
-            "source_keypoint_run": "kp_legacy",
-        },
-        parent_latest="kp_latest",
+def test_eye_angle_canonical_resolution_uses_subject_shape_sealed_base_run(
+    monkeypatch,
+) -> None:
+    import zarr
+
+    root = zarr.group()
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
     )
-    assert resolved == "kp_canonical"
+
+    context = eye_angle_analysis._resolve_eye_angle_inputs(
+        root,
+        subject_shape_run="shape_001",
+        refined_subject_run=None,
+        keypoint_run=None,
+    )
+
+    assert context.keypoint_run_name == "kp_from_shape"
+    assert context.kp_group_path == "keypoints_runs/kp_from_shape"
+    assert context.keypoint_source_mode == (
+        eye_angle_analysis.EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+    )
+    assert context.instance_key_path == "keypoints_runs/kp_from_shape/instance_key"
+    assert context.frame_indices_path.endswith("/source_acquisition_frame_index")
 
 
-def test_eye_angle_keypoint_resolution_falls_back_to_legacy_then_latest() -> None:
-    resolved_legacy = resolve_eye_angle_keypoint_run(
-        explicit_keypoint_run=None,
-        refined_attrs={"source_keypoint_run": "kp_legacy"},
-        parent_latest="kp_latest",
+def test_eye_angle_canonical_resolution_rejects_different_ordered_instance_keys(
+    monkeypatch,
+) -> None:
+    import zarr
+
+    root = zarr.group()
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    publication = _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
     )
-    resolved_latest = resolve_eye_angle_keypoint_run(
-        explicit_keypoint_run=None,
-        refined_attrs={},
-        parent_latest="kp_latest",
+    nested = publication.source.context.assignment_keypoint_surfaces
+    nested.context.row_identity.contract.key_array.content_sha256 = "9" * 64
+
+    with pytest.raises(ValueError, match="exact ordered instance_key identity"):
+        eye_angle_analysis._resolve_eye_angle_inputs(
+            root,
+            subject_shape_run="shape_001",
+            refined_subject_run=None,
+            keypoint_run=None,
+        )
+
+
+def test_eye_angle_canonical_resolution_rejects_different_acquisition_frame_mapping(
+    monkeypatch,
+) -> None:
+    import zarr
+
+    root = zarr.group()
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    publication = _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
     )
-    assert resolved_legacy == "kp_legacy"
-    assert resolved_latest == "kp_latest"
+    nested = publication.source.context.assignment_keypoint_surfaces
+    frame_record = (
+        nested.context.temporal_authority.record.source_acquisition_frame_index
+    )
+    frame_record.content_sha256 = "9" * 64
+
+    with pytest.raises(ValueError, match="exact acquisition-frame mapping"):
+        eye_angle_analysis._resolve_eye_angle_inputs(
+            root,
+            subject_shape_run="shape_001",
+            refined_subject_run=None,
+            keypoint_run=None,
+        )
+
+
+def test_eye_angle_canonical_output_uses_sealed_full_sparse_frame_extent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import zarr
+
+    zarr_path = tmp_path / "eye-sparse-frame-extent.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
+        source_total_frames=12,
+    )
+
+    args = eye_angle_analysis.build_parser().parse_args(
+        [
+            str(zarr_path),
+            "--subject-shape-run",
+            "shape_001",
+            "--keypoint-run",
+            "kp_from_shape",
+            "--run-name",
+            "eye_sparse_extent",
+            "--fps",
+            "200",
+            "--chunk-size",
+            "2",
+            "--smoothing-window",
+            "3",
+            "--quiet",
+        ]
+    )
+    eye_angle_analysis.run(args)
+
+    persisted = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=False,
+    )["analysis/eye_angle_runs/eye_sparse_extent"]
+    assert persisted.attrs["num_frames"] == 12
+    assert persisted["frame_angles"].shape[0] == 12
+    assert persisted["frame_qa"].shape[0] == 12
+    assert persisted[
+        "support/source_acquisition_frame_index"
+    ][:].tolist() == [4, 5]
+
+
+def test_eye_angle_keypoint_run_cannot_resolve_a_refined_child(
+    monkeypatch,
+) -> None:
+    import zarr
+
+    root = zarr.group()
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
+    )
+
+    with pytest.raises(ValueError, match="differs from the exact base keypoint run"):
+        eye_angle_analysis._resolve_eye_angle_inputs(
+            root,
+            subject_shape_run="shape_001",
+            refined_subject_run=None,
+            keypoint_run="refined_diag_001",
+        )
+
+
+def test_eye_angle_canonical_and_diagnostic_keypoint_arguments_are_exclusive() -> None:
+    import zarr
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        eye_angle_analysis._resolve_eye_angle_inputs(
+            zarr.group(),
+            subject_shape_run="shape_001",
+            refined_subject_run=None,
+            keypoint_run="kp_from_shape",
+            diagnostic_refined_keypoint_run="refined_diag_001",
+        )
 
 
 def test_overlay_keypoint_resolution_prefers_explicit() -> None:
@@ -798,14 +1183,12 @@ def test_eye_angle_chunk_uses_label_resolved_indices() -> None:
         ],
         dtype=np.float32,
     )
-    heading_deg = np.asarray([0.0], dtype=np.float32)
     detection_success = np.asarray([True], dtype=bool)
 
     result = _process_chunk(
         ellipse_params=ellipse_params,
         ellipse_success=ellipse_success,
         keypoints_roi=keypoints_roi,
-        heading_deg=heading_deg,
         detection_success=detection_success,
         keypoint_indices={
             "swim_bladder": 2,
@@ -854,7 +1237,6 @@ def test_eye_angle_chunk_computes_gaze_convergence_in_body_frame() -> None:
         ellipse_params=ellipse_params,
         ellipse_success=ellipse_success,
         keypoints_roi=keypoints_roi,
-        heading_deg=np.asarray([0.0], dtype=np.float32),
         detection_success=np.asarray([True], dtype=bool),
         keypoint_indices={
             "swim_bladder": 0,
@@ -904,7 +1286,6 @@ def test_eye_angle_chunk_computes_gaze_vergence_as_undirected_axis_separation() 
         ellipse_params=ellipse_params,
         ellipse_success=ellipse_success,
         keypoints_roi=keypoints_roi,
-        heading_deg=np.asarray([0.0], dtype=np.float32),
         detection_success=np.asarray([True], dtype=bool),
         keypoint_indices={
             "swim_bladder": 0,
@@ -937,7 +1318,6 @@ def test_eye_angle_base_writer_persists_body_frame_support_group() -> None:
         ellipse_params=np.asarray([[[2.0, -1.0, 4.0, 1.5, 110.0], [2.0, 1.0, 4.0, 1.5, 70.0]]], dtype=np.float32),
         ellipse_success=np.asarray([[True, True]], dtype=bool),
         keypoints_roi=np.asarray([[[0.0, 0.0], [2.0, -1.0], [2.0, 1.0]]], dtype=np.float32),
-        heading_deg=np.asarray([0.0], dtype=np.float32),
         detection_success=np.asarray([True], dtype=bool),
         keypoint_indices={"swim_bladder": 0, "eye_left": 1, "eye_right": 2},
     )
@@ -947,9 +1327,13 @@ def test_eye_angle_base_writer_persists_body_frame_support_group() -> None:
         slice(0, 1),
         result,
         frame_indices=np.asarray([12], dtype=np.int64),
+        instance_key=np.asarray([101], dtype=np.uint64),
         time_seconds=np.asarray([0.2], dtype=np.float32),
     )
 
+    support = run["support"]
+    assert support["instance_key"].dtype == np.dtype(np.uint64)
+    assert support["instance_key"][:].tolist() == [101]
     body_frame = run["support"]["body_frame"]
     assert body_frame.attrs["body_frame_schema_id"] == "fish_anatomical_body_frame"
     np.testing.assert_allclose(body_frame["origin_xy"][:], [[2.0, 0.0]])

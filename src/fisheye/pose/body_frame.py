@@ -154,12 +154,20 @@ def signed_angle_in_body_frame_deg(vectors_xy: np.ndarray, body_frame: BodyFrame
 
 def build_keypoint_body_frame_contract_attrs(
     *,
+    source_keypoints_run: Optional[str] = None,
     source_refined_keypoints_run: Optional[str] = None,
     coordinate_space: str = BODY_FRAME_COORDINATE_SPACE_ROI,
 ) -> dict[str, object]:
     """Return stable attrs for a keypoint-derived body-frame estimator."""
 
+    if source_keypoints_run and source_refined_keypoints_run:
+        raise ValueError(
+            "A keypoint body frame cannot name both canonical base and refined sources."
+        )
     source_refs: dict[str, object] = {}
+    if source_keypoints_run:
+        source_refs["keypoints_run"] = source_keypoints_run
+        source_refs["keypoints_path"] = f"keypoints_runs/{source_keypoints_run}"
     if source_refined_keypoints_run:
         source_refs["refined_keypoints_run"] = source_refined_keypoints_run
         source_refs["refined_keypoints_path"] = f"refined_keypoints_runs/{source_refined_keypoints_run}"
