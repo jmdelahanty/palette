@@ -48,6 +48,7 @@ from fisheye.shared.selected_calibration import (
     SOURCE_HOMOGRAPHY_EVIDENCE_DIGEST_SUFFIX,
     YAML_HOMOGRAPHY_PAYLOAD_SOURCE,
     YAML_HOMOGRAPHY_SERIALIZATION_FORMAT,
+    SelectedCalibrationSnapshot,
     SelectedCalibrationError,
     VerifiedSelectedCameraSourceEvidence,
     VerifiedSelectedDisplaySourceEvidence,
@@ -61,12 +62,14 @@ from fisheye.shared.selected_calibration import (
     parse_selected_calibration_manifest,
     parse_selected_display_source_evidence,
     parse_selected_homography_source_evidence,
+    require_bound_selected_calibration_snapshot,
     selected_calibration_paths,
     source_arena_config_dataset_sha256,
     source_artifact_from_homography_evidence,
     source_display_dataset_sha256,
     stamp_selected_calibration_snapshot,
 )
+from fisheye.shared.proof_verification import proof_verification_scope
 
 
 STIMULUS_RUN = "stim_1"
@@ -527,6 +530,31 @@ def test_loads_one_valid_builder_bound_non_self_inverse_snapshot() -> None:
         f"{SELECTED_CALIBRATION_MANIFEST_DIGEST_SUFFIX}"
     )
     assert calibration.attrs[manifest_digest_name] == snapshot.manifest_sha256
+
+
+def test_bound_snapshot_verification_is_reused_only_inside_one_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _calibration, _camera, _display, _matrix = _build_root()
+    snapshot = _load(root)
+    calls = 0
+    original = SelectedCalibrationSnapshot.assert_verified
+
+    def counted(value: SelectedCalibrationSnapshot) -> None:
+        nonlocal calls
+        calls += 1
+        original(value)
+
+    monkeypatch.setattr(SelectedCalibrationSnapshot, "assert_verified", counted)
+    with proof_verification_scope():
+        require_bound_selected_calibration_snapshot(snapshot)
+        require_bound_selected_calibration_snapshot(snapshot)
+        require_bound_selected_calibration_snapshot(snapshot)
+        assert calls == 1
+    assert calls == 2
+
+    require_bound_selected_calibration_snapshot(snapshot)
+    assert calls == 3
 
 
 def test_display_builder_binds_exact_raw_bytes_and_group_attrs() -> None:

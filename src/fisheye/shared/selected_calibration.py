@@ -104,6 +104,7 @@ from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     require_trusted_coordinate_attrs,
 )
+from fisheye.shared.proof_verification import verify_persisted_proof
 
 
 SELECTED_CALIBRATION_SCHEMA_ID = "palette.selected_calibration_snapshot"
@@ -4336,7 +4337,24 @@ def require_bound_selected_calibration_snapshot(
         raise SelectedCalibrationError(
             "A sealed persisted selected-calibration snapshot is required."
         )
-    value.assert_verified()
+    proof_key = (
+        SELECTED_CALIBRATION_SCHEMA_ID,
+        SELECTED_CALIBRATION_SCHEMA_VERSION,
+        id(value),
+        value.archive_identity.kind,
+        value.archive_identity.key,
+        value.stimulus_run,
+        value.camera_id,
+        value.paths.stimulus_run_path,
+        value.paths.display_snapshot_path,
+        value.paths.calibration_path,
+        value.paths.camera_calibration_path,
+        value.paths.homography_array_path,
+        value.manifest_sha256,
+        value.homography.matrix_sha256,
+        value.homography.transform_sha256,
+    )
+    verify_persisted_proof(proof_key, value.assert_verified)
     return value
 
 

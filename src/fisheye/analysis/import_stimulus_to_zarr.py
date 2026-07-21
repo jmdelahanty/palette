@@ -115,6 +115,10 @@ from fisheye.shared.citrus_enums import (
     STIMULUS_MODE_NAME_TO_ID,
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
+from fisheye.shared.proof_verification import (
+    proof_verification_operation,
+    proof_verification_scope,
+)
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.selector_activation import (
     SelectorActivationError,
@@ -1737,6 +1741,7 @@ def _activate_stimulus_run(
 
     run_path = f"analysis/stimulus_runs/{run_name}"
 
+    @proof_verification_operation
     def proof() -> tuple[Any, ...]:
         candidate = root[run_path]
         coordinate_token: tuple[Any, ...] | None = None
@@ -2130,18 +2135,20 @@ def _import_stimulus_from_open_h5(
                     else:
                         raise
 
-        materialize_stimulus_coordinate_contract(
-            run_group,
-            root_node=root,
-            preflight=coordinate_preflight,
-            selected_calibration=selected_calibration,
-        )
-        physical_authority = publish_stimulus_physical_coordinate_authority(
-            root,
-            run_group,
-            stimulus_run=run_name,
-            selected_calibration=selected_calibration,
-        )
+        with proof_verification_scope():
+            materialize_stimulus_coordinate_contract(
+                run_group,
+                root_node=root,
+                preflight=coordinate_preflight,
+                selected_calibration=selected_calibration,
+            )
+        with proof_verification_scope():
+            physical_authority = publish_stimulus_physical_coordinate_authority(
+                root,
+                run_group,
+                stimulus_run=run_name,
+                selected_calibration=selected_calibration,
+            )
 
         run_attrs = {
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -2189,19 +2196,21 @@ def _import_stimulus_from_open_h5(
             )
         if coordinate_preflight.surfaces:
             chaser_group = run_group["tracking_data"]["chaser_states"]
-            _load_bound_stimulus_coordinate_evidence_before_selection(
-                run_group,
-                chaser_group,
-                root_node=root,
-                require_complete=True,
+            with proof_verification_scope():
+                _load_bound_stimulus_coordinate_evidence_before_selection(
+                    run_group,
+                    chaser_group,
+                    root_node=root,
+                    require_complete=True,
+                )
+        with proof_verification_scope():
+            reloaded_physical_authority = (
+                _load_stimulus_physical_coordinate_authority_before_selection(
+                    root,
+                    stimulus_run=run_name,
+                    require_complete=True,
+                )
             )
-        reloaded_physical_authority = (
-            _load_stimulus_physical_coordinate_authority_before_selection(
-                root,
-                stimulus_run=run_name,
-                require_complete=True,
-            )
-        )
         if (physical_authority is None) != (reloaded_physical_authority is None):
             raise ValueError(
                 "Stimulus physical-coordinate publication did not reload exactly."

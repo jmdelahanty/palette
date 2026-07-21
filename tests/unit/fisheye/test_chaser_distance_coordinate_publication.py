@@ -44,6 +44,7 @@ from fisheye.shared.observation_coordinate_publication import (
 from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
 )
+from fisheye.shared.selected_calibration import SelectedCalibrationSnapshot
 from fisheye.shared.immutable_yolo_storage import (
     IMMUTABLE_YOLO_STORAGE_ATTR,
     IMMUTABLE_YOLO_STORAGE_SCHEMA,
@@ -357,10 +358,25 @@ def published_canonical_archive(
 
 def test_canonical_chaser_distance_publishes_exact_coordinate_contract(
     published_canonical_archive: tuple[Path, zarr.Group, zarr.Group],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _zarr_path, root, run = published_canonical_archive
 
+    selected_calibration_checks = 0
+    original = SelectedCalibrationSnapshot.assert_verified
+
+    def counted(value: SelectedCalibrationSnapshot) -> None:
+        nonlocal selected_calibration_checks
+        selected_calibration_checks += 1
+        original(value)
+
+    monkeypatch.setattr(SelectedCalibrationSnapshot, "assert_verified", counted)
+
     bound = load_bound_chaser_distance_run(root, run.path)
+
+    # The graph encounters the same selected calibration many times. One
+    # initial persisted check plus the operation-closing recheck is sufficient.
+    assert selected_calibration_checks == 2
 
     assert run.attrs["coordinate_contract"] == COORDINATE_CONTRACT
     assert INPUT_AUTHORITY_ATTR in run.attrs

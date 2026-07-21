@@ -47,6 +47,8 @@ from fisheye.shared.coordinate_identity import (
     validate_stamped_row_identity,
 )
 from fisheye.shared.selected_calibration import (
+    ACTIVE_CAMERA_ID_ATTR,
+    SelectedCalibrationSnapshot,
     load_selected_calibration_snapshot,
     selected_calibration_paths,
 )
@@ -1315,11 +1317,22 @@ def test_stimulus_physical_loader_requires_exact_published_acquisition_status(
 
 def test_imported_stimulus_round_trips_through_exact_chaser_handoff(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     h5_path = tmp_path / "roundtrip.h5"
     zarr_path = tmp_path / "roundtrip.zarr"
     _write_stimulus_h5_with_arena_relative_chaser_states(h5_path)
     _prepare_acquisition_authority(zarr_path)
+
+    selected_calibration_checks = 0
+    original = SelectedCalibrationSnapshot.assert_verified
+
+    def counted(value: SelectedCalibrationSnapshot) -> None:
+        nonlocal selected_calibration_checks
+        selected_calibration_checks += 1
+        original(value)
+
+    monkeypatch.setattr(SelectedCalibrationSnapshot, "assert_verified", counted)
 
     run_name = mod.import_stimulus_to_zarr(
         stimulus_h5=h5_path,
@@ -1329,6 +1342,7 @@ def test_imported_stimulus_round_trips_through_exact_chaser_handoff(
         verbose=False,
         repair_chaser_gaps=False,
     )
+    assert selected_calibration_checks == 26
     bundle = chaser_metrics_loader.load_chaser_metrics(
         zarr_path,
         stimulus_run=run_name,
@@ -1353,6 +1367,51 @@ def test_imported_stimulus_round_trips_through_exact_chaser_handoff(
         [0, 1],
     )
     assert len(handoff.frame_transform.transform_chain.transform_records) == 2
+
+
+def test_stimulus_activation_rechecks_calibration_after_lease_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h5_path = tmp_path / "activation_calibration_drift.h5"
+    zarr_path = tmp_path / "activation_calibration_drift.zarr"
+    run_name = "stimulus_activation_calibration_drift"
+    _write_stimulus_h5_with_arena_relative_chaser_states(h5_path)
+    _prepare_acquisition_authority(zarr_path)
+    original_write = mod._write_stimulus_activation_attr
+    drift_injected = False
+
+    def drift_after_lease(attrs, name, value):
+        nonlocal drift_injected
+        original_write(attrs, name, value)
+        if name == mod.STIMULUS_PARENT_PUBLICATION_LEASE_ATTR and not drift_injected:
+            drift_injected = True
+            root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+            calibration = root[
+                f"analysis/stimulus_runs/{run_name}/calibration"
+            ]
+            calibration.attrs[ACTIVE_CAMERA_ID_ATTR] = "tampered-camera"
+
+    monkeypatch.setattr(mod, "_write_stimulus_activation_attr", drift_after_lease)
+
+    with pytest.raises(
+        StimulusCoordinateContractError,
+        match="cannot be rebound.*active_camera_id.*mismatch",
+    ):
+        mod.import_stimulus_to_zarr(
+            stimulus_h5=h5_path,
+            zarr_path=zarr_path,
+            run_name=run_name,
+            overwrite=False,
+            verbose=False,
+            repair_chaser_gaps=False,
+        )
+
+    assert drift_injected is True
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    run = root[f"analysis/stimulus_runs/{run_name}"]
+    assert run.attrs["palette_run_completion_status"] == "failed"
+    assert run.attrs["stage_selector_eligible"] is False
 
 
 @pytest.mark.parametrize(

@@ -62,6 +62,7 @@ from fisheye.shared.observation_coordinate_publication import (
     BoundDetectionObservationGeometry,
     load_persisted_detection_observation_geometry,
 )
+from fisheye.shared.proof_verification import proof_verification_operation
 from fisheye.shared.stimulus_coordinate_contract import (
     BoundStimulusCoordinateEvidence,
     load_bound_stimulus_coordinate_evidence,
@@ -559,6 +560,7 @@ def _require_source_context_seal(
     return value
 
 
+@proof_verification_operation
 def load_chaser_distance_source_context(
     root_node: Any,
     *,
@@ -826,6 +828,7 @@ class ChaserDistanceCoordinateArrays:
     nearest_distance_mm: np.ndarray
 
 
+@proof_verification_operation
 def derive_chaser_distance_coordinate_arrays(
     context: BoundChaserDistanceSourceContext,
 ) -> ChaserDistanceCoordinateArrays:
@@ -1874,6 +1877,7 @@ def _validate_derived_measurement_arrays(
         )
 
 
+@proof_verification_operation
 def publish_chaser_distance_coordinate_contract(
     root_node: Any,
     run_group: Any,
@@ -2065,6 +2069,7 @@ def publish_chaser_distance_coordinate_contract(
     )
 
 
+@proof_verification_operation
 def _load_bound_chaser_distance_run(
     root_node: Any,
     run_path: str,
