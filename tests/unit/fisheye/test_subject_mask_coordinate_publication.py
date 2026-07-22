@@ -148,12 +148,12 @@ def _surface(run: Any, path: str) -> Any:
     return node
 
 
-def _subject_fixture(
+def _subject_fixture_with_source(
     monkeypatch: pytest.MonkeyPatch,
     *,
     include_identity: bool = True,
     roi_shape: tuple[int, int] = (40, 40),
-) -> tuple[Any, _MutableGroup, _MutableGroup]:
+) -> tuple[Any, _MutableGroup, _MutableGroup, Any]:
     root, _keypoints, _crop, _roi_images = keypoint_crop_fixture(monkeypatch)
     source = load_persisted_subject_mask_crop_source(root, "crop_runs/c1")
     _MutableGroup(
@@ -264,6 +264,20 @@ def _subject_fixture(
         "bbox_valid",
         data=np.zeros((n, c), dtype=bool),
         chunks=(n, c),
+    )
+    return root, parent, run, source
+
+
+def _subject_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    include_identity: bool = True,
+    roi_shape: tuple[int, int] = (40, 40),
+) -> tuple[Any, _MutableGroup, _MutableGroup]:
+    root, parent, run, _source = _subject_fixture_with_source(
+        monkeypatch,
+        include_identity=include_identity,
+        roi_shape=roi_shape,
     )
     return root, parent, run
 

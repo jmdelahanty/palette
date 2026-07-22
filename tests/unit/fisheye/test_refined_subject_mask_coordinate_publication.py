@@ -7,6 +7,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
+import fisheye.shared.keypoint_coordinate_publication as keypoint_publication_module
 import fisheye.shared.refined_subject_mask_coordinate_publication as module
 from fisheye.shared.array_measurement_descriptor import (
     ARRAY_MEASUREMENT_DESCRIPTOR_ATTR,
@@ -37,7 +38,7 @@ from tests.unit.fisheye.test_subject_mask_coordinate_publication import (
     _publish as _publish_raw,
     _selector_snapshot as _raw_selector_snapshot,
     _set_consistent_foreground,
-    _subject_fixture,
+    _subject_fixture_with_source,
 )
 
 
@@ -155,13 +156,13 @@ def _add_component_contract_surfaces(run: Any, raw_run: Any) -> Any:
     return components
 
 
-def _refined_fixture(
+def _build_refined_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     with_optional_geometry: bool = True,
     with_eye_relation: bool = False,
-) -> tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]]]:
-    root, raw_parent, raw_run = _subject_fixture(monkeypatch)
+) -> tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]], Any]:
+    root, raw_parent, raw_run, crop_source = _subject_fixture_with_source(monkeypatch)
     _activate_raw(root, raw_parent, raw_run)
     parent = _MutableGroup(
         path="refined_subject_masks_runs",
@@ -338,7 +339,117 @@ def _refined_fixture(
             data=np.asarray([True, False], dtype=bool),
             chunks=(2,),
         )
+    return root, parent, run, raw_run, snapshot, crop_source
+
+
+_REFINED_FIXTURE_TEMPLATES: dict[
+    tuple[bool, bool, bool],
+    tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]], Any],
+] = {}
+
+
+def _template_copy_memo(template: Any) -> dict[int, Any]:
+    """Preserve identity authorities while cloning the mutable archive graph."""
+
+    memo: dict[int, Any] = {}
+    pending = [template]
+    visited: set[int] = set()
+    while pending:
+        value = pending.pop()
+        identity = id(value)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        archive_token = getattr(value, "_coordinate_archive_token", None)
+        if archive_token is not None:
+            # ArchiveIdentity records bind the opaque token's object identity.
+            # The graph data is cloned, while its synthetic test-store authority
+            # must remain identical for existing sealed bindings to stay valid.
+            memo[id(archive_token)] = archive_token
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(value)
+        elif hasattr(value, "__dict__"):
+            attributes = vars(value)
+            for name, attribute in attributes.items():
+                if name.endswith("_seal") and attribute is not None:
+                    memo[id(attribute)] = attribute
+            pending.extend(attributes.values())
+    return memo
+
+
+def _copy_refined_fixture_template(
+    monkeypatch: pytest.MonkeyPatch,
+    template: tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]], Any],
+) -> tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]], Any]:
+    cloned = copy.deepcopy(
+        template,
+        _template_copy_memo(template),
+    )
+    root, _parent, _run, _raw_run, _snapshot, crop_source = cloned
+    monkeypatch.setattr(
+        keypoint_publication_module,
+        "load_persisted_crop_observation_geometry",
+        lambda _root, _path: crop_source.crop_geometry,
+    )
+    assert crop_source._root is root
+    return cloned
+
+
+def _clone_refined_fixture_template(
+    monkeypatch: pytest.MonkeyPatch,
+    template: tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]], Any],
+) -> tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]]]:
+    root, parent, run, raw_run, snapshot, _crop_source = (
+        _copy_refined_fixture_template(monkeypatch, template)
+    )
     return root, parent, run, raw_run, snapshot
+
+
+def _refined_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    with_optional_geometry: bool = True,
+    with_eye_relation: bool = False,
+    published: bool = False,
+    fresh: bool = False,
+) -> tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]]]:
+    if fresh:
+        root, parent, run, raw_run, snapshot, _crop_source = _build_refined_fixture(
+            monkeypatch,
+            with_optional_geometry=with_optional_geometry,
+            with_eye_relation=with_eye_relation,
+        )
+        if published:
+            _publish_activate(root, parent, run, snapshot)
+        return root, parent, run, raw_run, snapshot
+
+    key = (with_optional_geometry, with_eye_relation, published)
+    template = _REFINED_FIXTURE_TEMPLATES.get(key)
+    if template is None:
+        if published:
+            unpublished_key = (with_optional_geometry, with_eye_relation, False)
+            unpublished = _REFINED_FIXTURE_TEMPLATES.get(unpublished_key)
+            if unpublished is None:
+                unpublished = _build_refined_fixture(
+                    monkeypatch,
+                    with_optional_geometry=with_optional_geometry,
+                    with_eye_relation=with_eye_relation,
+                )
+                _REFINED_FIXTURE_TEMPLATES[unpublished_key] = unpublished
+            template = _copy_refined_fixture_template(monkeypatch, unpublished)
+            root, parent, run, _raw_run, snapshot, _crop_source = template
+            _publish_activate(root, parent, run, snapshot)
+        else:
+            template = _build_refined_fixture(
+                monkeypatch,
+                with_optional_geometry=with_optional_geometry,
+                with_eye_relation=with_eye_relation,
+            )
+        _REFINED_FIXTURE_TEMPLATES[key] = template
+    return _clone_refined_fixture_template(monkeypatch, template)
 
 
 def _prepare(root: Any, run: Any):
@@ -438,10 +549,46 @@ def _publish_activate(
     )
 
 
+def test_refined_fixture_clones_do_not_mutate_each_other_or_the_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_root, first_parent, first_run, _first_raw, _first_snapshot = (
+        _refined_fixture(monkeypatch)
+    )
+    first_run["masks_roi"].data[0, 0, 2, 5] = np.uint8(0)
+    first_run.attrs["provenance"]["method"] = "mutated_clone"
+    del first_parent.attrs["latest_pending"]
+
+    second_root, second_parent, second_run, _second_raw, _second_snapshot = (
+        _refined_fixture(monkeypatch)
+    )
+    template_root, template_parent, template_run, *_rest = (
+        _REFINED_FIXTURE_TEMPLATES[(True, False, False)]
+    )
+
+    assert first_root is not second_root
+    assert first_root is not template_root
+    assert second_root is not template_root
+    assert second_parent.attrs["latest_pending"] == "r1"
+    assert template_parent.attrs["latest_pending"] == "r1"
+    assert second_run.attrs["provenance"]["method"] == (
+        "smart_finalize_subject_masks_v1"
+    )
+    assert template_run.attrs["provenance"]["method"] == (
+        "smart_finalize_subject_masks_v1"
+    )
+    assert int(second_run["masks_roi"].data[0, 0, 2, 5]) == 1
+    assert int(template_run["masks_roi"].data[0, 0, 2, 5]) == 1
+    assert not np.shares_memory(
+        first_run["masks_roi"].data,
+        second_run["masks_roi"].data,
+    )
+
+
 def test_refined_publication_binds_dense_roi_geometry_and_exact_source_placement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run, _raw, snapshot = _refined_fixture(monkeypatch)
+    root, parent, run, _raw, snapshot = _refined_fixture(monkeypatch, fresh=True)
 
     loaded = _publish_activate(root, parent, run, snapshot)
 
@@ -487,6 +634,7 @@ def test_eye_separation_is_a_recomputed_measurement_not_a_coordinate(
     root, parent, run, _raw, snapshot = _refined_fixture(
         monkeypatch,
         with_eye_relation=True,
+        fresh=True,
     )
 
     loaded = _publish_activate(root, parent, run, snapshot)
@@ -513,7 +661,10 @@ def test_eye_separation_is_a_recomputed_measurement_not_a_coordinate(
 def test_refined_activation_replaces_a_committed_lease_with_next_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, first, raw, first_snapshot = _refined_fixture(monkeypatch)
+    root, parent, first, raw, first_snapshot = _refined_fixture(
+        monkeypatch,
+        fresh=True,
+    )
     _publish_activate(root, parent, first, first_snapshot)
     first_lease = copy.deepcopy(
         parent.attrs[REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR]
@@ -682,8 +833,10 @@ def test_refined_publication_rejects_stale_flags_and_unknown_root_arrays(
 def test_refined_loader_rejects_descriptor_drop_or_payload_tamper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run, _raw, snapshot = _refined_fixture(monkeypatch)
-    _publish_activate(root, parent, run, snapshot)
+    root, _parent, run, _raw, _snapshot = _refined_fixture(
+        monkeypatch,
+        published=True,
+    )
     descriptor = copy.deepcopy(run["masks_roi"].attrs[COORDINATE_DESCRIPTOR_ATTR])
     descriptor_digest = run["masks_roi"].attrs[f"{COORDINATE_DESCRIPTOR_ATTR}_sha256"]
     del run["masks_roi"].attrs[COORDINATE_DESCRIPTOR_ATTR]
@@ -705,8 +858,10 @@ def test_refined_loader_rejects_descriptor_drop_or_payload_tamper(
 def test_refined_loader_rejects_measurement_descriptor_drop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run, _raw, snapshot = _refined_fixture(monkeypatch)
-    _publish_activate(root, parent, run, snapshot)
+    root, _parent, run, _raw, _snapshot = _refined_fixture(
+        monkeypatch,
+        published=True,
+    )
     node = run["metrics"]["area_px"]
     del node.attrs[ARRAY_MEASUREMENT_DESCRIPTOR_ATTR]
 
@@ -720,8 +875,10 @@ def test_refined_loader_rejects_measurement_descriptor_drop(
 def test_refined_loader_rejects_wrong_transform_direction_with_fresh_digest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run, _raw, snapshot = _refined_fixture(monkeypatch)
-    _publish_activate(root, parent, run, snapshot)
+    root, _parent, run, _raw, _snapshot = _refined_fixture(
+        monkeypatch,
+        published=True,
+    )
     placement = run["source_crop_xywh"]
     record = copy.deepcopy(placement.attrs[DIRECTED_TRANSFORM_V2_PIXEL_CENTER_ATTR])
     record["from_space_id"], record["to_space_id"] = (
@@ -744,8 +901,10 @@ def test_refined_loader_rejects_wrong_transform_direction_with_fresh_digest(
 def test_refined_loader_rejects_stale_raw_or_refinement_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run, raw, snapshot = _refined_fixture(monkeypatch)
-    _publish_activate(root, parent, run, snapshot)
+    root, _parent, run, raw, _snapshot = _refined_fixture(
+        monkeypatch,
+        published=True,
+    )
     original_refinement_provenance = copy.deepcopy(run.attrs["provenance"])
     raw.attrs["provenance"] = {
         **raw.attrs["provenance"],
