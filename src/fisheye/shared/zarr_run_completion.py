@@ -1,6 +1,6 @@
 """Completion markers for Palette Zarr run groups.
 
-The contract is intentionally attr-based so it works for both Zarr v2/v3 and
+The contract is intentionally attr-based for Palette's Zarr-v3 stores and
 existing fake-group unit tests. Parent groups stamped with
 ``palette_completion_epoch >= 1`` are strict: unmarked children are not trusted
 as complete. Unstamped legacy parents still treat unmarked children as complete

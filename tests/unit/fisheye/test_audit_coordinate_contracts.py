@@ -5692,21 +5692,19 @@ def test_metadata_parser_rejects_noninteger_zarr_v3_format(
     assert "zarr_format is not 3" in str(node.metadata_error)
 
 
-@pytest.mark.parametrize("zarr_format", [2.0, True])
-def test_metadata_parser_rejects_noninteger_zarr_v2_format(
-    tmp_path: Path,
-    zarr_format: object,
-) -> None:
-    zarr_path = tmp_path / f"invalid-v2-{zarr_format!r}.zarr"
+def test_metadata_parser_rejects_zarr_v2_archive(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "unsupported-v2.zarr"
     zarr_path.mkdir()
     (zarr_path / ".zgroup").write_text(
-        json.dumps({"zarr_format": zarr_format}),
+        json.dumps({"zarr_format": 2}),
         encoding="utf-8",
     )
 
-    node = list(coordinate_audit.iter_metadata_nodes(zarr_path))[0]
-
-    assert "zarr_format is not 2" in str(node.metadata_error)
+    with pytest.raises(
+        coordinate_audit.MetadataTraversalError,
+        match="Zarr format 2 is unsupported",
+    ):
+        list(coordinate_audit.iter_metadata_nodes(zarr_path))
 
 
 @pytest.mark.parametrize(
@@ -6537,7 +6535,7 @@ def test_rowwise_transform_identity_checks_live_key_path_shape_and_dtype(
     ]
 
 
-def test_archive_root_symlink_root_array_and_invalid_v2_metadata_fail_closed(
+def test_archive_root_symlink_root_array_and_zarr_v2_archive_fail_closed(
     tmp_path: Path,
 ) -> None:
     real_root = tmp_path / "real.zarr"
@@ -6601,7 +6599,13 @@ def test_archive_root_symlink_root_array_and_invalid_v2_metadata_fail_closed(
     )
     v2_record = _dataset_rows(audit_registry(registry))[0]
     assert v2_record["status"] == "missing_or_unreadable"
-    assert "INVALID_ZARR_METADATA_INVENTORY" in v2_record["issue_codes"]
+    assert "ZARR_METADATA_TRAVERSAL_FAILED" in v2_record["issue_codes"]
+    traversal_issue = next(
+        issue
+        for issue in v2_record["issues"]
+        if issue["code"] == "ZARR_METADATA_TRAVERSAL_FAILED"
+    )
+    assert "Zarr format 2 is unsupported" in traversal_issue["evidence"]["error"]
 
 
 def test_registry_foreign_key_defects_and_archive_aliases_fail_closed(

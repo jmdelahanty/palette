@@ -61,7 +61,6 @@ def _is_zarr_path(path: Path) -> bool:
     return path.exists() and (
         path.suffix == ".zarr"
         or (path / "zarr.json").is_file()
-        or (path / ".zgroup").is_file()
     )
 
 

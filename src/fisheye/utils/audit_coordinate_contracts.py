@@ -2,7 +2,8 @@
 
 The scanner deliberately has no apply mode.  Registry access uses SQLite's
 ``mode=ro`` URI together with ``PRAGMA query_only`` and Zarr inspection reads
-only ``zarr.json`` / Zarr-v2 metadata files.  Array payloads, consolidated
+only Zarr-v3 ``zarr.json`` metadata files.  Zarr-v2 metadata markers are
+rejected explicitly rather than interpreted.  Array payloads, consolidated
 metadata, registry models, and processing code are never opened by this module.
 
 Without recording filters, the JSONL output contains one ``coordinate_dataset``
@@ -1424,76 +1425,16 @@ def _read_metadata_node(path: Path, relative_path: str) -> MetadataNode | None:
             metadata_error="; ".join(str(item) for item in errors if item) or None,
         )
 
-    zgroup = path / ".zgroup"
-    zarray = path / ".zarray"
-    zattrs = path / ".zattrs"
     if any(metadata_files[name] for name in (".zgroup", ".zarray", ".zattrs")):
-        attrs_payload: dict[str, Any] = {}
-        errors: list[str] = []
-        if metadata_files[".zgroup"]:
-            group_payload, error = _read_json_object(zgroup)
-            if error:
-                errors.append(f".zgroup: {error}")
-            elif group_payload is not None and (
-                type(group_payload.get("zarr_format")) is not int
-                or group_payload.get("zarr_format") != 2
-            ):
-                errors.append(".zgroup: zarr_format is not 2")
-        if metadata_files[".zattrs"]:
-            attrs, error = _read_json_object(zattrs)
-            attrs_payload = attrs or {}
-            if error:
-                errors.append(f".zattrs: {error}")
-        array_payload: dict[str, Any] = {}
-        if metadata_files[".zarray"]:
-            array, error = _read_json_object(zarray)
-            array_payload = array or {}
-            if error:
-                errors.append(f".zarray: {error}")
-            elif (
-                type(array_payload.get("zarr_format")) is not int
-                or array_payload.get("zarr_format") != 2
-            ):
-                errors.append(".zarray: zarr_format is not 2")
-            shape = array_payload.get("shape")
-            if not isinstance(shape, (list, tuple)) or any(
-                isinstance(item, bool) or not isinstance(item, int) or item < 0
-                for item in (shape or ())
-            ):
-                errors.append(".zarray: array shape is invalid")
-            raw_dtype = array_payload.get("dtype")
-            try:
-                np.dtype(raw_dtype)
-            except (TypeError, ValueError):
-                errors.append(".zarray: array dtype is invalid")
-            chunks = array_payload.get("chunks")
-            if (
-                not isinstance(chunks, (list, tuple))
-                or len(chunks) != len(shape or ())
-                or any(
-                    isinstance(item, bool)
-                    or not isinstance(item, int)
-                    or item <= 0
-                    for item in (chunks or ())
-                )
-            ):
-                errors.append(".zarray: array chunks are invalid")
-        if metadata_files[".zgroup"] and metadata_files[".zarray"]:
-            errors.append("node contains both .zgroup and .zarray")
-        if metadata_files[".zattrs"] and not (
-            metadata_files[".zgroup"] or metadata_files[".zarray"]
-        ):
-            errors.append("node contains .zattrs without .zgroup or .zarray")
-        return MetadataNode(
-            relative_path=relative_path,
-            node_type="array" if metadata_files[".zarray"] else "group",
-            metadata_format="zarr_v2",
-            shape=array_payload.get("shape"),
-            data_type=array_payload.get("dtype"),
-            chunk_shape=array_payload.get("chunks"),
-            storage_metadata=(dict(array_payload) if array_payload else None),
-            attributes=attrs_payload,
-            metadata_error="; ".join(errors) or None,
+        present = sorted(
+            name
+            for name in (".zgroup", ".zarray", ".zattrs")
+            if metadata_files[name]
+        )
+        raise MetadataTraversalError(
+            "Zarr format 2 is unsupported; Palette coordinate audits require "
+            f"Zarr format 3 zarr.json metadata at {path} "
+            f"(found {', '.join(present)})"
         )
     return None
 
@@ -1629,7 +1570,7 @@ def iter_metadata_nodes(zarr_path: Path) -> Iterable[MetadataNode]:
         node = _read_metadata_node(path, relative_path)
         if node is None:
             raise MetadataTraversalError(
-                f"metadata directory has no zarr.json/.zgroup/.zarray metadata: {path}"
+                f"metadata directory has no Zarr-v3 zarr.json metadata: {path}"
             )
         yield node
         # Zarr arrays are metadata leaves.  Their directories may contain very
@@ -14105,7 +14046,7 @@ def audit_dataset_row(
             _issue(
                 "ZARR_ROOT_METADATA_MISSING",
                 "critical",
-                "Dataset directory has no root zarr.json/.zgroup/.zarray metadata.",
+                "Dataset directory has no root Zarr-v3 zarr.json metadata.",
             )
         )
         return _stamp_record_bundle([
