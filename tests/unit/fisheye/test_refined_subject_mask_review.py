@@ -1418,7 +1418,7 @@ def test_partial_derived_refresh_rejects_noncanonical_bbox_before_write(tamper: 
         valid = np.asarray(refined.group["metrics/bbox_valid"][:], dtype=bool)
         values[..., 2:][valid] -= 1.0
         bbox[:] = values
-        match = "entire existing bbox surface"
+        match = "every untargeted bbox cell"
     masks_before = np.asarray(refined.group["masks_roi"][:], dtype=np.uint8).copy()
     bbox_before = np.asarray(refined.group["metrics/bbox_xyxy"][:], dtype=np.float32).copy()
     edited = np.asarray(refined.group["masks_roi"][0:1], dtype=np.uint8).copy()

@@ -963,7 +963,7 @@ def test_real_coordinate_publication_accepts_only_declared_empty_rowset(
         ("missing_n_detections", "arrays are incomplete"),
         ("nonzero_n_detections", "exact frame_indices cardinality"),
         ("summary_count_mismatch", "summary count authorities"),
-        ("decode_backend_mismatch", "does not match its exact decoder backend"),
+        ("decode_backend_mismatch", "decoder identity disagree"),
     ],
 )
 def test_public_detection_loader_rejects_invalid_empty_publication(

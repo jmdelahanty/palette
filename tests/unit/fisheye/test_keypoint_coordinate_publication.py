@@ -200,14 +200,18 @@ def _attach(group: FakeGroup, node: Any) -> None:
     group[node.path.rsplit("/", 1)[-1]] = node
 
 
-def _artifact() -> dict[str, Any]:
+def _artifact(
+    *,
+    keypoint_labels: tuple[str, ...] = ("swim_bladder", "eye_left"),
+) -> dict[str, Any]:
+    labels = list(keypoint_labels)
     binding = build_explicit_pose_model_schema_binding(
         model_sha256="a" * 64,
         assertion_id="fixture-reviewed-pose-model",
         skeleton_id="pose_skel_fixture_v1",
-        model_kpt_shape=[2, 3],
-        keypoint_labels=["swim_bladder", "eye_left"],
-        edges=[[0, 1]],
+        model_kpt_shape=[len(labels), 3],
+        keypoint_labels=labels,
+        edges=[[index, index + 1] for index in range(len(labels) - 1)],
     )
     return {
         "role": "keypoint_model",
@@ -1231,7 +1235,11 @@ def test_keypoint_publication_accepts_exact_half_open_bbox_extent_edges(
     )
 
 
-def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
+def _real_canonical_archive(
+    tmp_path: Any,
+    *,
+    include_bilateral_eyes: bool = False,
+) -> tuple[Any, Any]:
     root = zarr.open_group(str(tmp_path / "canonical.zarr"), mode="w")
     root.attrs.update(
         {
@@ -1561,14 +1569,17 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
     run.attrs["stage_selector_eligible"] = False
     mark_run_started(run, run_name="k1", stage="keypoints")
     labels = ["swim_bladder", "eye_left"]
-    pose_schema = _artifact()["pose_schema_binding"]["pose_schema"]
+    if include_bilateral_eyes:
+        labels.append("eye_right")
+    artifact = _artifact(keypoint_labels=tuple(labels))
+    pose_schema = artifact["pose_schema_binding"]["pose_schema"]
     run.attrs.update(
         {
             "keypoint_labels": list(labels),
             "keypoint_confidence_labels": list(labels),
             "skeleton_id": "pose_skel_fixture_v1",
-            "kpt_shape": [2, 2],
-            "model_kpt_shape": [2, 3],
+            "kpt_shape": [len(labels), 2],
+            "model_kpt_shape": [len(labels), 3],
             "pose_schema": pose_schema,
         }
     )
@@ -1581,8 +1592,18 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
     )
     output_placement = np.asarray(placement[:])[selected]
     run.create_array("source_crop_xywh", data=output_placement)
+    if include_bilateral_eyes:
+        keypoints_roi_values = [
+            [[1.0, 2.0], [3.0, 4.0], [8.0, 4.0]],
+            [[5.0, 6.0], [7.0, 8.0], [10.0, 8.0]],
+        ]
+    else:
+        keypoints_roi_values = [
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[5.0, 6.0], [7.0, 8.0]],
+        ]
     keypoints_roi = np.asarray(
-        [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]],
+        keypoints_roi_values,
         dtype="<f8",
     )
     keypoints_img = keypoints_roi + output_placement[:, None, :2]
@@ -1614,7 +1635,7 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         run.create_array(name, data=value)
     run.create_array(
         "keypoint_confidences",
-        data=np.full((2, 2), 0.5, dtype="<f8"),
+        data=np.full((2, len(labels)), 0.5, dtype="<f8"),
     )
     prepare_keypoint_coordinate_context(
         root,
@@ -1622,7 +1643,7 @@ def _real_canonical_archive(tmp_path: Any) -> tuple[Any, Any]:
         crop_path="crop_runs/c1",
         model_input_transform=resolve_model_input_transform((40, 40)),
         preprocessing_input_mode="numpy-list",
-        model_artifact=_artifact(),
+        model_artifact=artifact,
     )
     publish_keypoint_coordinate_surfaces(root, "keypoints_runs/k1")
     run = root["keypoints_runs/k1"]

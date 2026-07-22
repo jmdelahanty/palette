@@ -16,6 +16,7 @@ from fisheye.analysis.stimulus_response import (
 )
 from fisheye.analysis.stimulus_response_omr import OMRStepData
 from tests.unit.fisheye.test_stimulus_response import (
+    _synthetic_coordinate_authority,
     _synthetic_track_motion_lineage,
 )
 
@@ -210,6 +211,7 @@ def test_compact_writer_roundtrips_through_resolver() -> None:
             track_ids=(0,),
             fps=30.0,
         ),
+        coordinate_authority=_synthetic_coordinate_authority("stim"),
         parameters={
             "layout": STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
             "fps": 30.0,

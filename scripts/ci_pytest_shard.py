@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Run one deterministic, file-isolated pytest shard.
 
-Files are assigned by largest-processing-time-first using source bytes as a
-stable cost proxy.  A test file is never split between processes, which keeps
-module-scoped immutable fixtures reusable and prevents concurrent tests from
-mutating the same temporary Zarr or SQLite fixture.
+Files are assigned by largest-estimated-cost-first. Source bytes are the base
+proxy, with stable multipliers for proof-heavy publication suites whose runtime
+is dominated by repeated Zarr integrity validation rather than source length.
+A test file is never split between processes, which keeps module-scoped
+immutable fixtures reusable and prevents concurrent tests from mutating the
+same temporary Zarr or SQLite fixture.
 """
 
 from __future__ import annotations
@@ -17,6 +19,45 @@ import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+# A four-shard workstation run on 2026-07-22 finished in 9, 38, 61, and 51
+# minutes despite nearly equal source-byte loads. The first eight-shard run
+# improved that to 1, 2, 31, 9, 18, 34, 45, and 31 minutes, exposing four more
+# proof-heavy files that source bytes had underweighted. These suites contain
+# repeated fail-closed publication proofs and therefore need a larger stable
+# scheduling weight than ordinary numerical/unit tests. Keep this list narrow
+# and use CI's reported slow-test durations when revising it.
+PROOF_HEAVY_TEST_FILE_NAMES = frozenset(
+    {
+        "test_canonical_coordinate_publication.py",
+        "test_chaser_distance_coordinate_publication.py",
+        "test_finalize_subject_masks.py",
+        "test_keypoint_coordinate_publication.py",
+        "test_observation_coordinate_publication.py",
+        "test_refine_online_coordinate_contract.py",
+        "test_refined_subject_mask_coordinate_publication.py",
+        "test_stimulus_response.py",
+        "test_subject_mask_coordinate_publication.py",
+        "test_subject_shape_coordinate_publication.py",
+        "test_subject_shape_runs.py",
+        "test_tail_coordinate_publication.py",
+        "test_track_kinematics_coordinate_contract.py",
+        "test_track_motion_publication.py",
+    }
+)
+PROOF_HEAVY_TEST_COST_MULTIPLIER = 6
+
+
+def estimated_test_file_cost(path: Path) -> int:
+    """Return one deterministic relative runtime estimate for ``path``."""
+
+    size = path.stat().st_size
+    multiplier = (
+        PROOF_HEAVY_TEST_COST_MULTIPLIER
+        if path.name in PROOF_HEAVY_TEST_FILE_NAMES
+        else 1
+    )
+    return max(1, size) * multiplier
 
 
 def discover_test_files(test_root: Path) -> tuple[Path, ...]:
@@ -35,18 +76,18 @@ def assign_test_file_shards(
     if shard_count <= 0:
         raise ValueError("shard_count must be positive")
     buckets: list[list[Path]] = [[] for _ in range(shard_count)]
-    byte_loads = [0] * shard_count
+    estimated_loads = [0] * shard_count
     ordered = sorted(
         test_files,
-        key=lambda path: (-path.stat().st_size, path.as_posix()),
+        key=lambda path: (-estimated_test_file_cost(path), path.as_posix()),
     )
     for path in ordered:
         shard_index = min(
             range(shard_count),
-            key=lambda index: (byte_loads[index], index),
+            key=lambda index: (estimated_loads[index], index),
         )
         buckets[shard_index].append(path)
-        byte_loads[shard_index] += path.stat().st_size
+        estimated_loads[shard_index] += estimated_test_file_cost(path)
     return tuple(
         tuple(sorted(bucket, key=lambda path: path.as_posix()))
         for bucket in buckets

@@ -259,12 +259,13 @@ def test_refinement_publishes_stimulus_identity_temporal_authority_and_v2_surfac
     assert run.attrs[mod.RUN_STAGE_ATTR] == "refine_online_detect"
     assert run.attrs["stage_selector_eligible"] is True
     assert run.attrs[mod.REFINED_ONLINE_PUBLICATION_OWNER_ATTR]
+    activated_parent = root[mod.REFINED_ONLINE_GROUP]
     assert (
-        parent.attrs[mod.REFINED_ONLINE_PUBLICATION_POLICY_ATTR]
+        activated_parent.attrs[mod.REFINED_ONLINE_PUBLICATION_POLICY_ATTR]
         == mod.REFINED_ONLINE_PUBLICATION_POLICY
     )
-    assert parent.attrs[mod.REFINED_ONLINE_PUBLICATION_GENERATION_ATTR] == 1
-    assert parent.attrs[mod.REFINED_ONLINE_PARENT_PUBLICATION_LEASE_ATTR][
+    assert activated_parent.attrs[mod.REFINED_ONLINE_PUBLICATION_GENERATION_ATTR] == 1
+    assert activated_parent.attrs[mod.REFINED_ONLINE_PARENT_PUBLICATION_LEASE_ATTR][
         "run_path"
     ] == f"{mod.REFINED_ONLINE_GROUP}/{run_name}"
     assert "run_provenance" in run.attrs

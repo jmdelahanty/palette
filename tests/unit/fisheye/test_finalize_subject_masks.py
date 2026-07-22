@@ -483,7 +483,10 @@ def test_real_finalizer_publication_activation_and_strict_reader_integration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(tmp_path)
+    root, _keypoints = _real_canonical_archive(
+        tmp_path,
+        include_bilateral_eyes=True,
+    )
     _publish_real_canonical_subject_mask(root)
     monkeypatch.setattr(
         mod,
@@ -562,7 +565,10 @@ def test_real_finalizer_publication_activation_and_strict_reader_integration(
 def test_canonical_finalizer_rejects_keypoint_and_mask_selection_mismatch(
     tmp_path: Path,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(tmp_path)
+    root, _keypoints = _real_canonical_archive(
+        tmp_path,
+        include_bilateral_eyes=True,
+    )
     _publish_real_canonical_subject_mask(
         root,
         selected_rows=np.asarray([0, 1], dtype="<i8"),
@@ -586,7 +592,10 @@ def test_canonical_finalizer_rejects_keypoint_and_mask_selection_mismatch(
 def test_canonical_finalizer_requires_exact_detection_success_leaf(
     tmp_path: Path,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(tmp_path)
+    root, _keypoints = _real_canonical_archive(
+        tmp_path,
+        include_bilateral_eyes=True,
+    )
     _publish_real_canonical_subject_mask(root)
     keypoints = root["keypoints_runs/k1"]
     success = np.asarray(keypoints["detection_success"][:], dtype=bool)
@@ -608,7 +617,10 @@ def test_canonical_finalizer_requires_exact_detection_success_leaf(
 def test_canonical_assignment_rejects_conflicting_complete_lineage(
     tmp_path: Path,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(tmp_path)
+    root, _keypoints = _real_canonical_archive(
+        tmp_path,
+        include_bilateral_eyes=True,
+    )
     _publish_real_canonical_subject_mask(root)
     source = mod._load_source_subject_mask_run(root, "s1")
     source = replace(

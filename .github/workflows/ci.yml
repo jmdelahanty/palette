@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     env:
       MPLBACKEND: Agg
       PYTHONUNBUFFERED: "1"
@@ -97,5 +97,5 @@ jobs:
         run: |
           python scripts/ci_pytest_shard.py \
             --shard-index "${{ matrix.shard }}" \
-            --shard-count 4 \
-            -- -q -m "not gpu"
+            --shard-count 12 \
+            -- -q -m "not gpu" --durations=25 --durations-min=1.0
