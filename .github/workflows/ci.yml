@@ -4,9 +4,13 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
 jobs:
-  tests:
-    name: collection and non-gpu tests
+  quality:
+    name: package, boundaries, and collection
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -52,6 +56,46 @@ jobs:
         run: |
           python -m pytest --collect-only -q tests/
 
-      - name: Run non-GPU tests
+  tests:
+    name: non-gpu tests (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      MPLBACKEND: Agg
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Restore persistent test fixtures
+        uses: actions/cache@v4
+        with:
+          path: .pytest_cache/palette-fixtures
+          key: palette-test-fixtures-v1-${{ runner.os }}-shard-${{ matrix.shard }}-${{ github.sha }}
+          restore-keys: |
+            palette-test-fixtures-v1-${{ runner.os }}-shard-${{ matrix.shard }}-
+
+      - name: Install package and test dependencies
         run: |
-          python -m pytest -q -m "not gpu" tests/
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,gpu]"
+
+      - name: Run non-GPU test shard
+        run: |
+          python scripts/ci_pytest_shard.py \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count 4 \
+            -- -q -m "not gpu"
