@@ -14,6 +14,7 @@ from tests.persistent_fixture_cache import persistent_directory_fixture
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_CACHE_ROOT = _REPO_ROOT / ".pytest_cache" / "palette-subject-shape-fixture"
 
 
 def _canonical_builder_sha256() -> str:
@@ -106,6 +107,7 @@ def resolve_canonical_refined_archive_template() -> Path:
         },
         build=_build_cached_canonical_refined_archive,
         validate=_validate_cached_canonical_refined_archive,
+        cache_root=_CACHE_ROOT,
     )
     return fixture.path
 

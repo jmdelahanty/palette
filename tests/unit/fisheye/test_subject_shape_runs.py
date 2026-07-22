@@ -12,6 +12,7 @@ from fisheye.analysis import subject_shape_runs as mod
 from fisheye.analysis_workflows.materializers import subject_shape as materializer
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
+from fisheye.shared.proof_verification import proof_verification_scope
 from fisheye.shared.refined_subject_mask_mutation import (
     RefinedSubjectMaskMutationError,
 )
@@ -38,6 +39,42 @@ def canonical_refined_template() -> Path:
     """Reuse a validated immutable source graph; tests clone before mutation."""
 
     return resolve_canonical_refined_archive_template()
+
+
+@pytest.fixture(scope="session")
+def canonical_subject_shape_template(
+    tmp_path_factory: pytest.TempPathFactory,
+    canonical_refined_template: Path,
+) -> tuple[Path, dict[str, object]]:
+    """Build one fresh canonical publication for isolated downstream clones."""
+
+    target = tmp_path_factory.mktemp("canonical-subject-shape") / "canonical.zarr"
+    shutil.copytree(canonical_refined_template, target)
+    root = zarr.open_group(str(target), mode="a", use_consolidated=False)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _patch_provenance(monkeypatch)
+        summary = mod.write_subject_shape_run_group(
+            root,
+            refined_run="r1",
+            run_name="shape_001",
+            chunk_size=2,
+            include_chunk_timings=True,
+        )
+    return target, summary
+
+
+@pytest.fixture
+def canonical_subject_shape_root(
+    tmp_path: Path,
+    canonical_subject_shape_template: tuple[Path, dict[str, object]],
+) -> tuple[zarr.Group, dict[str, object]]:
+    """Clone the immutable publication so every test owns its mutations."""
+
+    template, summary = canonical_subject_shape_template
+    target = tmp_path / "canonical.zarr"
+    shutil.copytree(template, target)
+    root = zarr.open_group(str(target), mode="a", use_consolidated=False)
+    return root, summary
 
 
 @pytest.fixture
@@ -158,19 +195,9 @@ def test_snout_join_prefers_medial_head_region_over_branch_endpoint() -> None:
 
 
 def test_write_subject_shape_run_group_creates_coherent_components_and_relations(
-    monkeypatch,
-    canonical_refined_root: zarr.Group,
+    canonical_subject_shape_root: tuple[zarr.Group, dict[str, object]],
 ) -> None:
-    _patch_provenance(monkeypatch)
-    root = canonical_refined_root
-
-    summary = mod.write_subject_shape_run_group(
-        root,
-        refined_run="r1",
-        run_name="shape_001",
-        chunk_size=2,
-        include_chunk_timings=True,
-    )
+    root, summary = canonical_subject_shape_root
 
     assert summary["status"] == "updated"
     run = root["analysis"]["subject_shape_runs"]["shape_001"]
@@ -608,38 +635,43 @@ def test_unbound_subject_shape_receipt_rejects_scientific_and_schema_drift_befor
             expected_run_name="shape_unbound_hostile",
         )
 
-    original_smoothing = run.attrs["bspline_smoothing"]
-    run.attrs["bspline_smoothing"] = float(original_smoothing) + 1.0
-    with pytest.raises(ValueError, match="unbound|scientific|manifest"):
-        validate()
-    run.attrs["bspline_smoothing"] = original_smoothing
+    # The authoritative source is immutable throughout this tamper family, so
+    # its exact proofs may be shared. Every staged-run inventory/attr mutation
+    # is still read and rejected independently, and the source is rechecked
+    # when the outer proof scope closes.
+    with proof_verification_scope():
+        original_smoothing = run.attrs["bspline_smoothing"]
+        run.attrs["bspline_smoothing"] = float(original_smoothing) + 1.0
+        with pytest.raises(ValueError, match="unbound|scientific|manifest"):
+            validate()
+        run.attrs["bspline_smoothing"] = original_smoothing
 
-    body = run["components/subject_body"]
-    body.create_array(
-        "debug_point_xy",
-        data=np.zeros((2, 2), dtype=np.float32),
-    )
-    with pytest.raises(ValueError, match="array inventory"):
-        validate()
-    del body["debug_point_xy"]
+        body = run["components/subject_body"]
+        body.create_array(
+            "debug_point_xy",
+            data=np.zeros((2, 2), dtype=np.float32),
+        )
+        with pytest.raises(ValueError, match="array inventory"):
+            validate()
+        del body["debug_point_xy"]
 
-    body.create_group("debug_empty")
-    with pytest.raises(ValueError, match="group inventory"):
-        validate()
-    del body["debug_empty"]
+        body.create_group("debug_empty")
+        with pytest.raises(ValueError, match="group inventory"):
+            validate()
+        del body["debug_empty"]
 
-    body.attrs["coordinate_space"] = "roi_local_px"
-    with pytest.raises(ValueError, match="attrs differ"):
-        validate()
-    del body.attrs["coordinate_space"]
+        body.attrs["coordinate_space"] = "roi_local_px"
+        with pytest.raises(ValueError, match="attrs differ"):
+            validate()
+        del body.attrs["coordinate_space"]
 
-    body["centroid_xy"].attrs["coordinate_space"] = "roi_local_px"
-    with pytest.raises(ValueError, match="attrs differ"):
-        validate()
-    del body["centroid_xy"].attrs["coordinate_space"]
+        body["centroid_xy"].attrs["coordinate_space"] = "roi_local_px"
+        with pytest.raises(ValueError, match="attrs differ"):
+            validate()
+        del body["centroid_xy"].attrs["coordinate_space"]
 
-    result = validate()
-    assert result["valid"] is True
+        result = validate()
+        assert result["valid"] is True
 
 
 def test_future_subject_shape_writer_fails_closed_for_compact_only_refined_source(
@@ -796,17 +828,9 @@ def test_subject_shape_writer_rejects_unsealed_source_body_qc_mutation(
 
 
 def test_subject_shape_publication_rejects_post_publication_source_revision_injection(
-    monkeypatch,
-    canonical_refined_root: zarr.Group,
+    canonical_subject_shape_root: tuple[zarr.Group, dict[str, object]],
 ) -> None:
-    _patch_provenance(monkeypatch)
-    root = canonical_refined_root
-    mod.write_subject_shape_run_group(
-        root,
-        refined_run="r1",
-        run_name="shape_before_revision_injection",
-        chunk_size=2,
-    )
+    root, _summary = canonical_subject_shape_root
 
     refined = root["refined_subject_masks_runs/r1"]
     body = refined.require_group("components").require_group("subject_body")
@@ -819,7 +843,7 @@ def test_subject_shape_publication_rejects_post_publication_source_revision_inje
     with pytest.raises(SubjectShapeCoordinatePublicationError):
         load_persisted_subject_shape_coordinate_publication(
             root,
-            "analysis/subject_shape_runs/shape_before_revision_injection",
+            "analysis/subject_shape_runs/shape_001",
         )
     with pytest.raises(ValueError):
         mod.write_subject_shape_run_group(
@@ -831,19 +855,10 @@ def test_subject_shape_publication_rejects_post_publication_source_revision_inje
 
 
 def test_write_subject_shape_run_group_copies_instance_key_lineage(
-    monkeypatch,
-    canonical_refined_root: zarr.Group,
+    canonical_subject_shape_root: tuple[zarr.Group, dict[str, object]],
 ) -> None:
-    _patch_provenance(monkeypatch)
-    root = canonical_refined_root
+    root, _summary = canonical_subject_shape_root
     refined = root["refined_subject_masks_runs"]["r1"]
-
-    mod.write_subject_shape_run_group(
-        root,
-        refined_run="r1",
-        run_name="shape_001",
-        chunk_size=2,
-    )
 
     run = root["analysis"]["subject_shape_runs"]["shape_001"]
     np.testing.assert_array_equal(run["instance_key"][:], refined["instance_key"][:])
@@ -866,3 +881,30 @@ def test_future_subject_shape_writer_fails_closed_without_instance_key(monkeypat
             run_name="shape_001",
             chunk_size=2,
         )
+
+
+def test_canonical_subject_shape_template_clones_isolate_mutations(
+    tmp_path: Path,
+    canonical_subject_shape_template: tuple[Path, dict[str, object]],
+) -> None:
+    template, _summary = canonical_subject_shape_template
+    first_path = tmp_path / "first.zarr"
+    second_path = tmp_path / "second.zarr"
+    shutil.copytree(template, first_path)
+    shutil.copytree(template, second_path)
+    first = zarr.open_group(str(first_path), mode="a", use_consolidated=False)
+    second = zarr.open_group(str(second_path), mode="r", use_consolidated=False)
+    first_values = np.asarray(
+        first["analysis/subject_shape_runs/shape_001/instance_key"][:]
+    ).copy()
+    first["analysis/subject_shape_runs/shape_001/instance_key"][:] = first_values[::-1]
+
+    np.testing.assert_array_equal(
+        second["analysis/subject_shape_runs/shape_001/instance_key"][:],
+        first_values,
+    )
+    pristine = zarr.open_group(str(template), mode="r", use_consolidated=False)
+    np.testing.assert_array_equal(
+        pristine["analysis/subject_shape_runs/shape_001/instance_key"][:],
+        first_values,
+    )

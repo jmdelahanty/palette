@@ -93,6 +93,28 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,gpu]"
 
+      - name: Select canonical subject-shape fixture owner
+        id: subject-shape-fixture-owner
+        run: |
+          if python scripts/ci_pytest_shard.py \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count 12 \
+            --list-only \
+            | grep -Fxq "tests/unit/fisheye/test_subject_shape_runs.py"; then
+            echo "selected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore canonical subject-shape source fixture
+        if: steps.subject-shape-fixture-owner.outputs.selected == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .pytest_cache/palette-subject-shape-fixture
+          key: palette-subject-shape-fixture-v1-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            palette-subject-shape-fixture-v1-${{ runner.os }}-
+
       - name: Run non-GPU test shard
         run: |
           python scripts/ci_pytest_shard.py \
