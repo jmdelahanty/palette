@@ -6,6 +6,7 @@ from fisheye.utils.run_chaser_near_field_occupancy import *  # noqa: F403
 from fisheye.utils.run_chaser_near_field_occupancy import (
     _explicit_zarr_targets,
     _filesystem_targets,
+    _parse_float_list,
     _query_targets,
 )
 

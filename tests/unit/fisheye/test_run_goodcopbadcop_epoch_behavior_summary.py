@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from fisheye.utils import run_goodcopbadcop_epoch_behavior_summary as mod
+from fisheye.utils import run_chaser_epoch_behavior_summary as generic_mod
 
 
 def test_run_for_targets_forwards_epoch_behavior_parameters_and_writes(monkeypatch, tmp_path: Path) -> None:
@@ -45,8 +46,8 @@ def test_run_for_targets_forwards_epoch_behavior_parameters_and_writes(monkeypat
         calls["write_kwargs"] = kwargs
         return "analysis/chaser_distance_runs/chaser_distance_1/epoch_behavior_summary/kinematics_bouts_v1"
 
-    monkeypatch.setattr(mod, "build_goodcopbadcop_epoch_behavior_summary_result", fake_build)
-    monkeypatch.setattr(mod, "write_goodcopbadcop_epoch_behavior_summary_component", fake_write)
+    monkeypatch.setattr(generic_mod, "build_chaser_epoch_behavior_summary_result", fake_build)
+    monkeypatch.setattr(generic_mod, "write_chaser_epoch_behavior_summary_component", fake_write)
 
     rows = mod.run_for_targets(
         [
@@ -137,8 +138,12 @@ def test_run_for_targets_dry_run_does_not_write(monkeypatch, tmp_path: Path) -> 
             warnings=(),
         )
 
-    monkeypatch.setattr(mod, "build_goodcopbadcop_epoch_behavior_summary_result", fake_build)
-    monkeypatch.setattr(mod, "write_goodcopbadcop_epoch_behavior_summary_component", lambda *args, **kwargs: writes.append(args))
+    monkeypatch.setattr(generic_mod, "build_chaser_epoch_behavior_summary_result", fake_build)
+    monkeypatch.setattr(
+        generic_mod,
+        "write_chaser_epoch_behavior_summary_component",
+        lambda *args, **kwargs: writes.append(args),
+    )
 
     rows = mod.run_for_targets(
         [{"recording_id": "recording_GoodCopBadCop", "zarr_path": str(zarr_path)}],
