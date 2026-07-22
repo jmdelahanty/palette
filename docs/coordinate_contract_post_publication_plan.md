@@ -31,6 +31,19 @@ incomplete run.
 
 ## Decisions already made
 
+### Use Zarr format 3 only
+
+Palette's active archives, writers, readers, registry discovery, and contract
+audits target Zarr format 3. New code must use `zarr.json` and must not add
+`.zgroup`, `.zarray`, `.zattrs`, `DirectoryStore`, or other Zarr-format-2
+fallbacks. Encountering a format-2 archive is an unsupported-input error, not a
+compatibility path.
+
+Version suffixes on Palette schemas and scientific contracts are independent of
+the Zarr storage format. Names such as `source_video_metadata.v2`,
+`directed_transform_v2`, and pose-schema `v2` remain valid and must not be
+removed by storage-format cleanup.
+
 ### Preserve the scientific contract
 
 Keep all of the following:
@@ -215,11 +228,82 @@ failure cleanup, final H5 revalidation, post-completion reload failure,
 interrupt handling, source-file replacement, and the new activation-drift
 case, passed in 187.01 seconds.
 
+### Subject-shape publication extension
+
+Subject-shape publication now treats proof reuse as three explicit phases:
+
+1. validate the refined-mask source and newly written child while the child is
+   running and selector-ineligible, then close the phase before completion;
+2. freshly validate the completed child and close the phase before the first
+   parent-selector mutation; and
+3. after the guarded selector writes, restart from an empty proof set, reload
+   the complete child and its exact source graph, and close that phase before
+   the literal final `stage_selector_eligible=true` mutation.
+
+Deferred activation performs its final proof in a separate operation and also
+closes that proof before eligibility. Strict public subject-shape readers use
+one bounded operation scope, so they deduplicate shared acquisition/import
+authorities during a read while still reopening every distinct proof at the
+closing check. No cache survives an operation or publication phase.
+
+The motivating two-row cProfile traversed the provenance DAG as a fresh tree
+from every descriptor edge: 1.96 billion Python calls, including 388,772
+acquisition-frame validations, 777,604 import-ownership validations, and 3.2
+million archive-identity resolutions. These were shared-root validation fanout,
+not row processing or an equivalent number of filesystem reads.
+
+Using the retained canonical two-row archive on the same workstation:
+
+| Path | Unscoped baseline | Phase-scoped implementation |
+|---|---:|---:|
+| Write, publish, and activate | 150.639 s | 25.139 s |
+| Strict completed-publication read | about 70 s in the baseline profile | 3.802 s |
+
+The writer improved by about 6x while preserving selector rollback, interrupted
+eligibility, deferred activation, source-tamper rejection, and the rule that
+eligibility remains the final mutation. Canonical upstream test-fixture
+construction remains a separate performance target and is not hidden by this
+change.
+
+The final warm-fixture cProfile recorded 44,549,213 calls, down from
+1,957,304,450 (97.7% fewer, or about 44x). The high-fanout shared roots changed
+as follows:
+
+| Validation/root helper | Baseline calls | Final calls |
+|---|---:|---:|
+| Acquisition camera frame | 388,772 | 653 |
+| Acquisition import ownership | 777,604 | 24 |
+| Archive identity | 3,198,154 | 63,224 |
+
+The final profile retains exactly three complete subject-shape publication
+loads, corresponding to the deliberate completed-child, pre-selector, and
+post-selector checkpoints. Remaining cumulative time is dominated by Zarr's
+synchronous metadata path and real manifest/schema-inventory reconstruction.
+
+The upstream canonical refined-mask test source is now a persistent,
+content-addressed immutable fixture. Its first population took 5m50s and the
+identical steady-state writer test took 33.94s. Cache hits verify the complete
+directory digest plus essential Zarr v3 lifecycle, shape, and dtype metadata;
+each test mutates only a private clone. Relevant source or NumPy/Zarr version
+changes select a new cache key. The key hashes the exact source text of the five
+fixture-construction helpers rather than the whole tamper-test module, so an
+unrelated assertion edit does not discard the expensive source graph. Both the
+writer/materializer and strict-reader modules share the same entry.
+
+The full warm-cache subject-shape writer and materializer file passed all 16
+tests in 8m12s. The single broad strict publication/tamper regression, which
+performs about twenty real reloads, passed in 3m27s with the shared cache warm;
+the ordinary coherent-writer regression passed from the other module against
+the same entry in 34.93s.
+
 ## Work package 1: close normal-path calibration coverage
 
 This is the first scientific implementation priority.
 
 ### Stimulus response and OMR
+
+Status: implemented and focused validation green on 2026-07-21, with the
+angular-direction and imaging-model qualifications below still open.
 
 Normal stimulus-response computation still reaches historical calibration
 resolution in:
@@ -244,6 +328,49 @@ Required changes:
 6. Compare old and new numeric outputs when they resolve the same underlying
    calibration.  Any discrepancy must be explained before publication; do not
    relabel changed values as a metadata-only migration.
+
+The normal path now loads a `StimulusResponseCoordinateAuthority` from the
+selected, complete, selector-eligible stimulus run.  The authority binds the
+canonical stimulus coordinate-output manifest, arena frame, selected canvas,
+source-camera frame, directed arena-to-camera transform chain, selected
+calibration, and source-camera physical scale.  It also requires the selected
+track-motion run to use the exact same physical-authority identity.  The
+low-level writer repeats that cross-input check, so callers cannot bypass it by
+invoking publication directly.
+
+Loom, concentric, and moving-grating arena geometry no longer scan
+`analysis/calibration`, root `calibration`, or partially populated per-run
+attrs.  Arena points are transformed through the typed
+arena-to-selected-canvas-to-source-camera chain and then scaled with the exact
+camera millimetres-per-pixel authority.  Explicit precomputed millimetre
+coordinates are accepted only when labelled `source_camera_physical_mm`.
+Non-centre loom placement remains fail-closed until Citrus materializes a typed
+placement surface.
+
+This is a justified recomputation rather than a metadata-only migration.  The
+selected-calibration matrix is declared camera-to-canvas; historical response
+helpers applied a direction-neutral matrix as though it were canvas-to-camera.
+In the canonical numeric fixture, canvas point `(442, 692)` maps through the
+explicit inverse to camera point `(432, 672)`, or `(8.64, 13.44)` mm at 50
+camera pixels/mm.  Applying the same stored matrix forward would instead yield
+`(9.04, 14.24)` mm.  The real-Zarr regression test fixes this direction and
+also rejects a physically equivalent-looking authority copied from another
+stimulus run because its durable record identities differ.
+
+New publications use `stimulus_response.v3` and persist a digest-bound
+`source_refs.stimulus_coordinate_lineage`.  The production materializer
+validates that lineage before accepting its output.  Focused evidence is 127
+stimulus-response writer/materializer tests plus two canonical imported-Zarr
+authority tests passing outside the sandbox.
+
+The remaining moving-grating angular offset is not silently certified by this
+change.  Existing per-step `direction_mapping_status`,
+`direction_mapping_source`, and `direction_mapping_validated` metadata remain
+authoritative; results whose mapping is unvalidated retain that status.  The
+separate acquisition-direction calibration work must establish absolute
+angular accuracy.  Work package 2 also remains open: the selected source frame
+currently declares `image_space="raw"`, and no rectification or distortion
+model has yet been demonstrated.
 
 ### Chaser distance
 
