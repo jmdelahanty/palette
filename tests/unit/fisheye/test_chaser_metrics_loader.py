@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import shutil
 import tempfile
 
 import h5py
@@ -427,12 +428,13 @@ def _legacy_canonical_root(
 
 
 _CANONICAL_FIXTURE_DIRS: list[tempfile.TemporaryDirectory[str]] = []
+_CANONICAL_FIXTURE_TEMPLATES: dict[bool, Path] = {}
 
 
-def _canonical_root(
+def _build_canonical_template(
     *,
     multi_chaser: bool = False,
-) -> tuple[zarr.Group, zarr.Group]:
+) -> Path:
     """Build the reader fixture through the real future-canonical importer."""
 
     fixture_dir = tempfile.TemporaryDirectory(prefix="palette_chaser_contract_")
@@ -599,10 +601,30 @@ def _canonical_root(
         verbose=False,
         repair_chaser_gaps=False,
     )
-    root = zarr.open_group(str(zarr_path), mode="a")
-    chaser = root["analysis"]["stimulus_runs"][run_name]["tracking_data"][
-        "chaser_states"
-    ]
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert run_name in root["analysis/stimulus_runs"]
+    return zarr_path
+
+
+def _canonical_root(
+    *,
+    multi_chaser: bool = False,
+) -> tuple[zarr.Group, zarr.Group]:
+    """Clone one immutable imported template for an isolated mutation test."""
+
+    template = _CANONICAL_FIXTURE_TEMPLATES.get(bool(multi_chaser))
+    if template is None:
+        template = _build_canonical_template(multi_chaser=multi_chaser)
+        _CANONICAL_FIXTURE_TEMPLATES[bool(multi_chaser)] = template
+
+    fixture_dir = tempfile.TemporaryDirectory(
+        prefix="palette_chaser_contract_clone_"
+    )
+    _CANONICAL_FIXTURE_DIRS.append(fixture_dir)
+    zarr_path = Path(fixture_dir.name) / "analysis.zarr"
+    shutil.copytree(template, zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    chaser = root["analysis/stimulus_runs/stim_1/tracking_data/chaser_states"]
     return root, chaser
 
 
@@ -996,7 +1018,7 @@ def test_load_rejects_output_content_mutation_even_when_components_still_agree(
         (
             "stimulus_frame_num",
             np.array([0, 0, 2], dtype=np.int64),
-            "duplicate stimulus-frame mappings",
+            "duplicate stimulus frame",
         ),
     ],
 )

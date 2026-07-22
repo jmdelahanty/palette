@@ -49,6 +49,7 @@ from fisheye.shared.stimulus_coordinate_contract import (
 from fisheye.shared.stimulus_frame_transform import (
     BoundStimulusFrameTransformEvidence,
 )
+from fisheye.shared.proof_verification import proof_verification_operation
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -264,6 +265,7 @@ class ChaserMetricsBundle:
     online_coordinate_handoff: Optional[CanonicalOnlineCoordinateHandoff] = None
 
 
+@proof_verification_operation
 def load_chaser_metrics(
     zarr_path: PathLike,
     *,
@@ -300,14 +302,6 @@ def load_chaser_metrics(
         raise ChaserMetricsCoordinateContractError(
             "Stimulus run lacks canonical tracking_data/chaser_states."
         )
-    try:
-        stimulus_evidence = load_bound_stimulus_coordinate_evidence(
-            stim_group,
-            chaser_group,
-            root_node=root,
-        )
-    except StimulusCoordinateContractError as exc:
-        raise ChaserMetricsCoordinateContractError(str(exc)) from exc
     camera_meta, stimulus_field, timestamp_field = _build_camera_metadata_map(stim_group)
     metadata_mask = _load_metadata_mask(stim_group, len(camera_meta))
 
@@ -336,7 +330,6 @@ def load_chaser_metrics(
         frame_to_index=frame_to_index,
         trial_state=trial_state,
         chaser_index=chaser_index,
-        stimulus_evidence=stimulus_evidence,
     )
 
     metrics_parent = analysis_group.get("chaser_fish_metrics")
@@ -547,7 +540,6 @@ def _extract_online_fields(
     frame_to_index: Dict[int, int],
     trial_state: np.ndarray,
     chaser_index: int,
-    stimulus_evidence: BoundStimulusCoordinateEvidence,
 ) -> Tuple[
     Dict[str, np.ndarray],
     Dict[str, object],
@@ -577,11 +569,10 @@ def _extract_online_fields(
         root,
         stim_group,
         chaser_group,
-        stimulus_evidence=stimulus_evidence,
     )
     dtype_names = chaser_states.dtype.names or ()
-    camera_frames = np.asarray(stimulus_evidence.camera_frame_ids)
-    source_mapping_rows = np.asarray(stimulus_evidence.source_row_indices)
+    camera_frames = np.asarray(online_coordinate_handoff.camera_frame_ids)
+    source_mapping_rows = np.asarray(online_coordinate_handoff.source_row_indices)
     if (
         camera_frames.shape != (chaser_states.shape[0],)
         or source_mapping_rows.shape != (chaser_states.shape[0],)
@@ -948,6 +939,7 @@ def _load_canonical_target_surface(
     return point_values, metadata, handoff
 
 
+@proof_verification_operation
 def load_canonical_online_coordinate_surface(
     root: zarr.Group,
     stimulus_run_group: zarr.Group,
