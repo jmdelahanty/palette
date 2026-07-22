@@ -3,8 +3,11 @@ from __future__ import annotations
 import pytest
 
 from fisheye.shared.proof_verification import (
+    finish_proof_verification,
+    load_verified_value,
     proof_verification_operation,
     proof_verification_scope,
+    restart_proof_verification,
     verify_persisted_proof,
 )
 
@@ -95,3 +98,79 @@ def test_closing_recheck_failure_fails_the_operation_and_clears_scope() -> None:
 
     verify_persisted_proof(("authority", "digest"), verify)
     assert attempts == 3
+
+
+def test_scope_reuses_loaded_value_and_rechecks_it_before_return() -> None:
+    loads = 0
+    checks: list[object] = []
+
+    def load() -> object:
+        nonlocal loads
+        loads += 1
+        return object()
+
+    with proof_verification_scope():
+        first = load_verified_value(("crop", "c1"), load, checks.append)
+        second = load_verified_value(("crop", "c1"), load, checks.append)
+        assert first is second
+        assert loads == 1
+
+    assert checks == [first]
+
+
+def test_loaded_value_is_fresh_outside_scope() -> None:
+    loads = 0
+
+    def load() -> int:
+        nonlocal loads
+        loads += 1
+        return loads
+
+    assert load_verified_value(("crop", "c1"), load, lambda _value: None) == 1
+    assert load_verified_value(("crop", "c1"), load, lambda _value: None) == 2
+
+
+def test_finish_rechecks_before_commit_and_disables_later_reuse() -> None:
+    loads = 0
+    checks: list[int] = []
+
+    def load() -> int:
+        nonlocal loads
+        loads += 1
+        return loads
+
+    with proof_verification_scope():
+        assert load_verified_value(("crop", "c1"), load, checks.append) == 1
+        assert load_verified_value(("crop", "c1"), load, checks.append) == 1
+        finish_proof_verification()
+        assert checks == [1]
+        assert load_verified_value(("crop", "c1"), load, checks.append) == 2
+        assert load_verified_value(("crop", "c1"), load, checks.append) == 3
+
+    assert checks == [1]
+
+
+def test_restart_opens_a_second_independently_closed_phase() -> None:
+    calls: list[str] = []
+
+    with proof_verification_scope():
+        verify_persisted_proof(("phase", 1), lambda: calls.append("one"))
+        finish_proof_verification()
+        restart_proof_verification()
+        verify_persisted_proof(("phase", 2), lambda: calls.append("two"))
+        finish_proof_verification()
+
+    assert calls == ["one", "one", "two", "two"]
+
+
+def test_recursive_exact_proof_is_checked_once_per_phase() -> None:
+    calls: list[str] = []
+
+    def verify() -> None:
+        calls.append("verify")
+        verify_persisted_proof(("recursive", "digest"), verify)
+
+    with proof_verification_scope():
+        verify_persisted_proof(("recursive", "digest"), verify)
+
+    assert calls == ["verify", "verify"]

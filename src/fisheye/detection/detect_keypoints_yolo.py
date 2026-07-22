@@ -72,6 +72,11 @@ from ..shared.pose_model_schema_binding import (
     load_pose_model_schema_binding,
     pose_schema_from_model_binding,
 )
+from ..shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
+    restart_proof_verification,
+)
 from ..shared.run_provenance import (
     CLI_RUN_PROVENANCE_ATTR,
     RUN_PROVENANCE_ATTR,
@@ -388,6 +393,11 @@ class _KeypointAttemptFailureBoundary:
                     rollback_keypoint_coordinate_publication(
                         self.coordinate_checkpoint
                     )
+                    # Rollback writes through fresh root-resolved handles. The
+                    # previously opened attrs mapping still caches the
+                    # pre-rollback publication graph and would resurrect it
+                    # when failure status is written.
+                    run_for_failure = self.require_owned_run()
                 except BaseException as exc:  # pragma: no cover - hostile store
                     failures.append(f"coordinate publication: {exc}")
             publication_committed = (
@@ -1652,6 +1662,7 @@ def _clip_xyxy_to_roi(box_xyxy: np.ndarray, *, roi_height: int, roi_width: int) 
 
 
 @_fail_closed_keypoint_attempt
+@proof_verification_operation
 def detect_keypoints_yolo(
     zarr_path: str,
     model_path: str,
@@ -2961,6 +2972,10 @@ def detect_keypoints_yolo(
     else:
         run_group.attrs["coordinate_contract"] = expected_coordinate_contract
 
+    # Recheck every reused immutable input and newly published coordinate
+    # authority while this child remains running and selector-ineligible.
+    finish_proof_verification()
+
     mark_run_complete(
         run_group,
         # Canonical activation owns selector publication under its lease.
@@ -2970,6 +2985,7 @@ def detect_keypoints_yolo(
         run_provenance=effective_run_provenance,
     )
     if keypoint_coordinate_context is not None:
+        restart_proof_verification()
         fresh_surfaces = _load_completed_ineligible_keypoint_coordinate_surfaces(
             root,
             run_path,

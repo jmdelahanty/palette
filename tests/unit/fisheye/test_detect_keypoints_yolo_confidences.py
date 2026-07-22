@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 import numpy as np
@@ -33,6 +35,81 @@ from fisheye.shared.pose_model_schema_binding import (
 from tests.unit.fisheye.test_keypoint_coordinate_publication import (
     _real_canonical_archive,
 )
+from tests.persistent_fixture_cache import persistent_directory_fixture
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _build_cached_canonical_keypoint_archive(destination: Path) -> None:
+    build_root = destination.parent / "builder"
+    build_root.mkdir()
+    _real_canonical_archive(build_root)
+    (build_root / "canonical.zarr").replace(destination)
+    build_root.rmdir()
+
+
+def _validate_cached_canonical_keypoint_archive(path: Path) -> None:
+    def attributes(relative_path: str) -> dict[str, object]:
+        value = json.loads(
+            (path / relative_path / "zarr.json").read_text(encoding="utf-8")
+        )
+        attrs = value.get("attributes")
+        if not isinstance(attrs, dict):
+            raise ValueError(f"Cached Zarr node {relative_path!r} lacks attributes.")
+        return attrs
+
+    root_attrs = attributes("")
+    parent_attrs = attributes("keypoints_runs")
+    run_attrs = attributes("keypoints_runs/k1")
+    if (
+        root_attrs.get("current_keypoint_group_path") != "keypoints_runs/k1"
+        or parent_attrs.get("latest") != "k1"
+        or parent_attrs.get("latest_complete") != "k1"
+        or run_attrs.get("palette_run_completion_status") != "complete"
+        or run_attrs.get("stage_selector_eligible") is not True
+        or run_attrs.get("coordinate_contract") != "canonical_v2"
+    ):
+        raise ValueError("Cached canonical keypoint archive is not complete and selected.")
+
+
+@pytest.fixture(scope="session")
+def canonical_keypoint_archive_template() -> Path:
+    """Reuse a validated sealed archive; individual tests still clone it."""
+
+    fixture = persistent_directory_fixture(
+        namespace="canonical-keypoint-archive",
+        schema_version="canonical-keypoint-archive-v1",
+        source_paths=(
+            _REPO_ROOT / "src/fisheye/shared",
+            _REPO_ROOT / "src/fisheye/detection/detect_yolo.py",
+            _REPO_ROOT / "tests/unit/fisheye/test_keypoint_coordinate_publication.py",
+        ),
+        dependency_versions={
+            "numpy": np.__version__,
+            "zarr": zarr.__version__,
+        },
+        build=_build_cached_canonical_keypoint_archive,
+        validate=_validate_cached_canonical_keypoint_archive,
+    )
+    return fixture.path
+
+
+@pytest.fixture
+def canonical_keypoint_archive(
+    tmp_path: Path,
+    canonical_keypoint_archive_template: Path,
+) -> tuple[zarr.Group, zarr.Group]:
+    """Return an isolated mutable copy of the immutable canonical template."""
+
+    destination = tmp_path / "canonical.zarr"
+    shutil.copytree(canonical_keypoint_archive_template, destination)
+    root = zarr.open_group(
+        str(destination),
+        mode="r+",
+        use_consolidated=False,
+    )
+    return root, root["keypoints_runs/k1"]
 
 
 class _KeypointsWithConf:
@@ -668,8 +745,9 @@ def test_detect_keypoints_yolo_can_write_collection_shard_without_stage_selector
 def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_canonical_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    canonical_keypoint_archive: tuple[zarr.Group, zarr.Group],
 ) -> None:
-    root, _prior_run = _real_canonical_archive(tmp_path)
+    root, _prior_run = canonical_keypoint_archive
     parent = root["keypoints_runs"]
     parent.attrs["latest"] = "k1"
     parent.attrs["latest_complete"] = "k1"
@@ -801,8 +879,9 @@ def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_c
 def test_detect_keypoints_yolo_rejects_model_replacement_during_load_before_inference(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    canonical_keypoint_archive: tuple[zarr.Group, zarr.Group],
 ) -> None:
-    root, _prior_run = _real_canonical_archive(tmp_path)
+    root, _prior_run = canonical_keypoint_archive
     parent = root["keypoints_runs"]
     parent.attrs["latest"] = "k1"
     parent.attrs["latest_complete"] = "k1"
@@ -848,8 +927,9 @@ def test_detect_keypoints_yolo_rejects_model_replacement_during_load_before_infe
 def test_detect_keypoints_yolo_rejects_model_drift_before_publication(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    canonical_keypoint_archive: tuple[zarr.Group, zarr.Group],
 ) -> None:
-    root, _prior_run = _real_canonical_archive(tmp_path)
+    root, _prior_run = canonical_keypoint_archive
     parent = root["keypoints_runs"]
     parent.attrs["latest"] = "k1"
     parent.attrs["latest_complete"] = "k1"
@@ -905,8 +985,9 @@ def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selector
     tmp_path,
     model_class: type[_FakeYOLO],
     message: str,
+    canonical_keypoint_archive: tuple[zarr.Group, zarr.Group],
 ) -> None:
-    root, _prior_run = _real_canonical_archive(tmp_path)
+    root, _prior_run = canonical_keypoint_archive
     parent = root["keypoints_runs"]
     parent.attrs["latest"] = "k1"
     parent.attrs["latest_complete"] = "k1"
@@ -971,8 +1052,9 @@ def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selector
 def test_detect_keypoints_yolo_canonical_model_requires_static_keypoint_shape(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    canonical_keypoint_archive: tuple[zarr.Group, zarr.Group],
 ) -> None:
-    root, _prior_run = _real_canonical_archive(tmp_path)
+    root, _prior_run = canonical_keypoint_archive
     parent = root["keypoints_runs"]
     parent.attrs["latest"] = "k1"
     parent.attrs["latest_complete"] = "k1"
@@ -1022,8 +1104,9 @@ def test_detect_keypoints_yolo_canonical_model_requires_static_keypoint_shape(
 def test_detect_keypoints_yolo_late_activation_interrupt_restores_prior_selectors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    canonical_keypoint_archive: tuple[zarr.Group, zarr.Group],
 ) -> None:
-    root, _prior_run = _real_canonical_archive(tmp_path)
+    root, _prior_run = canonical_keypoint_archive
     parent = root["keypoints_runs"]
     parent.attrs["latest"] = "k1"
     parent.attrs["latest_complete"] = "k1"

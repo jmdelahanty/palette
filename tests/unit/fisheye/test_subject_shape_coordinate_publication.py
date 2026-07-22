@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
+import shutil
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.analysis import subject_shape_runs as subject_shape_writer
 from fisheye.analysis_workflows.materializers import subject_shape as shape_materializer
@@ -46,6 +49,9 @@ from fisheye.shared.subject_shape_coordinate_publication import (
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started
 from tests.unit.fisheye.test_keypoint_coordinate_publication import (
     _real_canonical_archive,
+)
+from tests.unit.fisheye.subject_shape_test_fixtures import (
+    resolve_canonical_refined_archive_template,
 )
 
 
@@ -348,12 +354,29 @@ def _canonical_refined_archive(tmp_path: Any) -> tuple[Any, Any]:
     return root, _create_canonical_refined_masks(root, raw)
 
 
+@pytest.fixture(scope="session")
+def canonical_refined_template() -> Path:
+    return resolve_canonical_refined_archive_template()
+
+
+@pytest.fixture
+def canonical_refined_archive(
+    tmp_path: Path,
+    canonical_refined_template: Path,
+) -> tuple[zarr.Group, zarr.Group]:
+    destination = tmp_path / "canonical.zarr"
+    shutil.copytree(canonical_refined_template, destination)
+    root = zarr.open_group(str(destination), mode="r+", use_consolidated=False)
+    return root, root["refined_subject_masks_runs/r1"]
+
+
 def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authority(
-    tmp_path: Any,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    canonical_refined_archive: tuple[zarr.Group, zarr.Group],
 ) -> None:
     _patch_provenance(monkeypatch)
-    root, refined = _canonical_refined_archive(tmp_path)
+    root, refined = canonical_refined_archive
     roi_metrics = batch_mask_spatial_metrics(np.asarray(refined["masks_roi"][:]))
     offsets = np.asarray(refined["source_crop_xywh"][:, :2], dtype=np.float32)
 
@@ -979,6 +1002,96 @@ def _patch_fake_activation(
         "_load_subject_shape_publication",
         lambda *_args, **_kwargs: proof,
     )
+
+
+def test_subject_shape_activation_closes_fresh_proof_phases_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class RecordingAttrs(dict[str, Any]):
+        def __init__(self, label: str, values: Mapping[str, Any]) -> None:
+            super().__init__(values)
+            self.label = label
+
+        def __setitem__(self, key: str, value: Any) -> None:
+            events.append(f"write:{self.label}:{key}")
+            super().__setitem__(key, value)
+
+        def __delitem__(self, key: str) -> None:
+            events.append(f"delete:{self.label}:{key}")
+            super().__delitem__(key)
+
+    owner = "a" * 32
+    run = SimpleNamespace(
+        attrs=RecordingAttrs(
+            "run",
+            {
+                SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR: owner,
+                "stage_selector_eligible": False,
+            },
+        )
+    )
+    parent = SimpleNamespace(
+        attrs=RecordingAttrs(
+            "parent",
+            {"latest": "old", "latest_complete": "old"},
+        )
+    )
+    root = object()
+    snapshot = selector_snapshot(parent)
+    proof = _fake_subject_shape_activation_proof(root, run, owner=owner)
+    _patch_fake_activation(
+        monkeypatch,
+        root=root,
+        parent=parent,
+        run=run,
+        proof=proof,
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_subject_shape_publication",
+        lambda *_args, **_kwargs: events.append("load-proof") or proof,
+    )
+    monkeypatch.setattr(
+        module,
+        "finish_proof_verification",
+        lambda: events.append("finish-proof-phase"),
+    )
+    monkeypatch.setattr(
+        module,
+        "restart_proof_verification",
+        lambda: events.append("restart-proof-phase"),
+    )
+
+    activate_subject_shape_coordinate_publication(
+        root,
+        parent,
+        proof,
+        run_name="new",
+        owner=owner,
+        snapshot=snapshot,
+    )
+
+    first_load, second_load = (
+        index for index, event in enumerate(events) if event == "load-proof"
+    )
+    first_finish, second_finish = (
+        index
+        for index, event in enumerate(events)
+        if event == "finish-proof-phase"
+    )
+    first_parent_write = next(
+        index
+        for index, event in enumerate(events)
+        if event.startswith("write:parent:")
+    )
+    restart = events.index("restart-proof-phase")
+    eligibility = events.index("write:run:stage_selector_eligible")
+
+    assert first_load < first_finish < first_parent_write
+    assert first_parent_write < restart < second_load < second_finish < eligibility
+    assert events[-1] == "write:run:stage_selector_eligible"
 
 
 def test_subject_shape_activation_rolls_back_persisted_then_interrupted_pending_receipt(

@@ -106,6 +106,11 @@ from fisheye.shared.pixel_frame_authority import (
     stamp_normalized_pixel_frame_authority,
     stamp_roi_pixel_frame_authority,
 )
+from fisheye.shared.proof_verification import (
+    finish_proof_verification,
+    load_verified_value,
+    verify_persisted_proof,
+)
 from fisheye.shared.transform_authority import (
     TRANSFORM_AUTHORITY_ATTR,
     TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
@@ -843,7 +848,10 @@ class BoundKeypointCropSource:
         object.__setattr__(self, "_seal", _verification_seal)
 
 
-def load_persisted_keypoint_crop_source(root_node: Any, crop_path: str) -> BoundKeypointCropSource:
+def _load_persisted_keypoint_crop_source_fresh(
+    root_node: Any,
+    crop_path: str,
+) -> BoundKeypointCropSource:
     """Load one exact canonical materialized crop for base keypoint inference."""
 
     path = _canonical_path(crop_path, prefix="crop_runs/", label="crop rowset")
@@ -1003,10 +1011,23 @@ def load_persisted_keypoint_crop_source(root_node: Any, crop_path: str) -> Bound
     )
 
 
-def require_bound_keypoint_crop_source(value: Any) -> BoundKeypointCropSource:
-    if type(value) is not BoundKeypointCropSource or value._seal is not _BOUND_SOURCE_SEAL:
-        _fail("A sealed persisted canonical keypoint crop source is required.")
-    current = load_persisted_keypoint_crop_source(value._root, value.crop_path)
+def _keypoint_crop_source_proof_key(root_node: Any, crop_path: str) -> tuple[Any, ...]:
+    identity = archive_identity(root_node)
+    return (
+        "palette.keypoint_crop_source.v1",
+        identity.kind,
+        identity.key,
+        _canonical_path(crop_path, prefix="crop_runs/", label="crop rowset"),
+    )
+
+
+def _assert_keypoint_crop_source_unchanged(
+    value: BoundKeypointCropSource,
+) -> None:
+    current = _load_persisted_keypoint_crop_source_fresh(
+        value._root,
+        value.crop_path,
+    )
     if (
         current.crop_geometry.selection_derivation.record_sha256
         != value.crop_geometry.selection_derivation.record_sha256
@@ -1033,6 +1054,30 @@ def require_bound_keypoint_crop_source(value: Any) -> BoundKeypointCropSource:
         )
     ):
         _fail("Selected canonical crop changed after binding.")
+
+
+def load_persisted_keypoint_crop_source(
+    root_node: Any,
+    crop_path: str,
+) -> BoundKeypointCropSource:
+    """Load one crop freshly, or reuse it inside one verified writer operation."""
+
+    path = _canonical_path(crop_path, prefix="crop_runs/", label="crop rowset")
+    key = _keypoint_crop_source_proof_key(root_node, path)
+    return load_verified_value(
+        key,
+        lambda: _load_persisted_keypoint_crop_source_fresh(root_node, path),
+        _assert_keypoint_crop_source_unchanged,
+    )
+
+
+def require_bound_keypoint_crop_source(value: Any) -> BoundKeypointCropSource:
+    if type(value) is not BoundKeypointCropSource or value._seal is not _BOUND_SOURCE_SEAL:
+        _fail("A sealed persisted canonical keypoint crop source is required.")
+    verify_persisted_proof(
+        _keypoint_crop_source_proof_key(value._root, value.crop_path),
+        lambda: _assert_keypoint_crop_source_unchanged(value),
+    )
     return value
 
 
@@ -2992,6 +3037,11 @@ def _activate_validated_keypoint_coordinate_surfaces(
     )
     if active_parent.attrs.get("latest_pending") != str(run_name):
         _fail("Keypoint pending selector changed before activation.")
+
+    # Close the completed-child proof phase before the publication lease or
+    # any selector is mutated. This makes reuse a validation optimization,
+    # never an authorization to publish stale evidence.
+    finish_proof_verification()
     lease = _acquire_keypoint_parent_publication_lease(
         active_parent,
         parent_selector_snapshot,

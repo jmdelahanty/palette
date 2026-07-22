@@ -28,16 +28,16 @@ from fisheye.shared.subject_shape_coordinate_publication import (
     SubjectShapeCoordinatePublicationError,
     load_persisted_subject_shape_coordinate_publication,
 )
-from tests.unit.fisheye.test_subject_shape_coordinate_publication import (
-    _canonical_refined_archive,
+from tests.unit.fisheye.subject_shape_test_fixtures import (
+    resolve_canonical_refined_archive_template,
 )
 
 
-@pytest.fixture(scope="module")
-def canonical_refined_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    template_parent = tmp_path_factory.mktemp("canonical-subject-shape-template")
-    _root, _refined = _canonical_refined_archive(template_parent)
-    return template_parent / "canonical.zarr"
+@pytest.fixture(scope="session")
+def canonical_refined_template() -> Path:
+    """Reuse a validated immutable source graph; tests clone before mutation."""
+
+    return resolve_canonical_refined_archive_template()
 
 
 @pytest.fixture

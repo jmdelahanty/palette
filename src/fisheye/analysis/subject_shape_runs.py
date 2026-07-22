@@ -42,6 +42,11 @@ from ..shared.coordinate_record import (
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import batch_mask_spatial_metrics, measure_mask_ellipse as _measure_mask
 from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
+    restart_proof_verification,
+)
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -2860,6 +2865,7 @@ def validate_unbound_subject_shape_run(
     )
 
 
+@proof_verification_operation
 def bind_staged_subject_shape_run(
     authoritative_root: zarr.Group,
     final_run_group: zarr.Group,
@@ -2956,6 +2962,7 @@ def bind_staged_subject_shape_run(
     }
 
 
+@proof_verification_operation
 def complete_and_activate_bound_subject_shape_run(
     authoritative_root: zarr.Group,
     final_run_group: zarr.Group,
@@ -2977,6 +2984,7 @@ def complete_and_activate_bound_subject_shape_run(
     return summary
 
 
+@proof_verification_operation
 def complete_bound_subject_shape_run_for_deferred_activation(
     authoritative_root: zarr.Group,
     final_run_group: zarr.Group,
@@ -3028,6 +3036,12 @@ def _complete_bound_subject_shape_run(
         raise ValueError(
             "Subject-shape completion requires one exact bound running/ineligible child."
         )
+
+    # Close every source/output proof collected while the child was running
+    # before changing its lifecycle state.  A completed-child publication is
+    # then established in a fresh phase and activation closes that phase before
+    # touching parent selectors.
+    finish_proof_verification()
     parent = authoritative_root["analysis/subject_shape_runs"]
     mark_run_complete(
         final_run_group,
@@ -3038,6 +3052,7 @@ def _complete_bound_subject_shape_run(
             fallback_command="subject_shape_runs",
         ),
     )
+    restart_proof_verification()
     proof = load_completed_ineligible_subject_shape_coordinate_publication(
         authoritative_root,
         f"analysis/subject_shape_runs/{expected_run_name}",
@@ -3065,6 +3080,7 @@ def _complete_bound_subject_shape_run(
     )
 
 
+@proof_verification_operation
 def write_subject_shape_run_group(
     root: zarr.Group,
     *,
@@ -3270,6 +3286,10 @@ def write_subject_shape_run_group(
         run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
             SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
         )
+        # An unbound scratch artifact has no selector activation phase. Close
+        # its reused source proofs while the child is still running so a
+        # failed closing recheck cannot leave a newly completed artifact.
+        finish_proof_verification()
         mark_run_complete(
             run_group,
             parent_group=None,

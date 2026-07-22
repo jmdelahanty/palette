@@ -90,6 +90,11 @@ from fisheye.shared.refined_subject_mask_coordinate_publication import (
     BoundRefinedSubjectMaskCoordinateSurfaces,
     load_persisted_refined_subject_mask_coordinate_surfaces,
 )
+from fisheye.shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
+    restart_proof_verification,
+)
 from fisheye.shared.coordinate_reference import canonical_node_path
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
@@ -270,6 +275,7 @@ def _refined_source_path(run: Any) -> str:
     return f"refined_subject_masks_runs/{name}"
 
 
+@proof_verification_operation
 def load_exact_subject_shape_refined_source(
     root: Any,
     run: Any,
@@ -3118,6 +3124,7 @@ def _load_subject_shape_publication(
     )
 
 
+@proof_verification_operation
 def load_persisted_subject_shape_coordinate_publication(
     root: Any,
     run_path: str,
@@ -3141,6 +3148,7 @@ def load_persisted_subject_shape_coordinate_publication(
         ) from exc
 
 
+@proof_verification_operation
 def load_completed_ineligible_subject_shape_coordinate_publication(
     root: Any,
     run_path: str,
@@ -3162,6 +3170,7 @@ def load_completed_ineligible_subject_shape_coordinate_publication(
         ) from exc
 
 
+@proof_verification_operation
 def publish_subject_shape_coordinate_surfaces(
     root: Any,
     run: Any,
@@ -3589,6 +3598,7 @@ def rollback_subject_shape_activation(
         raise RuntimeError(f"Subject-shape activation rollback was incomplete: {failures!r}.")
 
 
+@proof_verification_operation
 def activate_subject_shape_coordinate_publication(
     root: Any,
     parent: Any,
@@ -3641,6 +3651,24 @@ def activate_subject_shape_coordinate_publication(
     try:
         parent = fresh_parent()
         _require_activation_state(parent, snapshot, overrides=overrides)
+
+        # Reconstruct the complete child while no parent selector has changed.
+        # The supplied proof is an ownership/intent receipt; this live reload
+        # establishes the exact child and source graph for this activation.
+        fresh_proof = _load_subject_shape_publication(
+            root,
+            expected_path,
+            eligible=False,
+            expected_owner=owner,
+        )
+        if fresh_proof.manifest.record_sha256 != proof.manifest.record_sha256:
+            _fail("Subject-shape publication changed before activation.")
+
+        # Recheck and discard all reused proof state before the first parent
+        # mutation.  Reuse is therefore only a validation optimization, never
+        # authorization to publish stale evidence.
+        finish_proof_verification()
+
         installed_pending = _install_subject_shape_pending_receipt(
             root,
             parent,
@@ -3688,19 +3716,6 @@ def activate_subject_shape_coordinate_publication(
         policy_present, policy = _snapshot_value(snapshot, SUBJECT_SHAPE_PUBLICATION_POLICY_ATTR)
         if policy_present and policy != SUBJECT_SHAPE_PUBLICATION_POLICY:
             _fail("Subject-shape parent uses an unsupported publication policy.")
-        # Freshly reload every live output array, descriptor, exact refined
-        # source authority, and lineage record immediately before advancing
-        # selectors.  The earlier proof is an ownership/intent receipt, not a
-        # substitute for this final preflight.
-        fresh_proof = _load_subject_shape_publication(
-            root,
-            expected_path,
-            eligible=False,
-            expected_owner=owner,
-        )
-        if fresh_proof.manifest.record_sha256 != proof.manifest.record_sha256:
-            _fail("Subject-shape publication changed before activation.")
-
         parent = fresh_parent()
         _require_activation_state(parent, snapshot, overrides=overrides)
         parent.attrs[SUBJECT_SHAPE_PARENT_PUBLICATION_LEASE_ATTR] = copy.deepcopy(lease)
@@ -3741,6 +3756,7 @@ def activate_subject_shape_coordinate_publication(
         # then compare the full selector/lifecycle epoch once more immediately
         # before commit.  The parent itself was freshly reloaded between every
         # individual write above.
+        restart_proof_verification()
         final_proof = _load_subject_shape_publication(
             root,
             expected_path,
@@ -3749,6 +3765,10 @@ def activate_subject_shape_coordinate_publication(
         )
         if final_proof.manifest.record_sha256 != proof.manifest.record_sha256:
             _fail("Subject-shape publication changed during activation.")
+        # Close the post-selector proof phase while the child remains
+        # ineligible. A closing recheck failure enters the ordinary rollback
+        # path; no cached proof survives to the eligibility commit.
+        finish_proof_verification()
         parent = fresh_parent()
         _require_activation_state(parent, snapshot, overrides=overrides)
         run = _node(root, expected_path, label="subject-shape eligibility child")
@@ -3816,6 +3836,7 @@ def activate_subject_shape_coordinate_publication(
         raise
 
 
+@proof_verification_operation
 def commit_deferred_subject_shape_coordinate_activation(
     activation: DeferredSubjectShapeCoordinateActivation,
     *,
@@ -3944,6 +3965,9 @@ def commit_deferred_subject_shape_coordinate_activation(
     )
     if dict(run.attrs) != expected_attrs:
         _fail("Deferred subject-shape activation child payload changed during commit.")
+    # The deferred commit is a separate publication operation. Recheck every
+    # proof gathered above before the literal final eligibility mutation.
+    finish_proof_verification()
     try:
         # Literal final mutation. No ordinary-path read or metadata write follows.
         run.attrs["stage_selector_eligible"] = True

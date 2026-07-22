@@ -55,6 +55,7 @@ from fisheye.shared.coordinate_reference import (
     verify_bound_reference_extent,
 )
 from fisheye.shared.model_input_transform import ModelInputTransform
+from fisheye.shared.proof_verification import verify_persisted_proof
 
 
 PIXEL_FRAME_AUTHORITY_SCHEMA_ID = "palette.pixel_frame_authority"
@@ -175,6 +176,22 @@ _BOUND_PIXEL_FRAME_SEAL = object()
 _BOUND_ACQUISITION_FRAME_SEAL = object()
 _BOUND_ACQUISITION_OWNERSHIP_SEAL = object()
 _BOUND_CROP_PLACEMENT_OWNERSHIP_SEAL = object()
+
+
+def _bound_authority_proof_key(value: Any) -> tuple[Any, ...]:
+    """Identify one exact persisted authority without reopening its store."""
+
+    identity = value.archive_identity
+    return (
+        "palette.pixel_frame_authority_proof.v1",
+        type(value).__qualname__,
+        identity.kind,
+        identity.key,
+        value.record_ref,
+        value.record_sha256,
+    )
+
+
 _VERIFIED_ACQUISITION_MATERIALIZATION_SEAL = object()
 _ACQUISITION_PHYSICAL_OBJECT_EVIDENCE_SEAL = object()
 _SUPPORTED_PIXEL_CONVENTIONS = PIXEL_CONVENTIONS - {"not_applicable"}
@@ -2452,7 +2469,7 @@ def require_bound_acquisition_import_ownership(
         raise PixelFrameAuthorityError(
             "A sealed acquisition import/materialization ownership record is required."
         )
-    value.assert_verified()
+    verify_persisted_proof(_bound_authority_proof_key(value), value.assert_verified)
     return value
 
 
@@ -2826,7 +2843,7 @@ def require_bound_acquisition_camera_frame(value: Any) -> BoundAcquisitionCamera
         raise PixelFrameAuthorityError(
             "A sealed acquisition-owned camera frame is required."
         )
-    value.assert_verified()
+    verify_persisted_proof(_bound_authority_proof_key(value), value.assert_verified)
     return value
 
 
@@ -3800,7 +3817,7 @@ def require_bound_crop_placement_ownership(
         raise PixelFrameAuthorityError(
             "A sealed crop-writer placement ownership record is required."
         )
-    value.assert_verified()
+    verify_persisted_proof(_bound_authority_proof_key(value), value.assert_verified)
     return value
 
 
@@ -4592,7 +4609,7 @@ def require_bound_pixel_frame_authority(
         raise PixelFrameAuthorityError(
             "A sealed, typed pixel-frame authority is required."
         )
-    value.assert_verified()
+    verify_persisted_proof(_bound_authority_proof_key(value), value.assert_verified)
     if expected_kind is not None and value.record.kind != expected_kind:
         raise PixelFrameAuthorityError(
             f"Expected pixel-frame kind {expected_kind!r}, found {value.record.kind!r}."

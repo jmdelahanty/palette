@@ -12,6 +12,7 @@ import zarr
 
 from fisheye.detection import detect_keypoints_yolo as keypoint_writer_module
 import fisheye.shared.keypoint_coordinate_publication as publication_module
+from fisheye.shared.proof_verification import proof_verification_scope
 from fisheye.detection.detect_yolo import (
     _publish_detection_acquisition_mapping,
     _publish_detection_frame_evidence,
@@ -110,6 +111,47 @@ class _RootRegistry:
         parent = self.nodes.get(parent_path)
         if parent is not None and getattr(parent, "children", {}).get(name) is node:
             del parent.children[name]
+
+
+def test_keypoint_crop_loader_reuses_only_within_one_proof_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = object()
+    root = _RootRegistry(token)
+    bound = object()
+    loads: list[tuple[Any, str]] = []
+    checks: list[object] = []
+
+    def load_fresh(root_node: Any, crop_path: str) -> object:
+        loads.append((root_node, crop_path))
+        return bound
+
+    monkeypatch.setattr(
+        publication_module,
+        "_load_persisted_keypoint_crop_source_fresh",
+        load_fresh,
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "_assert_keypoint_crop_source_unchanged",
+        checks.append,
+    )
+
+    with proof_verification_scope():
+        first = publication_module.load_persisted_keypoint_crop_source(
+            root,
+            "crop_runs/c1",
+        )
+        second = publication_module.load_persisted_keypoint_crop_source(
+            root,
+            "crop_runs/c1",
+        )
+        assert first is second is bound
+        assert len(loads) == 1
+
+    assert checks == [bound]
+    publication_module.load_persisted_keypoint_crop_source(root, "crop_runs/c1")
+    assert len(loads) == 2
 
 
 class _MutableGroup(FakeGroup):
