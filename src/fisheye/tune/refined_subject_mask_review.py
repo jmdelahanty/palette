@@ -179,7 +179,11 @@ def _stamp_full_half_open_bbox_contract(run_group: zarr.Group) -> None:
     run_group.attrs["bbox_xyxy_derivation"] = REFINED_BBOX_XYXY_DERIVATION
 
 
-def _require_half_open_bbox_refresh_contract(run_group: zarr.Group) -> None:
+def _require_half_open_bbox_refresh_contract(
+    run_group: zarr.Group,
+    *,
+    allowed_dirty_cells: Sequence[tuple[int, int]] = (),
+) -> None:
     if (
         run_group.attrs.get("bbox_xyxy_convention")
         != REFINED_BBOX_XYXY_CONVENTION
@@ -213,16 +217,34 @@ def _require_half_open_bbox_refresh_contract(run_group: zarr.Group) -> None:
     )
     actual_bbox = np.asarray(metrics["bbox_xyxy"][:], dtype=np.float32)
     actual_valid = np.asarray(metrics["bbox_valid"][:], dtype=bool)
-    if (
-        actual_bbox.shape != expected_bbox.shape
-        or actual_valid.shape != expected_valid.shape
-        or not np.array_equal(actual_bbox, expected_bbox, equal_nan=True)
-        or not np.array_equal(actual_valid, expected_valid)
-    ):
+    if actual_bbox.shape != expected_bbox.shape or actual_valid.shape != expected_valid.shape:
         raise RuntimeError(
             "Partial derived refresh requires the entire existing bbox surface to be "
             "an exact half-open derivation of the pre-edit masks. Use a full all-component "
             "metric recompute to establish the canonical bbox contract."
+        )
+    untouched = np.ones((row_count, component_count), dtype=bool)
+    for row_idx, component_idx in allowed_dirty_cells:
+        row = int(row_idx)
+        component = int(component_idx)
+        if row < 0 or row >= row_count or component < 0 or component >= component_count:
+            raise RuntimeError(
+                "Partial derived refresh received an out-of-bounds dirty bbox cell: "
+                f"row={row}, component={component}."
+            )
+        untouched[row, component] = False
+    if (
+        not np.array_equal(
+            actual_bbox[untouched],
+            expected_bbox[untouched],
+            equal_nan=True,
+        )
+        or not np.array_equal(actual_valid[untouched], expected_valid[untouched])
+    ):
+        raise RuntimeError(
+            "Partial derived refresh requires every untargeted bbox cell to remain an "
+            "exact half-open derivation of dense masks_roi. Use a full all-component "
+            "metric recompute to repair unrelated bbox drift."
         )
 
 
@@ -2811,7 +2833,14 @@ def _apply_refined_subject_roi_rows(
             f"expected one of {DERIVED_UPDATE_POLICIES}."
         )
     if resolved_derived_policy == DERIVED_UPDATE_POLICY_REFRESH:
-        _require_half_open_bbox_refresh_contract(run_group)
+        _require_half_open_bbox_refresh_contract(
+            run_group,
+            allowed_dirty_cells=tuple(
+                (row_idx, int(refined.component_to_index[component_name]))
+                for row_idx in normalized_rows
+                for component_name in normalized_components
+            ),
+        )
     resolved_reason = str(update_reason or f"{update_mode}_refined_subject_mask_edit")
     resolved_method = str(update_method or DEFAULT_RUN_METHOD)
 
