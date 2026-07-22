@@ -10,6 +10,7 @@ import zarr
 
 from fisheye.analysis import plot_track_kinematics as plot_mod
 from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
+from fisheye.shared.zarr_run_completion import mark_run_complete
 from fisheye.visualization.interactive_track_kinematics import (
     DEFAULT_INTERACTIVE_ARTIFACT,
     bout_classification_records_to_dataframe,
@@ -463,6 +464,13 @@ def _add_bout_classification_run(zarr_path: Path) -> None:
         ],
     )
     write_columnar_dataset(run, "per_bout", records)
+    mark_run_complete(
+        run,
+        parent_group=parent,
+        run_name="classifier_1",
+        allow_missing_run_provenance=True,
+        missing_run_provenance_reason="synthetic interactive unit-test fixture",
+    )
 
 
 def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: Path) -> None:

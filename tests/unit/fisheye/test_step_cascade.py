@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 import sys
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
@@ -85,6 +83,7 @@ def test_get_transitive_dependents_detect() -> None:
         "arena_assignment",
         "tracks",
         "track_kinematics",
+        "track_kinematics_visualization",
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
@@ -100,9 +99,9 @@ def test_get_transitive_dependents_refined_keypoints() -> None:
         "arena_assignment",
         "tracks",
         "track_kinematics",
+        "track_kinematics_visualization",
         "swim_bouts",
         "bout_kinematics",
-        "eye_angles",
         "bout_classification",
         "stimulus_response",
     })
@@ -116,9 +115,9 @@ def test_get_transitive_dependents_keypoints() -> None:
         "arena_assignment",
         "tracks",
         "track_kinematics",
+        "track_kinematics_visualization",
         "swim_bouts",
         "bout_kinematics",
-        "eye_angles",
         "bout_classification",
         "stimulus_response",
     })
@@ -130,7 +129,10 @@ def test_get_transitive_dependents_subject_shape_includes_tail_classification_fl
     assert result == frozenset({
         "tail_kinematics",
         "tail_posture_view",
+        "bout_kinematics",
+        "eye_angles",
         "bout_classification",
+        "stimulus_response",
     })
 
 
@@ -165,6 +167,7 @@ def test_get_transitive_dependents_detect_quality_uses_catalog_flow() -> None:
         "arena_assignment",
         "tracks",
         "track_kinematics",
+        "track_kinematics_visualization",
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
@@ -255,6 +258,7 @@ def test_get_transitive_dependents_crop_includes_subject_masks() -> None:
         "arena_assignment",
         "tracks",
         "track_kinematics",
+        "track_kinematics_visualization",
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
@@ -321,9 +325,14 @@ def test_invalidate_downstream_creates_history_rows(tmp_path: Path) -> None:
     registry = _create_registry(tmp_path)
     _seed_step(registry, "refined_keypoints", "ok")
     _seed_step(registry, "track_kinematics", "ok")
+    _seed_step(registry, "track_kinematics_visualization", "ok")
     _seed_step(registry, "eye_angles", "ok")
 
     initial_track_count = _count_history_rows(registry, "track_kinematics")
+    initial_track_visualization_count = _count_history_rows(
+        registry,
+        "track_kinematics_visualization",
+    )
     initial_eye_angles_count = _count_history_rows(registry, "eye_angles")
 
     invalidate_downstream_steps(
@@ -336,7 +345,12 @@ def test_invalidate_downstream_creates_history_rows(tmp_path: Path) -> None:
 
     # Each invalidated step should have gotten a new history row
     assert _count_history_rows(registry, "track_kinematics") == initial_track_count + 1
-    assert _count_history_rows(registry, "eye_angles") == initial_eye_angles_count + 1
+    assert (
+        _count_history_rows(registry, "track_kinematics_visualization")
+        == initial_track_visualization_count + 1
+    )
+    # Eye angles now derive from subject shape, not refined keypoints.
+    assert _count_history_rows(registry, "eye_angles") == initial_eye_angles_count
     registry.close()
 
 
