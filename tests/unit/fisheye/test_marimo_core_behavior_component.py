@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
+import pytest
 import zarr
 
 import apps.marimo.components.core_behavior as core_component
+from fisheye.analysis import tail_kinematics_io as tail_io
 from apps.marimo.components.analysis_catalog import group_specs_by_provider
 from apps.marimo.components.core_behavior import (
     CoreBehaviorSource,
@@ -30,6 +34,51 @@ from tests.unit.fisheye.test_interactive_track_kinematics import (
 from tests.unit.fisheye.test_plot_track_kinematics_artifacts import (
     _make_track_kinematics_archive,
 )
+from tests.unit.fisheye.test_track_kinematics_io import _patch_bound_loader
+
+
+@pytest.fixture(autouse=True)
+def _verified_coordinate_publications(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bind synthetic viewer fixtures at the already-tested reader boundary."""
+
+    _patch_bound_loader(monkeypatch)
+
+    def load_tail_publication(root, run_path):
+        run = root[run_path]
+        return SimpleNamespace(
+            _run=run,
+            manifest=SimpleNamespace(record_sha256="b" * 64),
+            measurements={
+                "tail_tip_angle_deg": SimpleNamespace(),
+                "tail_tip_lateral_deflection_px": SimpleNamespace(),
+                "tail_angle_rms_deg": SimpleNamespace(),
+            },
+            source=SimpleNamespace(
+                run_path="analysis/subject_shape_runs/shape_1",
+            ),
+        )
+
+    def load_shape_publication(root, run_path):
+        body = root[f"{run_path}/components/subject_body"]
+        binding = SimpleNamespace(
+            array_node=body["tail_curvature_px_inv"],
+            validity_node=body["tail_sample_valid"],
+        )
+        return SimpleNamespace(
+            manifest=SimpleNamespace(record_sha256="a" * 64),
+            require_scalar_surface=lambda *_args, **_kwargs: binding,
+        )
+
+    monkeypatch.setattr(
+        tail_io,
+        "load_tail_kinematics_coordinate_publication",
+        load_tail_publication,
+    )
+    monkeypatch.setattr(
+        tail_io,
+        "load_persisted_subject_shape_coordinate_publication",
+        load_shape_publication,
+    )
 
 
 def _core_option(zarr_path):
@@ -54,12 +103,17 @@ def _add_tail_kinematics_run(zarr_path) -> None:
             "schema_id": "palette.tail_kinematics",
             "schema_version": 2,
             "method": "body_frame_spline_tangent",
-            "source_subject_shape_run": "shape_1",
+            "source_subject_shape_run": "analysis/subject_shape_runs/shape_1",
+            "source_subject_shape_publication_manifest_sha256": "a" * 64,
             "tail_angle_reference_axis": "caudal_axis=-forward_axis",
             "tail_angle_positive_direction": "anatomical_left",
         }
     )
-    tail.create_array("frame_index", data=frames, chunks=(6,))
+    tail.create_array(
+        "source_acquisition_frame_index",
+        data=frames,
+        chunks=(6,),
+    )
     tail.create_array("valid", data=np.ones(6, dtype=bool), chunks=(6,))
     tail.create_array(
         "tail_angle_deg",
@@ -80,6 +134,11 @@ def _add_tail_kinematics_run(zarr_path) -> None:
 
     shape = root["analysis"].require_group("subject_shape_runs").create_group("shape_1")
     shape.attrs["palette_run_completion_status"] = "complete"
+    shape.create_array(
+        "source_acquisition_frame_index",
+        data=frames,
+        chunks=(6,),
+    )
     row_index = shape.create_group("row_index")
     row_index.create_array("frame_indices", data=frames, chunks=(6,))
     body = shape.create_group("components").create_group("subject_body")

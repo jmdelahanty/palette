@@ -363,29 +363,61 @@ def _discover_track_kinematics_specs_fast(
 
     if artifact_wanted and "/" in artifact_wanted:
         candidate_paths = [artifact_wanted]
-    elif run_path_wanted:
-        candidate_paths = [artifact_path_for(run_path_wanted, TRACK_KINEMATICS_INTERACTIVE_ARTIFACT)]
     else:
+        candidate_paths = []
         try:
-            parent = root["analysis/track_kinematics_runs"]
+            visualization_parent = root[
+                "analysis/track_kinematics_visualization_runs"
+            ]
         except Exception:
             return []
-        candidate_paths = [
-            artifact_path_for(
-                f"analysis/track_kinematics_runs/{scope}/{run_name}",
-                TRACK_KINEMATICS_INTERACTIVE_ARTIFACT,
-            )
-            for scope in _group_names(parent)
-            for run_name in _group_names(parent[scope])
-        ]
+        for scope in _group_names(visualization_parent):
+            scope_group = visualization_parent[scope]
+            for source_run_name in _group_names(scope_group):
+                source_run = scope_group[source_run_name]
+                tracks = source_run.get("tracks")
+                if tracks is None:
+                    continue
+                for track_name in _group_names(tracks):
+                    render_parent = tracks[track_name]
+                    render_name = str(
+                        render_parent.attrs.get("latest_complete")
+                        or render_parent.attrs.get("latest")
+                        or ""
+                    ).strip()
+                    if not render_name or render_name not in render_parent:
+                        continue
+                    render = render_parent[render_name]
+                    if (
+                        render.attrs.get("palette_run_completion_status")
+                        != "complete"
+                        or render.attrs.get("stage_selector_eligible") is not True
+                    ):
+                        continue
+                    visualizations = render.get("visualizations")
+                    if visualizations is None:
+                        continue
+                    candidate_paths.extend(
+                        f"analysis/track_kinematics_visualization_runs/{scope}/"
+                        f"{source_run_name}/tracks/{track_name}/{render_name}/"
+                        f"visualizations/{artifact_name}"
+                        for artifact_name in _group_names(visualizations)
+                    )
 
     options: list[InteractiveSpecOption] = []
     for artifact_path in candidate_paths:
         option = _read_option(root, archive, artifact_path)
         if option is None or option.renderer != TRACK_KINEMATICS_PLOT_RENDERER:
             continue
-        if run_path_wanted and option.run_path != run_path_wanted:
-            continue
+        if run_path_wanted:
+            source_paths = option.spec.get("source_paths")
+            source_run_path = (
+                normalize_path(str(source_paths.get("run") or ""))
+                if isinstance(source_paths, Mapping)
+                else ""
+            )
+            if run_path_wanted not in {option.run_path, source_run_path}:
+                continue
         if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
             continue
         options.append(option)

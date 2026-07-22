@@ -122,13 +122,18 @@ def _source_paths(option: InteractiveSpecOption | CoreBehaviorOption) -> dict[st
 
 
 def _core_option_from_spec(option: InteractiveSpecOption) -> CoreBehaviorOption:
+    source_paths = _source_paths(option)
+    # Immutable visualization snapshots own the spec artifact, but the core
+    # behavior rowset remains the exact track run named by the spec's source
+    # paths. Do not mistake the random render snapshot name for track lineage.
+    source_run_path = source_paths.get("run") or _normal_path(option.run_path)
     return CoreBehaviorOption(
         zarr_path=option.zarr_path,
-        run_path=_normal_path(option.run_path),
-        run_name=option.run_name or _normal_path(option.run_path).split("/")[-1],
+        run_path=source_run_path,
+        run_name=option.run_name or source_run_path.split("/")[-1],
         label=option.label,
         track_id=int(option.spec.get("track_id") or 0),
-        source_paths=_source_paths(option),
+        source_paths=source_paths,
         attrs=option.attrs,
         interactive_option=option,
     )
