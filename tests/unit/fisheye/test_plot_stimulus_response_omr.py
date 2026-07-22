@@ -26,6 +26,7 @@ from fisheye.analysis.stimulus_response import (
     write_stimulus_response_run,
 )
 from tests.unit.fisheye.test_stimulus_response import (
+    _synthetic_coordinate_authority,
     _synthetic_track_motion_lineage,
 )
 
@@ -226,6 +227,7 @@ def _make_compact_omr_run() -> zarr.Group:
         source_kinematics_type="offline",
         source_stimulus_run="stim_test",
         source_bout_run="bouts_test",
+        coordinate_authority=_synthetic_coordinate_authority("stim_test"),
         upstream_lineage=_synthetic_track_motion_lineage(
             run_name="tk_test",
             scope="offline",

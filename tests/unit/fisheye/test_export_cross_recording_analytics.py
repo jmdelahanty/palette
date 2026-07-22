@@ -8,9 +8,6 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.analytics_exports.contracts import (
-    BASELINE_BEHAVIOR_SUMMARY_TABLE,
-    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
-    BASELINE_KINEMATIC_SAMPLES_TABLE,
     CHASER_BOUT_EVENTS_TABLE,
     CHASER_BOUT_HISTOGRAM_TABLE,
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
@@ -29,9 +26,6 @@ from fisheye.analytics_exports.contracts import (
     CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
     CHASER_SPATIAL_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
-    EXPORT_SCHEMA_ID,
-    EXPORT_SCHEMA_VERSION,
-    TABLE_CONTRACTS,
 )
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.shared.zarr.columnar import write_columnar_dataset
@@ -55,6 +49,7 @@ from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_chaser_result,
 )
 from tests.unit.fisheye.test_stimulus_response import (
+    _synthetic_coordinate_authority,
     _synthetic_track_motion_lineage,
 )
 
@@ -355,6 +350,7 @@ def _replace_stimulus_response_fixture_with_compact_v2(path: Path) -> None:
         source_kinematics_type="offline",
         source_stimulus_run="stimulus_test",
         source_bout_run="bouts_test",
+        coordinate_authority=_synthetic_coordinate_authority("stimulus_test"),
         upstream_lineage=_synthetic_track_motion_lineage(
             run_name="tk_test",
             scope="offline",

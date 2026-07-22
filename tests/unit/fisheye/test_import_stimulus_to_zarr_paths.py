@@ -10,6 +10,12 @@ import zarr
 
 from fisheye.analysis import import_stimulus_to_zarr as mod
 from fisheye.analysis import chaser_metrics_loader
+from fisheye.analysis.stimulus_response_coordinate_authority import (
+    STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_ID,
+    STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_VERSION,
+    StimulusResponseCoordinateAuthorityError,
+    load_stimulus_response_coordinate_authority,
+)
 from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_NOT_PUBLISHED,
     ACQUISITION_AUTHORITY_PENDING,
@@ -1198,6 +1204,98 @@ def test_import_materializes_canonical_array_specific_chaser_surfaces(tmp_path: 
     assert canonical_mapping_digest(lineage) == chaser_group.attrs[
         COORDINATE_IMPORT_LINEAGE_DIGEST_ATTR
     ]
+
+
+def test_stimulus_response_authority_uses_typed_inverse_transform_direction(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _write_stimulus_h5_with_arena_relative_chaser_states(h5_path)
+    _prepare_acquisition_authority(zarr_path)
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_response_coordinates",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    physical = load_stimulus_physical_coordinate_authority(
+        root,
+        stimulus_run=run_name,
+    )
+    assert physical is not None
+
+    authority = load_stimulus_response_coordinate_authority(
+        root,
+        stimulus_run=run_name,
+        track_physical_authority=physical,
+    )
+
+    # Arena center (172, 172) is placed at canvas origin (270, 520).
+    # The selected calibration is camera -> canvas translation (+10, +20),
+    # so the explicit canvas -> camera inverse yields camera (432, 672).
+    # The selected 50 camera px/mm scale then yields (8.64, 13.44) mm.
+    np.testing.assert_allclose(authority.arena_center_mm(), (8.64, 13.44))
+    np.testing.assert_allclose(
+        authority.selected_canvas_to_source_camera_mm([442.0, 692.0]),
+        [8.64, 13.44],
+    )
+    assert authority.arena_axis_extent_mm([1.0, 0.0]) == pytest.approx(3.44)
+    assert authority.record["schema_id"] == (
+        STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_ID
+    )
+    assert authority.record["schema_version"] == (
+        STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_VERSION
+    )
+    record = dict(authority.record)
+    digest = record.pop("record_sha256")
+    assert canonical_mapping_digest(record) == digest
+
+
+def test_stimulus_response_authority_rejects_another_run_physical_identity(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _write_stimulus_h5_with_arena_relative_chaser_states(h5_path)
+    _prepare_acquisition_authority(zarr_path)
+
+    first_run = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_response_first",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+    second_run = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_response_second",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    first_physical = load_stimulus_physical_coordinate_authority(
+        root,
+        stimulus_run=first_run,
+    )
+    assert first_physical is not None
+
+    with pytest.raises(
+        StimulusResponseCoordinateAuthorityError,
+        match="do not share the exact source-camera physical authority",
+    ):
+        load_stimulus_response_coordinate_authority(
+            root,
+            stimulus_run=second_run,
+            track_physical_authority=first_physical,
+        )
 
 
 def test_stimulus_physical_authority_fails_after_selected_scale_drift(

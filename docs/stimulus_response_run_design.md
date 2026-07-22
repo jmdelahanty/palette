@@ -59,6 +59,7 @@ This run stores references to its direct inputs:
 | `source_stimulus_run` | `analysis/stimulus_runs/<run>/` |
 | `source_bout_run` | `analysis/swim_bout_runs/<run>/` (optional) |
 | `source_eye_angle_run` | `analysis/eye_angle_runs/<run>/` (optional) |
+| `stimulus_coordinate_lineage` | Digest-bound selected stimulus frames, directed transform chain, calibration, arena geometry, and source-camera physical authority |
 
 No `source_id_assignment_run` is needed — identity resolution is the movement
 run's responsibility. Eye angle data is optional — if unavailable, eye-related
@@ -80,12 +81,15 @@ arena_assignment changes
 
 ## Storage Layout
 
-The layout below is the current default hierarchical-v1 storage contract.
-Compact-tabular-v2 is available as an explicit opt-in writer layout via
-`--layout compact_tabular_v2`, and current reader migrations use
+The current production default is compact-tabular-v2. Hierarchical-v1 remains
+available for compatibility and structure-oriented tests. Current readers use
 `fisheye.analysis.stimulus_response_io.resolve_stimulus_response_tables(...)`.
-The compact layout is not the default yet. See
-`docs/stimulus_response_compact_v2_design.md`.
+See `docs/stimulus_response_compact_v2_design.md`.
+
+Canonical selector-eligible publications use method version
+`stimulus_response.v3`. Their `source_refs` include a digest-bound
+`stimulus_coordinate_lineage`; the production materializer rejects missing,
+malformed, or stale lineage digests.
 
 ```
 analysis/stimulus_response_runs/<run_name>/
@@ -320,6 +324,7 @@ stimulus type. Its contents vary by `stimulus_mode`:
 {
     "center_x_mm": 10.0,              # grating center in camera/mm space
     "center_y_mm": 10.0,
+    "center_coordinate_frame": "source_camera_physical_mm",
     "center_source": "stimulus_coordinates",
     "radial_polarity_authored": "expanding",  # Citrus-authored intent
     "radial_sign_authored": +1,       # +1 expanding/outward, -1 contracting/inward
@@ -338,6 +343,7 @@ stimulus type. Its contents vary by `stimulus_mode`:
 {
     "loom_center_x_mm": 5.0,
     "loom_center_y_mm": 5.0,
+    "loom_center_coordinate_frame": "source_camera_physical_mm",
     "expansion_rate_deg_s": 20.0,
 }
 ```
@@ -742,8 +748,9 @@ Step 3  For each protocol step:
         - Write step_{i}/grating/omr/.
 
     3e  If stimulus_mode == "CONCENTRIC_GRATING":
-        - Resolve grating center position from canonical step attrs,
-          stimulus-coordinate metadata, or calibration-backed fallbacks.
+        - Resolve a frame-labelled physical center from canonical step attrs,
+          or derive the exact arena center through the selected typed
+          arena-to-source-camera transform authority.
         - Compute per-frame:
             distance_to_center_mm
             radial_heading_angle_deg (0° = toward center, ±180° = away)
@@ -811,6 +818,40 @@ subgroup alongside the existing ones.
 ---
 
 ## Coordinate System Note
+
+### Canonical spatial authority
+
+Normal stimulus-response computation does not search root/global calibration
+attrs. It binds all spatial response inputs to the selected complete stimulus
+run and the exact source-camera physical authority used by the selected
+track-motion run. Arena coordinates are transformed in this explicit order:
+
+```text
+arena_relative_canvas_px
+  -> stimulus_canvas_px
+  -> source_camera_image_px
+  -> source_camera_physical_mm
+```
+
+The first two links are a digest-bound directed transform chain. The final link
+uses the selected source-camera scale. Publication re-verifies both the track
+lineage and stimulus coordinate authority immediately before completion and
+stores the complete authority references under
+`source_refs.stimulus_coordinate_lineage`.
+
+The selected homography is declared camera-to-canvas, so response code uses its
+explicit persisted inverse for canvas-to-camera calculations. Historical
+direction-neutral transform helpers are compatibility surfaces and cannot feed
+a new selector-eligible `stimulus_response.v3` run.
+
+Direct `center_x_mm`/`center_y_mm` or `loom_center_x_mm`/`loom_center_y_mm`
+values require an accompanying coordinate-frame value of
+`source_camera_physical_mm`. Missing or conflicting authorities fail closed.
+Centre loom placement uses the typed arena centre. Left/right loom placement
+is not guessed and remains unavailable until the acquisition import publishes
+its exact typed placement.
+
+### Moving-grating angular qualification
 
 The grating `orientation_degrees` defines the direction of drift in
 projector/texture space. Fish `heading_degrees` is computed from keypoints

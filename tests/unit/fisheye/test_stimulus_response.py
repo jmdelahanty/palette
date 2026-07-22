@@ -54,6 +54,9 @@ from fisheye.analysis.stimulus_response_concentric_omr import (
     compute_step_concentric_radial_omr_metrics,
     resolve_concentric_radial_polarity,
 )
+from fisheye.analysis.stimulus_response_coordinate_authority import (
+    StimulusResponseCoordinateAuthority,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +83,47 @@ def write_stimulus_response_run(*args, **kwargs):
             fps=float(kwargs.get("parameters", {}).get("fps", 30.0)),
         ),
     )
+    kwargs.setdefault(
+        "coordinate_authority",
+        _synthetic_coordinate_authority(kwargs["source_stimulus_run"]),
+    )
     return _write_stimulus_response_run(*args, **kwargs)
+
+
+class _SyntheticCoordinateAuthority(StimulusResponseCoordinateAuthority):
+    """Test-only proof object that avoids constructing a complete source archive."""
+
+    def assert_verified(self) -> None:
+        return None
+
+    def assert_track_physical_authority(self, track_physical_authority) -> None:
+        return None
+
+
+class _RejectingCoordinateAuthority(_SyntheticCoordinateAuthority):
+    def assert_track_physical_authority(self, track_physical_authority) -> None:
+        raise ValueError("track physical authority mismatch")
+
+
+def _synthetic_coordinate_authority(
+    stimulus_run: str,
+    *,
+    authority_type: type[StimulusResponseCoordinateAuthority] = (
+        _SyntheticCoordinateAuthority
+    ),
+) -> StimulusResponseCoordinateAuthority:
+    return authority_type(
+        stimulus_run=stimulus_run,
+        record={
+            "schema_id": "palette.stimulus_response.coordinate_lineage",
+            "schema_version": 1,
+            "source_stimulus_run_ref": f"/analysis/stimulus_runs/{stimulus_run}",
+            "record_sha256": "b" * 64,
+        },
+        evidence=None,
+        physical=None,
+        _root_node=None,
+    )
 
 
 def _synthetic_track_motion_lineage(
@@ -110,6 +153,7 @@ def _synthetic_track_motion_lineage(
                 }
             },
         },
+        position_bindings=SimpleNamespace(physical_authority=None),
         assert_verified=lambda: None,
     )
     record = stimulus_response_module._expected_track_motion_lineage_record(bound)
@@ -138,10 +182,20 @@ def _make_kinematics_zarr(
 
     # analysis/track_kinematics_runs/offline/<run>/
     analysis = root.create_group("analysis")
-    kin_parent = analysis.create_group("track_kinematics_runs").create_group("offline")
+    track_parent = analysis.create_group("track_kinematics_runs")
+    kin_parent = track_parent.create_group("offline")
     run = kin_parent.create_group("test_run")
+    track_parent.attrs.update(
+        {
+            "latest": "offline/test_run",
+            "latest_complete": "offline/test_run",
+            "latest_offline": "test_run",
+        }
+    )
     kin_parent.attrs["latest"] = "test_run"
     run.attrs["fps"] = fps
+    run.attrs["palette_run_completion_status"] = "complete"
+    run.attrs["stage_selector_eligible"] = True
     run.attrs["track_motion_publication_manifest_sha256"] = "a" * 64
     run.attrs["source_refs"] = {
         "source_detection_path": "detect_runs/detect_fixture",
@@ -692,6 +746,7 @@ class TestWriteStimulusResponseRun:
             "source_kinematics_run": "test_kin",
             "source_kinematics_type": "offline",
             "source_stimulus_run": "test_stim",
+            "coordinate_authority": _synthetic_coordinate_authority("test_stim"),
             "parameters": {"fps": 30.0},
             "run_name": "strict_lineage",
         }
@@ -715,6 +770,35 @@ class TestWriteStimulusResponseRun:
         )
 
         with pytest.raises(ValueError, match="conflict with verified lineage"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rejects_missing_coordinate_authority(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+        )
+        kwargs["coordinate_authority"] = None
+
+        with pytest.raises(ValueError, match="requires typed selected-stimulus"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rejects_track_coordinate_authority_mismatch(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+        )
+        kwargs["coordinate_authority"] = _synthetic_coordinate_authority(
+            "test_stim",
+            authority_type=_RejectingCoordinateAuthority,
+        )
+
+        with pytest.raises(ValueError, match="track physical authority mismatch"):
             _write_stimulus_response_run(root, **kwargs)
         assert "analysis" not in root
 
@@ -787,6 +871,7 @@ class TestWriteStimulusResponseRun:
                 scope="offline",
                 track_ids=(0,),
             ),
+            coordinate_authority=_synthetic_coordinate_authority("test_stim"),
             parameters={"fps": 30.0},
             run_name="default_layout",
         )
@@ -1456,30 +1541,20 @@ class TestComputeOMRMetrics:
         assert 0.0 < pf["fraction_time_correct_side"][0] < 1.0
         assert omr.attrs["arena_geometry_source"] == "test_arena"
 
-    def test_arena_geometry_uses_projector_scale_for_experimental_area_center(self) -> None:
-        root = zarr.group()
-        cal = root.create_group("analysis").create_group("calibration")
-        cal.attrs.update(
-            {
-                "pixel_to_mm": 0.0187880455,
-                "pixels_per_mm_projector": 4.1693377495,
-                "experimental_area_center_x_px": 172.0,
-                "experimental_area_center_y_px": 172.0,
-                "experimental_area_radius_mm": 39.814476,
-            }
+    def test_arena_geometry_uses_bound_coordinate_authority(self) -> None:
+        authority = SimpleNamespace(
+            arena_center_mm=lambda: (40.25, 41.5),
+            arena_axis_extent_mm=lambda direction: 39.814476,
         )
 
         center_mm, extent_mm, source = _resolve_omr_arena_geometry_mm(
-            root,
-            stimulus_run=None,
-            direction_xy=np.array([1.0, 0.0], dtype=np.float64),
+            authority,
+            np.array([1.0, 0.0], dtype=np.float64),
         )
 
-        assert center_mm is not None
-        assert center_mm[0] == pytest.approx(172.0 / 4.1693377495)
-        assert center_mm[1] == pytest.approx(172.0 / 4.1693377495)
+        assert center_mm == pytest.approx((40.25, 41.5))
         assert extent_mm == pytest.approx(39.814476)
-        assert "experimental_area_center_projector_px" in source
+        assert source == "typed_arena_frame_projected_to_source_camera_physical_mm_v1"
 
     def test_bout_fraction_uses_bout_boundaries_and_physical_positions(self) -> None:
         tracks = _make_grating_tracks(heading_deg=90.0, speed=10.0)
@@ -2543,26 +2618,31 @@ class TestResolveLoomCenter:
         step = _make_loom_step()
         step.stimulus_params["loom_center_x_mm"] = 5.0
         step.stimulus_params["loom_center_y_mm"] = 7.0
-        cal = {"homography": None, "pixel_to_mm": None,
-               "arena_center_px": None, "pixels_per_mm_projector": None,
-               "z_eff_mm": None}
-        center = resolve_loom_center_mm(step, cal)
+        step.stimulus_params["loom_center_coordinate_frame"] = (
+            "source_camera_physical_mm"
+        )
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        center = resolve_loom_center_mm(step, authority)
         assert center == pytest.approx((5.0, 7.0))
 
     def test_arena_center_fallback(self) -> None:
         step = _make_loom_step()
-        cal = {"homography": None, "pixel_to_mm": 0.5,
-               "arena_center_px": (20.0, 20.0),
-               "pixels_per_mm_projector": None, "z_eff_mm": None}
-        center = resolve_loom_center_mm(step, cal)
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        center = resolve_loom_center_mm(step, authority)
         assert center == pytest.approx((10.0, 10.0))
 
-    def test_no_calibration_returns_none(self) -> None:
+    def test_unmaterialized_noncenter_target_returns_none(self) -> None:
+        step = _make_loom_step(target_side=1)
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        assert resolve_loom_center_mm(step, authority) is None
+
+    def test_unframed_precomputed_mm_fails_closed(self) -> None:
         step = _make_loom_step()
-        cal = {"homography": None, "pixel_to_mm": None,
-               "arena_center_px": None, "pixels_per_mm_projector": None,
-               "z_eff_mm": None}
-        assert resolve_loom_center_mm(step, cal) is None
+        step.stimulus_params["loom_center_x_mm"] = 5.0
+        step.stimulus_params["loom_center_y_mm"] = 7.0
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        with pytest.raises(ValueError, match="coordinate_frame"):
+            resolve_loom_center_mm(step, authority)
 
 
 # ---------------------------------------------------------------------------
