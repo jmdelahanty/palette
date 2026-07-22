@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
-import json
 from pathlib import Path
 import shutil
 
@@ -320,37 +318,6 @@ def _copy_zarr_archive(template: Path, target_parent: Path) -> Path:
     return target
 
 
-def _callables_sha256(*values: object) -> str:
-    """Fingerprint the exact helpers that construct a cached fixture."""
-
-    digest = hashlib.sha256()
-    for value in values:
-        identity = f"{value.__module__}.{value.__qualname__}".encode("utf-8")
-        source = inspect.getsource(value).encode("utf-8")
-        digest.update(len(identity).to_bytes(8, "little"))
-        digest.update(identity)
-        digest.update(len(source).to_bytes(8, "little"))
-        digest.update(source)
-    return digest.hexdigest()
-
-
-def _source_fixture_builder_sha256() -> str:
-    return _callables_sha256(
-        _prepare_acquisition_authority,
-        _write_stimulus_h5_with_arena_relative_chaser_states,
-        _publish_detection,
-        _canonical_sources,
-        _build_cached_canonical_source_archive,
-    )
-
-
-def _published_fixture_builder_sha256() -> str:
-    return _callables_sha256(
-        _publish_canonical_from_sources,
-        _build_cached_published_canonical_archive,
-    )
-
-
 def _build_cached_canonical_source_archive(destination: Path) -> None:
     build_root = destination.parent / "builder"
     build_root.mkdir()
@@ -361,8 +328,7 @@ def _build_cached_canonical_source_archive(destination: Path) -> None:
     ):
         raise ValueError("Canonical chaser-distance source paths changed unexpectedly.")
     zarr_path.replace(destination)
-    (build_root / "stimulus.h5").unlink()
-    build_root.rmdir()
+    shutil.rmtree(build_root)
 
 
 def _build_cached_published_canonical_archive(
@@ -382,103 +348,27 @@ def _build_cached_published_canonical_archive(
         )
 
 
-def _cached_zarr_metadata(path: Path, relative_path: str) -> dict[str, object]:
-    metadata_path = path / relative_path / "zarr.json"
-    value = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"Cached Zarr node {relative_path!r} is malformed.")
-    return value
-
-
-def _cached_zarr_attributes(path: Path, relative_path: str) -> dict[str, object]:
-    attrs = _cached_zarr_metadata(path, relative_path).get("attributes")
-    if not isinstance(attrs, dict):
-        raise ValueError(f"Cached Zarr node {relative_path!r} lacks attributes.")
-    return attrs
-
-
 def _validate_cached_canonical_source_archive(path: Path) -> None:
-    """Reject incomplete/stale source templates without opening sync Zarr."""
-
-    root_attrs = _cached_zarr_attributes(path, "")
-    detection_parent = _cached_zarr_attributes(path, "detect_runs")
-    detection_run = _cached_zarr_attributes(path, _CANONICAL_DETECTION_PATH)
-    stimulus_parent = _cached_zarr_attributes(path, "analysis/stimulus_runs")
-    stimulus_run = _cached_zarr_attributes(
-        path,
-        f"analysis/stimulus_runs/{_CANONICAL_STIMULUS_RUN}",
+    root = zarr.open_group(str(path), mode="r", use_consolidated=False)
+    publication_module.load_chaser_distance_source_context(
+        root,
+        detection_path=_CANONICAL_DETECTION_PATH,
+        stimulus_run=_CANONICAL_STIMULUS_RUN,
     )
-    centers = _cached_zarr_metadata(
-        path,
-        f"{_CANONICAL_DETECTION_PATH}/centers_img_xy",
-    )
-    chaser_positions = _cached_zarr_metadata(
-        path,
-        (
-            f"analysis/stimulus_runs/{_CANONICAL_STIMULUS_RUN}/"
-            "tracking_data/chaser_states/chaser_position_xy"
-        ),
-    )
-    if (
-        root_attrs.get("fps") != 120.0
-        or detection_parent.get("latest") != "canonical"
-        or detection_parent.get("latest_complete") != "canonical"
-        or detection_parent.get("authoritative_run") != "canonical"
-        or detection_run.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
-        or detection_run.get("stage_selector_eligible") is not True
-        or detection_run.get("coordinate_contract") != "canonical_v2"
-        or stimulus_parent.get("latest") != _CANONICAL_STIMULUS_RUN
-        or stimulus_parent.get("latest_complete") != _CANONICAL_STIMULUS_RUN
-        or stimulus_run.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
-        or stimulus_run.get("stage_selector_eligible") is not True
-        or centers.get("shape") != [2, 2]
-        or chaser_positions.get("shape") != [4, 2]
-    ):
-        raise ValueError(
-            "Cached canonical chaser-distance source archive is incomplete or stale."
-        )
 
 
 def _validate_cached_published_canonical_archive(path: Path) -> None:
-    """Reject incomplete/stale published templates without opening sync Zarr."""
-
-    _validate_cached_canonical_source_archive(path)
-    parent = _cached_zarr_attributes(path, "analysis/chaser_distance_runs")
-    run = _cached_zarr_attributes(path, _CANONICAL_DISTANCE_PATH)
-    fish_positions = _cached_zarr_metadata(
-        path,
-        f"{_CANONICAL_DISTANCE_PATH}/positions/fish_centroid_arena_xy",
-    )
-    distances = _cached_zarr_metadata(
-        path,
-        f"{_CANONICAL_DISTANCE_PATH}/distances/distance_mm",
-    )
-    if (
-        parent.get("latest") != "canonical_distance"
-        or parent.get("latest_complete") != "canonical_distance"
-        or run.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
-        or run.get("stage_selector_eligible") is not True
-        or run.get("coordinate_contract") != COORDINATE_CONTRACT
-        or PUBLICATION_SEAL_ATTR not in run
-        or fish_positions.get("shape") != [2, 2]
-        or distances.get("shape") != [2, 2]
-    ):
-        raise ValueError(
-            "Cached canonical chaser-distance publication is incomplete or stale."
-        )
+    root = zarr.open_group(str(path), mode="r", use_consolidated=False)
+    load_bound_chaser_distance_run(root, _CANONICAL_DISTANCE_PATH)
 
 
 _FIXTURE_SOURCE_PATHS = (
+    _REPO_ROOT / "src/fisheye/analysis",
+    _REPO_ROOT / "src/fisheye/detection",
     _REPO_ROOT / "src/fisheye/shared",
-    _REPO_ROOT / "src/fisheye/analysis/chaser_behavior.py",
-    _REPO_ROOT / "src/fisheye/analysis/chaser_contracts.py",
-    _REPO_ROOT / "src/fisheye/analysis/chaser_distance_coordinate_publication.py",
-    _REPO_ROOT / "src/fisheye/analysis/chaser_distance_runs.py",
-    _REPO_ROOT / "src/fisheye/analysis/detection_occupancy_runs.py",
-    _REPO_ROOT / "src/fisheye/analysis/import_stimulus_to_zarr.py",
-    _REPO_ROOT / "src/fisheye/detection/detect_yolo.py",
     _REPO_ROOT / "tests/persistent_fixture_cache.py",
     _REPO_ROOT / "tests/unit/fisheye/test_import_stimulus_to_zarr_paths.py",
+    Path(__file__),
 )
 
 
@@ -491,7 +381,6 @@ def _resolve_canonical_source_fixture(
         schema_version="canonical-chaser-distance-source-archive-v1",
         source_paths=_FIXTURE_SOURCE_PATHS,
         dependency_versions={
-            "fixture_builder_sha256": _source_fixture_builder_sha256(),
             "h5py": h5py.__version__,
             "numpy": np.__version__,
             "zarr": zarr.__version__,
@@ -512,7 +401,6 @@ def _resolve_published_canonical_fixture(
         schema_version="canonical-chaser-distance-published-archive-v1",
         source_paths=_FIXTURE_SOURCE_PATHS,
         dependency_versions={
-            "fixture_builder_sha256": _published_fixture_builder_sha256(),
             "h5py": h5py.__version__,
             "numpy": np.__version__,
             "source_fixture_cache_key": source_fixture.cache_key,
@@ -580,13 +468,11 @@ def published_canonical_archive(
 def test_cached_source_validator_rejects_stale_template_copy(
     canonical_source_archive: tuple[Path, str, str],
 ) -> None:
-    zarr_path, _detection_path, _stimulus_run = canonical_source_archive
-    metadata_path = zarr_path / "zarr.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["attributes"]["fps"] = 60.0
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    zarr_path, detection_path, _stimulus_run = canonical_source_archive
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root[f"{detection_path}/scores"][0] = np.float32(0.1)
 
-    with pytest.raises(ValueError, match="source archive is incomplete or stale"):
+    with pytest.raises(ChaserDistanceCoordinateError):
         _validate_cached_canonical_source_archive(zarr_path)
 
 
