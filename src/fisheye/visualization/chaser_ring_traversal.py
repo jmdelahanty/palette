@@ -62,7 +62,6 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _protocol_position_transition_s,
     _read_epochs,
     _resolve_chaser_distance_run,
-    _safe_float,
 )
 from fisheye.visualization.chaser_visit_trajectories import (
     DEFAULT_EPOCHS,
@@ -298,18 +297,28 @@ def _collect_chase_ring_entries_unsealed_inspection(
     # column from CRA/protocol fallbacks would be an unverified scientific join.
     distance_snapshot.require_behavior_authority()
     run_group = root[run_path]
-    ppm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    fps = _safe_float(run_group.attrs.get("fps"), 100.0)
+    ppm = float(distance_snapshot.pixels_per_mm_projector)
+    fps = float(distance_snapshot.fps)
 
     agg_idx, role_source = _aggressive_chaser_index(run_group)
-    chaser_indices = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.int64).reshape(-1)
+    chaser_indices = np.asarray(
+        distance_snapshot.chaser_index,
+        dtype=np.int64,
+    ).reshape(-1)
     col = int(np.flatnonzero(chaser_indices == agg_idx)[0]) if np.any(chaser_indices == agg_idx) else 0
 
-    positions = run_group["positions"]
-    fish_px = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64)
-    chaser_px = np.asarray(positions["chaser_arena_xy"][:, col, :], dtype=np.float64)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:, col], dtype=bool)
+    fish_px = np.asarray(
+        distance_snapshot.fish_centroid_arena_xy,
+        dtype=np.float64,
+    )
+    all_chaser_px = np.asarray(
+        distance_snapshot.chaser_arena_xy,
+        dtype=np.float64,
+    )
+    all_chaser_valid = np.asarray(distance_snapshot.chaser_valid, dtype=bool)
+    chaser_px = all_chaser_px[:, col, :]
+    fish_valid = np.asarray(distance_snapshot.fish_valid, dtype=bool)
+    chaser_valid = all_chaser_valid[:, col]
     total_frames = int(fish_px.shape[0])
 
     # chaser heading (direction of pursuit) and the fish in the chaser-centric frame
@@ -333,14 +342,17 @@ def _collect_chase_ring_entries_unsealed_inspection(
     )
 
     # the training epoch window, settle-trimmed the same way every other component trims it
-    epochs = _read_epochs(run_group, total_frames=total_frames)
+    epochs = _read_epochs(distance_snapshot, total_frames=total_frames)
     epochs = _apply_settle_trim(
         epochs,
-        chaser_xy=np.asarray(positions["chaser_arena_xy"][:], dtype=np.float32),
-        chaser_valid=np.asarray(positions["chaser_valid"][:], dtype=bool),
+        chaser_xy=np.asarray(all_chaser_px, dtype=np.float32),
+        chaser_valid=all_chaser_valid,
         fps=float(fps),
         pixels_per_mm=float(ppm),
-        settle_trim_s=_protocol_position_transition_s(root, run_group),
+        settle_trim_s=_protocol_position_transition_s(
+            root,
+            distance_snapshot,
+        ),
         motion_spread_threshold_mm=1.0,
     )
     epoch = next((e for e in epochs if e.label == epoch_label), None)

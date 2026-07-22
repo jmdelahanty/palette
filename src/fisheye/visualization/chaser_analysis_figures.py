@@ -38,6 +38,7 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_io import load_chaser_distance_run  # noqa: E402
+from fisheye.shared.arena_geometry import resolve_arena_geometry  # noqa: E402
 warnings.filterwarnings("ignore")
 
 OBJ_COLOR = {"aggressive": "#dc2626", "inert": "#2563eb"}
@@ -66,6 +67,57 @@ class RecordingData:
         self.root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
         self.distance = load_chaser_distance_run(self.root)
         self.distance.require_derived_surface_authority("cra_primary_endpoint")
+        self.run = self.root[self.distance.run_path]
+        self.recording_id = self.distance.recording_id
+        self.ppm = float(self.distance.pixels_per_mm_projector)
+        self.fps = float(self.distance.fps)
+        self.geometry, _notes = resolve_arena_geometry(
+            self.root,
+            self.run,
+            pixels_per_mm=self.ppm,
+        )
+
+        self.fish = np.asarray(
+            self.distance.fish_centroid_arena_xy,
+            dtype=np.float64,
+        ) / self.ppm
+        self.fish_valid = np.asarray(self.distance.fish_valid, dtype=bool)
+        self.epoch_labels = list(self.distance.epoch_labels)
+        self.epoch_start = np.asarray(
+            self.distance.epoch_start_frame,
+            dtype=np.int64,
+        )
+        self.epoch_end = np.asarray(
+            self.distance.epoch_end_frame,
+            dtype=np.int64,
+        )
+
+        self.roles: dict[int, str] = {}
+        cra = _latest_unsealed_inspection_child(
+            self.run.get("cra_primary_endpoint")
+        )
+        if cra is not None:
+            objects = cra["objects"]
+            indices = np.asarray(objects["object_index"][:]).reshape(-1)
+            role_codes = np.asarray(objects["object_role_code"][:]).reshape(-1)
+            for index, role_code in zip(indices, role_codes, strict=True):
+                self.roles[int(index)] = (
+                    "aggressive" if int(role_code) == 1 else "inert"
+                )
+
+        self.near_field = self._optional_derived_child("cra_near_field")
+        self.regimes = self._optional_derived_child("chaser_response_regimes")
+        self.bout = self._optional_derived_child("chaser_bout_response")
+        self.occupancy = self._optional_derived_child(
+            "chaser_radial_occupancy"
+        )
+
+    def _optional_derived_child(self, name: str) -> zarr.Group | None:
+        parent = self.run.get(name)
+        if parent is None:
+            return None
+        self.distance.require_derived_surface_authority(name)
+        return _latest_unsealed_inspection_child(parent)
 
     # ---- derived ----
     def wall_distance_mm(self, epoch: str) -> np.ndarray:

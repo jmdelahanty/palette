@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import zarr
 
+import fisheye.analysis.chaser_escape_freeze_summary as escape_freeze_summary
 from fisheye.analysis.chaser_escape_freeze import (
     DEFAULT_BASELINE_WINDOW_S,
     DEFAULT_COMPONENT_NAME,
@@ -200,7 +201,10 @@ def test_classify_escape_attempt_by_full_trial_path_threshold() -> None:
     assert _classify_escape_attempt_by_path(np.nan, threshold_mm=40.0) == (False, "unclassified")
 
 
-def test_escape_freeze_writer_distinguishes_trajectory_coordinate_frames(tmp_path: Path) -> None:
+def test_escape_freeze_writer_distinguishes_trajectory_coordinate_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     zarr_path = tmp_path / "escape_freeze.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
     run = root.create_group("analysis").create_group("chaser_distance_runs").create_group("chaser_distance_1")
@@ -231,6 +235,11 @@ def test_escape_freeze_writer_distinguishes_trajectory_coordinate_frames(tmp_pat
         summary={},
         diagnostics={},
         warnings=(),
+    )
+    monkeypatch.setattr(
+        escape_freeze_summary,
+        "reject_unsealed_chaser_derived_publication",
+        lambda *_args, **_kwargs: None,
     )
 
     component_path = write_escape_freeze_canary_component(zarr_path, result, overwrite=True, write_png=False)

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import zarr
-
 import fisheye.analysis.chaser_response_regimes as regimes_module
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
 from fisheye.analysis.chaser_response_regimes import (
@@ -24,6 +23,9 @@ from fisheye.analysis.chaser_response_regimes import (
 )
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
 from tests.unit.fisheye.test_chaser_radial_occupancy import ARENA_CENTER_MM, _make_archive
+
+
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 FPS = 10.0

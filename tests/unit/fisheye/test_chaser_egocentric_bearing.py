@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import zarr
-
 from fisheye.analysis import chaser_egocentric_bearing as bearing_module
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_egocentric_bearing import (
@@ -23,16 +22,17 @@ from fisheye.analysis.chaser_egocentric_bearing import (
     write_chaser_egocentric_bearing_component,
 )
 from fisheye.visualization.goodcopbadcop_interactive import (
+    ChaserDashboardUnavailableError,
     DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
     load_goodcopbadcop_interactive_data,
-    to_egocentric_bearing_dataframe,
-    to_egocentric_distance_alignment_dataframe,
-    to_egocentric_heading_dataframe,
 )
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
     _make_chaser_result,
 )
+
+
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
@@ -234,7 +234,7 @@ def test_build_chaser_egocentric_bearing_requires_offline_track_kinematics(tmp_p
         build_chaser_egocentric_bearing_result(zarr_path)
 
 
-def test_build_chaser_egocentric_bearing_falls_back_to_protocol_behavior_labels(
+def test_build_chaser_egocentric_bearing_does_not_recover_unsealed_protocol_labels(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -255,7 +255,7 @@ def test_build_chaser_egocentric_bearing_falls_back_to_protocol_behavior_labels(
         track_kinematics_run="tk_1",
     )
 
-    assert result.chaser_behavior_labels == ("aggressive", "inert")
+    assert result.chaser_behavior_labels == ()
 
 
 def test_build_chaser_egocentric_bearing_densifies_sparse_track_validity(
@@ -357,17 +357,11 @@ def test_chaser_egocentric_bearing_writer_refreshes_interactive_spec(
         f"/visualizations/{PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME}"
     )
 
-    data = load_goodcopbadcop_interactive_data(
-        zarr_path,
-        run_path="analysis/chaser_distance_runs/chaser_distance_1",
-    )
-    assert data.egocentric_component_name == "track_offline_tk_1_id_0_smoothed"
-    heading_df = to_egocentric_heading_dataframe(data)
-    assert heading_df.height == int(np.sum(result.fish_heading_valid))
-    assert set(["fish_heading_deg", "fish_heading_valid", "window_label"]).issubset(set(heading_df.columns))
-    bearing_df = to_egocentric_bearing_dataframe(data)
-    assert bearing_df.height == int(np.sum(result.valid))
-    assert set(["bearing_deg", "alignment_cos", "window_label"]).issubset(set(bearing_df.columns))
-    alignment_df = to_egocentric_distance_alignment_dataframe(data)
-    assert not alignment_df.is_empty()
-    assert "mean_alignment_cos" in alignment_df.columns
+    with pytest.raises(
+        ChaserDashboardUnavailableError,
+        match="independently verified sealed semantic authority",
+    ):
+        load_goodcopbadcop_interactive_data(
+            zarr_path,
+            run_path="analysis/chaser_distance_runs/chaser_distance_1",
+        )

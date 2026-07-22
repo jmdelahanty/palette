@@ -20,17 +20,19 @@ from pathlib import Path
 import numpy as np
 import pytest
 import zarr
-
 from fisheye.visualization.chaser_ring_traversal import (
     RESPONSIVE_BAND_MM,
     RING_EDGES_MM,
+    _collect_chase_ring_entries_unsealed_inspection as collect_chase_ring_entries,
+    _collect_ring_entries_unsealed_inspection as collect_ring_entries,
     _ordered_entries,
-    collect_chase_ring_entries,
-    collect_ring_entries,
     render_ring_entries_png,
     write_ring_traversal_gif,
 )
 from tests.unit.fisheye.test_chaser_visualization import _archive_with_components
+
+
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 PNG_MAGIC = b"\x89PNG"
@@ -262,7 +264,7 @@ def _chase_archive(tmp_path: Path, name: str) -> Path:
     """A training_event archive with a MOVING chaser, escape-speed bouts, and a materialized
     chaser_bout_response -- built by the escape-events fixture, which is exactly this shape."""
 
-    from tests.unit.fisheye.test_chaser_escape_events import THRESHOLD, _build
+    from tests.unit.fisheye.test_chaser_escape_events import _build
 
     z = _build(tmp_path, name=name)
     root = zarr.open_group(str(z), mode="a", use_consolidated=False)

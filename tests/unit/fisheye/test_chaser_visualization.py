@@ -19,7 +19,6 @@ import sqlite3
 import numpy as np
 import pytest
 import zarr
-
 from fisheye.analysis.chaser_bout_response import (
     build_chaser_bout_response_result,
     write_chaser_bout_response_component,
@@ -34,7 +33,7 @@ from fisheye.visualization.chaser_analysis_figures import (
     render_recording_summary,
 )
 from fisheye.visualization.chaser_visit_trajectories import (
-    collect_visits,
+    _collect_visits_unsealed_inspection as collect_visits,
     render_overlay_png,
     render_per_visit_png,
     write_gif,
@@ -43,6 +42,9 @@ from tests.unit.fisheye.test_chaser_bout_response import CX, CY, _bouts_every, _
 from tests.unit.fisheye.test_chaser_response_regimes import (
     _install_verified_track_reader,
 )
+
+
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 PNG_MAGIC = b"\x89PNG"
@@ -87,7 +89,12 @@ def _archive_with_components(tmp_path: Path, *, aggressive_chaser_index: int = 0
 
     r = build_chaser_bout_response_result(z, chaser_distance_run="chaser_distance_1", min_bin_bouts=5)
     write_chaser_bout_response_component(z, r, overwrite=True, write_png=False, write_interactive_spec=False)
-    g = build_chaser_response_regimes_result(z, chaser_distance_run="chaser_distance_1", min_bin_frames=5)
+    g = build_chaser_response_regimes_result(
+        z,
+        chaser_distance_run="chaser_distance_1",
+        min_bin_frames=5,
+        immobility_signal_mode="raw_centroid_explicit",
+    )
     write_chaser_response_regimes_component(z, g, overwrite=True, write_png=False, write_interactive_spec=False)
     return z
 
@@ -159,7 +166,7 @@ def test_recording_summary_renders_with_only_a_distance_run(tmp_path: Path) -> N
 def test_recording_data_rejects_an_archive_with_no_distance_run(tmp_path: Path) -> None:
     z = tmp_path / "empty.zarr"
     zarr.open_group(str(z), mode="w")
-    with pytest.raises(ValueError, match="No chaser_distance_run"):
+    with pytest.raises(ValueError, match="no analysis/chaser_distance_runs"):
         RecordingData(z)
 
 

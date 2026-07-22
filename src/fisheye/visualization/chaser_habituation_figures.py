@@ -82,10 +82,60 @@ class HabituationData:
         self.root = root
         self.distance = load_chaser_distance_run(root)
         self.distance.require_derived_surface_authority("chaser_escape_events")
+        self.recording_id = self.distance.recording_id
+        self.run = root[self.distance.run_path]
+
+        events = _latest_unsealed_inspection_child(
+            self.run.get("chaser_escape_events")
+        )
+        if events is None:
+            raise ValueError("No chaser_escape_events component; run it first.")
+        if "trials" not in events or int(
+            np.asarray(events["trials/ordinal"][:]).size
+        ) == 0:
+            raise ValueError(
+                "chaser_escape_events has no trials "
+                "(recording has no chase_trial_id)."
+            )
+        self.events = events
+
+        trials = events["trials"]
+        self.ordinal = np.asarray(trials["ordinal"][:], dtype=np.int64)
+        self.rate = np.asarray(
+            trials["escape_rate_per_valid_s"][:], dtype=np.float64
+        )
+        self.any_escape = np.asarray(trials["any_escape"][:], dtype=bool)
+        self.escape_count = np.asarray(
+            trials["escape_count"][:], dtype=np.int64
+        )
+        self.wall_mm = np.asarray(
+            trials["wall_distance_at_trigger_mm"][:], dtype=np.float64
+        )
+        self.dropout = np.asarray(
+            trials["dropout_fraction"][:], dtype=np.float64
+        )
+        self.latency = np.asarray(
+            trials["first_escape_latency_s"][:], dtype=np.float64
+        )
+        self.trial_start = np.asarray(
+            trials["start_frame"][:], dtype=np.int64
+        )
+        self.trial_end = np.asarray(trials["end_frame"][:], dtype=np.int64)
+        self.trigger = np.asarray(trials["trigger_frame"][:], dtype=np.int64)
+        self.event_frames = np.asarray(
+            events["events/start_frame"][:], dtype=np.int64
+        )
+        self.fps = float(self.distance.fps)
+        self.clean = self.dropout < CLEAN_DROPOUT
+        self.freeze = self._freeze_per_trial()
 
     # -- freeze comes from the sibling canary, which already scores it per trial ----------
     def _freeze_per_trial(self) -> np.ndarray:
         out = np.full(self.ordinal.size, np.nan)
+        if self.run.get("chaser_escape_freeze") is not None:
+            self.distance.require_derived_surface_authority(
+                "chaser_escape_freeze"
+            )
         ef = _latest_unsealed_inspection_child(
             self.run.get("chaser_escape_freeze")
         )
@@ -110,6 +160,10 @@ class HabituationData:
         geometric trap.
         """
 
+        if self.run.get("chaser_bout_response") is not None:
+            self.distance.require_derived_surface_authority(
+                "chaser_bout_response"
+            )
         bc = _latest_unsealed_inspection_child(
             self.run.get("chaser_bout_response")
         )

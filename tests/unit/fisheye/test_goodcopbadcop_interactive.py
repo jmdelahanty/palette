@@ -328,16 +328,17 @@ def test_legacy_chaser_dashboard_is_not_a_normal_read(tmp_path: Path) -> None:
         legacy_compatibility=True,
     )
 
-    with pytest.raises(ChaserDistanceReadError, match="complete coordinate publication"):
+    expected_error = "latest_complete|complete coordinate publication"
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
         discover_chaser_dashboard_options(zarr_path)
-    with pytest.raises(ChaserDistanceReadError, match="complete coordinate publication"):
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
         discover_goodcopbadcop_chaser_dashboard_options(zarr_path)
-    with pytest.raises(ChaserDistanceReadError, match="complete coordinate publication"):
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
         load_chaser_dashboard_data(
             zarr_path,
             run_path="analysis/chaser_distance_runs/chaser_distance_1",
         )
-    with pytest.raises(ChaserDistanceReadError, match="complete coordinate publication"):
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
         load_goodcopbadcop_interactive_data(
             zarr_path,
             run_path="analysis/chaser_distance_runs/chaser_distance_1",
