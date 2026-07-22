@@ -32,6 +32,7 @@ from fisheye.shared.refined_subject_mask_coordinate_publication import (
     require_bound_refined_subject_mask_coordinate_surfaces,
 )
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started
+from tests.publication_fixture_clone import sealed_fixture_copy_memo
 from tests.unit.fisheye.test_keypoint_coordinate_publication import _MutableGroup
 from tests.unit.fisheye.test_subject_mask_coordinate_publication import (
     _prepare_context as _prepare_raw_context,
@@ -348,45 +349,13 @@ _REFINED_FIXTURE_TEMPLATES: dict[
 ] = {}
 
 
-def _template_copy_memo(template: Any) -> dict[int, Any]:
-    """Preserve identity authorities while cloning the mutable archive graph."""
-
-    memo: dict[int, Any] = {}
-    pending = [template]
-    visited: set[int] = set()
-    while pending:
-        value = pending.pop()
-        identity = id(value)
-        if identity in visited:
-            continue
-        visited.add(identity)
-        archive_token = getattr(value, "_coordinate_archive_token", None)
-        if archive_token is not None:
-            # ArchiveIdentity records bind the opaque token's object identity.
-            # The graph data is cloned, while its synthetic test-store authority
-            # must remain identical for existing sealed bindings to stay valid.
-            memo[id(archive_token)] = archive_token
-        if isinstance(value, dict):
-            pending.extend(value.keys())
-            pending.extend(value.values())
-        elif isinstance(value, (list, tuple, set, frozenset)):
-            pending.extend(value)
-        elif hasattr(value, "__dict__"):
-            attributes = vars(value)
-            for name, attribute in attributes.items():
-                if name.endswith("_seal") and attribute is not None:
-                    memo[id(attribute)] = attribute
-            pending.extend(attributes.values())
-    return memo
-
-
 def _copy_refined_fixture_template(
     monkeypatch: pytest.MonkeyPatch,
     template: tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]], Any],
 ) -> tuple[Any, Any, Any, Any, dict[str, tuple[bool, Any]], Any]:
     cloned = copy.deepcopy(
         template,
-        _template_copy_memo(template),
+        sealed_fixture_copy_memo(template),
     )
     root, _parent, _run, _raw_run, _snapshot, crop_source = cloned
     monkeypatch.setattr(

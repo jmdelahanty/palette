@@ -7,6 +7,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
+import fisheye.shared.keypoint_coordinate_publication as keypoint_publication_module
 import fisheye.shared.subject_mask_coordinate_publication as publication_module
 from fisheye.shared.coordinate_descriptor import (
     COORDINATE_DESCRIPTOR_ATTR,
@@ -55,6 +56,7 @@ from fisheye.shared.transform_authority import (
     TransformAuthorityError,
     load_bound_transform_authority,
 )
+from tests.publication_fixture_clone import sealed_fixture_copy_memo
 from tests.unit.fisheye.test_keypoint_coordinate_publication import (
     _MutableGroup,
     _fixture as keypoint_crop_fixture,
@@ -148,7 +150,7 @@ def _surface(run: Any, path: str) -> Any:
     return node
 
 
-def _subject_fixture_with_source(
+def _build_subject_fixture_with_source(
     monkeypatch: pytest.MonkeyPatch,
     *,
     include_identity: bool = True,
@@ -268,16 +270,124 @@ def _subject_fixture_with_source(
     return root, parent, run, source
 
 
+_SUBJECT_FIXTURE_TEMPLATES: dict[
+    tuple[bool, tuple[int, int], bool, str],
+    tuple[Any, _MutableGroup, _MutableGroup, Any],
+] = {}
+
+
+def _copy_subject_fixture_template(
+    monkeypatch: pytest.MonkeyPatch,
+    template: tuple[Any, _MutableGroup, _MutableGroup, Any],
+) -> tuple[Any, _MutableGroup, _MutableGroup, Any]:
+    cloned = copy.deepcopy(template, sealed_fixture_copy_memo(template))
+    root, _parent, _run, source = cloned
+    monkeypatch.setattr(
+        keypoint_publication_module,
+        "load_persisted_crop_observation_geometry",
+        lambda _root, _path: source.crop_geometry,
+    )
+    assert source._root is root
+    return cloned
+
+
+def _subject_fixture_with_source(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    include_identity: bool = True,
+    roi_shape: tuple[int, int] = (40, 40),
+    consistent_foreground: bool = False,
+    prepared: bool = False,
+    published: bool = False,
+    fresh: bool = False,
+) -> tuple[Any, _MutableGroup, _MutableGroup, Any]:
+    if published:
+        prepared = True
+    if fresh:
+        fixture = _build_subject_fixture_with_source(
+            monkeypatch,
+            include_identity=include_identity,
+            roi_shape=roi_shape,
+        )
+        root, _parent, _run, _source = fixture
+        if consistent_foreground:
+            _set_consistent_foreground(_run)
+        if prepared:
+            _prepare_context(root)
+        if published:
+            _publish(root)
+        return fixture
+
+    state = "published" if published else "prepared" if prepared else "raw"
+    key = (include_identity, roi_shape, consistent_foreground, state)
+    template = _SUBJECT_FIXTURE_TEMPLATES.get(key)
+    if template is None:
+        if state == "raw":
+            if consistent_foreground:
+                plain_key = (include_identity, roi_shape, False, "raw")
+                plain_template = _SUBJECT_FIXTURE_TEMPLATES.get(plain_key)
+                if plain_template is None:
+                    plain_template = _build_subject_fixture_with_source(
+                        monkeypatch,
+                        include_identity=include_identity,
+                        roi_shape=roi_shape,
+                    )
+                    _SUBJECT_FIXTURE_TEMPLATES[plain_key] = plain_template
+                template = _copy_subject_fixture_template(
+                    monkeypatch,
+                    plain_template,
+                )
+                _set_consistent_foreground(template[2])
+            else:
+                template = _build_subject_fixture_with_source(
+                    monkeypatch,
+                    include_identity=include_identity,
+                    roi_shape=roi_shape,
+                )
+        else:
+            raw_key = (
+                include_identity,
+                roi_shape,
+                consistent_foreground,
+                "raw",
+            )
+            raw_template = _SUBJECT_FIXTURE_TEMPLATES.get(raw_key)
+            if raw_template is None:
+                raw_template = _build_subject_fixture_with_source(
+                    monkeypatch,
+                    include_identity=include_identity,
+                    roi_shape=roi_shape,
+                )
+                if consistent_foreground:
+                    _set_consistent_foreground(raw_template[2])
+                _SUBJECT_FIXTURE_TEMPLATES[raw_key] = raw_template
+            template = _copy_subject_fixture_template(monkeypatch, raw_template)
+            root, _parent, _run, _source = template
+            _prepare_context(root)
+            if state == "published":
+                _publish(root)
+        _SUBJECT_FIXTURE_TEMPLATES[key] = template
+    return _copy_subject_fixture_template(monkeypatch, template)
+
+
 def _subject_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     include_identity: bool = True,
     roi_shape: tuple[int, int] = (40, 40),
+    consistent_foreground: bool = False,
+    prepared: bool = False,
+    published: bool = False,
+    fresh: bool = False,
 ) -> tuple[Any, _MutableGroup, _MutableGroup]:
     root, parent, run, _source = _subject_fixture_with_source(
         monkeypatch,
         include_identity=include_identity,
         roi_shape=roi_shape,
+        consistent_foreground=consistent_foreground,
+        prepared=prepared,
+        published=published,
+        fresh=fresh,
     )
     return root, parent, run
 
@@ -285,7 +395,7 @@ def _subject_fixture(
 def test_subject_mask_publication_binds_exact_crop_identity_labels_and_surfaces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
+    root, parent, run = _subject_fixture(monkeypatch, fresh=True)
 
     context = _prepare_context(root)
     assert context.labels == LABELS
@@ -365,7 +475,7 @@ def test_subject_mask_publication_binds_exact_crop_identity_labels_and_surfaces(
 def test_canonical_success_scans_payload_once_at_publish_and_once_at_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
+    root, parent, run = _subject_fixture(monkeypatch, fresh=True)
     _prepare_context(root)
     original_validate = publication_module._validate_companion_metadata_and_values
     scans = 0
@@ -400,7 +510,7 @@ def test_canonical_success_scans_payload_once_at_publish_and_once_at_activation(
 def test_activation_revalidates_payload_instead_of_trusting_published_proof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
+    root, parent, run = _subject_fixture(monkeypatch, fresh=True)
     _prepare_context(root)
     published = _publish(root)
     selector_snapshot = _selector_snapshot(parent)
@@ -424,6 +534,44 @@ def test_activation_revalidates_payload_instead_of_trusting_published_proof(
     assert "latest" not in parent.attrs
     assert "latest_complete" not in parent.attrs
     assert run.attrs["stage_selector_eligible"] is False
+
+
+def test_subject_fixture_clones_do_not_mutate_each_other_or_the_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_root, first_parent, first_run, _first_source = (
+        _subject_fixture_with_source(monkeypatch)
+    )
+    first_run["mask_probs_roi"].data[0, 0, 0, 0] = np.uint8(255)
+    first_run.attrs["mask_probability_threshold"] = 0.75
+    first_parent.attrs["latest"] = "mutated-clone"
+
+    second_root, second_parent, second_run, second_source = (
+        _subject_fixture_with_source(monkeypatch)
+    )
+    template_root, template_parent, template_run, _template_source = (
+        _SUBJECT_FIXTURE_TEMPLATES[(True, (40, 40), False, "raw")]
+    )
+
+    assert first_root is not second_root
+    assert first_root is not template_root
+    assert second_root is not template_root
+    assert "latest" not in second_parent.attrs
+    assert "latest" not in template_parent.attrs
+    assert second_run.attrs["mask_probability_threshold"] == 0.5
+    assert template_run.attrs["mask_probability_threshold"] == 0.5
+    assert int(second_run["mask_probs_roi"].data[0, 0, 0, 0]) == 0
+    assert int(template_run["mask_probs_roi"].data[0, 0, 0, 0]) == 0
+    assert not np.shares_memory(
+        first_run["mask_probs_roi"].data,
+        second_run["mask_probs_roi"].data,
+    )
+    assert second_source._root is second_root
+    reloaded_source = load_persisted_subject_mask_crop_source(
+        second_root,
+        "crop_runs/c1",
+    )
+    assert reloaded_source.crop_geometry is second_source.crop_geometry
 
 
 def test_subject_mask_placement_records_coexist_and_fail_closed_on_cross_wiring(
@@ -518,8 +666,7 @@ def test_subject_mask_pixel_center_chain_rejects_record_digest_tampering(
     monkeypatch: pytest.MonkeyPatch,
     attr_name: str,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
+    root, _parent, run = _subject_fixture(monkeypatch, prepared=True)
     run["source_crop_xywh"].attrs[f"{attr_name}_sha256"] = "0" * 64
 
     with pytest.raises(ValueError):
@@ -605,9 +752,7 @@ def test_subject_mask_publication_rejects_wrong_roi_reference_dimensions(
 def test_subject_mask_loader_rejects_ordered_label_authority_tampering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, _parent, run = _subject_fixture(monkeypatch, published=True)
 
     label_record = copy.deepcopy(run.attrs[SUBJECT_MASK_COMPONENT_LABELS_ATTR])
     label_record["labels"] = ["eyes_union", "subject_body", "swim_bladder"]
@@ -620,9 +765,7 @@ def test_subject_mask_loader_rejects_ordered_label_authority_tampering(
 def test_subject_mask_loader_rejects_equal_cardinality_descriptor_authority_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, _parent, run = _subject_fixture(monkeypatch, published=True)
 
     node = run["mask_probs_roi"]
     payload = copy.deepcopy(node.attrs[COORDINATE_DESCRIPTOR_ATTR])
@@ -652,8 +795,7 @@ def test_subject_mask_loader_rejects_equal_cardinality_descriptor_authority_swap
 def test_subject_mask_publication_checkpoint_rolls_back_baseexception_attrs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
+    root, _parent, run = _subject_fixture(monkeypatch, prepared=True)
     checkpoint = capture_subject_mask_coordinate_publication_checkpoint(
         root,
         "subject_mask_runs/s1",
@@ -693,8 +835,7 @@ def test_subject_mask_publication_operations_require_the_exact_expected_owner(
 def test_subject_mask_checkpoint_refuses_replaced_child_and_leaves_stale_handle_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
+    root, parent, run = _subject_fixture(monkeypatch, prepared=True)
     checkpoint = capture_subject_mask_coordinate_publication_checkpoint(
         root,
         "subject_mask_runs/s1",
@@ -718,8 +859,7 @@ def test_subject_mask_checkpoint_refuses_replaced_child_and_leaves_stale_handle_
 def test_subject_mask_checkpoint_refuses_eligible_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
+    root, _parent, run = _subject_fixture(monkeypatch, prepared=True)
     checkpoint = capture_subject_mask_coordinate_publication_checkpoint(
         root,
         "subject_mask_runs/s1",
@@ -788,8 +928,7 @@ def test_subject_mask_loader_rejects_live_inference_evidence_tampering(
     attr_name: str,
     replacement: Any,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
+    root, _parent, run = _subject_fixture(monkeypatch, prepared=True)
     run.attrs[attr_name] = replacement
 
     with pytest.raises(SubjectMaskCoordinatePublicationError, match="inference authority"):
@@ -804,8 +943,7 @@ def test_subject_mask_loader_rejects_live_inference_evidence_tampering(
 def test_subject_mask_loader_rejects_structurally_invalid_transform_record_tamper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
+    root, _parent, run = _subject_fixture(monkeypatch, prepared=True)
     record = copy.deepcopy(run.attrs[SUBJECT_MASK_INFERENCE_AUTHORITY_ATTR])
     record["model_input_transform"]["pad_top"] = 1
     run.attrs[SUBJECT_MASK_INFERENCE_AUTHORITY_ATTR] = record
@@ -864,8 +1002,7 @@ def test_subject_mask_publication_requires_every_interpretation_companion(
     monkeypatch: pytest.MonkeyPatch,
     missing_path: str,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
+    root, _parent, run = _subject_fixture(monkeypatch, prepared=True)
     if "/" in missing_path:
         group_name, array_name = missing_path.split("/", 1)
         run[group_name].children.pop(array_name)
@@ -906,9 +1043,7 @@ def test_subject_mask_publication_rejects_binary_cache_presence_attr_mismatch(
 def test_subject_mask_loader_rejects_same_shape_validity_record_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, _parent, run = _subject_fixture(monkeypatch, published=True)
     centroid_valid = run["metrics"]["centroid_valid"]
     bbox_valid = run["metrics"]["bbox_valid"]
     centroid_attrs = copy.deepcopy(dict(centroid_valid.attrs))
@@ -930,9 +1065,7 @@ def test_subject_mask_loader_rejects_same_shape_validity_record_swap(
 def test_subject_mask_validity_makes_zero_sentinels_unambiguous_and_tamper_evident(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, _parent, run = _subject_fixture(monkeypatch, published=True)
     assert np.all(np.asarray(run["metrics"]["centroid_xy"][:]) == 0.0)
     assert not np.any(np.asarray(run["metrics"]["centroid_valid"][:]))
 
@@ -951,10 +1084,11 @@ def test_subject_mask_loader_rejects_same_shape_value_mutation_even_when_derivat
     monkeypatch: pytest.MonkeyPatch,
     surface_name: str,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _set_consistent_foreground(run)
-    _prepare_context(root)
-    _publish(root)
+    root, _parent, run = _subject_fixture(
+        monkeypatch,
+        consistent_foreground=True,
+        published=True,
+    )
 
     if surface_name == "mask_probs_roi":
         # The thresholded mask, area, centroid, bbox, and prob_max are unchanged.
@@ -980,9 +1114,7 @@ def test_subject_mask_loader_rejects_same_shape_value_mutation_even_when_derivat
 def test_subject_mask_loader_rejects_same_shape_probability_mask_role_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, _parent, run = _subject_fixture(monkeypatch, published=True)
     probabilities = run["mask_probs_roi"]
     masks = run["masks_roi"]
     probability_attrs = copy.deepcopy(dict(probabilities.attrs))
@@ -1019,10 +1151,11 @@ def test_subject_mask_loader_recomputes_and_rejects_inconsistent_derivations(
     replacement: Any,
     message: str,
 ) -> None:
-    root, _parent, run = _subject_fixture(monkeypatch)
-    _set_consistent_foreground(run)
-    _prepare_context(root)
-    _publish(root)
+    root, _parent, run = _subject_fixture(
+        monkeypatch,
+        consistent_foreground=True,
+        published=True,
+    )
     _surface(run, path).data[index] = replacement
 
     with pytest.raises(SubjectMaskCoordinatePublicationError, match=message):
@@ -1071,9 +1204,7 @@ def test_subject_mask_activation_rejects_concurrent_selector_mutation(
     selector: str,
     replacement: Any,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, parent, run = _subject_fixture(monkeypatch, published=True)
     selector_snapshot = _selector_snapshot(parent)
     parent.attrs["latest_pending"] = "s1"
     mark_run_complete(run, parent_group=None, run_name="s1")
@@ -1112,9 +1243,7 @@ def test_subject_mask_activation_rejects_concurrent_publication_epoch_mutation(
     attr_name: str,
     replacement: Any,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, parent, run = _subject_fixture(monkeypatch, published=True)
     selector_snapshot = _selector_snapshot(parent)
     parent.attrs["latest_pending"] = "s1"
     mark_run_complete(run, parent_group=None, run_name="s1")
@@ -1140,9 +1269,7 @@ def test_subject_mask_activation_rejects_concurrent_publication_epoch_mutation(
 def test_subject_mask_activation_rechecks_parent_lease_before_selector_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, parent, run = _subject_fixture(monkeypatch, published=True)
     selector_snapshot = _selector_snapshot(parent)
     parent.attrs["latest_pending"] = "s1"
     mark_run_complete(run, parent_group=None, run_name="s1")
@@ -1182,9 +1309,7 @@ def test_subject_mask_activation_rechecks_parent_lease_before_selector_mutation(
 def test_subject_mask_activation_rejects_publication_owner_tampering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, parent, run = _subject_fixture(monkeypatch)
-    _prepare_context(root)
-    _publish(root)
+    root, parent, run = _subject_fixture(monkeypatch, published=True)
     selector_snapshot = _selector_snapshot(parent)
     parent.attrs["latest_pending"] = "s1"
     mark_run_complete(run, parent_group=None, run_name="s1")
