@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
+from functools import lru_cache
 from types import MappingProxyType, SimpleNamespace
 import uuid
 
@@ -17,7 +19,7 @@ from tests.unit.fisheye.test_track_kinematics_coordinate_contract import (
 )
 
 
-def _full_motion_run(
+def _fresh_full_motion_run(
     monkeypatch: pytest.MonkeyPatch,
     *,
     physical: bool = False,
@@ -29,6 +31,7 @@ def _full_motion_run(
     headings_deg: np.ndarray | None = None,
     hysteresis_enabled: bool = False,
     source_rows: np.ndarray | None = None,
+    _return_template_source: bool = False,
 ):
     world = _world(convention="continuous", archive_token=object())
     source = _canonical_crop_position_surface(world)
@@ -105,9 +108,7 @@ def _full_motion_run(
         _selected_stimulus_physical_authority(world) if physical else None
     )
     pixel_to_mm = (
-        physical_authority.mm_per_pixel
-        if physical_authority is not None
-        else None
+        physical_authority.mm_per_pixel if physical_authority is not None else None
     )
     source_rows = (
         np.asarray([0, 1], dtype=np.int64)
@@ -121,9 +122,7 @@ def _full_motion_run(
     tracks, summaries = mod.build_track_datasets(
         track_ids=np.full(source_rows.shape, 7, dtype=np.int64),
         frames=frames,
-        positions_px=np.asarray(source.coordinates.coordinate_node[:])[
-            source_rows
-        ],
+        positions_px=np.asarray(source.coordinates.coordinate_node[:])[source_rows],
         headings_deg=source_heading_values[source_rows],
         keypoint_success=np.ones(source_rows.shape, dtype=bool),
         detection_source=None,
@@ -277,13 +276,140 @@ def _full_motion_run(
         lambda _root, path: source if path == "crop_runs/c1" else None,
     )
     sealed = mod._seal_and_load_track_motion_run_before_selection(root, run)
-    return root, run, run["tracks/id_7"], sealed, physical_authority
+    result = root, run, run["tracks/id_7"], sealed, physical_authority
+    if _return_template_source:
+        return (*result, source)
+    return result
+
+
+@dataclass(frozen=True)
+class _FullMotionRunTemplate:
+    """One sealed writer result whose mutable archive graph is never exposed."""
+
+    root: object
+    sealed: mod.BoundTrackMotionRun
+    source_surface: object
+
+
+def _motion_run_template(
+    monkeypatch: pytest.MonkeyPatch,
+    **writer_options: object,
+) -> _FullMotionRunTemplate:
+    root, _run, _track, sealed, _physical, source = _fresh_full_motion_run(
+        monkeypatch,
+        _return_template_source=True,
+        **writer_options,
+    )
+    return _FullMotionRunTemplate(
+        root=root,
+        sealed=sealed,
+        source_surface=source,
+    )
+
+
+def _clone_motion_run_template(
+    template: _FullMotionRunTemplate,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Bound coordinate authorities carry process-local opaque seals.  Preserve
+    # those identity-only objects and immutable mapping proxies while copying
+    # the source binding together with the archive graph, so its array nodes
+    # are redirected to the clone rather than back to the template.
+    memo: dict[int, object] = {}
+    _seed_template_clone_memo(
+        (template.root, template.source_surface),
+        memo=memo,
+        seen=set(),
+    )
+    root, source = copy.deepcopy(
+        (template.root, template.source_surface),
+        memo=memo,
+    )
+    run = root["analysis"]["track_kinematics_runs"]["offline"][
+        template.sealed.position_bindings.run_name
+    ]
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, path: source if path == "crop_runs/c1" else None,
+    )
+    sealed = mod._load_bound_track_motion_run_impl(
+        root,
+        run,
+        expected_selector_eligible=False,
+    )
+    return (
+        root,
+        run,
+        run["tracks/id_7"],
+        sealed,
+        sealed.position_bindings.physical_authority,
+    )
+
+
+def _seed_template_clone_memo(
+    value: object,
+    *,
+    memo: dict[int, object],
+    seen: set[int],
+) -> None:
+    """Keep opaque verification seals stable while cloning their bindings."""
+
+    identity = id(value)
+    if identity in seen:
+        return
+    seen.add(identity)
+    if type(value) is object or isinstance(value, MappingProxyType):
+        memo[identity] = value
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _seed_template_clone_memo(key, memo=memo, seen=seen)
+            _seed_template_clone_memo(item, memo=memo, seen=seen)
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _seed_template_clone_memo(item, memo=memo, seen=seen)
+        return
+    try:
+        attributes = vars(value)
+    except TypeError:
+        return
+    for item in attributes.values():
+        _seed_template_clone_memo(item, memo=memo, seen=seen)
+
+
+@lru_cache(maxsize=2)
+def _cached_motion_template(*, physical: bool) -> _FullMotionRunTemplate:
+    """Build each meaningful sealed template family at most once per worker."""
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        return _motion_run_template(monkeypatch, physical=physical)
+    finally:
+        monkeypatch.undo()
+
+
+def _clone_full_motion_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    return _clone_motion_run_template(
+        _cached_motion_template(physical=False),
+        monkeypatch,
+    )
+
+
+def _clone_physical_motion_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    return _clone_motion_run_template(
+        _cached_motion_template(physical=True),
+        monkeypatch,
+    )
 
 
 def _restore_publication_attrs(run, manifest, digest, commit) -> None:
-    run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = copy.deepcopy(
-        manifest
-    )
+    run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = copy.deepcopy(manifest)
     run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR] = digest
     run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR] = copy.deepcopy(commit)
 
@@ -385,9 +511,7 @@ def _expected_public_pixel_surface_input_refs(track_path: str) -> dict[str, list
             ref("delta_heading_smoothed_degrees"),
             ref("delta_seconds"),
         ],
-        "angular_speed_smoothed_deg_s": [
-            ref("angular_velocity_smoothed_deg_s")
-        ],
+        "angular_speed_smoothed_deg_s": [ref("angular_velocity_smoothed_deg_s")],
         "angular_velocity_deg_s": [ref("angular_velocity_raw_deg_s")],
         "delta_frames": [ref("source_acquisition_frame_index")],
         "delta_seconds": [ref("delta_frames"), run_ref],
@@ -440,9 +564,7 @@ def _expected_public_pixel_surface_input_refs(track_path: str) -> dict[str, list
         )
         expected[derivative] = [ref(f"{source_level}_px"), ref("delta_seconds")]
         expected[smoothed_derivative] = [ref(derivative), run_ref]
-        expected[f"movement/speed/{group_level}/acceleration_px"] = [
-            ref(derivative)
-        ]
+        expected[f"movement/speed/{group_level}/acceleration_px"] = [ref(derivative)]
         expected[f"movement/speed/{group_level}/smoothed_acceleration_px"] = [
             ref(smoothed_derivative)
         ]
@@ -488,10 +610,18 @@ def _expected_public_pixel_surface_input_refs(track_path: str) -> dict[str, list
     return expected
 
 
-def test_full_motion_seal_round_trips_domains_derivations_and_immutable_authority(
+def test_fresh_full_motion_writer_seal_round_trips_domains_and_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track_group, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track_group, sealed, _physical = _fresh_full_motion_run(monkeypatch)
+    template = _cached_motion_template(physical=False)
+
+    # Writer/sealing coverage must remain independent from the cached reader
+    # template, including its mutable archive graph and minted authority.
+    assert root is not template.root
+    assert run is not template.sealed.run_group
+    assert sealed is not template.sealed
+    assert root._coordinate_archive_token is not template.root._coordinate_archive_token
 
     assert isinstance(sealed, mod.BoundTrackMotionRun)
     assert isinstance(sealed.manifest, MappingProxyType)
@@ -510,8 +640,7 @@ def test_full_motion_seal_round_trips_domains_derivations_and_immutable_authorit
     assert flat.operation_id == "exact_alias_v1"
     assert flat.alias_of == f"/{track.track_group.path}/movement/speed/raw/px"
     assert all(
-        value["kind"]
-        in {"array", "group_attr", "manifest_record", "external_lineage"}
+        value["kind"] in {"array", "group_attr", "manifest_record", "external_lineage"}
         for value in flat.input_refs
     )
     with pytest.raises(TypeError):
@@ -554,15 +683,69 @@ def test_full_motion_seal_round_trips_domains_derivations_and_immutable_authorit
     public.assert_verified()
 
 
+def test_motion_template_clones_isolate_mutations_from_template_and_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_root, first_run, first_track, first_sealed, _ = _clone_full_motion_run(
+        monkeypatch
+    )
+    second_root, second_run, second_track, second_sealed, _ = _clone_full_motion_run(
+        monkeypatch
+    )
+    template = _cached_motion_template(physical=False)
+    template_run = template.sealed.run_group
+    template_track = template_run["tracks/id_7"]
+    template_speed = template_track["speed_raw_px"].data.copy()
+    template_heading = template.root["keypoints_runs"]["kp_1"]["heading"].data.copy()
+
+    assert first_root is not second_root
+    assert first_root is not template.root
+    assert first_run is not second_run
+    assert first_sealed is not second_sealed
+    assert first_sealed is not template.sealed
+    assert second_sealed is not template.sealed
+    assert (
+        first_sealed.track(7).surface("speed_raw_px").node
+        is first_track["speed_raw_px"]
+    )
+    assert (
+        second_sealed.track(7).surface("speed_raw_px").node
+        is second_track["speed_raw_px"]
+    )
+    assert (
+        first_sealed.position_bindings.source_positions.coordinate_node
+        is first_root["crop_runs"]["c1"]["centers_img_xy"]
+    )
+    assert (
+        second_sealed.position_bindings.source_positions.coordinate_node
+        is second_root["crop_runs"]["c1"]["centers_img_xy"]
+    )
+
+    first_run.attrs["inputs"]["crop_run"] = "mutated_clone"
+    first_track["speed_raw_px"].data[1] += np.float32(1.0)
+    first_root["keypoints_runs"]["kp_1"]["heading"].data[0] = np.float32(17.0)
+
+    assert second_run.attrs["inputs"]["crop_run"] == "c1"
+    assert template_run.attrs["inputs"]["crop_run"] == "c1"
+    np.testing.assert_array_equal(second_track["speed_raw_px"][:], template_speed)
+    np.testing.assert_array_equal(template_track["speed_raw_px"][:], template_speed)
+    np.testing.assert_array_equal(
+        second_root["keypoints_runs"]["kp_1"]["heading"][:],
+        template_heading,
+    )
+    np.testing.assert_array_equal(
+        template.root["keypoints_runs"]["kp_1"]["heading"][:],
+        template_heading,
+    )
+
+
 def test_every_public_pixel_surface_has_exact_kernel_input_refs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _root, _run, track_group, sealed, _physical = _full_motion_run(monkeypatch)
+    _root, _run, track_group, sealed, _physical = _clone_full_motion_run(monkeypatch)
     records = sealed.manifest["tracks"]["id_7"]["surfaces"]
     expected = _expected_public_pixel_surface_input_refs(track_group.path)
-    expected_paths = mod._expected_motion_track_surface_paths(
-        include_physical=False
-    )
+    expected_paths = mod._expected_motion_track_surface_paths(include_physical=False)
 
     assert set(expected) == expected_paths
     assert set(records) == expected_paths
@@ -576,26 +759,22 @@ def test_every_public_pixel_surface_has_exact_kernel_input_refs(
 def test_full_motion_loader_rejects_recomputed_manifest_and_live_attacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     baseline_manifest = copy.deepcopy(
         run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR]
     )
-    baseline_digest = run.attrs[
-        mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR
-    ]
-    baseline_commit = copy.deepcopy(
-        run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR]
-    )
+    baseline_digest = run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR]
+    baseline_commit = copy.deepcopy(run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR])
     mod.load_bound_track_motion_run(root, run)
 
     canonical = track["movement/speed/raw/px"]
     canonical_data = canonical.data.copy()
     canonical.data[1] = np.float32(canonical.data[1] + 0.25)
     forged = copy.deepcopy(baseline_manifest)
-    forged["tracks"]["id_7"]["surfaces"]["movement/speed/raw/px"][
-        "content_sha256"
-    ] = mod.array_payload_sha256(canonical)
+    forged["tracks"]["id_7"]["surfaces"]["movement/speed/raw/px"]["content_sha256"] = (
+        mod.array_payload_sha256(canonical)
+    )
     run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = forged
     run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR] = (
         mod._canonical_json_sha256(forged)
@@ -606,9 +785,7 @@ def test_full_motion_loader_rejects_recomputed_manifest_and_live_attacks(
     with pytest.raises(ValueError, match="alias target"):
         mod.load_bound_track_motion_run(root, run)
     canonical.data = canonical_data
-    _restore_publication_attrs(
-        run, baseline_manifest, baseline_digest, baseline_commit
-    )
+    _restore_publication_attrs(run, baseline_manifest, baseline_digest, baseline_commit)
 
     attacks = (
         ("axis0_domain", mod.TRACK_MOTION_AXIS_TRACK_SAMPLE),
@@ -629,9 +806,7 @@ def test_full_motion_loader_rejects_recomputed_manifest_and_live_attacks(
     )
     for field, value in attacks:
         forged = copy.deepcopy(baseline_manifest)
-        forged["tracks"]["id_7"]["surfaces"][
-            "movement/speed/raw/px"
-        ][field] = value
+        forged["tracks"]["id_7"]["surfaces"]["movement/speed/raw/px"][field] = value
         run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = forged
         run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR] = (
             mod._canonical_json_sha256(forged)
@@ -673,10 +848,7 @@ def test_full_motion_loader_rejects_recomputed_manifest_and_live_attacks(
 def test_full_motion_physical_surfaces_use_nonunit_multiply_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track_group, _sealed, physical = _full_motion_run(
-        monkeypatch,
-        physical=True,
-    )
+    root, run, track_group, _sealed, physical = _clone_physical_motion_run(monkeypatch)
     assert physical is not None
     assert physical.mm_per_pixel != 1.0
     run.attrs["stage_selector_eligible"] = True
@@ -708,7 +880,7 @@ def test_full_motion_physical_surfaces_use_nonunit_multiply_authority(
 def test_motion_commit_rejects_recomputed_group_and_root_auxiliary_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(
+    root, run, track, _sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         root_auxiliary=True,
     )
@@ -716,12 +888,8 @@ def test_motion_commit_rejects_recomputed_group_and_root_auxiliary_payloads(
     baseline_manifest = copy.deepcopy(
         run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR]
     )
-    baseline_digest = run.attrs[
-        mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR
-    ]
-    baseline_commit = copy.deepcopy(
-        run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR]
-    )
+    baseline_digest = run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR]
+    baseline_commit = copy.deepcopy(run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR])
 
     level = track["movement/speed/raw"]
     original_method = level.attrs["derivative_method"]
@@ -730,9 +898,7 @@ def test_motion_commit_rejects_recomputed_group_and_root_auxiliary_payloads(
     with pytest.raises(ValueError, match="group attr.*controlled"):
         mod._build_track_motion_publication_manifest(root, run, positions)
     level.attrs["derivative_method"] = original_method
-    _restore_publication_attrs(
-        run, baseline_manifest, baseline_digest, baseline_commit
-    )
+    _restore_publication_attrs(run, baseline_manifest, baseline_digest, baseline_commit)
 
     trial_state = run["trial_state"]
     original_trial_state = trial_state.data.copy()
@@ -746,9 +912,7 @@ def test_motion_commit_rejects_recomputed_group_and_root_auxiliary_payloads(
     with pytest.raises(ValueError, match="publication commit"):
         mod.load_bound_track_motion_run(root, run)
     trial_state.data = original_trial_state
-    _restore_publication_attrs(
-        run, baseline_manifest, baseline_digest, baseline_commit
-    )
+    _restore_publication_attrs(run, baseline_manifest, baseline_digest, baseline_commit)
 
     del track.attrs["track_id"]
     with pytest.raises(ValueError, match="track-root group attr inventory"):
@@ -758,19 +922,12 @@ def test_motion_commit_rejects_recomputed_group_and_root_auxiliary_payloads(
 def test_full_motion_loader_rejects_recomputed_physical_authority_attack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, physical = _full_motion_run(
-        monkeypatch,
-        physical=True,
-    )
+    root, run, _track, _sealed, physical = _clone_physical_motion_run(monkeypatch)
     assert physical is not None
     run.attrs["stage_selector_eligible"] = True
     public = mod.load_bound_track_motion_run(root, run)
-    forged = copy.deepcopy(
-        run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR]
-    )
-    forged["physical_authority"]["mm_per_pixel"] = (
-        float(physical.mm_per_pixel) * 2.0
-    )
+    forged = copy.deepcopy(run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR])
+    forged["physical_authority"]["mm_per_pixel"] = float(physical.mm_per_pixel) * 2.0
     run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = forged
     run.attrs[mod.TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR] = (
         mod._canonical_json_sha256(forged)
@@ -789,23 +946,19 @@ def test_full_motion_loader_rejects_recomputed_physical_authority_attack(
 def test_mirrored_bout_payload_is_sealed_but_not_public_motion_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track_group, sealed, _physical = _full_motion_run(
+    root, run, track_group, sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         bout_auxiliary=True,
     )
     bout_record = sealed.manifest["tracks"]["id_7"]["surfaces"][
         "swim_bouts/start_frame"
     ]
-    assert bout_record["authority_scope"] == (
-        "sealed_auxiliary_not_motion_public"
-    )
+    assert bout_record["authority_scope"] == ("sealed_auxiliary_not_motion_public")
     with pytest.raises(KeyError):
         sealed.track(7).surface("swim_bouts/start_frame")
 
     run.attrs["stage_selector_eligible"] = True
-    baseline_commit = copy.deepcopy(
-        run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR]
-    )
+    baseline_commit = copy.deepcopy(run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR])
     start = track_group["swim_bouts/start_frame"]
     start.data[0] = np.int32(12)
     positions = mod.load_bound_track_position_bindings(root, run)
@@ -822,7 +975,7 @@ def test_mirrored_bout_payload_is_sealed_but_not_public_motion_authority(
 def test_full_motion_fps_60_publishes_unique_second_bin_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(
+    root, run, track, _sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         fps=60.0,
         smooth_seconds=1.0 / 60.0,
@@ -930,7 +1083,7 @@ def test_heading_nan_gap_contributes_zero_circular_numerator() -> None:
 def test_float64_heading_input_and_disabled_hysteresis_writer_seal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(
+    root, run, track, _sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         fps=60.0,
         smooth_seconds=0.2,
@@ -973,7 +1126,7 @@ def test_physical_derivative_uses_finalized_pixel_rounding_path() -> None:
 def test_full_motion_rejects_unsealed_run_root_child_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     mystery = run.create_group("mystery_public")
     mystery.create_array(
@@ -987,7 +1140,7 @@ def test_full_motion_rejects_unsealed_run_root_child_group(
 def test_full_motion_rejects_array_directly_under_tracks_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     run["tracks"].create_array(
         "mystery_track_index",
@@ -1001,7 +1154,7 @@ def test_full_motion_rejects_array_directly_under_tracks_parent(
 def test_full_motion_rejects_recomputed_equal_shape_role_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     delta = track["delta_seconds"]
     cumulative = track["cumulative_path_distance_px"]
@@ -1019,7 +1172,7 @@ def test_full_motion_rejects_recomputed_equal_shape_role_swap(
 def test_full_motion_rejects_recomputed_equal_shape_second_role_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     heading = track["heading_per_second_degrees"]
     resultant = track["heading_per_second_resultant"]
@@ -1038,7 +1191,7 @@ def test_full_motion_rejects_recomputed_equal_shape_second_role_swap(
 def test_full_motion_recomputes_summary_values_and_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     positions = mod.load_bound_track_position_bindings(root, run)
 
@@ -1056,7 +1209,7 @@ def test_full_motion_recomputes_summary_values_and_inventory(
 def test_motion_seal_accepts_materializer_storage_and_dynamic_staging_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(
+    root, run, _track, _sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         materializer_metadata=True,
     )
@@ -1081,7 +1234,7 @@ def test_motion_seal_accepts_materializer_storage_and_dynamic_staging_metadata(
 def test_full_motion_loader_resolves_detached_handle_from_authoritative_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     detached = _WritableGroup(
         path=run.path,
@@ -1097,7 +1250,7 @@ def test_full_motion_loader_resolves_detached_handle_from_authoritative_root(
 def test_full_motion_rejects_recomputed_validity_and_angle_mutations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     positions = mod.load_bound_track_position_bindings(root, run)
 
@@ -1126,7 +1279,7 @@ def test_full_motion_rejects_recomputed_validity_and_angle_mutations(
 def test_full_motion_rejects_conflicting_root_and_array_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
 
     run.attrs["coordinate_space"] = "texture"
@@ -1159,7 +1312,7 @@ def test_full_motion_rejects_conflicting_root_and_array_semantics(
 def test_manifest_rejects_position_source_ref_that_conflicts_with_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     source_refs = copy.deepcopy(run.attrs["source_refs"])
     source_refs["source_position_source_path"] = "crop_runs/decoy"
     run.attrs["source_refs"] = source_refs
@@ -1175,7 +1328,7 @@ def test_manifest_rejects_position_source_ref_that_conflicts_with_inputs(
 def test_manifest_rejects_self_consistent_decoy_position_source_ref(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs["position_source_path"] = "crop_runs/decoy"
     run.attrs["inputs"] = inputs
@@ -1201,7 +1354,7 @@ def test_manifest_rejects_self_consistent_decoy_position_source_ref(
 def test_manifest_rejects_self_consistent_missing_position_source_rowset_ref(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     del inputs["position_source_rowset_path"]
     run.attrs["inputs"] = inputs
@@ -1244,7 +1397,7 @@ def test_manifest_rejects_coherent_deprecated_lineage_aliases(
     field: str,
     value: object,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs[field] = value
     _replace_motion_derivation_inputs(run, inputs)
@@ -1260,7 +1413,7 @@ def test_manifest_rejects_coherent_deprecated_lineage_aliases(
 def test_manifest_rejects_coherent_legacy_position_source_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs["position_source_kind"] = "crop_rows_source_image_bbox"
     _replace_motion_derivation_inputs(run, inputs)
@@ -1276,7 +1429,7 @@ def test_manifest_rejects_coherent_legacy_position_source_kind(
 def test_manifest_rejects_coherent_crop_run_that_is_not_position_rowset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs["crop_run"] = "decoy"
     _replace_motion_derivation_inputs(run, inputs)
@@ -1292,7 +1445,7 @@ def test_manifest_rejects_coherent_crop_run_that_is_not_position_rowset(
 def test_manifest_rejects_coherent_detection_path_outside_crop_lineage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs["detection_path"] = "detect_runs/decoy"
     _replace_motion_derivation_inputs(run, inputs)
@@ -1318,7 +1471,7 @@ def test_manifest_rejects_coherent_decoy_keypoint_or_tracking_path(
     value: str,
     message: str,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs[field] = value
     _replace_motion_derivation_inputs(run, inputs)
@@ -1364,7 +1517,7 @@ def test_offline_source_refs_reject_malformed_run_path_grammar(
 def test_manifest_rejects_coherent_duplicate_physical_calibration_parameter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     parameters = copy.deepcopy(run.attrs["parameters"])
     parameters["physical_calibration"] = {
         "pixels_per_mm_projector": 5.0,
@@ -1394,7 +1547,7 @@ def test_manifest_rejects_any_reintroduced_parameter_authority_alias(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     parameters = copy.deepcopy(run.attrs["parameters"])
     parameters[name] = 999
     run.attrs["parameters"] = copy.deepcopy(parameters)
@@ -1417,7 +1570,7 @@ def test_manifest_rejects_any_reintroduced_parameter_authority_alias(
 def test_manifest_rejects_uncontrolled_tracks_parent_attrs_even_if_resealed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     run["tracks"].attrs["physical_calibration"] = {"mm_per_pixel": 999.0}
 
     with pytest.raises(ValueError, match="/tracks attr inventory is not closed"):
@@ -1431,7 +1584,7 @@ def test_manifest_rejects_uncontrolled_tracks_parent_attrs_even_if_resealed(
 def test_manifest_rejects_reintroduced_root_physical_calibration_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["physical_calibration"] = {
         "pixels_per_mm_projector": 5.0,
     }
@@ -1469,7 +1622,7 @@ def test_offline_swim_bout_input_rejects_nonleaf_values(
 def test_manifest_rejects_chaser_auxiliary_legacy_nested_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs["chaser_metrics"] = {
         "metrics_run": "metrics_1",
@@ -1483,7 +1636,9 @@ def test_manifest_rejects_chaser_auxiliary_legacy_nested_metadata(
     }
     _replace_motion_derivation_inputs(run, inputs)
 
-    with pytest.raises(ValueError, match="chaser_metrics input inventory is not closed"):
+    with pytest.raises(
+        ValueError, match="chaser_metrics input inventory is not closed"
+    ):
         mod._build_track_motion_publication_manifest(
             root,
             run,
@@ -1494,7 +1649,7 @@ def test_manifest_rejects_chaser_auxiliary_legacy_nested_metadata(
 def test_manifest_rejects_claimed_chaser_auxiliary_without_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs["chaser_metrics"] = {
         "metrics_run": "metrics_1",
@@ -1517,8 +1672,7 @@ def test_manifest_rejects_claimed_chaser_auxiliary_without_payload(
 
 def test_online_input_inventory_rejects_legacy_authority_aliases() -> None:
     source_path = (
-        "analysis/stimulus_runs/stim_1/tracking_data/chaser_states/"
-        "target_position_xy"
+        "analysis/stimulus_runs/stim_1/tracking_data/chaser_states/target_position_xy"
     )
     inputs = {
         "stimulus_run": "stim_1",
@@ -1540,7 +1694,7 @@ def test_online_input_inventory_rejects_legacy_authority_aliases() -> None:
 def test_manifest_rejects_conflicting_legacy_position_source_attrs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["positions_px_source_path"] = "crop_runs/decoy/centers_img_xy"
 
     with pytest.raises(ValueError, match="positions_px_source_path conflicts"):
@@ -1554,11 +1708,10 @@ def test_manifest_rejects_conflicting_legacy_position_source_attrs(
 def test_online_derivation_binds_exact_position_path_and_descriptor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, _run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     source = sealed.position_bindings.source_positions
     online_source_path = (
-        "analysis/stimulus_runs/stim_1/tracking_data/chaser_states/"
-        "target_position_xy"
+        "analysis/stimulus_runs/stim_1/tracking_data/chaser_states/target_position_xy"
     )
     online_positions = SimpleNamespace(
         source_positions=SimpleNamespace(
@@ -1645,7 +1798,7 @@ def test_online_derivation_binds_exact_position_path_and_descriptor(
 def test_run_derivation_rejects_all_conflicting_duplicate_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    _root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     positions = sealed.position_bindings
 
     original_stage = copy.deepcopy(run.attrs["provenance"])
@@ -1670,9 +1823,7 @@ def test_run_derivation_rejects_all_conflicting_duplicate_metadata(
         mod._motion_run_derivation_record(run, positions)
 
     conflicting_final = copy.deepcopy(original_final)
-    conflicting_final["input_run_ids"]["position_source_path"] = (
-        "crop_runs/decoy"
-    )
+    conflicting_final["input_run_ids"]["position_source_path"] = "crop_runs/decoy"
     run.attrs["run_provenance"] = conflicting_final
     with pytest.raises(ValueError, match="finalization provenance conflicts"):
         mod._motion_run_derivation_record(run, positions)
@@ -1698,7 +1849,7 @@ def test_full_motion_rejects_mutated_exact_upstream_input_arrays(
     path: tuple[str, ...],
     replacement: object,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     node = root
     for part in path:
@@ -1712,7 +1863,7 @@ def test_full_motion_rejects_mutated_exact_upstream_input_arrays(
 def test_full_motion_rejects_equal_payload_from_unselected_keypoint_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     keypoint_runs = root["keypoints_runs"]
     selected = keypoint_runs["kp_1/heading"]
@@ -1722,8 +1873,8 @@ def test_full_motion_rejects_equal_payload_from_unselected_keypoint_run(
         data=np.asarray(selected[:]),
     )
     authority = copy.deepcopy(run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR])
-    authority["fields"]["heading_degrees"]["array"] = (
-        mod._motion_input_array_record(decoy)
+    authority["fields"]["heading_degrees"]["array"] = mod._motion_input_array_record(
+        decoy
     )
     run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority
     positions = mod.load_bound_track_position_bindings(root, run)
@@ -1735,7 +1886,7 @@ def test_full_motion_rejects_equal_payload_from_unselected_keypoint_run(
 def test_input_authority_rejects_equal_payload_detection_source_decoy_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, _run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     positions = sealed.position_bindings.source_positions
     crop = root["crop_runs"]["c1"]
     decoy = crop.create_array(
@@ -1749,12 +1900,8 @@ def test_input_authority_rejects_equal_payload_detection_source_decoy_leaf(
             source_positions=positions,
             mode="offline_exact_sources_v1",
             heading_node=root["keypoints_runs"]["kp_1"]["heading"],
-            keypoint_usability_node=root["keypoints_runs"]["kp_1"][
-                "heading_usable"
-            ],
-            keypoint_row_key_node=root["keypoints_runs"]["kp_1"][
-                "instance_key"
-            ],
+            keypoint_usability_node=root["keypoints_runs"]["kp_1"]["heading_usable"],
+            keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
             tracking_group=root["tracking_runs"]["trk_1"],
             detection_source_node=decoy,
         )
@@ -1763,7 +1910,7 @@ def test_input_authority_rejects_equal_payload_detection_source_decoy_leaf(
 def test_input_authority_rejects_omitted_selected_detection_source_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, _run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     crop = root["crop_runs"]["c1"]
     crop.create_array(
         "detection_source",
@@ -1776,12 +1923,8 @@ def test_input_authority_rejects_omitted_selected_detection_source_leaf(
             source_positions=sealed.position_bindings.source_positions,
             mode="offline_exact_sources_v1",
             heading_node=root["keypoints_runs"]["kp_1"]["heading"],
-            keypoint_usability_node=root["keypoints_runs"]["kp_1"][
-                "heading_usable"
-            ],
-            keypoint_row_key_node=root["keypoints_runs"]["kp_1"][
-                "instance_key"
-            ],
+            keypoint_usability_node=root["keypoints_runs"]["kp_1"]["heading_usable"],
+            keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
             tracking_group=root["tracking_runs"]["trk_1"],
         )
 
@@ -1789,7 +1932,7 @@ def test_input_authority_rejects_omitted_selected_detection_source_leaf(
 def test_manifest_rejects_generated_detection_source_after_leaf_appears(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     root["crop_runs"]["c1"].create_array(
         "detection_source",
         data=np.zeros(2, dtype=np.int8),
@@ -1806,7 +1949,7 @@ def test_manifest_rejects_generated_detection_source_after_leaf_appears(
 def test_input_authority_rejects_uncontrolled_keypoint_usability_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, _run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     keypoint = root["keypoints_runs"]["kp_1"]
     decoy = keypoint.create_array(
         "decoy_usability",
@@ -1828,7 +1971,7 @@ def test_input_authority_rejects_uncontrolled_keypoint_usability_leaf(
 def test_validator_rejects_equal_payload_uncontrolled_usability_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     decoy = root["keypoints_runs"]["kp_1"].create_array(
         "decoy_usability",
         data=np.ones(2, dtype=bool),
@@ -1853,7 +1996,7 @@ def test_validator_rejects_equal_payload_uncontrolled_usability_leaf(
 def test_validator_rejects_generated_usability_when_controlled_leaf_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     authority = copy.deepcopy(run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR])
     authority["fields"]["keypoint_success"] = mod._motion_generated_field(
         generator_id="all_true_v1",
@@ -1875,7 +2018,7 @@ def test_validator_rejects_generated_usability_when_controlled_leaf_exists(
 def test_validator_rejects_omitted_tracking_arena_authorities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     original = copy.deepcopy(run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR])
 
     missing_rows = copy.deepcopy(original)
@@ -1908,7 +2051,7 @@ def test_validator_rejects_omitted_tracking_arena_authorities(
 def test_manifest_rejects_forged_equal_payload_detection_source_decoy_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     crop = root["crop_runs"]["c1"]
     decoy = crop.create_array(
@@ -1931,7 +2074,7 @@ def test_manifest_rejects_forged_equal_payload_detection_source_decoy_leaf(
 def test_online_input_authority_accepts_only_visual_angle_heading_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, _run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     positions = sealed.position_bindings.source_positions
     crop = root["crop_runs"]["c1"]
     selected = crop.create_array(
@@ -1967,7 +2110,7 @@ def test_online_input_authority_accepts_only_visual_angle_heading_leaf(
 def test_online_input_authority_rejects_omitted_visual_angle_heading_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, _run, _track, sealed, _physical = _full_motion_run(monkeypatch)
+    root, _run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     root["crop_runs"]["c1"].create_array(
         "visual_angle_deg",
         data=np.asarray([10.0, 20.0], dtype=np.float32),
@@ -1985,7 +2128,7 @@ def test_online_input_authority_rejects_omitted_visual_angle_heading_leaf(
 def test_full_motion_rejects_forged_arena_identity_at_every_output_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     run["track_arena_ids"].data[0] = np.int32(9)
     track.attrs["arena_id"] = 9
@@ -2000,7 +2143,7 @@ def test_full_motion_rejects_forged_arena_identity_at_every_output_level(
 def test_full_motion_rejects_reintroduced_detection_ordinal_even_if_resealed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     assert "detection_indices" not in track
     run.attrs["stage_selector_eligible"] = True
     track.create_array(
@@ -2018,7 +2161,7 @@ def test_full_motion_normal_seal_rejects_legacy_coordinate_space_labels(
     monkeypatch: pytest.MonkeyPatch,
     legacy_space: str,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     parameters = copy.deepcopy(run.attrs["parameters"])
     parameters["coordinate_space"] = legacy_space
@@ -2038,7 +2181,7 @@ def test_full_motion_normal_seal_rejects_legacy_coordinate_space_labels(
 def test_one_row_pixel_only_producer_seal_and_strict_reader_round_trip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, sealed, _physical = _full_motion_run(
+    root, run, track, sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         source_rows=np.asarray([0], dtype=np.int64),
     )
@@ -2059,9 +2202,7 @@ def test_one_row_pixel_only_producer_seal_and_strict_reader_round_trip(
     assert tables.positions_mm is None
     assert tables.positions_px_descriptor is not None
     assert tables.positions_px_descriptor.geometry_type == "point_xy"
-    camera_positions, width, height = (
-        tables.require_direct_source_camera_positions_px()
-    )
+    camera_positions, width, height = tables.require_direct_source_camera_positions_px()
     np.testing.assert_array_equal(camera_positions, tables.positions_px)
     assert (width, height) == (100, 80)
 
@@ -2069,7 +2210,7 @@ def test_one_row_pixel_only_producer_seal_and_strict_reader_round_trip(
 def test_strict_reader_rejects_mutated_detached_surface_after_child_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, _track, _sealed, _physical = _full_motion_run(monkeypatch)
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
     run.attrs["stage_selector_eligible"] = True
     real_loader = mod.load_bound_track_motion_run
 
