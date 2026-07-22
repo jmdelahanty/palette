@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 
 
 SCRIPT = Path(__file__).parents[3] / "scripts" / "submit_keypoints_batches_bsub.sh"
@@ -32,7 +34,9 @@ def _run_dry_run(tmp_path: Path, *storage_args: str) -> tuple[subprocess.Complet
         capture_output=True,
         text=True,
         cwd=SCRIPT.parents[1],
+        env={**os.environ, "PALETTE_PYTHON": sys.executable},
     )
+    assert result.returncode == 0, result.stderr
     summary = json.loads(
         (log_dir / "kp_storage_test" / "manifest_summary.json").read_text(
             encoding="utf-8"
@@ -44,7 +48,6 @@ def _run_dry_run(tmp_path: Path, *storage_args: str) -> tuple[subprocess.Complet
 def test_batch_submitter_defaults_to_indexed_keypoint_shards(tmp_path: Path) -> None:
     result, summary = _run_dry_run(tmp_path)
 
-    assert result.returncode == 0, result.stderr
     assert "--keypoint-roi-shard-rows 131072" in result.stdout
     assert "--keypoint-frame-shard-rows 131072" in result.stdout
     assert summary["keypoint_storage"]["effective"] == {
@@ -58,7 +61,6 @@ def test_batch_submitter_defaults_to_indexed_keypoint_shards(tmp_path: Path) -> 
 def test_batch_submitter_forwards_regular_chunk_opt_out(tmp_path: Path) -> None:
     result, summary = _run_dry_run(tmp_path, "--no-keypoint-sharding")
 
-    assert result.returncode == 0, result.stderr
     assert "--no-keypoint-sharding" in result.stdout
     assert "--keypoint-roi-shard-rows" not in result.stdout
     assert summary["keypoint_storage"]["effective"] == {
@@ -78,7 +80,6 @@ def test_batch_submitter_forwards_custom_shard_rows(tmp_path: Path) -> None:
         "16384",
     )
 
-    assert result.returncode == 0, result.stderr
     assert "--keypoint-roi-shard-rows 8192" in result.stdout
     assert "--keypoint-frame-shard-rows 16384" in result.stdout
     assert summary["keypoint_storage"]["effective"]["keypoint_roi_shard_rows"] == 8192

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 
 from fisheye.cohorts.registry import compute_manifest_sha256
 from fisheye.cohorts.spec import canonical_sha256
@@ -84,6 +86,7 @@ def test_cohort_report_submitter_uses_frozen_members_and_dependency(
         check=True,
         text=True,
         capture_output=True,
+        env={**os.environ, "PALETTE_PYTHON": sys.executable},
     )
 
     bsub_line = next(

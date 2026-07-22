@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -72,6 +74,7 @@ def _render(
         check=True,
         text=True,
         capture_output=True,
+        env={**os.environ, "PALETTE_PYTHON": sys.executable},
     )
     run_dir = log_dir / f"chaser_analytics_{run_id}"
     return (
