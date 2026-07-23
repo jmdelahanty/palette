@@ -10,6 +10,11 @@ Define how Palette Zarr stores should behave across three distinct phases:
 
 The goal is to avoid forcing one storage layout to serve all three jobs.
 
+Shared implementation contracts:
+
+- [`shared_zarr_schema_catalog_design.md`](shared_zarr_schema_catalog_design.md)
+- [`shared_zarr_storage_benchmark_contract.md`](shared_zarr_storage_benchmark_contract.md)
+
 ## Why This Policy Exists
 
 Palette deliberately uses a hybrid storage model rather than treating one file
@@ -210,6 +215,24 @@ Policy:
   the authoritative editable pixel surface
 - compact deltas only through a validated maintenance publication job
 
+### Quarantined Noncanonical Evidence
+
+Example:
+
+- `detection_artifact_runs`
+
+Policy:
+
+- treat as immutable, selector-ineligible evidence with run-local identity, not
+  as a canonical detection stage or editable review authority
+- retain only where compatibility, transfer audit, or an explicit diagnostic
+  use requires it
+- shard retained payloads because they are immutable, but do not prioritize
+  writer migration or dedicated benchmarks ahead of canonical pipeline and
+  training surfaces
+- do not add general downstream consumers or canonical promotion behavior
+  without an approved coordinate- and identity-binding contract
+
 ### Compatibility / Regenerable Outputs
 
 Examples:
@@ -349,17 +372,28 @@ Avoid this for bulk outputs:
 many workers inserting individual chunks directly into the home Zarr over the network
 ```
 
-## Deferred Consolidated-Metadata Policy
+## Lifecycle Consolidated-Metadata Policy
 
-Direct child metadata remains the correctness baseline for mutable Palette
-stores. Readers that need correctness against actively edited local stores must
-be able to discover groups and attrs from direct `zarr.json` metadata, or by
-opening with consolidated metadata disabled. Consolidated metadata is a
-performance and portability surface, not the only source of truth.
+Direct child metadata remains the correctness baseline while a Palette store is
+mutable. Writers, edit tools, and readers inspecting in-progress state must open
+with consolidated metadata disabled. Published immutable profiles use a
+different contract: the validated consolidated root view is the external reader
+and selector visibility surface.
 
-The preferred writer policy is to refresh consolidated metadata at stable
-single-writer finalization boundaries, after all arrays, groups, direct attrs,
-indexes, and parent `latest` attrs have been written and validated.
+The writer policy is to refresh consolidated metadata at stable single-writer
+publication boundaries. The required order is:
+
+1. write arrays, groups, direct attrs, indexes, and provenance;
+2. validate the complete direct run;
+3. update direct `latest` and manifest selection metadata;
+4. consolidate the root as the final published visibility step;
+5. validate that the consolidated generation contains the intended selector,
+   schema bindings, and array metadata.
+
+Published readers continue using the preceding consolidated generation until
+step 4 completes. This avoids exposing a new selector through the intended
+published read path before its complete metadata view exists.
+
 Consolidation is available through the shared
 `fisheye.shared.zarr_helpers.reconsolidate_zarr_metadata()` helper and the
 operator CLI:
@@ -374,22 +408,24 @@ Helper behavior:
 
 - write direct metadata first and make direct readers correct before
   consolidation runs;
-- consolidate only after a complete run group is present and selected metadata
-  such as `latest` has been updated;
+- consolidate only after a complete run group is present and selected direct
+  metadata such as `latest` has been updated;
 - record consolidation provenance such as `metadata_consolidation_policy`,
   `metadata_consolidated_at_utc`, `metadata_consolidation_status`, and any
   warning/error text;
-- treat consolidation failure as a warning when direct metadata is valid, not as
-  a reason to roll back otherwise valid analysis data;
-- keep external consumers on a fallback path that can read direct metadata when
-  consolidated metadata is stale or absent.
+- treat consolidation failure as recoverable for mutable/local profiles, but as
+  a publication blocker for profiles that promise a consolidated external read
+  surface;
+- keep explicit legacy compatibility readers for historical archives that do
+  not carry the published-profile contract; do not make silent unconsolidated
+  fallback the default for newly published immutable artifacts.
 
 Do not run consolidation from parallel workers that share an archive. For
 clipped workflows, per-clip workers should leave consolidated metadata alone and
 the recording-level finalizer should refresh it once shared writes are complete.
-The near-term rule remains: do not trust consolidated metadata for correctness
-on mutable analysis stores, but make finalized stores fresh when a single
-finalization step can safely do so.
+The lifecycle rule is: never trust consolidated metadata for actively mutable
+analysis state, and never declare a consolidated-profile immutable artifact
+published until its consolidated generation has been validated.
 
 ## Recommended Near-Term Implementation Order
 

@@ -24,6 +24,26 @@
 - If sync `zarr.open_group(...)` hangs in Codex sandbox, use metadata-file checks from `docs/sandbox_zarr_fallback.md`.
 - For keypoint review status checks, prefer `zarr.json` + `jq` fallback over Python `zarr` reads when sandbox hangs are observed.
 
+## Consolidated Metadata Read Policy
+
+- Treat metadata mode as a lifecycle decision, not a universal reader option.
+- Writers, edit tools, and readers inspecting an actively mutable or incomplete
+  Palette Zarr must use `use_consolidated=False` so newly created groups are
+  visible during mutation.
+- For a selector-visible immutable publication, finish and validate all payload,
+  attrs, and provenance writes; update the direct `latest`/manifest selection
+  metadata; then consolidate the root as the final published visibility step.
+  Validate that the consolidated generation contains the intended selector
+  state before declaring publication complete.
+- New readers of published immutable artifacts should use consolidated metadata
+  by default and validate the published metadata generation/schema contract.
+- Missing or stale consolidated metadata on a published immutable artifact is a
+  publication defect. Do not silently normalize that state by making
+  unconsolidated traversal the permanent reader default.
+- Diagnostics and benchmarks that compare metadata paths must select
+  consolidated or unconsolidated mode explicitly and record the selected mode
+  in their result.
+
 ## Sandbox Zarr Test Policy
 
 - Run pytest-based validation outside the Codex sandbox by default for this repository; tests run normally there and sandbox execution can hang on zarr paths.
@@ -75,7 +95,9 @@
   `scripts/py -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'`
 - Real-zarr training/export/inference smokes should run outside the sandbox with escalation, especially when they use CUDA or touch `/nvme1`.
 - For U-Net subject-mask smoke validation, prefer the CUDA-capable outside-sandbox path over CPU sandbox execution. If the sandbox prints the startup banner but does not reach the artifact summary promptly, stop it and rerun outside the sandbox.
-- When newly written zarr groups are hidden by stale consolidated metadata, open mutable Palette zarrs with `use_consolidated=False`.
+- When newly written Zarr groups are hidden during an active mutation, follow
+  the Consolidated Metadata Read Policy above; do not use a stale consolidated
+  view of a mutable archive.
 
 ## Examples
 
