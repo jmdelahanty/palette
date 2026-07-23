@@ -115,6 +115,28 @@ jobs:
           restore-keys: |
             palette-subject-shape-fixture-v1-${{ runner.os }}-
 
+      - name: Select canonical subject-mask finalizer fixture owner
+        id: subject-mask-finalizer-fixture-owner
+        run: |
+          if python scripts/ci_pytest_shard.py \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count 12 \
+            --list-only \
+            | grep -Fxq "tests/unit/fisheye/test_finalize_subject_masks.py"; then
+            echo "selected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore canonical subject-mask finalizer source fixture
+        if: steps.subject-mask-finalizer-fixture-owner.outputs.selected == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .pytest_cache/palette-subject-mask-finalizer-fixture
+          key: palette-subject-mask-finalizer-fixture-v1-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            palette-subject-mask-finalizer-fixture-v1-${{ runner.os }}-
+
       - name: Run non-GPU test shard
         run: |
           python scripts/ci_pytest_shard.py \

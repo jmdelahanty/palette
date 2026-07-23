@@ -94,6 +94,7 @@ from fisheye.shared.pixel_frame_authority import (
     stamp_crop_placement_ownership,
     stamp_roi_pixel_frame_authority,
 )
+from fisheye.shared.proof_verification import finish_proof_verification
 from fisheye.shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_COORDINATE_DERIVATION_ATTR,
     SUBJECT_MASK_SURFACE_INVENTORY_ATTR,
@@ -4539,6 +4540,10 @@ def _activate_validated_refined_subject_mask_coordinate_surfaces(
             _fail("Refined coordinate publication changed before activation.")
         parent = fresh_parent()
         _require_exact_parent_states(parent, expected_parent_states)
+        # Close the completed-child proof phase before the publication lease or
+        # any selector is mutated. Reuse accelerates validation but never
+        # authorizes promotion from stale evidence.
+        finish_proof_verification()
         base = _base_generation(selector_snapshot)
         policy_present, policy = _snapshot_value(
             selector_snapshot,

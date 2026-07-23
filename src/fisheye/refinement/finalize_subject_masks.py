@@ -42,6 +42,11 @@ from ..shared.provenance_attrs import (
     build_assignment_keypoint_attrs,
     build_source_keypoints_attrs,
 )
+from ..shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_scope,
+    restart_proof_verification,
+)
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources, stamp_row_identity_mode
 from ..shared.refined_subject_mask_mutation import (
     resolve_mutable_refined_subject_mask_run,
@@ -6053,65 +6058,69 @@ def finalize_subject_mask_run(
     )
     if future_canonical:
         assert canonical_publication_owner is not None
-        if eye_assignment_context is not None:
-            canonical_keypoints = eye_assignment_context.canonical_coordinate_surfaces
-            if canonical_keypoints is None:
-                raise RuntimeError(
-                    "Canonical refined eye assignment lost its sealed keypoint dependency."
-                )
-            require_bound_keypoint_coordinate_surfaces(canonical_keypoints)
-        # Bind coordinate authority only after all scientific outputs and
-        # provenance inputs are final. Preparing earlier would seal a
-        # provisional provenance record that the eye-assignment summary later
-        # changes, making a correct publication fail its own fresh preflight.
-        prepare_refined_subject_mask_coordinate_context(
-            root,
-            f"refined_subject_masks_runs/{target_run}",
-            expected_publication_owner=canonical_publication_owner,
-            source_subject_mask_path=f"subject_mask_runs/{source.run_name}",
-            mask_labels=component_names,
-            assignment_keypoint_surfaces=(
-                eye_assignment_context.canonical_coordinate_surfaces
-                if eye_assignment_context is not None
-                else None
-            ),
-        )
-        run_group = root[f"refined_subject_masks_runs/{target_run}"]
-        _stamp_non_authoritative_refined_mask_caches(run_group)
-        pending_coordinate_surfaces = publish_refined_subject_mask_coordinate_surfaces(
-            root,
-            f"refined_subject_masks_runs/{target_run}",
-            expected_publication_owner=canonical_publication_owner,
-        )
-        # The publisher stamps run attrs through fresh handles; do not finalize
-        # completion through the pre-publication cached metadata object.
-        run_group = root[f"refined_subject_masks_runs/{target_run}"]
-        mark_run_complete(
-            run_group,
-            parent_group=None,
-            run_name=target_run,
-            run_provenance=run_provenance,
-        )
-        selector_snapshot = _canonical_refined_selector_snapshot(refined_parent)
-        try:
-            refined_parent.attrs["latest_pending"] = target_run
-            if refined_parent.attrs.get("latest_pending") != target_run:
-                raise RuntimeError("Canonical refined latest_pending did not persist exactly.")
-            _activate_validated_refined_subject_mask_coordinate_surfaces(
+        with proof_verification_scope():
+            if eye_assignment_context is not None:
+                canonical_keypoints = eye_assignment_context.canonical_coordinate_surfaces
+                if canonical_keypoints is None:
+                    raise RuntimeError(
+                        "Canonical refined eye assignment lost its sealed keypoint dependency."
+                    )
+                require_bound_keypoint_coordinate_surfaces(canonical_keypoints)
+            # Bind coordinate authority only after all scientific outputs and
+            # provenance inputs are final. Preparing earlier would seal a
+            # provisional provenance record that the eye-assignment summary later
+            # changes, making a correct publication fail its own fresh preflight.
+            prepare_refined_subject_mask_coordinate_context(
                 root,
-                refined_parent,
-                pending_coordinate_surfaces,
-                run_name=target_run,
-                publication_owner_token=canonical_publication_owner,
-                selector_snapshot=selector_snapshot,
+                f"refined_subject_masks_runs/{target_run}",
+                expected_publication_owner=canonical_publication_owner,
+                source_subject_mask_path=f"subject_mask_runs/{source.run_name}",
+                mask_labels=component_names,
+                assignment_keypoint_surfaces=(
+                    eye_assignment_context.canonical_coordinate_surfaces
+                    if eye_assignment_context is not None
+                    else None
+                ),
             )
-        except BaseException:
-            _restore_attempt_pending_selector(
-                refined_parent,
-                selector_snapshot,
-                run_name=target_run,
+            run_group = root[f"refined_subject_masks_runs/{target_run}"]
+            _stamp_non_authoritative_refined_mask_caches(run_group)
+            pending_coordinate_surfaces = publish_refined_subject_mask_coordinate_surfaces(
+                root,
+                f"refined_subject_masks_runs/{target_run}",
+                expected_publication_owner=canonical_publication_owner,
             )
-            raise
+            # Close the running-child proof phase before completion changes the
+            # lifecycle record. Activation starts a fresh completed-child phase
+            # and closes it before touching parent selectors.
+            finish_proof_verification()
+            run_group = root[f"refined_subject_masks_runs/{target_run}"]
+            mark_run_complete(
+                run_group,
+                parent_group=None,
+                run_name=target_run,
+                run_provenance=run_provenance,
+            )
+            restart_proof_verification()
+            selector_snapshot = _canonical_refined_selector_snapshot(refined_parent)
+            try:
+                refined_parent.attrs["latest_pending"] = target_run
+                if refined_parent.attrs.get("latest_pending") != target_run:
+                    raise RuntimeError("Canonical refined latest_pending did not persist exactly.")
+                _activate_validated_refined_subject_mask_coordinate_surfaces(
+                    root,
+                    refined_parent,
+                    pending_coordinate_surfaces,
+                    run_name=target_run,
+                    publication_owner_token=canonical_publication_owner,
+                    selector_snapshot=selector_snapshot,
+                )
+            except BaseException:
+                _restore_attempt_pending_selector(
+                    refined_parent,
+                    selector_snapshot,
+                    run_name=target_run,
+                )
+                raise
     else:
         mark_run_complete(
             run_group,

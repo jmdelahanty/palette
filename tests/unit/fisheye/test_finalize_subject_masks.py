@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -49,12 +50,12 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.shared.zarr.stage_arrays import REFINED_SUBJECT_MASKS_SPEC, validate_run
 from fisheye.tune import refined_subject_mask_review as review_mod
-from tests.unit.fisheye.test_keypoint_coordinate_publication import (
-    _real_canonical_archive,
-)
 from tests.unit.fisheye.test_subject_mask_coordinate_publication import (
     MODEL_ARTIFACT,
     MODEL_TRANSFORM,
+)
+from tests.unit.fisheye.subject_mask_finalizer_test_fixtures import (
+    resolve_subject_mask_finalizer_archive_template,
 )
 
 
@@ -242,6 +243,29 @@ def _publish_real_canonical_subject_mask(
         selector_snapshot=selector_snapshot,
     )
     return run
+
+
+@pytest.fixture(scope="session")
+def canonical_finalizer_template() -> Path:
+    """Reuse one validated immutable matched source graph."""
+
+    return resolve_subject_mask_finalizer_archive_template(mismatched=False)
+
+
+@pytest.fixture(scope="session")
+def mismatched_finalizer_template() -> Path:
+    """Reuse one validated immutable selection-mismatch source graph."""
+
+    return resolve_subject_mask_finalizer_archive_template(mismatched=True)
+
+
+def _clone_finalizer_template(
+    tmp_path: Path,
+    template: Path,
+) -> zarr.Group:
+    destination = tmp_path / "canonical.zarr"
+    shutil.copytree(template, destination)
+    return zarr.open_group(str(destination), mode="a", use_consolidated=False)
 
 
 @pytest.mark.parametrize("key", ["shard_runs", "subject_mask_shard_runs", "runs"])
@@ -482,12 +506,9 @@ def test_canonical_finalizer_forbids_retained_source_seed_rasters(
 def test_real_finalizer_publication_activation_and_strict_reader_integration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    canonical_finalizer_template: Path,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(
-        tmp_path,
-        include_bilateral_eyes=True,
-    )
-    _publish_real_canonical_subject_mask(root)
+    root = _clone_finalizer_template(tmp_path, canonical_finalizer_template)
     monkeypatch.setattr(
         mod,
         "get_git_info",
@@ -564,15 +585,9 @@ def test_real_finalizer_publication_activation_and_strict_reader_integration(
 
 def test_canonical_finalizer_rejects_keypoint_and_mask_selection_mismatch(
     tmp_path: Path,
+    mismatched_finalizer_template: Path,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(
-        tmp_path,
-        include_bilateral_eyes=True,
-    )
-    _publish_real_canonical_subject_mask(
-        root,
-        selected_rows=np.asarray([0, 1], dtype="<i8"),
-    )
+    root = _clone_finalizer_template(tmp_path, mismatched_finalizer_template)
 
     with pytest.raises(ValueError, match="exact dtype-preserving"):
         mod.finalize_subject_mask_run(
@@ -591,12 +606,9 @@ def test_canonical_finalizer_rejects_keypoint_and_mask_selection_mismatch(
 
 def test_canonical_finalizer_requires_exact_detection_success_leaf(
     tmp_path: Path,
+    canonical_finalizer_template: Path,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(
-        tmp_path,
-        include_bilateral_eyes=True,
-    )
-    _publish_real_canonical_subject_mask(root)
+    root = _clone_finalizer_template(tmp_path, canonical_finalizer_template)
     keypoints = root["keypoints_runs/k1"]
     success = np.asarray(keypoints["detection_success"][:], dtype=bool)
     del keypoints["detection_success"]
@@ -616,12 +628,9 @@ def test_canonical_finalizer_requires_exact_detection_success_leaf(
 
 def test_canonical_assignment_rejects_conflicting_complete_lineage(
     tmp_path: Path,
+    canonical_finalizer_template: Path,
 ) -> None:
-    root, _keypoints = _real_canonical_archive(
-        tmp_path,
-        include_bilateral_eyes=True,
-    )
-    _publish_real_canonical_subject_mask(root)
+    root = _clone_finalizer_template(tmp_path, canonical_finalizer_template)
     source = mod._load_source_subject_mask_run(root, "s1")
     source = replace(
         source,
