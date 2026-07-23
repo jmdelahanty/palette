@@ -1,6 +1,6 @@
 """Completion markers for Palette Zarr run groups.
 
-The contract is intentionally attr-based so it works for both Zarr v2/v3 and
+The contract is intentionally attr-based for Palette's Zarr-v3 stores and
 existing fake-group unit tests. Parent groups stamped with
 ``palette_completion_epoch >= 1`` are strict: unmarked children are not trusted
 as complete. Unstamped legacy parents still treat unmarked children as complete
@@ -232,8 +232,9 @@ def mark_run_complete(
         attrs[RUN_NAME_ATTR] = str(run_name)
     if parent_group is not None and run_name is not None:
         name = str(run_name)
-        parent_group.attrs[RUN_LATEST_COMPLETE_ATTR] = name
-        parent_group.attrs["latest"] = name
+        if is_run_selector_eligible(run_group):
+            parent_group.attrs[RUN_LATEST_COMPLETE_ATTR] = name
+            parent_group.attrs["latest"] = name
         if parent_group.attrs.get(RUN_LATEST_PENDING_ATTR) == name:
             try:
                 del parent_group.attrs[RUN_LATEST_PENDING_ATTR]
@@ -330,6 +331,20 @@ def is_run_complete_in_parent(
     return is_run_complete(run_group, legacy_default=effective_default)
 
 
+def is_run_selector_eligible(run_group: Any) -> bool:
+    """Return whether implicit or authoritative stage selection may choose a run.
+
+    Missing markers remain eligible for historical runs. Once the marker is
+    present it must be the JSON boolean ``true``; malformed values fail closed,
+    while auxiliary, shard, artifact, and compatibility outputs use ``false``.
+    """
+
+    attrs = getattr(run_group, "attrs", {})
+    if "stage_selector_eligible" not in attrs:
+        return True
+    return attrs.get("stage_selector_eligible") is True
+
+
 def _group_names(parent_group: Any) -> list[str]:
     if hasattr(parent_group, "group_keys"):
         names = parent_group.group_keys()
@@ -373,7 +388,44 @@ def resolve_latest_complete_run_name(
     latest_attr: str = "latest",
     legacy_default: bool | None = None,
 ) -> Optional[str]:
-    """Resolve the newest run that is complete under the run-completion contract."""
+    """Resolve a selected complete run without guessing for canonical parents.
+
+    A reverse-lexical child scan is a compatibility rule for unstamped legacy
+    parents only.  Canonical callers (``legacy_default=False``) and parents
+    stamped with a strict completion epoch must resolve through an explicit,
+    matching ``latest``/``latest_complete`` selector pair.  This matters during
+    selector activation: the pair is written one attr at a time before the
+    selected child's final eligibility commit.  Trusting either half
+    independently can temporarily resurrect an older run during that handoff.
+
+    Callers may opt an archive into the historical scan by explicitly enabling
+    ``legacy_default`` while performing a controlled legacy read.
+    """
+
+    allow_legacy_group_scan = (
+        effective_legacy_default(parent_group)
+        if legacy_default is None
+        else bool(legacy_default)
+    )
+    if not allow_legacy_group_scan:
+        latest = _normalize_name(parent_group.attrs.get(latest_attr))
+        latest_complete = _normalize_name(
+            parent_group.attrs.get(RUN_LATEST_COMPLETE_ATTR)
+        )
+        if latest is None or latest_complete is None or latest != latest_complete:
+            return None
+        child = _get_child(parent_group, latest)
+        if (
+            child is None
+            or not is_run_selector_eligible(child)
+            or not is_run_complete_in_parent(
+                parent_group,
+                child,
+                legacy_default=False,
+            )
+        ):
+            return None
+        return latest
 
     for attr in (latest_attr, RUN_LATEST_COMPLETE_ATTR):
         candidate = parent_group.attrs.get(attr)
@@ -381,19 +433,27 @@ def resolve_latest_complete_run_name(
             continue
         name = str(candidate)
         child = _get_child(parent_group, name)
-        if child is not None and is_run_complete_in_parent(
-            parent_group,
-            child,
-            legacy_default=legacy_default,
+        if (
+            child is not None
+            and is_run_selector_eligible(child)
+            and is_run_complete_in_parent(
+                parent_group,
+                child,
+                legacy_default=legacy_default,
+            )
         ):
             return name
 
     for name in reversed(_group_names(parent_group)):
         child = _get_child(parent_group, name)
-        if child is not None and is_run_complete_in_parent(
-            parent_group,
-            child,
-            legacy_default=legacy_default,
+        if (
+            child is not None
+            and is_run_selector_eligible(child)
+            and is_run_complete_in_parent(
+                parent_group,
+                child,
+                legacy_default=legacy_default,
+            )
         ):
             return name
     return None
@@ -424,10 +484,13 @@ def _is_child_complete(
     child = _get_child(parent_group, run_name)
     if child is None:
         return None, False
-    return child, is_run_complete_in_parent(
-        parent_group,
-        child,
-        legacy_default=legacy_default,
+    return child, (
+        is_run_selector_eligible(child)
+        and is_run_complete_in_parent(
+            parent_group,
+            child,
+            legacy_default=legacy_default,
+        )
     )
 
 
@@ -506,6 +569,10 @@ def set_authoritative_run(
     )
     if child is None:
         raise ValueError(f"authoritative run {name!r} does not exist")
+    if not is_run_selector_eligible(child):
+        raise ValueError(
+            f"authoritative run {name!r} is not eligible for normal stage selection"
+        )
     if not complete:
         raise ValueError(f"authoritative run {name!r} is not complete")
 
@@ -620,6 +687,7 @@ def describe_run_parent(
                 "has_completion_contract": has_contract,
                 "completion_status": status or ("legacy_complete" if complete else "legacy_incomplete"),
                 "complete": complete,
+                "selector_eligible": is_run_selector_eligible(child),
             }
         )
 

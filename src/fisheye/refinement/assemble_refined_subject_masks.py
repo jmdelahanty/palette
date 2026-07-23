@@ -381,6 +381,7 @@ def _load_refined_subject_mask_source(root: zarr.Group, refined_subject_run: Opt
         instance_key=_lineage_array(root, group, crop_run=crop_run, name="instance_key"),
         mask_surface_kind="binary",
         mask_surface_path=mask_surface_path,
+        canonical_coordinates=(group.attrs.get("coordinate_contract") == "canonical_v2"),
     )
 
 
@@ -407,9 +408,52 @@ def _resolve_subject_keypoint_group(
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
 ) -> tuple[zarr.Group, str, str, str]:
+    canonical_source = bool(
+        source.canonical_coordinates
+        or source.group.attrs.get("coordinate_contract") == "canonical_v2"
+    )
     if bool(assignment_keypoint_group) != bool(assignment_keypoints_run):
         raise ValueError(
             "Pass both assignment_keypoint_group and assignment_keypoints_run, or neither."
+        )
+    if canonical_source and (assignment_keypoint_group or assignment_keypoints_run):
+        raise ValueError(
+            "Canonical subject-mask assembly does not accept keypoint overrides."
+        )
+    if canonical_source:
+        assignment_pair = (
+            source.assignment_keypoint_group,
+            source.assignment_keypoints_run,
+        )
+        source_pair = (source.source_keypoint_group, source.source_keypoints_run)
+        if bool(assignment_pair[0]) != bool(assignment_pair[1]):
+            raise ValueError("Canonical source has incomplete assignment-keypoint lineage.")
+        if bool(source_pair[0]) != bool(source_pair[1]):
+            raise ValueError("Canonical source has incomplete source-keypoint lineage.")
+        if all(assignment_pair) and all(source_pair) and tuple(map(str, assignment_pair)) != tuple(
+            map(str, source_pair)
+        ):
+            raise ValueError(
+                "Canonical source has conflicting complete assignment_* and source_* "
+                "keypoint lineage."
+            )
+        selected_group, selected_run = (
+            assignment_pair if all(assignment_pair) else source_pair
+        )
+        if str(selected_group or "") != "keypoints_runs" or not selected_run:
+            raise ValueError(
+                "Canonical eye assignment requires one exact raw keypoints_runs dependency."
+            )
+        parent = root.get("keypoints_runs")
+        if parent is None or str(selected_run) not in parent:
+            raise ValueError(
+                f"Canonical assignment keypoint source keypoints_runs/{selected_run} is missing."
+            )
+        return (
+            parent[str(selected_run)],
+            str(selected_run),
+            "keypoints_runs",
+            "canonical_raw_keypoint_lineage",
         )
     if assignment_keypoint_group and assignment_keypoints_run:
         parent = root.get(str(assignment_keypoint_group))
@@ -596,7 +640,16 @@ def _assign_eyes_union_component_seeds(
     keypoints_roi = kp_group.get("keypoints_roi")
     if keypoints_roi is None:
         raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
-    keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
+    if source.canonical_coordinates or source.group.attrs.get("coordinate_contract") == "canonical_v2":
+        success_node = kp_group.get("detection_success")
+        if success_node is None or np.dtype(success_node.dtype) != np.dtype("bool"):
+            raise ValueError(
+                "Canonical raw-keypoint eye assignment requires exact bool detection_success."
+            )
+        keypoint_success = np.asarray(success_node[:], dtype=bool)
+        success_dataset = "detection_success"
+    else:
+        keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
     eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group, keypoint_run_name)
     reconcile_keypoint_mask_row_identity(
         keypoint_source_crop_row_ids=kp_group.get("source_crop_row_ids"),

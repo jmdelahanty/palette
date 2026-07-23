@@ -29,7 +29,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from fisheye.analysis.goodcopbadcop_common import figures_dir, open_distance_run, resolve_cohort
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
+from fisheye.analysis.goodcopbadcop_common import figures_dir, resolve_cohort
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 MAX_ORDINAL = 8
@@ -44,18 +48,8 @@ plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.rig
 
 def load(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = open_distance_run(r)
-    ev = cd["chaser_escape_events"][sorted(cd["chaser_escape_events"].group_keys())[-1]]["trials"]
-    o = np.asarray(ev["ordinal"][:], int)
-    rate = np.asarray(ev["escape_rate_per_valid_s"][:], float)
-    lat = np.asarray(ev["first_escape_latency_s"][:], float)
-    ef = cd["chaser_escape_freeze"][sorted(cd["chaser_escape_freeze"].group_keys())[-1]]
-    fo = np.asarray(ef["trials"]["trial_ordinal"][:], int)
-    ff = np.asarray(ef["trial_metrics"]["freeze_low_speed_fraction"][:], float)
-    esc = {int(oo): rr for oo, rr in zip(o, rate)}
-    latd = {int(oo): ll for oo, ll in zip(o, lat)}
-    frz = {int(oo): f for oo, f in zip(fo, ff)}
-    return esc, frz, latd
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_escape_events")
 
 
 def main() -> None:
@@ -70,6 +64,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             esc, frz, latd = load(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], ex)
             continue

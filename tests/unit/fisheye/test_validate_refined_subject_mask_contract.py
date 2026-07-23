@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
+
+from fisheye.utils import validate_refined_subject_mask_contract as validator_module
 
 from fisheye.shared.detect_reason_codec import write_reason_columns
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
@@ -278,6 +281,11 @@ def test_backfill_refined_subject_mask_contract_repairs_compact_run_without_dens
     run = root["refined_subject_masks_runs"]["refined_subject_test"]
     assert "masks_roi" not in run
     assert "mask_rle" in run
+    assert run.attrs["bbox_xyxy_convention"] == "pixel_edge_half_open"
+    assert (
+        run.attrs["bbox_xyxy_derivation"]
+        == "foreground_half_open_pixel_edges_xyxy_v1"
+    )
     np.testing.assert_array_equal(
         np.asarray(run["metrics/mask_present"][:], dtype=bool),
         np.asarray(
@@ -292,6 +300,30 @@ def test_backfill_refined_subject_mask_contract_repairs_compact_run_without_dens
         np.asarray(run["components/subject_body/area_px"][:], dtype=np.float32),
         np.asarray([36.0, 36.0], dtype=np.float32),
     )
+
+
+def test_backfill_freshly_rejects_canonical_run_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = tmp_path / "canonical_backfill_guard.zarr"
+    _make_archive(zarr_path, omit_component_arrays=True)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    run = root["refined_subject_masks_runs/refined_subject_test"]
+    run.attrs["coordinate_contract"] = "canonical_v2"
+    run.attrs["refined_subject_mask_publication_owner"] = "d" * 32
+    before_members = tuple(sorted(run.keys()))
+    monkeypatch.setattr(
+        validator_module,
+        "_resolve_refined_run",
+        lambda _root, _name: ("refined_subject_test", object()),
+    )
+
+    with pytest.raises(RuntimeError, match="immutable canonical publication"):
+        backfill_refined_subject_mask_contract(zarr_path)
+
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    assert tuple(sorted(reopened["refined_subject_masks_runs/refined_subject_test"].keys())) == before_members
 
 
 def test_backfill_refined_subject_mask_contract_does_not_fake_component_provenance(tmp_path: Path) -> None:

@@ -38,7 +38,10 @@ from fisheye.shared.source_video_metadata import (
     resolve_source_video,
 )
 from fisheye.shared.type_conversions import normalize_attr
-from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+)
 
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
 
@@ -142,8 +145,13 @@ def resolve_crop_run(
 
     for attr_name in ("latest_any", "latest", "latest_materialized"):
         candidate = _normalize_run_name(crop_parent.attrs.get(attr_name))
-        if candidate and candidate in crop_parent and is_run_complete_in_parent(crop_parent, crop_parent[candidate]):
-            return crop_parent, crop_parent[candidate], candidate
+        if candidate and candidate in crop_parent:
+            run_group = crop_parent[candidate]
+            if is_run_selector_eligible(run_group) and is_run_complete_in_parent(
+                crop_parent,
+                run_group,
+            ):
+                return crop_parent, run_group, candidate
 
     raise ValueError("No crop run found; cannot resolve latest_any/latest/latest_materialized")
 
@@ -190,14 +198,27 @@ def resolve_materialized_crop_run(
 
     for attr_name in ("latest_materialized", "latest"):
         candidate = _normalize_run_name(crop_parent.attrs.get(attr_name))
-        if candidate and candidate in crop_parent and is_run_complete_in_parent(crop_parent, crop_parent[candidate]):
+        if candidate and candidate in crop_parent:
             run_group = crop_parent[candidate]
+            if not is_run_selector_eligible(run_group) or not is_run_complete_in_parent(
+                crop_parent,
+                run_group,
+            ):
+                continue
             if _resolve_storage_mode(run_group) == "materialized" and "roi_images" in run_group:
                 return crop_parent, run_group, candidate
 
     latest_any = _normalize_run_name(crop_parent.attrs.get("latest_any"))
-    if latest_any and latest_any in crop_parent and is_run_complete_in_parent(crop_parent, crop_parent[latest_any]):
+    if latest_any and latest_any in crop_parent:
         run_group = crop_parent[latest_any]
+        if not is_run_selector_eligible(run_group) or not is_run_complete_in_parent(
+            crop_parent,
+            run_group,
+        ):
+            run_group = None
+    else:
+        run_group = None
+    if run_group is not None:
         latest_mode = _resolve_storage_mode(run_group)
         if latest_mode != "materialized":
             raise ValueError(

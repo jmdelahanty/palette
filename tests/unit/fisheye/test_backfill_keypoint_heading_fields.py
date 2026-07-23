@@ -78,7 +78,11 @@ def _patch_scan(monkeypatch, mapping: dict[Path, _FakeGroup]) -> None:
     ordered_paths = list(mapping.keys())
     monkeypatch.setattr(mod, "_iter_zarr", lambda *_args, **_kwargs: iter(ordered_paths))
 
-    def _open_group(path: str, mode: str = "r") -> _FakeGroup:  # noqa: ARG001
+    def _open_group(
+        path: str,
+        mode: str = "r",
+        **_open_kwargs: object,
+    ) -> _FakeGroup:  # noqa: ARG001
         return mapping[Path(path)]
 
     monkeypatch.setattr(mod.zarr, "open_group", _open_group)

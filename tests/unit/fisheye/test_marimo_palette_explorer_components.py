@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
+import pytest
 import zarr
 
 from apps.marimo.components.goodcopbadcop_chaser import (
@@ -28,20 +29,18 @@ from apps.marimo.components.goodcopbadcop_chaser import (
     build_epoch_summary_output,
     build_fish_heading_output,
     build_spatial_occupancy_output,
-    is_goodcopbadcop_option,
     load_chaser_gaze_tracking_view,
     load_goodcopbadcop_view,
     resolve_time_windows_from_multiselect,
 )
 from apps.marimo.components.registry import (
-    artifact_path_for,
     discover_interactive_spec_options,
     discover_recording_explorer_spec_options,
     discover_protocol_recording_options,
     infer_recordings_root_from_zarr_path,
     recording_id_from_analysis_zarr,
-    supported_renderer_ids,
 )
+from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
 from fisheye.analysis.cra_primary_endpoint import (
     build_cra_primary_endpoint_result,
     write_cra_primary_endpoint_component,
@@ -55,9 +54,7 @@ from fisheye.analysis.chaser_gaze_tracking import (
     SCHEMA_ID as CHASER_GAZE_TRACKING_SCHEMA_ID,
     SUMMARY_PNG_ARTIFACT_NAME as CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
 )
-from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.visualization.goodcopbadcop_interactive import (
-    CHASER_DASHBOARD_RENDERER,
     DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
     GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
@@ -78,18 +75,47 @@ from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
     _make_chaser_result,
 )
-from tests.unit.fisheye.test_export_cross_recording_analytics import _add_goodcopbadcop_cra_protocol_metadata
+from tests.unit.fisheye.goodcopbadcop_test_fixtures import (
+    _add_goodcopbadcop_cra_protocol_metadata,
+    _add_goodcopbadcop_swim_bout_run,
+)
+
+
+_DEFERRED_CHASER_PUBLICATION_REASON = (
+    "deferred: missing independent behavior, dashboard, and component "
+    "publication seals"
+)
+_DEFERRED_CHASER_PUBLICATION = pytest.mark.xfail(
+    strict=True,
+    raises=ChaserDistanceReadError,
+    reason=_DEFERRED_CHASER_PUBLICATION_REASON,
+)
+
+
+def _require_deferred_chaser_option(zarr_path):
+    options = discover_interactive_spec_options(zarr_path)
+    if not options:
+        raise ChaserDistanceReadError(_DEFERRED_CHASER_PUBLICATION_REASON)
+    return options[0]
 
 
 def _make_archive_with_goodcopbadcop_spec(tmp_path):
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     return zarr_path
 
 
-def _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path):
+def _make_archive_with_goodcopbadcop_egocentric_spec(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
-    _add_track_kinematics_run(zarr_path)
+    _add_track_kinematics_run(zarr_path, monkeypatch=monkeypatch)
     result = build_chaser_egocentric_bearing_result(
         zarr_path,
         chaser_distance_run="chaser_distance_1",
@@ -97,74 +123,6 @@ def _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path):
     )
     write_chaser_egocentric_bearing_component(zarr_path, result, overwrite=True)
     return zarr_path
-
-
-def _add_swim_bout_run(zarr_path):
-    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    track = root["analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"]
-    track.create_array(
-        "speed_filtered_mm",
-        data=np.asarray([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0], dtype=np.float32),
-        chunks=(8,),
-        overwrite=True,
-    )
-    tk_run = root["analysis/track_kinematics_runs/offline/tk_1"]
-    tk_run.attrs["fps"] = 10.0
-    tk_run.attrs["pixel_to_mm"] = 0.02
-
-    parent = root["analysis"].require_group("swim_bout_runs")
-    parent.attrs["latest"] = "bouts_1"
-    run = parent.create_group("bouts_1")
-    run.attrs.update(
-        {
-            "default_level": "filtered",
-            "source_track_kinematics_run": "tk_1",
-            "track_id": 0,
-            "detection_method": "threshold",
-        }
-    )
-    level = run.create_group("speed_filtered")
-    level.attrs["n_bouts"] = 4
-
-    bout_dtype = np.dtype(
-        [
-            ("bout_id", np.int32),
-            ("peak_time_s", np.float64),
-            ("start_time_s", np.float64),
-            ("end_time_s", np.float64),
-            ("start_frame", np.int64),
-            ("end_frame", np.int64),
-            ("duration_s", np.float64),
-            ("path_length_mm", np.float64),
-        ]
-    )
-    bouts = np.zeros(4, dtype=bout_dtype)
-    bouts["bout_id"] = [0, 1, 2, 3]
-    bouts["peak_time_s"] = [0.10, 0.20, 0.45, 0.70]
-    bouts["start_time_s"] = [0.08, 0.18, 0.42, 0.68]
-    bouts["end_time_s"] = [0.12, 0.24, 0.50, 0.76]
-    bouts["start_frame"] = [0, 1, 4, 7]
-    bouts["end_frame"] = [1, 2, 5, 8]
-    bouts["duration_s"] = [0.04, 0.06, 0.08, 0.08]
-    bouts["path_length_mm"] = [0.2, 0.3, 0.4, 0.5]
-    write_columnar_dataset(level, "bouts", bouts, {"n_bouts": 4})
-
-    interval_dtype = np.dtype(
-        [
-            ("interval_id", np.int32),
-            ("valid", bool),
-            ("prev_end_time_s", np.float64),
-            ("next_start_time_s", np.float64),
-            ("interval_s", np.float64),
-        ]
-    )
-    intervals = np.zeros(2, dtype=interval_dtype)
-    intervals["interval_id"] = [0, 1]
-    intervals["valid"] = [True, True]
-    intervals["prev_end_time_s"] = [0.12, 0.50]
-    intervals["next_start_time_s"] = [0.18, 0.68]
-    intervals["interval_s"] = [0.06, 0.18]
-    write_columnar_dataset(level, "inter_bout_intervals", intervals, {"n_intervals": 2})
 
 
 def _make_archive_with_goodcopbadcop_cra_spec(tmp_path):
@@ -285,34 +243,25 @@ def _add_chaser_gaze_component(zarr_path):
     )
 
 
-def test_palette_explorer_registry_discovers_goodcopbadcop_interactive_spec(tmp_path) -> None:
+def test_palette_explorer_registry_hides_unsealed_goodcopbadcop_interactive_spec(
+    tmp_path,
+) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
 
     options = discover_interactive_spec_options(zarr_path)
 
-    assert len(options) == 1
-    option = options[0]
-    assert option.renderer == CHASER_DASHBOARD_RENDERER
-    assert option.renderer in supported_renderer_ids()
-    assert option.is_supported is True
-    assert is_goodcopbadcop_option(option) is True
-    assert option.run_path == "analysis/chaser_distance_runs/chaser_distance_1"
-    assert option.artifact_name == DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT
-    assert option.artifact_path == artifact_path_for(option.run_path, option.artifact_name)
-    assert option.spec["source_runs"]["detection_occupancy"] == "occupancy_1"
-
-    filtered = discover_interactive_spec_options(
+    assert options == []
+    assert discover_interactive_spec_options(
         zarr_path,
         renderer_filter=GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
-        run_path_filter=option.run_path,
-        artifact_filter=option.artifact_name,
-    )
-    assert filtered == options
+        run_path_filter="analysis/chaser_distance_runs/chaser_distance_1",
+        artifact_filter=DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+    ) == []
     assert discover_interactive_spec_options(zarr_path, renderer_filter="missing-renderer") == []
-    assert discover_recording_explorer_spec_options(zarr_path) == options
+    assert discover_recording_explorer_spec_options(zarr_path) == []
 
 
-def test_palette_explorer_discovers_interactive_specs_from_manifest_without_recursive_walk(
+def test_palette_explorer_manifest_suppression_does_not_fall_back_to_recursive_walk(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -325,8 +274,7 @@ def test_palette_explorer_discovers_interactive_specs_from_manifest_without_recu
 
     options = discover_interactive_spec_options(zarr_path)
 
-    assert len(options) == 1
-    assert options[0].renderer == CHASER_DASHBOARD_RENDERER
+    assert options == []
 
 
 def test_palette_explorer_registry_backed_recording_list_is_lazy(
@@ -390,13 +338,15 @@ def test_palette_explorer_registry_backed_recording_list_is_lazy(
     assert all(option.supported_spec_count == 0 for option in options)
 
 
-def test_palette_explorer_discovers_sibling_goodcopbadcop_recordings(tmp_path) -> None:
+def test_palette_explorer_reports_seed_but_hides_unsealed_sibling_specs(
+    tmp_path,
+) -> None:
     recordings_root = tmp_path / "recordings"
     first = _make_recording_archive_with_goodcopbadcop_spec(
         recordings_root,
         "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop",
     )
-    second = _make_recording_archive_with_goodcopbadcop_spec(
+    _make_recording_archive_with_goodcopbadcop_spec(
         recordings_root,
         "2026-06-14T21-12-08Z_arena_2_GoodCopBadCop",
     )
@@ -411,18 +361,16 @@ def test_palette_explorer_discovers_sibling_goodcopbadcop_recordings(tmp_path) -
         first,
         recordings_root=recordings_root,
         renderer_filter=GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+        include_seed_without_specs=True,
     )
 
     assert [option.recording_id for option in options] == [
         "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop",
-        "2026-06-14T21-12-08Z_arena_2_GoodCopBadCop",
     ]
-    assert {option.zarr_path for option in options} == {first, second}
-    assert all(option.supported_spec_count == 1 for option in options)
-    assert all(
-        option.renderer_counts == {CHASER_DASHBOARD_RENDERER: 1}
-        for option in options
-    )
+    assert [option.zarr_path for option in options] == [first]
+    assert options[0].interactive_spec_count == 0
+    assert options[0].supported_spec_count == 0
+    assert options[0].renderer_counts == {}
 
 
 def test_palette_explorer_direct_launch_does_not_discover_siblings(tmp_path) -> None:
@@ -441,9 +389,12 @@ def test_palette_explorer_direct_launch_does_not_discover_siblings(tmp_path) -> 
         name_contains=None,
         recording_explorer_only=True,
         include_collection=False,
+        include_seed_without_specs=True,
     )
 
     assert [option.zarr_path for option in options] == [selected]
+    assert options[0].interactive_spec_count == 0
+    assert options[0].supported_spec_count == 0
 
 
 def test_palette_explorer_direct_launch_reports_selected_zarr_without_specs(tmp_path) -> None:
@@ -464,9 +415,10 @@ def test_palette_explorer_direct_launch_reports_selected_zarr_without_specs(tmp_
     assert options[0].supported_spec_count == 0
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
 
@@ -481,9 +433,16 @@ def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> Non
     assert loaded.load_duration_ms >= 0.0
 
 
-def test_goodcopbadcop_component_projects_only_selected_analysis_family(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+@_DEFERRED_CHASER_PUBLICATION
+def test_goodcopbadcop_component_projects_only_selected_analysis_family(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(
         zarr_path,
@@ -501,9 +460,10 @@ def test_goodcopbadcop_component_projects_only_selected_analysis_family(tmp_path
     assert loaded.data.occupancy_normalized is None
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_chaser_analysis_choices_follow_persisted_components(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
 
     analysis_ids = available_chaser_analysis_ids(zarr_path, option)
 
@@ -514,12 +474,13 @@ def test_chaser_analysis_choices_follow_persisted_components(tmp_path) -> None:
     assert "escape_freeze" not in analysis_ids
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_chaser_gaze_component_is_discovered_and_loaded_without_frame_arrays(
     tmp_path,
 ) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
     component_path = _add_chaser_gaze_component(zarr_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
 
     rows = discover_chaser_gaze_tracking_components(
         zarr_path,
@@ -540,10 +501,17 @@ def test_chaser_gaze_component_is_discovered_and_loaded_without_frame_arrays(
     assert loaded.summary_png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    _add_swim_bout_run(zarr_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+@_DEFERRED_CHASER_PUBLICATION
+def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
+    _add_goodcopbadcop_swim_bout_run(zarr_path)
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
     pre_chaser_0 = loaded.epoch_summary_df.filter(
@@ -591,9 +559,16 @@ def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> Non
     assert table["bout_count"].to_list() == [2, 1, 1]
 
 
-def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    _add_swim_bout_run(zarr_path)
+@_DEFERRED_CHASER_PUBLICATION
+def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
+    _add_goodcopbadcop_swim_bout_run(zarr_path)
     result = build_goodcopbadcop_epoch_behavior_summary_result(
         zarr_path,
         chaser_distance_run="chaser_distance_1",
@@ -603,7 +578,7 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
         result,
         overwrite=True,
     )
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
     pre_chaser_0 = loaded.epoch_summary_df.filter(
@@ -696,9 +671,16 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
     assert output[-1]["mean_inter_bout_interval_s"].to_list()[0] == 0.06
 
 
-def test_goodcopbadcop_component_loads_and_renders_egocentric_static_polar_png(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+@_DEFERRED_CHASER_PUBLICATION
+def test_goodcopbadcop_component_loads_and_renders_egocentric_static_polar_png(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
 
@@ -735,9 +717,10 @@ def test_goodcopbadcop_component_loads_and_renders_egocentric_static_polar_png(t
     assert "data:image/png;base64," in output[3]
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_goodcopbadcop_component_loads_and_renders_cra_endpoint(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_cra_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
 
@@ -813,9 +796,10 @@ def test_goodcopbadcop_component_loads_and_renders_cra_endpoint(tmp_path) -> Non
     assert figures[2].layout.yaxis.autorange == "reversed"
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
 
@@ -885,10 +869,14 @@ def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> N
     assert figures[5].layout.yaxis.range == (0, 1)
 
 
-def test_goodcopbadcop_component_can_skip_companion_analysis_loads(tmp_path) -> None:
+@_DEFERRED_CHASER_PUBLICATION
+def test_goodcopbadcop_component_can_skip_companion_analysis_loads(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path)
-    _add_track_kinematics_run(zarr_path)
-    _add_swim_bout_run(zarr_path)
+    _add_track_kinematics_run(zarr_path, monkeypatch=monkeypatch)
+    _add_goodcopbadcop_swim_bout_run(zarr_path)
     result = build_goodcopbadcop_epoch_behavior_summary_result(
         zarr_path,
         chaser_distance_run="chaser_distance_1",
@@ -898,7 +886,7 @@ def test_goodcopbadcop_component_can_skip_companion_analysis_loads(tmp_path) -> 
         result,
         overwrite=True,
     )
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
 
     loaded = load_goodcopbadcop_view(
         zarr_path,
@@ -914,9 +902,10 @@ def test_goodcopbadcop_component_can_skip_companion_analysis_loads(tmp_path) -> 
     assert loaded.epoch_summary_computed_in_viewer is False
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_goodcopbadcop_controls_do_not_read_widget_values_during_creation(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
 
     class _StrictWidget:
@@ -961,9 +950,10 @@ def test_goodcopbadcop_controls_do_not_read_widget_values_during_creation(tmp_pa
     assert len(controls.egocentric_epoch_picker._initial_value) == 3
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_goodcopbadcop_spatial_figures_use_image_y_axis(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
     window = GoodCopBadCopTimeWindow(
         selected_epoch_id=1,
@@ -1028,9 +1018,10 @@ def test_distance_line_display_budget_preserves_real_extrema() -> None:
     assert set(display["time_s"].to_list()).issubset(set(frame["time_s"].to_list()))
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_goodcopbadcop_spatial_occupancy_panel_renders_zone_summary(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
     window = GoodCopBadCopTimeWindow(
         selected_epoch_id=1,
@@ -1080,9 +1071,10 @@ def test_goodcopbadcop_spatial_occupancy_panel_renders_zone_summary(tmp_path) ->
     assert list(figures[1].data[0].y) == [0.8999999761581421, 1.0, 1.100000023841858, 1.2000000476837158]
 
 
+@_DEFERRED_CHASER_PUBLICATION
 def test_goodcopbadcop_spatial_occupancy_panel_marks_prepost_chaser_zones(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+    option = _require_deferred_chaser_option(zarr_path)
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
     window = GoodCopBadCopTimeWindow(
         selected_epoch_id=0,
@@ -1114,9 +1106,16 @@ def test_goodcopbadcop_spatial_occupancy_panel_marks_prepost_chaser_zones(tmp_pa
     assert [row[4] for row in post_fig.data[0].customdata] == ["none", "none", "chaser 1", "chaser 0"]
 
 
-def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
+@_DEFERRED_CHASER_PUBLICATION
+def test_goodcopbadcop_egocentric_panels_render_from_linked_component(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(
+        tmp_path,
+        monkeypatch,
+    )
+    option = _require_deferred_chaser_option(zarr_path)
     loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
     window = GoodCopBadCopTimeWindow(
         selected_epoch_id=2,
@@ -1235,10 +1234,15 @@ def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) 
     assert len(multi_epoch_figures) == 3
 
 
-def test_goodcopbadcop_multi_epoch_picker_resolves_selected_windows_in_time_order(tmp_path) -> None:
-    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
-    option = discover_interactive_spec_options(zarr_path)[0]
-    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+def test_goodcopbadcop_multi_epoch_picker_resolves_selected_windows_in_time_order() -> None:
+    windows_df = pl.DataFrame(
+        {
+            "window_id": [0, 1, 2],
+            "label": ["pre_event", "training_event", "post_event"],
+            "start_time_s": [0.0, 0.3, 0.6],
+            "end_time_s": [0.3, 0.6, 0.9],
+        }
+    )
 
     class _Picker:
         value = ["post (0.6-0.9s)", "pre (0.0-0.3s)"]
@@ -1251,7 +1255,7 @@ def test_goodcopbadcop_multi_epoch_picker_resolves_selected_windows_in_time_orde
             "post (0.6-0.9s)": 2,
         },
         epoch_picker=_Picker(),
-        windows_df=loaded.windows_df,
+        windows_df=windows_df,
     )
 
     assert [window.selected_epoch_id for window in resolved] == [0, 2]

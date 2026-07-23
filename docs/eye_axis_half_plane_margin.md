@@ -33,6 +33,10 @@ fragile if the axis is near the boundary, because small fit noise can flip
 which side the axis happens to land on, and the rule will then negate the
 "wrong" one.
 
+For current canonical runs, `f̂` is recomputed from the exact base-keypoint
+payload and success mask sealed by the selected subject-shape assignment proof.
+A separately persisted upstream heading is not an input to this rule.
+
 ## The margin metric
 
 The geometric quantity that captures this robustness is
@@ -125,8 +129,9 @@ right-eye rows of real data.
   near the comment `axis_major_aligned = axis_major * sign_major[:, None]`
 - Per-eye QA arrays: `qa/roi/{left,right}_major_axis_marginal`,
   per-frame: `qa/frame/major_axis_marginal`
-- Schema: `analysis.eye_angle_runs` v5 (`schema_version = 5`,
-  `method_version = "eye_angle_analysis.v5"`)
+- Schema: `analysis.eye_angle_runs` run schema v6 (`schema_version = 6`),
+  retaining scientific `method_version = "eye_angle_analysis.v5"`; output
+  schema v9 carries explicit row identity and acquisition-frame support.
 
 ## Animation
 

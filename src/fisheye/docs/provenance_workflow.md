@@ -14,15 +14,19 @@ detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined
                                            ├─ subject_mask_runs → refined_subject_masks_runs
                                            └─ eye_masks_runs → refined_eye_masks_runs
 refined_detect_runs → arena_assignment_runs → tracking_runs → track_kinematics_runs
+keypoints_runs ─(sealed assignment proof)─┐
+refined_subject_masks_runs ──────────────└→ analysis/subject_shape_runs → analysis/eye_angle_runs
 ```
 
 Current mask-local eye geometry authority is `refined_subject_masks_runs/<run>`
 when that run contains `eye_left` and `eye_right` components.
-`analysis/subject_shape_runs/<run>` is the preferred analysis-facing coherent
-body/eyes/swim shape surface. `analysis/eye_angle_runs` consumes subject-shape
-eye geometry when available, then falls back to refined-subject geometry. Phase
-1 of eye-mask severance removed Palette-side eye-angle fallback to legacy
-`refined_eye_masks_runs` compatibility data.
+`analysis/subject_shape_runs/<run>` is the canonical analysis-facing coherent
+body/eyes/swim shape surface for future-normal eye-angle publication.
+`analysis/eye_angle_runs` requires its eye geometry and the exact base-keypoint
+publication sealed by its assignment proof. It does not fall back to latest or
+refined keypoints. Historical refined keypoints and refined-subject geometry
+remain available only through an explicit diagnostic request; the resulting
+eye-angle output is permanently nonselector.
 Shared fish-relative body-frame outputs should materialize under
 `analysis/subject_shape_runs/<run>/body_frame/` when a subject-shape run
 produces them; analysis-local body-frame caches remain support data.
@@ -41,9 +45,14 @@ Relevant provenance attributes:
 | `refined_subject_masks_runs/<run>` | logical mask store via `MaskStore` (`masks_roi`, `mask_bitpacked`, and/or `mask_rle`), component geometry, `relations/eye_pair/metrics/separation_px` | `source_subject_mask_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `source_roi_read_mode`, `source_roi_cache_canonical_path`, `mask_storage_encoding`, `mask_store_encodings`, `refined_subject_mask_review_status`, `component_review_statuses`, `source_refined_eye_masks_run` *(when seeded from compatibility eye data)* |
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | Compatibility/historical refined-eye layout. Key attrs include `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)*, and `source_refined_subject_masks_run` when derived from canonical refined-subject masks. |
 | `analysis/subject_shape_runs/<run>` | component summaries, eye/swim ellipse summaries, body axes, `body_frame/`, relation metrics | `schema_id`, `schema_version`, `row_axis`, `method`, `method_version`, `source_refined_subject_masks_run`, `source_mask_labels`, `source_mask_label_schema_id`, `source_mask_store_encoding`, `source_mask_storage_surface`, `source_mask_store_path`, `source_refs`, optional `body_frame_schema_id`, `body_frame_estimator`, `body_frame_source_refs` |
-| `analysis/eye_angle_runs/<run>` | `angles/roi`, `angles/frame`, `qa/roi`, `qa/frame`, `support` | `schema_id`, `schema_version`, `method`, `method_version`, `row_axis`, `eye_angle_output_schema`, `preferred_angle_family`, `preferred_eye_axis`, `gaze_angle_source`, `canonical_eye_orientation_axis`, `source_eye_geometry_stage`, `source_eye_geometry_run`, `source_geometry_kind`, `source_subject_shape_run`, `source_refined_subject_masks_run`, `source_refined_eye_run`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
+| `analysis/eye_angle_runs/<run>` | logical `angles/roi`, `angles/frame`, `qa/roi`, `qa/frame`; `support/instance_key`, `support/source_acquisition_frame_index`, and equality-required `support/frame_indices` alias | `schema_id`, run `schema_version = 6`, `method`, `method_version`, `row_axis`, output schema v9, `keypoint_source_mode`, `source_eye_geometry_stage`, `source_eye_geometry_run`, `source_geometry_kind`, `source_subject_shape_run`, `source_base_keypoints_run`, `source_instance_key_path`, `source_acquisition_frame_index_path`, `eye_angle_source_contracts`, `eye_angle_algorithm_contract`, `stage_selector_eligible` |
 | `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
 | `tracking_runs/<run>` | `track_ids`, `track_arena_ids` | `source_detect_run`, `source_refined_run`, `source_arena_assignment_run`, `tracking_qc_state` |
+
+Canonical eye-angle row identity is the ordered `instance_key`; acquisition
+frames are a temporal coordinate, not an alternate identity. The writer
+recomputes its body frame and output heading from the proof-bound keypoints and
+success mask. It does not consume a separately persisted upstream heading.
 
 Keypoint-lineage attribute contract for legacy eye-mask stages:
 

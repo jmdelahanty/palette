@@ -10,13 +10,16 @@ from typing import Any, Iterable, Mapping, Optional
 import numpy as np
 import zarr
 
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, SPEC_MEDIA_TYPE
 from fisheye.shared.recording_artifact_inventory import build_recording_artifact_inventory
 from fisheye.utils.view_zarr_visualization import iter_visualization_artifacts
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.status_page.query import open_readonly_connection, resolve_registry_path
 from fisheye.visualization.goodcopbadcop_interactive import (
-    CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS,
     CHASER_DASHBOARD_RENDERER,
     CHASER_DASHBOARD_RENDERERS,
     LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
@@ -184,6 +187,16 @@ def _split_artifact_path(path: str) -> tuple[str, str]:
     return run_path, artifact_name
 
 
+def _chaser_distance_run_name(path: str | None) -> str | None:
+    parts = normalize_path(str(path or "")).split("/")
+    for index in range(len(parts) - 2):
+        if parts[index : index + 2] == ["analysis", "chaser_distance_runs"]:
+            name = parts[index + 2].strip()
+            if name and name not in {".", ".."}:
+                return name
+    return None
+
+
 def _is_interactive_spec_candidate(artifact: Any, node: object) -> bool:
     attrs = getattr(node, "attrs", {})
     if str(getattr(artifact, "artifact_role", "") or attrs.get("artifact_role") or "") == "interactive_spec":
@@ -210,6 +223,15 @@ def _option_label(
 
 
 def _read_option(root: zarr.Group, zarr_path: Path, artifact_path: str) -> Optional[InteractiveSpecOption]:
+    chaser_run_name = _chaser_distance_run_name(artifact_path)
+    if chaser_run_name is not None:
+        # A verified base run does not seal its dashboard spec. Preflight the
+        # exact base publication, but never read or advertise the raw artifact.
+        try:
+            load_chaser_distance_run(root, run_name=chaser_run_name)
+        except ChaserDistanceReadError:
+            return None
+        return None
     try:
         node = root[normalize_path(artifact_path)]
     except Exception:
@@ -314,45 +336,17 @@ def _discover_goodcopbadcop_chaser_specs_fast(
 ) -> list[InteractiveSpecOption]:
     run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
     artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
-    default_artifact = CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS[0]
-
-    if artifact_wanted and "/" not in artifact_wanted and artifact_wanted not in CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS:
+    requested_run = (
+        _chaser_distance_run_name(run_path_wanted)
+        or _chaser_distance_run_name(artifact_wanted)
+        or "latest"
+    )
+    try:
+        load_chaser_distance_run(root, run_name=requested_run)
+    except ChaserDistanceReadError:
         return []
-
-    candidate_paths: list[str]
-    if artifact_wanted and "/" in artifact_wanted:
-        candidate_paths = [artifact_wanted]
-    elif run_path_wanted:
-        candidate_paths = [artifact_path_for(run_path_wanted, artifact) for artifact in CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS]
-    else:
-        try:
-            parent = root["analysis/chaser_distance_runs"]
-        except Exception:
-            return []
-        candidate_paths = [
-            artifact_path_for(f"analysis/chaser_distance_runs/{run_name}", artifact)
-            for run_name in _group_names(parent)
-            for artifact in CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS
-        ]
-
-    options: list[InteractiveSpecOption] = []
-    seen: set[str] = set()
-    for artifact_path in candidate_paths:
-        normalized_path = normalize_path(artifact_path)
-        if not normalized_path or normalized_path in seen:
-            continue
-        seen.add(normalized_path)
-        option = _read_option(root, archive, normalized_path)
-        if option is None:
-            continue
-        if option.renderer not in CHASER_DASHBOARD_RENDERERS:
-            continue
-        if run_path_wanted and option.run_path != run_path_wanted:
-            continue
-        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
-            continue
-        options.append(option)
-    return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
+    # Dashboard artifacts have no independent payload/semantic seal yet.
+    return []
 
 
 def _discover_track_kinematics_specs_fast(
@@ -369,29 +363,61 @@ def _discover_track_kinematics_specs_fast(
 
     if artifact_wanted and "/" in artifact_wanted:
         candidate_paths = [artifact_wanted]
-    elif run_path_wanted:
-        candidate_paths = [artifact_path_for(run_path_wanted, TRACK_KINEMATICS_INTERACTIVE_ARTIFACT)]
     else:
+        candidate_paths = []
         try:
-            parent = root["analysis/track_kinematics_runs"]
+            visualization_parent = root[
+                "analysis/track_kinematics_visualization_runs"
+            ]
         except Exception:
             return []
-        candidate_paths = [
-            artifact_path_for(
-                f"analysis/track_kinematics_runs/{scope}/{run_name}",
-                TRACK_KINEMATICS_INTERACTIVE_ARTIFACT,
-            )
-            for scope in _group_names(parent)
-            for run_name in _group_names(parent[scope])
-        ]
+        for scope in _group_names(visualization_parent):
+            scope_group = visualization_parent[scope]
+            for source_run_name in _group_names(scope_group):
+                source_run = scope_group[source_run_name]
+                tracks = source_run.get("tracks")
+                if tracks is None:
+                    continue
+                for track_name in _group_names(tracks):
+                    render_parent = tracks[track_name]
+                    render_name = str(
+                        render_parent.attrs.get("latest_complete")
+                        or render_parent.attrs.get("latest")
+                        or ""
+                    ).strip()
+                    if not render_name or render_name not in render_parent:
+                        continue
+                    render = render_parent[render_name]
+                    if (
+                        render.attrs.get("palette_run_completion_status")
+                        != "complete"
+                        or render.attrs.get("stage_selector_eligible") is not True
+                    ):
+                        continue
+                    visualizations = render.get("visualizations")
+                    if visualizations is None:
+                        continue
+                    candidate_paths.extend(
+                        f"analysis/track_kinematics_visualization_runs/{scope}/"
+                        f"{source_run_name}/tracks/{track_name}/{render_name}/"
+                        f"visualizations/{artifact_name}"
+                        for artifact_name in _group_names(visualizations)
+                    )
 
     options: list[InteractiveSpecOption] = []
     for artifact_path in candidate_paths:
         option = _read_option(root, archive, artifact_path)
         if option is None or option.renderer != TRACK_KINEMATICS_PLOT_RENDERER:
             continue
-        if run_path_wanted and option.run_path != run_path_wanted:
-            continue
+        if run_path_wanted:
+            source_paths = option.spec.get("source_paths")
+            source_run_path = (
+                normalize_path(str(source_paths.get("run") or ""))
+                if isinstance(source_paths, Mapping)
+                else ""
+            )
+            if run_path_wanted not in {option.run_path, source_run_path}:
+                continue
         if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
             continue
         options.append(option)
@@ -573,7 +599,8 @@ def discover_interactive_spec_options(
         )
     options: list[InteractiveSpecOption] = []
     seen_paths: set[str] = set()
-    for artifact_path in _inventory_interactive_artifact_paths(root):
+    inventory_paths = _inventory_interactive_artifact_paths(root)
+    for artifact_path in inventory_paths:
         normalized_path = normalize_path(artifact_path)
         if not normalized_path or normalized_path in seen_paths:
             continue
@@ -588,7 +615,7 @@ def discover_interactive_spec_options(
         if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
             continue
         options.append(option)
-    if options:
+    if inventory_paths:
         return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
 
     for artifact in iter_visualization_artifacts(root):

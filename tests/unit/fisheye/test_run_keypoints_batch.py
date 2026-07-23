@@ -219,7 +219,7 @@ def test_main_background_requirement_defaults_by_method_and_honors_cli_overrides
     assert captured["require_background"] is expected_require_background
 
 
-def test_run_plan_returns_rich_payload_with_optional_refine(
+def test_run_plan_rejects_refine_before_keypoint_detection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -260,29 +260,24 @@ def test_run_plan_returns_rich_payload_with_optional_refine(
         camera_id="3",
         status="ok",
     )
-    result = mod._run_plan(
-        plan,
-        config={},
-        method="traditional",
-        scheduler=None,
-        num_workers=None,
-        quiet=True,
-        dask_progress=False,
-        refine=True,
-        refine_only=False,
-        json_output=False,
-    )
+    with pytest.raises(mod.RefinedKeypointCoordinatePublicationUnavailable):
+        mod._run_plan(
+            plan,
+            config={},
+            method="traditional",
+            scheduler=None,
+            num_workers=None,
+            quiet=True,
+            dask_progress=False,
+            refine=True,
+            refine_only=False,
+            json_output=False,
+        )
 
-    assert called == ["traditional", "refine"]
-    assert result["status"] == "ok"
-    assert result["method"] == "traditional"
-    assert result["keypoints"]["run_name"] == "keypoints_001"
-    assert result["refined_keypoints"]["run_name"] == "refined_keypoints_001"
-    assert result["registry_sync"]["synced"] is True
-    assert "duration_seconds" in result
+    assert called == []
 
 
-def test_run_plan_refine_only_skips_refine_when_zero_rois(
+def test_run_plan_refine_only_fails_before_archive_discovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -301,29 +296,30 @@ def test_run_plan_refine_only_skips_refine_when_zero_rois(
         camera_id="3",
         status="ok",
     )
-    result = mod._run_plan(
-        plan,
-        config={},
-        method="traditional",
-        scheduler=None,
-        num_workers=None,
-        quiet=True,
-        dask_progress=False,
-        refine=False,
-        refine_only=True,
-        json_output=False,
-    )
-
-    assert result["status"] == "ok"
-    assert result["source_keypoints_run"] == "keypoints_001"
-    assert result["refine_skipped_reason"] == "zero_keypoint_rois"
-    assert "refined_keypoints" not in result
+    with pytest.raises(mod.RefinedKeypointCoordinatePublicationUnavailable):
+        mod._run_plan(
+            plan,
+            config={},
+            method="traditional",
+            scheduler=None,
+            num_workers=None,
+            quiet=True,
+            dask_progress=False,
+            refine=False,
+            refine_only=True,
+            json_output=False,
+        )
 
 
 def test_run_plan_auto_review_syncs_step_status(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(
+        mod,
+        "require_future_normal_refined_keypoint_publication",
+        lambda: None,
+    )
     monkeypatch.setattr(mod, "_run_traditional", lambda *args, **kwargs: {"success_rate_percent": 99.0})  # noqa: ANN002, ANN003
     monkeypatch.setattr(mod, "_latest_keypoints_run", lambda _zarr_path: "keypoints_001")
     monkeypatch.setattr(mod, "_keypoints_total_rois", lambda _zarr_path, _run_name: 10)
@@ -453,7 +449,7 @@ def test_main_logs_rich_keypoint_results_to_jsonl(
     assert keypoints_ok[0]["results"]["refined_keypoints"]["run_name"] == "refined_keypoints_001"
 
 
-def test_main_refine_only_delegates_to_refine_keypoints_batch(
+def test_main_refine_only_fails_before_delegation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -484,25 +480,10 @@ def test_main_refine_only_delegates_to_refine_keypoints_batch(
             str(tmp_path),
         ]
     )
-    assert rc == 0
+    assert rc == 2
     stderr = capsys.readouterr().err
-    assert "deprecated" in stderr.lower()
-    assert "single-threaded" in stderr
-
-    argv = captured["argv"]
-    assert str(tmp_path) in argv
-    assert "--file-list" in argv
-    assert str(file_list) in argv
-    assert "--recursive" in argv
-    assert "--apply" in argv
-    assert "--zarr-use" in argv
-    assert "any" in argv
-    assert "--no-skip-existing" in argv
-    assert "--num-workers" in argv
-    assert "3" in argv
-    assert "--no-log" in argv
-    assert "--json" in argv
-    assert "--scheduler" not in argv
+    assert "disabled for future-normal processing" in stderr
+    assert captured == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1045,11 @@ def test_run_plan_retry_failed_only_routes_to_retry_helper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(
+        mod,
+        "require_future_normal_refined_keypoint_publication",
+        lambda: None,
+    )
     captured_retry_kwargs: dict[str, object] = {}
     captured_provenance: dict[str, object] = {}
 

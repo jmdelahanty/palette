@@ -269,8 +269,6 @@ def _eye_angle_command(context: StageCommandContext) -> tuple[str, ...]:
         (
             "--subject-shape-run",
             context.dependency_run("subject_shape"),
-            "--keypoint-run",
-            context.dependency_run("refined_keypoints"),
             "--run-name",
             context.output_run,
             "--chunk-size",

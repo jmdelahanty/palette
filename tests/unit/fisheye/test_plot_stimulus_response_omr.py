@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import zarr
 
+from fisheye.analysis import plot_stimulus_response_omr as omr_plot_module
 from fisheye.analysis.plot_stimulus_response_omr import (
     OMR_BOUT_TRAJECTORY_INTERACTIVE_ARTIFACT_NAME,
     OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME,
@@ -21,6 +24,10 @@ from fisheye.analysis.stimulus_response import (
     ProtocolStep,
     STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
     write_stimulus_response_run,
+)
+from tests.unit.fisheye.test_stimulus_response import (
+    _synthetic_coordinate_authority,
+    _synthetic_track_motion_lineage,
 )
 
 
@@ -44,6 +51,35 @@ def _add_track_kinematics(root: zarr.Group) -> None:
     ).astype(np.float32)
     track.create_array("positions_mm", data=positions)
     track.create_array("heading_degrees", data=np.full(frames.shape, 25.0, dtype=np.float32))
+
+
+def _patch_verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep visualization tests below the strict track-publication boundary."""
+
+    def _load(
+        root: zarr.Group,
+        *,
+        run_name: str,
+        scope: str,
+        track_id: int,
+        required_speed_levels=(),
+    ) -> SimpleNamespace:
+        if tuple(required_speed_levels):
+            raise ValueError("The OMR fixture does not publish speed surfaces.")
+        run = root["analysis"]["track_kinematics_runs"][scope][run_name]
+        track = run["tracks"][f"id_{int(track_id)}"]
+        heading = np.asarray(track["heading_degrees"][:])
+        return SimpleNamespace(
+            track_id=int(track_id),
+            track_path=f"{run.path}/tracks/id_{int(track_id)}",
+            frame_indices=np.asarray(track["frame_indices"][:]),
+            time_seconds=np.asarray(track["time_seconds"][:]),
+            positions_mm=np.asarray(track["positions_mm"][:]),
+            heading_degrees=heading,
+            smoothed_heading_degrees=heading.copy(),
+        )
+
+    monkeypatch.setattr(omr_plot_module, "load_track_kinematics_track", _load)
 
 
 def _make_omr_run() -> zarr.Group:
@@ -191,15 +227,25 @@ def _make_compact_omr_run() -> zarr.Group:
         source_kinematics_type="offline",
         source_stimulus_run="stim_test",
         source_bout_run="bouts_test",
-        parameters={},
+        coordinate_authority=_synthetic_coordinate_authority("stim_test"),
+        upstream_lineage=_synthetic_track_motion_lineage(
+            run_name="tk_test",
+            scope="offline",
+            track_ids=(0,),
+            fps=10.0,
+        ),
+        parameters={"fps": 10.0},
         run_name="omr_compact",
         layout=STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
     )
     return root
 
 
-def test_write_omr_summary_visualization_writes_png_and_spec() -> None:
+def test_write_omr_summary_visualization_writes_png_and_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = _make_omr_run()
+    _patch_verified_track_reader(monkeypatch)
 
     result = write_omr_summary_visualization(
         root,
@@ -250,8 +296,11 @@ def test_write_omr_summary_visualization_writes_png_and_spec() -> None:
     json.dumps(dict(run.attrs), allow_nan=False)
 
 
-def test_write_omr_summary_visualization_uses_compact_source_tables() -> None:
+def test_write_omr_summary_visualization_uses_compact_source_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = _make_compact_omr_run()
+    _patch_verified_track_reader(monkeypatch)
 
     result = write_omr_summary_visualization(
         root,

@@ -1,8 +1,8 @@
 # Subject Shape Runs Contract
 <!-- contract-meta
-version: 3
+version: 4
 status: active
-last_verified: 2026-07-17
+last_verified: 2026-07-19
 -->
 
 Purpose: define the downstream deterministic analysis layer for biological
@@ -28,11 +28,12 @@ outputs that should not be stored as mask-review metadata.
 
 It should consume:
 
-- `refined_subject_masks_runs/<run>` as the canonical mask-pixel authority
-- dense `refined_subject_masks_runs/<run>/masks_roi`, compact editable
-  `refined_subject_masks_runs/<run>/mask_bitpacked`, or compact final
-  `refined_subject_masks_runs/<run>/mask_rle` via the shared `MaskStore` reader;
-  writers must record which physical store was consumed
+- one complete, selector-eligible `refined_subject_masks_runs/<run>` with a
+  freshly verified `canonical_v2` coordinate publication as the exact
+  mask-pixel, row-identity, ROI-frame, and placement authority
+- dense `refined_subject_masks_runs/<run>/masks_roi` as the future-normal
+  authoritative pixel surface; compact-only historical runs are migration or
+  inspection inputs and are not eligible for new canonical subject-shape runs
 - optional refined-subject mask-local geometry primitives
 - optional `refined_keypoints_runs/<run>` or heading/track runs when anatomical
   polarity, body heading, or temporal alignment is required
@@ -137,6 +138,160 @@ analysis/track_kinematics_runs/<run>
 tracking_runs/<run>
 ```
 
+## Canonical Coordinate Publication (Schema v4, Method v11)
+
+New subject-shape runs publish one strict coordinate framework; coordinate
+meaning is never inferred from a path suffix, array shape, value range, or
+historical helper name.
+
+- The selected refined-mask run and subject-shape output must be in the same
+  archive. Cross-archive publication and overwrite-in-place are rejected.
+- `instance_key`, `source_crop_row_ids`, and
+  `source_acquisition_frame_index` are direct children of the output rowset and
+  exact dtype-preserving copies of the selected refined rows. The bound
+  `observation_instance/instance_key` contract is row identity; frame indices
+  and crop row IDs are lineage, not alternate identities.
+- Algorithms may compute against ROI-local masks internally. Published point
+  geometry is transformed once into `source_camera_image_px` through the exact
+  row-specific, direction-labelled ROI-to-camera placement. Schema v4 accepts
+  translation-only placement; scale, padding, affine, or projective placement
+  fails closed until vector, angle, and distance semantics are explicitly
+  rederived.
+- No paired ROI-local copies of the published point arrays are retained. A
+  consumer that needs ROI-local presentation must apply an explicitly bound
+  inverse transform outside the authoritative run.
+- Each per-component `(N, 2)` point array uses `geometry_type = "point_xy"`.
+  The aggregate `(N, components, 2)` `component_centroid_xy` also uses
+  `point_xy`, plus `collection_axis.role = "subject_component"` and the exact
+  digest-bound component-label authority. Uncollected `points_xy` is reserved
+  for `(N, P, 2)` point sequences; polylines such as centerlines use
+  `polyline_xy`.
+- Every `bbox_xyxy` array uses pixel-edge, half-open bounds
+  `[x_min, y_min, x_max_exclusive, y_max_exclusive]`. Both corners are
+  transformed as edges; no consumer may reinterpret maxima as inclusive.
+- Source-camera point, bbox, polyline, and ellipse arrays are direct camera
+  overlay surfaces. Translation-invariant source-camera offsets use
+  `source_camera_image_px.displacement_vector_y_down.v1`: `vector_xy`, pixel
+  units, no origin or pixel sampling convention, and overlay status
+  `not_suitable`. A displacement can be added to a bound point; it is not
+  itself an overlay position. Unit body axes use the narrow
+  `source_camera_image_px.unit_vector_y_down.v1` profile: `vector_xy`, unitless,
+  `pixel_convention = "not_applicable"`, and overlay status `not_suitable`.
+- `tail_tangent_xy` and `tail_normal_xy` are not polylines. They use the
+  distinct `vector_sequence_xy` geometry with physical shape `(N, K, 2)` and
+  the unit-vector profile above. Their axis 1 is bound to the exact
+  `tail_sample_s` array by `palette.subject_shape_tail_sample_axis`; the
+  authority declares normalized, unitless, strictly increasing arclength from
+  tail base (`0`) to tail tip (`1`).
+- Every emitted floating measurement scalar or scientific profile is
+  registered in the closed `palette.subject_shape_scalar_surface_inventory`.
+  Spline representation arrays such as knots and control-point tuples remain
+  bound by the full payload manifest and scientific-configuration record. Each
+  registered measurement array carries a
+  `palette.subject_shape_scalar_surface` record that digest-binds units,
+  quantity, sign convention, validity authority, producer method and
+  configuration, row identity, value payload, and all coordinate-bearing basis
+  arrays. This is semantic metadata on existing numeric arrays; it does not
+  create duplicate numeric surfaces.
+- `components/subject_body/tail_curvature_px_inv` is a signed `px^-1`
+  row-profile surface. Profile axis 1 is bound to the exact persisted
+  `tail_sample_s` payload and cardinality, validity is bound to
+  `tail_sample_valid`, and sample direction is tail base to tail tip. In the
+  source-camera x-right/y-down frame, the persisted curvature formula declares
+  positive curvature clockwise in image view. Readers must consume this typed
+  binding rather than infer units or direction from the array name.
+- Longitudinal and lateral relation scalars bind the exact persisted basis
+  arrays. In particular, offsets derived from the unoriented PCA principal axis
+  do not acquire anatomical-forward or anatomical-left meaning merely because
+  their paths contain `longitudinal` or `lateral`.
+- The aggregate source centroids bind the controlled body estimator. The
+  resulting `fish_anatomical_body_frame` v1 record digest-binds
+  `origin_xy`, `forward_axis_xy`, `left_axis_xy`, authoritative `axis_valid`,
+  exact source payload/schema/validity, estimator formula, and row identity.
+- The direct output rowset carries a typed source-acquisition temporal authority
+  bound to its exact `source_acquisition_frame_index` and `instance_key`.
+- The publication preserves the selected refined-mask context's assignment
+  keypoint authority. When that authority has `status = "used"`, it seals one
+  exact base `keypoints_runs/<run>` coordinate publication, keypoint payload,
+  success mask, crop placement, labels, ordered instance identity, and
+  acquisition-frame axis. Downstream consumers such as canonical eye-angle
+  analysis may use this nested proof; they must freshly reload the named child
+  and may not substitute a latest or refined keypoint run.
+- The exact refined component-QC inventory is closed-world and digest-bound.
+  Every declared component records either explicit absence or the complete QC
+  group attrs and flat array payloads; subject-shape publication revalidates
+  this authority before computation and again before final binding.
+- A scientific-configuration record seals all run parameters and component,
+  relation, and body-frame group attrs that define the computation. A separate
+  row-bound heading record binds `heading_deg`, `forward_axis_xy`, `axis_valid`,
+  row identity, units, and the formula
+  `degrees(atan2(-forward_y, forward_x))`.
+- A closed publication manifest digests every output array and binds every
+  array-specific coordinate descriptor, the exact refined context, surface and
+  component-QC inventories, derivation/transform records, component and sample
+  axes, temporal authority, scientific configuration, heading semantics, row
+  identity, and body-frame record.
+
+Cluster materialization follows a deferred-binding transaction. Scratch
+contains only a completed, explicitly unbound ROI-local numeric stage and a
+closed decoded-payload manifest: no canonical descriptor, direct output
+identity, selector, or coordinate-completion claim is permitted there. After
+deterministic sharding and atomic rename into the authoritative archive,
+Palette freshly resolves the exact refined source, consumes the unbound
+manifest, creates direct identity/temporal authorities, performs the exact
+ROI-to-camera transform, seals descriptors and manifests, marks the child
+complete but ineligible, and performs a fresh strict reload. Parent selectors
+advance only after that reload; child eligibility is the final scientific and
+selection-state mutation. The generic publisher may subsequently update only
+the explicitly non-scientific `cluster_output_staging` operational receipt,
+which is outside the immutable scientific manifest. Any post-rename failure,
+including an operational-receipt failure, removes only the UUID-owned target
+and restores the UUID-owned selector epoch.
+
+Subject-shape activation owns an exact structured `latest_pending` receipt and
+compares the complete selector/lifecycle epoch: selectors, publication
+generation, policy, and lease. It freshly reloads the parent between every
+parent write, and freshly reloads the complete child before selector
+advancement and again before the final eligibility write. A failed attempt
+rolls back only values still equal to that attempt's exact owned values; it
+never overwrites a concurrent publisher's state. If the final eligibility
+store persists and then raises, a fresh owner-bound eligible read proves the
+commit and the publisher returns success rather than deleting a valid run.
+
+The node-local tail-kinematics materializer is the one intentional detached
+consumer. It first performs the full canonical subject-shape preflight in the
+authoritative archive, then creates a closed, digest-bound staging receipt with
+the canonical publication manifest, row identity, body-frame, tail-sample-axis,
+tail-curvature semantic digests, source contract attrs, and exact payload
+hashes for every permitted staged array. Workers accept that receipt only
+through the private staged-subset path and revalidate it before and after
+bounded reads. The receipt explicitly has `normal_reader_authority = false`;
+it cannot make a partial staged Zarr readable through the normal
+subject-shape API.
+
+Published tail-derived runs bind the exact subject-shape input, not only its
+run name. Canonical tail-kinematics readers require
+`source_subject_shape_publication_manifest_sha256` and reject the run unless it
+equals a fresh strict reload of the selected subject-shape publication.
+Tail-posture writers persist the same digest both as a run attr and a
+provenance input, then revalidate it after source reads and immediately before
+activation.
+
+Normal readers accept only complete, selector-eligible schema-v4 publications
+that pass a fresh strict reload. Implicit selection requires matching `latest`
+and `latest_complete` values naming that exact direct child; disagreement or an
+ineligible child is an in-progress/invalid handoff and fails closed. Explicit
+selection accepts only a bare direct-child name or the exact path
+`analysis/subject_shape_runs/<run>`; extra prefixes or suffixes are rejected.
+`historical_inspection=True` is an explicit audit/migration escape hatch and
+returns no coordinate authority; scientific or presentation readers must not
+use it as a legacy adapter.
+
+Subject-shape eye-geometry and overlay readers follow the same rule. Historical
+refined-subject eye geometry is available only through the explicitly named
+noncanonical compatibility option, and the resulting source is labelled
+`historical_compatibility_noncanonical`. It is not a future-normal adapter.
+
 ## Required Provenance
 
 An `analysis/subject_shape_runs/<run>` writer should record:
@@ -149,14 +304,13 @@ An `analysis/subject_shape_runs/<run>` writer should record:
 - `source_mask_labels`
 - `source_mask_label_schema_id`
 - `source_mask_geometry_schema_id` when mask-local geometry was consumed
-- `source_mask_store_encoding`, e.g. `dense_uint8`, `bitpacked_binary_v1`, or
-  `component_rle_v1`
-- `source_mask_storage_surface`, e.g. `masks_roi`, `mask_bitpacked`, or
-  `mask_rle`
+- `source_mask_store_encoding = "dense_uint8"` for a schema-v4 publication
+- `source_mask_storage_surface = "masks_roi"`; historical compact encodings
+  may be reported during inspection but are not new-run authorities
 - `source_mask_store_path`, the exact physical refined-mask store consumed
-- `source_refined_subject_masks/row_revision` when available, so row-local
-  refined-mask edits can be detected without silently mutating this analysis
-  run
+- exact refined coordinate-context, surface-inventory, component-QC-inventory,
+  refinement-authority, and row-identity record digests in the subject-shape
+  derivation record
 - method name and method version
 - parameter/config hash or serialized config
 - creation timestamp
@@ -180,21 +334,34 @@ Required when used:
 analysis/subject_shape_runs/
   attrs:
     latest                         "<run_id>"
+    latest_complete                "<run_id>"
+    latest_pending                 structured owner-bound receipt while publishing only
+    subject_shape_publication_generation nonnegative committed epoch
+    subject_shape_publication_lease exact owner/run/epoch receipt
   <run_id>/
     attrs:
       schema_id                    "analysis.subject_shape_runs"
-      schema_version               3
+      schema_version               4
       source_refined_subject_masks_run
       source_mask_labels
       source_mask_label_schema_id
-      source_mask_store_encoding   "dense_uint8", "bitpacked_binary_v1", or "component_rle_v1"
-      source_mask_storage_surface  "masks_roi", "mask_bitpacked", or "mask_rle"
+      source_mask_store_encoding   "dense_uint8"
+      source_mask_storage_surface  "masks_roi"
       source_mask_store_path       exact physical source path
       method
       method_version
       created_at_utc
       row_axis                     "refined_subject_mask_rows"
       source_refs                  dict of exact input runs/paths
+      coordinate_contract          "canonical_v2"
+      bbox_convention              "xyxy_pixel_edge_half_open"
+    instance_key                   (N,) uint64 authoritative row key
+    source_crop_row_ids            (N,) exact selected refined source row
+    source_acquisition_frame_index (N,) exact source-camera frame lineage
+    component_centroid_xy          (N, C, 2) collected source-camera points
+    component_centroid_valid       (N, C)
+    coordinate_records/            exact component/body-frame authorities
+      scalar_surface_inventory/    closed typed scalar/profile inventory
     row_index/
       frame_indices                (N,)
       detection_indices            (N,) optional
@@ -205,15 +372,16 @@ analysis/subject_shape_runs/
         source_stage                "refined_subject_masks_runs"
         source_run                  "<refined run>"
         component_names             list[str]
-        row_revision_semantics      description
-      row_revision                  (N, C) int64 per-component source generation
-      row_revision_available        (C,) bool; false means source had no revision array
+        row_revision_semantics      historical compatibility description
+      row_revision                  (N, C) legacy compatibility snapshot
+      row_revision_available        (C,) false for future-normal canonical sources
     body_frame/                     optional shared fish anatomical frame
       origin_xy                     (N, 2)
       forward_axis_xy               (N, 2)
       left_axis_xy                  (N, 2)
       heading_deg                   (N,)
-      valid                         (N,)
+      axis_valid                    (N,) authoritative
+      valid                         (N,) explicit compatibility alias only
       failure_reason_bytes          (N, width) optional uint8 utf8-null-terminated tags
       midline_xy                    (N, P, 2) optional
       arclength_px                  (N,) optional
@@ -304,10 +472,12 @@ analysis/subject_shape_runs/
         right_eye_angle_rad        (N,) optional
 ```
 
-This layout is intentionally permissive. The first implementation should write
-only the arrays it can validate.
+Array presence is intentionally method-specific: a writer should emit only the
+surfaces it can scientifically validate. Coordinate authority is not
+permissive—every emitted canonical coordinate surface must have its exact
+array-specific descriptor and manifest binding.
 
-Current schema v3 tail samples are subject-shape geometry samples. They are
+Schema-v4 tail samples remain subject-shape geometry samples. They are
 used to support geometry review, width/curvature profiles, and downstream
 resampling. They should not be assumed to be the final low-dimensional
 behavioral tail-angle vector.
@@ -372,8 +542,8 @@ Schema bump rule:
 
 - Do not bump subject-shape schema solely because a downstream
   `tail_kinematics_runs` writer derives `K=10` behavior samples from existing
-  schema-v3 geometry.
-- Do bump `analysis.subject_shape_runs` to schema v4, and bump the
+  schema-v4 geometry.
+- Do bump `analysis.subject_shape_runs` beyond schema v4, and bump the
   subject-shape method version, if this run family changes the semantics,
   default dimensionality, or intended role of `tail_sample_xy` itself.
 
@@ -383,43 +553,40 @@ can resolve rows by frame or track without scanning all row-aligned arrays. The
 canonical shape arrays remain sparse and row-aligned. See
 [realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md).
 
-The canonical row-to-frame mapping is `row_index/frame_indices`, not a
-root-level `frame_indices` array. Current canary runs may have
-`analysis/subject_shape_runs/<run>/row_index/frame_indices` without
-`analysis/subject_shape_runs/<run>/frame_indices`. Consumers should use
-`row_index/frame_indices[row]` for direct row-to-video seeking. A future
-top-level `frame_index` alias or CSR-style `frame_index/` cache may be added
-for convenience, but it must remain a derived lookup over the same stable row
-axis.
+For schema-v4 coordinate authority, the direct
+`source_acquisition_frame_index` array is digest-bound to the same row identity
+as every coordinate surface. Historical `row_index/frame_indices` remains a
+lineage/viewer compatibility surface and may be absent. A future CSR-style
+`frame_index/` cache may be added for convenience, but it must remain a derived
+lookup over the same stable row axis.
 
 ## Source Revision And Staleness
 
 Subject-shape runs are downstream analysis products. They should not silently
 change when a refined mask row is manually edited.
 
-When the source refined run exposes
-`refined_subject_masks_runs/<run>/components/<component>/row_revision`, the
-subject-shape writer should copy those values into:
+Future-normal canonical refined-mask runs are immutable snapshots. Any added,
+removed, or changed source payload or namespace invalidates the sealed refined
+publication and therefore invalidates strict reload of every dependent
+subject-shape publication. An accepted mask edit must create and activate a new
+refined run/publication; recomputation creates a new subject-shape run from
+that exact source. A mutable `row_revision` counter is not a canonical
+scientific-consumer authority.
+
+The following arrays remain only as historical archive compatibility surfaces:
 
 ```text
 analysis/subject_shape_runs/<run>/source_refined_subject_masks/row_revision
+analysis/subject_shape_runs/<run>/source_refined_subject_masks/row_revision_available
 ```
 
-Column order is declared by
-`source_refined_subject_masks.attrs["component_names"]`. If an older refined
-run has no row-revision array for a component, the copied values should be zero
-and `row_revision_available[component]` should be false.
+For a future-normal source, values are zero and
+`row_revision_available[component]` is false. Explicit migration/audit tooling
+may inspect historical mutable archives and compare legacy revisions, but
+normal writers and readers do not use that result to grant coordinate or
+scientific authority. They require the strict sealed source records instead.
 
-Validation should compare the copied revisions to current refined-mask
-component revisions:
-
-- equal revisions mean the subject-shape row is current with respect to that
-  component
-- changed revisions mean the subject-shape row is stale/source-drifted
-- missing current revisions on older archives mean revision-based drift
-  detection is unavailable for that component, not that the masks are approved
-
-The initial operator command is:
+The historical inspection command remains:
 
 ```bash
 scripts/py -m fisheye.analysis.subject_shape_runs /path/to/analysis.zarr \
@@ -434,7 +601,15 @@ save path.
 ## Row Identity, Frame Lookup, And Track Identity
 
 `analysis/subject_shape_runs/<run>` is row-aligned to the selected refined
-subject-mask source. It should preserve the source row lineage under
+subject-mask source. Schema v4 directly persists and binds:
+
+```text
+instance_key
+source_crop_row_ids
+source_acquisition_frame_index
+```
+
+It may additionally preserve historical or convenience lineage under
 `row_index/` when available:
 
 ```text
@@ -451,8 +626,8 @@ CSR-style `frame_index/` cache described in
 That cache maps a displayed frame to the physical subject-shape rows that
 should be drawn.
 
-Do not treat missing root-level `frame_indices` as missing lineage if
-`row_index/frame_indices` exists.
+Do not substitute a same-length `row_index` array for the direct, digest-bound
+schema-v4 identity and temporal lineage arrays.
 
 Subject-shape rows should not treat `track_id` as primary identity. Track IDs
 are optional temporal/biological identity assignments from an exact tracking
@@ -490,7 +665,8 @@ The body-frame contract separates semantic anchors from estimators:
 - estimators declare how those anchors were measured and how frame arrays were
   materialized
 - outputs expose shared arrays such as `origin_xy`, `forward_axis_xy`,
-  `left_axis_xy`, `heading_deg`, and `valid`
+  `left_axis_xy`, `heading_deg`, and authoritative `axis_valid`; `valid` is an
+  explicitly declared compatibility alias in method v11
 
 Keypoint-only datasets remain valid. A writer may materialize a body frame from
 `pose_schema.metadata.heading_computation` when masks or body splines are not
@@ -621,9 +797,9 @@ or semantics of snout fields become part of the declared schema contract.
 
 Current implementation:
 
-- `schema_version = 3`
-- `method = "subject_shape_from_refined_masks_v8"`
-- `method_version = 8`
+- `schema_version = 4`
+- `method = "subject_shape_from_refined_masks_v11"`
+- `method_version = 11`
 - `snout_tip_estimator = "subject_body_contour_max_forward_projection_v1"`
 - `centerline_method = "snout_anchored_skeleton_longest_endpoint_path_v1"`
 - `centerline_skeleton_method = "skeleton_longest_endpoint_path_v1"`
@@ -632,7 +808,8 @@ Current implementation:
 - `head_endpoint_semantics = "validated_snout_tip"`
 - `centerline_snout_check_method = "head_endpoint_to_snout_distance_v1"`
 
-The v8/schema-v3 writer makes the semantic change explicit:
+The original v8/schema-v3 writer made the snout semantic change explicit; the
+v11/schema-v4 writer retains it while adding strict coordinate publication:
 `head_endpoint_xy` is written as the validated `snout_tip_xy` for every row with
 `centerline_valid = true`. The centerline/spline is generated by prepending a
 bounded mask-path snout-to-skeleton segment before resampling. The skeleton
@@ -772,23 +949,26 @@ explain or review a frame should use the reason tags.
 
 ## Relationship To Existing Analysis Runs
 
-`analysis/eye_angle_runs` computes interpreted eye angles from eye geometry plus
-heading/keypoint context. It remains a valid specialized analysis run, but it
-is not the first authority for mask-derived eye shape geometry in unified
+`analysis/eye_angle_runs` computes interpreted eye angles from eye geometry and
+a keypoint-derived body frame. It remains a valid specialized analysis run, but
+it is not the first authority for mask-derived eye shape geometry in unified
 body/eyes/swim workflows.
 
-Current eye-angle v5 runs opt into `analysis/subject_shape_runs` as the
-preferred source when left/right eye ellipse geometry is present. They record
-`schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
+Current eye-angle run-schema v6 outputs require `analysis/subject_shape_runs`
+as the canonical geometry source. The selected publication must be complete,
+selector-eligible, contain left/right eye ellipse geometry, and carry the used
+assignment proof for the exact base keypoint source. Eye-angle runs record
+`schema_id = "analysis.eye_angle_runs"`, `schema_version = 6`,
 `method = "ellipse_and_centroid_eye_angles"`,
 `row_axis = "keypoint_detection_rows"`, `source_geometry_kind`, and
-`eye_angle_output_schema` so consumers can distinguish subject-shape,
-refined-subject, and legacy refined-eye geometry sources. Schema v5 also
+`eye_angle_output_schema`. The v5 scientific method also
 records `preferred_angle_family = "gaze"` and
 `preferred_eye_axis = "ellipse_major"` because the major axis is the canonical
 eye-orientation axis. The gaze/minor direction is derived from the resolved
-major axis with eye-specific 90 degree rotations, and keypoint-derived
-`support/body_frame/` arrays define signed-angle polarity. It retains the
+major axis with eye-specific 90 degree rotations. The writer recomputes
+`support/body_frame/` from the exact base-keypoint values and success mask
+sealed by the subject-shape assignment proof; a separately persisted upstream
+heading is not an input. It retains the
 v3-compatible `vergence_gaze_deg` total/axis separation and adds per-eye nasal
 gaze plus
 `mean_eye_vergence_gaze_deg` for Johnson/BEAST-style comparisons. Output
@@ -796,7 +976,12 @@ schema v6 adds `left_eye_angle_deg`, `right_eye_angle_deg`, and
 `vergence_eye_angle_deg` for Bianco/Engert-style nasal-positive eye-frame
 angles. Output schema v7 adds `eye_angle_variant_schema` so UI consumers can
 select among eye-frame, gaze, nasal-gaze, major-axis, centroid, and legacy
-representations from metadata.
+representations from metadata. Output schema v9 adds ordered
+`support/instance_key` and `support/source_acquisition_frame_index`;
+`support/frame_indices` is an equality-required compatibility alias.
+Historical refined keypoints and refined-subject geometry are accepted only
+through the explicitly requested diagnostic route, whose output is permanently
+nonselector and is not a future-normal fallback.
 
 `analysis/subject_shape_runs` should not force every specialized metric to move
 immediately. It defines the mask-derived shape layer that can later feed or
@@ -809,10 +994,11 @@ Recommended near-term approach:
 - include `eye_left` and `eye_right` component geometry in
   `analysis/subject_shape_runs` when producing a coherent body/eyes/swim shape
   run.
-- keep current eye-angle outputs in `analysis/eye_angle_runs`; eye-angle writers
-  should consume `analysis/subject_shape_runs` when mask-derived eye geometry is
-  available there, with refined-subject and refined-eye geometry retained as
-  explicit compatibility fallbacks.
+- keep current eye-angle outputs in `analysis/eye_angle_runs`; canonical
+  eye-angle writers consume the exact `analysis/subject_shape_runs`
+  publication and its nested assignment-keypoint proof. Historical alternatives
+  remain explicitly labelled, nonselector diagnostic inputs rather than
+  compatibility fallbacks for future recordings.
 - do not create a separate eye-analysis authority for mask-derived eye geometry
   unless it is a downstream temporal, behavioral, or task-specific analysis.
 

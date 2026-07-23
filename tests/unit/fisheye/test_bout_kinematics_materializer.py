@@ -166,6 +166,9 @@ def test_materialize_bout_kinematics_storage_publishes_without_promotion(
     candidate = parent["bout_candidate"]
     assert candidate.attrs["palette_run_completion_status"] == "complete"
     assert candidate.attrs["palette_run_name"] == "bout_candidate"
+    assert candidate.attrs["stage_selector_eligible"] is False
+    assert candidate.attrs["atomic_publication_owner_uuid"]
+    assert "atomic_publication_tombstone" not in candidate.attrs
     assert candidate.attrs["cluster_output_staging"]["promotion_policy"] == (
         "named_candidate_only_parent_pointers_unchanged"
     )
@@ -214,7 +217,9 @@ def test_promote_bout_candidate_validates_then_updates_both_pointers(
     parent = root["analysis/bout_kinematics_runs"]
     assert parent.attrs["latest"] == "bout_candidate"
     assert parent.attrs["latest_complete"] == "bout_candidate"
-    receipt = parent["bout_candidate"].attrs["storage_promotion"]
+    promoted_candidate = parent["bout_candidate"]
+    assert promoted_candidate.attrs["stage_selector_eligible"] is True
+    receipt = promoted_candidate.attrs["storage_promotion"]
     assert receipt["approved_by"] == "test"
     assert receipt["previous_latest"] == "bout_source"
 
@@ -302,9 +307,12 @@ def test_compute_materializer_publishes_and_promotes_local_run(
     assert parent.attrs["latest"] == "bout_fresh"
     assert parent.attrs["latest_complete"] == "bout_fresh"
     fresh = parent["bout_fresh"]
+    assert fresh.attrs["stage_selector_eligible"] is True
+    assert fresh.attrs["atomic_publication_owner_uuid"]
+    assert "atomic_publication_tombstone" not in fresh.attrs
     assert fresh.attrs["node_local_materialization"]["compute_output"] == (
         "node_local_zarr"
     )
     assert fresh.attrs["cluster_output_staging"]["promotion_policy"] == (
-        "completion_last_then_latest_pointer_update"
+        "complete_ineligible_then_pointers_then_eligibility_final"
     )

@@ -4,6 +4,8 @@ Date anchored: 2026-04-17
 
 Status addendum: 2026-05-17
 
+Canonical model-binding addendum: 2026-07-19
+
 Purpose: document the current implementation status of Palette's modern
 keypoint pose stack after the heading-semantics cutover and the first packaged
 pose-heuristic rollout, and define the next concrete implementation sequence.
@@ -36,10 +38,22 @@ What is now materially true:
 - the first major consumer/training surfaces now resolve labels from run
   metadata and reject missing or mixed signatures rather than silently assuming
   the starter skeleton
-- YOLO keypoint inference can now be explicitly stamped with a packaged pose
-  schema via `detect_keypoints_yolo --pose-schema`, and the writer validates
-  the model keypoint count against that schema before writing dynamic `K`
-  arrays
+- canonical YOLO keypoint inference now requires an exact content-addressed
+  model-to-pose-schema binding; model cardinality and packaged defaults are not
+  keypoint identity evidence
+- registry-backed inference binds the selected model digest to the
+  hash-verified training manifest's ordered labels and requires every populated
+  registry skeleton field to agree
+- direct-model canonical inference requires an explicit digest-bound binding
+  file; `--pose-schema` is only an optional consistency assertion
+- package-default pose schemas remain available only to explicitly
+  `legacy_noncanonical` collection-shard paths
+
+The canonical binding is persisted inside the model artifact evidence sealed by
+the keypoint coordinate context. It contains the ordered labels, nodes, edges,
+model and runtime keypoint shapes, model digest, manifest digest, and registry
+run/set/skeleton evidence. Same-cardinality label reordering is therefore a
+hard failure rather than an undetectable relabeling.
 
 The main remaining work is not "decide the architecture." The architecture is
 clear enough now. The remaining work is:

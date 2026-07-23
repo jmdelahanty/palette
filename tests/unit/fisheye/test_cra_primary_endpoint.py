@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 import math
 from pathlib import Path
@@ -9,6 +8,11 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    UNAVAILABLE_BEHAVIOR_AUTHORITY_STATUS,
+    load_chaser_distance_run,
+)
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceResult,
     ChaserDistanceWindow,
@@ -22,6 +26,9 @@ from fisheye.analysis.chaser_quadrant_occupancy import (
     OVERVIEW_PNG_ARTIFACT_NAME,
     QUADRANT_LABELS,
     SCHEMA_ID,
+    _build_summary,
+    _compute_endpoint_arrays,
+    _quadrant_bounds_from_stimulus,
     build_chaser_quadrant_occupancy_result as build_cra_primary_endpoint_result,
     quadrant_code_for_xy,
     resolve_effective_phase_windows,
@@ -31,6 +38,19 @@ from fisheye.analysis.chaser_quadrant_occupancy import (
 from fisheye.analysis.chaser_profiles import default_goodcopbadcop_source_profile_path
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
+from tests.unit.fisheye.test_chaser_distance_coordinate_publication import (
+    _publish_canonical,
+)
+
+
+_REQUIRES_SEALED_CRA_PUBLICATION = pytest.mark.xfail(
+    raises=ChaserDistanceReadError,
+    reason=(
+        "CRA primary-endpoint persistence requires sealed chaser behavior-role "
+        "and derived-component authority"
+    ),
+    strict=True,
+)
 
 
 def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
@@ -186,6 +206,54 @@ def _decode_first(array: zarr.Array) -> str:
     return decode_null_terminated_text(np.asarray(array[0], dtype=np.uint8)).strip()
 
 
+def _compute_endpoint_fixture(
+    *,
+    fish_valid: np.ndarray | None = None,
+    dropout_warning_fraction: float = 0.2,
+) -> tuple[
+    ChaserDistanceResult,
+    tuple,
+    dict[str, np.ndarray],
+    tuple[str, ...],
+    dict[str, object],
+]:
+    source = _make_chaser_result(Path("unused.zarr"))
+    chasers = resolve_object_roles_from_protocol_payload(
+        json.loads(_make_protocol_json())
+    )
+    phases = resolve_effective_phase_windows(
+        source.windows,
+        fps=source.fps,
+        post_settle_duration_s=0.1,
+    )
+    arrays, warnings, _diagnostics = _compute_endpoint_arrays(
+        chasers=chasers,
+        phases=phases,
+        chaser_indices=source.chaser_indices,
+        fish_xy=source.fish_centroid_arena_xy,
+        chaser_xy=source.chaser_arena_xy,
+        fish_valid=(
+            source.fish_valid
+            if fish_valid is None
+            else np.asarray(fish_valid, dtype=bool)
+        ),
+        chaser_valid=source.chaser_valid,
+        distance_mm=source.distance_mm,
+        width_px=20.0,
+        height_px=20.0,
+        pixels_per_mm=source.pixels_per_mm_projector,
+        dropout_warning_fraction=dropout_warning_fraction,
+        static_chaser_drift_warning_mm=1.0,
+    )
+    summary = _build_summary(
+        recording_id=source.recording_id,
+        chasers=chasers,
+        arrays=arrays,
+        phases=phases,
+    )
+    return source, phases, arrays, warnings, summary
+
+
 def test_resolve_object_roles_from_protocol_payload_maps_protocol_metadata() -> None:
     roles = resolve_object_roles_from_protocol_payload(json.loads(_make_protocol_json()))
 
@@ -222,15 +290,96 @@ def test_quadrant_code_for_xy_uses_right_bottom_midline_ownership() -> None:
     assert quadrant_code_for_xy(-1.0, 1.0, width_px=20.0, height_px=20.0) == -1
 
 
-def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
-    zarr_path = _make_archive(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+def test_compute_cra_primary_endpoint_arrays_and_summary() -> None:
+    _source, phases, arrays, warnings, summary = _compute_endpoint_fixture()
 
-    result = build_cra_primary_endpoint_result(
-        zarr_path,
-        chaser_distance_run="chaser_distance_1",
-        protocol_profile=default_goodcopbadcop_source_profile_path(),
+    assert warnings == ()
+    assert [
+        (
+            phase.phase_label,
+            phase.source_start_frame,
+            phase.source_end_frame,
+            phase.effective_start_frame,
+            phase.effective_end_frame,
+            phase.settle_excluded_frame_count,
+        )
+        for phase in phases
+    ] == [
+        ("pre_static", 0, 2, 0, 2, 0),
+        ("post_static", 6, 8, 7, 8, 1),
+    ]
+    np.testing.assert_array_equal(
+        arrays["chaser_quadrant_code"],
+        [[0, 1], [3, 2]],
     )
+    np.testing.assert_array_equal(
+        arrays["occupancy_fraction"],
+        [[1.0, 0.0], [0.0, 1.0]],
+    )
+    np.testing.assert_array_equal(
+        arrays["valid_frame_count"],
+        [[3, 3], [2, 2]],
+    )
+    expected_median_distance_mm = np.asarray(
+        [
+            [math.sqrt(8.0) / 2.0, math.sqrt(68.0) / 2.0],
+            [
+                (math.sqrt(58.0) + math.sqrt(45.0)) / 4.0,
+                (math.sqrt(18.0) + math.sqrt(25.0)) / 4.0,
+            ],
+        ]
+    )
+    np.testing.assert_allclose(
+        arrays["median_distance_mm"],
+        expected_median_distance_mm,
+        rtol=1e-6,
+    )
+    assert summary["valid_frame_count_by_phase"] == {
+        "pre_static": 3,
+        "post_static": 2,
+    }
+    aggressive = summary["per_chaser"][0]
+    inert = summary["per_chaser"][1]
+    assert math.isclose(aggressive["phase_values"][0]["occupancy_fraction"], 1.0)
+    assert math.isclose(aggressive["phase_values"][1]["occupancy_fraction"], 0.0)
+    assert math.isclose(
+        aggressive["first_to_last_delta_occupancy_fraction"],
+        -1.0,
+    )
+    assert aggressive["first_to_last_delta_median_distance_mm"] == pytest.approx(
+        expected_median_distance_mm[1, 0] - expected_median_distance_mm[0, 0]
+    )
+    assert math.isclose(inert["phase_values"][1]["occupancy_fraction"], 1.0)
+    assert math.isclose(inert["first_to_last_delta_occupancy_fraction"], 1.0)
+    assert aggressive["phase_values"][0]["quadrant"] == "top_left"
+    assert aggressive["phase_values"][1]["quadrant"] == "bottom_right"
+    assert aggressive["phase_values"][0]["median_distance_mm"] == pytest.approx(
+        math.sqrt(2.0)
+    )
+
+
+@_REQUIRES_SEALED_CRA_PUBLICATION
+def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
+    zarr_path, root, run = _publish_canonical(tmp_path)
+    run_name = run.path.rsplit("/", 1)[-1]
+    assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs["coordinate_publication_status"] == "sealed_canonical_v2"
+    snapshot = load_chaser_distance_run(root, run_name=run_name)
+    assert snapshot.run_path == run.path
+    assert (
+        snapshot.behavior_authority_status
+        == UNAVAILABLE_BEHAVIOR_AUTHORITY_STATUS
+    )
+
+    try:
+        result = build_cra_primary_endpoint_result(
+            zarr_path,
+            chaser_distance_run=run_name,
+            protocol_profile=default_goodcopbadcop_source_profile_path(),
+        )
+    except ChaserDistanceReadError as exc:
+        assert "sealed behavior-role/color authority" in str(exc)
+        raise
 
     assert result.endpoint_status == "computed"
     assert result.qc_warnings == ()
@@ -256,7 +405,7 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
     component_path = write_cra_primary_endpoint_component(zarr_path, result, overwrite=True)
 
     root = zarr.open_group(str(zarr_path), mode="r")
-    run = root["analysis/chaser_distance_runs/chaser_distance_1"]
+    run = root[f"analysis/chaser_distance_runs/{run_name}"]
     assert _decode_first(run["chasers"]["behavior_class_label_bytes"]) == "aggressive"
     assert np.asarray(run["chasers"]["behavior_class_id"][:]).tolist() == [1, 3]
     assert _decode_first(run["chasers"]["stimulus_instance_id_bytes"]) == "chaser:0"
@@ -302,29 +451,41 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
     assert mirror_spec.attrs["canonical_artifact_path"] == f"{component_path}/visualizations/{INTERACTIVE_ARTIFACT_NAME}"
 
 
-def test_cra_primary_endpoint_rejects_noncanonical_chaser_distance_frame(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("attr_name", "legacy_value"),
+    [
+        ("coordinate_frame", "source_image_px"),
+        ("coordinate_origin", "camera_top_left"),
+    ],
+    ids=("frame-claim", "origin-claim"),
+)
+def test_cra_primary_endpoint_rejects_unsealed_legacy_coordinate_claims(
+    tmp_path: Path,
+    attr_name: str,
+    legacy_value: str,
+) -> None:
     zarr_path = _make_archive(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
-    root = zarr.open_group(str(zarr_path), mode="a")
-    root["analysis/chaser_distance_runs/chaser_distance_1"].attrs["coordinate_frame"] = "source_image_px"
+    write_chaser_distance_run(
+        zarr_path,
+        _make_chaser_result(zarr_path),
+        overwrite=True,
+        legacy_compatibility=True,
+    )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root["analysis/chaser_distance_runs/chaser_distance_1"].attrs[attr_name] = (
+        legacy_value
+    )
 
-    with pytest.raises(ValueError, match="requires coordinate_frame='arena_relative_canvas_px'"):
+    with pytest.raises(
+        ChaserDistanceReadError,
+        match="complete coordinate publication",
+    ):
         build_cra_primary_endpoint_result(zarr_path, chaser_distance_run="chaser_distance_1")
 
 
-def test_cra_primary_endpoint_rejects_noncanonical_chaser_distance_origin(tmp_path: Path) -> None:
+def test_quadrant_bounds_use_single_nondefault_stimulus_arena(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
-    root = zarr.open_group(str(zarr_path), mode="a")
-    root["analysis/chaser_distance_runs/chaser_distance_1"].attrs["coordinate_origin"] = "camera_top_left"
-
-    with pytest.raises(ValueError, match="requires coordinate_origin='top_left_of_active_arena'"):
-        build_cra_primary_endpoint_result(zarr_path, chaser_distance_run="chaser_distance_1")
-
-
-def test_cra_primary_endpoint_uses_single_nondefault_stimulus_arena_bounds(tmp_path: Path) -> None:
-    zarr_path = _make_archive(tmp_path)
-    root = zarr.open_group(str(zarr_path), mode="a")
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     coords = root["analysis/stimulus_runs/stimulus_1/stimulus_coordinates"]
     del coords["arena_1"]
     arena = coords.create_group("arena_2")
@@ -335,46 +496,44 @@ def test_cra_primary_endpoint_uses_single_nondefault_stimulus_arena_bounds(tmp_p
             "texture_origin": "top_left",
         }
     )
-    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    stimulus = root["analysis/stimulus_runs/stimulus_1"]
 
-    result = build_cra_primary_endpoint_result(
-        zarr_path,
-        chaser_distance_run="chaser_distance_1",
-        protocol_profile=default_goodcopbadcop_source_profile_path(),
+    width_px, height_px, bounds_source = _quadrant_bounds_from_stimulus(
+        stimulus
     )
 
-    assert (
-        result.quadrant_bounds_source
-        == "analysis/stimulus_runs/*/stimulus_coordinates/arena_2"
-    )
-    assert result.chaser_quadrant_code.tolist() == [[0, 1], [3, 2]]
+    assert (width_px, height_px) == (20.0, 20.0)
+    assert bounds_source == "analysis/stimulus_runs/*/stimulus_coordinates/arena_2"
 
 
-def test_cra_primary_endpoint_dropout_warning_is_report_only_by_default(tmp_path: Path) -> None:
-    zarr_path = _make_archive(tmp_path)
-    chaser_result = _make_chaser_result(zarr_path)
-    fish_valid = chaser_result.fish_valid.copy()
+def test_endpoint_arrays_report_dropout_warning_without_suppressing_result() -> None:
+    source = _make_chaser_result(Path("unused.zarr"))
+    fish_valid = source.fish_valid.copy()
     fish_valid[7:9] = False
-    write_chaser_distance_run(
-        zarr_path,
-        replace(chaser_result, fish_valid=fish_valid),
-        overwrite=True,
-    )
 
-    result = build_cra_primary_endpoint_result(
-        zarr_path,
-        chaser_distance_run="chaser_distance_1",
+    _source, _phases, arrays, warnings, _summary = _compute_endpoint_fixture(
+        fish_valid=fish_valid,
         dropout_warning_fraction=0.2,
-        protocol_profile=default_goodcopbadcop_source_profile_path(),
     )
 
-    assert result.endpoint_status == "computed"
-    assert result.dropout_exclusion_fraction is None
-    assert result.tracking_dropout_fraction[1, 0] == 1.0
-    assert any("post_static:aggressive:tracking_dropout_fraction>0.2" == item for item in result.qc_warnings)
-
-    component_path = write_cra_primary_endpoint_component(zarr_path, result, overwrite=True)
-    root = zarr.open_group(str(zarr_path), mode="r")
-    component = root[component_path]
-    assert component.attrs["status"] == "computed"
-    assert component.attrs["qc_warnings"] == list(result.qc_warnings)
+    assert warnings == (
+        "post_static:aggressive:tracking_dropout_fraction>0.2",
+        "post_static:inert:tracking_dropout_fraction>0.2",
+    )
+    np.testing.assert_array_equal(
+        arrays["chaser_quadrant_code"][1],
+        [3, 2],
+    )
+    np.testing.assert_array_equal(arrays["total_frame_count"][1], [2, 2])
+    np.testing.assert_array_equal(arrays["valid_frame_count"][1], [0, 0])
+    np.testing.assert_array_equal(
+        arrays["distance_valid_frame_count"][1],
+        [0, 0],
+    )
+    np.testing.assert_array_equal(arrays["missing_frame_count"][1], [2, 2])
+    np.testing.assert_array_equal(
+        arrays["tracking_dropout_fraction"][1],
+        [1.0, 1.0],
+    )
+    assert np.isnan(arrays["median_distance_mm"][1]).all()
+    assert np.isnan(arrays["occupancy_fraction"][1]).all()

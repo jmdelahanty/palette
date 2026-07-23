@@ -159,7 +159,10 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert eyes[eyes.index("--subject-shape-run") + 1] == (
         "subject_shape_canary_20260713_01"
     )
-    assert eyes[eyes.index("--keypoint-run") + 1] == "refined_kp_a"
+    assert "--keypoint-run" not in eyes
+    assert commands["eye_angles"].dependency_runs == {
+        "subject_shape": "subject_shape_canary_20260713_01"
+    }
     assert eyes[eyes.index("--execution-backend") + 1] == "dask_worker_chunks"
     assert eyes[eyes.index("--num-workers") + 1] == "8"
     assert eyes[eyes.index("--angle-chunk-rows") + 1] == "4096"

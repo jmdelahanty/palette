@@ -50,10 +50,7 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
         "refined_keypoints",
         "tracks",
     )
-    assert workflow.node_by_id["eye_angles"].depends_on == (
-        "refined_keypoints",
-        "subject_shape",
-    )
+    assert workflow.node_by_id["eye_angles"].depends_on == ("subject_shape",)
     assert workflow.node_by_id["eye_angles"].execution_policy == (
         "exact_source_subset_node_local_compute_shard_publish"
     )
@@ -67,6 +64,43 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
         "track_kinematics_visualization",
         "eye_angles",
     )
+
+
+def test_eye_plan_derives_keypoint_authority_only_through_subject_shape() -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_subject_masks": StageAvailability(
+            stage_id="refined_subject_masks",
+            available=True,
+            artifact_path="refined_subject_masks_runs/masks_a",
+            run_name="masks_a",
+            reason="complete canonical publication",
+        ),
+        "subject_shape": StageAvailability(
+            stage_id="subject_shape",
+            available=True,
+            artifact_path="analysis/subject_shape_runs/shape_a",
+            run_name="shape_a",
+            reason="complete canonical publication",
+        ),
+        "eye_angles": StageAvailability(
+            stage_id="eye_angles",
+            available=False,
+            reason="missing",
+        ),
+    }
+
+    plan = plan_analysis_workflow(workflow, availability, targets=("eye_angles",))
+
+    assert plan.ready is True
+    assert plan.topological_order == (
+        "refined_subject_masks",
+        "subject_shape",
+        "eye_angles",
+    )
+    assert "refined_keypoints" not in plan.node_by_id
+    assert plan.node_by_id["eye_angles"].depends_on == ("subject_shape",)
+    assert plan.execution_order == ("eye_angles",)
 
 
 def test_temporal_policy_allows_numeric_overrides_but_not_trace_downsampling() -> None:
@@ -287,11 +321,42 @@ def test_visualization_availability_is_tied_to_selected_track_run(
 
     assert missing.available is False
     assert missing.run_name == "track_a"
-    assert "interactive track-kinematics contract is missing" in missing.reason
+    assert "sibling track-kinematics visualization parent is missing" in missing.reason
 
-    artifact = (
-        parent
+    visualization_parent = (
+        tmp_path
+        / "analysis"
+        / "track_kinematics_visualization_runs"
+        / "offline"
         / "track_a"
+        / "tracks"
+        / "id_0"
+    )
+    _write_zarr_metadata(
+        visualization_parent,
+        {"latest_complete": "render_a"},
+    )
+    motion_authority = {
+        "run_ref": "/analysis/track_kinematics_runs/offline/track_a",
+        "track_ref": (
+            "/analysis/track_kinematics_runs/offline/track_a/tracks/id_0"
+        ),
+        "track_id": 0,
+        "motion_manifest_sha256": "a" * 64,
+        "positions_px_coordinate_descriptor_sha256": "b" * 64,
+    }
+    render = visualization_parent / "render_a"
+    _write_zarr_metadata(
+        render,
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "source_track_motion_authority": motion_authority,
+            "track_id": 0,
+        },
+    )
+    artifact = (
+        render
         / "visualizations"
         / "track_kinematics_summary_track_0_interactive"
     )
@@ -301,6 +366,7 @@ def test_visualization_availability_is_tied_to_selected_track_run(
             "renderer": "palette-track-kinematics-summary-v1",
             "source_runs": {"track_kinematics": "offline/track_a"},
             "parameters": {"swim_bout_run": "swim_a"},
+            "track_motion_authority": motion_authority,
         },
     )
     _write_zarr_metadata(artifact / "spec_json")
@@ -318,7 +384,8 @@ def test_visualization_availability_is_tied_to_selected_track_run(
     assert available.available is True
     assert available.run_name == "track_a"
     assert available.artifact_path == (
-        "analysis/track_kinematics_runs/offline/track_a/visualizations/"
+        "analysis/track_kinematics_visualization_runs/offline/track_a/"
+        "tracks/id_0/render_a/visualizations/"
         "track_kinematics_summary_track_0_interactive"
     )
 

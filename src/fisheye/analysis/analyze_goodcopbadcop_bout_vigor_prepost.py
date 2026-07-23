@@ -27,10 +27,11 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
-    load_epochs,
-    open_distance_run,
     resolve_cohort,
-    resolve_object_roles,
+)
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
@@ -48,13 +49,8 @@ plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.rig
 
 def load(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = open_distance_run(r)
-    dist = np.asarray(cd["distances"]["distance_mm"][:], float)
-    b = cd["chaser_bout_response"][sorted(cd["chaser_bout_response"].group_keys())[-1]]["bouts"]
-    bv = np.asarray(b["valid"][:], bool)
-    bs = np.asarray(b["start_frame"][:], np.int64)[bv]
-    pk = np.asarray(b["peak_speed_mm_s"][:], float)[bv]
-    return dist, bs, pk, resolve_object_roles(r), load_epochs(r)
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_bout_response")
 
 
 def band_median(dist, bs, pk, idx, rng, band) -> float:
@@ -84,6 +80,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             dist, bs, pk, roles, epochs = load(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], ex)
             continue

@@ -22,6 +22,11 @@ def _build_source(path: Path) -> np.ndarray:
         .require_group("id_0")
     )
     track.create_array("frame_indices", data=frames, chunks=(6,))
+    track.create_array(
+        "source_acquisition_frame_index",
+        data=frames,
+        chunks=(6,),
+    )
     return frames
 
 
@@ -32,7 +37,8 @@ def _fake_writer(argv) -> int:
     source_root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     frames = np.asarray(
         source_root[
-            "analysis/track_kinematics_runs/offline/track_1/tracks/id_0/frame_indices"
+            "analysis/track_kinematics_runs/offline/track_1/tracks/id_0/"
+            "source_acquisition_frame_index"
         ][:],
         dtype=np.int64,
     )
@@ -58,15 +64,17 @@ def _fake_writer(argv) -> int:
                 )
             },
             "source_track_kinematics_run": "track_1",
+            "source_track_motion_manifest_sha256": "a" * 64,
             "track_id": 0,
             "frame_axis_contract": build_frame_axis_contract(
                 frames,
                 authoritative_path=(
                     "analysis/track_kinematics_runs/offline/track_1/"
-                    "tracks/id_0/frame_indices"
+                    "tracks/id_0/source_acquisition_frame_index"
                 ),
                 source_track_kinematics_run="track_1",
                 track_id=0,
+                source_track_motion_manifest_sha256="a" * 64,
             ),
             "provenance": {
                 "stage": "detect_bouts_multi_level",
@@ -129,6 +137,9 @@ def test_materializer_computes_locally_and_publishes_atomically(
     assert parent.attrs["latest"] == "bouts_1"
     assert parent.attrs["latest_complete"] == "bouts_1"
     run = parent["bouts_1"]
+    assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs["atomic_publication_owner_uuid"]
+    assert "atomic_publication_tombstone" not in run.attrs
     assert run.attrs["cluster_output_staging"]["publisher_contract"] == {
         "schema_id": "palette.atomic_run_group_publisher",
         "schema_version": 1,

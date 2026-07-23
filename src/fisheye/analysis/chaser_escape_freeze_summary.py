@@ -19,11 +19,15 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
-from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.shared.system_metadata import get_git_info
 
 SCHEMA_ID = "palette.chaser.escape_freeze_summary.v1"
@@ -95,16 +99,15 @@ def _attr_text(attrs: Any, *keys: str) -> str | None:
     return None
 
 
-def _resolve_chaser_distance_run(root: zarr.Group, run_name: str | None) -> tuple[zarr.Group, str, str]:
-    parent = root.get("analysis/chaser_distance_runs")
-    if parent is None:
-        raise ValueError("Archive has no analysis/chaser_distance_runs group.")
-    resolved = str(run_name or "latest").strip()
-    if not resolved or resolved == "latest":
-        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
-    return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"
+def _resolve_chaser_distance_run(
+    root: zarr.Group,
+    run_name: str | None,
+) -> tuple[ChaserDistanceReadSnapshot, str, str]:
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(run_name or "latest").strip() or "latest",
+    )
+    return snapshot, snapshot.run_name, snapshot.run_path
 
 
 def _source_stimulus_path(run_group: zarr.Group) -> tuple[str | None, str | None]:
@@ -726,8 +729,15 @@ def build_chaser_escape_freeze_summary_result(
     heading_min_speed_mm_s: float = DEFAULT_HEADING_MIN_SPEED_MM_S,
 ) -> ChaserEscapeFreezeSummaryResult:
     root = _open_root(zarr_path, mode="r")
-    run_group, run_name, run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
-    source_stimulus_run, source_stimulus_path = _source_stimulus_path(run_group)
+    distance, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_stimulus_protocol_authority(
+        "chaser controller states and trigger radius"
+    )
+    source_stimulus_run = distance.source_stimulus_run
+    source_stimulus_path = distance.source_stimulus_path
     chaser_states = _load_chaser_states(root, source_stimulus_path)
     resolved_trigger_radius_mm, trigger_radius_source, trigger_radius_override, radius_warnings = _resolve_trigger_radius(
         root,
@@ -737,26 +747,36 @@ def build_chaser_escape_freeze_summary_result(
         trigger_radius_mm=trigger_radius_mm,
     )
 
-    fps = _read_scalar_attr(run_group, "fps", 100.0)
-    ppm = _read_scalar_attr(run_group, "pixels_per_mm_projector", math.nan)
-    if not math.isfinite(fps) or fps <= 0:
-        raise ValueError("Chaser-distance run lacks a valid fps attr.")
-    if not math.isfinite(ppm) or ppm <= 0:
-        raise ValueError("Chaser-distance run lacks a valid pixels_per_mm_projector attr.")
-    total_frames = int(_read_scalar_attr(run_group, "total_frames", 0.0))
-    fish_xy = np.asarray(run_group["positions/fish_centroid_arena_xy"][:], dtype=np.float32)
-    fish_valid = np.asarray(run_group["positions/fish_valid"][:], dtype=bool)
-    chaser_col = _chaser_column(run_group, int(chaser_index))
-    chaser_xy = np.asarray(run_group["positions/chaser_arena_xy"][:, chaser_col, :], dtype=np.float32)
-    chaser_valid = np.asarray(run_group["positions/chaser_valid"][:, chaser_col], dtype=bool)
+    fps = float(distance.fps)
+    ppm = float(distance.pixels_per_mm_projector)
+    total_frames = int(distance.total_frames)
+    fish_xy = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float32)
+    fish_valid = np.asarray(distance.fish_valid, dtype=bool)
+    indices = np.asarray(distance.chaser_index, dtype=np.int64).reshape(-1)
+    matches = np.flatnonzero(indices == int(chaser_index))
+    if matches.size == 0:
+        raise ValueError(
+            f"Chaser index {chaser_index} not present in chaser-distance run; "
+            f"available={indices.tolist()}"
+        )
+    chaser_col = int(matches[0])
+    chaser_xy = np.asarray(
+        distance.chaser_arena_xy[:, chaser_col, :],
+        dtype=np.float32,
+    )
+    chaser_valid = np.asarray(
+        distance.chaser_valid[:, chaser_col],
+        dtype=bool,
+    )
     _assert_chaser_trace_moves(chaser_xy, chaser_valid, run_name)
-    distance_mm = np.asarray(run_group["distances/distance_mm"][:, chaser_col], dtype=np.float32)
-    camera_frame_ids = np.asarray(run_group["frames/camera_frame_id"][:], dtype=np.int64)
-    stimulus_frame_nums = np.asarray(run_group["frames/stimulus_frame_num"][:], dtype=np.int64)
-    if total_frames <= 0:
-        total_frames = int(fish_xy.shape[0])
+    distance_mm = np.asarray(
+        distance.distance_mm[:, chaser_col],
+        dtype=np.float32,
+    )
+    camera_frame_ids = np.asarray(distance.camera_frame_id, dtype=np.int64)
+    stimulus_frame_nums = np.asarray(distance.stimulus_frame_num, dtype=np.int64)
     if fish_xy.shape[0] != total_frames:
-        total_frames = int(fish_xy.shape[0])
+        raise ValueError("Typed chaser-distance frame extent is inconsistent.")
 
     controller = _dense_controller_state(
         chaser_states,
@@ -991,7 +1011,7 @@ def build_chaser_escape_freeze_summary_result(
         if trajectory_rows
         else np.zeros(0, dtype=_trajectory_dtype())
     )
-    recording_id = _attr_text(root.attrs, "recording_id", "recording_name") or Path(zarr_path).stem
+    recording_id = distance.recording_id
     escape_attempt_count = int(np.count_nonzero(metric_table["escape_attempt"])) if metric_table.size else 0
     classified_count = int(
         np.count_nonzero(
@@ -1630,6 +1650,12 @@ def write_chaser_escape_freeze_summary_component(
     write_png: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name

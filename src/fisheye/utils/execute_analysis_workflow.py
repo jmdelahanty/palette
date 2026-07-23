@@ -65,6 +65,11 @@ def _preflight_new_outputs(
     execution_plan: WorkflowExecutionPlan,
 ) -> None:
     for stage_id, run_name in execution_plan.output_runs.items():
+        if stage_id == "track_kinematics_visualization":
+            # The visualization publisher owns a unique immutable render child
+            # below the source-run-specific sibling parent. Existing renders
+            # therefore do not collide with a new requested render.
+            continue
         relative = stage_run_relative_path(stage_id, run_name)
         if (zarr_path / relative / "zarr.json").exists():
             raise WorkflowExecutionError(

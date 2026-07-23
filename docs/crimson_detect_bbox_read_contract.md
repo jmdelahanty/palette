@@ -1,212 +1,202 @@
-# Crimson Detect BBox Read Contract
+# Crimson Detection Bounding-Box Read Contract
 <!-- contract-meta
-version: 5
-status: active
-last_verified: 2026-05-16
+version: 7
+status: future-normal
+last_verified: 2026-07-19
 -->
 
-Purpose: define the read contract Crimson should use to load detect bounding
-boxes from Palette Zarr archives.
-
-Scope note for clipped recordings:
-
-- This contract applies to traditional top-level analysis Zarrs and
-  materialized training Zarrs.
-- For clipped analysis archives, this contract defines the bbox leaf-group
-  read rules after a resolver has selected a concrete clip-local refined run,
-  such as
-  `clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs/<run>/instances`.
-- It does not by itself define how to select a finalized collection, map parent
-  frames to clip-local frames, or switch videos at clip boundaries.
-  Crimson needs a finalized collection resolver for that.
-  See `docs/clipped_recording_consumer_mapping_contract.md`.
-
-## Primary Read Surface
-
-Current primary source:
-
-- `refined_detect_runs/<run_name>/instances` when present
-
-`source_detections/` is a candidate-audit surface and is not the primary bbox
-render source.
-
-Fallbacks:
-
-1. legacy sparse refined groups:
-   - `refined_detect_runs/<run_name>/<legacy_group>`
-   - `refined_detect_runs/<run_name>/interpolated`
-   - `refined_detect_runs/<run_name>/filtered`
-2. raw detect:
-   - `detect_runs/<run_name>`
-
-Current archives should not be expected to contain separate preferred detect or
-crop arrays.
-Current Crimson readers should treat the subgroup-era fallbacks as
-compatibility-only and prefer `instances/` whenever it exists.
-
-## Run Selection Rules
-
-Default refined selection:
-
-1. use `refined_detect_runs.attrs["latest"]`
-2. if that run has `instances/`, read `instances/`
-3. otherwise fall back to legacy sparse resolution:
-   - `manual_review_latest` (legacy pointer)
-   - `manual`
-   - `interpolated`
-   - `filtered`
-   - raw detect
-
-## Required Arrays
-
-### Curated sparse `instances/`
-
-- `frame_indices`
-- `bbox_img_xyxy`
-- `bbox_norm_coords`
-- `source_kind_codes`
-
-Common optional arrays:
-
-- `refined_row_ids`
-- `confidence_scores`
-- `class_ids`
-- `source_detect_row_index`
-- `reason_bytes`
-
-Reader rule:
-
-- Rows in `instances/` are already the curated accepted detections. Render only
-  finite bbox geometry.
-
-### Legacy sparse refined groups
-
-These are compatibility-only for historical archives.
-
-- `frame_indices`
-- `bbox_norm_coords`
-
-Optional:
-
-- `detection_source`
-- `reason_bytes`
-- `reason`
-- `scores`
-- `class_ids`
-
-### Raw detect
-
-- `frame_indices`
-- `bbox_norm_coords`
-
-## Semantics
-
-`source_kind_codes` is the machine-readable provenance state on current refined
-surfaces:
-
-- `none`
-- `raw_detect`
-- `interpolated`
-- `manual`
-
-Reason labels are explanatory only. Crimson should display them, but should
-not depend on parsing them to determine whether a row is present.
-
-For current sparse refined runs, prefer `source_kind_codes` over any string
-label when deciding whether a row is operator-corrected or inherited from raw
-detect.
-
-For `source_detections/`, `decision_codes` is the machine-readable raw
-candidate disposition. It is useful for audit and UI summaries, but it should
-not be treated as the bbox render surface.
-
-For legacy sparse refined groups:
-
-- if `reason_bytes` exists, decode and use it
-- else if `reason` exists, use it
-- else if `detection_source` exists, derive:
-  - `0 -> clean`
-  - `1 -> interpolated`
-- else default to `clean`
-
-For current groups, `reason_bytes` is the sole persisted reason authority.
-Crimson must not create or synchronize a variable-length `reason` array. If
-both arrays occur in a historical archive, `reason_bytes` wins; `reason` is a
-read-only fallback only when `reason_bytes` is absent.
-
-## Coordinate Rules
-
-Canonical refined detect geometry:
-
-- `bbox_img_xyxy` is authoritative for rendering/editing and is source-image
-  pixel-space `[x1, y1, x2, y2]`
-- `bbox_norm_coords` is a normalized mirror in `[cx, cy, w, h]`
-- consumers should read `bbox_img_xyxy_coordinate_space`,
-  `bbox_img_xyxy_reference_width/height`, and
-  `bbox_norm_reference_width/height` attrs when present
-- Palette owns the inference-to-source transform when refined surfaces are
-  written; Crimson should not silently treat inference-space pixels as source
-  pixels
-
-Legacy sparse/raw geometry:
-
-- `bbox_norm_coords` is `[cx, cy, w, h]`
-- normalize against the detector input frame dimensions
-- if an older refined run has `bbox_img_xyxy` numerically in inference pixels,
-  repair it with `fisheye.utils.backfill_refined_detect_bbox_img_xyxy` instead
-  of baking scale heuristics into new consumers
-
-## Zarr Chunking Rules
-
-The logical bbox interface is `[N, 4]` for both traditional and clipped
-archives. Crimson should read Zarr arrays by logical indices and must not assume
-that a row is contiguous inside one physical chunk.
-
-Palette now writes refined-detect bbox arrays with preferred chunk shape:
+This document is Palette's implementation-facing mirror of the authoritative
+cross-repository contract:
 
 ```text
-(row_chunk, 4)
+agent-contracts/palette-crimson/detect_bbox_read.md
 ```
 
-for:
+The future-normal Crimson path reads only sealed canonical raw detections from
+`detect_runs/<run>`. Historical refined/manual layouts and unbound raw runs are
+not normal fallbacks. A future recording must be readable without invoking a
+legacy adapter.
 
-- `instances/bbox_img_xyxy`
-- `instances/bbox_norm_coords`
-- `source_detections/bbox_img_xyxy`
-- `source_detections/bbox_norm_coords`
+Presentation viewport coordinates are ephemeral Crimson renderer state. They
+must not be persisted as Palette coordinate authority.
 
-Older archives may still have auto-chosen chunks such as `(26664, 2)`, which
-split the fixed-width bbox columns. That is valid Zarr storage but can expose
-reader bugs. Use `fisheye.utils.validate_refined_detect_run` to warn on this
-layout and `fisheye.utils.rechunk_refined_detect_bbox_arrays` to opt-in repair
-existing refined-detect runs.
+## Candidate discovery and pinning
 
-## Metadata Hints
+An explicit run name or `detect_runs.attrs["latest_complete"]`/`["latest"]` may
+discover a candidate. The selector does not authorize it. Crimson must reopen
+the exact `detect_runs/<run>` child and require:
 
-Helpful attrs when present:
+```text
+coordinate_contract == "canonical_v2"
+palette_run_completion_contract is supported
+palette_run_completion_status == "complete"
+stage_selector_eligible is true
+```
 
-- `source_detect_run`
-- `detect_review_status`
-- `summary_statistics`
-- `curated_row_storage`
-- `refined_storage_semantics`
-- `status_code_map`
-- `source_kind_code_map`
+Lexicographic selection, refined-to-raw fallback, and use of a detached child
+handle are forbidden. A selected child that is missing, replaced, incomplete,
+ineligible, or changed during the read is unavailable.
 
-`detect_review_status["resolved_group"]` should normally be `refined` for current
-runs with `instances/`.
+## Required arrays and identity
 
-## Failure Modes
+One nonempty canonical run contains:
 
-- Missing `refined_detect_runs` and `detect_runs`: return a structured
-  "no detections available" status.
-- Empty arrays: valid, render no boxes.
-- Missing optional arrays: still valid.
+```text
+instance_key                         uint64  (N,)
+source_acquisition_frame_index       int64   (N,)
+frame_indices                        int32   (N,)
+bbox_norm_coords                     float64 (N,4)
+bbox_img_xyxy                        float64 (N,4)
+centers_img_xy                       float64 (N,2)
+scores                               float32 (N,)
+class_ids                            int32   (N,)
+frame_counts                         int32   (F,)
+n_detections                         int32   (F,)
+```
 
-## Related Documents
+`instance_key` is observation identity. Acquisition frame is a separate time
+mapping; row offset is not frame number. `frame_indices` is an exact
+compatibility alias and cannot replace the typed temporal authority.
 
-- `docs/refined_detect_collapse_v2.md`
-- `docs/detection_refinement_workflow.md`
-- `src/fisheye/docs/zarr_structure.md`
+`frame_counts` and `n_detections` must equal the bincount of the acquisition
+frame mapping over the sealed full frame domain and sum to `N`. Zero-observation
+runs require the canonical full-domain empty-observation proof; empty arrays by
+themselves are insufficient.
+
+## Coordinate surfaces
+
+Every geometry array owns `coordinate_descriptor` and
+`coordinate_descriptor_sha256`. Names and numerical ranges carry no coordinate
+meaning.
+
+### Source-camera boxes
+
+`bbox_img_xyxy` is the preferred overlay surface and must declare:
+
+```text
+profile_id == "source_camera_image_px.top_left_y_down.v1"
+geometry_type == "bbox_xyxy"
+components == ["x_min", "y_min", "x_max", "y_max"]
+component_units == ["px", "px", "px", "px"]
+pixel_convention == "pixel_edge_half_open"
+source_camera_overlay.status == "direct"
+```
+
+The box uses half-open edge geometry. `x_max == width` and
+`y_max == height` are valid; scientific validation must not clamp them to
+`width - 1` or `height - 1`.
+
+The bbox authority is distinct from the continuous source-camera point frame.
+Both frames bind the same exact acquisition extent, but a reader must not
+substitute one convention for the other merely because their numeric extents
+match.
+
+### Normalized boxes
+
+`bbox_norm_coords` is a source-camera-normalized `[cx, cy, width, height]`
+sibling, not detector-model-input geometry. It must declare the controlled
+source-camera-normalized profile, continuous convention, and an exact
+direction-labelled normalized-to-source-camera transform. Crimson must not
+multiply it by root, inference, video-widget, or viewport dimensions chosen
+independently of that authority.
+
+### Source-camera centers
+
+`centers_img_xy` must declare source-camera pixels, `point_xy`, continuous
+convention, and direct-overlay status. Its derivation proves exact midpoint
+equality to `bbox_img_xyxy` under the same observation identity and explicitly
+crosses from the half-open bbox-edge authority to the continuous point
+authority.
+
+### Detector result-space lineage
+
+`detection_backend_result_projection` is required. It binds the exact
+fingerprinted model artifact, decoder/backend identity, validated result count,
+uniform `result.orig_shape`, persisted normalized bbox payload, and the exact
+result-pixel-to-normalized/source-camera matrices. Palette validates that every
+YOLO result's `orig_shape` equals its corresponding runtime input shape before
+normalization.
+
+This record is deliberately not a guessed network letterbox authority. When
+the backend's internal network preprocessing is not persisted exactly, the
+record labels it unavailable and excludes it from coordinate projection
+authority. Crimson consumes the validated result-space projection and must not
+reconstruct a model-input transform from `imgsz` or resolution ratios.
+
+## Required validation boundary
+
+Before returning values, Crimson must validate the logical equivalent of
+`fisheye.shared.observation_coordinate_publication.load_persisted_detection_observation_geometry`,
+including:
+
+- acquisition camera, source-video identity, continuous point frame,
+  half-open bbox-edge frame, and their common exact extent;
+- the validated detector result-space projection and exact model fingerprint;
+- the source-camera-normalized frame and directed transform;
+- observation identity and acquisition-time records;
+- instance-key derivation and exact observation cardinality;
+- bbox projection and center derivations;
+- every geometry payload, descriptor, digest, and referenced record;
+- the full-domain declaration for a zero-observation run.
+
+The reader copies the requested arrays, reopens/revalidates the pinned child
+and exact source graph, and only then returns ordinary arrays to the renderer.
+This boundary validation does not require rendering or scientific kernels to
+carry metadata dictionaries internally.
+
+## Refined and manual detections
+
+Current `refined_detect_runs/<run>` layouts do not provide the immutable
+successor, exact row identity, complete source-camera geometry, descriptors,
+and publication seal required by the future-normal contract. Crimson therefore
+reports canonical refined detections as unavailable. It must not silently fall
+back to raw detections after an explicit refined selection.
+
+The future write boundary is
+`agent-contracts/palette-crimson/refined_detect_manual.md`: Crimson submits a
+logical edit request; Palette owns validation, recomputation of image and
+normalized siblings, immutable successor publication, sealing, and activation.
+Direct in-place Crimson mutation cannot preserve canonical authority.
+
+Historical `instances/`, sparse manual/interpolated/filtered groups, legacy
+normalized boxes, reason arrays, and old chunk layouts may be exposed only by
+an explicitly selected, visibly labelled read-only mode such as
+`unverified_legacy_inspection_only`. That mode cannot enter normal selectors,
+feed canonical scientific publication, or mint missing coordinate metadata.
+
+## Failure behavior
+
+Normal reading fails closed for missing or stale lifecycle gates, identity or
+time evidence, arrays, descriptors, digests, frame extents, source-video
+binding, transform direction, derivation, cardinality, or empty-run proof. It
+also fails closed when model-input, ROI, normalized, or viewport geometry is
+presented as direct source-camera geometry.
+
+Renderer clipping and source-camera-to-viewport scaling are allowed only after
+validation and remain ephemeral.
+
+## Required tests
+
+Focused Palette and Crimson fixtures cover:
+
+1. multiple observations in one acquisition frame;
+2. plausible ROI/model/viewport values rejected as source-camera boxes;
+3. unequal source, model-input, and display extents;
+4. a non-self-inverse transform used in the wrong direction;
+5. stale descriptors, payloads, row keys, frame counts, or source records;
+6. half-open boxes whose maximum edge equals the reference extent, with
+   continuous centers bound to the separate point frame;
+7. proved versus unproved zero-observation runs;
+8. exact-child replacement or mutation during read;
+9. missing, stale, or dimension-mismatched backend result-space lineage;
+10. explicit refined/manual selection failing without raw fallback; and
+11. a future recording read without any legacy adapter or persisted viewport
+    coordinates.
+
+## Related documents
+
+- `docs/video_pixel_model_input_contract.md`
+- `docs/coordinate_metadata_framework.md`
+- `docs/keypoint_refined_coordinate_space_incident_2026-03-04.md`
 - `docs/crimson_refined_detect_manual_contract.md`
 - `docs/clipped_recording_consumer_mapping_contract.md`

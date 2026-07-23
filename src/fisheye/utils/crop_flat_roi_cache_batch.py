@@ -20,6 +20,7 @@ from fisheye.utils.crop_batch import (
     _load_config,
     _load_paths_file,
     _normalize_path,
+    _require_completed_crop_result,
     _resolve_targets,
 )
 
@@ -100,7 +101,8 @@ def _resolve_crop_run_after_crop(plan: CropPlan, crop_result: Optional[Dict[str,
         run_name = crop_result.get("run_name")
         if run_name:
             return str(run_name)
-    if plan.latest_crop:
+        return None
+    if plan.status == "skipped" and plan.latest_crop:
         return str(plan.latest_crop)
     return None
 
@@ -184,14 +186,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--crop-storage-mode",
         choices=["materialized", "geometry_only"],
-        default="geometry_only",
-        help="Crop persistence mode for newly written crop runs (default: geometry_only).",
+        default="materialized",
+        help="Crop persistence mode for newly written crop runs (default: materialized).",
     )
     parser.add_argument(
         "--source-type",
         choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         default=None,
-        help="Detection source for crop generation (default: config value, otherwise auto).",
+        help="Detection source for crop generation (default: config value, otherwise detect).",
     )
     parser.add_argument(
         "--source-path",
@@ -285,7 +287,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     config = _load_config(args.config)
     crop_cfg = config.get("crop", {}) or {}
-    raw_source_type = args.source_type or crop_cfg.get("source_type") or "auto"
+    raw_source_type = args.source_type or crop_cfg.get("source_type") or "detect"
     source_path = _normalize_path(args.source_path or crop_cfg.get("source_path"))
     source_type = infer_detection_source_type(source_path, raw_source_type)
     selection_policy = args.selection_policy or crop_cfg.get("selection_policy")
@@ -436,7 +438,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     force_cpu=args.force_cpu,
                     verbose=args.verbose,
                 )
-                crop_run = _resolve_crop_run_after_crop(plan, crop_result)
+                crop_run = _require_completed_crop_result(crop_result)
                 log(
                     "crop_success",
                     zarr=str(plan.zarr_path),

@@ -131,8 +131,17 @@ def _select_refined_run(
 
     matching: list[tuple[str, Any]] = []
     for run_name, run_group in candidates:
+        attrs = getattr(run_group, "attrs", {})
         source_run = _source_keypoints_run(run_group)
         if requested_keypoint_run and source_run != requested_keypoint_run:
+            continue
+        if attrs.get("stage_selector_eligible") is not True:
+            continue
+        if (
+            attrs.get("coordinate_contract")
+            == refine_mod._LEGACY_UNVERIFIED_OUTPUT_CONTRACT
+            or attrs.get("legacy_unverified_diagnostic_output") is True
+        ):
             continue
         if not is_run_complete_in_parent(parent, run_group):
             continue
@@ -144,7 +153,10 @@ def _select_refined_run(
             if requested_keypoint_run
             else ""
         )
-        raise RuntimeError(f"No complete refined keypoint run found{source_suffix}")
+        raise RuntimeError(
+            "No complete selector-eligible refined keypoint run found"
+            f"{source_suffix}"
+        )
 
     matching.sort(key=lambda item: _run_sort_key(item[0], item[1]))
     return matching[-1]

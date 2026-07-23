@@ -1,10 +1,13 @@
 # Detection Refinement Workflow
 
-This is the current detect workflow as of 2026-04-07.
+This is the current detect workflow as of 2026-07-19.
 
 ## Contract
 
 - `detect_runs/<run>` is raw detector output.
+- `detection_artifact_runs/<run>` is selector-free, unbound numeric evidence.
+  It is not a raw-detect authority and cannot be passed directly to
+  `detect_quality` or `refine_detect`.
 - `detect_runs/<run>/quality_reports/<qrun>` is the raw detect artifact-label
   surface used by refine guardrails.
 - `refined_detect_runs/<run>` is the canonical curated detect surface.
@@ -16,33 +19,60 @@ This is the current detect workflow as of 2026-04-07.
 
 ## Recommended Sequence
 
-1. Run detection.
-   - Blob:
-     ```bash
-     scripts/py -m fisheye.detection.detect_traditional /path/to/zarr
-     ```
-   - YOLO:
-     ```bash
-     scripts/py -m fisheye.detection.detect_yolo /path/to/zarr --model /path/to/model.pt
-     ```
-   - Sampled training Zarr:
-     ```bash
-     scripts/py -m fisheye.utils.predict_training_detections \
-       /path/to/training.zarr \
-       --registry /nvme1/palette_registry.sqlite \
-       --model-run-id <registered_detect_run_id> \
-       --run-name detect_seed_<model_or_date> \
-       --apply
-     ```
+1. Run a canonical detector, currently YOLO:
+
+   ```bash
+   scripts/py -m fisheye.detection.detect_yolo \
+     /path/to/source-video.mp4 \
+     --output /path/to/analysis.zarr \
+     --model /path/to/model.pt
+   ```
+
+   Canonical publication also requires the output archive to contain the exact
+   acquisition identity, source-camera frame, temporal, and model-input
+   transform authorities for that video; the writer fails closed when those
+   authorities are absent or disagree.
+
+   Traditional blob detection against `raw_video/images_ds` is available only
+   as an explicitly unbound, nonselector diagnostic artifact because that
+   downsampled array does not yet carry the exact acquisition transform needed
+   for canonical publication:
+
+   ```bash
+   scripts/py -m fisheye.detection.detect_traditional \
+     --zarr-path /path/to/zarr \
+     --artifact-only
+   ```
+
+   This writes `detection_artifact_runs/<run>` and stops; it cannot proceed
+   directly to detect quality or refinement.
+
+   A sampled training Zarr prediction is likewise an unbound artifact only:
+
+   ```bash
+   scripts/py -m fisheye.utils.predict_training_detections \
+     /path/to/training.zarr \
+     --registry /nvme1/palette_registry.sqlite \
+     --model-run-id <registered_detect_run_id> \
+     --run-name detect_seed_<model_or_date> \
+     --apply
+   ```
+
+   This writes `detection_artifact_runs/<run>`, never `detect_runs/<run>`.
+   Before continuing with detect quality or refinement, an explicit canonical
+   binding/promotion step must validate the training-frame lineage and publish
+   a new canonical detect run. If that path is unavailable, stop here; do not
+   relabel or copy the artifact into `detect_runs`.
 2. Run detect quality.
    ```bash
    scripts/py -m fisheye.refinement.detect_quality /path/to/zarr
    ```
    This labels raw-detect artifacts (`quality_flags`,
    `detection_quality_labels`) for the selected detect run. It is distinct from
-   later refined-detect review approval. Skip this for sampled training Zarrs:
-   `refine_detect` automatically uses sampled-import passthrough mode and does
-   not require a detect-quality report there.
+   later refined-detect review approval. A sampled training Zarr may skip this
+   only after an explicit canonical binding/promotion path has produced a
+   supported `detect_runs/<run>` for sampled-import passthrough. The unbound
+   prediction artifact itself is not accepted.
 
    For fixed multi-subject recordings, pass the expected total subject count:
    ```bash
@@ -66,12 +96,9 @@ This is the current detect workflow as of 2026-04-07.
    This writes sparse `instances/` and `source_detections/` on
    `refined_detect_runs/<latest>`.
    Interpolation is no longer part of the normal detect-refinement workflow.
-   For seeded sampled training Zarrs, pass the explicit seed run:
-   ```bash
-   scripts/py -m fisheye.refinement.refine_detect \
-     /path/to/training.zarr \
-     --detect-run detect_seed_<model_or_date>
-   ```
+   Do not pass a `predict_training_detections` artifact as `--detect-run`.
+   Refinement requires the distinct canonical detect run produced by an
+   approved binding/promotion path.
    If a tuned `analysis_metadata.attrs["dish_mask"]` is present, refinement
    applies it as a spatial gate for any source detect run: raw detect candidates
    remain in `source_detections`, but clean candidates whose bbox center falls
@@ -81,10 +108,9 @@ This is the current detect workflow as of 2026-04-07.
    The expansion is resolved from camera-space
    `pixels_per_mm_camera` plus full-frame dimensions and is recorded separately
    from the immutable fitted dish geometry.
-   In sampled-import
-   passthrough mode, jump/blip filters are disabled before this spatial gate and
-   the remaining raw detections are materialized into the curated sparse
-   `instances/` surface for manual review.
+   In sampled-import passthrough mode, after canonical binding, jump/blip filters
+   are disabled before this spatial gate and the remaining raw detections are
+   materialized into the curated sparse `instances/` surface for manual review.
    If a single-subject sampled training Zarr has multiple seed detections per
    frame, use `--per-frame-top-k 1` to accept only the highest-confidence
    candidate per frame while preserving all raw candidates in
@@ -92,7 +118,7 @@ This is the current detect workflow as of 2026-04-07.
    ```bash
    scripts/py -m fisheye.refinement.refine_detect \
      /path/to/training.zarr \
-     --detect-run detect_seed_<model_or_date> \
+     --detect-run <canonically_bound_detect_run> \
      --per-frame-top-k 1
    ```
    Non-top clean candidates are marked as `duplicate` with reason
@@ -100,9 +126,10 @@ This is the current detect workflow as of 2026-04-07.
 
    For web detection assignment on sampled training Zarrs, this refined run is
    the required review surface. Assignment infrastructure should skip a Zarr
-   that has only `detect_runs/<run>` and no `refined_detect_runs/<run>`, because
-   raw detections are not the editable curated authority. A RedScare-style
-   explicit run should look like:
+   that has only `detection_artifact_runs/<run>` (or only a canonical
+   `detect_runs/<run>`) and no `refined_detect_runs/<run>`, because neither
+   surface is the editable curated authority. After canonical binding, a
+   RedScare-style explicit run should look like:
    ```bash
    scripts/py -m fisheye.refinement.refine_detect \
      /path/to/RedScare_training.zarr \

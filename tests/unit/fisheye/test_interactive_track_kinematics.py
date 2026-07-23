@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis import plot_track_kinematics as plot_mod
 from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
+from fisheye.shared.zarr_run_completion import mark_run_complete
 from fisheye.visualization.interactive_track_kinematics import (
     DEFAULT_INTERACTIVE_ARTIFACT,
     bout_classification_records_to_dataframe,
@@ -26,6 +30,12 @@ from fisheye.visualization.interactive_track_kinematics import (
     to_validity_span_dataframe,
 )
 from tests.unit.fisheye.test_plot_track_kinematics_artifacts import _make_track_kinematics_archive
+from tests.unit.fisheye.test_track_kinematics_io import _patch_bound_loader
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_motion(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_bound_loader(monkeypatch)
 
 
 def _make_archive_with_interactive_artifact(tmp_path: Path) -> Path:
@@ -454,6 +464,13 @@ def _add_bout_classification_run(zarr_path: Path) -> None:
         ],
     )
     write_columnar_dataset(run, "per_bout", records)
+    mark_run_complete(
+        run,
+        parent_group=parent,
+        run_name="classifier_1",
+        allow_missing_run_provenance=True,
+        missing_run_provenance_reason="synthetic interactive unit-test fixture",
+    )
 
 
 def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: Path) -> None:
@@ -743,18 +760,25 @@ def test_load_track_kinematics_interactive_data_skips_mismatched_swim_bout_run(t
 def test_load_track_kinematics_interactive_data_rejects_wrong_schema(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_interactive_artifact(tmp_path)
     root = zarr.open_group(str(zarr_path), mode="a")
-    artifact = root[
-        "analysis/track_kinematics_runs/offline/track_kinematics_1/visualizations/"
-        "track_kinematics_summary_track_0_interactive"
+    render_parent = root[
+        "analysis/track_kinematics_visualization_runs/offline/"
+        "track_kinematics_1/tracks/id_0"
+    ]
+    render = render_parent[render_parent.attrs["latest_complete"]]
+    artifact = render[
+        "visualizations/track_kinematics_summary_track_0_interactive"
     ]
     del artifact["spec_json"]
     payload = b'{"schema_id":"wrong"}'
-    artifact.create_array(
+    spec_node = artifact.create_array(
         "spec_json",
         data=np.frombuffer(payload, dtype=np.uint8),
         chunks=(len(payload),),
         overwrite=True,
     )
+    digest = hashlib.sha256(payload).hexdigest()
+    spec_node.attrs["content_sha256"] = digest
+    artifact.attrs["content_sha256"] = digest
 
     try:
         load_track_kinematics_interactive_data(
@@ -765,3 +789,46 @@ def test_load_track_kinematics_interactive_data_rejects_wrong_schema(tmp_path: P
         assert "Unsupported interactive spec schema" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected ValueError")
+
+
+def test_interactive_reader_rejects_equal_shaped_source_path_substitution(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive_with_interactive_artifact(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root.create_array(
+        "decoy_positions_mm",
+        data=np.zeros((6, 2), dtype=np.float32),
+        overwrite=True,
+    )
+    render_parent = root[
+        "analysis/track_kinematics_visualization_runs/offline/"
+        "track_kinematics_1/tracks/id_0"
+    ]
+    render = render_parent[render_parent.attrs["latest_complete"]]
+    artifact = render[
+        "visualizations/track_kinematics_summary_track_0_interactive"
+    ]
+    spec = json.loads(
+        np.asarray(artifact["spec_json"][:], dtype=np.uint8)
+        .tobytes()
+        .decode("utf-8")
+    )
+    spec["source_paths"]["positions_mm"] = "decoy_positions_mm"
+    payload = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+    del artifact["spec_json"]
+    spec_node = artifact.create_array(
+        "spec_json",
+        data=np.frombuffer(payload, dtype=np.uint8),
+        chunks=(len(payload),),
+        overwrite=True,
+    )
+    digest = hashlib.sha256(payload).hexdigest()
+    spec_node.attrs["content_sha256"] = digest
+    artifact.attrs["content_sha256"] = digest
+
+    with pytest.raises(ValueError, match="manifest-authorized"):
+        load_track_kinematics_interactive_data(
+            zarr_path,
+            run_path="analysis/track_kinematics_runs/offline/track_kinematics_1",
+        )

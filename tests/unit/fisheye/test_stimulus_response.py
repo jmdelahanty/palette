@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pytest
 import zarr
+
+import fisheye.analysis.stimulus_response as stimulus_response_module
 
 from fisheye.analysis.stimulus_response import (
     BoutEntry,
@@ -51,6 +54,9 @@ from fisheye.analysis.stimulus_response_concentric_omr import (
     compute_step_concentric_radial_omr_metrics,
     resolve_concentric_radial_polarity,
 )
+from fisheye.analysis.stimulus_response_coordinate_authority import (
+    StimulusResponseCoordinateAuthority,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +68,106 @@ def write_stimulus_response_run(*args, **kwargs):
     """Keep legacy structure tests on hierarchical-v1 unless they opt out."""
 
     kwargs.setdefault("layout", STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1)
+    parameters = dict(kwargs.get("parameters", {}))
+    parameters.setdefault("fps", 30.0)
+    kwargs["parameters"] = parameters
+    kwargs.setdefault(
+        "upstream_lineage",
+        _synthetic_track_motion_lineage(
+            run_name=kwargs["source_kinematics_run"],
+            scope=kwargs["source_kinematics_type"],
+            track_ids=tuple(
+                int(value)
+                for value in np.asarray(kwargs["global_metrics"]["fish_id"])
+            ),
+            fps=float(kwargs.get("parameters", {}).get("fps", 30.0)),
+        ),
+    )
+    kwargs.setdefault(
+        "coordinate_authority",
+        _synthetic_coordinate_authority(kwargs["source_stimulus_run"]),
+    )
     return _write_stimulus_response_run(*args, **kwargs)
+
+
+class _SyntheticCoordinateAuthority(StimulusResponseCoordinateAuthority):
+    """Test-only proof object that avoids constructing a complete source archive."""
+
+    def assert_verified(self) -> None:
+        return None
+
+    def assert_track_physical_authority(self, track_physical_authority) -> None:
+        return None
+
+
+class _RejectingCoordinateAuthority(_SyntheticCoordinateAuthority):
+    def assert_track_physical_authority(self, track_physical_authority) -> None:
+        raise ValueError("track physical authority mismatch")
+
+
+def _synthetic_coordinate_authority(
+    stimulus_run: str,
+    *,
+    authority_type: type[StimulusResponseCoordinateAuthority] = (
+        _SyntheticCoordinateAuthority
+    ),
+) -> StimulusResponseCoordinateAuthority:
+    return authority_type(
+        stimulus_run=stimulus_run,
+        record={
+            "schema_id": "palette.stimulus_response.coordinate_lineage",
+            "schema_version": 1,
+            "source_stimulus_run_ref": f"/analysis/stimulus_runs/{stimulus_run}",
+            "record_sha256": "b" * 64,
+        },
+        evidence=None,
+        physical=None,
+        _root_node=None,
+    )
+
+
+def _synthetic_track_motion_lineage(
+    *,
+    run_name: str,
+    scope: str,
+    track_ids: tuple[int, ...] = (0,),
+    fps: float = 30.0,
+    source_refs: Dict[str, object] | None = None,
+):
+    """Mint deterministic test-only evidence below the real strict loader."""
+
+    run_path = f"analysis/track_kinematics_runs/{scope}/{run_name}"
+    digest = "a" * 64
+    bound = SimpleNamespace(
+        run_group=SimpleNamespace(path=run_path),
+        manifest_sha256=digest,
+        tracks=tuple(SimpleNamespace(track_id=value) for value in track_ids),
+        manifest={
+            "run_root_attrs": {
+                "record": {"immutable_attrs": {"fps": float(fps)}}
+            },
+            "run_derivation": {
+                "record": {
+                    "parameters": {"fps": float(fps)},
+                    "source_refs": dict(source_refs or {}),
+                }
+            },
+        },
+        position_bindings=SimpleNamespace(physical_authority=None),
+        assert_verified=lambda: None,
+    )
+    record = stimulus_response_module._expected_track_motion_lineage_record(bound)
+    return stimulus_response_module.VerifiedTrackMotionLineage(
+        record=record,
+        run_path=run_path,
+        manifest_sha256=digest,
+        track_ids=track_ids,
+        fps=fps,
+        bound_run=bound,
+        _verification_seal=(
+            stimulus_response_module._VERIFIED_TRACK_MOTION_LINEAGE_SEAL
+        ),
+    )
 
 
 def _make_kinematics_zarr(
@@ -77,10 +182,27 @@ def _make_kinematics_zarr(
 
     # analysis/track_kinematics_runs/offline/<run>/
     analysis = root.create_group("analysis")
-    kin_parent = analysis.create_group("track_kinematics_runs").create_group("offline")
+    track_parent = analysis.create_group("track_kinematics_runs")
+    kin_parent = track_parent.create_group("offline")
     run = kin_parent.create_group("test_run")
+    track_parent.attrs.update(
+        {
+            "latest": "offline/test_run",
+            "latest_complete": "offline/test_run",
+            "latest_offline": "test_run",
+        }
+    )
     kin_parent.attrs["latest"] = "test_run"
     run.attrs["fps"] = fps
+    run.attrs["palette_run_completion_status"] = "complete"
+    run.attrs["stage_selector_eligible"] = True
+    run.attrs["track_motion_publication_manifest_sha256"] = "a" * 64
+    run.attrs["source_refs"] = {
+        "source_detection_path": "detect_runs/detect_fixture",
+        "source_keypoint_path": "keypoints_runs/keypoints_fixture",
+        "source_crop_path": "crop_runs/crop_fixture",
+        "source_tracking_path": "tracking_runs/tracking_fixture",
+    }
 
     track_ids = np.array(list(fish_ids), dtype=np.int32)
     run.create_array("track_ids", data=track_ids)
@@ -117,6 +239,78 @@ def _make_kinematics_zarr(
         tg.create_array("detection_source", data=np.zeros(n_samples, dtype=np.int8))
 
     return root
+
+
+def _patch_synthetic_verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep sparse-to-dense unit tests below the strict reader boundary."""
+
+    def _load(
+        root: zarr.Group,
+        *,
+        run_name: str,
+        scope: str,
+        track_id: int,
+        required_speed_levels=(),
+    ) -> SimpleNamespace:
+        del required_speed_levels
+        run = root["analysis"]["track_kinematics_runs"][scope][run_name]
+        track = run["tracks"][f"id_{int(track_id)}"]
+        run_path = f"analysis/track_kinematics_runs/{scope}/{run_name}"
+        return SimpleNamespace(
+            track_id=int(track_id),
+            track_path=f"{run_path}/tracks/id_{int(track_id)}",
+            run_path=run_path,
+            authority_status="verified_canonical_track_motion_v1",
+            motion_manifest_sha256=run.attrs[
+                "track_motion_publication_manifest_sha256"
+            ],
+            frame_indices=np.asarray(track["frame_indices"][:]),
+            speed_mm_by_level={
+                "smoothed": np.asarray(track["speed_smoothed_mm"][:]),
+            },
+            heading_degrees=np.asarray(track["heading_degrees"][:]),
+            positions_mm=np.asarray(track["positions_mm"][:]),
+            angular_velocity_deg_s=np.asarray(
+                track["angular_velocity_deg_s"][:]
+            ),
+            time_seconds=np.asarray(track["time_seconds"][:]),
+            detection_source=np.asarray(track["detection_source"][:]),
+            frame_path_distance_mm_by_level={
+                "smoothed": np.asarray(
+                    track["frame_path_distance_smoothed_mm"][:]
+                ),
+            },
+            cumulative_path_distance_mm=np.asarray(
+                track["cumulative_path_distance_mm"][:]
+            ),
+        )
+
+    monkeypatch.setattr(
+        stimulus_response_module,
+        "load_track_kinematics_track",
+        _load,
+    )
+
+    def _lineage(root: zarr.Group, kin_group: zarr.Group):
+        del root
+        track_ids = tuple(
+            int(value) for value in np.asarray(kin_group["track_ids"][:])
+        )
+        evidence = _synthetic_track_motion_lineage(
+            run_name=str(kin_group.path).strip("/").rsplit("/", 1)[-1],
+            scope=str(kin_group.path).strip("/").split("/")[2],
+            track_ids=track_ids,
+            fps=float(kin_group.attrs["fps"]),
+            source_refs=dict(kin_group.attrs["source_refs"]),
+        )
+        evidence._bound_run.run_group = kin_group
+        return evidence
+
+    monkeypatch.setattr(
+        stimulus_response_module,
+        "_load_verified_track_motion_lineage",
+        _lineage,
+    )
 
 
 def _make_stimulus_zarr(
@@ -288,8 +482,9 @@ def _make_dense_tracks(
 
 class TestLoadTrackData:
 
-    def test_basic_load(self) -> None:
+    def test_basic_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
         root = _make_kinematics_zarr(n_frames=50, fish_ids=(0,))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         tracks, run_name, n_frames, _ = load_track_data(root, kinematics_type="offline")
         assert len(tracks) == 1
         assert run_name == "test_run"
@@ -298,8 +493,12 @@ class TestLoadTrackData:
         assert tracks[0].valid.shape == (50,)
         assert tracks[0].valid.all()
 
-    def test_gaps_produce_zeros_and_false_valid(self) -> None:
+    def test_gaps_produce_zeros_and_false_valid(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         root = _make_kinematics_zarr(n_frames=20, fish_ids=(0,), gap_frames=(5, 10, 15))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         tracks, _, n_frames, _ = load_track_data(root, kinematics_type="offline")
         t = tracks[0]
         assert n_frames == 20
@@ -323,8 +522,9 @@ class TestLoadTrackData:
         assert t.cumulative_path_distance_mm is not None
         assert t.cumulative_path_distance_mm[5] == t.cumulative_path_distance_mm[4]
 
-    def test_multiple_fish(self) -> None:
+    def test_multiple_fish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         root = _make_kinematics_zarr(n_frames=30, fish_ids=(0, 1, 2))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         tracks, _, _, _ = load_track_data(root, kinematics_type="offline")
         assert len(tracks) == 3
         assert [t.fish_id for t in tracks] == [0, 1, 2]
@@ -524,6 +724,133 @@ class TestComputeStepBaseMetrics:
 
 class TestWriteStimulusResponseRun:
 
+    @staticmethod
+    def _minimal_write_kwargs():
+        tracks = _make_dense_tracks(n_frames=2, n_fish=1)
+        step = ProtocolStep(0, "test", "SOLID_BLACK", 4, 0, 2, 2 / 30.0)
+        return {
+            "global_metrics": compute_global_metrics(
+                tracks,
+                fps=30.0,
+                moving_threshold=2.0,
+            ),
+            "steps": [step],
+            "step_metrics": [
+                compute_step_base_metrics(
+                    tracks,
+                    step,
+                    fps=30.0,
+                    moving_threshold=2.0,
+                )
+            ],
+            "source_kinematics_run": "test_kin",
+            "source_kinematics_type": "offline",
+            "source_stimulus_run": "test_stim",
+            "coordinate_authority": _synthetic_coordinate_authority("test_stim"),
+            "parameters": {"fps": 30.0},
+            "run_name": "strict_lineage",
+        }
+
+    @pytest.mark.parametrize("lineage", (None, {"manifest": "forged"}))
+    def test_writer_rejects_missing_or_plain_mapping_lineage(self, lineage) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = lineage
+
+        with pytest.raises(ValueError, match="requires live verified"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rejects_conflicting_duplicate_source_args(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="different_run",
+            scope="offline",
+        )
+
+        with pytest.raises(ValueError, match="conflict with verified lineage"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rejects_missing_coordinate_authority(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+        )
+        kwargs["coordinate_authority"] = None
+
+        with pytest.raises(ValueError, match="requires typed selected-stimulus"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rejects_track_coordinate_authority_mismatch(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+        )
+        kwargs["coordinate_authority"] = _synthetic_coordinate_authority(
+            "test_stim",
+            authority_type=_RejectingCoordinateAuthority,
+        )
+
+        with pytest.raises(ValueError, match="track physical authority mismatch"):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    @pytest.mark.parametrize(
+        ("track_ids", "fps", "message"),
+        (
+            ((99,), 30.0, "fish IDs conflict"),
+            ((0,), 60.0, "fps conflicts"),
+        ),
+    )
+    def test_writer_rejects_payload_or_fps_lineage_mismatch(
+        self,
+        track_ids: tuple[int, ...],
+        fps: float,
+        message: str,
+    ) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs["upstream_lineage"] = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+            track_ids=track_ids,
+            fps=fps,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            _write_stimulus_response_run(root, **kwargs)
+        assert "analysis" not in root
+
+    def test_writer_rechecks_live_lineage_before_completion(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        evidence = _synthetic_track_motion_lineage(
+            run_name="test_kin",
+            scope="offline",
+        )
+        calls = 0
+
+        def _assert_stable_then_change() -> None:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise ValueError("track source changed during publication")
+
+        evidence._bound_run.assert_verified = _assert_stable_then_change
+        kwargs["upstream_lineage"] = evidence
+
+        with pytest.raises(ValueError, match="changed during publication"):
+            _write_stimulus_response_run(root, **kwargs)
+        run = root["analysis/stimulus_response_runs/strict_lineage"]
+        assert run.attrs.get("palette_run_completion_status") != "complete"
+
     def test_default_layout_is_compact_v2(self) -> None:
         root = zarr.group()
         tracks = _make_dense_tracks(n_frames=50, n_fish=1)
@@ -539,7 +866,13 @@ class TestWriteStimulusResponseRun:
             source_kinematics_run="test_kin",
             source_kinematics_type="offline",
             source_stimulus_run="test_stim",
-            parameters={},
+            upstream_lineage=_synthetic_track_motion_lineage(
+                run_name="test_kin",
+                scope="offline",
+                track_ids=(0,),
+            ),
+            coordinate_authority=_synthetic_coordinate_authority("test_stim"),
+            parameters={"fps": 30.0},
             run_name="default_layout",
         )
 
@@ -1208,30 +1541,20 @@ class TestComputeOMRMetrics:
         assert 0.0 < pf["fraction_time_correct_side"][0] < 1.0
         assert omr.attrs["arena_geometry_source"] == "test_arena"
 
-    def test_arena_geometry_uses_projector_scale_for_experimental_area_center(self) -> None:
-        root = zarr.group()
-        cal = root.create_group("analysis").create_group("calibration")
-        cal.attrs.update(
-            {
-                "pixel_to_mm": 0.0187880455,
-                "pixels_per_mm_projector": 4.1693377495,
-                "experimental_area_center_x_px": 172.0,
-                "experimental_area_center_y_px": 172.0,
-                "experimental_area_radius_mm": 39.814476,
-            }
+    def test_arena_geometry_uses_bound_coordinate_authority(self) -> None:
+        authority = SimpleNamespace(
+            arena_center_mm=lambda: (40.25, 41.5),
+            arena_axis_extent_mm=lambda direction: 39.814476,
         )
 
         center_mm, extent_mm, source = _resolve_omr_arena_geometry_mm(
-            root,
-            stimulus_run=None,
-            direction_xy=np.array([1.0, 0.0], dtype=np.float64),
+            authority,
+            np.array([1.0, 0.0], dtype=np.float64),
         )
 
-        assert center_mm is not None
-        assert center_mm[0] == pytest.approx(172.0 / 4.1693377495)
-        assert center_mm[1] == pytest.approx(172.0 / 4.1693377495)
+        assert center_mm == pytest.approx((40.25, 41.5))
         assert extent_mm == pytest.approx(39.814476)
-        assert "experimental_area_center_projector_px" in source
+        assert source == "typed_arena_frame_projected_to_source_camera_physical_mm_v1"
 
     def test_bout_fraction_uses_bout_boundaries_and_physical_positions(self) -> None:
         tracks = _make_grating_tracks(heading_deg=90.0, speed=10.0)
@@ -1621,25 +1944,58 @@ class TestMultiDirectionGrating:
 
 class TestProvenanceLineage:
 
-    def test_upstream_lineage_embedded(self) -> None:
-        root = _make_kinematics_zarr(n_frames=50, fish_ids=(0,))
-        # Add upstream attrs to the kinematics run (simulating what
-        # track_kinematics writes).
+    def test_upstream_lineage_rejects_unbound_track_manifest(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _make_kinematics_zarr(n_frames=2, fish_ids=(0,))
+        _patch_synthetic_verified_track_reader(monkeypatch)
         kin = root["analysis"]["track_kinematics_runs"]["offline"]["test_run"]
-        kin.attrs["inputs"] = {
-            "detection_run": "detect_2026-01-01",
-            "keypoint_run": "refined_kp_2026-01-01",
-            "crop_run": "crop_2026-01-01",
+        stale = SimpleNamespace(
+            authority_status="verified_canonical_track_motion_v1",
+            motion_manifest_sha256="b" * 64,
+            run_path=str(kin.path),
+        )
+
+        with pytest.raises(ValueError, match="do not share one freshly verified"):
+            stimulus_response_module._snapshot_upstream_lineage(
+                root,
+                kin,
+                [stale],
+            )
+
+    def test_upstream_lineage_embedded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _make_kinematics_zarr(n_frames=50, fish_ids=(0,))
+        _patch_synthetic_verified_track_reader(monkeypatch)
+        kin = root["analysis"]["track_kinematics_runs"]["offline"]["test_run"]
+        kin.attrs["source_refs"] = {
+            "source_detection_path": "detect_runs/detect_2026-01-01",
+            "source_keypoint_path": (
+                "refined_keypoints_runs/refined_kp_2026-01-01"
+            ),
+            "source_crop_path": "crop_runs/crop_2026-01-01",
+            "source_tracking_path": "tracking_runs/tracking_2026-01-01",
         }
-        kin.attrs["source_tracking_run"] = "tracking_2026-01-01"
-        kin.attrs["source_arena_assignment_run"] = "arena_2026-01-01"
 
         tracks, _, _, lineage = load_track_data(root, kinematics_type="offline")
-        assert lineage["detection_run"] == "detect_2026-01-01"
-        assert lineage["keypoint_run"] == "refined_kp_2026-01-01"
-        assert lineage["crop_run"] == "crop_2026-01-01"
-        assert lineage["source_tracking_run"] == "tracking_2026-01-01"
-        assert lineage["source_arena_assignment_run"] == "arena_2026-01-01"
+        assert dict(lineage.record) == {
+            "schema_id": "palette.stimulus_response.track_motion_lineage",
+            "schema_version": 1,
+            "source_track_motion_run_ref": (
+                "/analysis/track_kinematics_runs/offline/test_run"
+            ),
+            "source_track_motion_manifest_ref": (
+                "/analysis/track_kinematics_runs/offline/test_run"
+                "@track_motion_publication_manifest"
+            ),
+            "source_track_motion_manifest_sha256": "a" * 64,
+            "source_track_ids": [0],
+            "source_fps": 30.0,
+            "source_refs": dict(kin.attrs["source_refs"]),
+        }
 
     def test_archive_identity_from_root_attrs(self) -> None:
         root = zarr.group()
@@ -2262,26 +2618,31 @@ class TestResolveLoomCenter:
         step = _make_loom_step()
         step.stimulus_params["loom_center_x_mm"] = 5.0
         step.stimulus_params["loom_center_y_mm"] = 7.0
-        cal = {"homography": None, "pixel_to_mm": None,
-               "arena_center_px": None, "pixels_per_mm_projector": None,
-               "z_eff_mm": None}
-        center = resolve_loom_center_mm(step, cal)
+        step.stimulus_params["loom_center_coordinate_frame"] = (
+            "source_camera_physical_mm"
+        )
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        center = resolve_loom_center_mm(step, authority)
         assert center == pytest.approx((5.0, 7.0))
 
     def test_arena_center_fallback(self) -> None:
         step = _make_loom_step()
-        cal = {"homography": None, "pixel_to_mm": 0.5,
-               "arena_center_px": (20.0, 20.0),
-               "pixels_per_mm_projector": None, "z_eff_mm": None}
-        center = resolve_loom_center_mm(step, cal)
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        center = resolve_loom_center_mm(step, authority)
         assert center == pytest.approx((10.0, 10.0))
 
-    def test_no_calibration_returns_none(self) -> None:
+    def test_unmaterialized_noncenter_target_returns_none(self) -> None:
+        step = _make_loom_step(target_side=1)
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        assert resolve_loom_center_mm(step, authority) is None
+
+    def test_unframed_precomputed_mm_fails_closed(self) -> None:
         step = _make_loom_step()
-        cal = {"homography": None, "pixel_to_mm": None,
-               "arena_center_px": None, "pixels_per_mm_projector": None,
-               "z_eff_mm": None}
-        assert resolve_loom_center_mm(step, cal) is None
+        step.stimulus_params["loom_center_x_mm"] = 5.0
+        step.stimulus_params["loom_center_y_mm"] = 7.0
+        authority = SimpleNamespace(arena_center_mm=lambda: (10.0, 10.0))
+        with pytest.raises(ValueError, match="coordinate_frame"):
+            resolve_loom_center_mm(step, authority)
 
 
 # ---------------------------------------------------------------------------

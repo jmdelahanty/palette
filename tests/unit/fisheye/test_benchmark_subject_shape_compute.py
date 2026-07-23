@@ -87,6 +87,7 @@ def test_benchmark_runs_real_kernels_on_bounded_read_only_source(tmp_path: Path)
     assert report["status"] == "complete"
     assert report["mutates_source"] is False
     assert report["all_variants_exact"] is True
+    assert report["process_start_method"] == "spawn"
     assert report_path.exists()
     assert (source / "zarr.json").read_bytes() == source_metadata_before
     assert len(report["results"]) == 2
@@ -102,6 +103,8 @@ def test_benchmark_runs_real_kernels_on_bounded_read_only_source(tmp_path: Path)
 
     baseline = zarr.open_group(str(outputs / "baseline.zarr"), mode="r")
     cropped = zarr.open_group(str(outputs / "cropped.zarr"), mode="r")
+    assert baseline.attrs["process_start_method"] == "spawn"
+    assert cropped.attrs["process_start_method"] == "spawn"
     np.testing.assert_array_equal(
         baseline["components/subject_body/centerline_xy"][:],
         cropped["components/subject_body/centerline_xy"][:],

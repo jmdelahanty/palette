@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-from fisheye.analysis.track_kinematics import save_track_kinematics_tracks
+from fisheye.analysis import track_kinematics as track_mod
 from fisheye.shared.row_lineage import copy_row_lineage_arrays
 from fisheye.shared.zarr.chunk_profiles import (
     GEOMETRY_PRELOAD_ROW_CHUNK,
@@ -14,6 +14,11 @@ from fisheye.shared.zarr.chunk_profiles import (
     geometry_preload_chunks_for_shape,
 )
 from fisheye.tracking.crop import save_crop_metadata
+from tests.unit.fisheye.test_directed_transform_chain import _world
+from tests.unit.fisheye.test_track_coordinate_publication import _source
+from tests.unit.fisheye.test_track_kinematics_coordinate_contract import (
+    _WritableGroup,
+)
 
 
 def _root(path: Path) -> zarr.Group:
@@ -205,23 +210,43 @@ def _track_data(row_count: int = 20_000) -> dict[str, np.ndarray | dict[str, dic
     return data
 
 
-def test_track_kinematics_writer_uses_geometry_preload_chunks_and_attrs(tmp_path: Path) -> None:
-    root = _root(tmp_path / "track.zarr")
-    run = root.create_group("track_kinematics")
-
-    save_track_kinematics_tracks(
-        run,
-        {0: _track_data()},
-        [{"track_id": 0, "total_distance_px": 1.0}],
+def test_track_kinematics_writer_uses_geometry_preload_chunks_and_attrs() -> None:
+    world = _world(convention="pixel_center", archive_token=object())
+    _, _, source, temporal = _source(world)
+    positions = np.asarray(source.coordinate_node[:])
+    tracks, summaries = track_mod.build_track_datasets(
+        track_ids=np.asarray([7, 7], dtype=np.int64),
+        frames=np.asarray([0, 1], dtype=np.int64),
+        positions_px=positions,
+        headings_deg=np.zeros(2, dtype=np.float32),
+        keypoint_success=np.ones(2, dtype=bool),
+        detection_source=None,
+        fps=1.0,
+        smooth_seconds=1.0,
+        pixel_to_mm=None,
+        source_row_index=np.asarray([0, 1], dtype=np.int64),
+        source_temporal_authority=temporal,
+    )
+    run = _WritableGroup(
+        path="analysis/track_kinematics_runs/offline/chunks",
+        archive_token=world["archive_token"],
     )
 
-    track = run["tracks"]["id_0"]
+    track_mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=temporal,
+        positions_px_source=source,
+    )
+
+    track = run["tracks"]["id_7"]
     assert run["track_ids"].attrs["storage_profile_id"] == GEOMETRY_PRELOAD_STORAGE_PROFILE_ID
-    assert track["frame_indices"].chunks == (GEOMETRY_PRELOAD_ROW_CHUNK,)
-    assert track["positions_px"].chunks == (GEOMETRY_PRELOAD_ROW_CHUNK, 2)
+    assert track["frame_indices"].chunks == (2,)
+    assert track["positions_px"].chunks == (2, 2)
     assert (
         track["speed_derivatives"]["speed_raw"]["acceleration_px"].chunks
-        == (GEOMETRY_PRELOAD_ROW_CHUNK,)
+        == (2,)
     )
-    assert track["movement"]["speed"]["raw"]["px"].chunks == (GEOMETRY_PRELOAD_ROW_CHUNK,)
+    assert track["movement"]["speed"]["raw"]["px"].chunks == (2,)
     assert track["frame_indices"].attrs["storage_profile_id"] == GEOMETRY_PRELOAD_STORAGE_PROFILE_ID

@@ -12,23 +12,27 @@ computes statistics to recommend appropriate speed floor thresholds.
 
 import argparse
 import sys
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
-import zarr
 from rich.console import Console
 from rich.table import Table
 
-from fisheye.shared.zarr.schema import get_run_group
+from fisheye.analysis.track_kinematics_io import (
+    TrackKinematicsTrackTables,
+    list_track_ids,
+    load_track_kinematics_track,
+    resolve_track_kinematics_run,
+)
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 def load_track_kinematics_run(
     zarr_path: str,
     track_kinematics_run: Optional[str] = None,
     console: Optional[Console] = None,
-) -> Tuple[zarr.Group, Dict[str, zarr.Group]]:
-    """Load track kinematics run data from a zarr archive.
+) -> Tuple[Mapping[str, Any], Dict[str, TrackKinematicsTrackTables]]:
+    """Load one verified canonical offline track-motion run.
 
     Args:
         zarr_path: Path to zarr archive
@@ -36,59 +40,48 @@ def load_track_kinematics_run(
         console: Rich console for output
 
     Returns:
-        Tuple of (run_group, tracks_dict)
+        Tuple of (immutable run attrs, logical verified tracks)
     """
     if console is None:
         console = Console()
 
-    root = zarr.open(str(zarr_path), mode="r")
-
-    # Try to find the latest offline track kinematics run.
-    if track_kinematics_run is None:
-        # Look for latest offline run
-        if "analysis" in root and "track_kinematics_runs" in root["analysis"]:
-            movement_parent = root["analysis"]["track_kinematics_runs"]
-            if "offline" in movement_parent:
-                offline_group = movement_parent["offline"]
-                track_kinematics_run = offline_group.attrs.get("latest")
-                if track_kinematics_run:
-                    console.print(
-                        f"[cyan]Using latest offline track kinematics run:[/cyan] {track_kinematics_run}"
-                    )
-                else:
-                    raise ValueError("No offline track kinematics runs found")
-            else:
-                raise ValueError("No offline track kinematics runs found")
-        else:
-            raise ValueError("No track_kinematics_runs found in archive")
-
-    # Load the run
-    if "analysis" in root and "track_kinematics_runs" in root["analysis"]:
-        movement_parent = root["analysis"]["track_kinematics_runs"]
-        if "offline" in movement_parent:
-            offline_group = movement_parent["offline"]
-            if track_kinematics_run in offline_group:
-                run_group = offline_group[track_kinematics_run]
-            else:
-                raise ValueError(
-                    f"Track kinematics run '{track_kinematics_run}' not found in offline runs"
-                )
-        else:
-            raise ValueError("No offline track kinematics runs found")
-    else:
-        raise ValueError("No track_kinematics_runs found in archive")
-
-    # Load tracks
-    tracks_dict = {}
-    if "tracks" in run_group:
-        tracks_group = run_group["tracks"]
-        for track_id in tracks_group.keys():
-            tracks_dict[track_id] = tracks_group[track_id]
-        console.print(f"[cyan]Loaded {len(tracks_dict)} tracks[/cyan]")
-    else:
-        raise ValueError("No tracks found in the track kinematics run")
-
-    return run_group, tracks_dict
+    root = open_zarr_root(zarr_path, mode="r")
+    requested_name = str(track_kinematics_run or "latest")
+    run_group, resolved_name, _run_path = resolve_track_kinematics_run(
+        root,
+        run_name=requested_name,
+        scope="offline",
+    )
+    if requested_name == "latest":
+        console.print(
+            "[cyan]Using latest verified offline track kinematics run:[/cyan] "
+            f"{resolved_name}"
+        )
+    track_ids = list_track_ids(run_group)
+    if not track_ids:
+        raise ValueError("Verified track-motion run has no tracks.")
+    tracks: Dict[str, TrackKinematicsTrackTables] = {}
+    manifest_sha256: str | None = None
+    run_attrs: Mapping[str, Any] | None = None
+    for track_id in track_ids:
+        tables = load_track_kinematics_track(
+            root,
+            run_name=resolved_name,
+            scope="offline",
+            track_id=int(track_id),
+            required_speed_levels=("raw",),
+        )
+        if manifest_sha256 is None:
+            manifest_sha256 = tables.motion_manifest_sha256
+            run_attrs = dict(tables.run_attrs)
+        elif tables.motion_manifest_sha256 != manifest_sha256:
+            raise ValueError(
+                "Track-motion authority changed while loading noise-floor inputs."
+            )
+        tracks[f"id_{int(track_id)}"] = tables
+    console.print(f"[cyan]Loaded {len(tracks)} verified tracks[/cyan]")
+    assert run_attrs is not None
+    return run_attrs, tracks
 
 
 def identify_stationary_periods(
@@ -108,14 +101,27 @@ def identify_stationary_periods(
     Returns:
         List of (start_idx, end_idx) tuples for stationary periods
     """
-    # Find frames below threshold
-    is_stationary = raw_speed_mm < max_stationary_speed
+    speeds = np.asarray(raw_speed_mm, dtype=np.float64).reshape(-1)
+    acquisition_frames = np.asarray(frames, dtype=np.int64).reshape(-1)
+    if speeds.shape != acquisition_frames.shape:
+        raise ValueError("raw_speed_mm and acquisition frame identities must align.")
+    # Find valid rows below threshold. A gap in acquisition-frame identity ends a
+    # stationary period even when the surrounding speed samples are both small.
+    is_stationary = np.isfinite(speeds) & (speeds < max_stationary_speed)
 
     # Find consecutive runs
     periods = []
     start_idx = None
 
     for i in range(len(is_stationary)):
+        if (
+            i > 0
+            and acquisition_frames[i] != acquisition_frames[i - 1] + 1
+            and start_idx is not None
+        ):
+            if i - start_idx >= min_period_frames:
+                periods.append((start_idx, i))
+            start_idx = None
         if is_stationary[i] and start_idx is None:
             start_idx = i
         elif not is_stationary[i] and start_idx is not None:
@@ -132,11 +138,11 @@ def identify_stationary_periods(
 
 
 def compute_noise_statistics(
-    tracks_dict: Dict[str, zarr.Group],
+    tracks_dict: Mapping[str, TrackKinematicsTrackTables],
     max_stationary_speed: float = 0.5,
     min_period_frames: int = 30,
     console: Optional[Console] = None,
-) -> Dict[str, any]:
+) -> Dict[str, Any]:
     """Compute noise floor statistics from stationary periods.
 
     Args:
@@ -157,12 +163,52 @@ def compute_noise_statistics(
 
     for track_id, track_group in tracks_dict.items():
         # Load data
-        raw_speed_mm = track_group["speed_raw_mm"][:]
-        frame_path_distance_mm = track_group["frame_path_distance_raw_mm"][:]
-        frame_indices = track_group["frame_indices"][:]
+        if track_group.source_acquisition_frame_index is None:
+            raise ValueError(
+                f"Verified track motion {track_group.track_path} has no acquisition-frame identity."
+            )
+        if track_group.sample_valid is None or track_group.transition_valid is None:
+            raise ValueError(
+                f"Verified track motion {track_group.track_path} lacks validity surfaces."
+            )
+        try:
+            raw_speed_mm = np.asarray(
+                track_group.speed_mm_by_level["raw"], dtype=np.float64
+            )
+            frame_path_distance_mm = np.asarray(
+                track_group.frame_path_distance_mm_by_level["raw"],
+                dtype=np.float64,
+            )
+        except KeyError as exc:
+            raise ValueError(
+                f"Verified track motion {track_group.track_path} lacks raw physical motion surfaces."
+            ) from exc
+        frame_indices = np.asarray(
+            track_group.source_acquisition_frame_index,
+            dtype=np.int64,
+        )
+        sample_valid = np.asarray(track_group.sample_valid, dtype=bool)
+        transition_valid = np.asarray(track_group.transition_valid, dtype=bool)
+        if not (
+            raw_speed_mm.shape
+            == frame_path_distance_mm.shape
+            == frame_indices.shape
+            == sample_valid.shape
+            == transition_valid.shape
+        ):
+            raise ValueError(
+                f"Verified track motion {track_group.track_path} has inconsistent raw surface lengths."
+            )
+        valid_rows = sample_valid & transition_valid
+        raw_speed_mm = np.where(valid_rows, raw_speed_mm, np.nan)
+        frame_path_distance_mm = np.where(
+            valid_rows,
+            frame_path_distance_mm,
+            np.nan,
+        )
 
         # Skip if no valid data
-        valid_mask = np.isfinite(raw_speed_mm)
+        valid_mask = np.isfinite(raw_speed_mm) & np.isfinite(frame_path_distance_mm)
         if not valid_mask.any():
             continue
 
@@ -244,7 +290,7 @@ def compute_noise_statistics(
 
 
 def print_statistics(
-    statistics: Dict[str, any],
+    statistics: Dict[str, Any],
     console: Console,
 ) -> None:
     """Print noise floor statistics in a formatted table.
@@ -256,7 +302,7 @@ def print_statistics(
     console.rule("[bold]Noise Floor Analysis Results[/bold]")
 
     # Summary statistics
-    console.print(f"\n[bold cyan]Dataset Summary:[/bold cyan]")
+    console.print("\n[bold cyan]Dataset Summary:[/bold cyan]")
     console.print(f"  Tracks analyzed: {statistics['n_tracks']}")
     console.print(f"  Total stationary frames: {statistics['total_stationary_frames']}")
 
@@ -338,23 +384,29 @@ def main():
     try:
         # Load movement data
         console.print(f"[bold]Loading movement data from:[/bold] {args.zarr_path}")
-        run_group, tracks_dict = load_track_kinematics_run(
+        run_attrs, tracks_dict = load_track_kinematics_run(
             args.zarr_path,
             args.track_kinematics_run,
             console,
         )
 
         # Display run info
-        method = run_group.attrs.get("method", "unknown")
-        fps = run_group.attrs.get("fps", "unknown")
-        pixel_to_mm = run_group.attrs.get("pixel_to_mm", "unknown")
+        method = run_attrs.get("method", "unknown")
+        fps = run_attrs.get("fps", "unknown")
+        physical_outputs_available = run_attrs.get(
+            "physical_outputs_available",
+            "unknown",
+        )
 
         console.print(f"[cyan]Method:[/cyan] {method}")
         console.print(f"[cyan]FPS:[/cyan] {fps}")
-        console.print(f"[cyan]Calibration:[/cyan] {pixel_to_mm} pixels/mm")
+        console.print(
+            "[cyan]Verified physical outputs available:[/cyan] "
+            f"{physical_outputs_available}"
+        )
 
         # Compute noise floor statistics
-        console.print(f"\n[bold]Analyzing stationary periods...[/bold]")
+        console.print("\n[bold]Analyzing stationary periods...[/bold]")
         console.print(f"  Max stationary speed threshold: {args.max_stationary_speed} mm/s")
         console.print(f"  Min period length: {args.min_period_frames} frames")
 

@@ -41,7 +41,6 @@ def _run_eye_chunk(*, left_major_deg: float, right_major_deg: float):
         ellipse_params=ellipse_params,
         ellipse_success=np.asarray([[True, True]], dtype=bool),
         keypoints_roi=keypoints_roi,
-        heading_deg=np.asarray([0.0], dtype=np.float32),
         detection_success=np.asarray([True], dtype=bool),
         keypoint_indices={"swim_bladder": 0, "eye_left": 1, "eye_right": 2},
     )

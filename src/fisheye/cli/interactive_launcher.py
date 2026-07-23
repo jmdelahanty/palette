@@ -703,14 +703,9 @@ class PipelineLauncherApp(App):
                         yield Label("  └─ Crop source:", classes="info_text")
                         yield Select(
                         [
-                            ("Auto (prefer refined current runs)", "auto"),
-                            ("Refined curated instances (canonical)", "refined"),
-                            ("Original detections", "detect"),
-                            ("Manual sparse group (legacy)", "manual"),
-                            ("Filtered sparse group (legacy)", "filtered"),
-                            ("Interpolated sparse group (legacy)", "interpolated"),
+                            ("Canonical detection run", "detect"),
                         ],
-                        value="auto",
+                        value="detect",
                         id="crop_source_select",
                         classes="stage_option"
                     )
@@ -908,10 +903,10 @@ class PipelineLauncherApp(App):
         """Get the selected crop source from dropdown."""
         try:
             crop_source_select = self.query_one("#crop_source_select", Select)
-            return crop_source_select.value if crop_source_select.value != Select.BLANK else "auto"
+            return crop_source_select.value if crop_source_select.value != Select.BLANK else "detect"
         except Exception:
             # Fallback if widget not found
-            return "auto"
+            return "detect"
     
     def _get_training_data_options(self) -> Dict[str, Optional[Any]]:
         """Read training data sampling options from the UI."""
@@ -1127,17 +1122,6 @@ class PipelineLauncherApp(App):
         # Add crop source if crop stage is selected
         if 'crop' in stages:
             crop_source = self._get_crop_source_selection()
-            
-            # Check if refined source is available
-            if crop_source in ['filtered', 'interpolated', 'manual', 'refined']:
-                if not self._check_refined_runs_exist(zarr_path):
-                    self.status_message = f" Error: No refined detection runs found for '{crop_source}' source"
-                    if self.progress_log:
-                        self.progress_log.write(
-                            f"[red] Error: '{crop_source}' source requires refined detections.[/red]\n"
-                            "[yellow]Run the 'refine' stage first or select 'detect' source.[/yellow]\n"
-                        )
-                    return None
             
             cmd.extend(["--crop-source", crop_source])
             

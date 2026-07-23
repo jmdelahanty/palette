@@ -144,7 +144,7 @@ def test_status_surfaces_authoritative_run_distinct_from_latest(tmp_path, capsys
     assert subject_masks["authoritative_run_provenance"]["approved_by"] == "jeremy"
 
 
-def test_status_discovers_embedded_track_kinematics_visualization(
+def test_status_discovers_sibling_track_kinematics_visualization(
     tmp_path,
     capsys,
 ) -> None:
@@ -158,7 +158,30 @@ def test_status_discovers_embedded_track_kinematics_visualization(
         run_name="offline/track_a",
         completed_at_utc="2026-07-14T12:00:00+00:00",
     )
-    artifact = run.require_group("visualizations").require_group(
+    visualization_parent = root.require_group(
+        "analysis/track_kinematics_visualization_runs/offline/"
+        "track_a/tracks/id_0"
+    )
+    render = visualization_parent.require_group("render_a")
+    mark_run_complete(
+        render,
+        parent_group=visualization_parent,
+        run_name="render_a",
+        completed_at_utc="2026-07-14T12:01:00+00:00",
+    )
+    render.attrs["stage_selector_eligible"] = True
+    motion_authority = {
+        "run_ref": "/analysis/track_kinematics_runs/offline/track_a",
+        "track_ref": (
+            "/analysis/track_kinematics_runs/offline/track_a/tracks/id_0"
+        ),
+        "track_id": 0,
+        "motion_manifest_sha256": "a" * 64,
+        "positions_px_coordinate_descriptor_sha256": "b" * 64,
+    }
+    render.attrs["source_track_motion_authority"] = motion_authority
+    render.attrs["track_id"] = 0
+    artifact = render.require_group("visualizations").require_group(
         "track_kinematics_summary_track_0_interactive"
     )
     artifact.require_group("spec_json")
@@ -166,6 +189,7 @@ def test_status_discovers_embedded_track_kinematics_visualization(
         {
             "renderer": "palette-track-kinematics-summary-v1",
             "created_at_utc": "2026-07-14T12:01:00+00:00",
+            "track_motion_authority": motion_authority,
         }
     )
 
@@ -181,7 +205,8 @@ def test_status_discovers_embedded_track_kinematics_visualization(
     assert visualization["run"] == "offline/track_a"
     assert visualization["completion"] == "artifact_present"
     assert visualization["artifact"].endswith(
-        "offline/track_a/visualizations/track_kinematics_summary_track_0_interactive"
+        "offline/track_a/tracks/id_0/render_a/visualizations/"
+        "track_kinematics_summary_track_0_interactive"
     )
 
 

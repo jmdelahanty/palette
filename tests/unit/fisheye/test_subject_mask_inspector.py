@@ -67,11 +67,12 @@ def _build_inspector_root():
     edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
     edited[0, 1:7, 1:7] = 1
     edited[0, 3:5, 3:5] = 0
-    review_mod.save_refined_subject_roi(
+    review_mod._apply_refined_subject_roi_rows(
         source=_source,
         refined=refined,
-        roi_idx=0,
-        edited_masks=edited,
+        roi_indices=[0],
+        edited_masks_batch=edited,
+        derived_update_policy=review_mod.DERIVED_UPDATE_POLICY_REFRESH,
     )
     return root
 
@@ -114,7 +115,7 @@ def test_stage_summary_lines_include_raw_and_refined_metrics() -> None:
 
     assert raw_lines[0] == "subject_mask_runs/subject_masks_001"
     assert any("area_px=36.0" in line for line in raw_lines)
-    assert any("bbox=[1.0,1.0,6.0,6.0]" in line for line in raw_lines)
+    assert any("bbox=[1.0,1.0,7.0,7.0]" in line for line in raw_lines)
     assert refined_lines[0] == "refined_subject_masks_runs/refined_subject_masks_001"
     assert any("review=" in line for line in refined_lines)
     assert any("sigma_noise=" in line for line in refined_lines)
@@ -151,7 +152,7 @@ def test_component_geometry_reads_run_level_bbox_and_centroid() -> None:
 
     np.testing.assert_allclose(centroid_xy, np.asarray([3.5, 3.5], dtype=np.float32))
     assert centroid_valid is True
-    np.testing.assert_allclose(bbox_xyxy, np.asarray([1.0, 1.0, 6.0, 6.0], dtype=np.float32))
+    np.testing.assert_allclose(bbox_xyxy, np.asarray([1.0, 1.0, 7.0, 7.0], dtype=np.float32))
     assert bbox_valid is True
 
 

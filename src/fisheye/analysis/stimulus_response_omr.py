@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import zarr
 
+from fisheye.analysis.stimulus_response_coordinate_authority import (
+    StimulusResponseCoordinateAuthority,
+)
 from fisheye.analysis.stimulus_response_grating import (
     _flatten_stimulus_params,
     _grating_direction_vector,
 )
-from fisheye.shared.coordinate_transform import load_calibration_transform
+
+if TYPE_CHECKING:
+    from fisheye.analysis.stimulus_response import BoutEntry, DenseTrack, ProtocolStep
 
 
 OMR_METHOD_VERSION = "stimulus_response_omr_v3"
@@ -135,230 +139,19 @@ def _moving_grating_provenance_attrs(step: Any, grating_dir_deg: float) -> Dict[
     return out
 
 
-def _first_finite_float(*values: Any) -> Optional[float]:
-    for value in values:
-        if value is None:
-            continue
-        if isinstance(value, np.generic):
-            value = value.item()
-        try:
-            out = float(value)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(out):
-            return out
-    return None
-
-
-def _group_attrs(group: Any) -> Dict[str, Any]:
-    if group is None or not hasattr(group, "attrs"):
-        return {}
-    try:
-        return dict(group.attrs)
-    except Exception:
-        return {}
-
-
-def _get_child_group(group: Any, key: str) -> Any:
-    if group is None:
-        return None
-    getter = getattr(group, "get", None)
-    if callable(getter):
-        try:
-            child = getter(key)
-            if child is not None:
-                return child
-        except Exception:
-            pass
-    try:
-        return group[key]
-    except Exception:
-        return None
-
-
-def _iter_child_group_names(group: Any) -> List[str]:
-    if group is None:
-        return []
-    keys_fn = getattr(group, "group_keys", None)
-    if callable(keys_fn):
-        try:
-            return [str(key) for key in keys_fn()]
-        except Exception:
-            pass
-    keys_fn = getattr(group, "keys", None)
-    if callable(keys_fn):
-        names: List[str] = []
-        try:
-            for key in keys_fn():
-                child = _get_child_group(group, str(key))
-                if isinstance(child, zarr.Group):
-                    names.append(str(key))
-        except Exception:
-            return names
-        return names
-    return []
-
-
-def _calibration_attr_sources(root: Any, stimulus_run: Optional[str]) -> List[Tuple[str, Dict[str, Any]]]:
-    sources: List[Tuple[str, Dict[str, Any]]] = []
-    analysis = _get_child_group(root, "analysis")
-    analysis_cal = _get_child_group(analysis, "calibration")
-    sources.append(("analysis/calibration", _group_attrs(analysis_cal)))
-
-    root_cal = _get_child_group(root, "calibration")
-    sources.append(("calibration", _group_attrs(root_cal)))
-
-    stim_parent = _get_child_group(analysis, "stimulus_runs")
-    stim_name = stimulus_run
-    if not stim_name and hasattr(stim_parent, "attrs"):
-        latest = stim_parent.attrs.get("latest")
-        stim_name = str(latest) if latest is not None else None
-    stim_group = _get_child_group(stim_parent, stim_name) if stim_name else None
-    stim_cal = _get_child_group(stim_group, "calibration")
-    for camera_id in _iter_child_group_names(stim_cal):
-        sources.append((
-            f"analysis/stimulus_runs/{stim_name}/calibration/{camera_id}",
-            _group_attrs(_get_child_group(stim_cal, camera_id)),
-        ))
-    return [(name, attrs) for name, attrs in sources if attrs]
-
-
 def _resolve_omr_arena_geometry_mm(
-    root: Any,
-    stimulus_run: Optional[str],
+    authority: StimulusResponseCoordinateAuthority,
     direction_xy: np.ndarray,
-) -> Tuple[Optional[Tuple[float, float]], Optional[float], str]:
-    """Resolve arena center and half-extent along the grating axis in mm."""
+) -> Tuple[Tuple[float, float], float, str]:
+    """Resolve typed source-camera-mm arena geometry for one response axis."""
 
-    cal = load_calibration_transform(root, stimulus_run=stimulus_run)
-    pixel_to_mm = _first_finite_float(cal.get("pixel_to_mm"))
-    projector_pixels_per_mm = _first_finite_float(cal.get("pixels_per_mm_projector"))
-    sources = _calibration_attr_sources(root, stimulus_run)
-
-    center_mm: Optional[Tuple[float, float]] = None
-    center_source = ""
-    if cal.get("arena_center_px") is not None and pixel_to_mm is not None:
-        cx, cy = cal["arena_center_px"]
-        center_mm = (float(cx) * pixel_to_mm, float(cy) * pixel_to_mm)
-        center_source = "arena_center_px_camera"
-    for source_name, attrs in sources:
-        if center_mm is None:
-            cx = _first_finite_float(
-                attrs.get("arena_center_x_mm"),
-                attrs.get("experimental_area_center_x_mm"),
-            )
-            cy = _first_finite_float(
-                attrs.get("arena_center_y_mm"),
-                attrs.get("experimental_area_center_y_mm"),
-            )
-            if cx is not None and cy is not None:
-                center_mm = (cx, cy)
-                center_source = f"{source_name}:center_mm"
-        if center_mm is None:
-            cx = _first_finite_float(attrs.get("experimental_area_center_x_px"))
-            cy = _first_finite_float(attrs.get("experimental_area_center_y_px"))
-            pixels_per_mm = _first_finite_float(
-                attrs.get("pixels_per_mm_projector"),
-                projector_pixels_per_mm,
-            )
-            if cx is not None and cy is not None and pixels_per_mm is not None and pixels_per_mm > 0:
-                # Citrus experimental-area fields are in stimulus/projector
-                # pixels, matching local arena millimetres after projector
-                # scale conversion. Do not convert them with camera pixel_to_mm.
-                center_mm = (cx / pixels_per_mm, cy / pixels_per_mm)
-                center_source = f"{source_name}:experimental_area_center_projector_px"
-        if center_mm is None:
-            cx = _first_finite_float(attrs.get("arena_center_x_px"))
-            cy = _first_finite_float(attrs.get("arena_center_y_px"))
-            if cx is not None and cy is not None and pixel_to_mm is not None:
-                center_mm = (cx * pixel_to_mm, cy * pixel_to_mm)
-                center_source = f"{source_name}:arena_center_camera_px"
-        if center_mm is None:
-            w_mm = _first_finite_float(attrs.get("sub_arena_width_mm"))
-            h_mm = _first_finite_float(attrs.get("sub_arena_height_mm"))
-            if w_mm is not None and h_mm is not None and w_mm > 0 and h_mm > 0:
-                center_mm = (0.5 * w_mm, 0.5 * h_mm)
-                center_source = f"{source_name}:sub_arena_size_mm"
-        if center_mm is None:
-            w_px = _first_finite_float(attrs.get("sub_arena_width_px"))
-            h_px = _first_finite_float(attrs.get("sub_arena_height_px"))
-            pixels_per_mm = _first_finite_float(
-                attrs.get("pixels_per_mm_projector"),
-                projector_pixels_per_mm,
-            )
-            if w_px is not None and h_px is not None and pixels_per_mm is not None and pixels_per_mm > 0:
-                center_mm = (0.5 * w_px / pixels_per_mm, 0.5 * h_px / pixels_per_mm)
-                center_source = f"{source_name}:sub_arena_size_projector_px"
-
-    extent_mm: Optional[float] = None
-    extent_source = ""
-    for source_name, attrs in sources:
-        radius_mm = _first_finite_float(
-            attrs.get("arena_radius_mm"),
-            attrs.get("experimental_area_radius_mm"),
-        )
-        if radius_mm is not None and radius_mm > 0:
-            extent_mm = radius_mm
-            extent_source = f"{source_name}:radius_mm"
-            break
-
-        radius_px = _first_finite_float(attrs.get("experimental_area_radius_px"))
-        pixels_per_mm = _first_finite_float(
-            attrs.get("pixels_per_mm_projector"),
-            projector_pixels_per_mm,
-        )
-        if radius_px is not None and radius_px > 0 and pixels_per_mm is not None and pixels_per_mm > 0:
-            extent_mm = radius_px / pixels_per_mm
-            extent_source = f"{source_name}:experimental_area_radius_projector_px"
-            break
-
-        radius_px = _first_finite_float(attrs.get("arena_radius_px"))
-        if radius_px is not None and radius_px > 0 and pixel_to_mm is not None:
-            extent_mm = radius_px * pixel_to_mm
-            extent_source = f"{source_name}:arena_radius_camera_px"
-            break
-
-        width_mm = _first_finite_float(
-            attrs.get("arena_width_mm"),
-            attrs.get("experimental_area_width_mm"),
-            attrs.get("sub_arena_width_mm"),
-        )
-        height_mm = _first_finite_float(
-            attrs.get("arena_height_mm"),
-            attrs.get("experimental_area_height_mm"),
-            attrs.get("sub_arena_height_mm"),
-        )
-        if width_mm is None or height_mm is None:
-            width_px = _first_finite_float(
-                attrs.get("arena_width_px"),
-                attrs.get("experimental_area_width_px"),
-                attrs.get("sub_arena_width_px"),
-            )
-            height_px = _first_finite_float(
-                attrs.get("arena_height_px"),
-                attrs.get("experimental_area_height_px"),
-                attrs.get("sub_arena_height_px"),
-            )
-            if width_px is not None and height_px is not None and pixel_to_mm is not None:
-                width_mm = width_px * pixel_to_mm
-                height_mm = height_px * pixel_to_mm
-        if width_mm is not None and height_mm is not None and width_mm > 0 and height_mm > 0:
-            extent_mm = 0.5 * (
-                abs(float(direction_xy[0])) * width_mm
-                + abs(float(direction_xy[1])) * height_mm
-            )
-            extent_source = f"{source_name}:axis_projected_rectangle"
-            break
-
-    if center_mm is None and extent_mm is None:
-        return None, None, "unavailable"
-
-    parts = []
-    if center_mm is not None:
-        parts.append(center_source or "center")
-    if extent_mm is not None:
-        parts.append(extent_source or "extent")
-    return center_mm, extent_mm, ";".join(parts)
+    center_mm = authority.arena_center_mm()
+    extent_mm = authority.arena_axis_extent_mm(direction_xy)
+    return (
+        center_mm,
+        extent_mm,
+        "typed_arena_frame_projected_to_source_camera_physical_mm_v1",
+    )
 
 
 def _position_axis_metrics(

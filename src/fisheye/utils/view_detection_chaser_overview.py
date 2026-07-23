@@ -15,6 +15,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import zarr  # noqa: E402
 
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.analysis.chaser_distance_runs import PNG_ARTIFACT_NAME as CHASER_DISTANCE_ARTIFACT
 from fisheye.analysis.detection_occupancy_runs import PNG_ARTIFACT_NAME as DETECTION_OCCUPANCY_ARTIFACT
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
@@ -49,8 +53,10 @@ def _run_names(parent: zarr.Group) -> set[str]:
         return {str(name) for name, node in parent.items() if isinstance(node, zarr.Group)}
 
 
-def _resolve_run_path(root: zarr.Group, parent_path: str, run_name_or_path: Optional[str]) -> str:
-    parent_path = _normalize_path(parent_path)
+def _resolve_detection_run_path(root: zarr.Group, run_name_or_path: Optional[str]) -> str:
+    """Legacy detection-occupancy selector; never use for chaser-distance runs."""
+
+    parent_path = DETECTION_OCCUPANCY_PARENT
     if parent_path not in root:
         raise ValueError(f"Missing run parent: {parent_path}")
     parent = root[parent_path]
@@ -79,15 +85,28 @@ def _resolve_run_path(root: zarr.Group, parent_path: str, run_name_or_path: Opti
     return _join_path(parent_path, names[-1])
 
 
-def _load_artifact(
+def _requested_chaser_run_name(run_name_or_path: Optional[str]) -> str:
+    if run_name_or_path is None or not str(run_name_or_path).strip():
+        return "latest"
+    requested = _normalize_path(str(run_name_or_path))
+    prefix = CHASER_DISTANCE_PARENT + "/"
+    run_name = requested[len(prefix) :] if requested.startswith(prefix) else requested
+    if not run_name or "/" in run_name:
+        raise ChaserDistanceReadError(
+            "A chaser-distance selection must be one exact child name or its exact "
+            f"{CHASER_DISTANCE_PARENT}/<run> path."
+        )
+    return run_name
+
+
+def _load_detection_artifact(
     root: zarr.Group,
     *,
     title: str,
-    parent_path: str,
     run_name_or_path: Optional[str],
     artifact_name: str,
 ) -> ResolvedArtifact:
-    run_path = _resolve_run_path(root, parent_path, run_name_or_path)
+    run_path = _resolve_detection_run_path(root, run_name_or_path)
     artifact_path = _join_path(run_path, "visualizations", artifact_name)
     resolved_path, png_bytes = load_png_artifact_bytes(root, artifact_path)
     return ResolvedArtifact(
@@ -96,6 +115,21 @@ def _load_artifact(
         artifact_name=artifact_name,
         resolved_artifact_path=resolved_path,
         png_bytes=png_bytes,
+    )
+
+
+def _load_chaser_artifact(
+    root: zarr.Group,
+    *,
+    run_name_or_path: Optional[str],
+    artifact_name: str,
+) -> ResolvedArtifact:
+    """Fail closed until the exact artifact is included in a publication seal."""
+
+    run_name = _requested_chaser_run_name(run_name_or_path)
+    distance = load_chaser_distance_run(root, run_name=run_name)
+    distance.require_derived_surface_authority(
+        _join_path("visualizations", artifact_name)
     )
 
 
@@ -181,17 +215,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         root = open_zarr_root(args.zarr_path, mode="r")
         recording_id = str(root.attrs.get("recording_id") or root.attrs.get("recording_name") or args.zarr_path.stem)
         artifacts = [
-            _load_artifact(
+            _load_detection_artifact(
                 root,
                 title="Detection occupancy",
-                parent_path=DETECTION_OCCUPANCY_PARENT,
                 run_name_or_path=args.occupancy_run,
                 artifact_name=DETECTION_OCCUPANCY_ARTIFACT,
             ),
-            _load_artifact(
+            _load_chaser_artifact(
                 root,
-                title="Chaser distance",
-                parent_path=CHASER_DISTANCE_PARENT,
                 run_name_or_path=args.chaser_distance_run,
                 artifact_name=CHASER_DISTANCE_ARTIFACT,
             ),

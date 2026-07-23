@@ -5,6 +5,7 @@ from pathlib import Path
 import zarr
 
 from fisheye.analysis_workflows.materializers import stimulus_response as mod
+from fisheye.shared.stimulus_coordinate_contract import canonical_mapping_digest
 
 
 def _build_source(path: Path) -> None:
@@ -21,13 +22,21 @@ def _fake_writer(argv) -> None:
         .require_group("stimulus_response_runs")
         .create_group(run_name)
     )
+    coordinate_lineage = {
+        "schema_id": "palette.stimulus_response.coordinate_lineage",
+        "schema_version": 1,
+        "source_stimulus_run_ref": "/analysis/stimulus_runs/stim_1",
+    }
+    coordinate_lineage["record_sha256"] = canonical_mapping_digest(
+        coordinate_lineage
+    )
     run.attrs.update(
         {
             "palette_run_completion_status": "complete",
             "schema_id": "palette.stimulus_response",
             "schema_version": 2,
             "method": "stimulus_response",
-            "method_version": "stimulus_response.v2",
+            "method_version": "stimulus_response.v3",
             "row_axis": "stimulus_steps",
             "layout": "compact_tabular_v2",
             "parameters": {"moving_threshold_mm_s": 2.0},
@@ -36,6 +45,7 @@ def _fake_writer(argv) -> None:
                     "analysis/track_kinematics_runs/offline/track_1"
                 ),
                 "source_stimulus_run": "analysis/stimulus_runs/stim_1",
+                "stimulus_coordinate_lineage": coordinate_lineage,
             },
             "n_steps": 1,
             "n_fish": 1,
@@ -91,7 +101,43 @@ def test_materializer_computes_locally_and_publishes_atomically(
     assert parent.attrs["latest"] == "response_1"
     assert parent.attrs["latest_complete"] == "response_1"
     run = parent["response_1"]
+    assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs["atomic_publication_owner_uuid"]
+    assert "atomic_publication_tombstone" not in run.attrs
     assert run.attrs["cluster_output_staging"]["publisher_contract"] == {
         "schema_id": "palette.atomic_run_group_publisher",
         "schema_version": 1,
     }
+
+
+def test_validator_rejects_stale_stimulus_coordinate_lineage(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output.zarr"
+    _fake_writer(
+        [
+            "--output-zarr-path",
+            str(output),
+            "--run-name",
+            "response_1",
+        ]
+    )
+    run = zarr.open_group(
+        str(output / "analysis" / "stimulus_response_runs" / "response_1"),
+        mode="a",
+        use_consolidated=False,
+    )
+    source_refs = dict(run.attrs["source_refs"])
+    coordinate_lineage = dict(source_refs["stimulus_coordinate_lineage"])
+    coordinate_lineage["source_stimulus_run_ref"] = (
+        "/analysis/stimulus_runs/tampered"
+    )
+    source_refs["stimulus_coordinate_lineage"] = coordinate_lineage
+    run.attrs["source_refs"] = source_refs
+
+    result = mod._validate_stimulus_response_run(
+        output / "analysis" / "stimulus_response_runs" / "response_1"
+    )
+
+    assert result["valid"] is False
+    assert "stale stimulus_coordinate_lineage digest" in result["errors"]

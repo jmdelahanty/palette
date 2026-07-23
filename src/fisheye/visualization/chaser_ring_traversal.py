@@ -62,14 +62,13 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _protocol_position_transition_s,
     _read_epochs,
     _resolve_chaser_distance_run,
-    _safe_float,
 )
 from fisheye.visualization.chaser_visit_trajectories import (
     DEFAULT_EPOCHS,
     DEFAULT_VIRTUAL_ROTATIONS_DEG,
     DOT_RADIUS_MM,
     VisitScene,
-    collect_visits,
+    _collect_visits_unsealed_inspection,
 )
 
 
@@ -94,6 +93,28 @@ def collect_ring_entries(
     high_turn_threshold_deg: float = DEFAULT_HIGH_TURN_THRESHOLD_DEG,
     **visit_kwargs: Any,
 ) -> tuple[list[VisitScene], dict[str, Any]]:
+    """Fail closed until the bout-response view input is independently sealed."""
+
+    root = _open_root(zarr_path, mode="r")
+    distance, _run_name, _run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_derived_surface_authority("chaser_bout_response")
+
+
+def _collect_ring_entries_unsealed_inspection(
+    zarr_path: Path,
+    *,
+    chaser_distance_run: str = "latest",
+    swim_bout_run: str = "latest",
+    bout_response_component: str = "latest",
+    epochs_wanted: Sequence[str] = DEFAULT_EPOCHS,
+    virtual_rotations_deg: Sequence[float] = DEFAULT_VIRTUAL_ROTATIONS_DEG,
+    peak_speed_threshold_mm_s: float = DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
+    high_turn_threshold_deg: float = DEFAULT_HIGH_TURN_THRESHOLD_DEG,
+    **visit_kwargs: Any,
+) -> tuple[list[VisitScene], dict[str, Any]]:
     """collect_visits, then attach the bout SEGMENTS of each entry (speed + turn tier).
 
     The base collector marks bout *onsets*; here each visit also gets a ``bouts`` list, one
@@ -105,7 +126,7 @@ def collect_ring_entries(
     so the animation can light bouts up one at a time and colour turn/dash escapes.
     """
 
-    scenes, meta = collect_visits(
+    scenes, meta = _collect_visits_unsealed_inspection(
         zarr_path,
         chaser_distance_run=chaser_distance_run,
         swim_bout_run=swim_bout_run,
@@ -114,7 +135,11 @@ def collect_ring_entries(
         **visit_kwargs,
     )
 
-    bs, be, peak, turn = _load_bout_segments(zarr_path, chaser_distance_run, bout_response_component)
+    bs, be, peak, turn = _load_bout_segments_unsealed_inspection(
+        zarr_path,
+        chaser_distance_run,
+        bout_response_component,
+    )
     meta["peak_speed_threshold_mm_s"] = float(peak_speed_threshold_mm_s)
     meta["high_turn_threshold_deg"] = float(high_turn_threshold_deg)
     meta["responsive_band_mm"] = list(RESPONSIVE_BAND_MM)
@@ -228,6 +253,30 @@ def collect_chase_ring_entries(
     pad_s: float = 1.0,
     min_speed_mm_s: float = 0.5,
 ) -> tuple[list[VisitScene], dict[str, Any]]:
+    """Fail closed until the training-view derived inputs are sealed."""
+
+    root = _open_root(zarr_path, mode="r")
+    distance, _run_name, _run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_derived_surface_authority("chaser_bout_response")
+
+
+def _collect_chase_ring_entries_unsealed_inspection(
+    zarr_path: Path,
+    *,
+    chaser_distance_run: str = "latest",
+    swim_bout_run: str = "latest",
+    bout_response_component: str = "latest",
+    peak_speed_threshold_mm_s: float = DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
+    high_turn_threshold_deg: float = DEFAULT_HIGH_TURN_THRESHOLD_DEG,
+    epoch_label: str = "training_event",
+    visit_enter_mm: float = 15.0,
+    visit_exit_mm: float = 20.0,
+    pad_s: float = 1.0,
+    min_speed_mm_s: float = 0.5,
+) -> tuple[list[VisitScene], dict[str, Any]]:
     """The training-epoch analogue of collect_ring_entries, in a CHASER-CENTRIC frame.
 
     During the chase the object MOVES, so the static-object ring frame is a fiction. Here the
@@ -239,19 +288,37 @@ def collect_chase_ring_entries(
     """
 
     root = _open_root(zarr_path, mode="r")
-    run_group, run_name, _run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
-    ppm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    fps = _safe_float(run_group.attrs.get("fps"), 100.0)
+    distance_snapshot, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    # This training view must choose the behaviorally aggressive chaser.  Until
+    # role identity is protected by the canonical publication seal, selecting a
+    # column from CRA/protocol fallbacks would be an unverified scientific join.
+    distance_snapshot.require_behavior_authority()
+    run_group = root[run_path]
+    ppm = float(distance_snapshot.pixels_per_mm_projector)
+    fps = float(distance_snapshot.fps)
 
     agg_idx, role_source = _aggressive_chaser_index(run_group)
-    chaser_indices = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.int64).reshape(-1)
+    chaser_indices = np.asarray(
+        distance_snapshot.chaser_index,
+        dtype=np.int64,
+    ).reshape(-1)
     col = int(np.flatnonzero(chaser_indices == agg_idx)[0]) if np.any(chaser_indices == agg_idx) else 0
 
-    positions = run_group["positions"]
-    fish_px = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64)
-    chaser_px = np.asarray(positions["chaser_arena_xy"][:, col, :], dtype=np.float64)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:, col], dtype=bool)
+    fish_px = np.asarray(
+        distance_snapshot.fish_centroid_arena_xy,
+        dtype=np.float64,
+    )
+    all_chaser_px = np.asarray(
+        distance_snapshot.chaser_arena_xy,
+        dtype=np.float64,
+    )
+    all_chaser_valid = np.asarray(distance_snapshot.chaser_valid, dtype=bool)
+    chaser_px = all_chaser_px[:, col, :]
+    fish_valid = np.asarray(distance_snapshot.fish_valid, dtype=bool)
+    chaser_valid = all_chaser_valid[:, col]
     total_frames = int(fish_px.shape[0])
 
     # chaser heading (direction of pursuit) and the fish in the chaser-centric frame
@@ -275,14 +342,17 @@ def collect_chase_ring_entries(
     )
 
     # the training epoch window, settle-trimmed the same way every other component trims it
-    epochs = _read_epochs(run_group, total_frames=total_frames)
+    epochs = _read_epochs(distance_snapshot, total_frames=total_frames)
     epochs = _apply_settle_trim(
         epochs,
-        chaser_xy=np.asarray(positions["chaser_arena_xy"][:], dtype=np.float32),
-        chaser_valid=np.asarray(positions["chaser_valid"][:], dtype=bool),
+        chaser_xy=np.asarray(all_chaser_px, dtype=np.float32),
+        chaser_valid=all_chaser_valid,
         fps=float(fps),
         pixels_per_mm=float(ppm),
-        settle_trim_s=_protocol_position_transition_s(root, run_group),
+        settle_trim_s=_protocol_position_transition_s(
+            root,
+            distance_snapshot,
+        ),
         motion_spread_threshold_mm=1.0,
     )
     epoch = next((e for e in epochs if e.label == epoch_label), None)
@@ -333,7 +403,11 @@ def collect_chase_ring_entries(
             }
         )
 
-    bs, be, peak, turn = _load_bout_segments(zarr_path, chaser_distance_run, bout_response_component)
+    bs, be, peak, turn = _load_bout_segments_unsealed_inspection(
+        zarr_path,
+        chaser_distance_run,
+        bout_response_component,
+    )
     for visit in scene.visits:
         visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, turn,
                                          float(peak_speed_threshold_mm_s), float(high_turn_threshold_deg))
@@ -356,6 +430,19 @@ def collect_chase_ring_entries(
 def _load_bout_segments(
     zarr_path: Path, chaser_distance_run: str, component: str
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Fail closed before navigating an unsealed bout-response component."""
+
+    root = _open_root(zarr_path, mode="r")
+    distance, _run_name, _run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_derived_surface_authority("chaser_bout_response")
+
+
+def _load_bout_segments_unsealed_inspection(
+    zarr_path: Path, chaser_distance_run: str, component: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """(start_frame, end_frame, peak_speed_mm_s, turn_deg) from the chaser_bout_response table.
 
     That table is the single source of the bout boundaries, the peak speed used to call escapes,
@@ -365,8 +452,11 @@ def _load_bout_segments(
 
     empty = (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.float64), np.zeros(0, np.float64))
     root = _open_root(zarr_path, mode="r")
-    run_group, _name, _path = _resolve_chaser_distance_run(root, chaser_distance_run)
-    parent = run_group.get("chaser_bout_response")
+    _distance_snapshot, _name, path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    parent = root[path].get("chaser_bout_response")
     if parent is None or not len(list(parent.keys())):
         return empty
     name = str(component).strip()

@@ -31,7 +31,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--manifest",
         type=str,
-        help="Optional manifest JSON path to record in the registry.",
+        help=(
+            "Pose training manifest JSON. Required when registry logging is enabled; "
+            "its ordered pose schema is authoritative."
+        ),
     )
     parser.add_argument(
         "--set-id",

@@ -4,9 +4,21 @@ import argparse
 import json
 from pathlib import Path
 
+import pytest
 import zarr
 
 from fisheye.analysis import create_analysis_zarr as create_mod
+
+
+def test_cli_has_no_historical_coordinate_compatibility_flag() -> None:
+    with pytest.raises(SystemExit):
+        create_mod.parse_args(
+            [
+                "--recording-dir",
+                "/tmp/recording",
+                "--historical-coordinate-compatibility",
+            ]
+        )
 
 
 def _base_args(tmp_path: Path) -> argparse.Namespace:
@@ -98,6 +110,10 @@ def test_ensure_archive_sets_analysis_attrs(monkeypatch, tmp_path: Path) -> None
     video = tmp_path / "rec" / "cams" / "Cam2010093_a.mp4"
     video.parent.mkdir(parents=True)
     video.touch()
+    (tmp_path / "rec" / "recording_manifest.json").write_text(
+        json.dumps({"camera_id": "2010093"}),
+        encoding="utf-8",
+    )
 
     plan = create_mod.CreationPlan(
         recording_dir=(tmp_path / "rec"),
@@ -113,6 +129,8 @@ def test_ensure_archive_sets_analysis_attrs(monkeypatch, tmp_path: Path) -> None
     assert fake_root.attrs.get("source_video_path") == str(video)
     assert fake_root.attrs.get("source_video") == video.name
     assert fake_root.attrs.get("recording_path") == str(plan.recording_dir)
+    assert fake_root.attrs.get("recording_id") == "rec"
+    assert fake_root.attrs.get("camera_id") == "2010093"
 
 
 def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monkeypatch) -> None:
@@ -154,6 +172,11 @@ def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monke
 
     monkeypatch.setattr(create_mod, "probe_video_metadata", _fake_probe)
     monkeypatch.setattr(create_mod, "write_video_metadata", _fake_write)
+    monkeypatch.setattr(
+        create_mod,
+        "publish_external_video_acquisition_authority",
+        lambda root: calls.setdefault("authority_root", root),
+    )
     monkeypatch.setattr(create_mod.zarr, "open_group", lambda *_args, **_kwargs: object())
 
     updates = create_mod._apply_video_metadata(plan, overwrite=True)  # noqa: SLF001
@@ -162,6 +185,7 @@ def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monke
     assert calls["overwrite"] is True
     assert calls["import_purpose"] == "analysis"
     assert calls["recording_path"] == plan.recording_dir
+    assert calls["authority_root"] is calls["root"]
     assert updates == {"root_attrs_updated": 1, "raw_video_attrs_updated": 1}
 
 

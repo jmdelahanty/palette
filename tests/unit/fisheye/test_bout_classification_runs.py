@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis.bout_classification_runs import (
+    resolve_bout_classification_run,
     summarize_bout_classification_run,
     validate_bout_classification_run,
 )
@@ -13,6 +15,14 @@ from fisheye.analysis.megabouts_classifier import (
 )
 from fisheye.analysis.megabouts_classifier_inputs import build_megabouts_classifier_input_pack
 from tests.unit.fisheye.test_megabouts_classifier import _build_classifier_root, _fake_runtime
+from tests.unit.fisheye.test_megabouts_classifier_inputs import (
+    _install_verified_source_readers,
+)
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_verified_source_readers(monkeypatch)
 
 
 def _classification_root() -> zarr.Group:
@@ -33,6 +43,21 @@ def _classification_root() -> zarr.Group:
         result=result,
     )
     return out_root
+
+
+def _resolver_root() -> zarr.Group:
+    root = zarr.group()
+    parent = root.require_group("analysis/bout_classification_runs")
+    run = parent.create_group("classification_001")
+    run.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+    parent.attrs["latest"] = "classification_001"
+    parent.attrs["latest_complete"] = "classification_001"
+    return root
 
 
 def test_validate_bout_classification_run_accepts_writer_output() -> None:
@@ -89,3 +114,119 @@ def test_validate_bout_classification_run_strict_promotes_recommended_attrs() ->
     assert non_strict["ok"] is True
     assert strict["ok"] is False
     assert "missing recommended run attr: trajectory_conversion" in strict["warnings"]
+
+
+@pytest.mark.parametrize(
+    "run_spec",
+    (
+        "classification_001",
+        "analysis/bout_classification_runs/classification_001",
+    ),
+)
+def test_explicit_resolution_accepts_only_controlled_name_forms(run_spec: str) -> None:
+    root = _resolver_root()
+
+    _run, run_name, run_path = resolve_bout_classification_run(root, run_spec)
+
+    assert run_name == "classification_001"
+    assert run_path == "analysis/bout_classification_runs/classification_001"
+
+
+@pytest.mark.parametrize(
+    "run_spec",
+    (
+        "analysis/swim_bout_runs/classification_001",
+        "analysis/tail_kinematics_runs/classification_001",
+        "nested/classification_001",
+        "analysis/bout_classification_runs/nested/classification_001",
+        "analysis/bout_classification_runs",
+        "/analysis/bout_classification_runs/classification_001",
+        "analysis/bout_classification_runs/classification_001/",
+        "analysis/bout_classification_runs//classification_001",
+    ),
+)
+def test_explicit_resolution_rejects_wrong_family_or_nested_paths(
+    run_spec: str,
+) -> None:
+    root = _resolver_root()
+
+    with pytest.raises(ValueError, match="bare child name or the exact path"):
+        resolve_bout_classification_run(root, run_spec)
+
+
+@pytest.mark.parametrize(
+    ("status", "eligible", "message"),
+    (
+        ("running", True, "not complete"),
+        ("failed", True, "not complete"),
+        ("complete", False, "not selector-eligible"),
+    ),
+)
+def test_explicit_resolution_requires_complete_selector_eligible_run(
+    status: str,
+    eligible: bool,
+    message: str,
+) -> None:
+    root = _resolver_root()
+    run = root["analysis/bout_classification_runs/classification_001"]
+    run.attrs["palette_run_completion_status"] = status
+    run.attrs["stage_selector_eligible"] = eligible
+
+    with pytest.raises(ValueError, match=message):
+        resolve_bout_classification_run(root, "classification_001")
+
+
+def test_implicit_resolution_never_guesses_during_selector_handoff() -> None:
+    root = _resolver_root()
+    parent = root["analysis/bout_classification_runs"]
+    candidate = parent.create_group("candidate")
+    candidate.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        }
+    )
+    parent.attrs["latest"] = "candidate"
+    parent.attrs["latest_complete"] = "candidate"
+
+    with pytest.raises(ValueError, match="activation may be in progress"):
+        resolve_bout_classification_run(root)
+
+    _run, run_name, _run_path = resolve_bout_classification_run(
+        root,
+        "classification_001",
+    )
+    assert run_name == "classification_001"
+
+
+@pytest.mark.parametrize(
+    ("latest", "latest_complete"),
+    (
+        ("classification_001", "candidate"),
+        ("candidate", "classification_001"),
+    ),
+)
+def test_implicit_resolution_rejects_each_intermediate_selector_pair(
+    latest: str,
+    latest_complete: str,
+) -> None:
+    root = _resolver_root()
+    parent = root["analysis/bout_classification_runs"]
+    candidate = parent.create_group("candidate")
+    candidate.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        }
+    )
+    parent.attrs["latest"] = latest
+    parent.attrs["latest_complete"] = latest_complete
+
+    with pytest.raises(ValueError, match="activation may be in progress"):
+        resolve_bout_classification_run(root)
+
+    _run, run_name, _run_path = resolve_bout_classification_run(
+        root,
+        "classification_001",
+    )
+    assert run_name == "classification_001"

@@ -1,7 +1,7 @@
 # Video Pixel And Model Input Contract
 <!-- contract-meta
 status: current
-last_verified: 2026-07-06
+last_verified: 2026-07-19
 purpose: Clarify the difference between persisted video/crop pixels and model-input tensors, especially PyNvVideoCodec luma versus NV12-to-RGB detection preprocessing.
 -->
 
@@ -118,6 +118,26 @@ Orange mono videos need chroma for biological signal. It is because the current
 detector was trained and validated against RGB-like preprocessing, and the
 recorded parity check showed lower box/score drift for NV12-to-RGB than for
 luma replication.
+
+Future-canonical detection publication separates three authorities:
+
+- the backend result image extent proved by per-result `orig_shape` checks;
+- source-camera half-open pixel edges for `bbox_img_xyxy`; and
+- source-camera continuous points for `centers_img_xy`.
+
+`detection_backend_result_projection` binds the exact model content
+fingerprint, decoder/backend and resize metadata, validated result count and
+uniform result extent, normalized bbox payload, and direction-labelled
+result-pixel-to-normalized/source-camera matrices. This projection is based on
+the coordinates actually returned by the backend after it verifies that every
+result matches the exact runtime input shape.
+
+Do not promote an inferred Ultralytics resize or letterbox matrix into this
+record. When exact network preprocessing evidence is unavailable, it is
+explicitly marked as not persisted and is not coordinate authority. The
+validated backend result-space projection remains sufficient to publish source
+camera boxes; a future exact network-input contract may add further lineage
+without changing those published values.
 
 ## Preferred Future Direction
 

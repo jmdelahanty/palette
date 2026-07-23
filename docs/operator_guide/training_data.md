@@ -4,8 +4,9 @@ This guide covers how to create labeled training datasets from analysis Zarrs or
 sampled training Zarrs, and how to train detection, pose, and segmentation
 models. The normal analysis-Zarr path assumes you have already run the
 [analysis pipeline](pipeline_workflow.md) and have Zarrs with detections,
-keypoints, and/or masks. Recording-only sampled training Zarrs need an initial
-prediction seed before review.
+keypoints, and/or masks. Recording-only sampled training Zarrs may use an
+initial prediction artifact, but that unbound artifact must be canonically bound
+before review.
 
 ## Overview
 
@@ -66,8 +67,8 @@ Keyboard shortcuts in the UI: **n** / **p** (next/previous), **c** (clear
 detection for this frame/slot), **r** (reset current edit), **a** (approve),
 **q** (save changes and quit).
 
-For a sampled training Zarr that starts from raw frames only, create the initial
-detection labels first:
+For a sampled training Zarr that starts from raw frames only, create unbound
+prediction evidence first:
 
 ```bash
 scripts/py -m fisheye.utils.predict_training_detections \
@@ -76,17 +77,20 @@ scripts/py -m fisheye.utils.predict_training_detections \
   --model-run-id <registered_detect_run_id> \
   --run-name detect_seed_<model_or_date> \
   --apply
-
-scripts/py -m fisheye.refinement.refine_detect \
-  /path/to/training.zarr \
-  --detect-run detect_seed_<model_or_date>
 ```
 
-`refine_detect` detects sampled training imports from `raw_video` metadata or
-`raw_video/original_frame_indices`. In this mode it runs as a passthrough
-initializer: it writes the canonical `refined_detect_runs/<run>/instances`
-surface, disables jump/blip filters, and does not require a detect-quality
-report. The refinement step still applies a tuned
+This command writes immutable, selector-free
+`detection_artifact_runs/<run>`. It does not publish `detect_runs`, and its
+training/model-frame boxes are not source-camera coordinate authority. Do not
+pass the artifact to `refine_detect --detect-run` or copy/relabel it under
+`detect_runs`. An explicit canonical binding/promotion path must validate its
+frame-source lineage and publish a distinct canonical detect run first. If that
+path is unavailable, stop before review.
+
+After canonical binding, `refine_detect` can use sampled-import passthrough to
+write the canonical `refined_detect_runs/<run>/instances` surface, disable
+jump/blip filters, and omit a detect-quality report. The refinement step still
+applies a tuned
 `analysis_metadata.attrs["dish_mask"]` when one is present, just as it does for
 full analysis Zarrs: outside-dish seed detections are retained in
 `source_detections` for audit but excluded from the approved `instances` surface
@@ -116,10 +120,11 @@ fish/background contrast metrics. It complements the detection data profile:
 detection profiles describe label geometry; training image profiles describe the
 sampled pixels. See `docs/training_image_profile_schema_contract.md`.
 
-For one-fish-per-frame training Zarrs, add `--per-frame-top-k 1` if the seed
-detector produces multiple candidates per sampled frame. This keeps only the
-highest-confidence candidate in `instances` while retaining the lower-scoring
-raw candidates in `source_detections` as `duplicate` rows for audit/review.
+After canonical binding, for one-fish-per-frame training Zarrs add
+`--per-frame-top-k 1` if the seed detector produces multiple candidates per
+sampled frame. This keeps only the highest-confidence candidate in `instances`
+while retaining the lower-scoring raw candidates in `source_detections` as
+`duplicate` rows for audit/review.
 
 For a resumable queue of pending detection-training archives:
 
@@ -399,7 +404,7 @@ See
 [`../model_input_shape_registry_design.md`](../model_input_shape_registry_design.md)
 for the schema and backfill plan.
 
-### Seed detection labels on a training Zarr
+### Generate an unbound detection-prediction artifact
 
 Use `predict_training_detections` to run a registered detector directly over
 frames stored inside a training Zarr. The utility resolves the model input
@@ -416,7 +421,7 @@ scripts/py -m fisheye.utils.predict_training_detections \
   --model-run-id omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb
 ```
 
-Write the initial `detect_runs/<run>` labels:
+Write the immutable `detection_artifact_runs/<run>` evidence:
 
 ```bash
 scripts/py -m fisheye.utils.predict_training_detections \
@@ -427,16 +432,18 @@ scripts/py -m fisheye.utils.predict_training_detections \
   --apply
 ```
 
-The written run records the selected model, `input_shape_status`, frame source
-array, sampled-frame mapping (`source_frame_indices` when available), and
-prediction parameters in run attrs and stage provenance.
+The written run records the selected model, `input_shape_status`, frame-source
+array and exact extent, sampled-frame mapping (`source_frame_indices` when
+available), dense run-local `artifact_row_id`, array-specific unbound numeric
+semantics, prediction parameters, and a sealed live payload inventory. It never
+advances a detector selector and cannot be consumed as an ordinary detect run.
 
-For sampled training imports, refined detection image-space boxes are computed
-in the same frame-source basis as the seed detect run. If
-`predict_training_detections` selected `raw_video/images_ds` at `640x640`,
-then `refined_detect_runs/<run>/instances/bbox_img_xyxy` is also in that
-`640x640` review-frame basis; full-resolution source dimensions remain
-available under `raw_video` metadata.
+Before refinement, an explicit canonical binding/promotion step must validate
+the artifact's frame-source lineage and publish a distinct canonical
+`detect_runs/<run>`. Do not assume that a `640x640` training frame can be mapped
+to source-camera pixels by a resolution ratio. If no approved binding path is
+available, fail closed rather than creating `refined_detect_runs` from the
+artifact.
 
 Refinement, not prediction, is responsible for applying the dish-mask spatial
 gate. This keeps raw model predictions immutable while making the curated

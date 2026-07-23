@@ -22,10 +22,11 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.goodcopbadcop_common import (
-    load_dense_kinematics,
-    load_epochs,
-    open_distance_run,
     resolve_cohort,
+)
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
@@ -34,21 +35,8 @@ ESCAPE_PEAK_MM_S = 100.0
 
 def load(zp: str) -> dict:
     r = zarr.open_group(zp, mode="r")
-    cd = open_distance_run(r)
-    total_frames = int(cd.attrs.get("total_frames"))
-    fps = float(cd.attrs.get("fps") or 100.0)
-    b = cd["chaser_bout_response"][sorted(cd["chaser_bout_response"].group_keys())[-1]]["bouts"]
-    bv = np.asarray(b["valid"][:], bool)
-    bs = np.asarray(b["start_frame"][:], np.int64)[bv]
-    be = np.asarray(b["end_frame"][:], np.int64)[bv]
-    peak_table = np.asarray(b["peak_speed_mm_s"][:], float)[bv]
-    dense, valid = load_dense_kinematics(r, total_frames, fields=("speed_smoothed_mm",))
-    smoothed = dense["speed_smoothed_mm"]
-    peak_smoothed = np.array(
-        [np.nanmax(smoothed[a:bb + 1]) if bb >= a else np.nan for a, bb in zip(bs, be)]
-    )
-    return dict(fps=fps, onsets=bs, peak_table=peak_table, peak_smoothed=peak_smoothed,
-                moving_valid=valid, epochs=load_epochs(r))
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_bout_response")
 
 
 def escape_rate(d: dict, epoch: str, peaks: np.ndarray) -> float:
@@ -67,6 +55,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             d = load(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover - per-recording robustness
             print("skip", rid.split("_GoodCop")[0], ex)
             continue

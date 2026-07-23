@@ -89,6 +89,18 @@ class TrackSpeeds:
     cumulative_path_distance: np.ndarray
     seconds: np.ndarray
     speed_per_second: np.ndarray
+    distance_smoothing_window_frames_requested: int
+    distance_smoothing_window_frames_effective: int
+    speed_smoothing_window_frames_requested: int
+    speed_smoothing_window_frames_effective: int
+
+
+def _effective_smoothing_window(requested: int, sample_count: int) -> int:
+    """Return the bounded window actually usable by one finite row domain."""
+
+    if sample_count <= 0:
+        return 0
+    return min(max(1, int(requested)), int(sample_count))
 
 
 def find_fps(root: zarr.Group, console: Console, fallback: float = 60.0) -> float:
@@ -126,7 +138,8 @@ def _moving_average_ignore_mask(
     if alignment not in SMOOTHING_ALIGNMENTS:
         expected = ", ".join(SMOOTHING_ALIGNMENTS)
         raise ValueError(f"Unsupported smoothing alignment {alignment!r}; expected one of: {expected}")
-    if window <= 1 or series.size == 0:
+    effective_window = _effective_smoothing_window(window, int(series.size))
+    if effective_window <= 1:
         result = np.zeros_like(series, dtype=np.float64)
         result[valid_mask] = series[valid_mask]
         return result
@@ -134,14 +147,14 @@ def _moving_average_ignore_mask(
     filled = np.where(valid_mask, series, 0.0)
     counts = valid_mask.astype(np.float64)
     if alignment == "centered":
-        kernel = np.ones(window, dtype=np.float64)
+        kernel = np.ones(effective_window, dtype=np.float64)
         sum_values = np.convolve(filled, kernel, mode="same")
         count_values = np.convolve(counts, kernel, mode="same")
     else:
         cumulative_values = np.concatenate([[0.0], np.cumsum(filled, dtype=np.float64)])
         cumulative_counts = np.concatenate([[0.0], np.cumsum(counts, dtype=np.float64)])
         stops = np.arange(1, series.size + 1)
-        starts = np.maximum(0, stops - int(window))
+        starts = np.maximum(0, stops - effective_window)
         sum_values = cumulative_values[stops] - cumulative_values[starts]
         count_values = cumulative_counts[stops] - cumulative_counts[starts]
 
@@ -428,6 +441,25 @@ def compute_track_speed(
             cumulative_path_distance=empty,
             seconds=empty_int64,
             speed_per_second=empty,
+            distance_smoothing_window_frames_requested=max(
+                1,
+                int(
+                    round(
+                        fps
+                        * (
+                            distance_smooth_seconds
+                            if distance_smooth_seconds is not None
+                            else smooth_seconds
+                        )
+                    )
+                ),
+            ),
+            distance_smoothing_window_frames_effective=0,
+            speed_smoothing_window_frames_requested=max(
+                1,
+                int(round(fps * smooth_seconds)),
+            ),
+            speed_smoothing_window_frames_effective=0,
         )
 
     order = np.argsort(frames)
@@ -452,8 +484,24 @@ def compute_track_speed(
     distance_window_seconds = (
         distance_smooth_seconds if distance_smooth_seconds is not None else smooth_seconds
     )
-    distance_window = max(1, int(round(fps * distance_window_seconds)))
-    speed_window = max(1, int(round(fps * smooth_seconds)))
+    distance_window_requested = max(
+        1,
+        int(round(fps * distance_window_seconds)),
+    )
+    speed_window_requested = max(1, int(round(fps * smooth_seconds)))
+    # Distance smoothing operates on transitions (N - 1); speed averaging
+    # operates on the destination-sample domain (N).  Persist both requested
+    # and effective values so a short track never silently claims a window it
+    # could not have used.
+    distance_window = _effective_smoothing_window(
+        distance_window_requested,
+        max(0, int(frames.size) - 1),
+    )
+    speed_window = _effective_smoothing_window(
+        speed_window_requested,
+        int(frames.size),
+    )
+    distance_window_effective = distance_window
 
     if frames.size >= 2:
         delta_frames = np.diff(frames)
@@ -537,12 +585,20 @@ def compute_track_speed(
         if distance_window > 1 and displacement_post_hysteresis.size > 0:
             if smoothing_method == "savitzky_golay":
                 # Savitzky-Golay filter for shape-preserving smoothing
-                # Ensure window length is odd
-                window_length = distance_window if distance_window % 2 == 1 else distance_window + 1
+                # Ensure window length is odd without exceeding the live
+                # transition domain.  The former round-up could exceed a
+                # short trace even after its requested window was bounded.
+                window_length = (
+                    distance_window
+                    if distance_window % 2 == 1
+                    else distance_window - 1
+                )
+                window_length = max(1, window_length)
                 # Ensure polynomial order is less than window length
                 polyorder = min(savgol_polyorder, window_length - 1)
 
                 if window_length >= polyorder + 2:  # Minimum requirement for savgol_filter
+                    distance_window_effective = window_length
                     displacement_post_smoothing = savgol_filter(
                         displacement_post_hysteresis,
                         window_length=window_length,
@@ -643,6 +699,12 @@ def compute_track_speed(
         cumulative_path_distance=cumulative_path_distance.astype(np.float32),
         seconds=unique_seconds.astype(np.int64),
         speed_per_second=speed_per_second.astype(np.float32),
+        distance_smoothing_window_frames_requested=(
+            distance_window_requested
+        ),
+        distance_smoothing_window_frames_effective=distance_window_effective,
+        speed_smoothing_window_frames_requested=speed_window_requested,
+        speed_smoothing_window_frames_effective=speed_window,
     )
 
 

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import zarr
 
+import fisheye.shared.refined_subject_masks_io as io_module
 from fisheye.shared.mask_rle import encode_mask_component_stack_rle
 from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.refined_subject_masks_io import (
     RefinedSubjectMasksIOError,
     discover_refined_subject_masks_run_options,
+    load_canonical_refined_subject_masks_run_tables,
     load_refined_subject_masks_run_tables,
+    resolve_historical_refined_subject_masks_run,
     resolve_refined_subject_masks_run,
 )
 
@@ -205,6 +209,67 @@ def test_load_refined_subject_masks_run_tables_can_skip_dense_masks(tmp_path: Pa
         tables.require_masks_roi()
 
 
+def test_canonical_tables_fail_closed_on_legacy_compatibility_run(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+
+    with pytest.raises(RefinedSubjectMasksIOError, match="not a valid canonical"):
+        load_canonical_refined_subject_masks_run_tables(root)
+
+
+def test_canonical_tables_carry_the_exact_strict_coordinate_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = root["refined_subject_masks_runs/refined_1"]
+    _write_array(run, "source_crop_row_ids", np.asarray([0, 1, 2], dtype=np.int64))
+    _write_array(run, "instance_key", np.asarray([100, 101, 102], dtype=np.uint64))
+    _write_array(
+        run,
+        "source_acquisition_frame_index",
+        np.asarray([10, 11, 12], dtype=np.int64),
+    )
+    _write_array(
+        run,
+        "source_crop_xywh",
+        np.asarray([[1, 2, 8, 8], [1, 2, 8, 8], [1, 2, 8, 8]], dtype=np.int32),
+    )
+    sentinel = SimpleNamespace(
+        context=SimpleNamespace(
+            run_path="refined_subject_masks_runs/refined_1",
+            labels=("subject_body", "eye_left", "eye_right", "swim_bladder"),
+        )
+    )
+    monkeypatch.setattr(
+        io_module,
+        "load_persisted_refined_subject_mask_coordinate_surfaces",
+        lambda _root, _path: sentinel,
+    )
+    revalidated: list[object] = []
+    monkeypatch.setattr(
+        io_module,
+        "require_bound_refined_subject_mask_coordinate_surfaces",
+        lambda value: revalidated.append(value) or value,
+    )
+
+    loaded = load_canonical_refined_subject_masks_run_tables(root)
+
+    assert loaded.coordinate_surfaces is sentinel
+    assert loaded.run_path == "refined_subject_masks_runs/refined_1"
+    assert loaded.masks_roi.shape == (3, 4, 8, 8)
+    assert set(loaded.tables.run_arrays) == {
+        "available_channels",
+        "source_crop_row_ids",
+        "instance_key",
+        "source_acquisition_frame_index",
+        "source_crop_xywh",
+    }
+    assert loaded.tables.components == {}
+    assert loaded.tables.relations == {}
+    assert "edit_applied" not in loaded.tables.run_arrays
+    assert revalidated == [sentinel]
+
+
 def test_load_refined_subject_masks_run_tables_rejects_missing_component(tmp_path: Path) -> None:
     root = _make_refined_subject_archive(tmp_path)
 
@@ -217,6 +282,40 @@ def test_resolve_refined_subject_masks_run_rejects_missing_run(tmp_path: Path) -
 
     with pytest.raises(RefinedSubjectMasksIOError, match="not found"):
         resolve_refined_subject_masks_run(root, "missing_refined")
+
+
+def test_normal_refined_resolver_never_uses_lexicographic_child_fallback(
+    tmp_path: Path,
+) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    parent = root["refined_subject_masks_runs"]
+    del parent.attrs["latest"]
+    fallback = parent.create_group("zzz_historical")
+    fallback.attrs["mask_labels"] = ["subject_body"]
+
+    with pytest.raises(
+        RefinedSubjectMasksIOError,
+        match="no valid controlled selector",
+    ):
+        resolve_refined_subject_masks_run(root)
+
+    _group, run_name, run_path = resolve_historical_refined_subject_masks_run(root)
+    assert run_name == "zzz_historical"
+    assert run_path == "refined_subject_masks_runs/zzz_historical"
+
+
+def test_normal_refined_resolver_rejects_invalid_controlled_selector(
+    tmp_path: Path,
+) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    parent = root["refined_subject_masks_runs"]
+    parent.attrs["authoritative_run"] = "missing_authority"
+
+    with pytest.raises(
+        RefinedSubjectMasksIOError,
+        match="authoritative_run='missing_authority'",
+    ):
+        resolve_refined_subject_masks_run(root)
 
 
 def test_open_mask_store_reads_dense_masks_by_rows_and_components(tmp_path: Path) -> None:

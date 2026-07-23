@@ -39,7 +39,7 @@ nodes:
     kind: prerequisite
     stage_id: refined_keypoints
     runnable: false
-    description: Curated keypoint authority required by downstream kinematics and eyes.
+    description: Curated keypoint authority required by downstream track kinematics.
 
   - id: refined_subject_masks
     kind: prerequisite
@@ -90,12 +90,13 @@ nodes:
   - id: eye_angles
     kind: analysis
     stage_id: eye_angles
-    depends_on: [refined_keypoints, subject_shape]
+    depends_on: [subject_shape]
     execution_policy: exact_source_subset_node_local_compute_shard_publish
     description: >-
-      Stage completed subject-shape eye geometry and refined keypoints locally,
-      compute framewise eye angles without downsampling, shard the completed
-      output, and publish it atomically with source and algorithm provenance.
+      Stage completed subject-shape eye geometry locally, derive the exact
+      canonical base-keypoint authority from that sealed publication, compute
+      framewise eye angles without downsampling, shard the completed output,
+      and publish it atomically with source and algorithm provenance.
 
   - id: subject_shape
     kind: analysis

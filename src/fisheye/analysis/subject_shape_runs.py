@@ -9,10 +9,11 @@ import json
 import math
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import dask
 from dask import delayed
@@ -32,17 +33,36 @@ except ImportError:  # pragma: no cover - depends on optional dependency
     HAVE_DISTRIBUTED = False
 
 from ..shared.detect_reason_codec import decode_reason_bytes
+from ..shared.archive_identity import archive_identity
+from ..shared.coordinate_frame_record import array_payload_sha256
+from ..shared.coordinate_record import (
+    bind_persisted_coordinate_record,
+    stamp_and_bind_persisted_coordinate_record,
+)
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import batch_mask_spatial_metrics, measure_mask_ellipse as _measure_mask
 from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
+    restart_proof_verification,
+)
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
+    require_runs_parent,
+)
 from ..shared.refined_subject_masks_io import (
     RefinedSubjectMasksRunTables,
     load_refined_subject_masks_run_tables,
     resolve_refined_subject_masks_run,
+)
+from ..shared.refined_subject_mask_coordinate_publication import (
+    load_persisted_refined_subject_mask_coordinate_surfaces,
 )
 from ..shared.mask_store import MaskStore, open_mask_store
 from ..shared.subject_mask_chunks import (
@@ -51,6 +71,26 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
+from ..shared.subject_shape_coordinate_publication import (
+    SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+    SUBJECT_SHAPE_COMPUTING_UNBOUND_STATUS,
+    SUBJECT_SHAPE_COORDINATE_CONTRACT,
+    SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
+    SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
+    SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
+    SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
+    SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+    DeferredSubjectShapeCoordinateActivation,
+    activate_subject_shape_coordinate_publication,
+    build_subject_shape_schema_inventory_record,
+    build_subject_shape_scientific_configuration_record,
+    load_completed_ineligible_subject_shape_coordinate_publication,
+    prepare_subject_shape_identity_and_schema,
+    publish_subject_shape_coordinate_surfaces,
+    selector_snapshot,
+)
 from ..shared.zarr_io import open_zarr_root
 from .subject_shape_spline import (
     BSPLINE_METHOD,
@@ -66,10 +106,10 @@ from .subject_shape_spline import (
 )
 
 SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
-SUBJECT_SHAPE_SCHEMA_VERSION = 3
+SUBJECT_SHAPE_SCHEMA_VERSION = 4
 SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID = "analysis.subject_shape.source_refined_subject_masks_v1"
-SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v10"
-SUBJECT_SHAPE_METHOD_VERSION = 10
+SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v11"
+SUBJECT_SHAPE_METHOD_VERSION = 11
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
 COMPONENT_ORDER = ("subject_body", "swim_bladder", "eye_left", "eye_right")
 ELLIPSE_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
@@ -345,6 +385,9 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
     component_group.attrs["component_name"] = component_name
     component_group.attrs["source_component"] = component_name
     component_group.attrs["component_schema_id"] = "analysis.subject_shape_component_v1"
+    component_group.attrs["point_coordinate_space"] = "roi_local_px"
+    component_group.attrs["bbox_coordinate_space"] = "roi_local_px"
+    component_group.attrs["bbox_convention"] = "xyxy_pixel_edge_half_open"
     _create_array(component_group, "mask_present", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
     _create_array(component_group, "area_px", shape=(total_rows,), dtype=np.float32, chunks=chunks_1d, fill_value=np.nan)
     _create_array(
@@ -999,6 +1042,8 @@ def _prepare_subject_shape_run(
     centerline_crop_to_foreground: bool,
     native_threads: Optional[int],
     stage_command: str,
+    publication_owner: str,
+    write_best_effort_lineage: bool,
     overwrite: bool,
 ) -> zarr.Group:
     total_rows = int(source_mask_store.n_rows)
@@ -1006,13 +1051,22 @@ def _prepare_subject_shape_run(
     analysis_group = root.require_group("analysis")
     parent = require_runs_parent(analysis_group, "subject_shape_runs")
     if target_run in parent:
-        if not overwrite:
-            raise ValueError(
-                f"analysis/subject_shape_runs/{target_run} already exists. Pass overwrite=True to replace it."
-            )
-        del parent[target_run]
+        raise ValueError(
+            f"analysis/subject_shape_runs/{target_run} already exists. Canonical "
+            "subject-shape runs are immutable; choose a new run name."
+        )
+    if overwrite:
+        raise ValueError(
+            "overwrite=True is unsupported for canonical subject-shape publication; "
+            "choose a new immutable run name."
+        )
     run_group = parent.create_group(target_run)
     mark_run_started(run_group, run_name=target_run, stage="subject_shape")
+    run_group.attrs[SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR] = str(publication_owner)
+    run_group.attrs["stage_selector_eligible"] = False
+    run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+        SUBJECT_SHAPE_COMPUTING_UNBOUND_STATUS
+    )
 
     row_index = run_group.require_group("row_index")
     copy_result = copy_row_lineage_arrays(
@@ -1227,7 +1281,11 @@ def _prepare_subject_shape_run(
         },
     )
     write_stage_provenance(run_group, provenance)
-    write_best_effort_run_lineage_attrs(run_group, run_family="subject_shape_run")
+    if write_best_effort_lineage:
+        write_best_effort_run_lineage_attrs(
+            run_group,
+            run_family="subject_shape_run",
+        )
     return run_group
 
 
@@ -2595,6 +2653,434 @@ def _summarize_subject_shape_chunk_timings(
     }
 
 
+def _iter_subject_shape_arrays(
+    group: zarr.Group,
+    prefix: str = "",
+):
+    for name in sorted(str(value) for value in group.array_keys()):
+        path = f"{prefix}/{name}" if prefix else name
+        yield path, group[name]
+    for name in sorted(str(value) for value in group.group_keys()):
+        path = f"{prefix}/{name}" if prefix else name
+        yield from _iter_subject_shape_arrays(group[name], path)
+
+
+def _unbound_numeric_manifest_record(run_group: zarr.Group) -> dict[str, object]:
+    schema_inventory = build_subject_shape_schema_inventory_record(
+        run_group,
+        phase="unbound",
+    )
+    arrays = {
+        path: {
+            "relative_ref": path,
+            "dtype": np.dtype(node.dtype).str,
+            "shape": [int(value) for value in node.shape],
+            "content_sha256": array_payload_sha256(node),
+            "canonicalization": "numpy_dtype_shape_c_order_bytes_v1",
+        }
+        for path in schema_inventory["arrays"]
+        for node in (run_group[path],)
+    }
+    return {
+        "schema_id": SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
+        "schema_version": 1,
+        "run_name": run_group.attrs.get("palette_run_name"),
+        "binding_status": "unbound_roi_local_numeric_payload",
+        "source_refined_subject_masks_run": run_group.attrs.get(
+            "source_refined_subject_masks_run"
+        ),
+        "method": run_group.attrs.get("method"),
+        "method_version": run_group.attrs.get("method_version"),
+        "component_names": list(run_group.attrs.get("component_names") or ()),
+        "scientific_configuration": (
+            build_subject_shape_scientific_configuration_record(run_group)
+        ),
+        "schema_inventory": schema_inventory,
+        "arrays": arrays,
+        "closed_array_inventory": True,
+        "closed_group_inventory": True,
+        "closed_attr_inventory": True,
+        "coordinate_descriptors_present": False,
+    }
+
+
+def _stamp_unbound_numeric_manifest(run_group: zarr.Group):
+    return stamp_and_bind_persisted_coordinate_record(
+        run_group,
+        _unbound_numeric_manifest_record(run_group),
+        attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
+    )
+
+
+def _load_unbound_numeric_manifest(run_group: zarr.Group):
+    result = bind_persisted_coordinate_record(
+        run_group,
+        attr_name=SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
+    )
+    if result.record != _unbound_numeric_manifest_record(run_group):
+        raise ValueError(
+            "Subject-shape unbound numeric manifest differs from live arrays."
+        )
+    return result
+
+
+def _validate_unbound_subject_shape_payload(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_refined_run: str,
+    expected_run_name: str,
+    expected_binding_status: str,
+    require_complete: bool,
+) -> dict[str, object]:
+    expected_path = f"analysis/subject_shape_runs/{expected_run_name}"
+    if str(run_group.path) != expected_path:
+        raise ValueError(
+            f"Unbound subject-shape run path differs from {expected_path!r}."
+        )
+    expected_completion = "complete" if require_complete else "running"
+    if (
+        run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != expected_binding_status
+        or run_group.attrs.get("palette_run_completion_status")
+        != expected_completion
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Unbound subject-shape lifecycle/binding state is not exact."
+        )
+    owner = run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+    try:
+        owner_is_uuid = isinstance(owner, str) and len(owner) == 32 and int(owner, 16) >= 0
+    except ValueError:
+        owner_is_uuid = False
+    if not owner_is_uuid:
+        raise ValueError("Unbound subject-shape run lacks a canonical owner UUID.")
+    if (
+        run_group.attrs.get("schema_id") != SUBJECT_SHAPE_SCHEMA_ID
+        or run_group.attrs.get("schema_version") != SUBJECT_SHAPE_SCHEMA_VERSION
+        or run_group.attrs.get("method") != SUBJECT_SHAPE_METHOD
+        or run_group.attrs.get("method_version") != SUBJECT_SHAPE_METHOD_VERSION
+        or run_group.attrs.get("source_refined_subject_masks_run")
+        != expected_refined_run
+    ):
+        raise ValueError("Unbound subject-shape identity/configuration is invalid.")
+    component_names = tuple(run_group.attrs.get("component_names") or ())
+    if (
+        len(component_names) != len(COMPONENT_ORDER)
+        or len(set(component_names)) != len(component_names)
+        or set(component_names) != set(COMPONENT_ORDER)
+    ):
+        raise ValueError("Unbound subject-shape stage lacks the full component set.")
+    forbidden_children = {
+        "instance_key",
+        "source_crop_row_ids",
+        "source_acquisition_frame_index",
+        "coordinate_records",
+        "component_centroid_xy",
+        "component_centroid_valid",
+    }
+    if any(run_group.get(name) is not None for name in forbidden_children):
+        raise ValueError(
+            "Unbound subject-shape stage contains final-path canonical children."
+        )
+    forbidden_attrs = {
+        "coordinate_contract",
+        "subject_shape_coordinate_derivation",
+        "subject_shape_publication_manifest",
+        "source_row_temporal_authority",
+        "row_identity_contract",
+    }
+    if any(name in run_group.attrs for name in forbidden_attrs):
+        raise ValueError(
+            "Unbound subject-shape stage contains canonical coordinate records."
+        )
+    for _path, node in _iter_subject_shape_arrays(run_group):
+        if "coordinate_descriptor" in node.attrs:
+            raise ValueError(
+                "Unbound subject-shape stage contains a coordinate descriptor."
+            )
+
+    source = load_persisted_refined_subject_mask_coordinate_surfaces(
+        authoritative_root,
+        f"refined_subject_masks_runs/{expected_refined_run}",
+    )
+    row_count = int(source.context.row_identity.leading_dimension)
+    for name in ("instance_key", "source_crop_row_ids"):
+        staged = run_group.get(f"row_index/{name}")
+        source_node = source.context._run_group.get(name)
+        if staged is None or source_node is None or not np.array_equal(
+            np.asarray(staged[:]),
+            np.asarray(source_node[:]),
+        ):
+            raise ValueError(
+                f"Unbound subject-shape row_index/{name} differs from exact source."
+            )
+    core_shapes = {
+        "row_index/instance_key": (row_count,),
+        "components/subject_body/centerline_xy": (
+            row_count,
+            CENTERLINE_SAMPLE_COUNT,
+            2,
+        ),
+        "components/subject_body/tail_sample_xy": (
+            row_count,
+            TAIL_SAMPLE_COUNT,
+            2,
+        ),
+        "body_frame/heading_deg": (row_count,),
+    }
+    for path, shape in core_shapes.items():
+        node = run_group.get(path)
+        if node is None or tuple(int(value) for value in node.shape) != shape:
+            raise ValueError(f"Unbound subject-shape array {path!r} has wrong shape.")
+    manifest = _load_unbound_numeric_manifest(run_group)
+    return {
+        "valid": True,
+        "status": expected_binding_status,
+        "run_name": expected_run_name,
+        "row_count": row_count,
+        "unbound_manifest_sha256": manifest.record_sha256,
+    }
+
+
+def validate_unbound_subject_shape_run(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_refined_run: str,
+    expected_run_name: str,
+    expected_binding_status: str = SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+    require_complete: bool = True,
+) -> dict[str, object]:
+    """Validate one numeric-only ROI-local stage against its exact source."""
+
+    return _validate_unbound_subject_shape_payload(
+        authoritative_root,
+        run_group,
+        expected_refined_run=expected_refined_run,
+        expected_run_name=expected_run_name,
+        expected_binding_status=expected_binding_status,
+        require_complete=require_complete,
+    )
+
+
+@proof_verification_operation
+def bind_staged_subject_shape_run(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_refined_run: str,
+    expected_run_name: str,
+) -> dict[str, object]:
+    """Bind and transform an unbound stage only at its authoritative path."""
+
+    if archive_identity(authoritative_root) != archive_identity(final_run_group):
+        raise ValueError(
+            "Final subject-shape run is not inside the authoritative archive."
+        )
+    validation = _validate_unbound_subject_shape_payload(
+        authoritative_root,
+        final_run_group,
+        expected_refined_run=expected_refined_run,
+        expected_run_name=expected_run_name,
+        expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+        require_complete=False,
+    )
+    source_revision_audit = audit_subject_shape_source_revisions_group(
+        authoritative_root,
+        shape_run=expected_run_name,
+        refined_run=expected_refined_run,
+    )
+    if source_revision_audit.get("status") != "current":
+        raise ValueError(
+            "Refined subject-mask revisions changed before final-path binding: "
+            f"{source_revision_audit!r}."
+        )
+    source = load_persisted_refined_subject_mask_coordinate_surfaces(
+        authoritative_root,
+        f"refined_subject_masks_runs/{expected_refined_run}",
+    )
+    unbound_manifest = _load_unbound_numeric_manifest(final_run_group)
+    manifest_sha256 = str(validation["unbound_manifest_sha256"])
+    if unbound_manifest.record_sha256 != manifest_sha256:
+        raise ValueError(
+            "Subject-shape unbound receipt changed between validation and consumption."
+        )
+    records = final_run_group.require_group("coordinate_records")
+    consumed_node = records.require_group("consumed_unbound_stage")
+    consumed = stamp_and_bind_persisted_coordinate_record(
+        consumed_node,
+        unbound_manifest.record,
+        attr_name=SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
+    )
+    if consumed.record_sha256 != manifest_sha256:
+        raise ValueError(
+            "Retained subject-shape unbound receipt differs from its validated digest."
+        )
+    del final_run_group.attrs[SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR]
+    del final_run_group.attrs[f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256"]
+    final_run_group.attrs["unbound_numeric_stage_manifest_sha256_consumed"] = (
+        manifest_sha256
+    )
+    component_names = tuple(
+        str(value) for value in final_run_group.attrs["component_names"]
+    )
+    identity, component_schema = prepare_subject_shape_identity_and_schema(
+        final_run_group,
+        source,
+        component_names=component_names,
+    )
+    publication = publish_subject_shape_coordinate_surfaces(
+        authoritative_root,
+        final_run_group,
+        source,
+        component_names=component_names,
+        identity=identity,
+        component_schema=component_schema,
+    )
+    final_run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+        SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+    )
+    if (
+        publication.run_path
+        != f"analysis/subject_shape_runs/{expected_run_name}"
+        or publication.publication_owner
+        != final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        or final_run_group.attrs.get("coordinate_contract")
+        != SUBJECT_SHAPE_COORDINATE_CONTRACT
+    ):
+        raise ValueError("Final-path subject-shape binding did not persist exactly.")
+    return {
+        "valid": True,
+        "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+        "run_name": expected_run_name,
+        "row_count": int(identity.leading_dimension),
+        "publication_manifest_sha256": publication.manifest.record_sha256,
+        "unbound_manifest_sha256": manifest_sha256,
+        "source_revision_audit": source_revision_audit,
+    }
+
+
+@proof_verification_operation
+def complete_and_activate_bound_subject_shape_run(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_run_name: str,
+    publication_owner: str,
+) -> dict[str, object]:
+    """Complete, strictly reload, and selector-last activate one bound child."""
+
+    summary, activation = _complete_bound_subject_shape_run(
+        authoritative_root,
+        final_run_group,
+        expected_run_name=expected_run_name,
+        publication_owner=publication_owner,
+        defer_eligibility=False,
+    )
+    if activation is not None:
+        raise RuntimeError("Immediate subject-shape activation was unexpectedly deferred.")
+    return summary
+
+
+@proof_verification_operation
+def complete_bound_subject_shape_run_for_deferred_activation(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_run_name: str,
+    publication_owner: str,
+) -> tuple[dict[str, object], DeferredSubjectShapeCoordinateActivation]:
+    """Complete and select a child while deferring its eligibility commit."""
+
+    summary, activation = _complete_bound_subject_shape_run(
+        authoritative_root,
+        final_run_group,
+        expected_run_name=expected_run_name,
+        publication_owner=publication_owner,
+        defer_eligibility=True,
+    )
+    if activation is None:
+        raise RuntimeError("Deferred subject-shape completion lacks a receipt.")
+    return summary, activation
+
+
+def _complete_bound_subject_shape_run(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_run_name: str,
+    publication_owner: str,
+    defer_eligibility: bool,
+) -> tuple[
+    dict[str, object],
+    DeferredSubjectShapeCoordinateActivation | None,
+]:
+    """Complete one bound child and prepare its guarded selector epoch."""
+
+    if archive_identity(authoritative_root) != archive_identity(final_run_group):
+        raise ValueError(
+            "Bound subject-shape completion is outside the authoritative archive."
+        )
+    if (
+        str(final_run_group.path)
+        != f"analysis/subject_shape_runs/{expected_run_name}"
+        or final_run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+        or final_run_group.attrs.get("palette_run_completion_status") != "running"
+        or final_run_group.attrs.get("stage_selector_eligible") is not False
+        or final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        != publication_owner
+    ):
+        raise ValueError(
+            "Subject-shape completion requires one exact bound running/ineligible child."
+        )
+
+    # Close every source/output proof collected while the child was running
+    # before changing its lifecycle state.  A completed-child publication is
+    # then established in a fresh phase and activation closes that phase before
+    # touching parent selectors.
+    finish_proof_verification()
+    parent = authoritative_root["analysis/subject_shape_runs"]
+    mark_run_complete(
+        final_run_group,
+        parent_group=None,
+        run_name=expected_run_name,
+        run_provenance=build_run_provenance_from_stage_record(
+            final_run_group.attrs.get("provenance", {}),
+            fallback_command="subject_shape_runs",
+        ),
+    )
+    restart_proof_verification()
+    proof = load_completed_ineligible_subject_shape_coordinate_publication(
+        authoritative_root,
+        f"analysis/subject_shape_runs/{expected_run_name}",
+        expected_publication_owner=publication_owner,
+    )
+    activation_snapshot = selector_snapshot(parent)
+    activation = activate_subject_shape_coordinate_publication(
+        authoritative_root,
+        parent,
+        proof,
+        run_name=expected_run_name,
+        owner=publication_owner,
+        snapshot=activation_snapshot,
+        defer_eligibility=defer_eligibility,
+    )
+    return (
+        {
+            "valid": True,
+            "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+            "run_name": expected_run_name,
+            "row_count": int(proof.row_identity.leading_dimension),
+            "publication_manifest_sha256": proof.manifest.record_sha256,
+        },
+        activation,
+    )
+
+
+@proof_verification_operation
 def write_subject_shape_run_group(
     root: zarr.Group,
     *,
@@ -2614,6 +3100,7 @@ def write_subject_shape_run_group(
     centerline_crop_to_foreground: bool = False,
     native_threads: Optional[int] = None,
     stage_command: Optional[str] = None,
+    _unbound_coordinate_stage: bool = False,
 ) -> dict[str, object]:
     """Write one row-aligned subject-shape analysis run."""
 
@@ -2621,11 +3108,26 @@ def write_subject_shape_run_group(
     backend = _normalize_execution_backend(execution_backend)
     destination_root = output_root if output_root is not None else root
     destination_zarr_path = output_zarr_path if output_zarr_path is not None else zarr_path
+    if destination_root is not root and not _unbound_coordinate_stage:
+        raise ValueError(
+            "Canonical subject-shape publication must remain in the same archive "
+            "as its exact refined-mask authority; cross-archive output is unsupported."
+        )
+    if _unbound_coordinate_stage and destination_root is root:
+        raise ValueError(
+            "An unbound subject-shape numeric stage must use a separate scratch archive."
+        )
     if backend == DASK_WORKER_EXECUTION_BACKEND and (zarr_path is None or destination_zarr_path is None):
         raise ValueError(
             "execution_backend='dask_worker_chunks' requires filesystem source and output Zarr paths."
         )
     refined_run_name, refined_group = _resolve_refined_run(root, refined_run)
+    refined_coordinate_source = load_persisted_refined_subject_mask_coordinate_surfaces(
+        root,
+        f"refined_subject_masks_runs/{refined_run_name}",
+    )
+    if refined_coordinate_source.context._run_group.path != refined_group.path:
+        raise ValueError("Logical refined-mask selection differs from canonical coordinate authority.")
     refined_tables = load_refined_subject_masks_run_tables(
         root,
         run_name=refined_run_name,
@@ -2636,6 +3138,13 @@ def write_subject_shape_run_group(
         include_relations=False,
     )
     component_indices = _resolve_components_from_refined_tables(refined_tables, components)
+    selected_component_names = tuple(name for name, _idx in component_indices)
+    missing_required = sorted(set(COMPONENT_ORDER) - set(selected_component_names))
+    if missing_required:
+        raise ValueError(
+            "Canonical subject-shape publication requires the full component/body-frame "
+            f"anchor set; missing {missing_required!r}."
+        )
     mask_store = refined_tables.require_mask_store()
     total_rows = int(mask_store.n_rows)
     target_run = str(run_name or _default_run_name())
@@ -2667,12 +3176,23 @@ def write_subject_shape_run_group(
         ),
         "separate_output_root": destination_root is not root,
         "mutates_archive": not bool(dry_run),
+        "coordinate_contract": (
+            "unbound_numeric_stage"
+            if _unbound_coordinate_stage
+            else "canonical_v2"
+        ),
+        "point_coordinate_space": (
+            "roi_local_px_unbound_numeric"
+            if _unbound_coordinate_stage
+            else "source_camera_image_px"
+        ),
     }
     if dry_run:
         return summary
 
     stage_start = time.perf_counter()
     command = stage_command or (" ".join(sys.argv) if sys.argv else "unknown")
+    publication_owner = uuid.uuid4().hex
     run_group = _prepare_subject_shape_run(
         destination_root,
         target_run=target_run,
@@ -2689,9 +3209,10 @@ def write_subject_shape_run_group(
         centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
         native_threads=native_threads,
         stage_command=command,
+        publication_owner=publication_owner,
+        write_best_effort_lineage=not _unbound_coordinate_stage,
         overwrite=overwrite,
     )
-
     chunk_timings: list[dict[str, object]] = []
     rows_with_component: dict[str, int] = {name: 0 for name, _idx in component_indices}
     if backend == DASK_WORKER_EXECUTION_BACKEND:
@@ -2761,15 +3282,74 @@ def write_subject_shape_run_group(
     )
     if include_chunk_timings:
         run_group.attrs["subject_shape_chunk_timings"] = list(_json_safe(chunk_timings))
-    parent = destination_root["analysis"]["subject_shape_runs"]
-    mark_run_complete(
+    if _unbound_coordinate_stage:
+        run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+            SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+        )
+        # An unbound scratch artifact has no selector activation phase. Close
+        # its reused source proofs while the child is still running so a
+        # failed closing recheck cannot leave a newly completed artifact.
+        finish_proof_verification()
+        mark_run_complete(
+            run_group,
+            parent_group=None,
+            run_name=target_run,
+            run_provenance=build_run_provenance_from_stage_record(
+                run_group.attrs.get("provenance", {}),
+                fallback_command="subject_shape_runs_unbound_stage",
+            ),
+        )
+        _stamp_unbound_numeric_manifest(run_group)
+        validation = _validate_unbound_subject_shape_payload(
+            root,
+            run_group,
+            expected_refined_run=refined_run_name,
+            expected_run_name=target_run,
+            expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+            require_complete=True,
+        )
+        summary.update(
+            {
+                "status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                "coordinate_binding_status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+                "unbound_validation": validation,
+                "duration_seconds": duration_seconds,
+                "rows_per_second": rows_per_second,
+                "rows_with_component": rows_with_component,
+                "chunk_timing_count": len(chunk_timings),
+            }
+        )
+        if include_chunk_timings:
+            summary["chunk_timings"] = list(_json_safe(chunk_timings))
+        return dict(_json_safe(summary))
+
+    run_group.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+        SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS
+    )
+    _stamp_unbound_numeric_manifest(run_group)
+    try:
+        bind_staged_subject_shape_run(
+            root,
+            run_group,
+            expected_refined_run=refined_run_name,
+            expected_run_name=target_run,
+        )
+    except BaseException as exc:
+        try:
+            mark_run_failed(
+                run_group,
+                parent_group=None,
+                run_name=target_run,
+                error=f"coordinate publication failed: {exc}",
+            )
+        except BaseException:
+            pass
+        raise
+    complete_and_activate_bound_subject_shape_run(
+        root,
         run_group,
-        parent_group=parent,
-        run_name=target_run,
-        run_provenance=build_run_provenance_from_stage_record(
-            run_group.attrs.get("provenance", {}),
-            fallback_command="subject_shape_runs",
-        ),
+        expected_run_name=target_run,
+        publication_owner=publication_owner,
     )
     summary.update(
         {

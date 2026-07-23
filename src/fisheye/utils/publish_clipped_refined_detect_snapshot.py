@@ -22,7 +22,6 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-import zarr
 
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_io import open_zarr_root
@@ -33,6 +32,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_failed,
     mark_run_started,
     note_pending_latest,
+    require_runs_parent,
 )
 from fisheye.utils.validate_refined_detect_run import validate_refined_detect_run
 
@@ -877,7 +877,7 @@ def publish_clipped_refined_detect_snapshot(
     if not apply:
         return result
 
-    parent = root.require_group("refined_detect_runs")
+    parent = require_runs_parent(root, "refined_detect_runs")
     if output_run in parent:
         raise ValueError(f"Output run already exists: refined_detect_runs/{output_run}.")
     target = parent.create_group(output_run)

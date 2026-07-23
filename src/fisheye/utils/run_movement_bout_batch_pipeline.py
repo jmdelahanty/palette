@@ -389,7 +389,7 @@ def _eye_angle_command(plan: ArchivePlan, args: argparse.Namespace) -> list[str]
         plan.zarr_path,
         "--refined-subject-run",
         str(plan.refined_subject_run),
-        "--keypoint-run",
+        "--diagnostic-refined-keypoint-run",
         str(plan.refined_keypoint_run),
         "--run-name",
         plan.eye_angle_run,

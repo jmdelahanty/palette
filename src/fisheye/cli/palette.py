@@ -13,8 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-import zarr
-
 from fisheye.cli.envelope import (
     EXIT_BLOCKED,
     EXIT_FAILED,
@@ -485,15 +483,50 @@ def _completion_from_quality_reports(root: Any) -> CompletionInfo:
 
 
 def _completion_from_track_kinematics_visualization(root: Any) -> CompletionInfo:
-    parent_path = "analysis/track_kinematics_runs"
-    parent = _get_group(root, parent_path)
+    source_parent_path = "analysis/track_kinematics_runs"
+    parent = _get_group(root, source_parent_path)
     if parent is None:
         return CompletionInfo(complete=False)
-    source = _completion_from_parent(parent, parent_path)
+    source = _completion_from_parent(parent, source_parent_path)
     if source.run is None:
-        return CompletionInfo(complete=False, artifact=parent_path)
+        return CompletionInfo(complete=False, artifact=source_parent_path)
+    visualization_parent_path = (
+        "analysis/track_kinematics_visualization_runs/"
+        f"{source.run}/tracks/id_0"
+    )
+    visualization_parent = _get_group(root, visualization_parent_path)
+    if visualization_parent is None:
+        return CompletionInfo(
+            complete=False,
+            run=source.run,
+            artifact=visualization_parent_path,
+            latest_complete_run=source.latest_complete_run,
+            run_resolution=source.run_resolution,
+        )
+    render = _completion_from_parent(visualization_parent, visualization_parent_path)
+    if render.run is None:
+        return CompletionInfo(
+            complete=False,
+            run=source.run,
+            artifact=visualization_parent_path,
+            latest_complete_run=source.latest_complete_run,
+            run_resolution=source.run_resolution,
+        )
+    render_group = _get_group(root, f"{visualization_parent_path}/{render.run}")
+    if (
+        render_group is None
+        or getattr(render_group, "attrs", {}).get("stage_selector_eligible")
+        is not True
+    ):
+        return CompletionInfo(
+            complete=False,
+            run=source.run,
+            artifact=f"{visualization_parent_path}/{render.run}",
+            latest_complete_run=source.latest_complete_run,
+            run_resolution=source.run_resolution,
+        )
     artifact_path = (
-        f"{parent_path}/{source.run}/visualizations/"
+        f"{visualization_parent_path}/{render.run}/visualizations/"
         "track_kinematics_summary_track_0_interactive"
     )
     artifact = _get_group(root, artifact_path)
@@ -506,7 +539,25 @@ def _completion_from_track_kinematics_visualization(root: Any) -> CompletionInfo
             run_resolution=source.run_resolution,
         )
     attrs = getattr(artifact, "attrs", {})
-    if str(attrs.get("renderer") or "") != "palette-track-kinematics-summary-v1":
+    motion_authority = attrs.get("track_motion_authority")
+    expected_run_ref = f"/{source_parent_path}/{source.run}"
+    expected_track_ref = f"{expected_run_ref}/tracks/id_0"
+    render_attrs = getattr(render_group, "attrs", {})
+    if (
+        str(attrs.get("renderer") or "")
+        != "palette-track-kinematics-summary-v1"
+        or not isinstance(motion_authority, Mapping)
+        or motion_authority.get("run_ref") != expected_run_ref
+        or motion_authority.get("track_ref") != expected_track_ref
+        or motion_authority.get("track_id") != 0
+        or not str(motion_authority.get("motion_manifest_sha256") or "").strip()
+        or not str(
+            motion_authority.get("positions_px_coordinate_descriptor_sha256")
+            or ""
+        ).strip()
+        or render_attrs.get("source_track_motion_authority") != motion_authority
+        or render_attrs.get("track_id") != 0
+    ):
         return CompletionInfo(
             complete=False,
             run=source.run,
@@ -1830,7 +1881,7 @@ def crop(request: CropRequest) -> dict[str, Any]:
     resolved_command = _resolved_palette_command("crop", dataset, request, apply=apply)
     spec = _stage_spec("crop")
     config = _load_config(request.config)
-    source_type = request.source_type or "auto"
+    source_type = request.source_type or "detect"
     source_path = _normalize_path(request.source_path)
     params = {
         **_arg_params(request),
@@ -2059,11 +2110,14 @@ def _keypoints_request_from_args(args: argparse.Namespace) -> KeypointsRequest:
 
 def _run_mutating_verb(args: argparse.Namespace) -> int:
     if args.command == "detect":
-        call = lambda: detect(_detect_request_from_args(args))
+        def call() -> dict[str, Any]:
+            return detect(_detect_request_from_args(args))
     elif args.command == "crop":
-        call = lambda: crop(_crop_request_from_args(args))
+        def call() -> dict[str, Any]:
+            return crop(_crop_request_from_args(args))
     elif args.command == "keypoints":
-        call = lambda: keypoints(_keypoints_request_from_args(args))
+        def call() -> dict[str, Any]:
+            return keypoints(_keypoints_request_from_args(args))
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(f"unknown run verb: {args.command}")
     with _runner_stdout_context(bool(args.json)):
@@ -2117,9 +2171,24 @@ def _add_crop_args(sub: argparse.ArgumentParser) -> None:
     _add_common_run_args(sub)
     sub.add_argument("--config", type=Path, default=None, help="Optional crop config YAML.")
     sub.add_argument("--force-new", action="store_true", help="Always create a new crop run on apply.")
-    sub.add_argument("--crop-storage-mode", choices=["materialized", "geometry_only"], default=None)
-    sub.add_argument("--source-type", choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"], default=None)
-    sub.add_argument("--source-path", type=str, default=None)
+    sub.add_argument(
+        "--crop-storage-mode",
+        choices=["materialized", "geometry_only"],
+        default=None,
+        help="Future ordinary crop writes require materialized; geometry_only fails closed.",
+    )
+    sub.add_argument(
+        "--source-type",
+        choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
+        default=None,
+        help="Future ordinary crop writes default to and require exact detect sources.",
+    )
+    sub.add_argument(
+        "--source-path",
+        type=str,
+        default=None,
+        help="Explicit canonical source path: detect_runs/<run>.",
+    )
     sub.add_argument("--selection-policy", choices=["training", "full_recording"], default=None)
     sub.add_argument("--scheduler", choices=["processes", "threads", "distributed"], default=None)
     sub.add_argument("--num-workers", type=int, default=None)

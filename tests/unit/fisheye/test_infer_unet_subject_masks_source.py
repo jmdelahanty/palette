@@ -60,8 +60,15 @@ class _FakeGroup:
         self.attrs: dict[str, object] = {}
         self._children: dict[str, object] = {}
 
-    def create_group(self, name: str) -> "_FakeGroup":
+    def create_group(
+        self,
+        name: str,
+        *,
+        attributes: dict[str, object] | None = None,
+    ) -> "_FakeGroup":
         group = _FakeGroup()
+        if attributes is not None:
+            group.attrs.update(attributes)
         self._children[name] = group
         return group
 
@@ -205,6 +212,24 @@ def test_postprocess_logits_on_device_returns_storage_outputs_and_compact_metric
     assert skipped_binary is None
     np.testing.assert_array_equal(skipped_metrics["mask_present"], metrics["mask_present"])
     np.testing.assert_allclose(skipped_metrics["centroid_xy"], metrics["centroid_xy"])
+
+
+def test_subject_mask_bbox_uses_positive_extent_half_open_pixel_edges() -> None:
+    binary = np.zeros((1, 1, 4, 5), dtype=np.uint8)
+    binary[0, 0, 1, 2] = 1
+
+    tensor_metrics = mod._compute_spatial_metrics_from_binary_tensor(
+        torch.from_numpy(binary)
+    )
+    channel_metrics = mod._compute_channel_spatial_metrics(binary[:, 0])
+
+    expected = np.asarray([[2.0, 1.0, 3.0, 2.0]], dtype=np.float32)
+    np.testing.assert_array_equal(
+        tensor_metrics["bbox_xyxy"].cpu().numpy()[:, 0],
+        expected,
+    )
+    np.testing.assert_array_equal(channel_metrics["bbox_xyxy"], expected)
+    assert np.all(expected[:, 2:] - expected[:, :2] == 1.0)
 
 
 def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:
@@ -593,7 +618,7 @@ def test_write_subject_mask_outputs_writes_double_buffered_probability_shards() 
     assert summary["source_working_array_created"] is False
 
 
-def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporary_cache(
+def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary_cache(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -740,6 +765,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
             str(checkpoint_path),
             "--crop-run",
             "crop_geometry",
+            "--output-parent",
+            "subject_mask_shard_runs",
             "--roi-cache-policy",
             "always",
             "--roi-cache-dir",
@@ -760,9 +787,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         ]
     )
 
-    subject_parent = fake_root["subject_mask_runs"]
-    latest = str(subject_parent.attrs["latest"])
-    run_group = subject_parent[latest]
+    subject_parent = fake_root["subject_mask_shard_runs"]
+    run_group = subject_parent[subject_parent.group_keys()[0]]
 
     assert seen["batch_shape"] == (2, 4, 4)
     assert seen["mask_labels"] == ("subject_body", "eyes_union", "swim_bladder")
@@ -821,6 +847,259 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     )
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
     assert "masks_roi" not in run_group
+    np.testing.assert_array_equal(
+        np.asarray(run_group["detection_source"][:]),
+        np.asarray([0, 0], dtype=np.int8),
+    )
+
+
+def test_canonical_writer_omits_legacy_detection_source_through_publication(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Exercise main's canonical ordering with a crop that carries the legacy array."""
+
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    checkpoint_path = tmp_path / "subject_unet.pt"
+    checkpoint_path.write_text("", encoding="utf-8")
+    fake_root = _build_fake_root()
+    crop_group = fake_root["crop_runs"]["crop_geometry"]
+    crop_group.path = "crop_runs/crop_geometry"
+    crop_group.attrs["crop_storage_mode"] = "materialized"
+    assert "detection_source" in crop_group
+
+    selected = {
+        "source_crop_row_ids": np.asarray([0, 1], dtype="<i8"),
+        "instance_key": np.asarray([101, 102], dtype="<u8"),
+        "source_acquisition_frame_index": np.asarray([0, 1], dtype="<i8"),
+        "source_crop_xywh": np.asarray(
+            [[1, 2, 4, 4], [3, 4, 4, 4]],
+            dtype="<i4",
+        ),
+    }
+
+    class _CanonicalEvidence:
+        crop_geometry = type(
+            "CropGeometry",
+            (),
+            {
+                "row_identity": type(
+                    "RowIdentity",
+                    (),
+                    {"leading_dimension": 2},
+                )()
+            },
+        )()
+        roi_frame = type(
+            "RoiFrame",
+            (),
+            {
+                "endpoint": type(
+                    "Endpoint",
+                    (),
+                    {"height": 4, "width": 4},
+                )()
+            },
+        )()
+
+    class _CanonicalCropSource:
+        def __init__(self) -> None:
+            self.crop_group = crop_group
+            self.crop_run_name = "crop_geometry"
+            self.total_rois = 2
+            self.roi_shape = (4, 4)
+            self.roi_array = _FakeArray(
+                np.zeros((2, 4, 4), dtype=np.uint8),
+                chunks=(1, 4, 4),
+            )
+            self._roi_images = self.roi_array
+            self.source_crop_row_ids = None
+            self.roi_coordinates_full = selected["source_crop_xywh"][:, :2]
+            self.frame_indices = selected["source_acquisition_frame_index"]
+            self.storage_mode = "materialized"
+            self.frame_source_kind = "roi_images"
+            self.frame_source_path = None
+            self.roi_read_mode = "materialized_crop_run"
+            self.roi_cache_policy = "auto"
+            self.roi_cache_used = False
+            self.roi_cache_backend = None
+            self.roi_cache_key = None
+            self.roi_cache_path = None
+            self.roi_cache_canonical_path = None
+            self.roi_live_acceleration_requested = "auto"
+            self.roi_live_acceleration_effective = "cpu"
+            self.roi_live_acceleration_fallback_reason = None
+            self.roi_live_gpu_chunk_frames = 256
+            self.pixel_materialization_id = None
+            self.pixel_materialization_manifest = None
+            self.roi_pixel_contract = None
+            self.roi_image_representation = "grayscale_uint8"
+
+        def read_slice(self, start: int, stop: int) -> np.ndarray:
+            return np.zeros((stop - start, 4, 4), dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    def _run_at(root, run_path: str):
+        parent_name, run_name = run_path.split("/", 1)
+        return root[parent_name][run_name]
+
+    def _fake_load_checkpoint(_path: Path, _device):
+        return object(), {
+            "label_schema_id": "subject_v1_union",
+            "mask_labels": ["subject_body", "eyes_union", "swim_bladder"],
+            "best_val_dice": 0.88,
+        }
+
+    def _fake_write_outputs(run_group, _model, roi_source, **_kwargs) -> float:
+        shape = (roi_source.total_rois, 3, *roi_source.roi_shape)
+        run_group.create_array(
+            "mask_probs_roi",
+            data=np.zeros(shape, dtype=np.uint8),
+            overwrite=True,
+        )
+        run_group.create_array(
+            "available_channels",
+            data=np.ones((3,), dtype=bool),
+            overwrite=True,
+        )
+        metrics = run_group.require_group("metrics")
+        metrics.create_array(
+            "prob_max",
+            data=np.zeros((2, 3), dtype=np.float32),
+            overwrite=True,
+        )
+        metrics.create_array(
+            "mask_present",
+            data=np.zeros((2, 3), dtype=bool),
+            overwrite=True,
+        )
+        metrics.create_array(
+            "area_px",
+            data=np.zeros((2, 3), dtype=np.float32),
+            overwrite=True,
+        )
+        metrics.create_array(
+            "centroid_xy",
+            data=np.zeros((2, 3, 2), dtype=np.float32),
+            overwrite=True,
+        )
+        metrics.create_array(
+            "centroid_valid",
+            data=np.zeros((2, 3), dtype=bool),
+            overwrite=True,
+        )
+        metrics.create_array(
+            "bbox_xyxy",
+            data=np.zeros((2, 3, 4), dtype=np.float32),
+            overwrite=True,
+        )
+        metrics.create_array(
+            "bbox_valid",
+            data=np.zeros((2, 3), dtype=bool),
+            overwrite=True,
+        )
+        return 0.01
+
+    observed: dict[str, bool] = {}
+
+    def _fake_prepare(root, run_path: str, **_kwargs):
+        assert "detection_source" not in _run_at(root, run_path)
+        observed["prepared_without_detection_source"] = True
+        return object()
+
+    def _fake_publish(root, run_path: str, **_kwargs):
+        assert "detection_source" not in _run_at(root, run_path)
+        observed["published_without_detection_source"] = True
+        return object()
+
+    def _fake_activate(
+        _root,
+        parent,
+        _surfaces,
+        *,
+        run_name: str,
+        **_kwargs,
+    ) -> None:
+        run = parent[run_name]
+        assert "detection_source" not in run
+        parent.attrs["latest_complete"] = run_name
+        parent.attrs["latest"] = run_name
+        if "latest_pending" in parent.attrs:
+            del parent.attrs["latest_pending"]
+        run.attrs["stage_selector_eligible"] = True
+
+    monkeypatch.setattr(mod, "_load_checkpoint", _fake_load_checkpoint)
+    monkeypatch.setattr(mod, "_write_subject_mask_outputs", _fake_write_outputs)
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(
+        mod.CropImageSource,
+        "open",
+        lambda *_args, **_kwargs: _CanonicalCropSource(),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_subject_mask_crop_source",
+        lambda *_args, **_kwargs: _CanonicalEvidence(),
+    )
+    monkeypatch.setattr(
+        mod,
+        "require_direct_subject_mask_crop_pixel_source",
+        lambda source, _pixels: source,
+    )
+    monkeypatch.setattr(
+        mod,
+        "selected_subject_mask_crop_values",
+        lambda *_args, **_kwargs: {name: value.copy() for name, value in selected.items()},
+    )
+    monkeypatch.setattr(mod, "prepare_subject_mask_coordinate_context", _fake_prepare)
+    monkeypatch.setattr(
+        mod,
+        "capture_subject_mask_coordinate_publication_checkpoint",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(mod, "publish_subject_mask_coordinate_surfaces", _fake_publish)
+    monkeypatch.setattr(
+        mod,
+        "_activate_validated_subject_mask_coordinate_surfaces",
+        _fake_activate,
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_environment_info",
+        lambda **_kwargs: {"platform": {}, "environment": {}},
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_git_info",
+        lambda: {"commit_hash": "abc123", "short_hash": "abc123"},
+    )
+
+    mod.main(
+        [
+            str(zarr_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--crop-run",
+            "crop_geometry",
+            "--run-name",
+            "canonical_no_detection_source",
+            "--device",
+            "cpu",
+            "--no-mask-probs-sharding",
+            "--no-progress",
+            "--defer-registry-status",
+        ]
+    )
+
+    run = fake_root["subject_mask_runs"]["canonical_no_detection_source"]
+    assert observed == {
+        "prepared_without_detection_source": True,
+        "published_without_detection_source": True,
+    }
+    assert "detection_source" not in run
+    assert run.attrs["stage_selector_eligible"] is True
 
 
 def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
@@ -952,12 +1231,13 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         str(checkpoint_path),
         "--crop-run",
         "crop_geometry",
+        "--output-parent",
+        "subject_mask_shard_runs",
         "--write-masks-roi",
     ])
 
-    subject_parent = fake_root["subject_mask_runs"]
-    latest = str(subject_parent.attrs["latest"])
-    run_group = subject_parent[latest]
+    subject_parent = fake_root["subject_mask_shard_runs"]
+    run_group = subject_parent[subject_parent.group_keys()[0]]
 
     assert seen["mask_labels"] == ("subject_body", "eye_left", "eye_right", "swim_bladder")
     assert run_group.attrs["label_schema_id"] == "subject_v1_lr"
@@ -1132,13 +1412,15 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
             "dense_all_components",
             "--crop-run",
             "crop_geometry",
+            "--output-parent",
+            "subject_mask_shard_runs",
             "--async-output",
             "--no-progress",
         ]
     )
 
-    subject_parent = fake_root["subject_mask_runs"]
-    run_group = subject_parent[str(subject_parent.attrs["latest"])]
+    subject_parent = fake_root["subject_mask_shard_runs"]
+    run_group = subject_parent[subject_parent.group_keys()[0]]
 
     assert seen["coverage_class"] == "dense_all_components"
     assert seen["checkpoint_path"] == checkpoint_path

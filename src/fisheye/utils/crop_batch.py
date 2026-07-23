@@ -1,9 +1,10 @@
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import zarr
 import yaml
@@ -15,13 +16,18 @@ from ..shared.batch_logging import make_run_id
 from ..shared.batch_logging import utc_now
 from ..shared.environment import resolve_log_dir
 from ..shared.environment import resolve_recording_roots
+from ..shared.observation_coordinate_publication import (
+    load_persisted_ordinary_crop_observation_geometry,
+)
 from ..shared.zarr_discovery import discover_registry_zarrs
 from ..tracking.crop import (
     _infer_archive_use,
     _normalize_crop_storage_mode,
+    _preflight_ordinary_crop_coordinates,
     crop_detections,
     get_detection_source_info,
     get_crop_parameters,
+    get_video_source,
     infer_detection_source_type,
 )
 
@@ -123,6 +129,21 @@ def _normalize_str(value: object) -> Optional[str]:
     return text or None
 
 
+def _require_completed_crop_result(result: Mapping[str, Any]) -> str:
+    """Return the committed run name or fail a zero-row/pseudo-success result."""
+
+    try:
+        total_crops = int(result.get("total_crops", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Crop result has an invalid total_crops value.") from exc
+    run_name = _normalize_str(result.get("run_name"))
+    if total_crops <= 0:
+        raise RuntimeError("Crop produced zero rows and no normal run was committed.")
+    if run_name is None:
+        raise RuntimeError("Crop reported rows but no committed run_name.")
+    return run_name
+
+
 def _normalize_roi(value: object) -> Optional[Tuple[int, int]]:
     if value is None:
         return None
@@ -158,10 +179,6 @@ def _desired_crop_storage_mode(
     configured = crop_cfg.get("crop_storage_mode")
     if configured is not None:
         return _normalize_crop_storage_mode(configured)
-
-    archive_use = _infer_archive_use(root, zarr_path)
-    if archive_use == "analysis":
-        return "geometry_only"
 
     return _normalize_crop_storage_mode(crop_params.get("crop_storage_mode", "materialized"))
 
@@ -266,12 +283,71 @@ def _build_plan(
         crop_params=crop_params,
         explicit_crop_storage_mode=crop_storage_mode,
     )
-    archive_use = _infer_archive_use(root, zarr_path)
-    if archive_use == "training" and desired_crop_storage_mode != "materialized":
+    if desired_crop_storage_mode != "materialized":
         return CropPlan(
             zarr_path=zarr_path,
             status="invalid",
-            reason="training zarrs require materialized crop runs",
+            reason=(
+                "future-canonical ordinary crop requires crop_storage_mode=materialized; "
+                "geometry_only crop creation is an isolated legacy workflow"
+            ),
+            source_type=resolved_type,
+            source_path=resolved_path,
+            roi_size=roi_size,
+            crop_storage_mode=desired_crop_storage_mode,
+            selection_policy=selection_policy,
+        )
+    source_parts = str(resolved_path).strip().strip("/").split("/")
+    if (
+        resolved_type != "detect"
+        or len(source_parts) != 2
+        or source_parts[0] != "detect_runs"
+    ):
+        return CropPlan(
+            zarr_path=zarr_path,
+            status="invalid",
+            reason=(
+                "future-canonical ordinary crop requires an exact "
+                "detect_runs/<run> source; refined and sparse sources are isolated "
+                "until they publish a canonical row-selection contract"
+            ),
+            source_type=resolved_type,
+            source_path=resolved_path,
+            roi_size=roi_size,
+            crop_storage_mode=desired_crop_storage_mode,
+            selection_policy=selection_policy,
+        )
+
+    try:
+        video_source_type, video_path = get_video_source(root, console=None)
+        canonical_preflight = _preflight_ordinary_crop_coordinates(
+            root,
+            zarr_path=str(zarr_path),
+            source_path=resolved_path,
+            source_group=_source_group,
+            video_source_type=video_source_type,
+            video_path=video_path,
+            roi_size=roi_size,
+        )
+    except Exception as exc:
+        return CropPlan(
+            zarr_path=zarr_path,
+            status="invalid",
+            reason=(
+                "ordinary crop canonical preflight failed "
+                f"({type(exc).__name__}: {exc})"
+            ),
+            source_type=resolved_type,
+            source_path=resolved_path,
+            roi_size=roi_size,
+            crop_storage_mode=desired_crop_storage_mode,
+            selection_policy=selection_policy,
+        )
+    if canonical_preflight.row_count == 0:
+        return CropPlan(
+            zarr_path=zarr_path,
+            status="missing",
+            reason="validated canonical detection source contains zero rows",
             source_type=resolved_type,
             source_path=resolved_path,
             roi_size=roi_size,
@@ -299,18 +375,39 @@ def _build_plan(
         if latest_status and latest_status.lower() != "completed":
             reason = f"latest crop run '{latest_crop}' not completed"
         else:
-            diffs = _diff_signature(
-                desired,
-                latest_signature,
-                compare_policy=selection_policy is not None,
-            )
-            if not diffs and not force_new:
-                status = "skipped"
-                reason = f"matches latest crop run '{latest_crop}'"
-            elif diffs:
-                reason = "differs: " + ", ".join(diffs)
-            elif force_new:
-                reason = "force-new"
+            latest_group = root["crop_runs"][latest_crop]
+            if (
+                latest_group.attrs.get("coordinate_contract") != "canonical_v2"
+                or latest_group.attrs.get("stage_selector_eligible") is not True
+            ):
+                reason = (
+                    f"latest crop run '{latest_crop}' is not an eligible canonical_v2 "
+                    "run; a new canonical run is required"
+                )
+            else:
+                try:
+                    load_persisted_ordinary_crop_observation_geometry(
+                        root,
+                        f"crop_runs/{latest_crop}",
+                    )
+                except Exception as exc:
+                    reason = (
+                        f"latest crop run '{latest_crop}' failed canonical validation "
+                        f"({type(exc).__name__}: {exc}); a new canonical run is required"
+                    )
+                else:
+                    diffs = _diff_signature(
+                        desired,
+                        latest_signature,
+                        compare_policy=selection_policy is not None,
+                    )
+                    if not diffs and not force_new:
+                        status = "skipped"
+                        reason = f"matches validated canonical crop run '{latest_crop}'"
+                    elif diffs:
+                        reason = "differs: " + ", ".join(diffs)
+                    elif force_new:
+                        reason = "force-new"
 
     return CropPlan(
         zarr_path=zarr_path,
@@ -426,6 +523,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--recursive", action="store_true", help="Search recursively for zarrs.")
     parser.add_argument("--apply", action="store_true", help="Run cropping (default is dry-run).")
     parser.add_argument(
+        "--fail-on-invalid-plan",
+        action="store_true",
+        help="In dry-run mode, return nonzero when any plan is missing or invalid.",
+    )
+    parser.add_argument(
         "--zarr-use",
         choices=["analysis", "training", "any"],
         default="any",
@@ -441,7 +543,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--crop-storage-mode",
         choices=["materialized", "geometry_only"],
         default=None,
-        help="Crop persistence mode for newly written crop runs.",
+        help=(
+            "Crop persistence mode. Future ordinary runs require materialized; "
+            "geometry_only is rejected as an isolated legacy workflow."
+        ),
     )
     parser.add_argument(
         "--source-type",
@@ -449,11 +554,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         help=(
-            "Detection source (default: config value, otherwise auto). "
-            "'auto' prefers the canonical current refined surface and falls back "
-            "to raw detect; 'refined' requires the canonical curated refined "
-            "surface. 'manual'/'filtered'/'interpolated' are legacy sparse "
-            "compatibility modes for older archives."
+            "Detection source (default: config value, otherwise detect). Future "
+            "ordinary crop writes require an exact detect_runs/<run> source; "
+            "auto/refined/sparse sources are rejected until they publish canonical "
+            "row-selection lineage."
         ),
     )
     parser.add_argument(
@@ -461,9 +565,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=str,
         default=None,
         help=(
-            "Explicit detection source path (e.g. detect_runs/<run> or the "
-            "canonical refined path "
-            "refined_detect_runs/<run>/instances)."
+            "Explicit canonical detection source path: detect_runs/<run>."
         ),
     )
     parser.add_argument(
@@ -530,6 +632,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-gpu", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--result-json",
+        type=Path,
+        default=None,
+        help=(
+            "Write exact per-recording outcomes, including the committed or "
+            "validated reused crop_run, for dependent workflow jobs."
+        ),
+    )
     add_log_args(
         parser,
         log_dir_help="Directory for JSONL logs.",
@@ -551,7 +662,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     config = _load_config(args.config)
     crop_cfg = config.get("crop", {}) or {}
-    raw_source_type = args.source_type or crop_cfg.get("source_type") or "auto"
+    raw_source_type = args.source_type or crop_cfg.get("source_type") or "detect"
     source_path = _normalize_path(args.source_path or crop_cfg.get("source_path"))
     source_type = infer_detection_source_type(source_path, raw_source_type)
     selection_policy = args.selection_policy or crop_cfg.get("selection_policy")
@@ -570,7 +681,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        skip_existing = not bool(args.force_new)
         registry_zarrs = _discover_zarrs_from_registry(
             registry_path=args.registry,
             scope_paths=roots,
@@ -578,7 +688,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             arena_id=args.arena_id,
             camera_id=args.camera_id,
             path_contains=args.path_contains,
-            skip_existing=skip_existing,
+            # Registry crop=ok may describe a legacy or ambiguous crop. Always
+            # discover detect-ready archives and validate Zarr evidence.
+            skip_existing=False,
         )
         if args.emit_paths:
             for p in registry_zarrs:
@@ -644,6 +756,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  missing: {counts.get('missing', 0)}")
         print(f"  invalid: {counts.get('invalid', 0)}")
         print("\nUse --apply to run cropping.")
+        if args.fail_on_invalid_plan and (
+            counts.get("missing", 0) > 0 or counts.get("invalid", 0) > 0
+        ):
+            return 1
         return 0
 
     log_dir = _resolve_log_dir(args.log_dir, roots)
@@ -669,10 +785,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     task_id = progress.add_task("crop_batch", total=len(plans)) if progress else None
 
     ok = skipped = missing = invalid = failed = 0
+    outcomes: List[Dict[str, Any]] = []
     strict_abort = False
     for plan in plans:
         if plan.status == "missing":
             missing += 1
+            outcomes.append(
+                {
+                    "zarr_path": str(plan.zarr_path),
+                    "status": "missing",
+                    "reason": plan.reason,
+                    "crop_run": None,
+                }
+            )
             logger.log("recording_missing", zarr=str(plan.zarr_path), reason=plan.reason)
             if args.strict:
                 failed += 1
@@ -681,12 +806,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif plan.status == "invalid":
             invalid += 1
             failed += 1
+            outcomes.append(
+                {
+                    "zarr_path": str(plan.zarr_path),
+                    "status": "invalid",
+                    "reason": plan.reason,
+                    "crop_run": None,
+                }
+            )
             logger.log("recording_invalid", zarr=str(plan.zarr_path), reason=plan.reason)
             if args.strict:
                 strict_abort = True
                 logger.log("run_abort_strict", zarr=str(plan.zarr_path), reason=plan.reason, status=plan.status)
         elif plan.status == "skipped":
             skipped += 1
+            outcomes.append(
+                {
+                    "zarr_path": str(plan.zarr_path),
+                    "status": "skipped",
+                    "reason": plan.reason,
+                    "crop_run": plan.latest_crop,
+                }
+            )
             logger.log(
                 "recording_skipped",
                 zarr=str(plan.zarr_path),
@@ -727,17 +868,35 @@ def main(argv: Optional[List[str]] = None) -> int:
                     force_cpu=args.force_cpu,
                     verbose=args.verbose,
                 )
+                committed_run = _require_completed_crop_result(results)
             except Exception as exc:
                 failed += 1
+                outcomes.append(
+                    {
+                        "zarr_path": str(plan.zarr_path),
+                        "status": "failed",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "crop_run": None,
+                    }
+                )
                 logger.log("crop_failed", zarr=str(plan.zarr_path), error=str(exc))
                 if args.strict:
                     strict_abort = True
                     logger.log("run_abort_strict", zarr=str(plan.zarr_path), reason=str(exc), status="failed")
             else:
                 ok += 1
+                outcomes.append(
+                    {
+                        "zarr_path": str(plan.zarr_path),
+                        "status": "ok",
+                        "reason": None,
+                        "crop_run": committed_run,
+                    }
+                )
                 logger.log(
                     "crop_success",
                     zarr=str(plan.zarr_path),
+                    run_name=committed_run,
                     total_crops=results.get("total_crops"),
                     detection_source_type=results.get("detection_source_type"),
                     detection_source_path=results.get("detection_source_path"),
@@ -753,6 +912,27 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logger.log("run_end", ok=ok, skipped=skipped, missing=missing, invalid=invalid, failed=failed)
     logger.close()
+
+    if args.result_json is not None:
+        result_path = args.result_json.expanduser()
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": "palette.crop_batch_result.v1",
+            "outcomes": outcomes,
+            "summary": {
+                "ok": ok,
+                "skipped": skipped,
+                "missing": missing,
+                "invalid": invalid,
+                "failed": failed,
+            },
+        }
+        temporary = result_path.with_name(result_path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(result_path)
 
     print("\nSummary:")
     print(f"  ok: {ok}")

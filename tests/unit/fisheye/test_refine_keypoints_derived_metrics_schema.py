@@ -37,11 +37,20 @@ class _FakeGroup:
         self._children: dict[str, _FakeGroup | _FakeArray] = {}
         self.attrs: dict[str, Any] = {}
 
-    def create_group(self, name: str) -> "_FakeGroup":
+    def create_group(
+        self,
+        name: str,
+        *,
+        attributes: dict[str, Any] | None = None,
+    ) -> "_FakeGroup":
         if "/" in name:
             head, tail = name.split("/", 1)
-            return self.require_group(head).create_group(tail)
+            return self.require_group(head).create_group(
+                tail,
+                attributes=attributes,
+            )
         child = _FakeGroup()
+        child.attrs.update(attributes or {})
         self._children[name] = child
         return child
 
@@ -308,11 +317,17 @@ def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -
             }
         },
         created_at_utc="2026-04-11T12:00:00+00:00",
+        allow_legacy_unverified_diagnostic_output=True,
     )
 
     refined = root["refined_keypoints_runs"][run_name]
     schema = dict(refined.attrs["derived_metrics_schema"])
 
+    assert refined.attrs["stage_selector_eligible"] is False
+    assert refined.attrs["legacy_unverified_diagnostic_output"] is True
+    assert refined.attrs["publication_scope"] == "historical_diagnostic_only"
+    assert "latest" not in root["refined_keypoints_runs"].attrs
+    assert "latest_complete" not in root["refined_keypoints_runs"].attrs
     assert refined.attrs["source_refined_run"] == "refined_detect_001"
     assert refined.attrs["row_identity_mode"] == "instance_key"
     assert refined.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"

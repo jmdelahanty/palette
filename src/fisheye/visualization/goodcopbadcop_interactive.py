@@ -1,8 +1,11 @@
-"""Interactive visualization adapters for chaser-protocol analyses.
+"""Interactive visualization surfaces for chaser-protocol analyses.
 
 The first persisted dashboard artifacts used GoodCopBadCop-specific schema,
 renderer, and artifact names. New writers use protocol-neutral names below; the
-legacy constants remain as read aliases so existing zarrs stay viewable.
+legacy constants remain for artifact production and metadata labeling, not as
+normal read aliases. Dashboard discovery and loading require canonical
+chaser-distance selection and will not expose an unsealed legacy or derived
+dashboard artifact.
 """
 
 from __future__ import annotations
@@ -10,13 +13,18 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, NoReturn, Optional, Sequence
 
 import numpy as np
 import polars as pl
 import zarr
 
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+)
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import decode_null_terminated_text
@@ -101,6 +109,33 @@ GOODCOPBADCOP_ESCAPE_FREEZE_TRIAL_OUTCOME_TIMELINE_PNG = "escape_freeze_trial_ou
 GOODCOPBADCOP_ESCAPE_FREEZE_FISH_CENTERED_POLAR_APPROACH_PNG = "escape_freeze_fish_centered_polar_approach_png"
 GOODCOPBADCOP_ESCAPE_FREEZE_FISH_CENTERED_POLAR_DENSITY_PNG = "escape_freeze_fish_centered_polar_density_png"
 GOODCOPBADCOP_CRA_QUADRANT_LABELS = ("top_left", "top_right", "bottom_left", "bottom_right")
+
+
+class ChaserDashboardUnavailableError(ChaserDistanceReadError):
+    """Raised when a dashboard artifact has no verified semantic authority."""
+
+
+_UNSEALED_DASHBOARD_REASON = (
+    "persisted chaser dashboard artifacts do not yet have an independently "
+    "verified sealed semantic authority; raw dashboard reads are unavailable"
+)
+_UNSEALED_COMPONENT_REASON = (
+    "persisted chaser-derived components do not yet have an independently "
+    "verified sealed semantic authority; raw component reads are unavailable"
+)
+
+
+def _raise_unsealed_component(
+    snapshot: ChaserDistanceReadSnapshot,
+    *,
+    component_family: str,
+    component_name: str | None,
+) -> NoReturn:
+    requested = str(component_name or "latest")
+    raise ChaserDashboardUnavailableError(
+        f"Derived component {component_family}/{requested!s} under "
+        f"{snapshot.run_path!r} is unavailable: {_UNSEALED_COMPONENT_REASON}."
+    )
 
 
 @dataclass(frozen=True)
@@ -784,11 +819,11 @@ def _derive_component_path_from_source(source_paths: Mapping[str, str], key: str
     return normalized.split(marker, 1)[0]
 
 
-def resolve_related_detection_occupancy_run_path(
+def _writer_resolve_related_detection_occupancy_run_path(
     root: zarr.Group,
     chaser_run_group: zarr.Group,
 ) -> Optional[str]:
-    """Find the detection-occupancy run that matches a chaser-distance run."""
+    """Writer-only discovery for constructing a staged dashboard spec."""
 
     parent = root.get("analysis/detection_occupancy_runs")
     if parent is None:
@@ -819,12 +854,12 @@ def resolve_related_detection_occupancy_run_path(
     return _join_path("analysis/detection_occupancy_runs", selected)
 
 
-def resolve_latest_egocentric_bearing_component_path(
+def _writer_resolve_latest_egocentric_bearing_component_path(
     root: zarr.Group,
     *,
     run_path: str,
 ) -> Optional[str]:
-    """Return the latest complete egocentric-bearing component for a chaser run."""
+    """Writer-only discovery for constructing a staged dashboard spec."""
 
     parent_path = _join_path(run_path, "egocentric_bearing")
     try:
@@ -851,57 +886,12 @@ def resolve_latest_egocentric_bearing_component_path(
     return None
 
 
-def resolve_latest_cra_primary_endpoint_component_path(
+def _writer_resolve_latest_cra_near_field_component_path(
     root: zarr.Group,
     *,
     run_path: str,
 ) -> Optional[str]:
-    """Return the latest complete CRA primary endpoint component for a chaser run."""
-
-    parent = None
-    parent_path = ""
-    for parent_name in (
-        CHASER_QUADRANT_OCCUPANCY_COMPONENT_PARENT,
-        GOODCOPBADCOP_CRA_COMPONENT_PARENT,
-    ):
-        candidate_path = _join_path(run_path, parent_name)
-        try:
-            parent = root[candidate_path]
-            parent_path = candidate_path
-            break
-        except Exception:
-            continue
-    if parent is None:
-        return None
-
-    keys = set(_group_keys(parent))
-    for attr_name in ("latest_complete", "latest"):
-        candidate = str(getattr(parent, "attrs", {}).get(attr_name) or "").strip()
-        if candidate and candidate in keys:
-            return _join_path(parent_path, candidate)
-
-    complete_candidates: list[str] = []
-    for name in sorted(keys):
-        try:
-            group = parent[name]
-        except Exception:
-            continue
-        attrs = getattr(group, "attrs", {})
-        if str(attrs.get("status") or "").strip() in {"computed", "complete"}:
-            complete_candidates.append(name)
-    if complete_candidates:
-        return _join_path(parent_path, complete_candidates[-1])
-    if keys:
-        return _join_path(parent_path, sorted(keys)[-1])
-    return None
-
-
-def resolve_latest_cra_near_field_component_path(
-    root: zarr.Group,
-    *,
-    run_path: str,
-) -> Optional[str]:
-    """Return the latest complete CRA near-field component for a chaser run."""
+    """Writer-only discovery for constructing a staged dashboard spec."""
 
     parent = None
     parent_path = ""
@@ -936,74 +926,6 @@ def resolve_latest_cra_near_field_component_path(
             complete_candidates.append(name)
     if complete_candidates:
         return _join_path(parent_path, complete_candidates[-1])
-    if keys:
-        return _join_path(parent_path, sorted(keys)[-1])
-    return None
-
-
-def resolve_latest_epoch_behavior_summary_component_path(
-    root: zarr.Group,
-    *,
-    run_path: str,
-) -> Optional[str]:
-    """Return the latest complete epoch-behavior component for a chaser run."""
-
-    parent_path = _join_path(run_path, GOODCOPBADCOP_EPOCH_BEHAVIOR_COMPONENT_PARENT)
-    try:
-        parent = root[parent_path]
-    except Exception:
-        return None
-
-    keys = set(_group_keys(parent))
-    for attr_name in ("latest_complete", "latest"):
-        candidate = str(getattr(parent, "attrs", {}).get(attr_name) or "").strip()
-        if candidate and candidate in keys:
-            return _join_path(parent_path, candidate)
-
-    complete_candidates: list[str] = []
-    for name in sorted(keys):
-        try:
-            group = parent[name]
-        except Exception:
-            continue
-        attrs = getattr(group, "attrs", {})
-        if str(attrs.get("status") or "").strip() == "complete":
-            complete_candidates.append(name)
-    if complete_candidates:
-        return _join_path(parent_path, complete_candidates[-1])
-    return None
-
-
-def resolve_latest_escape_freeze_component_path(
-    root: zarr.Group,
-    *,
-    run_path: str,
-) -> Optional[str]:
-    """Return the latest escape/freeze canary component for a chaser run."""
-
-    parent_path = _join_path(run_path, GOODCOPBADCOP_ESCAPE_FREEZE_COMPONENT_PARENT)
-    try:
-        parent = root[parent_path]
-    except Exception:
-        return None
-
-    keys = set(_group_keys(parent))
-    for attr_name in ("latest_complete", "latest"):
-        candidate = str(getattr(parent, "attrs", {}).get(attr_name) or "").strip()
-        if candidate and candidate in keys:
-            return _join_path(parent_path, candidate)
-
-    canary_candidates: list[str] = []
-    for name in sorted(keys):
-        try:
-            group = parent[name]
-        except Exception:
-            continue
-        attrs = getattr(group, "attrs", {})
-        if str(attrs.get("status") or "").strip() in {"diagnostic_canary", "computed", "complete"}:
-            canary_candidates.append(name)
-    if canary_candidates:
-        return _join_path(parent_path, canary_candidates[-1])
     if keys:
         return _join_path(parent_path, sorted(keys)[-1])
     return None
@@ -1774,10 +1696,16 @@ def load_goodcopbadcop_cra_primary_endpoint_data(
     run_path: str,
     component_name: Optional[str] = None,
 ) -> Optional[GoodCopBadCopCRAEndpointData]:
-    """Load the persisted CRA primary endpoint component for a chaser run."""
+    """Fail closed until CRA primary endpoints publish sealed authority."""
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=CHASER_QUADRANT_OCCUPANCY_COMPONENT_PARENT,
+        component_name=component_name,
+    )
     normalized_run_path = _normalize_path(run_path)
     if component_name and str(component_name).strip() not in {"latest", ""}:
         candidates = [
@@ -1791,7 +1719,10 @@ def load_goodcopbadcop_cra_primary_endpoint_data(
             (path for path in candidates if path in root), candidates[0]
         )
     else:
-        component_path = resolve_latest_cra_primary_endpoint_component_path(root, run_path=normalized_run_path)
+        component_path = resolve_latest_cra_primary_endpoint_component_path(
+            root,
+            run_path=normalized_run_path,
+        )
     if not component_path:
         return None
     try:
@@ -1841,10 +1772,16 @@ def load_goodcopbadcop_cra_near_field_data(
     run_path: str,
     component_name: Optional[str] = None,
 ) -> Optional[GoodCopBadCopCRANearFieldData]:
-    """Load the persisted CRA near-field component for a chaser run."""
+    """Fail closed until CRA near-field outputs publish sealed authority."""
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=CHASER_NEAR_FIELD_OCCUPANCY_COMPONENT_PARENT,
+        component_name=component_name,
+    )
     normalized_run_path = _normalize_path(run_path)
     if component_name and str(component_name).strip() not in {"latest", ""}:
         candidates = [
@@ -1858,7 +1795,10 @@ def load_goodcopbadcop_cra_near_field_data(
             (path for path in candidates if path in root), candidates[0]
         )
     else:
-        component_path = resolve_latest_cra_near_field_component_path(root, run_path=normalized_run_path)
+        component_path = resolve_latest_cra_near_field_component_path(
+            root,
+            run_path=normalized_run_path,
+        )
     if not component_path:
         return None
     try:
@@ -1934,10 +1874,16 @@ def load_goodcopbadcop_epoch_behavior_data(
     run_path: str,
     component_name: Optional[str] = None,
 ) -> Optional[GoodCopBadCopEpochBehaviorData]:
-    """Load the persisted GoodCopBadCop epoch behavior summary component."""
+    """Fail closed until epoch-behavior summaries publish sealed authority."""
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=GOODCOPBADCOP_EPOCH_BEHAVIOR_COMPONENT_PARENT,
+        component_name=component_name,
+    )
     normalized_run_path = _normalize_path(run_path)
     if component_name and str(component_name).strip() not in {"latest", ""}:
         component_path = _join_path(
@@ -2024,10 +1970,16 @@ def load_goodcopbadcop_escape_freeze_data(
     run_path: str,
     component_name: Optional[str] = None,
 ) -> Optional[GoodCopBadCopEscapeFreezeData]:
-    """Load the persisted GoodCopBadCop escape/freeze canary component."""
+    """Fail closed until escape/freeze outputs publish sealed authority."""
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=GOODCOPBADCOP_ESCAPE_FREEZE_COMPONENT_PARENT,
+        component_name=component_name,
+    )
     normalized_run_path = _normalize_path(run_path)
     if component_name and str(component_name).strip() not in {"latest", ""}:
         component_path = _join_path(
@@ -2036,7 +1988,10 @@ def load_goodcopbadcop_escape_freeze_data(
             str(component_name),
         )
     else:
-        component_path = resolve_latest_escape_freeze_component_path(root, run_path=normalized_run_path)
+        component_path = resolve_latest_escape_freeze_component_path(
+            root,
+            run_path=normalized_run_path,
+        )
     if not component_path:
         return None
     try:
@@ -2258,6 +2213,132 @@ def _dashboard_artifact_candidates(artifact_name: str | None) -> tuple[str, ...]
     return (str(artifact_name),)
 
 
+def _verified_dashboard_run(
+    root: zarr.Group,
+    *,
+    run_path: str | None = None,
+) -> ChaserDistanceReadSnapshot:
+    """Select one exact canonical run without exposing its raw child."""
+
+    if run_path is None:
+        return load_chaser_distance_run(root, run_name="latest")
+    normalized = _normalize_path(run_path)
+    parts = normalized.split("/")
+    if len(parts) != 3 or parts[:2] != ["analysis", "chaser_distance_runs"]:
+        raise ChaserDashboardUnavailableError(
+            "Dashboard run_path must be exactly "
+            "analysis/chaser_distance_runs/<run>."
+        )
+    snapshot = load_chaser_distance_run(root, run_name=parts[-1])
+    if snapshot.run_path != normalized:
+        raise ChaserDashboardUnavailableError(
+            "Dashboard run selection disagrees with canonical reader authority."
+        )
+    return snapshot
+
+
+def resolve_related_detection_occupancy_run_path(
+    root: zarr.Group,
+    chaser_run_group: zarr.Group,
+) -> Optional[str]:
+    """Fail closed for the former raw cross-family dashboard join."""
+
+    run_path = _normalize_path(str(getattr(chaser_run_group, "path", "")))
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family="detection_occupancy_dashboard_join",
+        component_name="latest",
+    )
+
+
+def resolve_latest_egocentric_bearing_component_path(
+    root: zarr.Group,
+    *,
+    run_path: str,
+) -> Optional[str]:
+    """Fail closed for normal egocentric-component discovery."""
+
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family="egocentric_bearing",
+        component_name="latest",
+    )
+
+
+def resolve_latest_cra_primary_endpoint_component_path(
+    root: zarr.Group,
+    *,
+    run_path: str,
+) -> Optional[str]:
+    """Fail closed for normal CRA primary-component discovery."""
+
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=CHASER_QUADRANT_OCCUPANCY_COMPONENT_PARENT,
+        component_name="latest",
+    )
+
+
+def resolve_latest_cra_near_field_component_path(
+    root: zarr.Group,
+    *,
+    run_path: str,
+) -> Optional[str]:
+    """Fail closed for normal CRA near-field component discovery."""
+
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=CHASER_NEAR_FIELD_OCCUPANCY_COMPONENT_PARENT,
+        component_name="latest",
+    )
+
+
+def resolve_latest_epoch_behavior_summary_component_path(
+    root: zarr.Group,
+    *,
+    run_path: str,
+) -> Optional[str]:
+    """Fail closed for normal epoch-behavior component discovery."""
+
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=GOODCOPBADCOP_EPOCH_BEHAVIOR_COMPONENT_PARENT,
+        component_name="latest",
+    )
+
+
+def resolve_latest_escape_freeze_component_path(
+    root: zarr.Group,
+    *,
+    run_path: str,
+) -> Optional[str]:
+    """Fail closed for normal escape/freeze component discovery."""
+
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_component(
+        snapshot,
+        component_family=GOODCOPBADCOP_ESCAPE_FREEZE_COMPONENT_PARENT,
+        component_name="latest",
+    )
+
+
+def _raise_unsealed_dashboard(
+    snapshot: ChaserDistanceReadSnapshot,
+    *,
+    artifact_name: str | None,
+) -> NoReturn:
+    requested = str(artifact_name or DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT)
+    raise ChaserDashboardUnavailableError(
+        f"Dashboard artifact {requested!r} under {snapshot.run_path!r} is "
+        f"unavailable: {_UNSEALED_DASHBOARD_REASON}."
+    )
+
+
 def build_chaser_protocol_dashboard_spec(
     root: zarr.Group,
     *,
@@ -2266,20 +2347,24 @@ def build_chaser_protocol_dashboard_spec(
     run_group: zarr.Group,
     detection_occupancy_run_path: Optional[str] = None,
 ) -> Mapping[str, Any]:
-    """Build a renderer-neutral chaser-protocol dashboard spec."""
+    """Build an unsealed renderer spec during run publication.
+
+    This is producer-only assembly. Normal presentation readers refuse the
+    resulting artifact until a separate semantic-authority contract is added.
+    """
 
     attrs = dict(getattr(run_group, "attrs", {}))
-    resolved_occupancy_path = detection_occupancy_run_path or resolve_related_detection_occupancy_run_path(
+    resolved_occupancy_path = detection_occupancy_run_path or _writer_resolve_related_detection_occupancy_run_path(
         root,
         run_group,
     )
-    egocentric_component_path = resolve_latest_egocentric_bearing_component_path(root, run_path=run_path)
+    egocentric_component_path = _writer_resolve_latest_egocentric_bearing_component_path(root, run_path=run_path)
     egocentric_component_name = (
         _normalize_path(egocentric_component_path).split("/")[-1]
         if egocentric_component_path
         else None
     )
-    cra_near_field_component_path = resolve_latest_cra_near_field_component_path(root, run_path=run_path)
+    cra_near_field_component_path = _writer_resolve_latest_cra_near_field_component_path(root, run_path=run_path)
     cra_near_field_component_name = (
         _normalize_path(cra_near_field_component_path).split("/")[-1]
         if cra_near_field_component_path
@@ -2439,48 +2524,11 @@ def discover_chaser_dashboard_options(
     *,
     artifact_name: str | None = DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
 ) -> list[GoodCopBadCopRunOption]:
-    """Return chaser-distance runs with a persisted chaser dashboard spec."""
+    """Fail closed until persisted dashboard specs have sealed authority."""
 
     root = open_zarr_root(Path(zarr_path), mode="r")
-    parent = root.get("analysis/chaser_distance_runs")
-    if parent is None:
-        return []
-    latest = str(parent.attrs.get("latest_complete") or parent.attrs.get("latest") or "").strip()
-    artifact_candidates = _dashboard_artifact_candidates(artifact_name)
-    options: list[GoodCopBadCopRunOption] = []
-    for run_name in _group_keys(parent):
-        run_path = _join_path("analysis/chaser_distance_runs", run_name)
-        resolved_artifact_name = None
-        artifact = None
-        for candidate in artifact_candidates:
-            artifact = _try_resolve_interactive_artifact(root, run_path=run_path, artifact_name=candidate)
-            if artifact is not None:
-                resolved_artifact_name = candidate
-                break
-        if artifact is None:
-            continue
-        spec = _json_from_uint8_array(artifact["spec_json"])
-        if spec.get("schema_id") not in CHASER_DASHBOARD_SPEC_SCHEMA_IDS:
-            continue
-        run_group = parent[run_name]
-        attrs = dict(getattr(run_group, "attrs", {}))
-        summary = attrs.get("summary", {}) if isinstance(attrs.get("summary"), Mapping) else {}
-        chaser_count = len(summary.get("chaser_indices", [])) if isinstance(summary, Mapping) else 0
-        frame_count = _safe_int(attrs.get("total_frames"), default=0)
-        is_latest = bool(latest and latest == run_name)
-        suffix = " | latest" if is_latest else ""
-        options.append(
-            GoodCopBadCopRunOption(
-                run_name=run_name,
-                run_path=run_path,
-                artifact_name=str(resolved_artifact_name or artifact_name or ""),
-                label=f"{run_name} | {frame_count:,} frames | {chaser_count} chasers{suffix}",
-                is_latest=is_latest,
-                attrs=attrs,
-                spec=spec,
-            )
-        )
-    return sorted(options, key=lambda item: (not item.is_latest, item.run_name))
+    snapshot = _verified_dashboard_run(root)
+    _raise_unsealed_dashboard(snapshot, artifact_name=artifact_name)
 
 
 def _load_windows(root: zarr.Group, source_paths: Mapping[str, str], fps: float) -> tuple[GoodCopBadCopWindow, ...]:
@@ -2542,16 +2590,21 @@ def load_chaser_dashboard_data(
     artifact_name: str | None = DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
     optional_families: Optional[Sequence[str]] = None,
 ) -> GoodCopBadCopInteractiveData:
-    """Load a persisted chaser dashboard spec and selected optional arrays.
+    """Load a persisted chaser dashboard after its authority is verified.
 
-    Core time, position, distance, chaser, and window arrays are always loaded.
-    When ``optional_families`` is provided, only the named ``occupancy``,
-    ``spatial_occupancy``, and ``egocentric`` payloads are materialized.
-    ``None`` preserves the historical load-all behavior.
+    No dashboard semantic-authority verifier exists yet, so current artifacts
+    fail closed before their spec or source paths are read. ``optional_families``
+    cannot weaken that boundary.
     """
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
+    snapshot = _verified_dashboard_run(root, run_path=run_path)
+    _raise_unsealed_dashboard(snapshot, artifact_name=artifact_name)
+
+    # Unreachable until a future dashboard authority reader replaces the
+    # fail-closed boundary above.  Keep the existing renderer implementation in
+    # place so that change can be reviewed independently of this selector cutover.
     artifact = None
     for candidate in _dashboard_artifact_candidates(artifact_name):
         artifact = _try_resolve_interactive_artifact(root, run_path=run_path, artifact_name=candidate)

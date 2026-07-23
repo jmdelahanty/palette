@@ -2551,42 +2551,32 @@ def _detect_bouts_from_peak_events(
     return bouts, peak_events
 
 
-def _resolved_track_source_array_paths(root: Any, track: Any) -> Dict[str, Any]:
-    """Return the physical track arrays selected by the logical resolver."""
+def _resolved_track_source_array_paths(track: Any) -> Dict[str, Any]:
+    """Return manifest-authorized canonical paths copied by the strict reader."""
 
-    track_group = root["analysis"]["track_kinematics_runs"][track.scope][
-        track.run_name
-    ]["tracks"][f"id_{int(track.track_id)}"]
+    if track.authority_status != "verified_canonical_track_motion_v1":
+        raise ValueError(
+            "Bout detection requires verified canonical track-motion authority."
+        )
     track_path = str(track.track_path)
     speed_mm: Dict[str, str] = {}
     frame_path_distance_mm: Dict[str, str] = {}
-    grouped_speed = None
-    if "movement" in track_group and "speed" in track_group["movement"]:
-        grouped_speed = track_group["movement"]["speed"]
 
     for level in BASE_SPEED_LEVELS:
         short_level = level.replace("speed_", "", 1)
-        grouped_level = (
-            grouped_speed[short_level]
-            if grouped_speed is not None and short_level in grouped_speed
-            else None
-        )
-        if grouped_level is not None and "mm" in grouped_level:
+        if short_level in track.speed_mm_by_level:
             speed_mm[level] = f"{track_path}/movement/speed/{short_level}/mm"
-        else:
-            speed_mm[level] = f"{track_path}/{level}_mm"
-
-        if grouped_level is not None and "frame_path_distance_mm" in grouped_level:
+        if short_level in track.frame_path_distance_mm_by_level:
             frame_path_distance_mm[short_level] = (
                 f"{track_path}/movement/speed/{short_level}/frame_path_distance_mm"
-            )
-        elif f"frame_path_distance_{short_level}_mm" in track_group:
-            frame_path_distance_mm[short_level] = (
-                f"{track_path}/frame_path_distance_{short_level}_mm"
             )
 
     resolved: Dict[str, Any] = {
         "frame_indices": f"{track_path}/frame_indices",
+        "track_sample_key": f"{track_path}/track_sample_key",
+        "source_acquisition_frame_index": (
+            f"{track_path}/source_acquisition_frame_index"
+        ),
         "speed_mm": speed_mm,
         "frame_path_distance_mm": frame_path_distance_mm,
     }
@@ -2597,7 +2587,7 @@ def _resolved_track_source_array_paths(root: Any, track: Any) -> Dict[str, Any]:
         "positions_mm",
         "positions_px",
     ):
-        if name in track_group:
+        if getattr(track, name) is not None:
             resolved[name] = f"{track_path}/{name}"
     return resolved
 
@@ -2629,8 +2619,8 @@ def _load_track_kinematics_track_speeds(
         track_id=track_id,
     )
     speeds = track.speed_level_dict()
-    source_array_paths = _resolved_track_source_array_paths(root, track)
-    source_frame_indices = root[source_array_paths["frame_indices"]]
+    source_array_paths = _resolved_track_source_array_paths(track)
+    source_frame_indices = np.asarray(track.source_acquisition_frame_index)
 
     source_provenance = track.run_attrs.get('provenance')
     if not isinstance(source_provenance, dict):
@@ -2653,6 +2643,7 @@ def _load_track_kinematics_track_speeds(
         'track_kinematics_git_dirty': track.run_attrs.get('git_dirty', source_git.get('is_dirty')),
         'track_id': track_id,
         'source_array_paths': source_array_paths,
+        'track_motion_authority': track.authority_record(),
         'source_frame_indices_dtype': str(np.dtype(source_frame_indices.dtype)),
         'source_frame_indices_shape': [
             int(value) for value in source_frame_indices.shape
@@ -3122,7 +3113,13 @@ def detect_and_save_bouts(
     run_group.attrs['source_track_kinematics_run'] = metadata['track_kinematics_run']
     run_group.attrs['track_id'] = track_id
     run_group.attrs['fps'] = fps
-    run_group.attrs['pixel_to_mm'] = _json_safe_attr_value(metadata.get('pixel_to_mm'))
+    track_motion_authority = _json_safe_attr_value(
+        metadata['track_motion_authority']
+    )
+    run_group.attrs['source_track_motion_authority'] = track_motion_authority
+    run_group.attrs['source_track_motion_manifest_sha256'] = (
+        track_motion_authority['motion_manifest_sha256']
+    )
     run_group.attrs['default_level'] = default_level_key
     run_group.attrs['git_commit'] = git_info['commit_hash']
     run_group.attrs['git_branch'] = git_info['branch']
@@ -3135,8 +3132,8 @@ def detect_and_save_bouts(
     frame_axis_contract_sha256: Optional[str] = None
     if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
         source_frame_path = dict(metadata.get('source_array_paths') or {}).get(
-            'frame_indices',
-            f"{source_track_path}/frame_indices",
+            'source_acquisition_frame_index',
+            f"{source_track_path}/source_acquisition_frame_index",
         )
         source_frame_shape = metadata.get('source_frame_indices_shape')
         if source_frame_shape is not None and list(source_frame_shape) != [int(len(frames))]:
@@ -3150,6 +3147,9 @@ def detect_and_save_bouts(
                 authoritative_path=str(source_frame_path),
                 source_track_kinematics_run=str(metadata['track_kinematics_run']),
                 track_id=int(track_id),
+                source_track_motion_manifest_sha256=str(
+                    track_motion_authority['motion_manifest_sha256']
+                ),
                 storage_mode=frame_axis_storage,
                 authoritative_dtype=metadata.get('source_frame_indices_dtype', 'int64'),
             )
@@ -3220,6 +3220,7 @@ def detect_and_save_bouts(
     run_group.attrs['source_refs'] = _json_safe_attr_value({
         'source_track_kinematics_path': source_track_path,
         'source_track_id': int(track_id),
+        'source_track_motion_authority': track_motion_authority,
         'source_frame_axis_path': (
             frame_axis_contract.get('authoritative_path')
             if frame_axis_contract is not None
@@ -3267,7 +3268,7 @@ def detect_and_save_bouts(
         'source_track_kinematics_git_dirty': metadata.get('track_kinematics_git_dirty'),
         'track_id': int(track_id),
         'fps': float(fps),
-        'pixel_to_mm': metadata.get('pixel_to_mm'),
+        'source_track_motion_authority': track_motion_authority,
         'n_frames': int(metadata['n_frames']),
         'resolved_source_array_paths': metadata.get('source_array_paths'),
         'frame_axis_contract': frame_axis_contract,

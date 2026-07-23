@@ -519,13 +519,14 @@ def test_crop_apply_writes_cli_provenance_to_real_tmp_zarr(monkeypatch, tmp_path
     _complete_run(root, "refined_detect_runs", "refined_001")
 
     def fake_plan(zarr_path_arg, config, source_type, source_path, selection_policy, force_new, crop_storage_mode):
+        assert source_type == "detect"
         return CropPlan(
             zarr_path=Path(zarr_path_arg),
             status="ok",
-            source_type="refined",
-            source_path="refined_detect_runs/refined_001/instances",
+            source_type="detect",
+            source_path="detect_runs/detect_001",
             roi_size=(512, 512),
-            crop_storage_mode="geometry_only",
+            crop_storage_mode="materialized",
             selection_policy=selection_policy,
         )
 
@@ -569,13 +570,14 @@ def test_crop_callable_returns_dry_run_envelope(monkeypatch, tmp_path) -> None:
     _complete_run(root, "refined_detect_runs", "refined_001")
 
     def fake_plan(zarr_path_arg, config, source_type, source_path, selection_policy, force_new, crop_storage_mode):
+        assert source_type == "detect"
         return CropPlan(
             zarr_path=Path(zarr_path_arg),
             status="ok",
-            source_type="refined",
-            source_path="refined_detect_runs/refined_001/instances",
+            source_type="detect",
+            source_path="detect_runs/detect_001",
             roi_size=(512, 512),
-            crop_storage_mode="geometry_only",
+            crop_storage_mode="materialized",
             selection_policy=selection_policy,
         )
 
@@ -586,7 +588,7 @@ def test_crop_callable_returns_dry_run_envelope(monkeypatch, tmp_path) -> None:
     payload = palette.crop(
         palette.CropRequest(
             recording=zarr_path,
-            crop_storage_mode="geometry_only",
+            crop_storage_mode="materialized",
             selection_policy="training",
         )
     )
@@ -595,7 +597,7 @@ def test_crop_callable_returns_dry_run_envelope(monkeypatch, tmp_path) -> None:
     assert payload["status"] == "dry_run"
     assert payload["reason_code"] == "DRY_RUN"
     assert payload["metrics"]["crop_plan_status"] == "ok"
-    assert payload["metrics"]["crop_storage_mode"] == "geometry_only"
+    assert payload["metrics"]["crop_storage_mode"] == "materialized"
     assert "--apply" in payload["next_hints"][0]
 
 
@@ -608,10 +610,10 @@ def test_crop_apply_reports_no_rows_as_failed_envelope(monkeypatch, tmp_path, ca
         return CropPlan(
             zarr_path=Path(zarr_path_arg),
             status="ok",
-            source_type="refined",
-            source_path="refined_detect_runs/refined_001/instances",
+            source_type="detect",
+            source_path="detect_runs/detect_001",
             roi_size=(512, 512),
-            crop_storage_mode="geometry_only",
+            crop_storage_mode="materialized",
             selection_policy=selection_policy,
         )
 
@@ -652,10 +654,10 @@ def test_crop_apply_reports_all_failed_rows_as_failed_envelope(monkeypatch, tmp_
         return CropPlan(
             zarr_path=Path(zarr_path_arg),
             status="ok",
-            source_type="refined",
-            source_path="refined_detect_runs/refined_001/instances",
+            source_type="detect",
+            source_path="detect_runs/detect_001",
             roi_size=(512, 512),
-            crop_storage_mode="geometry_only",
+            crop_storage_mode="materialized",
             selection_policy=selection_policy,
         )
 

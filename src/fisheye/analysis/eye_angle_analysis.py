@@ -12,6 +12,7 @@ tools can consume clean, frame-aligned measurements.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -38,6 +39,13 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.coordinate_frame_record import array_values_sha256
+from fisheye.shared.coordinate_identity import (
+    INSTANCE_KEY_ARRAY_REF,
+    INSTANCE_KEY_MODE,
+    OBSERVATION_INSTANCE_DOMAIN,
+)
+from fisheye.shared.coordinate_record import bind_persisted_coordinate_record
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
@@ -47,6 +55,12 @@ from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
     resolve_eye_geometry_source,
 )
+from fisheye.shared.keypoint_coordinate_publication import (
+    KEYPOINT_LABEL_AUTHORITY_ATTR,
+    KEYPOINT_LABEL_AUTHORITY_SCHEMA_ID,
+    KEYPOINT_LABEL_AUTHORITY_SCHEMA_VERSION,
+    load_persisted_keypoint_coordinate_surfaces,
+)
 from fisheye.pose.body_frame import (
     BODY_FRAME_COORDINATE_SPACE_ROI,
     BODY_FRAME_SCHEMA_ID,
@@ -54,7 +68,10 @@ from fisheye.pose.body_frame import (
     build_keypoint_body_frame_contract_attrs,
     compute_keypoint_body_frame,
 )
-from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
+from fisheye.pose.schema import (
+    resolve_keypoint_labels_from_attrs,
+    resolve_required_keypoint_indices_from_attrs,
+)
 from fisheye.shared.metadata import get_fps
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
@@ -86,9 +103,9 @@ EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
 DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
 EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
-EYE_ANGLE_RUN_SCHEMA_VERSION = 5
+EYE_ANGLE_RUN_SCHEMA_VERSION = 6
 EYE_ANGLE_OUTPUT_SCHEMA_ID = "analysis.eye_angle_output_schema"
-EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 8
+EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 9
 EYE_ANGLE_VARIANT_SCHEMA_ID = "analysis.eye_angle_variant_schema"
 EYE_ANGLE_VARIANT_SCHEMA_VERSION = 1
 EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID = "analysis.eye_angle_algorithm_contract"
@@ -105,6 +122,42 @@ EYE_ANGLE_COLUMN_ORDER_PROFILE = "semantic_bundles_v1"
 EYE_ANGLE_DENSE_CHUNK_ROWS = 4_096
 EYE_ANGLE_DENSE_CHUNK_COLUMNS = 16
 MAJOR_AXIS_MARGINAL_DOT_THRESHOLD = 0.1
+EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCHEMA_ID = (
+    "palette.eye_angle_staged_input_integrity_receipt"
+)
+EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCHEMA_VERSION = 1
+EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCOPE = (
+    "materializer_private_exact_worker_input_snapshot_v1"
+)
+EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_ID = (
+    "palette.eye_angle_staged_input_chunk_integrity_receipt"
+)
+EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_VERSION = 1
+EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION = (
+    "numpy_dtype_shape_c_order_bytes_v1"
+)
+_EYE_ANGLE_WORKER_LOGICAL_INPUTS = (
+    "ellipse_params",
+    "ellipse_success",
+    "keypoints_roi",
+    "detection_success",
+    "instance_key",
+    "source_acquisition_frame_index",
+)
+EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL = "canonical_subject_shape_assignment"
+EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC = (
+    "legacy_unverified_refined_keypoint_diagnostic"
+)
+EYE_ANGLE_REFINED_DIAGNOSTIC_COORDINATE_CONTRACT = (
+    "palette.eye_angles.legacy_refined_keypoint_diagnostic_nonselector.v1"
+)
+EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_ID = (
+    "palette.eye_angle_staged_canonical_keypoint_authority"
+)
+EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION = 1
+EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCOPE = (
+    "materializer_private_subject_shape_assignment_keypoints_subset_v1"
+)
 
 _BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
     ("left_deg", "left_deg"),
@@ -462,7 +515,19 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         "mean_eye_vergence_gaze_accel_deg_s2",
     ]
     support_outputs = [
-        {"name": "frame_indices", "row_axis": "roi", "value_kind": "frame_index"},
+        {"name": "instance_key", "row_axis": "roi", "value_kind": "observation_instance_key"},
+        {
+            "name": "source_acquisition_frame_index",
+            "row_axis": "roi",
+            "value_kind": "source_acquisition_frame_index",
+        },
+        {
+            "name": "frame_indices",
+            "row_axis": "roi",
+            "value_kind": "source_acquisition_frame_index",
+            "compatibility_alias_of": "support/source_acquisition_frame_index",
+            "values_must_equal_canonical": True,
+        },
         {"name": "time_seconds", "row_axis": "roi", "units": "s"},
         {"name": "ellipse_major", "row_axis": "roi", "units": "px"},
         {"name": "ellipse_minor", "row_axis": "roi", "units": "px"},
@@ -689,9 +754,30 @@ class EyeAngleInputContext:
     detection_success_key: str
     detection_success_path: str
     frame_indices_source: zarr.Group
+    frame_indices_key: str
     frame_indices_path: str
+    instance_key_source: Optional[zarr.Group]
+    instance_key_key: Optional[str]
+    instance_key_path: Optional[str]
     keypoint_run_name: str
     keypoint_indices: Dict[str, int]
+    keypoint_labels: tuple[str, ...]
+    keypoint_source_mode: str
+    source_total_frames: Optional[int]
+    canonical_keypoint_surfaces: Any = None
+    canonical_keypoint_authority: Optional[Mapping[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class _EyeAngleChunkInputSnapshot:
+    """Owned worker inputs that are verified before any scientific computation."""
+
+    ellipse_params: np.ndarray
+    ellipse_success: np.ndarray
+    keypoints_roi: np.ndarray
+    detection_success: np.ndarray
+    instance_key: np.ndarray
+    source_acquisition_frame_index: np.ndarray
 
 
 _SOURCE_CONTRACT_ATTRS = (
@@ -781,6 +867,7 @@ def _eye_angle_source_contracts(context: EyeAngleInputContext) -> Dict[str, obje
     """Return the complete resolved source identity used by one eye-angle run."""
 
     geometry = context.eye_geometry
+    source_authority = getattr(geometry, "source_authority", None)
     return {
         "eye_geometry": {
             **_source_group_contract(geometry.group, path=geometry.group_path),
@@ -790,16 +877,35 @@ def _eye_angle_source_contracts(context: EyeAngleInputContext) -> Dict[str, obje
             "source_subject_shape_run": geometry.source_subject_shape_run,
             "source_refined_subject_masks_run": geometry.source_refined_subject_run,
             "source_refined_eye_run": geometry.source_refined_eye_run,
+            # This location-independent, self-digested receipt is identical for
+            # the authoritative publication and its explicitly staged subset.
+            # Keep execution authority mode out of the scientific source
+            # contract so planning and staged-compute hashes remain identical.
+            **(
+                {"source_authority": _canonical_json_copy(source_authority)}
+                if isinstance(source_authority, Mapping)
+                else {}
+            ),
             "components": _eye_geometry_component_contracts(context),
         },
-        "refined_keypoints": {
+        "keypoints": {
             **_source_group_contract(
                 context.kp_group,
                 path=context.kp_group_path,
             ),
             "run_name": context.keypoint_run_name,
+            "source_mode": context.keypoint_source_mode,
+            **(
+                {
+                    "canonical_keypoint_authority": _canonical_json_copy(
+                        context.canonical_keypoint_authority
+                    )
+                }
+                if isinstance(context.canonical_keypoint_authority, Mapping)
+                else {}
+            ),
         },
-        "source_keypoints": {
+        "diagnostic_base_keypoints": {
             **_source_group_contract(
                 context.source_kp_group,
                 path=context.source_kp_group_path,
@@ -808,9 +914,9 @@ def _eye_angle_source_contracts(context: EyeAngleInputContext) -> Dict[str, obje
         },
         "resolved_arrays": {
             "keypoints_roi": f"{context.kp_group_path}/keypoints_roi",
-            "heading": f"{context.kp_group_path}/heading",
             "detection_success": context.detection_success_path,
-            "frame_indices": context.frame_indices_path,
+            "instance_key": context.instance_key_path,
+            "source_acquisition_frame_index": context.frame_indices_path,
         },
     }
 
@@ -925,7 +1031,9 @@ def _eye_angle_algorithm_contract(
         "temporal_sampling": {
             "fps": float(fps) if fps else None,
             "fps_source": fps_source,
-            "time_seconds_formula": "frame_indices / fps when fps is available",
+            "time_seconds_formula": (
+                "source_acquisition_frame_index / fps when fps is available"
+            ),
         },
         "smoothing": {
             "method": "nan_aware_centered_boxcar_finite_count_normalized",
@@ -1117,7 +1225,6 @@ def _process_chunk(
     ellipse_params: np.ndarray,
     ellipse_success: np.ndarray,
     keypoints_roi: np.ndarray,
-    heading_deg: np.ndarray,
     detection_success: np.ndarray,
     *,
     keypoint_indices: Dict[str, int],
@@ -1467,6 +1574,41 @@ def _to_serializable(value):
     if isinstance(value, (list, tuple, set)):
         return [_to_serializable(v) for v in value]
     return value
+
+
+def _canonical_json_copy(value: Any) -> Any:
+    """Return a deterministic, process-safe copy of one JSON value."""
+
+    return json.loads(
+        json.dumps(
+            value,
+            default=_to_serializable,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    )
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    canonical = _canonical_json_copy(value)
+    payload = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _count_reason_bits(reason_codes: np.ndarray) -> Dict[str, int]:
@@ -2151,7 +2293,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keypoint-run",
         type=str,
-        help="Refined keypoint run providing heading and ROI coordinates (default: inferred from subject eye geometry lineage or latest).",
+        help=(
+            "Optional exact base keypoints_runs child name. This is an assertion "
+            "against the canonical keypoint dependency sealed by subject shape; "
+            "there is no latest or refined-keypoint fallback."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-refined-keypoint-run",
+        type=str,
+        help=(
+            "Explicit historical refined_keypoints_runs child for a permanently "
+            "nonselector diagnostic eye-angle output. Not accepted by materialized "
+            "future-normal publication."
+        ),
     )
     parser.add_argument(
         "--run-name",
@@ -2231,18 +2386,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_keypoint_run_name(
-    *,
-    explicit_keypoint_run: Optional[str],
-    refined_attrs: Dict[str, object],
-    parent_latest: Optional[str],
-) -> Optional[str]:
-    """Resolve refined-keypoints run from explicit, canonical, legacy, then latest."""
-    return (
-        explicit_keypoint_run
-        or resolve_source_keypoints_run(refined_attrs)
-        or parent_latest
-    )
+def _exact_child_run_name(value: Optional[str], *, label: str) -> Optional[str]:
+    if value is None:
+        return None
+    name = str(value).strip()
+    if not name or "/" in name or name in {".", "..", "latest"}:
+        raise ValueError(f"{label} must be one exact child run name, not a selector or path.")
+    return name
 
 
 def _open_archive_for_eye_angle(zarr_path: Path) -> zarr.Group:
@@ -2250,11 +2400,20 @@ def _open_archive_for_eye_angle(zarr_path: Path) -> zarr.Group:
     return open_zarr_root(zarr_path, mode="a")
 
 
-def _resolve_head_keypoint_indices(kp_group: zarr.Group) -> Dict[str, int]:
+def _resolve_head_keypoint_indices(
+    kp_group: zarr.Group,
+    *,
+    labels: Optional[Sequence[str]] = None,
+) -> Dict[str, int]:
     keypoint_count = int(kp_group["keypoints_roi"].shape[1])
+    attrs: Mapping[str, Any] = (
+        {"keypoint_labels": [str(value) for value in labels]}
+        if labels is not None
+        else kp_group.attrs
+    )
     try:
         return resolve_required_keypoint_indices_from_attrs(
-            kp_group.attrs,
+            attrs,
             _HEAD_KEYPOINT_LABELS,
             keypoint_count=keypoint_count,
         )
@@ -2265,81 +2424,883 @@ def _resolve_head_keypoint_indices(kp_group: zarr.Group) -> Dict[str, int]:
         ) from exc
 
 
+def _row_identity_evidence(identity: Any) -> dict[str, Any]:
+    contract = identity.contract
+    key = contract.key_array
+    return {
+        "record_ref": str(identity.record_ref),
+        "record_sha256": str(identity.record_sha256),
+        "domain": str(contract.domain),
+        "mode": str(contract.mode),
+        "components": [str(value) for value in key.components],
+        "dtype": str(key.dtype),
+        "shape": [int(value) for value in key.shape],
+        "leading_dimension": int(contract.leading_dimension),
+        "content_sha256": str(key.content_sha256),
+    }
+
+
+def _temporal_authority_evidence(authority: Any) -> dict[str, Any]:
+    record = authority.record
+    frame = record.source_acquisition_frame_index
+    return {
+        "record_ref": str(authority.record_ref),
+        "record_sha256": str(authority.record_sha256),
+        "recording_id": str(record.recording_id),
+        "camera_id": str(record.camera_id),
+        "source_total_frames": int(record.source_total_frames),
+        "source_identity_domain": str(record.source_identity_domain),
+        "source_identity_mode": str(record.source_identity_mode),
+        "source_leading_dimension": int(record.source_leading_dimension),
+        "frame_index_dtype": str(frame.dtype),
+        "frame_index_shape": [int(value) for value in frame.shape],
+        "frame_index_content_sha256": str(frame.content_sha256),
+    }
+
+
+def _require_ordered_eye_row_alignment(
+    subject_identity: Any,
+    keypoint_identity: Any,
+    subject_temporal: Any,
+    keypoint_temporal: Any,
+) -> dict[str, Any]:
+    subject = _row_identity_evidence(subject_identity)
+    keypoint = _row_identity_evidence(keypoint_identity)
+    expected_identity_vocabulary = {
+        "domain": OBSERVATION_INSTANCE_DOMAIN,
+        "mode": INSTANCE_KEY_MODE,
+        "components": [INSTANCE_KEY_ARRAY_REF],
+    }
+    if any(
+        subject[name] != value or keypoint[name] != value
+        for name, value in expected_identity_vocabulary.items()
+    ):
+        raise ValueError(
+            "Canonical eye inputs must use the observation_instance / "
+            "instance_key row-identity vocabulary."
+        )
+    comparable_identity_fields = (
+        "domain",
+        "mode",
+        "components",
+        "dtype",
+        "shape",
+        "leading_dimension",
+        "content_sha256",
+    )
+    if any(subject[name] != keypoint[name] for name in comparable_identity_fields):
+        raise ValueError(
+            "Canonical eye keypoints do not have the exact ordered instance_key "
+            "identity of the selected subject-shape rows."
+        )
+    subject_time = _temporal_authority_evidence(subject_temporal)
+    keypoint_time = _temporal_authority_evidence(keypoint_temporal)
+    comparable_time_fields = (
+        "recording_id",
+        "camera_id",
+        "source_total_frames",
+        "source_identity_domain",
+        "source_identity_mode",
+        "source_leading_dimension",
+        "frame_index_dtype",
+        "frame_index_shape",
+        "frame_index_content_sha256",
+    )
+    if any(subject_time[name] != keypoint_time[name] for name in comparable_time_fields):
+        raise ValueError(
+            "Canonical eye keypoints do not have the exact acquisition-frame "
+            "mapping of the selected subject-shape rows."
+        )
+    return {
+        "policy": "same_ordered_observation_instance_and_acquisition_time_v1",
+        "subject_shape_row_identity": subject,
+        "keypoint_row_identity": keypoint,
+        "shared_instance_key_content_sha256": subject["content_sha256"],
+        "subject_shape_temporal_authority": subject_time,
+        "keypoint_temporal_authority": keypoint_time,
+        "shared_frame_index_content_sha256": subject_time[
+            "frame_index_content_sha256"
+        ],
+    }
+
+
+def _array_authority_entry(node: Any, *, array_ref: str) -> dict[str, Any]:
+    return {
+        "array_ref": str(array_ref),
+        "dtype": np.dtype(node.dtype).str,
+        "shape": [int(value) for value in node.shape],
+        "content_sha256": array_values_sha256(node),
+        "canonicalization": EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION,
+    }
+
+
+def _build_staged_canonical_keypoint_authority(
+    *,
+    eye_geometry: Any,
+    surfaces: Any,
+    assignment_authority: Any,
+    alignment: Mapping[str, Any],
+) -> dict[str, Any]:
+    context = surfaces.context
+    run_path = str(context.run_path)
+    run_name = run_path.split("/", 1)[1]
+    group = context._run_group
+    arrays = {
+        name: _array_authority_entry(
+            group[name],
+            array_ref=f"/{run_path}/{name}",
+        )
+        for name in (
+            "keypoints_roi",
+            "detection_success",
+            "instance_key",
+            "source_acquisition_frame_index",
+        )
+    }
+    body = {
+        "schema_id": EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_ID,
+        "schema_version": EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION,
+        "authority_scope": EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCOPE,
+        "keypoint_run_name": run_name,
+        "keypoint_run_path": run_path,
+        "publication": {
+            "coordinate_context_ref": context.context_record.record_ref,
+            "coordinate_context_sha256": context.context_record.record_sha256,
+            "coordinate_derivation_ref": surfaces.derivation.record_ref,
+            "coordinate_derivation_sha256": surfaces.derivation.record_sha256,
+            "keypoints_roi_descriptor_sha256": (
+                surfaces.keypoints_roi.descriptor.digest()
+            ),
+            "row_identity_ref": context.row_identity.record_ref,
+            "row_identity_sha256": context.row_identity.record_sha256,
+            "temporal_authority_ref": context.temporal_authority.record_ref,
+            "temporal_authority_sha256": context.temporal_authority.record_sha256,
+            "keypoint_label_authority_ref": (
+                context.keypoint_label_authority.record_ref
+            ),
+            "keypoint_label_authority_sha256": (
+                context.keypoint_label_authority.record_sha256
+            ),
+        },
+        "assignment_authority": {
+            "record_ref": assignment_authority.record_ref,
+            "record_sha256": assignment_authority.record_sha256,
+        },
+        "subject_shape_run_path": str(
+            eye_geometry.subject_shape_coordinate_publication.run_path
+        ),
+        "ordered_row_alignment": _canonical_json_copy(alignment),
+        "keypoint_labels": [str(value) for value in context.keypoint_labels],
+        "source_total_frames": int(context.temporal_authority.record.source_total_frames),
+        "arrays": arrays,
+        "closed_array_inventory": True,
+        "normal_reader_authority": False,
+    }
+    return {**body, "record_sha256": _canonical_json_sha256(body)}
+
+
+def _canonical_staged_keypoint_authority(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Staged canonical keypoint authority must be a mapping.")
+    canonical = _canonical_json_copy(value)
+    digest = canonical.pop("record_sha256", None)
+    expected = {
+        "schema_id",
+        "schema_version",
+        "authority_scope",
+        "keypoint_run_name",
+        "keypoint_run_path",
+        "publication",
+        "assignment_authority",
+        "subject_shape_run_path",
+        "ordered_row_alignment",
+        "keypoint_labels",
+        "source_total_frames",
+        "arrays",
+        "closed_array_inventory",
+        "normal_reader_authority",
+    }
+    if set(canonical) != expected:
+        raise ValueError("Staged canonical keypoint authority fields are not exact.")
+    if (
+        canonical.get("schema_id") != EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_ID
+        or canonical.get("schema_version")
+        != EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCHEMA_VERSION
+        or canonical.get("authority_scope")
+        != EYE_ANGLE_STAGED_KEYPOINT_AUTHORITY_SCOPE
+        or canonical.get("closed_array_inventory") is not True
+        or canonical.get("normal_reader_authority") is not False
+        or not _is_sha256(digest)
+        or digest != _canonical_json_sha256(canonical)
+    ):
+        raise ValueError("Staged canonical keypoint authority is unsupported or stale.")
+    name = _exact_child_run_name(
+        canonical.get("keypoint_run_name"),
+        label="Staged canonical keypoint run",
+    )
+    if canonical.get("keypoint_run_path") != f"keypoints_runs/{name}":
+        raise ValueError("Staged canonical keypoint authority names an invalid run path.")
+    run_path = str(canonical["keypoint_run_path"])
+    publication = canonical.get("publication")
+    publication_fields = {
+        "coordinate_context_ref",
+        "coordinate_context_sha256",
+        "coordinate_derivation_ref",
+        "coordinate_derivation_sha256",
+        "keypoints_roi_descriptor_sha256",
+        "row_identity_ref",
+        "row_identity_sha256",
+        "temporal_authority_ref",
+        "temporal_authority_sha256",
+        "keypoint_label_authority_ref",
+        "keypoint_label_authority_sha256",
+    }
+    if not isinstance(publication, Mapping) or set(publication) != publication_fields:
+        raise ValueError("Staged canonical keypoint publication proof is incomplete.")
+    for field in publication_fields:
+        value = publication.get(field)
+        if field.endswith("sha256"):
+            if not _is_sha256(value):
+                raise ValueError("Staged canonical keypoint publication digest is invalid.")
+        elif not isinstance(value, str) or not value.startswith(f"/{run_path}"):
+            raise ValueError("Staged canonical keypoint publication reference escaped its run.")
+    assignment = canonical.get("assignment_authority")
+    if (
+        not isinstance(assignment, Mapping)
+        or set(assignment) != {"record_ref", "record_sha256"}
+        or not isinstance(assignment.get("record_ref"), str)
+        or not assignment["record_ref"].startswith("/")
+        or not _is_sha256(assignment.get("record_sha256"))
+    ):
+        raise ValueError("Staged canonical assignment authority pointer is invalid.")
+    subject_shape_path = canonical.get("subject_shape_run_path")
+    if (
+        not isinstance(subject_shape_path, str)
+        or not subject_shape_path.startswith("analysis/subject_shape_runs/")
+        or subject_shape_path.count("/") != 2
+    ):
+        raise ValueError("Staged canonical keypoints name an invalid subject-shape path.")
+    labels = canonical.get("keypoint_labels")
+    total_frames = canonical.get("source_total_frames")
+    if (
+        not isinstance(labels, list)
+        or not labels
+        or any(not isinstance(label, str) or not label for label in labels)
+        or type(total_frames) is not int
+        or total_frames <= 0
+    ):
+        raise ValueError("Staged canonical keypoint labels or frame extent are invalid.")
+    arrays = canonical.get("arrays")
+    required_arrays = {
+        "keypoints_roi",
+        "detection_success",
+        "instance_key",
+        "source_acquisition_frame_index",
+    }
+    if not isinstance(arrays, Mapping) or set(arrays) != required_arrays:
+        raise ValueError("Staged canonical keypoint array inventory is not closed.")
+    for array_name, entry in arrays.items():
+        expected_fields = {
+            "array_ref",
+            "dtype",
+            "shape",
+            "content_sha256",
+            "canonicalization",
+        }
+        if (
+            not isinstance(entry, Mapping)
+            or set(entry) != expected_fields
+            or entry.get("array_ref")
+            != f"/{canonical['keypoint_run_path']}/{array_name}"
+            or not isinstance(entry.get("shape"), list)
+            or not entry["shape"]
+            or any(type(item) is not int or item < 0 for item in entry["shape"])
+            or np.dtype(entry.get("dtype")).str != entry.get("dtype")
+            or not _is_sha256(entry.get("content_sha256"))
+            or entry.get("canonicalization")
+            != EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION
+        ):
+            raise ValueError(
+                f"Staged canonical keypoint array authority for {array_name!r} is invalid."
+            )
+    alignment = canonical.get("ordered_row_alignment")
+    alignment_fields = {
+        "policy",
+        "subject_shape_row_identity",
+        "keypoint_row_identity",
+        "shared_instance_key_content_sha256",
+        "subject_shape_temporal_authority",
+        "keypoint_temporal_authority",
+        "shared_frame_index_content_sha256",
+    }
+    if (
+        not isinstance(alignment, Mapping)
+        or set(alignment) != alignment_fields
+        or alignment.get("policy")
+        != "same_ordered_observation_instance_and_acquisition_time_v1"
+        or arrays["instance_key"]["content_sha256"]
+        != alignment.get("shared_instance_key_content_sha256")
+        or arrays["source_acquisition_frame_index"]["content_sha256"]
+        != alignment.get("shared_frame_index_content_sha256")
+    ):
+        raise ValueError(
+            "Staged canonical keypoint identity arrays disagree with their ordered alignment proof."
+        )
+
+    keypoint_shape = arrays["keypoints_roi"]["shape"]
+    instance_shape = arrays["instance_key"]["shape"]
+    if (
+        len(keypoint_shape) != 3
+        or keypoint_shape[2] != 2
+        or len(instance_shape) != 1
+        or arrays["detection_success"]["shape"] != instance_shape
+        or arrays["source_acquisition_frame_index"]["shape"] != instance_shape
+        or keypoint_shape[0] != instance_shape[0]
+        or len(labels) != keypoint_shape[1]
+        or len(set(labels)) != len(labels)
+        or arrays["detection_success"]["dtype"] != np.dtype(bool).str
+        or arrays["instance_key"]["dtype"] != np.dtype("<u8").str
+        or arrays["source_acquisition_frame_index"]["dtype"]
+        != np.dtype("<i8").str
+    ):
+        raise ValueError(
+            "Staged canonical keypoint arrays do not form one exact row-aligned axis."
+        )
+    row_count = int(instance_shape[0])
+
+    identity_fields = {
+        "record_ref",
+        "record_sha256",
+        "domain",
+        "mode",
+        "components",
+        "dtype",
+        "shape",
+        "leading_dimension",
+        "content_sha256",
+    }
+    subject_identity = alignment.get("subject_shape_row_identity")
+    keypoint_identity = alignment.get("keypoint_row_identity")
+    for evidence in (subject_identity, keypoint_identity):
+        if (
+            not isinstance(evidence, Mapping)
+            or set(evidence) != identity_fields
+            or not isinstance(evidence.get("record_ref"), str)
+            or not evidence["record_ref"].startswith("/")
+            or not _is_sha256(evidence.get("record_sha256"))
+            or not _is_sha256(evidence.get("content_sha256"))
+            or evidence.get("domain") != OBSERVATION_INSTANCE_DOMAIN
+            or evidence.get("mode") != INSTANCE_KEY_MODE
+            or evidence.get("components") != [INSTANCE_KEY_ARRAY_REF]
+            or evidence.get("dtype") != np.dtype("<u8").str
+            or evidence.get("shape") != [row_count]
+            or evidence.get("leading_dimension") != row_count
+        ):
+            raise ValueError("Staged canonical row-identity evidence is invalid.")
+    identity_semantic_fields = identity_fields - {"record_ref", "record_sha256"}
+    if (
+        any(
+            subject_identity[field] != keypoint_identity[field]
+            for field in identity_semantic_fields
+        )
+        or keypoint_identity["content_sha256"]
+        != arrays["instance_key"]["content_sha256"]
+        or publication["row_identity_ref"] != keypoint_identity["record_ref"]
+        or publication["row_identity_sha256"]
+        != keypoint_identity["record_sha256"]
+    ):
+        raise ValueError(
+            "Staged canonical keypoint row identity is not closed over its publication and array."
+        )
+
+    temporal_fields = {
+        "record_ref",
+        "record_sha256",
+        "recording_id",
+        "camera_id",
+        "source_total_frames",
+        "source_identity_domain",
+        "source_identity_mode",
+        "source_leading_dimension",
+        "frame_index_dtype",
+        "frame_index_shape",
+        "frame_index_content_sha256",
+    }
+    subject_temporal = alignment.get("subject_shape_temporal_authority")
+    keypoint_temporal = alignment.get("keypoint_temporal_authority")
+    for temporal, identity in (
+        (subject_temporal, subject_identity),
+        (keypoint_temporal, keypoint_identity),
+    ):
+        if (
+            not isinstance(temporal, Mapping)
+            or set(temporal) != temporal_fields
+            or not isinstance(temporal.get("record_ref"), str)
+            or not temporal["record_ref"].startswith("/")
+            or not _is_sha256(temporal.get("record_sha256"))
+            or not isinstance(temporal.get("recording_id"), str)
+            or not temporal["recording_id"]
+            or not isinstance(temporal.get("camera_id"), str)
+            or not temporal["camera_id"]
+            or type(temporal.get("source_total_frames")) is not int
+            or temporal["source_total_frames"] <= 0
+            or temporal.get("source_identity_domain") != identity["domain"]
+            or temporal.get("source_identity_mode") != identity["mode"]
+            or temporal.get("source_leading_dimension") != row_count
+            or temporal.get("frame_index_dtype") != np.dtype("<i8").str
+            or temporal.get("frame_index_shape") != [row_count]
+            or not _is_sha256(temporal.get("frame_index_content_sha256"))
+        ):
+            raise ValueError("Staged canonical temporal-authority evidence is invalid.")
+    temporal_semantic_fields = temporal_fields - {"record_ref", "record_sha256"}
+    if (
+        any(
+            subject_temporal[field] != keypoint_temporal[field]
+            for field in temporal_semantic_fields
+        )
+        or total_frames != keypoint_temporal["source_total_frames"]
+        or keypoint_temporal["frame_index_content_sha256"]
+        != arrays["source_acquisition_frame_index"]["content_sha256"]
+        or publication["temporal_authority_ref"] != keypoint_temporal["record_ref"]
+        or publication["temporal_authority_sha256"]
+        != keypoint_temporal["record_sha256"]
+    ):
+        raise ValueError(
+            "Staged canonical temporal authority is not closed over its publication, frame extent, and array."
+        )
+    return {**canonical, "record_sha256": str(digest)}
+
+
+def _validate_staged_canonical_keypoint_source(
+    root: zarr.Group,
+    *,
+    authority: Mapping[str, Any],
+    subject_shape_authority: Mapping[str, Any],
+    expected_keypoint_run: Optional[str],
+    verify_payload: bool,
+) -> tuple[zarr.Group, str, tuple[str, ...], dict[str, Any]]:
+    canonical = _canonical_staged_keypoint_authority(authority)
+    run_name = str(canonical["keypoint_run_name"])
+    if expected_keypoint_run is not None and expected_keypoint_run != run_name:
+        raise ValueError(
+            "--keypoint-run differs from the exact base keypoint run sealed by "
+            "the selected subject-shape publication."
+        )
+    subject_publication = subject_shape_authority.get("canonical_publication")
+    subject_assignment = (
+        subject_publication.get("assignment_keypoint_authority")
+        if isinstance(subject_publication, Mapping)
+        else None
+    )
+    alignment = canonical.get("ordered_row_alignment")
+    subject_identity = (
+        alignment.get("subject_shape_row_identity")
+        if isinstance(alignment, Mapping)
+        else None
+    )
+    if (
+        not isinstance(subject_publication, Mapping)
+        or not isinstance(subject_identity, Mapping)
+        or subject_shape_authority.get("source_subject_shape_run_ref")
+        != f"/{canonical['subject_shape_run_path']}"
+        or subject_identity.get("record_ref")
+        != subject_publication.get("row_identity_ref")
+        or subject_identity.get("record_sha256")
+        != subject_publication.get("row_identity_sha256")
+        or subject_assignment != canonical.get("assignment_authority")
+    ):
+        raise ValueError(
+            "Staged canonical keypoint authority is not bound to this subject-shape dependency."
+        )
+    path = str(canonical["keypoint_run_path"])
+    group = root.get(path)
+    if group is None:
+        raise ValueError(f"Staged canonical keypoint source {path!r} is missing.")
+    keypoint_entry = canonical["arrays"]["keypoints_roi"]
+    keypoint_count = int(keypoint_entry["shape"][1])
+    sealed_labels = tuple(canonical["keypoint_labels"])
+    raw_live_labels = group.attrs.get("keypoint_labels")
+    if type(raw_live_labels) is not list or raw_live_labels != list(sealed_labels):
+        raise ValueError(
+            "Staged canonical keypoint labels differ from the exact source-group "
+            "label order."
+        )
+    # Confirm that the exact live labels remain resolvable for anatomical
+    # selection without using alias normalization as the equality authority.
+    resolved_live_labels = resolve_keypoint_labels_from_attrs(
+        group.attrs,
+        keypoint_count=keypoint_count,
+    )
+    if not resolved_live_labels:
+        raise ValueError(
+            "Staged canonical keypoint labels cannot resolve an anatomical axis."
+        )
+    try:
+        label_authority = bind_persisted_coordinate_record(
+            group,
+            attr_name=KEYPOINT_LABEL_AUTHORITY_ATTR,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Staged canonical keypoint source lacks its exact persisted label authority."
+        ) from exc
+    label_record = label_authority.record
+    label_row_axis = label_record.get("axis0")
+    label_axis = label_record.get("axis1")
+    label_coordinate_axis = label_record.get("coordinate_component_axis")
+    label_arrays = label_record.get("arrays")
+    label_keypoints = (
+        label_arrays.get("keypoints_roi")
+        if isinstance(label_arrays, Mapping)
+        else None
+    )
+    alignment = canonical["ordered_row_alignment"]
+    keypoint_identity = alignment["keypoint_row_identity"]
+    publication = canonical["publication"]
+    if (
+        label_authority.record_ref
+        != publication["keypoint_label_authority_ref"]
+        or label_authority.record_sha256
+        != publication["keypoint_label_authority_sha256"]
+        or label_record.get("schema_id") != KEYPOINT_LABEL_AUTHORITY_SCHEMA_ID
+        or type(label_record.get("schema_version")) is not int
+        or label_record.get("schema_version")
+        != KEYPOINT_LABEL_AUTHORITY_SCHEMA_VERSION
+        or not isinstance(label_row_axis, Mapping)
+        or label_row_axis.get("role") != OBSERVATION_INSTANCE_DOMAIN
+        or label_row_axis.get("row_identity_ref")
+        != keypoint_identity["record_ref"]
+        or label_row_axis.get("row_identity_sha256")
+        != keypoint_identity["record_sha256"]
+        or not isinstance(label_axis, Mapping)
+        or label_axis.get("role") != "keypoint"
+        or type(label_axis.get("cardinality")) is not int
+        or label_axis.get("cardinality") != keypoint_count
+        or label_axis.get("labels") != list(sealed_labels)
+        or not isinstance(label_coordinate_axis, Mapping)
+        or set(label_coordinate_axis) != {"axis", "components"}
+        or type(label_coordinate_axis.get("axis")) is not int
+        or label_coordinate_axis.get("axis") != 2
+        or label_coordinate_axis.get("components") != ["x", "y"]
+        or not isinstance(label_keypoints, Mapping)
+        or set(label_keypoints)
+        != {"array_ref", "shape", "dtype", "keypoint_axis"}
+        or label_keypoints.get("array_ref")
+        != f"/{canonical['keypoint_run_path']}/keypoints_roi"
+        or label_keypoints.get("shape") != keypoint_entry["shape"]
+        or label_keypoints.get("dtype") != keypoint_entry["dtype"]
+        or type(label_keypoints.get("keypoint_axis")) is not int
+        or label_keypoints.get("keypoint_axis") != 1
+    ):
+        raise ValueError(
+            "Staged canonical keypoint label authority differs from its sealed "
+            "publication or ordered labels."
+        )
+    for name, entry in canonical["arrays"].items():
+        node = group.get(name)
+        if (
+            node is None
+            or np.dtype(node.dtype).str != entry["dtype"]
+            or [int(value) for value in node.shape] != entry["shape"]
+            or (
+                verify_payload
+                and array_values_sha256(node) != entry["content_sha256"]
+            )
+        ):
+            raise ValueError(
+                f"Staged canonical keypoint array {path}/{name} differs from its authority."
+            )
+    return group, run_name, tuple(canonical["keypoint_labels"]), canonical
+
+
+def _resolve_canonical_eye_keypoints(
+    root: zarr.Group,
+    *,
+    eye_geometry: Any,
+    expected_keypoint_run: Optional[str],
+    staged_keypoint_authority: Optional[Mapping[str, Any]],
+    staged_subject_shape_authority: Optional[Mapping[str, Any]],
+    verify_staged_payload: bool,
+) -> tuple[Any, ...]:
+    if staged_keypoint_authority is not None:
+        if not isinstance(staged_subject_shape_authority, Mapping):
+            raise ValueError(
+                "Staged canonical keypoints require the matching subject-shape authority."
+            )
+        group, run_name, labels, authority = _validate_staged_canonical_keypoint_source(
+            root,
+            authority=staged_keypoint_authority,
+            subject_shape_authority=staged_subject_shape_authority,
+            expected_keypoint_run=expected_keypoint_run,
+            verify_payload=verify_staged_payload,
+        )
+        path = f"keypoints_runs/{run_name}"
+        return (
+            group,
+            path,
+            run_name,
+            labels,
+            None,
+            authority,
+            int(authority["source_total_frames"]),
+        )
+
+    publication = getattr(
+        eye_geometry,
+        "subject_shape_coordinate_publication",
+        None,
+    )
+    if publication is None:
+        raise ValueError(
+            "Future-normal eye analysis requires a canonical subject-shape publication. "
+            "Refined-subject geometry is available only with an explicit refined-keypoint "
+            "diagnostic source."
+        )
+    refined_context = publication.source.context
+    nested = refined_context.assignment_keypoint_surfaces
+    assignment_authority = refined_context.assignment_keypoint_authority
+    if (
+        nested is None
+        or assignment_authority.record.get("status") != "used"
+    ):
+        raise ValueError(
+            "The selected subject-shape publication does not seal canonical assignment "
+            "keypoints; future-normal eye analysis must fail closed."
+        )
+    path = str(nested.context.run_path)
+    if not path.startswith("keypoints_runs/") or path.count("/") != 1:
+        raise ValueError("Subject-shape assignment names a noncanonical keypoint path.")
+    run_name = path.split("/", 1)[1]
+    if expected_keypoint_run is not None and expected_keypoint_run != run_name:
+        raise ValueError(
+            "--keypoint-run differs from the exact base keypoint run sealed by "
+            "the selected subject-shape publication."
+        )
+    surfaces = load_persisted_keypoint_coordinate_surfaces(root, path)
+    if (
+        surfaces.context.run_path != path
+        or surfaces.derivation.record_sha256 != nested.derivation.record_sha256
+        or surfaces.context.row_identity.record_sha256
+        != nested.context.row_identity.record_sha256
+        or surfaces.keypoints_roi.descriptor.digest()
+        != nested.keypoints_roi.descriptor.digest()
+    ):
+        raise ValueError(
+            "Fresh canonical keypoint proof differs from the subject-shape assignment proof."
+        )
+    group = root.get(path)
+    if group is None or "detection_success" not in group:
+        raise ValueError("Canonical assignment keypoint run lacks detection_success.")
+    success = group["detection_success"]
+    expected_success = assignment_authority.record.get("success", {}).get("payload")
+    expected_keypoints = assignment_authority.record.get("keypoints_roi", {}).get(
+        "payload"
+    )
+    if (
+        not isinstance(expected_success, Mapping)
+        or not isinstance(expected_keypoints, Mapping)
+        or array_values_sha256(success)
+        != expected_success.get("array_values_sha256")
+        or array_values_sha256(group["keypoints_roi"])
+        != expected_keypoints.get("array_values_sha256")
+    ):
+        raise ValueError(
+            "Canonical eye keypoint values differ from the subject-shape assignment authority."
+        )
+    alignment = _require_ordered_eye_row_alignment(
+        publication.row_identity,
+        surfaces.context.row_identity,
+        publication.temporal_authority,
+        surfaces.context.temporal_authority,
+    )
+    authority = _build_staged_canonical_keypoint_authority(
+        eye_geometry=eye_geometry,
+        surfaces=surfaces,
+        assignment_authority=assignment_authority,
+        alignment=alignment,
+    )
+    authority_arrays = authority["arrays"]
+    if (
+        authority_arrays["keypoints_roi"]["content_sha256"]
+        != expected_keypoints.get("array_values_sha256")
+        or authority_arrays["detection_success"]["content_sha256"]
+        != expected_success.get("array_values_sha256")
+        or authority_arrays["instance_key"]["content_sha256"]
+        != alignment["shared_instance_key_content_sha256"]
+        or authority_arrays["source_acquisition_frame_index"]["content_sha256"]
+        != alignment["shared_frame_index_content_sha256"]
+    ):
+        raise ValueError(
+            "Canonical eye keypoint payload changed while its detached authority "
+            "was being sealed."
+        )
+    return (
+        group,
+        path,
+        run_name,
+        tuple(surfaces.context.keypoint_labels),
+        surfaces,
+        authority,
+        int(surfaces.context.temporal_authority.record.source_total_frames),
+    )
+
+
+def _resolve_refined_keypoint_diagnostic(
+    root: zarr.Group,
+    *,
+    run_name: str,
+) -> tuple[zarr.Group, str, tuple[str, ...], Optional[zarr.Group], Optional[str]]:
+    parent = root.get("refined_keypoints_runs")
+    if parent is None or run_name not in parent:
+        raise ValueError(f"Explicit refined-keypoint diagnostic run {run_name!r} is missing.")
+    group = parent[run_name]
+    if (
+        group.attrs.get("palette_run_completion_status") != "complete"
+        or group.attrs.get("stage_selector_eligible") is not False
+        or group.attrs.get("coordinate_contract")
+        != "palette.refined_keypoints.legacy_unverified_nonselector.v1"
+        or group.attrs.get("legacy_unverified_diagnostic_output") is not True
+        or group.attrs.get("publication_scope") != "historical_diagnostic_only"
+    ):
+        raise ValueError(
+            "Refined keypoints may enter eye analysis only as an explicitly declared, "
+            "permanently nonselector legacy diagnostic."
+        )
+    for name in (
+        "keypoints_roi",
+        "refined_success",
+        "instance_key",
+        "frame_indices",
+    ):
+        if name not in group:
+            raise ValueError(
+                f"Refined-keypoint diagnostic {run_name!r} lacks exact local {name!r}."
+            )
+    keypoint_count = int(group["keypoints_roi"].shape[1])
+    labels = resolve_keypoint_labels_from_attrs(
+        group.attrs,
+        keypoint_count=keypoint_count,
+    )
+    if not labels:
+        raise ValueError("Refined-keypoint diagnostic lacks exact keypoint labels.")
+    source_name = resolve_source_keypoints_run(group.attrs)
+    source_group = None
+    source_path = None
+    if isinstance(source_name, str) and source_name:
+        source_group = root.get(f"keypoints_runs/{source_name}")
+        source_path = f"keypoints_runs/{source_name}" if source_group is not None else None
+    return group, f"refined_keypoints_runs/{run_name}", tuple(labels), source_group, source_path
+
+
 def _resolve_eye_angle_inputs(
     root: zarr.Group,
     *,
     subject_shape_run: Optional[str],
     refined_subject_run: Optional[str],
     keypoint_run: Optional[str],
+    diagnostic_refined_keypoint_run: Optional[str] = None,
+    _staged_subject_shape_authority: Optional[Mapping[str, Any]] = None,
+    _staged_keypoint_authority: Optional[Mapping[str, Any]] = None,
+    _verify_staged_payload: bool = True,
 ) -> EyeAngleInputContext:
+    expected_keypoint_run = _exact_child_run_name(
+        keypoint_run,
+        label="Canonical base keypoint run",
+    )
+    diagnostic_run = _exact_child_run_name(
+        diagnostic_refined_keypoint_run,
+        label="Diagnostic refined-keypoint run",
+    )
+    if expected_keypoint_run is not None and diagnostic_run is not None:
+        raise ValueError(
+            "Canonical --keypoint-run and --diagnostic-refined-keypoint-run are mutually exclusive."
+        )
+    if diagnostic_run is not None and (
+        _staged_subject_shape_authority is not None
+        or _staged_keypoint_authority is not None
+    ):
+        raise ValueError("Staged/materialized eye analysis cannot use refined diagnostics.")
     eye_geometry = resolve_eye_geometry_source(
         root,
         subject_shape_run=subject_shape_run,
         refined_subject_run=refined_subject_run,
         prefer_subject_shape=True,
         prefer_subject=True,
+        _staged_subject_shape_authority=_staged_subject_shape_authority,
+        _verify_staged_payload=_verify_staged_payload,
     )
-
-    kp_parent = root.get("refined_keypoints_runs")
-    if kp_parent is None:
-        raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
-    keypoint_run_name = _resolve_keypoint_run_name(
-        explicit_keypoint_run=keypoint_run,
-        refined_attrs=dict(eye_geometry.lineage_attrs),
-        parent_latest=kp_parent.attrs.get("latest"),
-    )
-    if not keypoint_run_name or keypoint_run_name not in kp_parent:
-        raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
-    kp_group = kp_parent[keypoint_run_name]
-    kp_group_path = f"refined_keypoints_runs/{keypoint_run_name}"
-
-    source_kp_run_name = resolve_source_keypoints_run(kp_group.attrs)
-    source_kp_group = None
-    source_kp_group_path = None
-    if source_kp_run_name:
-        source_kp_parent = root.get("keypoints_runs")
-        if source_kp_parent and source_kp_run_name in source_kp_parent:
-            source_kp_group = source_kp_parent[source_kp_run_name]
-            source_kp_group_path = f"keypoints_runs/{source_kp_run_name}"
-
-    required_kp = ["keypoints_roi", "heading"]
-    for dataset in required_kp:
-        if dataset not in kp_group:
-            raise ValueError(f"Keypoint run '{keypoint_run_name}' missing dataset '{dataset}'.")
-
-    if "refined_success" in kp_group:
-        detection_success_key = "refined_success"
-        detection_success_source = kp_group
-        detection_success_path = f"{kp_group_path}/{detection_success_key}"
-    elif "detection_success" in kp_group:
+    if diagnostic_run is None:
+        (
+            kp_group,
+            kp_group_path,
+            keypoint_run_name,
+            keypoint_labels,
+            canonical_surfaces,
+            canonical_authority,
+            source_total_frames,
+        ) = _resolve_canonical_eye_keypoints(
+            root,
+            eye_geometry=eye_geometry,
+            expected_keypoint_run=expected_keypoint_run,
+            staged_keypoint_authority=_staged_keypoint_authority,
+            staged_subject_shape_authority=_staged_subject_shape_authority,
+            verify_staged_payload=_verify_staged_payload,
+        )
+        source_kp_group = None
+        source_kp_run_name = None
+        source_kp_group_path = None
         detection_success_key = "detection_success"
-        detection_success_source = kp_group
-        detection_success_path = f"{kp_group_path}/{detection_success_key}"
-    elif source_kp_group is not None and "detection_success" in source_kp_group:
-        detection_success_key = "detection_success"
-        detection_success_source = source_kp_group
-        detection_success_path = f"{source_kp_group_path}/{detection_success_key}"
+        frame_indices_key = "source_acquisition_frame_index"
+        instance_key_source: Optional[zarr.Group] = kp_group
+        instance_key_key: Optional[str] = "instance_key"
+        instance_key_path: Optional[str] = f"{kp_group_path}/instance_key"
+        keypoint_source_mode = EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
     else:
-        raise ValueError(
-            f"Keypoint run '{keypoint_run_name}' missing detection success data "
-            "(no 'refined_success' or 'detection_success' in refined or source keypoints run)."
+        (
+            kp_group,
+            kp_group_path,
+            keypoint_labels,
+            source_kp_group,
+            source_kp_group_path,
+        ) = _resolve_refined_keypoint_diagnostic(root, run_name=diagnostic_run)
+        keypoint_run_name = diagnostic_run
+        source_kp_run_name = resolve_source_keypoints_run(kp_group.attrs)
+        detection_success_key = "refined_success"
+        frame_indices_key = "frame_indices"
+        instance_key_source = kp_group if "instance_key" in kp_group else None
+        instance_key_key = "instance_key" if instance_key_source is not None else None
+        instance_key_path = (
+            f"{kp_group_path}/instance_key" if instance_key_source is not None else None
         )
+        canonical_surfaces = None
+        canonical_authority = None
+        source_total_frames = None
+        keypoint_source_mode = EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC
 
-    frame_indices_source = kp_group if "frame_indices" in kp_group else source_kp_group
-    if frame_indices_source is None or "frame_indices" not in frame_indices_source:
-        raise ValueError(
-            f"Keypoint run '{keypoint_run_name}' missing 'frame_indices' "
-            "(not in refined or source keypoints run)."
-        )
-    frame_indices_path = (
-        f"{kp_group_path}/frame_indices"
-        if frame_indices_source is kp_group
-        else f"{source_kp_group_path}/frame_indices"
-    )
+    detection_success_source = kp_group
+    detection_success_path = f"{kp_group_path}/{detection_success_key}"
+    frame_indices_source = kp_group
+    frame_indices_path = f"{kp_group_path}/{frame_indices_key}"
 
     total_detections = eye_geometry.ellipse_params.shape[0]
     if kp_group["keypoints_roi"].shape[0] != total_detections:
         raise ValueError("Mismatch between eye geometry source and keypoint detections.")
+    row_count = int(total_detections)
+    if (
+        tuple(int(value) for value in kp_group[detection_success_key].shape)
+        != (row_count,)
+        or np.dtype(kp_group[detection_success_key].dtype) != np.dtype(bool)
+        or tuple(int(value) for value in kp_group[frame_indices_key].shape)
+        != (row_count,)
+    ):
+        raise ValueError("Eye keypoint success or acquisition-frame axis is not row aligned.")
+    if (
+        instance_key_source is None
+        or tuple(int(value) for value in instance_key_source["instance_key"].shape)
+        != (row_count,)
+        or np.dtype(instance_key_source["instance_key"].dtype) != np.dtype("<u8")
+    ):
+        raise ValueError("Eye keypoint inputs require exact uint64 instance_key rows.")
 
     return EyeAngleInputContext(
         eye_geometry=eye_geometry,
@@ -2352,10 +3313,841 @@ def _resolve_eye_angle_inputs(
         detection_success_key=detection_success_key,
         detection_success_path=detection_success_path,
         frame_indices_source=frame_indices_source,
+        frame_indices_key=frame_indices_key,
         frame_indices_path=frame_indices_path,
+        instance_key_source=instance_key_source,
+        instance_key_key=instance_key_key,
+        instance_key_path=instance_key_path,
         keypoint_run_name=keypoint_run_name,
-        keypoint_indices=_resolve_head_keypoint_indices(kp_group),
+        keypoint_indices=_resolve_head_keypoint_indices(
+            kp_group,
+            labels=keypoint_labels,
+        ),
+        keypoint_labels=tuple(keypoint_labels),
+        keypoint_source_mode=keypoint_source_mode,
+        source_total_frames=source_total_frames,
+        canonical_keypoint_surfaces=canonical_surfaces,
+        canonical_keypoint_authority=canonical_authority,
     )
+
+
+def _resolved_eye_angle_input_identity(
+    context: EyeAngleInputContext,
+) -> Dict[str, object]:
+    """Capture exact run/path selection plus its stable scientific contract."""
+
+    geometry = context.eye_geometry
+    return _canonical_json_copy(
+        {
+            "eye_geometry_stage": geometry.stage_group,
+            "eye_geometry_run": geometry.run_name,
+            "eye_geometry_path": geometry.group_path,
+            "source_authority_mode": getattr(
+                geometry,
+                "source_authority_mode",
+                "canonical_publication",
+            )
+            or "canonical_publication",
+            "keypoint_source_mode": context.keypoint_source_mode,
+            "keypoints_run": context.keypoint_run_name,
+            "keypoints_path": context.kp_group_path,
+            "diagnostic_base_keypoints_run": context.source_kp_run_name,
+            "diagnostic_base_keypoints_path": context.source_kp_group_path,
+            "detection_success_path": context.detection_success_path,
+            "instance_key_path": context.instance_key_path,
+            "source_acquisition_frame_index_path": context.frame_indices_path,
+            "resolved_head_keypoint_indices": {
+                key: int(value) for key, value in context.keypoint_indices.items()
+            },
+            "source_contracts": _eye_angle_source_contracts(context),
+        }
+    )
+
+
+def _staged_input_source_identity(context: EyeAngleInputContext) -> dict[str, Any]:
+    geometry = context.eye_geometry
+    return {
+        "eye_geometry_stage": str(geometry.stage_group),
+        "eye_geometry_run": str(geometry.run_name),
+        "eye_geometry_path": str(geometry.group_path),
+        "keypoint_source_mode": str(context.keypoint_source_mode),
+        "keypoints_run": str(context.keypoint_run_name),
+        "keypoints_path": str(context.kp_group_path),
+        "diagnostic_base_keypoints_run": context.source_kp_run_name,
+        "diagnostic_base_keypoints_path": context.source_kp_group_path,
+        "detection_success_path": str(context.detection_success_path),
+        "instance_key_path": context.instance_key_path,
+        "source_acquisition_frame_index_path": str(context.frame_indices_path),
+    }
+
+
+def _logical_input_source_specs(
+    context: EyeAngleInputContext,
+) -> dict[str, dict[str, Any]]:
+    geometry = context.eye_geometry
+    geometry_path = str(geometry.group_path)
+    ellipse_param_nodes = (
+        geometry.group["components/eye_left/ellipse_params"],
+        geometry.group["components/eye_right/ellipse_params"],
+    )
+    ellipse_success_nodes = (
+        geometry.group["components/eye_left/ellipse_success"],
+        geometry.group["components/eye_right/ellipse_success"],
+    )
+    direct_nodes = {
+        "keypoints_roi": context.kp_group["keypoints_roi"],
+        "detection_success": context.detection_success_source[
+            context.detection_success_key
+        ],
+        "instance_key": context.instance_key_source[context.instance_key_key],
+        "source_acquisition_frame_index": context.frame_indices_source[
+            context.frame_indices_key
+        ],
+    }
+
+    def source_metadata(nodes: Sequence[Any]) -> tuple[list[str], list[list[int]]]:
+        return (
+            [np.dtype(node.dtype).str for node in nodes],
+            [[int(value) for value in node.shape] for node in nodes],
+        )
+
+    param_dtypes, param_shapes = source_metadata(ellipse_param_nodes)
+    success_dtypes, success_shapes = source_metadata(ellipse_success_nodes)
+    specs: dict[str, dict[str, Any]] = {
+        "ellipse_params": {
+            "source_array_refs": [
+                f"{geometry_path}/components/eye_left/ellipse_params",
+                f"{geometry_path}/components/eye_right/ellipse_params",
+            ],
+            "source_dtypes": param_dtypes,
+            "source_shapes": param_shapes,
+            "assembly": "stack_axis_1_eye_left_then_eye_right",
+            "snapshot_dtype": np.dtype(geometry.ellipse_params.dtype).str,
+            "snapshot_shape": [int(value) for value in geometry.ellipse_params.shape],
+            "canonicalization": EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION,
+        },
+        "ellipse_success": {
+            "source_array_refs": [
+                f"{geometry_path}/components/eye_left/ellipse_success",
+                f"{geometry_path}/components/eye_right/ellipse_success",
+            ],
+            "source_dtypes": success_dtypes,
+            "source_shapes": success_shapes,
+            "assembly": "stack_axis_1_eye_left_then_eye_right",
+            "snapshot_dtype": np.dtype(geometry.ellipse_success.dtype).str,
+            "snapshot_shape": [int(value) for value in geometry.ellipse_success.shape],
+            "canonicalization": EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION,
+        },
+    }
+    direct_paths = {
+        "keypoints_roi": f"{context.kp_group_path}/keypoints_roi",
+        "detection_success": context.detection_success_path,
+        "instance_key": context.instance_key_path,
+        "source_acquisition_frame_index": context.frame_indices_path,
+    }
+    normalized_dtypes = {
+        "detection_success": np.dtype(bool).str,
+        "instance_key": np.dtype("<u8").str,
+        "source_acquisition_frame_index": np.dtype(np.int64).str,
+    }
+    normalized_assemblies = {
+        "detection_success": "owned_c_order_astype_bool",
+        "instance_key": "owned_c_order_astype_uint64",
+        "source_acquisition_frame_index": "owned_c_order_astype_int64",
+    }
+    for name, node in direct_nodes.items():
+        snapshot_dtype = normalized_dtypes.get(name, np.dtype(node.dtype).str)
+        specs[name] = {
+            "source_array_refs": [str(direct_paths[name])],
+            "source_dtypes": [np.dtype(node.dtype).str],
+            "source_shapes": [[int(value) for value in node.shape]],
+            "assembly": normalized_assemblies.get(name, "owned_c_order_identity"),
+            "snapshot_dtype": snapshot_dtype,
+            "snapshot_shape": [int(value) for value in node.shape],
+            "canonicalization": EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION,
+        }
+    return {name: specs[name] for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS}
+
+
+def _owned_c_array(values: Any, *, dtype: Any = None) -> np.ndarray:
+    array = np.array(values, dtype=dtype, copy=True, order="C")
+    if array.dtype.hasobject:
+        raise ValueError("Eye-angle worker inputs cannot use object-reference dtype.")
+    array.setflags(write=False)
+    return array
+
+
+def _load_eye_angle_chunk_input_snapshot(
+    context: EyeAngleInputContext,
+    *,
+    start_row: int,
+    stop_row: int,
+) -> _EyeAngleChunkInputSnapshot:
+    row_count = int(context.eye_geometry.ellipse_params.shape[0])
+    if (
+        type(start_row) is not int
+        or type(stop_row) is not int
+        or not (0 <= start_row < stop_row <= row_count)
+    ):
+        raise ValueError("Eye-angle input snapshot row bounds are invalid.")
+    row_slice = slice(start_row, stop_row)
+    return _EyeAngleChunkInputSnapshot(
+        ellipse_params=_owned_c_array(
+            context.eye_geometry.ellipse_params[row_slice]
+        ),
+        ellipse_success=_owned_c_array(
+            context.eye_geometry.ellipse_success[row_slice]
+        ),
+        keypoints_roi=_owned_c_array(context.kp_group["keypoints_roi"][row_slice]),
+        detection_success=_owned_c_array(
+            context.detection_success_source[context.detection_success_key][row_slice],
+            dtype=bool,
+        ),
+        instance_key=_owned_c_array(
+            context.instance_key_source[context.instance_key_key][row_slice],
+            dtype=np.uint64,
+        ),
+        source_acquisition_frame_index=_owned_c_array(
+            context.frame_indices_source[context.frame_indices_key][row_slice],
+            dtype=np.int64,
+        ),
+    )
+
+
+def _chunk_snapshot_arrays(
+    snapshot: _EyeAngleChunkInputSnapshot,
+) -> dict[str, np.ndarray]:
+    return {
+        name: getattr(snapshot, name)
+        for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS
+    }
+
+
+def _snapshot_payload_record(values: np.ndarray) -> dict[str, Any]:
+    return {
+        "dtype": np.dtype(values.dtype).str,
+        "shape": [int(value) for value in values.shape],
+        "canonicalization": EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION,
+        "content_sha256": array_values_sha256(values),
+    }
+
+
+def _keypoint_axis_receipt(context: EyeAngleInputContext) -> dict[str, Any]:
+    labels = tuple(context.keypoint_labels)
+    if not labels:
+        raise ValueError(
+            "Staged eye-angle integrity requires exact resolved keypoint labels."
+        )
+    return {
+        "resolved_labels": [str(label) for label in labels],
+        "resolved_head_keypoint_indices": {
+            key: int(value) for key, value in context.keypoint_indices.items()
+        },
+    }
+
+
+def _chunk_integrity_record(
+    snapshot: _EyeAngleChunkInputSnapshot,
+    *,
+    chunk_index: int,
+    start_row: int,
+    stop_row: int,
+) -> dict[str, Any]:
+    body = {
+        "schema_id": EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_ID,
+        "schema_version": EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_VERSION,
+        "chunk_index": int(chunk_index),
+        "start_row": int(start_row),
+        "stop_row": int(stop_row),
+        "logical_inputs": {
+            name: _snapshot_payload_record(values)
+            for name, values in _chunk_snapshot_arrays(snapshot).items()
+        },
+    }
+    return {**body, "record_sha256": _canonical_json_sha256(body)}
+
+
+def _verify_receipt_geometry_payloads(
+    context: EyeAngleInputContext,
+    parts: Mapping[str, Sequence[np.ndarray]],
+) -> None:
+    authority = getattr(context.eye_geometry, "source_authority", None)
+    allowed = authority.get("allowed_arrays") if isinstance(authority, Mapping) else None
+    if not isinstance(allowed, Mapping):
+        raise ValueError(
+            "Staged eye-angle integrity lacks canonical subject-shape payload authority."
+        )
+    relative_paths = {
+        "left_params": "components/eye_left/ellipse_params",
+        "right_params": "components/eye_right/ellipse_params",
+        "left_success": "components/eye_left/ellipse_success",
+        "right_success": "components/eye_right/ellipse_success",
+    }
+    for key, relative_path in relative_paths.items():
+        node = context.eye_geometry.group[relative_path]
+        values = (
+            np.concatenate(tuple(parts[key]), axis=0)
+            if parts[key]
+            else np.empty(tuple(int(value) for value in node.shape), dtype=node.dtype)
+        )
+        declared = allowed.get(relative_path)
+        if (
+            not isinstance(declared, Mapping)
+            or array_values_sha256(values) != declared.get("content_sha256")
+        ):
+            raise ValueError(
+                f"Staged eye-angle snapshot for {relative_path!r} differs from "
+                "canonical subject-shape payload authority."
+            )
+
+
+def _build_staged_eye_angle_input_integrity_receipt(
+    context: EyeAngleInputContext,
+    *,
+    chunk_rows: int,
+    fps: Optional[float],
+    fps_source: str,
+) -> dict[str, Any]:
+    """Seal exact staged worker inputs without granting coordinate authority."""
+
+    if type(chunk_rows) is not int or chunk_rows <= 0:
+        raise ValueError("Staged eye-angle integrity chunk_rows must be positive.")
+    if fps_source not in {
+        "cli_override",
+        "authoritative_recording_metadata",
+        "unavailable",
+    }:
+        raise ValueError("Staged eye-angle integrity fps_source is unsupported.")
+    canonical_fps = None if fps is None else float(fps)
+    if (canonical_fps is None) != (fps_source == "unavailable") or (
+        canonical_fps is not None and canonical_fps <= 0.0
+    ):
+        raise ValueError("Staged eye-angle integrity FPS value and source disagree.")
+    geometry = context.eye_geometry
+    authority = getattr(geometry, "source_authority", None)
+    if (
+        getattr(geometry, "source_authority_mode", None)
+        not in {"canonical_publication", "digest_bound_staged_subset"}
+        or not isinstance(authority, Mapping)
+        or not _is_sha256(authority.get("record_sha256"))
+    ):
+        raise ValueError(
+            "Staged eye-angle input integrity requires canonical subject-shape "
+            "authority or its exact digest-bound staged subset."
+        )
+    keypoint_authority = context.canonical_keypoint_authority
+    if (
+        context.keypoint_source_mode != EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+        or not isinstance(keypoint_authority, Mapping)
+        or not _is_sha256(keypoint_authority.get("record_sha256"))
+    ):
+        raise ValueError(
+            "Staged eye-angle input integrity requires the canonical base "
+            "keypoints sealed by subject shape."
+        )
+
+    row_count = int(geometry.ellipse_params.shape[0])
+    chunk_records: list[dict[str, Any]] = []
+    geometry_parts: dict[str, list[np.ndarray]] = {
+        "left_params": [],
+        "right_params": [],
+        "left_success": [],
+        "right_success": [],
+    }
+    for chunk_index, (start_row, stop_row) in enumerate(
+        _row_chunks(row_count, chunk_rows)
+    ):
+        snapshot = _load_eye_angle_chunk_input_snapshot(
+            context,
+            start_row=start_row,
+            stop_row=stop_row,
+        )
+        chunk_records.append(
+            _chunk_integrity_record(
+                snapshot,
+                chunk_index=chunk_index,
+                start_row=start_row,
+                stop_row=stop_row,
+            )
+        )
+        geometry_parts["left_params"].append(snapshot.ellipse_params[:, 0, ...])
+        geometry_parts["right_params"].append(snapshot.ellipse_params[:, 1, ...])
+        geometry_parts["left_success"].append(snapshot.ellipse_success[:, 0, ...])
+        geometry_parts["right_success"].append(snapshot.ellipse_success[:, 1, ...])
+    _verify_receipt_geometry_payloads(context, geometry_parts)
+
+    body = {
+        "schema_id": EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCHEMA_ID,
+        "schema_version": EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCHEMA_VERSION,
+        "integrity_scope": EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCOPE,
+        "receipt_role": "materializer_private_integrity_not_coordinate_authority",
+        "source_identity": _staged_input_source_identity(context),
+        "source_contract_sha256": _canonical_json_sha256(
+            _eye_angle_source_contracts(context)
+        ),
+        "subject_shape_authority_sha256": str(authority["record_sha256"]),
+        "subject_shape_authority": _canonical_json_copy(authority),
+        "canonical_keypoint_authority_sha256": str(
+            keypoint_authority["record_sha256"]
+        ),
+        "canonical_keypoint_authority": _canonical_json_copy(
+            keypoint_authority
+        ),
+        "keypoint_axis": _keypoint_axis_receipt(context),
+        "scientific_parameters": {
+            "fps": canonical_fps,
+            "fps_source": fps_source,
+        },
+        "row_count": row_count,
+        "requested_chunk_rows": int(chunk_rows),
+        "logical_inputs": _logical_input_source_specs(context),
+        "chunks": chunk_records,
+        "closed_logical_input_inventory": True,
+        "normal_reader_authority": False,
+        "coordinate_authority": False,
+    }
+    receipt = {**body, "record_sha256": _canonical_json_sha256(body)}
+    # Re-read every logical input and compare it with the just-captured
+    # chunks.  This is the keypoint-side counterpart to the canonical
+    # subject-shape loader's two-read payload binding.
+    return _validate_staged_eye_angle_input_integrity_receipt(
+        context,
+        receipt,
+        verify_payload=True,
+    )
+
+
+def _canonical_chunk_integrity_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Staged eye-angle chunk receipt must be a mapping.")
+    canonical = _canonical_json_copy(value)
+    digest = canonical.pop("record_sha256", None)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "chunk_index",
+        "start_row",
+        "stop_row",
+        "logical_inputs",
+    }
+    if set(canonical) != expected_fields:
+        raise ValueError("Staged eye-angle chunk receipt fields are not exact.")
+    if (
+        canonical.get("schema_id") != EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_ID
+        or type(canonical.get("schema_version")) is not int
+        or canonical.get("schema_version")
+        != EYE_ANGLE_STAGED_INPUT_CHUNK_SCHEMA_VERSION
+        or not _is_sha256(digest)
+        or digest != _canonical_json_sha256(canonical)
+    ):
+        raise ValueError("Staged eye-angle chunk receipt is unsupported or stale.")
+    start_row = canonical.get("start_row")
+    stop_row = canonical.get("stop_row")
+    chunk_index = canonical.get("chunk_index")
+    if (
+        type(chunk_index) is not int
+        or chunk_index < 0
+        or type(start_row) is not int
+        or type(stop_row) is not int
+        or not (0 <= start_row < stop_row)
+    ):
+        raise ValueError("Staged eye-angle chunk receipt bounds are invalid.")
+    logical = canonical.get("logical_inputs")
+    if not isinstance(logical, Mapping) or set(logical) != set(
+        _EYE_ANGLE_WORKER_LOGICAL_INPUTS
+    ):
+        raise ValueError("Staged eye-angle chunk logical input inventory is not closed.")
+    row_count = stop_row - start_row
+    for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS:
+        record = logical.get(name)
+        if not isinstance(record, Mapping) or set(record) != {
+            "dtype",
+            "shape",
+            "canonicalization",
+            "content_sha256",
+        }:
+            raise ValueError(
+                f"Staged eye-angle chunk payload record for {name!r} is not exact."
+            )
+        shape = record.get("shape")
+        dtype = record.get("dtype")
+        try:
+            canonical_dtype = np.dtype(dtype).str
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Staged eye-angle chunk dtype for {name!r} is invalid."
+            ) from exc
+        if (
+            canonical_dtype != dtype
+            or not isinstance(shape, list)
+            or not shape
+            or any(type(item) is not int or item < 0 for item in shape)
+            or shape[0] != row_count
+            or record.get("canonicalization")
+            != EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION
+            or not _is_sha256(record.get("content_sha256"))
+        ):
+            raise ValueError(
+                f"Staged eye-angle chunk payload record for {name!r} is invalid."
+            )
+    return {**canonical, "record_sha256": str(digest)}
+
+
+def _canonical_staged_input_integrity_receipt(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Staged eye-angle input integrity receipt must be a mapping.")
+    canonical = _canonical_json_copy(value)
+    digest = canonical.pop("record_sha256", None)
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "integrity_scope",
+        "receipt_role",
+        "source_identity",
+        "source_contract_sha256",
+        "subject_shape_authority_sha256",
+        "subject_shape_authority",
+        "canonical_keypoint_authority_sha256",
+        "canonical_keypoint_authority",
+        "keypoint_axis",
+        "scientific_parameters",
+        "row_count",
+        "requested_chunk_rows",
+        "logical_inputs",
+        "chunks",
+        "closed_logical_input_inventory",
+        "normal_reader_authority",
+        "coordinate_authority",
+    }
+    if set(canonical) != expected_fields:
+        raise ValueError("Staged eye-angle input integrity receipt fields are not exact.")
+    if (
+        canonical.get("schema_id") != EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCHEMA_ID
+        or type(canonical.get("schema_version")) is not int
+        or canonical.get("schema_version")
+        != EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCHEMA_VERSION
+        or canonical.get("integrity_scope")
+        != EYE_ANGLE_STAGED_INPUT_INTEGRITY_SCOPE
+        or canonical.get("receipt_role")
+        != "materializer_private_integrity_not_coordinate_authority"
+        or canonical.get("closed_logical_input_inventory") is not True
+        or canonical.get("normal_reader_authority") is not False
+        or canonical.get("coordinate_authority") is not False
+        or not _is_sha256(digest)
+        or digest != _canonical_json_sha256(canonical)
+    ):
+        raise ValueError("Staged eye-angle input integrity receipt is unsupported or stale.")
+    if not _is_sha256(canonical.get("source_contract_sha256")):
+        raise ValueError("Staged eye-angle source-contract digest is invalid.")
+    scientific_parameters = canonical.get("scientific_parameters")
+    if (
+        not isinstance(scientific_parameters, Mapping)
+        or set(scientific_parameters) != {"fps", "fps_source"}
+        or scientific_parameters.get("fps_source")
+        not in {
+            "cli_override",
+            "authoritative_recording_metadata",
+            "unavailable",
+        }
+    ):
+        raise ValueError("Staged eye-angle scientific parameters are invalid.")
+    fps_value = scientific_parameters.get("fps")
+    if (
+        fps_value is not None
+        and (type(fps_value) not in {int, float} or float(fps_value) <= 0.0)
+    ) or ((fps_value is None) != (scientific_parameters.get("fps_source") == "unavailable")):
+        raise ValueError("Staged eye-angle FPS value and source disagree.")
+
+    authority = canonical.get("subject_shape_authority")
+    authority_sha = canonical.get("subject_shape_authority_sha256")
+    if not isinstance(authority, Mapping) or not _is_sha256(authority_sha):
+        raise ValueError("Staged eye-angle receipt lacks subject-shape authority.")
+    authority_body = _canonical_json_copy(authority)
+    authority_digest = authority_body.pop("record_sha256", None)
+    if (
+        authority_digest != authority_sha
+        or not _is_sha256(authority_digest)
+        or authority_digest != _canonical_json_sha256(authority_body)
+        or authority.get("normal_reader_authority") is not False
+    ):
+        raise ValueError("Nested subject-shape authority is missing or stale.")
+
+    keypoint_authority = _canonical_staged_keypoint_authority(
+        canonical.get("canonical_keypoint_authority")
+    )
+    if (
+        canonical.get("canonical_keypoint_authority_sha256")
+        != keypoint_authority["record_sha256"]
+    ):
+        raise ValueError("Nested canonical keypoint authority is missing or stale.")
+    canonical["canonical_keypoint_authority"] = keypoint_authority
+
+    row_count = canonical.get("row_count")
+    chunk_rows = canonical.get("requested_chunk_rows")
+    if (
+        type(row_count) is not int
+        or row_count < 0
+        or type(chunk_rows) is not int
+        or chunk_rows <= 0
+    ):
+        raise ValueError("Staged eye-angle receipt row or chunk count is invalid.")
+    logical_specs = canonical.get("logical_inputs")
+    if not isinstance(logical_specs, Mapping) or set(logical_specs) != set(
+        _EYE_ANGLE_WORKER_LOGICAL_INPUTS
+    ):
+        raise ValueError("Staged eye-angle logical input specification is not closed.")
+    spec_fields = {
+        "source_array_refs",
+        "source_dtypes",
+        "source_shapes",
+        "assembly",
+        "snapshot_dtype",
+        "snapshot_shape",
+        "canonicalization",
+    }
+    for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS:
+        spec = logical_specs.get(name)
+        if not isinstance(spec, Mapping) or set(spec) != spec_fields:
+            raise ValueError(
+                f"Staged eye-angle logical input specification for {name!r} is not exact."
+            )
+        refs = spec.get("source_array_refs")
+        source_dtypes = spec.get("source_dtypes")
+        source_shapes = spec.get("source_shapes")
+        snapshot_shape = spec.get("snapshot_shape")
+        if (
+            not isinstance(refs, list)
+            or not refs
+            or any(not isinstance(item, str) or not item for item in refs)
+            or not isinstance(source_dtypes, list)
+            or len(source_dtypes) != len(refs)
+            or not isinstance(source_shapes, list)
+            or len(source_shapes) != len(refs)
+            or not isinstance(snapshot_shape, list)
+            or not snapshot_shape
+            or snapshot_shape[0] != row_count
+            or spec.get("canonicalization")
+            != EYE_ANGLE_INPUT_PAYLOAD_CANONICALIZATION
+        ):
+            raise ValueError(
+                f"Staged eye-angle logical input specification for {name!r} is invalid."
+            )
+        try:
+            if np.dtype(spec.get("snapshot_dtype")).str != spec.get(
+                "snapshot_dtype"
+            ):
+                raise ValueError
+            if any(np.dtype(item).str != item for item in source_dtypes):
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Staged eye-angle logical input dtype specification for {name!r} is invalid."
+            ) from exc
+        if any(
+            not isinstance(shape, list)
+            or not shape
+            or any(type(item) is not int or item < 0 for item in shape)
+            for shape in source_shapes
+        ) or any(type(item) is not int or item < 0 for item in snapshot_shape):
+            raise ValueError(
+                f"Staged eye-angle logical input shape specification for {name!r} is invalid."
+            )
+
+    chunks = canonical.get("chunks")
+    if not isinstance(chunks, list):
+        raise ValueError("Staged eye-angle receipt chunk inventory must be a list.")
+    canonical_chunks: list[dict[str, Any]] = []
+    cursor = 0
+    for expected_index, raw_chunk in enumerate(chunks):
+        chunk = _canonical_chunk_integrity_record(raw_chunk)
+        if (
+            chunk["chunk_index"] != expected_index
+            or chunk["start_row"] != cursor
+            or chunk["stop_row"] > row_count
+            or chunk["stop_row"] - chunk["start_row"] > chunk_rows
+            or (
+                chunk["stop_row"] < row_count
+                and chunk["stop_row"] - chunk["start_row"] != chunk_rows
+            )
+        ):
+            raise ValueError(
+                "Staged eye-angle chunk receipts have a gap, overlap, or wrong order."
+            )
+        for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS:
+            payload = chunk["logical_inputs"][name]
+            spec = logical_specs[name]
+            expected_shape = [
+                chunk["stop_row"] - chunk["start_row"],
+                *spec["snapshot_shape"][1:],
+            ]
+            if (
+                payload["dtype"] != spec["snapshot_dtype"]
+                or payload["shape"] != expected_shape
+            ):
+                raise ValueError(
+                    f"Staged eye-angle chunk payload for {name!r} differs from its "
+                    "logical input specification."
+                )
+        cursor = int(chunk["stop_row"])
+        canonical_chunks.append(chunk)
+    if cursor != row_count or (row_count == 0 and canonical_chunks):
+        raise ValueError("Staged eye-angle chunk receipts do not cover every row exactly once.")
+    canonical["chunks"] = canonical_chunks
+    return {**canonical, "record_sha256": str(digest)}
+
+
+def _staged_subject_shape_authority_from_input_receipt(
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Extract nested coordinate authority only after integrity-envelope validation."""
+
+    canonical = _canonical_staged_input_integrity_receipt(receipt)
+    return _canonical_json_copy(canonical["subject_shape_authority"])
+
+
+def _staged_keypoint_authority_from_input_receipt(
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Extract the materializer-private canonical keypoint subset receipt."""
+
+    canonical = _canonical_staged_input_integrity_receipt(receipt)
+    return _canonical_json_copy(canonical["canonical_keypoint_authority"])
+
+
+def _validate_chunk_snapshot_against_receipt(
+    snapshot: _EyeAngleChunkInputSnapshot,
+    chunk_receipt: Mapping[str, Any],
+) -> str:
+    chunk = _canonical_chunk_integrity_record(chunk_receipt)
+    observed = _chunk_snapshot_arrays(snapshot)
+    errors: list[str] = []
+    for name in _EYE_ANGLE_WORKER_LOGICAL_INPUTS:
+        values = observed[name]
+        expected = chunk["logical_inputs"][name]
+        if np.dtype(values.dtype).str != expected["dtype"]:
+            errors.append(f"{name}: dtype changed")
+        elif [int(value) for value in values.shape] != expected["shape"]:
+            errors.append(f"{name}: shape changed")
+        elif array_values_sha256(values) != expected["content_sha256"]:
+            errors.append(f"{name}: payload changed")
+        elif (
+            values.flags.writeable
+            or not values.flags.c_contiguous
+            or not values.flags.owndata
+        ):
+            errors.append(f"{name}: snapshot is not immutable owned C-order data")
+    if errors:
+        raise ValueError(
+            "Staged eye-angle worker input differs from its exact integrity receipt: "
+            + "; ".join(errors)
+        )
+    return str(chunk["record_sha256"])
+
+
+def _validate_staged_eye_angle_input_integrity_receipt(
+    context: EyeAngleInputContext,
+    receipt: Mapping[str, Any],
+    *,
+    verify_payload: bool,
+) -> dict[str, Any]:
+    """Validate a private integrity receipt without minting reader authority."""
+
+    if type(verify_payload) is not bool:
+        raise ValueError("Staged eye-angle payload verification flag must be an exact bool.")
+    canonical = _canonical_staged_input_integrity_receipt(receipt)
+    geometry = context.eye_geometry
+    authority = getattr(geometry, "source_authority", None)
+    if (
+        getattr(geometry, "source_authority_mode", None)
+        not in {"canonical_publication", "digest_bound_staged_subset"}
+        or not isinstance(authority, Mapping)
+        or _canonical_json_copy(authority) != canonical["subject_shape_authority"]
+        or authority.get("record_sha256")
+        != canonical["subject_shape_authority_sha256"]
+    ):
+        raise ValueError(
+            "Staged eye-angle integrity receipt is not bound to this exact "
+            "subject-shape source authority."
+        )
+    if (
+        context.keypoint_source_mode != EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+        or not isinstance(context.canonical_keypoint_authority, Mapping)
+        or _canonical_json_copy(context.canonical_keypoint_authority)
+        != canonical["canonical_keypoint_authority"]
+        or context.canonical_keypoint_authority.get("record_sha256")
+        != canonical["canonical_keypoint_authority_sha256"]
+    ):
+        raise ValueError(
+            "Staged eye-angle integrity receipt is not bound to this exact "
+            "canonical keypoint source authority."
+        )
+    if canonical["source_identity"] != _staged_input_source_identity(context):
+        raise ValueError("Staged eye-angle receipt names different source runs or paths.")
+    if canonical["source_contract_sha256"] != _canonical_json_sha256(
+        _eye_angle_source_contracts(context)
+    ):
+        raise ValueError("Staged eye-angle source contract differs from its receipt.")
+    if canonical["keypoint_axis"] != _keypoint_axis_receipt(context):
+        raise ValueError("Staged eye-angle keypoint labels or head indices changed.")
+    if canonical["row_count"] != int(geometry.ellipse_params.shape[0]):
+        raise ValueError("Staged eye-angle row count differs from its receipt.")
+    if canonical["logical_inputs"] != _logical_input_source_specs(context):
+        raise ValueError("Staged eye-angle logical input paths or metadata changed.")
+
+    if verify_payload:
+        geometry_parts: dict[str, list[np.ndarray]] = {
+            "left_params": [],
+            "right_params": [],
+            "left_success": [],
+            "right_success": [],
+        }
+        for chunk in canonical["chunks"]:
+            snapshot = _load_eye_angle_chunk_input_snapshot(
+                context,
+                start_row=int(chunk["start_row"]),
+                stop_row=int(chunk["stop_row"]),
+            )
+            _validate_chunk_snapshot_against_receipt(snapshot, chunk)
+            geometry_parts["left_params"].append(snapshot.ellipse_params[:, 0, ...])
+            geometry_parts["right_params"].append(snapshot.ellipse_params[:, 1, ...])
+            geometry_parts["left_success"].append(snapshot.ellipse_success[:, 0, ...])
+            geometry_parts["right_success"].append(snapshot.ellipse_success[:, 1, ...])
+        _verify_receipt_geometry_payloads(context, geometry_parts)
+    return canonical
+
+
+def _load_validated_staged_frame_indices(
+    context: EyeAngleInputContext,
+    receipt: Mapping[str, Any],
+) -> np.ndarray:
+    canonical = _validate_staged_eye_angle_input_integrity_receipt(
+        context,
+        receipt,
+        verify_payload=False,
+    )
+    values = _owned_c_array(
+        context.frame_indices_source[context.frame_indices_key][:],
+        dtype=np.int64,
+    )
+    if values.shape != (int(canonical["row_count"]),):
+        raise ValueError(
+            "Staged full source_acquisition_frame_index snapshot has the wrong shape."
+        )
+    for chunk in canonical["chunks"]:
+        start_row = int(chunk["start_row"])
+        stop_row = int(chunk["stop_row"])
+        expected = chunk["logical_inputs"]["source_acquisition_frame_index"]
+        observed = _owned_c_array(values[start_row:stop_row], dtype=np.int64)
+        if (
+            [int(value) for value in observed.shape] != expected["shape"]
+            or np.dtype(observed.dtype).str != expected["dtype"]
+            or array_values_sha256(observed) != expected["content_sha256"]
+        ):
+            raise ValueError(
+                "Staged full source_acquisition_frame_index snapshot differs from "
+                "its chunk integrity receipt."
+            )
+    return values
 
 
 def _prepare_base_output_arrays(
@@ -2397,6 +4189,13 @@ def _prepare_base_output_arrays(
     _prepare_output_arrays(
         support_group,
         [
+            ("instance_key", (total_detections,), (chunk_len,), "u8"),
+            (
+                "source_acquisition_frame_index",
+                (total_detections,),
+                (chunk_len,),
+                "i8",
+            ),
             ("frame_indices", (total_detections,), (chunk_len,), "i8"),
             ("time_seconds", (total_detections,), (chunk_len,), "f4"),
             ("ellipse_major", (total_detections,), (chunk_len,), "f4"),
@@ -2424,6 +4223,27 @@ def _prepare_base_output_arrays(
     body_frame_group.attrs["reason_encoding"] = REASON_BYTES_ENCODING
     body_frame_group.attrs["reason_bytes_width"] = REASON_BYTES_MIN_WIDTH
     body_frame_group.attrs["reason_bytes_null_terminated"] = True
+    support_group["instance_key"].attrs.update(
+        {
+            "identity_domain": "observation_instance",
+            "identity_mode": "instance_key",
+            "row_axis": EYE_ANGLE_ROW_AXIS,
+        }
+    )
+    support_group["source_acquisition_frame_index"].attrs.update(
+        {
+            "value_kind": "source_acquisition_frame_index",
+            "row_axis": EYE_ANGLE_ROW_AXIS,
+        }
+    )
+    support_group["frame_indices"].attrs.update(
+        {
+            "compatibility_alias_of": "support/source_acquisition_frame_index",
+            "values_must_equal_canonical": True,
+            "value_kind": "source_acquisition_frame_index",
+            "row_axis": EYE_ANGLE_ROW_AXIS,
+        }
+    )
 
 
 def _write_base_eye_angle_result(
@@ -2432,6 +4252,7 @@ def _write_base_eye_angle_result(
     result: EyeAngleResults,
     *,
     frame_indices: np.ndarray,
+    instance_key: np.ndarray,
     time_seconds: np.ndarray,
 ) -> None:
     roi_group = run_group["angles"]["roi"]
@@ -2445,6 +4266,8 @@ def _write_base_eye_angle_result(
     roi_group["right_gaze_xy"][row_slice, :] = result.right_gaze_xy
     for dataset_name, field_name in _BASE_QA_RESULT_FIELDS:
         qa_roi[dataset_name][row_slice] = getattr(result, field_name)
+    support_group["instance_key"][row_slice] = instance_key
+    support_group["source_acquisition_frame_index"][row_slice] = frame_indices
     support_group["frame_indices"][row_slice] = frame_indices
     support_group["time_seconds"][row_slice] = time_seconds
     for dataset_name, field_name in _BASE_SUPPORT_RESULT_FIELDS:
@@ -2466,6 +4289,7 @@ def _process_and_write_eye_angle_chunk_groups(
     chunk_index: int,
     fps: Optional[float],
     execution_backend: str,
+    _staged_input_integrity_chunk: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, object]:
     chunk_start = time.perf_counter()
     row_slice = slice(int(start_row), int(stop_row))
@@ -2478,42 +4302,69 @@ def _process_and_write_eye_angle_chunk_groups(
     }
 
     phase_start = time.perf_counter()
-    ellipse_params = context.eye_geometry.ellipse_params[row_slice]
-    ellipse_success = context.eye_geometry.ellipse_success[row_slice]
-    keypoints_roi = context.kp_group["keypoints_roi"][row_slice]
-    heading_deg = context.kp_group["heading"][row_slice]
-    detection_success = context.detection_success_source[context.detection_success_key][row_slice].astype(bool, copy=False)
-    frame_indices = context.frame_indices_source["frame_indices"][row_slice].astype(np.int64, copy=False)
+    integrity_chunk = (
+        _canonical_chunk_integrity_record(_staged_input_integrity_chunk)
+        if _staged_input_integrity_chunk is not None
+        else None
+    )
+    if integrity_chunk is not None and (
+        integrity_chunk["chunk_index"] != int(chunk_index)
+        or integrity_chunk["start_row"] != int(start_row)
+        or integrity_chunk["stop_row"] != int(stop_row)
+    ):
+        raise ValueError(
+            "Staged eye-angle worker received an integrity receipt for another chunk."
+        )
+    snapshot = _load_eye_angle_chunk_input_snapshot(
+        context,
+        start_row=int(start_row),
+        stop_row=int(stop_row),
+    )
+    chunk_receipt_sha256 = (
+        _validate_chunk_snapshot_against_receipt(snapshot, integrity_chunk)
+        if integrity_chunk is not None
+        else None
+    )
     timing["read_seconds"] = float(time.perf_counter() - phase_start)
 
     phase_start = time.perf_counter()
     chunk_result = _process_chunk(
-        ellipse_params=ellipse_params,
-        ellipse_success=ellipse_success,
-        keypoints_roi=keypoints_roi,
-        heading_deg=heading_deg,
-        detection_success=detection_success,
+        ellipse_params=snapshot.ellipse_params,
+        ellipse_success=snapshot.ellipse_success,
+        keypoints_roi=snapshot.keypoints_roi,
+        detection_success=snapshot.detection_success,
         keypoint_indices=context.keypoint_indices,
     )
     timing["compute_seconds"] = float(time.perf_counter() - phase_start)
 
     if fps:
-        chunk_time_seconds = (frame_indices.astype(np.float64) / float(fps)).astype(np.float32, copy=False)
+        chunk_time_seconds = (
+            snapshot.source_acquisition_frame_index.astype(np.float64) / float(fps)
+        ).astype(np.float32, copy=False)
     else:
-        chunk_time_seconds = np.full(frame_indices.shape, np.nan, dtype=np.float32)
+        chunk_time_seconds = np.full(
+            snapshot.source_acquisition_frame_index.shape,
+            np.nan,
+            dtype=np.float32,
+        )
 
     phase_start = time.perf_counter()
     _write_base_eye_angle_result(
         run_group,
         row_slice,
         chunk_result,
-        frame_indices=frame_indices,
+        frame_indices=snapshot.source_acquisition_frame_index,
+        instance_key=snapshot.instance_key,
         time_seconds=chunk_time_seconds,
     )
     timing["write_seconds"] = float(time.perf_counter() - phase_start)
     timing["valid_frame_count"] = int(chunk_result.valid_frame.sum())
     timing["total_seconds"] = float(time.perf_counter() - chunk_start)
-    return {"chunk_timing": timing, "valid_frame_count": int(chunk_result.valid_frame.sum())}
+    return {
+        "chunk_timing": timing,
+        "valid_frame_count": int(chunk_result.valid_frame.sum()),
+        "staged_input_chunk_receipt_sha256": chunk_receipt_sha256,
+    }
 
 
 def _process_and_write_eye_angle_chunk(
@@ -2522,19 +4373,56 @@ def _process_and_write_eye_angle_chunk(
     subject_shape_run: Optional[str],
     refined_subject_run: Optional[str],
     keypoint_run: Optional[str],
+    diagnostic_refined_keypoint_run: Optional[str],
     eye_angle_run: str,
     start_row: int,
     stop_row: int,
     chunk_index: int,
     fps: Optional[float],
+    _staged_input_integrity_receipt: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, object]:
+    staged_subject_shape_authority = (
+        _staged_subject_shape_authority_from_input_receipt(
+            _staged_input_integrity_receipt
+        )
+        if _staged_input_integrity_receipt is not None
+        else None
+    )
+    staged_keypoint_authority = (
+        _staged_keypoint_authority_from_input_receipt(
+            _staged_input_integrity_receipt
+        )
+        if _staged_input_integrity_receipt is not None
+        else None
+    )
     root = open_zarr_root(zarr_path, mode="a")
     context = _resolve_eye_angle_inputs(
         root,
         subject_shape_run=subject_shape_run,
         refined_subject_run=refined_subject_run,
         keypoint_run=keypoint_run,
+        diagnostic_refined_keypoint_run=diagnostic_refined_keypoint_run,
+        _staged_subject_shape_authority=staged_subject_shape_authority,
+        _staged_keypoint_authority=staged_keypoint_authority,
+        _verify_staged_payload=(staged_subject_shape_authority is None),
     )
+    staged_receipt = (
+        _validate_staged_eye_angle_input_integrity_receipt(
+            context,
+            _staged_input_integrity_receipt,
+            verify_payload=False,
+        )
+        if _staged_input_integrity_receipt is not None
+        else None
+    )
+    integrity_chunk = (
+        staged_receipt["chunks"][int(chunk_index)]
+        if staged_receipt is not None
+        and 0 <= int(chunk_index) < len(staged_receipt["chunks"])
+        else None
+    )
+    if staged_receipt is not None and integrity_chunk is None:
+        raise ValueError("Staged eye-angle worker chunk is absent from its receipt.")
     run_group = root["analysis"]["eye_angle_runs"][eye_angle_run]
     return _process_and_write_eye_angle_chunk_groups(
         context,
@@ -2544,6 +4432,7 @@ def _process_and_write_eye_angle_chunk(
         chunk_index=chunk_index,
         fps=fps,
         execution_backend=DASK_WORKER_EXECUTION_BACKEND,
+        _staged_input_integrity_chunk=integrity_chunk,
     )
 
 
@@ -2636,38 +4525,114 @@ def _project_detection_bool_to_frames(
     return frame_values
 
 
-def run(args: argparse.Namespace) -> None:
+def run(
+    args: argparse.Namespace,
+    *,
+    _staged_input_integrity_receipt: Optional[Mapping[str, Any]] = None,
+) -> None:
     console = Console()
     root = _open_archive_for_eye_angle(args.zarr_path)
 
-    analysis_group = root.require_group("analysis")
-    parent_group = require_runs_parent(analysis_group, "eye_angle_runs")
-
     backend = _normalize_execution_backend(args.execution_backend)
     scheduler_key = _normalize_scheduler(args.scheduler)
+    staged_subject_shape_authority = (
+        _staged_subject_shape_authority_from_input_receipt(
+            _staged_input_integrity_receipt
+        )
+        if _staged_input_integrity_receipt is not None
+        else None
+    )
+    staged_keypoint_authority = (
+        _staged_keypoint_authority_from_input_receipt(
+            _staged_input_integrity_receipt
+        )
+        if _staged_input_integrity_receipt is not None
+        else None
+    )
     context = _resolve_eye_angle_inputs(
         root,
         subject_shape_run=args.subject_shape_run,
         refined_subject_run=args.refined_subject_run,
         keypoint_run=args.keypoint_run,
+        diagnostic_refined_keypoint_run=args.diagnostic_refined_keypoint_run,
+        _staged_subject_shape_authority=staged_subject_shape_authority,
+        _staged_keypoint_authority=staged_keypoint_authority,
+        _verify_staged_payload=True,
+    )
+    staged_input_integrity_receipt = (
+        _validate_staged_eye_angle_input_integrity_receipt(
+            context,
+            _staged_input_integrity_receipt,
+            verify_payload=True,
+        )
+        if _staged_input_integrity_receipt is not None
+        else None
     )
     eye_geometry = context.eye_geometry
+    initial_input_identity = _resolved_eye_angle_input_identity(context)
+    source_authority_mode = str(
+        getattr(eye_geometry, "source_authority_mode", None)
+        or "canonical_publication"
+    )
     keypoint_run_name = context.keypoint_run_name
     total_detections = int(eye_geometry.ellipse_params.shape[0])
     chunk_size = max(1, int(args.chunk_size))
     if total_detections and chunk_size > total_detections:
         chunk_size = total_detections
 
-    frame_indices = context.frame_indices_source["frame_indices"][:].astype(np.int64, copy=False)
+    chunks = _row_chunks(total_detections, chunk_size)
+    if staged_input_integrity_receipt is not None:
+        receipt_chunks = [
+            (int(chunk["start_row"]), int(chunk["stop_row"]))
+            for chunk in staged_input_integrity_receipt["chunks"]
+        ]
+        if receipt_chunks != chunks:
+            raise ValueError(
+                "Staged eye-angle integrity receipt chunking differs from writer chunking."
+            )
+        frame_indices = _load_validated_staged_frame_indices(
+            context,
+            staged_input_integrity_receipt,
+        )
+    else:
+        frame_indices = context.frame_indices_source[context.frame_indices_key][
+            :
+        ].astype(
+            np.int64,
+            copy=False,
+        )
     if frame_indices.shape[0] != total_detections:
         raise ValueError("Mismatch between frame_indices and detection count.")
 
-    fps = args.fps or get_fps(root)
-    if fps is None or fps <= 0:
-        fps = None
+    if staged_input_integrity_receipt is not None:
+        staged_parameters = staged_input_integrity_receipt["scientific_parameters"]
+        expected_fps = staged_parameters["fps"]
+        supplied_fps = (
+            None if args.fps is None else float(args.fps)
+        )
+        if supplied_fps != expected_fps:
+            raise ValueError(
+                "Staged eye-angle FPS differs from its sealed materialization plan."
+            )
+        fps = None if expected_fps is None else float(expected_fps)
+    else:
+        fps = args.fps or get_fps(root)
+        if fps is None or fps <= 0:
+            fps = None
     smoothing_window_param = args.smoothing_window
     valid_frame_index_mask = frame_indices >= 0
-    num_frames = int(frame_indices[valid_frame_index_mask].max() + 1) if np.any(valid_frame_index_mask) else 0
+    if context.source_total_frames is not None:
+        num_frames = int(context.source_total_frames)
+        if np.any(frame_indices[valid_frame_index_mask] >= num_frames):
+            raise ValueError(
+                "Canonical acquisition-frame indices exceed their sealed full-video extent."
+            )
+    else:
+        num_frames = (
+            int(frame_indices[valid_frame_index_mask].max() + 1)
+            if np.any(valid_frame_index_mask)
+            else 0
+        )
     chunk_len = min(chunk_size, total_detections) if total_detections else 1
     frame_chunk = min(chunk_size, num_frames) if num_frames else 1
 
@@ -2676,15 +4641,50 @@ def run(args: argparse.Namespace) -> None:
     else:
         resolved_run_name = datetime.now(timezone.utc).strftime("eye_angle_%Y%m%d_%H%M%S")
 
+    analysis_group = root.require_group("analysis")
+    parent_group = require_runs_parent(analysis_group, "eye_angle_runs")
     if resolved_run_name in parent_group:
         raise ValueError(f"Run '{resolved_run_name}' already exists in analysis/eye_angle_runs.")
 
-    run_group = parent_group.create_group(resolved_run_name)
+    diagnostic_output = (
+        context.keypoint_source_mode
+        == EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC
+    )
+    initial_publication_attrs: dict[str, Any] = {
+        # A run becomes selector eligible only after every source recheck,
+        # output/provenance write, and completion marker has persisted.  This
+        # remains false forever for diagnostic and staged-local outputs.
+        "stage_selector_eligible": False,
+        "keypoint_source_mode": context.keypoint_source_mode,
+    }
+    if diagnostic_output:
+        initial_publication_attrs.update(
+            {
+                "coordinate_contract": (
+                    EYE_ANGLE_REFINED_DIAGNOSTIC_COORDINATE_CONTRACT
+                ),
+                "legacy_unverified_diagnostic_output": True,
+                "publication_scope": "historical_diagnostic_only",
+            }
+        )
+    run_group = parent_group.create_group(
+        resolved_run_name,
+        attributes=initial_publication_attrs,
+    )
     mark_run_started(run_group, run_name=resolved_run_name, stage="eye_angle")
     output_layout = str(args.layout)
     run_group.attrs["status"] = "running"
     run_group.attrs["layout"] = output_layout
     run_group.attrs["execution_backend"] = backend
+    run_group.attrs["keypoint_source_mode"] = context.keypoint_source_mode
+    run_group.attrs["source_eye_geometry_authority_mode"] = source_authority_mode
+    if staged_input_integrity_receipt is not None:
+        run_group.attrs["staged_input_integrity_receipt_sha256"] = (
+            staged_input_integrity_receipt["record_sha256"]
+        )
+        run_group.attrs["staged_input_integrity_scope"] = (
+            staged_input_integrity_receipt["integrity_scope"]
+        )
     run_group.attrs["dask_scheduler"] = scheduler_key
     run_group.attrs["dask_num_workers"] = int(args.num_workers) if args.num_workers is not None else None
     if not args.quiet:
@@ -2693,7 +4693,12 @@ def run(args: argparse.Namespace) -> None:
     _prepare_base_output_arrays(run_group, total_detections=total_detections, chunk_len=chunk_len)
     run_group["support"]["body_frame"].attrs.update(
         build_keypoint_body_frame_contract_attrs(
-            source_refined_keypoints_run=keypoint_run_name,
+            source_keypoints_run=(
+                keypoint_run_name if not diagnostic_output else None
+            ),
+            source_refined_keypoints_run=(
+                keypoint_run_name if diagnostic_output else None
+            ),
             coordinate_space=BODY_FRAME_COORDINATE_SPACE_ROI,
         )
     )
@@ -2706,7 +4711,6 @@ def run(args: argparse.Namespace) -> None:
             "source_detection_success_path": context.detection_success_path,
         }
     )
-    chunks = _row_chunks(total_detections, chunk_size)
     chunk_timings: list[dict[str, object]] = []
     stage_start = time.perf_counter()
 
@@ -2718,17 +4722,36 @@ def run(args: argparse.Namespace) -> None:
         worker_subject_shape_run = (
             eye_geometry.run_name if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_SUBJECT_SHAPE else None
         )
+        worker_staged_input_integrity_receipt = (
+            _canonical_json_copy(staged_input_integrity_receipt)
+            if staged_input_integrity_receipt is not None
+            else None
+        )
         tasks = [
             delayed(_process_and_write_eye_angle_chunk)(
                 worker_zarr_path,
                 subject_shape_run=worker_subject_shape_run,
                 refined_subject_run=worker_refined_subject_run,
-                keypoint_run=keypoint_run_name,
+                keypoint_run=(
+                    keypoint_run_name
+                    if context.keypoint_source_mode
+                    == EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+                    else None
+                ),
+                diagnostic_refined_keypoint_run=(
+                    keypoint_run_name
+                    if context.keypoint_source_mode
+                    == EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC
+                    else None
+                ),
                 eye_angle_run=resolved_run_name,
                 start_row=start_row,
                 stop_row=stop_row,
                 chunk_index=chunk_index,
                 fps=fps,
+                _staged_input_integrity_receipt=(
+                    worker_staged_input_integrity_receipt
+                ),
             )
             for chunk_index, (start_row, stop_row) in enumerate(chunks)
         ]
@@ -2743,9 +4766,32 @@ def run(args: argparse.Namespace) -> None:
                 chunk_index=chunk_index,
                 fps=fps,
                 execution_backend=SERIAL_EXECUTION_BACKEND,
+                _staged_input_integrity_chunk=(
+                    staged_input_integrity_receipt["chunks"][chunk_index]
+                    if staged_input_integrity_receipt is not None
+                    else None
+                ),
             )
             for chunk_index, (start_row, stop_row) in enumerate(chunks)
         ]
+    if staged_input_integrity_receipt is not None:
+        expected_chunk_receipts = [
+            str(chunk["record_sha256"])
+            for chunk in staged_input_integrity_receipt["chunks"]
+        ]
+        observed_chunk_receipts = [
+            result.get("staged_input_chunk_receipt_sha256") for result in results
+        ]
+        if (
+            len(observed_chunk_receipts) != len(expected_chunk_receipts)
+            or len(set(observed_chunk_receipts)) != len(observed_chunk_receipts)
+            or sorted(str(value) for value in observed_chunk_receipts)
+            != sorted(expected_chunk_receipts)
+        ):
+            raise RuntimeError(
+                "Staged eye-angle workers did not attest the exact complete chunk "
+                "integrity receipt set."
+            )
     for result in sorted(results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
         chunk_timings.append(dict(result["chunk_timing"]))
     phase_seconds: dict[str, float] = {
@@ -3696,6 +5742,13 @@ def run(args: argparse.Namespace) -> None:
     _prepare_output_arrays(
         support_group,
         [
+            ("instance_key", (total_detections,), (chunk_len,), "u8"),
+            (
+                "source_acquisition_frame_index",
+                (total_detections,),
+                (chunk_len,),
+                "i8",
+            ),
             ("frame_indices", (total_detections,), (chunk_len,), "i8"),
             ("time_seconds", (total_detections,), (chunk_len,), "f4"),
             ("ellipse_major", (total_detections,), (chunk_len,), "f4"),
@@ -3755,7 +5808,9 @@ def run(args: argparse.Namespace) -> None:
         "worker_chunk_summed_seconds": worker_chunk_summed_seconds,
     }
     fps_source = (
-        "cli_override"
+        str(staged_input_integrity_receipt["scientific_parameters"]["fps_source"])
+        if staged_input_integrity_receipt is not None
+        else "cli_override"
         if args.fps is not None and float(args.fps) > 0.0
         else "recording_metadata"
         if fps
@@ -3764,13 +5819,81 @@ def run(args: argparse.Namespace) -> None:
     smoothing_window_source = (
         "cli_override" if smoothing_window_param is not None else "module_default"
     )
+
+    # Close the staged-source TOCTOU window after every source read and before
+    # any completion/provenance publication.  A fresh open avoids trusting
+    # cached group/array metadata. Exact worker snapshots are the computation
+    # authority; this independent full scan remains defense in depth.
+    verified_root = _open_archive_for_eye_angle(args.zarr_path)
+    verified_context = _resolve_eye_angle_inputs(
+        verified_root,
+        subject_shape_run=(
+            eye_geometry.run_name
+            if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_SUBJECT_SHAPE
+            else None
+        ),
+        refined_subject_run=(
+            eye_geometry.run_name
+            if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
+            else None
+        ),
+        keypoint_run=(
+            keypoint_run_name
+            if context.keypoint_source_mode == EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+            else None
+        ),
+        diagnostic_refined_keypoint_run=(
+            keypoint_run_name
+            if context.keypoint_source_mode
+            == EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC
+            else None
+        ),
+        _staged_subject_shape_authority=(
+            _canonical_json_copy(staged_subject_shape_authority)
+            if staged_input_integrity_receipt is not None
+            else None
+        ),
+        _staged_keypoint_authority=(
+            _canonical_json_copy(staged_keypoint_authority)
+            if staged_input_integrity_receipt is not None
+            else None
+        ),
+        _verify_staged_payload=True,
+    )
+    if staged_input_integrity_receipt is not None:
+        verified_staged_receipt = (
+            _validate_staged_eye_angle_input_integrity_receipt(
+                verified_context,
+                staged_input_integrity_receipt,
+                verify_payload=True,
+            )
+        )
+        if (
+            verified_staged_receipt["record_sha256"]
+            != staged_input_integrity_receipt["record_sha256"]
+        ):
+            raise RuntimeError(
+                "Staged eye-angle input integrity receipt changed after source reads."
+            )
+    verified_input_identity = _resolved_eye_angle_input_identity(verified_context)
+    if verified_input_identity != initial_input_identity:
+        raise RuntimeError(
+            "Eye-angle source selection or contract changed after source reads; "
+            "refusing to complete the run."
+        )
+    context = verified_context
+    eye_geometry = context.eye_geometry
+
     source_contracts = json.loads(
-        json.dumps(_eye_angle_source_contracts(context), default=_to_serializable)
+        json.dumps(
+            _eye_angle_source_contracts(verified_context),
+            default=_to_serializable,
+        )
     )
     algorithm_contract = json.loads(
         json.dumps(
             _eye_angle_algorithm_contract(
-                context,
+                verified_context,
                 fps=fps,
                 fps_source=fps_source,
                 smoothing_window_requested=int(window_setting),
@@ -3798,9 +5921,29 @@ def run(args: argparse.Namespace) -> None:
             "source_subject_shape_run": eye_geometry.source_subject_shape_run,
             "source_refined_eye_run": eye_geometry.source_refined_eye_run,
             "source_refined_subject_masks_run": eye_geometry.source_refined_subject_run,
-            "source_base_keypoints_run": context.source_kp_run_name,
+            "keypoint_source_mode": context.keypoint_source_mode,
+            "source_base_keypoints_run": (
+                context.keypoint_run_name
+                if context.keypoint_source_mode
+                == EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+                else context.source_kp_run_name
+            ),
+            "source_refined_keypoints_diagnostic_run": (
+                context.keypoint_run_name
+                if context.keypoint_source_mode
+                == EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC
+                else None
+            ),
             "source_detection_success_path": context.detection_success_path,
+            "source_instance_key_path": context.instance_key_path,
+            "source_acquisition_frame_index_path": context.frame_indices_path,
             "source_frame_indices_path": context.frame_indices_path,
+            "source_eye_geometry_authority_mode": source_authority_mode,
+            "staged_input_integrity_receipt_sha256": (
+                staged_input_integrity_receipt["record_sha256"]
+                if staged_input_integrity_receipt is not None
+                else None
+            ),
             "resolved_head_keypoint_indices": {
                 key: int(value) for key, value in context.keypoint_indices.items()
             },
@@ -3808,9 +5951,28 @@ def run(args: argparse.Namespace) -> None:
             "eye_angle_algorithm_contract": algorithm_contract,
             "eye_angle_output_schema": _eye_angle_output_schema(),
             "eye_angle_variant_schema": _eye_angle_variant_schema(),
-            **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
+            **build_source_keypoints_attrs(
+                (
+                    context.keypoint_run_name
+                    if context.keypoint_source_mode
+                    == EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+                    else context.source_kp_run_name
+                ),
+                include_legacy_alias=False,
+            ),
             **build_keypoint_body_frame_contract_attrs(
-                source_refined_keypoints_run=keypoint_run_name,
+                source_keypoints_run=(
+                    keypoint_run_name
+                    if context.keypoint_source_mode
+                    == EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+                    else None
+                ),
+                source_refined_keypoints_run=(
+                    keypoint_run_name
+                    if context.keypoint_source_mode
+                    == EYE_ANGLE_KEYPOINT_SOURCE_REFINED_DIAGNOSTIC
+                    else None
+                ),
                 coordinate_space=BODY_FRAME_COORDINATE_SPACE_ROI,
             ),
             "fps": float(fps) if fps else None,
@@ -3858,6 +6020,14 @@ def run(args: argparse.Namespace) -> None:
         "git": get_git_info(),
         "algorithm_contract": algorithm_contract,
         "source_contracts": source_contracts,
+        "execution": {
+            "source_eye_geometry_authority_mode": source_authority_mode,
+            "staged_input_integrity_receipt_sha256": (
+                staged_input_integrity_receipt["record_sha256"]
+                if staged_input_integrity_receipt is not None
+                else None
+            ),
+        },
         "arguments": {
             "zarr_path": str(args.zarr_path),
             "eye_geometry_stage": eye_geometry.stage_group,
@@ -3865,11 +6035,18 @@ def run(args: argparse.Namespace) -> None:
             "subject_shape_run": eye_geometry.source_subject_shape_run,
             "refined_eye_run": eye_geometry.source_refined_eye_run,
             "refined_subject_run": eye_geometry.source_refined_subject_run,
+            "keypoint_source_mode": context.keypoint_source_mode,
             "keypoint_run": keypoint_run_name,
-            "base_keypoint_run": context.source_kp_run_name,
+            "base_keypoint_run": (
+                keypoint_run_name
+                if context.keypoint_source_mode
+                == EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+                else context.source_kp_run_name
+            ),
             "keypoints_roi_path": f"{context.kp_group_path}/keypoints_roi",
             "detection_success_path": context.detection_success_path,
-            "frame_indices_path": context.frame_indices_path,
+            "instance_key_path": context.instance_key_path,
+            "source_acquisition_frame_index_path": context.frame_indices_path,
             "resolved_head_keypoint_indices": {
                 key: int(value) for key, value in context.keypoint_indices.items()
             },
@@ -4136,15 +6313,29 @@ def run(args: argparse.Namespace) -> None:
                 "subject_shape_run": eye_geometry.source_subject_shape_run,
                 "refined_eye_run": eye_geometry.source_refined_eye_run,
                 "refined_subject_run": eye_geometry.source_refined_subject_run,
+                "keypoint_source_mode": context.keypoint_source_mode,
                 "keypoint_run": keypoint_run_name,
-                "base_keypoint_run": context.source_kp_run_name,
+                "base_keypoint_run": (
+                    keypoint_run_name
+                    if context.keypoint_source_mode
+                    == EYE_ANGLE_KEYPOINT_SOURCE_CANONICAL
+                    else context.source_kp_run_name
+                ),
                 "eye_geometry_path": eye_geometry.group_path,
-                "refined_keypoints_path": context.kp_group_path,
+                "keypoints_path": context.kp_group_path,
                 "detection_success_path": context.detection_success_path,
-                "frame_indices_path": context.frame_indices_path,
+                "instance_key_path": context.instance_key_path,
+                "source_acquisition_frame_index_path": context.frame_indices_path,
             },
         ),
     )
+    if not diagnostic_output and staged_input_integrity_receipt is None:
+        # Publish selectors while the completed candidate still fails closed,
+        # then make eligibility the final canonical activation write. Strict
+        # readers therefore cannot observe a partially written eye run.
+        parent_group.attrs["latest_complete"] = resolved_run_name
+        parent_group.attrs["latest"] = resolved_run_name
+        run_group.attrs["stage_selector_eligible"] = True
 
     if not args.quiet:
         console.print(
@@ -4157,10 +6348,17 @@ def run(args: argparse.Namespace) -> None:
         )
 
 
-def main(argv: Optional[Iterable[str]] = None) -> int:
+def main(
+    argv: Optional[Iterable[str]] = None,
+    *,
+    _staged_input_integrity_receipt: Optional[Mapping[str, Any]] = None,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    run(args)
+    run(
+        args,
+        _staged_input_integrity_receipt=_staged_input_integrity_receipt,
+    )
     return 0
 
 

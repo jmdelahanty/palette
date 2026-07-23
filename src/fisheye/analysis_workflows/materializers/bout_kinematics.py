@@ -490,6 +490,14 @@ def publish_bout_kinematics_candidate(
         candidate = parent.get(plan.run_name)
         if not isinstance(candidate, zarr.Group):
             raise RuntimeError("Published bout-kinematics candidate is missing.")
+        if (
+            candidate.attrs.get("palette_run_completion_status") != "complete"
+            or candidate.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Non-promoted bout-kinematics candidate must remain complete and "
+                "selector-ineligible."
+            )
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -501,7 +509,7 @@ def publish_bout_kinematics_candidate(
             publish_schema_id=PUBLISH_SCHEMA_ID,
             policy="node_local_small_run_sharding_atomic_nonpromoting_publish",
             rollback_policy=(
-                "remove_new_target_and_restore_parent_attrs_on_any_failure"
+                "retain_failed_public_tombstone_leave_unleased_parent_state_untouched"
             ),
         ),
         copy_backend=copy_backend,
@@ -555,16 +563,43 @@ def publish_computed_bout_kinematics_run(
             run_name=plan.run_name,
             run_provenance=run_group.attrs.get("run_provenance"),
         )
+        parent.attrs["latest_complete"] = plan.run_name
+        parent.attrs["latest"] = plan.run_name
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/bout_kinematics_runs"]
+        run_group = parent[plan.run_name]
         if str(parent.attrs.get("latest")) != plan.run_name or str(
             parent.attrs.get("latest_complete")
-        ) != plan.run_name:
+        ) != plan.run_name or (
+            run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
+        ):
             raise RuntimeError(
-                "Bout-kinematics parent pointers were not updated to the "
-                "published computed run."
+                "Bout-kinematics run was not persisted complete and ineligible "
+                "behind its parent pointers."
             )
+
+    def activate(
+        _root: zarr.Group,
+        parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if (
+            str(parent.attrs.get("latest")) != plan.run_name
+            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Bout-kinematics activation requires one complete, ineligible run."
+            )
+        try:
+            run_group.attrs["stage_selector_eligible"] = True
+        except BaseException:
+            if run_group.attrs.get("stage_selector_eligible") is True:
+                return
+            raise
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -576,7 +611,7 @@ def publish_computed_bout_kinematics_run(
             publish_schema_id=COMPUTE_PUBLISH_SCHEMA_ID,
             policy="node_local_compute_atomic_run_group_publish",
             rollback_policy=(
-                "remove_new_target_and_restore_parent_attrs_on_any_failure"
+                "retain_failed_public_tombstone_leave_unleased_parent_state_untouched"
             ),
         ),
         copy_backend=copy_backend,
@@ -584,9 +619,12 @@ def publish_computed_bout_kinematics_run(
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
         payload_metadata={
             "copy_backend": copy_backend,
-            "promotion_policy": "completion_last_then_latest_pointer_update",
+            "promotion_policy": (
+                "complete_ineligible_then_pointers_then_eligibility_final"
+            ),
             "materialization": json_attr_safe(dict(materialization_payload)),
         },
     )
@@ -789,6 +827,23 @@ def promote_bout_kinematics_candidate(
                     raise RuntimeError(
                         "Bout-kinematics candidate pointer verification failed."
                     )
+                if (
+                    write_candidate.attrs.get("palette_run_completion_status")
+                    != "complete"
+                ):
+                    raise RuntimeError(
+                        "Bout-kinematics promotion requires a complete candidate."
+                    )
+                # Literal publication commit. No archive read or metadata write
+                # follows this eligibility transition.
+                try:
+                    write_candidate.attrs["stage_selector_eligible"] = True
+                except BaseException:
+                    if (
+                        write_candidate.attrs.get("stage_selector_eligible")
+                        is not True
+                    ):
+                        raise
             except BaseException:
                 write_parent.attrs.clear()
                 write_parent.attrs.update(parent_before)

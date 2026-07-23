@@ -28,10 +28,14 @@ from fisheye.analysis.chaser_distance_runs import (
     write_chaser_dashboard_spec_artifact,
     write_goodcopbadcop_chaser_dashboard_spec_artifact,
 )
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
-from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.shared.system_metadata import get_git_info
 
 
@@ -347,16 +351,12 @@ def compute_egocentric_chaser_bearing(
 def _resolve_chaser_distance_run(
     root: zarr.Group,
     run_name: str,
-) -> tuple[zarr.Group, str, str]:
-    parent = root.get("analysis/chaser_distance_runs")
-    if parent is None:
-        raise ValueError("Archive has no analysis/chaser_distance_runs group.")
-    resolved = str(run_name).strip()
-    if not resolved or resolved == "latest":
-        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
-    return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"
+) -> tuple[ChaserDistanceReadSnapshot, str, str]:
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(run_name).strip() or "latest",
+    )
+    return snapshot, snapshot.run_name, snapshot.run_path
 
 
 def _decode_text_column(data: np.ndarray) -> list[str]:
@@ -366,17 +366,15 @@ def _decode_text_column(data: np.ndarray) -> list[str]:
     return [decode_null_terminated_text(value).strip() for value in values.reshape(-1)]
 
 
-def _read_windows(run_group: zarr.Group, *, fps: float) -> tuple[ChaserDistanceWindow, ...]:
-    summary = run_group.get("epoch_summary")
-    if summary is None:
-        return ()
-    required = ("window_id", "label_bytes", "start_frame", "end_frame")
-    if any(name not in summary for name in required):
-        return ()
-    ids = np.asarray(summary["window_id"][:], dtype=np.int32).reshape(-1)
-    labels = _decode_text_column(np.asarray(summary["label_bytes"][:]))
-    starts = np.asarray(summary["start_frame"][:], dtype=np.int64).reshape(-1)
-    ends = np.asarray(summary["end_frame"][:], dtype=np.int64).reshape(-1)
+def _read_windows(
+    distance: ChaserDistanceReadSnapshot,
+    *,
+    fps: float,
+) -> tuple[ChaserDistanceWindow, ...]:
+    ids = np.asarray(distance.epoch_window_id, dtype=np.int32).reshape(-1)
+    labels = list(distance.epoch_labels)
+    starts = np.asarray(distance.epoch_start_frame, dtype=np.int64).reshape(-1)
+    ends = np.asarray(distance.epoch_end_frame, dtype=np.int64).reshape(-1)
     n = min(ids.shape[0], len(labels), starts.shape[0], ends.shape[0])
     if n == 0:
         return ()
@@ -593,40 +591,38 @@ def build_chaser_egocentric_bearing_result(
 ) -> ChaserEgocentricBearingResult:
     root = _open_root(zarr_path, mode="r")
     normalized_track_scope = _normalize_track_scope(track_scope)
-    run_group, distance_run_name, distance_run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
-    fps = float(run_group.attrs.get("fps", 1.0) or 1.0)
-    total_frames_attr = int(run_group.attrs.get("total_frames", 0) or 0)
-    pixels_per_mm_projector = float(run_group.attrs.get("pixels_per_mm_projector", np.nan))
+    distance, distance_run_name, distance_run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    fps = float(distance.fps)
+    pixels_per_mm_projector = float(distance.pixels_per_mm_projector)
 
-    frames = run_group["frames"]
-    positions = run_group["positions"]
-    distances = run_group["distances"]
-    camera_frame_id = np.asarray(frames["camera_frame_id"][:], dtype=np.int64)
-    stimulus_epoch_window_id = np.asarray(frames["stimulus_epoch_window_id"][:], dtype=np.int32)
-    fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float32)
-    chaser_xy = np.asarray(positions["chaser_arena_xy"][:], dtype=np.float32)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
-    distance_mm = np.asarray(distances["distance_mm"][:], dtype=np.float32)
-    chaser_indices = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.uint8)
-    chaser_group = run_group["chasers"]
-    if "behavior_class_label_bytes" in chaser_group:
-        chaser_behavior_labels = tuple(
-            decode_null_terminated_text(row).strip()
-            for row in np.asarray(chaser_group["behavior_class_label_bytes"][:])
-        )
-    else:
-        chaser_behavior_labels = _load_configured_chaser_behavior_labels(
-            root,
-            run_group,
-            chaser_indices,
-        )
-    chaser_color_hex = _load_chaser_color_hex(root, run_group, chaser_indices)
+    camera_frame_id = np.asarray(distance.camera_frame_id, dtype=np.int64)
+    stimulus_epoch_window_id = np.asarray(
+        distance.stimulus_epoch_window_id,
+        dtype=np.int32,
+    )
+    fish_xy = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float32)
+    chaser_xy = np.asarray(distance.chaser_arena_xy, dtype=np.float32)
+    fish_valid = np.asarray(distance.fish_valid, dtype=bool)
+    chaser_valid = np.asarray(distance.chaser_valid, dtype=bool)
+    distance_mm = np.asarray(distance.distance_mm, dtype=np.float32)
+    chaser_indices = np.asarray(distance.chaser_index, dtype=np.int16)
+    # Behavior roles/colors are not part of bearing mathematics and are not yet
+    # sealed.  Preserve identity-only output and use deterministic presentation
+    # colors rather than reading mutable protocol semantics.
+    chaser_behavior_labels: tuple[str, ...] = ()
+    chaser_color_hex = {
+        int(index): STATIC_CHASER_FALLBACK_COLORS[column % len(STATIC_CHASER_FALLBACK_COLORS)]
+        for column, index in enumerate(chaser_indices)
+    }
     total_frames = int(camera_frame_id.shape[0])
-    if total_frames_attr > 0 and total_frames_attr != total_frames:
+    if distance.total_frames != total_frames:
         raise ValueError(
-            "Chaser-distance run frame-axis mismatch: "
-            f"attrs total_frames={total_frames_attr}, frames/camera_frame_id length={total_frames}."
+            "Chaser-distance typed frame-axis mismatch: "
+            f"authority total_frames={distance.total_frames}, "
+            f"frames/camera_frame_id length={total_frames}."
         )
     expected_frame_shapes = {
         "frames/stimulus_epoch_window_id": stimulus_epoch_window_id.shape[:1],
@@ -639,7 +635,7 @@ def build_chaser_egocentric_bearing_result(
     mismatched = {name: shape for name, shape in expected_frame_shapes.items() if shape != (total_frames,)}
     if mismatched:
         raise ValueError(f"Chaser-distance run arrays disagree on camera-frame axis: {mismatched}")
-    windows = _read_windows(run_group, fps=fps)
+    windows = _read_windows(distance, fps=fps)
 
     normalized_heading_level = normalize_heading_level(heading_level)
     resolved_track_run, track_path, heading_array_path, heading_dense, heading_valid = _dense_heading_from_track(
@@ -689,7 +685,7 @@ def build_chaser_egocentric_bearing_result(
 
     return ChaserEgocentricBearingResult(
         zarr_path=str(zarr_path),
-        recording_id=str(run_group.attrs.get("recording_id") or Path(zarr_path).stem),
+        recording_id=distance.recording_id,
         component_name=component,
         chaser_distance_run_name=distance_run_name,
         chaser_distance_run_path=distance_run_path,
@@ -1225,6 +1221,12 @@ def write_chaser_egocentric_bearing_component(
     write_interactive_spec: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name

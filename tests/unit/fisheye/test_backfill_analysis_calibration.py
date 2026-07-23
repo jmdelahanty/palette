@@ -5,6 +5,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.utils import backfill_analysis_calibration as mod
@@ -69,7 +70,7 @@ def _seed_analysis_zarr(zarr_path: Path, *, source_h5: Path | None, zarr_purpose
 
 
 def _seed_donor_calibration(zarr_path: Path, *, with_scale: bool = True) -> None:
-    root = zarr.open_group(str(zarr_path), mode="w")
+    root = zarr.open_group(str(zarr_path), mode="a")
     root.attrs["zarr_purpose"] = "analysis"
     root.attrs["recording_id"] = "donor_recording"
     calib = root.require_group("analysis").require_group("calibration")
@@ -84,7 +85,14 @@ def _seed_donor_calibration(zarr_path: Path, *, with_scale: bool = True) -> None
     calib.create_array("homography_matrix", data=HOMOGRAPHY, chunks=(3, 3), overwrite=True)
 
 
-def test_plan_or_backfill_one_writes_analysis_calibration_from_stimulus_source_h5(tmp_path: Path) -> None:
+def _zarr_metadata_snapshot(zarr_path: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(zarr_path)): path.read_bytes()
+        for path in sorted(zarr_path.rglob("zarr.json"))
+    }
+
+
+def test_plan_or_backfill_one_reports_h5_candidate_without_mutation(tmp_path: Path) -> None:
     h5_path = tmp_path / "session.h5"
     zarr_path = tmp_path / "sample_analysis.zarr"
     _write_stimulus_h5(h5_path)
@@ -95,24 +103,45 @@ def test_plan_or_backfill_one_writes_analysis_calibration_from_stimulus_source_h
         apply=False,
         overwrite_existing=False,
     )
-    assert dry.status == "would_backfill"
+    assert dry.status == mod.H5_CANDIDATE_STATUS
     assert dry.h5_path == h5_path
     assert dry.run_name == "stimulus_001"
 
-    result = mod.plan_or_backfill_one(  # noqa: SLF001
-        zarr_path,
-        apply=True,
-        overwrite_existing=False,
-    )
-    assert result.status == "backfilled"
-
     root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
-    calib = root["analysis"]["calibration"]
-    assert calib.attrs["active_camera_id"] == "2010094"
-    assert calib.attrs["source_h5"] == str(h5_path)
-    assert calib.attrs["source_stimulus_run"] == "stimulus_001"
-    assert calib.attrs["pixel_to_mm"] == 1.0 / 50.0
-    np.testing.assert_allclose(calib["homography_matrix"][:], HOMOGRAPHY)
+    assert "calibration" not in root["analysis"]
+
+
+@pytest.mark.parametrize("with_donor", [False, True])
+def test_apply_rejected_before_any_zarr_open_and_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_donor: bool,
+) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    donor_zarr = tmp_path / "donor_analysis.zarr"
+    _write_stimulus_h5(h5_path)
+    _seed_analysis_zarr(zarr_path, source_h5=h5_path)
+    if with_donor:
+        _seed_donor_calibration(donor_zarr)
+    before = _zarr_metadata_snapshot(zarr_path)
+
+    def _unexpected_open(*_args, **_kwargs):
+        raise AssertionError("retired apply path opened a Zarr archive")
+
+    monkeypatch.setattr(mod, "_open_zarr", _unexpected_open)
+    with pytest.raises(
+        mod.AnalysisCalibrationApplyRetiredError,
+        match="Legacy global analysis/calibration writes are retired",
+    ):
+        mod.plan_or_backfill_one(
+            zarr_path,
+            apply=True,
+            overwrite_existing=False,
+            donor_zarr_path=donor_zarr if with_donor else None,
+        )
+
+    assert _zarr_metadata_snapshot(zarr_path) == before
 
 
 def test_plan_or_backfill_one_skips_complete_calibration_without_overwrite(tmp_path: Path) -> None:
@@ -120,13 +149,20 @@ def test_plan_or_backfill_one_skips_complete_calibration_without_overwrite(tmp_p
     zarr_path = tmp_path / "sample_analysis.zarr"
     _write_stimulus_h5(h5_path)
     _seed_analysis_zarr(zarr_path, source_h5=h5_path)
+    _seed_donor_calibration(zarr_path)
 
-    assert mod.plan_or_backfill_one(zarr_path, apply=True, overwrite_existing=False).status == "backfilled"
     assert mod.plan_or_backfill_one(zarr_path, apply=False, overwrite_existing=False).status == "skipped_existing"
-    assert mod.plan_or_backfill_one(zarr_path, apply=False, overwrite_existing=True).status == "would_overwrite"
+    assert (
+        mod.plan_or_backfill_one(
+            zarr_path,
+            apply=False,
+            overwrite_existing=True,
+        ).status
+        == mod.H5_OVERWRITE_CANDIDATE_STATUS
+    )
 
 
-def test_plan_or_backfill_one_copies_calibration_from_donor_zarr(tmp_path: Path) -> None:
+def test_plan_or_backfill_one_reports_donor_candidate_without_copying(tmp_path: Path) -> None:
     donor_zarr = tmp_path / "donor_analysis.zarr"
     target_zarr = tmp_path / "target_analysis.zarr"
     _seed_donor_calibration(donor_zarr)
@@ -139,29 +175,12 @@ def test_plan_or_backfill_one_copies_calibration_from_donor_zarr(tmp_path: Path)
         donor_zarr_path=donor_zarr,
         donor_note="same camera/rig configuration verified",
     )
-    assert dry.status == "would_copy_donor"
+    assert dry.status == mod.DONOR_CANDIDATE_STATUS
     assert dry.donor_zarr_path == donor_zarr
     assert "source_h5=/example/donor.h5" in dry.message
 
-    result = mod.plan_or_backfill_one(
-        target_zarr,
-        apply=True,
-        overwrite_existing=False,
-        donor_zarr_path=donor_zarr,
-        donor_note="same camera/rig configuration verified",
-    )
-    assert result.status == "copied_donor"
-
     root = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)
-    calib = root["analysis"]["calibration"]
-    assert calib.attrs["source"] == "donor_zarr_calibration"
-    assert calib.attrs["donor_zarr"] == str(donor_zarr.resolve())
-    assert calib.attrs["donor_calibration_path"] == "analysis/calibration"
-    assert calib.attrs["donor_configuration_verified_by_operator"] is True
-    assert calib.attrs["donor_backfill_note"] == "same camera/rig configuration verified"
-    assert calib.attrs["primary_camera_id"] == "2010095"
-    assert calib.attrs["pixel_to_mm"] == 0.018725470251143482
-    np.testing.assert_allclose(calib["homography_matrix"][:], HOMOGRAPHY)
+    assert "calibration" not in root["analysis"]
 
 
 def test_plan_or_backfill_one_rejects_donor_without_usable_scale(tmp_path: Path) -> None:
@@ -192,7 +211,7 @@ def test_source_h5_falls_back_to_recording_raw_directory(tmp_path: Path) -> None
     _seed_analysis_zarr(zarr_path, source_h5=None)
 
     result = mod.plan_or_backfill_one(zarr_path, apply=False, overwrite_existing=False)
-    assert result.status == "would_backfill"
+    assert result.status == mod.H5_CANDIDATE_STATUS
     assert result.h5_path == h5_path
 
 
@@ -214,7 +233,7 @@ def test_training_source_h5_falls_back_to_recording_raw_directory(tmp_path: Path
         overwrite_existing=False,
         zarr_use="training",
     )
-    assert result.status == "would_backfill"
+    assert result.status == mod.H5_CANDIDATE_STATUS
     assert result.h5_path == h5_path
 
 
@@ -228,8 +247,23 @@ def test_main_dry_run_reports_candidate(tmp_path: Path, capsys) -> None:
     assert rc == 0
 
     out = capsys.readouterr().out
-    assert "would_backfill" in out
-    assert "would_backfill=1" in out
+    assert mod.H5_CANDIDATE_STATUS in out
+    assert f"{mod.H5_CANDIDATE_STATUS}=1" in out
+
+
+def test_main_apply_fails_before_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _unexpected_inventory(*_args, **_kwargs):
+        raise AssertionError("retired apply path started archive discovery")
+
+    monkeypatch.setattr(mod, "_iter_zarr", _unexpected_inventory)
+    rc = mod.main(["--apply", "/does/not/need/to/exist"])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "Legacy global analysis/calibration writes are retired" in captured.err
 
 
 def test_training_archive_is_filtered_by_default_but_processed_when_requested(tmp_path: Path) -> None:
@@ -247,7 +281,7 @@ def test_training_archive_is_filtered_by_default_but_processed_when_requested(tm
         overwrite_existing=False,
         zarr_use="training",
     )
-    assert training_result.status == "would_backfill"
+    assert training_result.status == mod.H5_CANDIDATE_STATUS
 
     any_result = mod.plan_or_backfill_one(zarr_path, apply=False, overwrite_existing=False, zarr_use="any")
-    assert any_result.status == "would_backfill"
+    assert any_result.status == mod.H5_CANDIDATE_STATUS

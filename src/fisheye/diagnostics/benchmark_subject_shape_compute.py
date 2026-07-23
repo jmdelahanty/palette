@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
 import math
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
@@ -41,6 +42,7 @@ from fisheye.diagnostics.benchmark_tail_kinematics_sharding import (
 REPORT_SCHEMA = "palette.subject_shape_compute_benchmark.v1"
 OUTPUT_SCHEMA = "palette.subject_shape_compute_benchmark_output.v1"
 OUTPUT_LOGICAL_ROW_CHUNK = 256
+PROCESS_START_METHOD = "spawn"
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,7 @@ def _prepare_output(
             "source_stop_row": int(source_start_row) + int(row_count),
             "row_count": int(row_count),
             "variant": asdict(variant),
+            "process_start_method": PROCESS_START_METHOD,
             "created_at_utc": _utc_now(),
         }
     )
@@ -408,6 +411,7 @@ def run_benchmark(
         "output_root": str(output_path),
         "report_path": str(report_file),
         "variants": [asdict(variant) for variant in chosen_variants],
+        "process_start_method": PROCESS_START_METHOD,
         "mutates_source": False,
         "mutates_disposable_output": bool(apply),
     }
@@ -443,6 +447,7 @@ def run_benchmark(
             started = time.perf_counter()
             with ProcessPoolExecutor(
                 max_workers=int(variant.workers),
+                mp_context=multiprocessing.get_context(PROCESS_START_METHOD),
                 initializer=_init_worker,
                 initargs=(
                     str(source_path),

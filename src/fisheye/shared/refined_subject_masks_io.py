@@ -18,6 +18,11 @@ import numpy as np
 import zarr
 
 from .mask_store import MaskStore, MaskStoreError, open_mask_store
+from .refined_subject_mask_coordinate_publication import (
+    BoundRefinedSubjectMaskCoordinateSurfaces,
+    load_persisted_refined_subject_mask_coordinate_surfaces,
+    require_bound_refined_subject_mask_coordinate_surfaces,
+)
 from .zarr_helpers import (
     normalize_zarr_path as _normalize_path,
     read_zarr_array_mapping,
@@ -25,7 +30,11 @@ from .zarr_helpers import (
     zarr_child_group as _child_group,
     zarr_group_keys as _group_keys,
 )
-from .zarr_run_completion import resolve_authoritative_run_name, resolve_latest_complete_run_name
+from .zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+    resolve_authoritative_run_name,
+)
 
 
 REFINED_SUBJECT_MASKS_RUN_PARENT = "refined_subject_masks_runs"
@@ -37,6 +46,8 @@ REFINED_SUBJECT_MASKS_ROW_LINEAGE_ARRAYS: tuple[str, ...] = (
     "source_refined_row_ids",
     "source_detect_row_index",
     "instance_key",
+    "source_acquisition_frame_index",
+    "source_crop_xywh",
 )
 REFINED_SUBJECT_MASKS_SMALL_RUN_ARRAYS: tuple[str, ...] = (
     "available_channels",
@@ -61,6 +72,13 @@ REFINED_SUBJECT_COMPONENT_SMALL_ARRAYS: tuple[str, ...] = (
     "source_row_stale",
     "reason_bytes",
     "reason",
+)
+CANONICAL_REFINED_SUBJECT_MASK_RUN_ARRAYS: tuple[str, ...] = (
+    "available_channels",
+    "source_crop_row_ids",
+    "instance_key",
+    "source_acquisition_frame_index",
+    "source_crop_xywh",
 )
 
 
@@ -206,6 +224,34 @@ class RefinedSubjectMasksRunTables:
         return self.mask_store
 
 
+@dataclass(frozen=True)
+class CanonicalRefinedSubjectMasksRunTables:
+    """Future-normal logical tables with freshly validated coordinate authority."""
+
+    tables: RefinedSubjectMasksRunTables
+    coordinate_surfaces: BoundRefinedSubjectMaskCoordinateSurfaces
+
+    @property
+    def run_name(self) -> str:
+        return self.tables.run_name
+
+    @property
+    def run_path(self) -> str:
+        return self.tables.run_path
+
+    @property
+    def masks_roi(self) -> Any:
+        return self.tables.require_masks_roi()
+
+    @property
+    def sealed_array_paths(self) -> tuple[str, ...]:
+        manifest = self.coordinate_surfaces.scientific_manifest.record
+        arrays = manifest.get("table_arrays")
+        if not isinstance(arrays, Mapping):
+            raise RefinedSubjectMasksIOError("Canonical scientific manifest is malformed.")
+        return tuple(sorted(str(value) for value in arrays))
+
+
 def _mask_labels(group: Any) -> tuple[str, ...]:
     labels_raw = _attrs_dict(group).get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
@@ -275,21 +321,49 @@ def resolve_refined_subject_masks_run(
     root: zarr.Group,
     run_name: str | None = None,
 ) -> tuple[zarr.Group, str, str]:
-    """Resolve one ``refined_subject_masks_runs`` child from a name, path, or latest."""
+    """Resolve an explicit child or a valid controlled parent selector.
+
+    Normal readers never infer authority from child names or insertion order.
+    Historical callers that intentionally need the old compatibility search
+    must opt into :func:`resolve_historical_refined_subject_masks_run`.
+    """
 
     parent = root.get(REFINED_SUBJECT_MASKS_RUN_PARENT)
     if parent is None:
         raise RefinedSubjectMasksIOError("No refined_subject_masks_runs group found.")
 
     if run_name is None or str(run_name).strip().lower() in {"", "latest"}:
-        latest = resolve_authoritative_run_name(parent)
-        if latest and latest in parent:
-            resolved = latest
+        authoritative = str(parent.attrs.get("authoritative_run") or "").strip()
+        if authoritative:
+            candidates = (("authoritative_run", authoritative),)
         else:
-            keys = _group_keys(parent)
-            if not keys:
-                raise RefinedSubjectMasksIOError("refined_subject_masks_runs has no runs.")
-            resolved = keys[-1]
+            candidates = tuple(
+                (attr_name, str(parent.attrs.get(attr_name) or "").strip())
+                for attr_name in ("latest", "latest_complete")
+                if str(parent.attrs.get(attr_name) or "").strip()
+            )
+        resolved = ""
+        invalid: list[str] = []
+        for attr_name, candidate in candidates:
+            child = parent.get(candidate)
+            if child is None or not isinstance(child, zarr.Group):
+                invalid.append(f"{attr_name}={candidate!r} does not name a child group")
+                continue
+            if not is_run_selector_eligible(child):
+                invalid.append(f"{attr_name}={candidate!r} names an ineligible run")
+                continue
+            if not is_run_complete_in_parent(parent, child):
+                invalid.append(f"{attr_name}={candidate!r} names an incomplete run")
+                continue
+            resolved = candidate
+            break
+        if not resolved:
+            detail = f" ({'; '.join(invalid)})" if invalid else ""
+            raise RefinedSubjectMasksIOError(
+                "refined_subject_masks_runs has no valid controlled selector; "
+                "pass an explicit run name or use the explicitly historical resolver"
+                f"{detail}."
+            )
     else:
         normalized = _normalize_path(str(run_name))
         parts = normalized.split("/")
@@ -307,6 +381,25 @@ def resolve_refined_subject_masks_run(
     return run_group, str(resolved), run_path
 
 
+def resolve_historical_refined_subject_masks_run(
+    root: zarr.Group,
+    run_name: str | None = None,
+) -> tuple[zarr.Group, str, str]:
+    """Opt into historical selector/search behavior for compatibility tooling."""
+
+    if run_name is not None and str(run_name).strip().lower() not in {"", "latest"}:
+        return resolve_refined_subject_masks_run(root, run_name)
+    parent = root.get(REFINED_SUBJECT_MASKS_RUN_PARENT)
+    if parent is None:
+        raise RefinedSubjectMasksIOError("No refined_subject_masks_runs group found.")
+    resolved = resolve_authoritative_run_name(parent)
+    if not resolved:
+        raise RefinedSubjectMasksIOError(
+            "refined_subject_masks_runs has no complete selector-eligible historical run."
+        )
+    return resolve_refined_subject_masks_run(root, resolved)
+
+
 def load_refined_subject_masks_run_tables(
     root: zarr.Group,
     *,
@@ -319,10 +412,12 @@ def load_refined_subject_masks_run_tables(
     run_array_names: Sequence[str] = REFINED_SUBJECT_MASKS_SMALL_RUN_ARRAYS,
     component_array_names: Sequence[str] = REFINED_SUBJECT_COMPONENT_SMALL_ARRAYS,
 ) -> RefinedSubjectMasksRunTables:
-    """Load one refined subject-mask run as logical tables.
+    """Load one historical/compatibility refined run as logical tables.
 
     ``masks_roi`` remains an array handle. The small arrays requested by
-    ``run_array_names`` and ``component_array_names`` are materialized.
+    ``run_array_names`` and ``component_array_names`` are materialized. This
+    permissive API does not establish coordinate authority; new scientific
+    consumers must use :func:`load_canonical_refined_subject_masks_run_tables`.
     """
 
     run_group, resolved_run, run_path = resolve_refined_subject_masks_run(root, run_name)
@@ -488,13 +583,124 @@ def load_refined_subject_masks_run_tables(
     )
 
 
+def load_canonical_refined_subject_masks_run_tables(
+    root: zarr.Group,
+    *,
+    run_name: str | None = None,
+    component_names: Optional[Sequence[str]] = None,
+    include_metrics: bool = True,
+    include_components: bool = False,
+    include_relations: bool = False,
+    component_array_names: Sequence[str] = (),
+) -> CanonicalRefinedSubjectMasksRunTables:
+    """Load a complete, eligible canonical refined run or fail closed.
+
+    The coordinate loader validates exact source selection, row identity,
+    payload digests, ROI placement direction, reference dimensions, geometry
+    conventions, and refinement provenance before logical tables are exposed.
+    Dense ``masks_roi`` is always required as the authoritative pixel surface.
+    """
+
+    if component_names is not None or include_components or include_relations or component_array_names:
+        raise RefinedSubjectMasksIOError(
+            "Canonical refined tables expose only the typed sealed run-level scientific "
+            "subset. Use coordinate_surfaces for sealed optional geometry, or the explicit "
+            "historical reader for review/revision/reason component state."
+        )
+    _run_group, resolved_run, run_path = resolve_refined_subject_masks_run(
+        root,
+        run_name,
+    )
+    try:
+        coordinate_surfaces = load_persisted_refined_subject_mask_coordinate_surfaces(
+            root,
+            run_path,
+        )
+    except Exception as exc:
+        raise RefinedSubjectMasksIOError(
+            f"{run_path} is not a valid canonical refined subject-mask input: {exc}"
+        ) from exc
+    tables = load_refined_subject_masks_run_tables(
+        root,
+        run_name=resolved_run,
+        component_names=None,
+        include_masks_roi=True,
+        include_metrics=include_metrics,
+        include_components=False,
+        include_relations=False,
+        run_array_names=CANONICAL_REFINED_SUBJECT_MASK_RUN_ARRAYS,
+        component_array_names=(),
+    )
+    if tables.run_path != coordinate_surfaces.context.run_path:
+        raise RefinedSubjectMasksIOError(
+            "Logical refined tables and coordinate preflight resolved different runs."
+        )
+    if tables.masks_roi is None:
+        raise RefinedSubjectMasksIOError(
+            f"{run_path} lacks authoritative dense masks_roi."
+        )
+    if tables.source_paths.get("masks_roi") != f"{run_path}/masks_roi":
+        raise RefinedSubjectMasksIOError(
+            f"{run_path} masks_roi source path is not exact."
+        )
+    if set(tables.run_arrays) != set(CANONICAL_REFINED_SUBJECT_MASK_RUN_ARRAYS):
+        raise RefinedSubjectMasksIOError(
+            f"{run_path} canonical table reader did not resolve the exact sealed run arrays."
+        )
+    if tables.components or tables.relations:
+        raise RefinedSubjectMasksIOError(
+            f"{run_path} canonical table reader exposed an untyped component/relation namespace."
+        )
+    if tables.mask_labels != coordinate_surfaces.context.labels:
+        raise RefinedSubjectMasksIOError(
+            f"{run_path} copied table labels differ from the sealed collection authority."
+        )
+    # Small arrays are copied first, compared once more with their exact live
+    # leaves, and only then is the full coordinate/measurement publication
+    # revalidated.  This closes the preflight-to-copy race for canonical table
+    # values without materializing the large authoritative mask tensor.
+    for name, copied in tables.run_arrays.items():
+        live = np.asarray(_run_group[name][:])
+        if live.dtype != copied.dtype or not np.array_equal(live, copied):
+            raise RefinedSubjectMasksIOError(
+                f"{run_path}/{name} changed while canonical tables were copied."
+            )
+    if include_metrics:
+        metrics_group = _child_group(_run_group, "metrics")
+        if metrics_group is None:
+            raise RefinedSubjectMasksIOError(f"{run_path}/metrics disappeared during read.")
+        for name, copied in tables.metrics.items():
+            live = np.asarray(metrics_group[name][:])
+            if live.dtype != copied.dtype or not np.array_equal(live, copied, equal_nan=True):
+                raise RefinedSubjectMasksIOError(
+                    f"{run_path}/metrics/{name} changed while canonical tables were copied."
+                )
+    try:
+        coordinate_surfaces = require_bound_refined_subject_mask_coordinate_surfaces(
+            coordinate_surfaces
+        )
+    except Exception as exc:
+        raise RefinedSubjectMasksIOError(
+            f"{run_path} changed during canonical table materialization: {exc}"
+        ) from exc
+    return CanonicalRefinedSubjectMasksRunTables(
+        tables=tables,
+        coordinate_surfaces=coordinate_surfaces,
+    )
+
+
 def discover_refined_subject_masks_run_options(root: zarr.Group) -> list[RefinedSubjectMasksRunOption]:
     """Return available refined subject-mask runs from an open Zarr root."""
 
     parent = root.get(REFINED_SUBJECT_MASKS_RUN_PARENT)
     if parent is None:
         return []
-    latest = resolve_latest_complete_run_name(parent)
+    try:
+        _latest_group, latest, _latest_path = resolve_refined_subject_masks_run(
+            root,
+        )
+    except RefinedSubjectMasksIOError:
+        latest = None
     options: list[RefinedSubjectMasksRunOption] = []
     for run_name in _group_keys(parent):
         try:
@@ -554,6 +760,8 @@ def discover_refined_subject_masks_run_options(root: zarr.Group) -> list[Refined
 
 
 __all__ = [
+    "CANONICAL_REFINED_SUBJECT_MASK_RUN_ARRAYS",
+    "CanonicalRefinedSubjectMasksRunTables",
     "REFINED_SUBJECT_COMPONENT_SMALL_ARRAYS",
     "REFINED_SUBJECT_MASKS_ROW_LINEAGE_ARRAYS",
     "REFINED_SUBJECT_MASKS_RUN_METRIC_ARRAYS",
@@ -565,6 +773,8 @@ __all__ = [
     "RefinedSubjectMasksRunTables",
     "RefinedSubjectRelationTables",
     "discover_refined_subject_masks_run_options",
+    "load_canonical_refined_subject_masks_run_tables",
     "load_refined_subject_masks_run_tables",
+    "resolve_historical_refined_subject_masks_run",
     "resolve_refined_subject_masks_run",
 ]

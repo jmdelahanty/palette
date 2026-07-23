@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import zarr
 
@@ -24,20 +24,33 @@ from ...analysis.subject_shape_runs import (
     CENTERLINE_SAMPLE_COUNT,
     COMPONENT_ORDER,
     DASK_WORKER_EXECUTION_BACKEND,
+    SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+    SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR,
+    SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
     SUBJECT_SHAPE_SCHEMA_ID,
+    SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
     TAIL_SAMPLE_COUNT,
-    audit_subject_shape_source_revisions_group,
+    bind_staged_subject_shape_run,
+    complete_bound_subject_shape_run_for_deferred_activation,
     write_subject_shape_run_group,
 )
 from ...shared.json_safety import json_attr_safe
+from ...shared.subject_shape_coordinate_publication import (
+    SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    commit_deferred_subject_shape_coordinate_activation,
+    load_completed_ineligible_subject_shape_coordinate_publication,
+    rollback_deferred_subject_shape_coordinate_activation,
+)
 from ...shared.refined_subject_masks_io import (
     load_refined_subject_masks_run_tables,
     resolve_refined_subject_masks_run,
 )
+from ...shared.refined_subject_mask_coordinate_publication import (
+    load_persisted_refined_subject_mask_coordinate_surfaces,
+)
 from ...shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
-from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
-from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from ...shared.zarr_run_completion import require_runs_parent
 from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
@@ -181,6 +194,14 @@ def build_subject_shape_materialization_plan(
 
     root = open_zarr_root(source, mode="r")
     refined_group, resolved_refined_run, _path = resolve_refined_subject_masks_run(root, refined_run)
+    refined_coordinates = load_persisted_refined_subject_mask_coordinate_surfaces(
+        root,
+        f"refined_subject_masks_runs/{resolved_refined_run}",
+    )
+    if refined_coordinates.context._run_group.path != refined_group.path:
+        raise ValueError(
+            "Logical refined-mask selection differs from its canonical authority."
+        )
     tables = load_refined_subject_masks_run_tables(
         root,
         run_name=resolved_refined_run,
@@ -199,6 +220,12 @@ def build_subject_shape_materialization_plan(
     )
     if not selected:
         raise ValueError("No known subject-shape components are available in the refined run.")
+    missing_required = sorted(set(COMPONENT_ORDER) - set(selected))
+    if missing_required:
+        raise ValueError(
+            "Canonical subject-shape materialization requires the full component "
+            f"anchor set; missing {missing_required!r}."
+        )
     target_name = _validate_run_name(run_name)
     target = source / "analysis" / "subject_shape_runs" / target_name
     if target.exists():
@@ -237,6 +264,15 @@ def build_subject_shape_materialization_plan(
                 "mask_labels": list(available),
                 "mask_store_encoding": mask_store.encoding,
                 "mask_storage_surface": mask_store.storage_surface,
+                "coordinate_context_sha256": (
+                    refined_coordinates.context.context_record.record_sha256
+                ),
+                "surface_inventory_sha256": (
+                    refined_coordinates.inventory.record_sha256
+                ),
+                "component_qc_inventory_sha256": (
+                    refined_coordinates.component_qc_inventory.record_sha256
+                ),
             }
         ),
     )
@@ -247,17 +283,28 @@ def _validate_subject_shape_run(
     *,
     row_count: int,
     require_sharded: bool,
+    expected_binding_status: str,
+    require_complete: bool,
+    expected_selector_eligible: bool,
 ) -> dict[str, Any]:
     group = open_zarr_root(path, mode="r")
     errors: list[str] = []
     if str(group.attrs.get("schema_id")) != SUBJECT_SHAPE_SCHEMA_ID:
         errors.append("schema_id mismatch")
-    if str(group.attrs.get("palette_run_completion_status")) != "complete":
-        errors.append("run is not complete")
+    expected_completion = "complete" if require_complete else "running"
+    if str(group.attrs.get("palette_run_completion_status")) != expected_completion:
+        errors.append("run completion status mismatch")
+    if group.attrs.get("stage_selector_eligible") is not expected_selector_eligible:
+        errors.append("stage selector eligibility mismatch")
+    if (
+        group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != expected_binding_status
+    ):
+        errors.append("coordinate binding status mismatch")
     if not bool(group.attrs.get("centerline_crop_to_foreground")):
         errors.append("foreground-cropped centerline acceleration not recorded")
     expected = {
-        "row_index/frame_indices": (int(row_count),),
+        "row_index/instance_key": (int(row_count),),
         "components/subject_body/centerline_xy": (
             int(row_count),
             CENTERLINE_SAMPLE_COUNT,
@@ -288,11 +335,27 @@ def _validate_subject_shape_run(
     layout = group.attrs.get("physical_storage_layout")
     if require_sharded and not isinstance(layout, dict):
         errors.append("physical storage layout provenance missing")
+    if expected_binding_status == SUBJECT_SHAPE_BOUND_CANONICAL_STATUS:
+        if group.attrs.get("coordinate_contract") != "canonical_v2":
+            errors.append("bound run lacks canonical_v2 coordinate contract")
+    else:
+        for name in (
+            "coordinate_contract",
+            "subject_shape_coordinate_derivation",
+            "subject_shape_publication_manifest",
+            "source_row_temporal_authority",
+            "row_identity_contract",
+        ):
+            if name in group.attrs:
+                errors.append(f"unbound run contains canonical attr {name}")
+        if "coordinate_records" in group:
+            errors.append("unbound run contains coordinate_records")
     return {
         "valid": not errors,
         "errors": errors,
         "row_count": int(row_count),
         "require_sharded": bool(require_sharded),
+        "binding_status": expected_binding_status,
         "physical_storage_layout": layout,
     }
 
@@ -303,12 +366,56 @@ def publish_subject_shape_run(
     materialization_payload: dict[str, Any],
     copy_backend: str,
 ) -> dict[str, Any]:
+    transaction = {
+        "binding_complete": False,
+        "completion_published": False,
+        "publication_owner_uuid": None,
+    }
+    deferred_activation: list[Any] = []
+
     def validate(path: Path) -> dict[str, Any]:
-        return _validate_subject_shape_run(
+        structural = _validate_subject_shape_run(
             path,
             row_count=plan.row_count,
             require_sharded=True,
+            expected_binding_status=(
+                SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+                if transaction["binding_complete"]
+                else SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS
+            ),
+            require_complete=bool(transaction["completion_published"]),
+            expected_selector_eligible=False,
         )
+        if not structural["valid"] or not transaction["binding_complete"]:
+            return structural
+        if path.resolve() != plan.target_run_path.resolve():
+            structural["valid"] = False
+            structural["errors"].append(
+                "canonical validation is permitted only at the exact authoritative path"
+            )
+            return structural
+        if transaction["completion_published"]:
+            try:
+                root = open_zarr_root(plan.source_zarr, mode="r")
+                proof = load_completed_ineligible_subject_shape_coordinate_publication(
+                    root,
+                    f"analysis/subject_shape_runs/{plan.run_name}",
+                    expected_publication_owner=str(
+                        transaction["publication_owner_uuid"]
+                    ),
+                )
+                structural["canonical_validation"] = {
+                    "valid": True,
+                    "run_name": plan.run_name,
+                    "row_count": int(proof.row_identity.leading_dimension),
+                    "manifest_sha256": proof.manifest.record_sha256,
+                }
+            except Exception as exc:
+                structural["valid"] = False
+                structural["errors"].append(
+                    f"strict canonical validation failed: {exc}"
+                )
+        return structural
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
         return (
@@ -322,41 +429,104 @@ def publish_subject_shape_run(
         root: zarr.Group,
         run_group: zarr.Group,
     ) -> dict[str, Any]:
-        source_revision_audit = audit_subject_shape_source_revisions_group(
-            root,
-            shape_run=plan.run_name,
-            refined_run=plan.refined_run,
-        )
-        if str(source_revision_audit.get("status")) != "current":
-            raise RuntimeError(
-                "Refined subject-mask revisions changed during materialization: "
-                f"{source_revision_audit}"
-            )
+        if transaction["binding_complete"] or transaction["completion_published"]:
+            raise RuntimeError("Subject-shape publication state is inconsistent.")
+        owner = run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        if not isinstance(owner, str):
+            raise RuntimeError("Subject-shape publication owner is missing.")
+        transaction["publication_owner_uuid"] = owner
         write_best_effort_run_lineage_attrs(run_group, run_family="subject_shape_run")
-        return {"source_revision_audit": source_revision_audit}
+        binding = bind_staged_subject_shape_run(
+            root,
+            run_group,
+            expected_refined_run=plan.refined_run,
+            expected_run_name=plan.run_name,
+        )
+        if binding.get("valid") is not True:
+            raise RuntimeError(f"Final-path subject-shape binding failed: {binding!r}")
+        transaction["binding_complete"] = True
+        return {"canonical_binding": binding}
 
     def complete(
-        _root: zarr.Group,
+        root: zarr.Group,
+        _parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if not transaction["binding_complete"] or transaction["completion_published"]:
+            raise RuntimeError(
+                "Subject-shape completion requires exactly one successful binding."
+            )
+        owner = transaction["publication_owner_uuid"]
+        if not isinstance(owner, str):
+            raise RuntimeError("Subject-shape completion lacks its exact owner.")
+        completion, activation = (
+            complete_bound_subject_shape_run_for_deferred_activation(
+                root,
+                run_group,
+                expected_run_name=plan.run_name,
+                publication_owner=owner,
+            )
+        )
+        if completion.get("valid") is not True:
+            raise RuntimeError(
+                f"Deferred subject-shape completion failed: {completion!r}."
+            )
+        deferred_activation[:] = [activation]
+        transaction["completion_published"] = True
+
+    def activate(
+        root: zarr.Group,
         parent: zarr.Group,
         run_group: zarr.Group,
     ) -> None:
-        mark_run_complete(
-            run_group,
-            parent_group=parent,
-            run_name=plan.run_name,
-            run_provenance=build_run_provenance_from_stage_record(
-                run_group.attrs.get("provenance", {}),
-                fallback_command="subject_shape_materializer",
-            ),
+        if len(deferred_activation) != 1:
+            raise RuntimeError(
+                "Subject-shape publication lacks one deferred activation receipt."
+            )
+        expected_run_attrs = json_attr_safe(dict(run_group.attrs))
+        staging = expected_run_attrs.get("cluster_output_staging")
+        final_validation = (
+            staging.get("final_validation")
+            if isinstance(staging, Mapping)
+            else None
         )
+        if (
+            not isinstance(staging, Mapping)
+            or staging.get("schema_id") != PUBLISH_SCHEMA_ID
+            or not isinstance(final_validation, Mapping)
+            or final_validation.get("valid") is not True
+        ):
+            raise RuntimeError(
+                "Subject-shape activation lacks its exact successful final "
+                "validation payload."
+            )
+        commit_deferred_subject_shape_coordinate_activation(
+            deferred_activation[0],
+            root=root,
+            parent=parent,
+            run=run_group,
+            expected_run_attrs=expected_run_attrs,
+        )
+
+    def rollback_activation() -> None:
+        if deferred_activation:
+            rollback_deferred_subject_shape_coordinate_activation(
+                deferred_activation[0]
+            )
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/subject_shape_runs"]
-        if str(parent.attrs.get("latest")) != plan.run_name or str(
-            parent.attrs.get("latest_complete")
-        ) != plan.run_name:
+        run = parent[plan.run_name]
+        if (
+            str(parent.attrs.get("latest")) != plan.run_name
+            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or run.attrs.get("stage_selector_eligible") is not False
+            or run.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+            != SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+        ):
             raise RuntimeError(
-                "Subject-shape parent pointers were not updated to the published run."
+                "Subject-shape complete run was not selected while remaining "
+                "ineligible before the final commit."
             )
 
     return atomic_publish_run_group(
@@ -367,17 +537,23 @@ def publish_subject_shape_run(
             run_name=plan.run_name,
             lock_suffix="subject-shape-publish",
             publish_schema_id=PUBLISH_SCHEMA_ID,
-            policy="node_local_compute_then_shard_then_atomic_run_group_publish",
+            policy="read_only_compute_unbound_stage_shard_final_path_bind_then_publish",
             rollback_policy=(
-                "remove_new_target_and_restore_parent_attrs_on_post_rename_failure"
+                "retain_owner_bound_failed_public_tombstone_and_"
+                "stage_specific_receipt_rollback_only"
             ),
             content_checksum=True,
+            publication_owner_attr=SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+            # The sealed stage receipt is the only selector rollback authority.
+            # A generic pre-copy snapshot can predate an intervening publication.
         ),
         copy_backend=copy_backend,
         validate_run=validate,
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
+        rollback_activation=rollback_activation,
         after_rename=after_rename,
         payload_metadata={
             "local_sharded_run": str(plan.sharded_run),
@@ -460,18 +636,22 @@ def materialize_subject_shape(
             centerline_crop_to_foreground=True,
             native_threads=plan.native_threads,
             stage_command=stage_command or (" ".join(sys.argv) if sys.argv else "unknown"),
+            _unbound_coordinate_stage=True,
         )
         compute_validation = _validate_subject_shape_run(
             plan.compute_run_path,
             row_count=plan.row_count,
             require_sharded=False,
+            expected_binding_status=SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+            require_complete=True,
+            expected_selector_eligible=False,
         )
         if not compute_validation["valid"]:
             raise RuntimeError(f"Node-local compute validation failed: {compute_validation}")
         sharding = copy_completed_run_to_sharded(
             plan.compute_run_path,
             plan.sharded_run,
-            row_count_array="row_index/frame_indices",
+            row_count_array="row_index/instance_key",
             shard_rows=plan.output_shard_rows,
             workers=plan.shard_copy_workers,
         )
@@ -480,6 +660,34 @@ def materialize_subject_shape(
             for key, value in sharding.items()
             if key not in {"arrays", "shards", "static_arrays"}
         }
+        sharded = open_zarr_root(plan.sharded_run, mode="a")
+        if (
+            sharded.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+            != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+            or sharded.attrs.get("palette_run_completion_status") != "complete"
+        ):
+            raise RuntimeError(
+                "Sharded subject-shape copy did not preserve the exact unbound stage."
+            )
+        sharded.attrs[SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR] = (
+            SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS
+        )
+        sharded.attrs["palette_run_completion_status"] = "running"
+        if "palette_run_completed_at_utc" in sharded.attrs:
+            del sharded.attrs["palette_run_completed_at_utc"]
+        publishing_validation = _validate_subject_shape_run(
+            plan.sharded_run,
+            row_count=plan.row_count,
+            require_sharded=True,
+            expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
+            require_complete=False,
+            expected_selector_eligible=False,
+        )
+        if not publishing_validation["valid"]:
+            raise RuntimeError(
+                "Sharded subject-shape publishing stage is invalid: "
+                f"{publishing_validation!r}"
+            )
         materialization_payload = {
             "schema_id": MATERIALIZATION_SCHEMA_ID,
             "status": "complete",
@@ -488,6 +696,7 @@ def materialize_subject_shape(
             "node_local_compute": compute_summary,
             "node_local_compute_validation": compute_validation,
             "node_local_sharding": sharding_summary,
+            "publishing_validation": publishing_validation,
             "native_thread_environment": native_environment,
             "capacity": {
                 "check_enabled": bool(check_capacity),

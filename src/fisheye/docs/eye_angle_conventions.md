@@ -1,6 +1,6 @@
 # Eye-Angle Metrics: Data Layout and Computation
 
-This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and subject-mask eye geometry. It reflects the v5 eye-angle run schema and v8 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, a machine-readable variant schema classifies those surfaces for UI selection, and versioned algorithm/source contracts make the exact computation reproducible. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
+This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and subject-mask eye geometry. It reflects the v6 eye-angle run schema and v9 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, a machine-readable variant schema classifies those surfaces for UI selection, and versioned algorithm/source contracts make the exact computation reproducible. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
 
 ## Where the data lives
 
@@ -30,33 +30,49 @@ Key datasets:
 - `_delta_deg` and `_delta_deg_smoothed` arrays contain absolute frame-to-frame changes.
 - `qa/roi/valid_left`, `valid_right`, `valid_frame`, and `reason_codes` provide flags and bitmasks that explain any exclusions.
 - `qa/roi/left_major_axis_marginal`, `right_major_axis_marginal`, and `major_axis_marginal` are non-fatal warnings for the rare case where the major axis is close to the forward half-plane boundary and 180 degree ambiguity resolution is therefore less certain.
-- `support/time_seconds`, `frame_indices`, `ellipse_*` expose timing metadata and ellipse diagnostics used by the visualizations.
+- `support/instance_key` is the ordered observation identity copied from the
+  exact base-keypoint publication sealed by subject-shape assignment.
+- `support/source_acquisition_frame_index` is the canonical acquisition-frame
+  coordinate for each ROI row. `support/frame_indices` is a compatibility alias
+  and must be byte-for-byte equal to it.
+- `support/time_seconds` and `ellipse_*` expose timing metadata and ellipse
+  diagnostics used by the visualizations.
 
-Current runs resolve eye geometry through `fisheye.shared.eye_geometry_source`.
-The preferred source is `analysis/subject_shape_runs/<run>` when it contains
-`eye_left` and `eye_right` component ellipse geometry. If no subject-shape
-geometry is available, the resolver falls back to
-`refined_subject_masks_runs/<run>` with eye component geometry. Phase 1 of
-eye-mask severance removed the Palette-side fallback to historical
-`refined_eye_masks_runs/<run>` geometry.
+Canonical runs resolve eye geometry through
+`fisheye.shared.eye_geometry_source` from a completed
+`analysis/subject_shape_runs/<run>` publication containing `eye_left` and
+`eye_right` ellipse geometry. The same subject-shape publication must seal an
+assignment proof for one exact completed `keypoints_runs/<run>` child. Palette
+reloads that child and fails closed unless crop placement, keypoint labels,
+success mask, ordered `instance_key`, ordered acquisition-frame index, and
+source frame count agree with the sealed proof.
+
+Historical refined keypoints are not a canonical fallback. They may be used
+only with the explicit `--diagnostic-refined-keypoint-run` option, and the
+result is permanently marked nonselector with diagnostic-only publication
+scope. Ordinary `--keypoint-run` is only an assertion that the caller expected
+the exact base-keypoint child already sealed by the selected subject-shape run.
 
 The referenced sources are captured in run attributes:
 
-- `schema_id = "analysis.eye_angle_runs"` and `schema_version = 5`: stable
+- `schema_id = "analysis.eye_angle_runs"` and `schema_version = 6`: stable
   run-level contract for this analysis product.
 - `method = "ellipse_and_centroid_eye_angles"`: the writer computes both
   ellipse-axis and centroid-position eye-angle families.
 - `method_version = "eye_angle_analysis.v5"`: gaze direction is derived from
   the resolved major axis and is no longer clipped to +/-90 deg.
 - `row_axis = "keypoint_detection_rows"`: ROI outputs are row-aligned to the
-  refined keypoint/eye-geometry detection rows.
+  subject-shape-sealed base-keypoint rows. The ordered identity is explicit in
+  `support/instance_key`; the acquisition-time coordinate is explicit in
+  `support/source_acquisition_frame_index`.
 - `eye_angle_output_schema`: machine-readable summary of output groups,
   row axes, units, suffix conventions, derivative outputs, QA reason-code
   linkage, and `variant_schema`. Output schema v6 adds Bianco/Engert-style
   eye-frame fields, and output schema v7 adds the UI-facing representation
   registry while leaving the run schema and v5 method semantics intact. Output
   schema v8 adds the versioned algorithm-contract link and exact temporal
-  operator identities.
+  operator identities. Output schema v9 adds canonical row identity and
+  acquisition-frame support surfaces.
 - `eye_angle_variant_schema`: mirror of
   `eye_angle_output_schema.variant_schema`. Consumers can use it to present
   selectable `eye_frame`, `gaze`, `nasal_gaze`, `major`, `centroid`, and
@@ -70,12 +86,12 @@ The referenced sources are captured in run attributes:
   `method_version` because adding more precise provenance does not change the
   v5 scientific calculation.
 - `eye_angle_source_contracts`: resolved paths and available schema, method,
-  completion, git, and lineage-fingerprint attrs for the eye-geometry,
-  refined-keypoint, and base-keypoint runs. It also records the exact
-  `ellipse_params`, `ellipse_success`, `keypoints_roi`, `heading`, detection
-  success, and frame-index paths. Source-shape component attrs preserve the
-  upstream ellipse estimator, such as
-  `cv2.fitEllipse_component_contour_v1`.
+  completion, git, and lineage-fingerprint attrs for the eye geometry and exact
+  keypoint source. Its canonical keypoint authority binds the subject-shape
+  assignment proof to `keypoints_roi`, `detection_success`, `instance_key`,
+  `source_acquisition_frame_index`, crop placement, labels, and temporal
+  authority. Source-shape component attrs preserve the upstream ellipse
+  estimator, such as `cv2.fitEllipse_component_contour_v1`.
 - `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
   and run used for geometry.
 - `source_geometry_kind`: normalized geometry role, one of
@@ -88,8 +104,10 @@ The referenced sources are captured in run attributes:
   available.
 - `source_refined_eye_run`: historical lineage only when a subject-mask source
   was seeded from compatibility refined-eye data.
-- `source_keypoints_run`: canonical refined keypoint source. The legacy
-  `source_keypoint_run` alias may be mirrored during migration.
+- `source_base_keypoints_run`: exact canonical base-keypoint source sealed by
+  subject shape.
+- `source_refined_keypoints_diagnostic_run`: present only on an explicitly
+  requested historical diagnostic run; such a run is never selector eligible.
 
 The raw ROIs sampled by the viewer live under `keypoints_runs/<run>/roi_images`.
 
@@ -110,11 +128,10 @@ Schema boundary:
 
 Body-frame boundary:
 
-- Current v5 eye-angle runs materialize a keypoint-derived body-frame support
+- Current v6 eye-angle runs materialize a keypoint-derived body-frame support
   group under `support/body_frame/`.
-- Future schema updates should prefer `analysis/subject_shape_runs/<run>/body_frame/`
-  when a coherent mask/spline/keypoint body frame exists and fall back to
-  `pose_schema.metadata.heading_computation` for keypoint-only datasets.
+- The body frame is recomputed from the same sealed keypoint payload used by
+  the analysis. A separately persisted upstream heading is not an input.
 - See `docs/body_frame_contract.md`.
 
 ## Execution model
@@ -137,7 +154,11 @@ Angles are generated inside `fisheye.analysis.eye_angle_analysis._process_chunk`
 
 1. Keypoint ROIs (swim bladder, left/right eye centers).
 2. Eye-geometry ellipse fits, preferably from `analysis/subject_shape_runs`.
-3. A keypoint-derived body-frame support group computed from the same keypoints.
+3. The exact success mask, ordered `instance_key`, and ordered acquisition-frame
+   coordinate bound to those keypoints by the subject-shape assignment proof.
+
+`_process_chunk` computes the body frame from the keypoints and success mask;
+it does not accept a separately persisted heading input.
 
 ### Per-eye angles
 
@@ -208,7 +229,9 @@ source, are persisted in `eye_angle_algorithm_contract`.
 ## Auxiliary products
 
 - `support/ellipse_major`, `ellipse_minor`, and `ellipse_ratio` capture the geometric properties of the fitted ellipses and are useful for QA thresholds.
-- Heading (in degrees) is re-serialized alongside the angles so downstream viewers can overlay the fish’s forward axis (`heading_deg`).
+- Heading is derived from the sealed keypoints and re-serialized alongside the
+  angles so downstream viewers can overlay the fish's forward axis
+  (`support/body_frame/heading_deg` and its angle-output compatibility field).
 - Frame-level outputs repeat the same signals after the detections are resampled onto the video frame timeline; they live under `angles/frame/` with matching schema.
 
 ## Visual tools

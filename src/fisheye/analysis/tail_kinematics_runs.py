@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import hashlib
 import json
 import multiprocessing as mp
+import re
 import sys
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -16,20 +19,42 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from ..shared.archive_identity import archive_identity
+from ..shared.coordinate_reference import canonical_node_path
 from ..shared.detect_reason_codec import decode_reason_bytes
+from ..shared.coordinate_frame_record import array_payload_sha256
 from ..shared.json_safety import json_attr_safe
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
+from ..shared.tail_coordinate_publication import (
+    TAIL_PUBLICATION_OWNER_ATTR,
+    activate_tail_coordinate_publication,
+    publish_tail_kinematics_coordinate_surfaces,
+)
+from ..shared.zarr_run_completion import (
+    RUN_COMPLETED_AT_ATTR,
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_NAME_ATTR,
+    RUN_STATUS_FAILED,
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+    utc_now_iso,
+)
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.zarr_io import open_zarr_root
-from .subject_shape_io import SubjectShapeIOError, resolve_subject_shape_run
+from .subject_shape_io import (
+    SubjectShapeIOError,
+    resolve_canonical_subject_shape_run,
+)
 from .subject_shape_spline import tail_sample_positions
 
 TAIL_KINEMATICS_SCHEMA_ID = "analysis.tail_kinematics_runs"
-TAIL_KINEMATICS_SCHEMA_VERSION = 1
+TAIL_KINEMATICS_SCHEMA_VERSION = 2
 TAIL_KINEMATICS_METHOD = "tail_metrics_from_subject_shape"
 TAIL_KINEMATICS_METHOD_VERSION = 1
 TAIL_KINEMATICS_COMPUTE_KERNEL = "vectorized_shared_grid_v1"
@@ -40,13 +65,11 @@ DEFAULT_BLOCK_ROWS = 16_384
 DEFAULT_OUTPUT_SHARD_ROWS = 262_144
 TAIL_KINEMATICS_EXECUTION_BACKENDS = frozenset({"serial", "process_shards"})
 REASON_BYTES_WIDTH = 64
+TAIL_PUBLICATION_TOMBSTONE_ATTR = "tail_publication_tombstone"
 ROW_LINEAGE_NAMES = (
-    "frame_indices",
-    "detection_indices",
-    "source_refined_row_ids",
-    "source_detect_row_index",
     "source_crop_row_ids",
     "instance_key",
+    "source_acquisition_frame_index",
 )
 SUBJECT_SHAPE_BODY_ARRAY_NAMES = (
     "tail_sample_s",
@@ -62,10 +85,49 @@ SUBJECT_SHAPE_BODY_ARRAY_NAMES = (
 SUBJECT_SHAPE_BODY_FRAME_ARRAY_NAMES = (
     "forward_axis_xy",
     "left_axis_xy",
-    "valid",
+    "axis_valid",
     "failure_reason_bytes",
 )
 SOURCE_REVISION_ARRAY_NAMES = ("row_revision", "row_revision_available")
+TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_ID = (
+    "palette.tail_kinematics_staged_subject_shape_authority"
+)
+TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_VERSION = 1
+TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCOPE = (
+    "tail_kinematics_exact_digest_bound_staged_subset_only"
+)
+
+_REQUIRED_SOURCE_ARRAY_PATHS = (
+    "components/subject_body/tail_sample_s",
+    "components/subject_body/tail_sample_xy",
+    "components/subject_body/tail_tangent_xy",
+    "components/subject_body/tail_curvature_px_inv",
+    "components/subject_body/tail_sample_valid",
+    "components/subject_body/bspline_valid",
+    "components/subject_body/tail_base_xy",
+    "body_frame/forward_axis_xy",
+    "body_frame/left_axis_xy",
+    "body_frame/axis_valid",
+    "source_crop_row_ids",
+    "instance_key",
+    "source_acquisition_frame_index",
+)
+_OPTIONAL_SOURCE_ARRAY_PATHS = (
+    "components/subject_body/tail_sample_failure_reason_bytes",
+    "components/subject_body/bspline_failure_reason_bytes",
+    "body_frame/failure_reason_bytes",
+    *(f"source_refined_subject_masks/{name}" for name in SOURCE_REVISION_ARRAY_NAMES),
+)
+_SOURCE_CONTRACT_ATTR_NAMES = (
+    "schema_id",
+    "schema_version",
+    "method",
+    "method_version",
+    "palette_run_completion_status",
+    "source_refined_subject_masks_run",
+    "body_frame_schema_id",
+    "tail_geometry_schema_id",
+)
 
 
 @dataclass(frozen=True)
@@ -102,6 +164,10 @@ class TailKinematicsSources:
     reason_arrays: Mapping[str, Any | None]
     row_count: int
     source_sample_count: int
+    source_publication_manifest_sha256: str
+    source_authority_mode: str
+    source_authority: Mapping[str, Any] = field(repr=False)
+    shape_group: Any = field(repr=False, compare=False)
 
 
 def _utc_now() -> str:
@@ -114,6 +180,212 @@ def _default_run_name() -> str:
 
 
 _json_safe = json_attr_safe
+
+
+def _canonical_json_copy(value: Any) -> Any:
+    return json.loads(
+        json.dumps(
+            json_attr_safe(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    )
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        json_attr_safe(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _source_contract_attrs(shape_group: Any) -> dict[str, Any]:
+    return _canonical_json_copy(
+        {
+            name: shape_group.attrs.get(name)
+            for name in _SOURCE_CONTRACT_ATTR_NAMES
+            if name in shape_group.attrs
+        }
+    )
+
+
+def _build_staged_source_authority(
+    shape_group: Any,
+    *,
+    run_name: str,
+    row_count: int,
+    source_sample_count: int,
+    publication: Any,
+) -> dict[str, Any]:
+    """Build a closed detached receipt from an already verified publication."""
+
+    manifest_arrays = publication.manifest.record.get("arrays")
+    if not isinstance(manifest_arrays, Mapping):
+        raise SubjectShapeIOError(
+            "Canonical subject-shape publication lacks a closed array manifest."
+        )
+    curvature = publication.require_scalar_surface(
+        "components/subject_body/tail_curvature_px_inv",
+        units="px^-1",
+        surface_kind="row_profile",
+    )
+    allowed_arrays: dict[str, Any] = {}
+    for relative_ref in (*_REQUIRED_SOURCE_ARRAY_PATHS, *_OPTIONAL_SOURCE_ARRAY_PATHS):
+        node = shape_group.get(relative_ref)
+        if node is None:
+            if relative_ref in _REQUIRED_SOURCE_ARRAY_PATHS:
+                raise SubjectShapeIOError(
+                    f"Canonical subject-shape source is missing required array {relative_ref!r}."
+                )
+            continue
+        manifest_entry = manifest_arrays.get(relative_ref)
+        if not isinstance(manifest_entry, Mapping):
+            raise SubjectShapeIOError(
+                f"Canonical subject-shape manifest does not bind staged array {relative_ref!r}."
+            )
+        if str(manifest_entry.get("relative_ref")) != relative_ref:
+            raise SubjectShapeIOError(
+                f"Canonical array-manifest reference for {relative_ref!r} is inconsistent."
+            )
+        allowed_arrays[relative_ref] = _canonical_json_copy(manifest_entry)
+
+    record = {
+        "schema_id": TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_ID,
+        "schema_version": TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_VERSION,
+        "authority_scope": TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCOPE,
+        "source_subject_shape_run": str(run_name),
+        "source_subject_shape_run_ref": f"/analysis/subject_shape_runs/{run_name}",
+        "row_count": int(row_count),
+        "source_sample_count": int(source_sample_count),
+        "canonical_publication": {
+            "manifest_ref": publication.manifest.record_ref,
+            "manifest_sha256": publication.manifest.record_sha256,
+            "row_identity_ref": publication.row_identity.record_ref,
+            "row_identity_sha256": publication.row_identity.record_sha256,
+            "tail_sample_axis_ref": publication.tail_sample_axis.record_ref,
+            "tail_sample_axis_sha256": publication.tail_sample_axis.record_sha256,
+            "tail_curvature_semantics_ref": curvature.semantics.record_ref,
+            "tail_curvature_semantics_sha256": curvature.semantics.record_sha256,
+            "body_frame_ref": publication.body_frame.record_ref,
+            "body_frame_sha256": publication.body_frame.record_sha256,
+        },
+        "source_contract_attrs": _source_contract_attrs(shape_group),
+        "allowed_arrays": allowed_arrays,
+        "closed_array_inventory": True,
+        "normal_reader_authority": False,
+    }
+    return {
+        **record,
+        "record_sha256": _canonical_sha256(record),
+    }
+
+
+def _validated_staged_source_authority(
+    shape_group: Any,
+    *,
+    run_name: str,
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one explicit materializer-only detached source receipt."""
+
+    if not isinstance(authority, Mapping):
+        raise SubjectShapeIOError("Staged subject-shape authority must be a mapping.")
+    canonical = _canonical_json_copy(authority)
+    digest = canonical.pop("record_sha256", None)
+    if not _is_sha256(digest) or digest != _canonical_sha256(canonical):
+        raise SubjectShapeIOError("Staged subject-shape authority digest is missing or stale.")
+    if canonical.get("schema_id") != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_ID:
+        raise SubjectShapeIOError("Unsupported staged subject-shape authority schema.")
+    if canonical.get("schema_version") != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_VERSION:
+        raise SubjectShapeIOError("Unsupported staged subject-shape authority schema version.")
+    if canonical.get("authority_scope") != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCOPE:
+        raise SubjectShapeIOError("Staged subject-shape authority has the wrong scope.")
+    if canonical.get("normal_reader_authority") is not False:
+        raise SubjectShapeIOError("Detached staging receipts cannot grant normal reader authority.")
+    if canonical.get("closed_array_inventory") is not True:
+        raise SubjectShapeIOError("Staged subject-shape array inventory is not closed.")
+    expected_ref = f"/analysis/subject_shape_runs/{run_name}"
+    if (
+        canonical.get("source_subject_shape_run") != run_name
+        or canonical.get("source_subject_shape_run_ref") != expected_ref
+    ):
+        raise SubjectShapeIOError("Staged subject-shape authority names a different source run.")
+    publication = canonical.get("canonical_publication")
+    required_publication_digests = (
+        "manifest_sha256",
+        "row_identity_sha256",
+        "tail_sample_axis_sha256",
+        "tail_curvature_semantics_sha256",
+        "body_frame_sha256",
+    )
+    if not isinstance(publication, Mapping) or any(
+        not _is_sha256(publication.get(name))
+        for name in required_publication_digests
+    ):
+        raise SubjectShapeIOError(
+            "Staged authority lacks exact canonical-publication proof digests."
+        )
+    if canonical.get("source_contract_attrs") != _source_contract_attrs(shape_group):
+        raise SubjectShapeIOError("Staged source contract attrs differ from the canonical receipt.")
+
+    allowed = canonical.get("allowed_arrays")
+    if not isinstance(allowed, Mapping):
+        raise SubjectShapeIOError("Staged subject-shape authority lacks its array inventory.")
+    allowed_names = set(str(name) for name in allowed)
+    supported_names = set((*_REQUIRED_SOURCE_ARRAY_PATHS, *_OPTIONAL_SOURCE_ARRAY_PATHS))
+    missing = set(_REQUIRED_SOURCE_ARRAY_PATHS) - allowed_names
+    unsupported = allowed_names - supported_names
+    if missing:
+        raise SubjectShapeIOError(
+            f"Staged subject-shape authority omits required arrays: {sorted(missing)!r}."
+        )
+    if unsupported:
+        raise SubjectShapeIOError(
+            f"Staged subject-shape authority grants unsupported arrays: {sorted(unsupported)!r}."
+        )
+
+    for relative_ref in sorted(allowed_names):
+        declared = allowed.get(relative_ref)
+        node = shape_group.get(relative_ref)
+        if not isinstance(declared, Mapping) or node is None:
+            raise SubjectShapeIOError(
+                f"Staged source array {relative_ref!r} is missing from receipt or subset."
+            )
+        expected_shape = declared.get("shape")
+        if (
+            declared.get("relative_ref") != relative_ref
+            or declared.get("canonicalization") != "numpy_dtype_shape_c_order_bytes_v1"
+            or not isinstance(expected_shape, list)
+            or any(type(value) is not int or value < 0 for value in expected_shape)
+            or declared.get("dtype") != np.dtype(node.dtype).str
+            or expected_shape != [int(value) for value in node.shape]
+            or not _is_sha256(declared.get("content_sha256"))
+        ):
+            raise SubjectShapeIOError(
+                f"Staged source metadata for {relative_ref!r} differs from its receipt."
+            )
+        try:
+            observed_digest = array_payload_sha256(node)
+        except Exception as exc:
+            raise SubjectShapeIOError(
+                f"Staged source array {relative_ref!r} could not be verified: {exc}"
+            ) from exc
+        if observed_digest != declared.get("content_sha256"):
+            raise SubjectShapeIOError(
+                f"Staged source array {relative_ref!r} differs from its canonical payload."
+            )
+
+    return {**canonical, "record_sha256": str(digest)}
 
 
 def _encode_reasons(reasons: Sequence[object], *, width: int = REASON_BYTES_WIDTH) -> np.ndarray:
@@ -697,10 +969,45 @@ def _validate_source_shape(name: str, source: Any, expected: Sequence[int]) -> N
 def _resolve_tail_kinematics_sources(
     root: zarr.Group,
     shape_run: Optional[str],
+    *,
+    _staged_source_authority: Mapping[str, Any] | None = None,
 ) -> tuple[str, zarr.Group, TailKinematicsSources]:
-    """Resolve lazy array handles without materializing framewise source tables."""
+    """Resolve lazy source handles through canonical or explicit staged proof.
 
-    shape_group, run_name, run_path = resolve_subject_shape_run(root, shape_run)
+    The private staged path is reserved for the node-local materializer.  It
+    validates a closed detached receipt made from a fully verified canonical
+    publication.  It is not exposed by the normal subject-shape reader API.
+    """
+
+    publication: Any | None = None
+    staged_authority: dict[str, Any] | None = None
+    if _staged_source_authority is None:
+        (
+            shape_group,
+            run_name,
+            run_path,
+            publication,
+        ) = resolve_canonical_subject_shape_run(root, shape_run)
+    else:
+        requested = str(shape_run or "").strip()
+        if not requested or requested.lower() == "latest":
+            raise SubjectShapeIOError(
+                "Digest-bound staged source resolution requires an exact subject-shape run name."
+            )
+        normalized = requested.strip("/")
+        prefix = "analysis/subject_shape_runs/"
+        run_name = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+        if not run_name or "/" in run_name:
+            raise SubjectShapeIOError(f"Invalid staged subject-shape run name {shape_run!r}.")
+        run_path = f"analysis/subject_shape_runs/{run_name}"
+        shape_group = root.get(run_path)
+        if not isinstance(shape_group, zarr.Group):
+            raise SubjectShapeIOError(f"Staged subject-shape run {run_path!r} is missing.")
+        staged_authority = _validated_staged_source_authority(
+            shape_group,
+            run_name=run_name,
+            authority=_staged_source_authority,
+        )
     components = _require_group(shape_group, "components", path=run_path)
     body_path = f"{run_path}/components"
     body = _require_group(components, "subject_body", path=body_path)
@@ -724,7 +1031,7 @@ def _resolve_tail_kinematics_sources(
         "tail_base_xy": _require_array_handle(body, "tail_base_xy", path=f"{body_path}/subject_body"),
         "body_forward_axis_xy": _require_array_handle(body_frame, "forward_axis_xy", path=f"{run_path}/body_frame"),
         "body_left_axis_xy": _require_array_handle(body_frame, "left_axis_xy", path=f"{run_path}/body_frame"),
-        "body_frame_valid": _require_array_handle(body_frame, "valid", path=f"{run_path}/body_frame"),
+        "body_frame_valid": _require_array_handle(body_frame, "axis_valid", path=f"{run_path}/body_frame"),
     }
     tail_xy_shape = tuple(int(value) for value in arrays["tail_sample_xy"].shape)
     if len(tail_xy_shape) != 3 or int(tail_xy_shape[2]) != 2:
@@ -755,6 +1062,28 @@ def _resolve_tail_kinematics_sources(
                 f"{name} has shape {tuple(int(value) for value in source.shape)!r}; expected first axis {row_count}."
             )
 
+    if staged_authority is not None:
+        if (
+            staged_authority.get("row_count") != int(row_count)
+            or staged_authority.get("source_sample_count") != int(source_sample_count)
+        ):
+            raise SubjectShapeIOError(
+                "Staged subject-shape cardinality differs from its canonical receipt."
+            )
+        source_authority = staged_authority
+        source_authority_mode = "digest_bound_staged_subset"
+    else:
+        assert publication is not None
+        source_authority = _build_staged_source_authority(
+            shape_group,
+            run_name=run_name,
+            row_count=int(row_count),
+            source_sample_count=int(source_sample_count),
+            publication=publication,
+        )
+        source_authority_mode = "canonical_publication"
+    manifest_sha256 = source_authority["canonical_publication"]["manifest_sha256"]
+
     return (
         run_name,
         shape_group,
@@ -764,7 +1093,24 @@ def _resolve_tail_kinematics_sources(
             reason_arrays=reason_arrays,
             row_count=int(row_count),
             source_sample_count=int(source_sample_count),
+            source_publication_manifest_sha256=str(manifest_sha256),
+            source_authority_mode=source_authority_mode,
+            source_authority=source_authority,
+            shape_group=shape_group,
         ),
+    )
+
+
+def _revalidate_tail_kinematics_sources(sources: TailKinematicsSources) -> None:
+    """Close staged-copy TOCTOU after all bounded source reads complete."""
+
+    if sources.source_authority_mode != "digest_bound_staged_subset":
+        return
+    run_name = str(sources.source_authority.get("source_subject_shape_run") or "")
+    _validated_staged_source_authority(
+        sources.shape_group,
+        run_name=run_name,
+        authority=sources.source_authority,
     )
 
 
@@ -806,54 +1152,234 @@ def _copy_row_lineage_bounded(
     block_rows: int,
     output_shard_rows: int,
 ) -> tuple[list[str], list[str], str]:
-    target = run_group.require_group("row_index")
-    source = shape_group.get("row_index")
     copied: list[str] = []
-    missing: list[str] = []
-    frame_source: Any | None = None
-    if isinstance(source, zarr.Group):
-        for name in ROW_LINEAGE_NAMES:
-            source_array = source.get(name)
-            if source_array is None:
-                missing.append(name)
-                continue
-            _copy_array_bounded(
-                target,
-                name,
-                source_array,
-                block_rows=int(block_rows),
-                row_aligned_count=int(row_count),
-                shard_rows=int(output_shard_rows),
+    for name in ROW_LINEAGE_NAMES:
+        source_array = shape_group.get(name)
+        if source_array is None:
+            raise SubjectShapeIOError(
+                f"Canonical subject-shape source lacks required direct {name!r}."
             )
-            copied.append(name)
-            if name == "frame_indices":
-                frame_source = source_array
-    else:
-        missing.extend(ROW_LINEAGE_NAMES)
-
-    frame_dtype = frame_source.dtype if frame_source is not None else np.dtype(np.int64)
-    frame_chunks = _metric_chunks(int(row_count))
-    frame_index = _create_array(
-        run_group,
-        "frame_index",
-        shape=(int(row_count),),
-        dtype=frame_dtype,
-        chunks=frame_chunks,
-        shards=_output_shards(
-            frame_chunks,
+        values = np.asarray(source_array[:])
+        if values.ndim != 1 or int(values.shape[0]) != int(row_count):
+            raise SubjectShapeIOError(
+                f"Canonical subject-shape {name!r} must be one-dimensional and row aligned."
+            )
+        if name == "instance_key":
+            if values.dtype != np.dtype("uint64") or np.unique(values).size != values.size:
+                raise SubjectShapeIOError(
+                    "Canonical subject-shape instance_key must be unique uint64."
+                )
+        elif values.dtype.kind not in {"i", "u"} or np.any(values < 0):
+            raise SubjectShapeIOError(
+                f"Canonical subject-shape {name!r} must be non-negative integer identity."
+            )
+        _copy_array_bounded(
+            run_group,
+            name,
+            source_array,
+            block_rows=int(block_rows),
+            row_aligned_count=int(row_count),
             shard_rows=int(output_shard_rows),
-            dtype=frame_dtype,
-        ),
+        )
+        copied.append(name)
+    return copied, [], "source_acquisition_frame_index"
+
+
+def _create_tail_kinematics_public_candidate(
+    parent: zarr.Group,
+    *,
+    run_name: str,
+    publication_owner_uuid: str,
+) -> zarr.Group:
+    """Create one owner-bound public child; injectable for ambiguity tests."""
+
+    return parent.create_group(
+        run_name,
+        attributes={
+            TAIL_PUBLICATION_OWNER_ATTR: publication_owner_uuid,
+            "stage_selector_eligible": False,
+        },
     )
-    for row_slice in _iter_row_slices(int(row_count), int(block_rows)):
-        if frame_source is not None:
-            frame_index[row_slice] = np.asarray(frame_source[row_slice])
-        else:
-            start = int(row_slice.start or 0)
-            stop = int(row_slice.stop or start)
-            frame_index[row_slice] = np.arange(start, stop, dtype=np.int64)
-    frame_index_source = "row_index/frame_indices" if frame_source is not None else "row_number_fallback"
-    return copied, missing, frame_index_source
+
+
+def _write_tail_kinematics_failure_attr(attrs: Any, name: str, value: Any) -> None:
+    attrs[name] = value
+
+
+def _delete_tail_kinematics_failure_attr(attrs: Any, name: str) -> None:
+    del attrs[name]
+
+
+def _fresh_owned_tail_kinematics_candidate(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    publication_owner_uuid: str,
+) -> Optional[zarr.Group]:
+    candidate = root.get(run_path)
+    if not isinstance(candidate, zarr.Group):
+        return None
+    try:
+        exact_binding = (
+            canonical_node_path(candidate) == run_path
+            and archive_identity(candidate) == archive_identity(root)
+        )
+    except Exception:
+        return None
+    if (
+        not exact_binding
+        or candidate.attrs.get(TAIL_PUBLICATION_OWNER_ATTR)
+        != publication_owner_uuid
+    ):
+        return None
+    return candidate
+
+
+def _persist_owned_tail_kinematics_attr(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    publication_owner_uuid: str,
+    name: str,
+    value: Any,
+) -> bool:
+    candidate = _fresh_owned_tail_kinematics_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if candidate is None:
+        return False
+    try:
+        _write_tail_kinematics_failure_attr(candidate.attrs, name, value)
+    except BaseException:
+        fresh = _fresh_owned_tail_kinematics_candidate(
+            root,
+            run_path=run_path,
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        if fresh is not None and fresh.attrs.get(name) == value:
+            return True
+        raise
+    fresh = _fresh_owned_tail_kinematics_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if fresh is None:
+        return False
+    if fresh.attrs.get(name) != value:
+        raise RuntimeError(f"Tail-kinematics cleanup attr {name!r} did not persist.")
+    return True
+
+
+def _delete_owned_tail_kinematics_attr(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    publication_owner_uuid: str,
+    name: str,
+) -> bool:
+    candidate = _fresh_owned_tail_kinematics_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if candidate is None:
+        return False
+    if name not in candidate.attrs:
+        return True
+    try:
+        _delete_tail_kinematics_failure_attr(candidate.attrs, name)
+    except BaseException:
+        fresh = _fresh_owned_tail_kinematics_candidate(
+            root,
+            run_path=run_path,
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        if fresh is not None and name not in fresh.attrs:
+            return True
+        raise
+    fresh = _fresh_owned_tail_kinematics_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if fresh is None:
+        return False
+    if name in fresh.attrs:
+        raise RuntimeError(f"Tail-kinematics cleanup attr {name!r} was not deleted.")
+    return True
+
+
+def _cleanup_failed_tail_kinematics_candidate(
+    root: zarr.Group,
+    *,
+    run_name: str,
+    publication_owner_uuid: str,
+    error: BaseException,
+    completed_block_count: int,
+    completed_worker_task_count: int,
+) -> bool:
+    run_path = f"analysis/tail_kinematics_runs/{run_name}"
+
+    def persist(name: str, value: Any) -> bool:
+        return _persist_owned_tail_kinematics_attr(
+            root,
+            run_path=run_path,
+            publication_owner_uuid=publication_owner_uuid,
+            name=name,
+            value=value,
+        )
+
+    for name, value in (
+        ("stage_selector_eligible", False),
+        (RUN_COMPLETION_CONTRACT_ATTR, RUN_COMPLETION_CONTRACT),
+        (RUN_COMPLETION_STATUS_ATTR, RUN_STATUS_FAILED),
+        ("palette_run_failed_at_utc", utc_now_iso()),
+        (RUN_NAME_ATTR, run_name),
+        ("palette_run_error", f"{type(error).__name__}: {error}"),
+        ("completed_block_count", int(completed_block_count)),
+        ("completed_worker_task_count", int(completed_worker_task_count)),
+    ):
+        if not persist(name, value):
+            return False
+    if not _delete_owned_tail_kinematics_attr(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+        name=RUN_COMPLETED_AT_ATTR,
+    ):
+        return False
+    tombstone = json_attr_safe(
+        {
+            "schema_id": "palette.tail_publication_tombstone",
+            "schema_version": 1,
+            "run_family": "tail_kinematics",
+            "publication_owner_uuid": publication_owner_uuid,
+            "run_name": run_name,
+            "public_path_retained": True,
+            "selector_eligible": False,
+            "retry_policy": "new_immutable_run_name_required",
+        }
+    )
+    if not persist(TAIL_PUBLICATION_TOMBSTONE_ATTR, tombstone):
+        return False
+    fresh = _fresh_owned_tail_kinematics_candidate(
+        root,
+        run_path=run_path,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if fresh is None:
+        return False
+    if (
+        fresh.attrs.get("stage_selector_eligible") is not False
+        or fresh.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_FAILED
+        or RUN_COMPLETED_AT_ATTR in fresh.attrs
+        or fresh.attrs.get(TAIL_PUBLICATION_TOMBSTONE_ATTR) != tombstone
+    ):
+        raise RuntimeError("Owned tail-kinematics tombstone did not verify exactly.")
+    return True
 
 
 def _prepare_tail_kinematics_run(
@@ -872,25 +1398,53 @@ def _prepare_tail_kinematics_run(
     execution_backend: str,
     worker_count_requested: int,
     worker_count_effective: int,
+    source_publication_manifest_sha256: str,
+    source_authority_mode: str,
+    source_authority: Mapping[str, Any],
     stage_command: str,
+    publication_owner_uuid: str,
     overwrite: bool,
 ) -> zarr.Group:
     analysis = root.require_group("analysis")
     parent = require_runs_parent(analysis, "tail_kinematics_runs")
     if target_run in parent:
-        if not overwrite:
-            raise ValueError(
-                f"analysis/tail_kinematics_runs/{target_run} already exists. Pass overwrite=True to replace it."
-            )
-        del parent[target_run]
-    run_group = parent.create_group(target_run)
+        raise ValueError(
+            f"analysis/tail_kinematics_runs/{target_run} already exists. "
+            "Canonical tail runs are immutable; use a new run name or explicit "
+            "failed-run maintenance tooling."
+        )
+    run_group = _create_tail_kinematics_public_candidate(
+        parent,
+        run_name=target_run,
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    fresh = _fresh_owned_tail_kinematics_candidate(
+        root,
+        run_path=f"analysis/tail_kinematics_runs/{target_run}",
+        publication_owner_uuid=publication_owner_uuid,
+    )
+    if fresh is None:
+        raise RuntimeError(
+            "Tail-kinematics child did not freshly bind to its exact owner, path, "
+            "and archive."
+        )
+    run_group = fresh
     mark_run_started(run_group, run_name=target_run, stage="tail_kinematics")
+    if (
+        run_group.attrs.get(TAIL_PUBLICATION_OWNER_ATTR)
+        != publication_owner_uuid
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise RuntimeError(
+            "Tail-kinematics child did not persist its exact owner-bound, "
+            "selector-ineligible creation state."
+        )
     _set_reason_bytes_attrs(run_group)
 
     source_refined_run = shape_group.attrs.get("source_refined_subject_masks_run")
     created = _utc_now()
 
-    copied, missing, frame_index_source = _copy_row_lineage_bounded(
+    copied, missing, acquisition_frame_index_source = _copy_row_lineage_bounded(
         run_group,
         shape_group,
         row_count=int(row_count),
@@ -916,9 +1470,17 @@ def _prepare_tail_kinematics_run(
             "method_version": TAIL_KINEMATICS_METHOD_VERSION,
             "created_at_utc": created,
             "created_utc": created,
-            "row_axis": "roi_rows",
+            "row_axis": "observation_instance",
             "source_subject_shape_run": str(shape_run_name),
             "source_subject_shape_path": f"analysis/subject_shape_runs/{shape_run_name}",
+            "source_subject_shape_publication_manifest_sha256": str(
+                source_publication_manifest_sha256
+            ),
+            "source_subject_shape_authority_mode": str(source_authority_mode),
+            "source_subject_shape_authority_sha256": str(
+                source_authority.get("record_sha256")
+            ),
+            "source_subject_shape_authority": json_attr_safe(source_authority),
             "source_refined_subject_masks_run": str(source_refined_run) if source_refined_run is not None else None,
             "source_tail_geometry_kind": SOURCE_TAIL_GEOMETRY_KIND,
             "body_frame_convention": shape_group.attrs.get("body_frame_schema_id", "fish_anatomical_body_frame"),
@@ -930,7 +1492,7 @@ def _prepare_tail_kinematics_run(
             "tail_angle_sample_count": int(tail_angle_sample_count),
             "source_geometry_tail_sample_count": int(source_geometry_tail_sample_count),
             "curvature_source": "subject_shape.tail_curvature_px_inv",
-            "frame_index_source": frame_index_source,
+            "acquisition_frame_index_source": acquisition_frame_index_source,
             "row_lineage_copied": copied,
             "row_lineage_missing": missing,
             "materialization_mode": materialization_mode,
@@ -961,7 +1523,7 @@ def _prepare_tail_kinematics_run(
             "output_shard_rows": int(effective_output_shard_rows),
             "output_shard_count": int(output_shard_count),
             "output_shard_scope": (
-                "canonical_tail_arrays_and_frame_index; copied_lineage_preserves_"
+                "canonical_tail_arrays_and_identity; copied_lineage_preserves_"
                 "source_chunks_with_output_shard_as_floor"
             ),
             "worker_task_count": (
@@ -1046,7 +1608,7 @@ def _prepare_tail_kinematics_run(
             "output_shard_rows": int(effective_output_shard_rows),
             "output_shard_count": int(output_shard_count),
             "output_shard_scope": (
-                "canonical_tail_arrays_and_frame_index; copied_lineage_preserves_"
+                "canonical_tail_arrays_and_identity; copied_lineage_preserves_"
                 "source_chunks_with_output_shard_as_floor"
             ),
             "worker_task_count": (
@@ -1057,6 +1619,13 @@ def _prepare_tail_kinematics_run(
         inputs={
             "source_subject_shape_run": shape_run_name,
             "source_refined_subject_masks_run": source_refined_run,
+            "source_subject_shape_publication_manifest_sha256": str(
+                source_publication_manifest_sha256
+            ),
+            "source_subject_shape_authority_mode": str(source_authority_mode),
+            "source_subject_shape_authority_sha256": str(
+                source_authority.get("record_sha256")
+            ),
         },
     )
     write_stage_provenance(run_group, provenance)
@@ -1182,6 +1751,7 @@ def _process_tail_kinematics_shard(
     row_stop: int,
     tail_angle_sample_count: int,
     block_rows: int,
+    staged_source_authority: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Compute one worker-owned output shard in bounded row sub-blocks."""
 
@@ -1189,6 +1759,7 @@ def _process_tail_kinematics_shard(
     resolved_shape_run, _shape_group, sources = _resolve_tail_kinematics_sources(
         root,
         shape_run,
+        _staged_source_authority=staged_source_authority,
     )
     if resolved_shape_run != shape_run:
         raise RuntimeError(
@@ -1220,6 +1791,7 @@ def _process_tail_kinematics_shard(
         for reason, count in block_reason_counts.items():
             reason_counts[str(reason)] = int(reason_counts.get(str(reason), 0) + int(count))
         completed_block_count += 1
+    _revalidate_tail_kinematics_sources(sources)
     return {
         "row_start": int(row_start),
         "row_stop": int(row_stop),
@@ -1260,6 +1832,7 @@ def write_tail_kinematics_run_group(
     overwrite: bool = False,
     dry_run: bool = False,
     stage_command: Optional[str] = None,
+    _staged_source_authority: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Write one tail-kinematics run from an existing subject-shape run."""
 
@@ -1279,7 +1852,11 @@ def write_tail_kinematics_run_group(
         raise ValueError("num_workers must be positive.")
     if backend == "process_shards" and not dry_run and worker_zarr_path is None:
         raise ValueError("process_shards requires worker_zarr_path for independent worker opens.")
-    shape_run_name, shape_group, sources = _resolve_tail_kinematics_sources(root, shape_run)
+    shape_run_name, shape_group, sources = _resolve_tail_kinematics_sources(
+        root,
+        shape_run,
+        _staged_source_authority=_staged_source_authority,
+    )
     row_count = int(sources.row_count)
     effective_block_rows = _effective_block_rows(
         row_count=row_count,
@@ -1357,7 +1934,7 @@ def write_tail_kinematics_run_group(
         "output_shard_rows": int(effective_output_shard_rows),
         "output_shard_count": int(len(worker_shard_slices)),
         "output_shard_scope": (
-            "canonical_tail_arrays_and_frame_index; copied_lineage_preserves_"
+            "canonical_tail_arrays_and_identity; copied_lineage_preserves_"
             "source_chunks_with_output_shard_as_floor"
         ),
         "worker_task_count": (
@@ -1379,6 +1956,7 @@ def write_tail_kinematics_run_group(
     source_read_duration_seconds_sum = 0.0
     compute_duration_seconds_sum = 0.0
     write_duration_seconds_sum = 0.0
+    publication_owner_uuid = str(uuid.uuid4())
 
     def record_block_result(block_result: Mapping[str, object]) -> None:
         nonlocal completed_block_count
@@ -1417,7 +1995,13 @@ def write_tail_kinematics_run_group(
             execution_backend=backend,
             worker_count_requested=int(num_workers),
             worker_count_effective=int(worker_count_effective),
+            source_publication_manifest_sha256=(
+                sources.source_publication_manifest_sha256
+            ),
+            source_authority_mode=sources.source_authority_mode,
+            source_authority=sources.source_authority,
             stage_command=command,
+            publication_owner_uuid=publication_owner_uuid,
             overwrite=overwrite,
         )
         target_s = tail_sample_positions(int(tail_angle_sample_count)).astype(np.float32)
@@ -1470,11 +2054,18 @@ def write_tail_kinematics_run_group(
                         row_stop=int(row_slice.stop or 0),
                         tail_angle_sample_count=int(tail_angle_sample_count),
                         block_rows=int(effective_block_rows),
+                        staged_source_authority=(
+                            _canonical_json_copy(_staged_source_authority)
+                            if _staged_source_authority is not None
+                            else None
+                        ),
                     )
                     for row_slice in worker_shard_slices
                 ]
                 for future in as_completed(futures):
                     record_block_result(future.result())
+
+        _revalidate_tail_kinematics_sources(sources)
 
         if completed_block_count != len(compute_block_slices):
             raise RuntimeError(
@@ -1500,31 +2091,65 @@ def write_tail_kinematics_run_group(
         run_group.attrs["source_read_duration_seconds_sum"] = source_read_duration_seconds_sum
         run_group.attrs["compute_duration_seconds_sum"] = compute_duration_seconds_sum
         run_group.attrs["write_duration_seconds_sum"] = write_duration_seconds_sum
+        if sources.source_authority_mode == "canonical_publication":
+            publish_tail_kinematics_coordinate_surfaces(root, run_group)
+        else:
+            # A node-local staged subset proves its numeric inputs but cannot
+            # grant live source-camera frame authority.  The atomic publisher
+            # seals the copied child against the authoritative source archive.
+            run_group.attrs["tail_coordinate_publication_deferred"] = (
+                "authoritative_archive_post_copy_pre_activation"
+            )
+        parent = root["analysis"]["tail_kinematics_runs"]
         mark_run_complete(
             run_group,
-            parent_group=root["analysis"]["tail_kinematics_runs"],
+            parent_group=parent,
             run_name=target_run,
             run_provenance=build_run_provenance_from_stage_record(
                 run_group.attrs.get("provenance", {}),
                 fallback_command=command,
             ),
         )
-    except Exception as exc:
-        if run_group is None:
-            candidate = root.get(f"analysis/tail_kinematics_runs/{target_run}")
-            if isinstance(candidate, zarr.Group):
-                run_group = candidate
-        if run_group is not None:
-            run_group.attrs["completed_block_count"] = int(completed_block_count)
-            run_group.attrs["completed_worker_task_count"] = int(
-                completed_worker_task_count
+        if sources.source_authority_mode == "canonical_publication":
+            summary.update(
+                {
+                    "status": "updated",
+                    "valid_row_count": valid_count,
+                    "invalid_row_count": invalid_count,
+                    "failure_reason_counts": reason_counts,
+                    "duration_seconds": duration_seconds,
+                    "rows_per_second": rows_per_second,
+                    "completed_block_count": int(completed_block_count),
+                    "completed_worker_task_count": int(completed_worker_task_count),
+                    "source_read_duration_seconds_sum": source_read_duration_seconds_sum,
+                    "compute_duration_seconds_sum": compute_duration_seconds_sum,
+                    "write_duration_seconds_sum": write_duration_seconds_sum,
+                }
             )
-            mark_run_failed(
+            result = dict(_json_safe(summary))
+            activate_tail_coordinate_publication(
+                root,
+                parent,
                 run_group,
-                parent_group=root.get("analysis/tail_kinematics_runs"),
                 run_name=target_run,
-                error=f"{type(exc).__name__}: {exc}",
+                expected_publication_owner_uuid=publication_owner_uuid,
             )
+            return result
+    except BaseException as exc:
+        try:
+            _cleanup_failed_tail_kinematics_candidate(
+                root,
+                run_name=target_run,
+                publication_owner_uuid=publication_owner_uuid,
+                error=exc,
+                completed_block_count=completed_block_count,
+                completed_worker_task_count=completed_worker_task_count,
+            )
+        except BaseException as cleanup_exc:
+            raise RuntimeError(
+                "Tail-kinematics failure cleanup could not persist the exact "
+                "owned tombstone."
+            ) from cleanup_exc
         raise
 
     summary.update(
@@ -1612,7 +2237,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Serial driver writes or chunk/shard-aligned node-local process workers.",
     )
     parser.add_argument("--num-workers", type=int, default=1)
-    parser.add_argument("--overwrite", action="store_true", help="Replace an existing target tail-kinematics run.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Legacy compatibility flag; canonical public run names are immutable "
+            "and an existing child cannot be reused."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Resolve inputs without mutating the archive.")
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser

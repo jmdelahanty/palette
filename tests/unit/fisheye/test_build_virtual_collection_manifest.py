@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 from typing import Any
 
 from fisheye.utils import build_virtual_collection_manifest as builder
@@ -46,8 +47,40 @@ def _install_fake_zarr(monkeypatch, root: FakeRoot) -> None:
             raise ValueError(f"{resolved} not found under {parent}")
         return group, resolved
 
+    def fake_load_chaser_distance_run(
+        fake_root: FakeRoot,
+        *,
+        run_name: str = "latest",
+    ) -> SimpleNamespace:
+        parent = "analysis/chaser_distance_runs"
+        resolved = (
+            fake_root.latest.get(parent)
+            if str(run_name).strip() in {"", "latest"}
+            else str(run_name).strip()
+        )
+        if not resolved or (parent, resolved) not in fake_root.runs:
+            raise builder.ChaserDistanceReadError(
+                f"{resolved!r} not found under {parent}"
+            )
+        return SimpleNamespace(
+            authority_status=builder.VERIFIED_AUTHORITY_STATUS,
+            run_name=resolved,
+            run_path=f"{parent}/{resolved}",
+            publication_seal_ref=f"/{parent}/{resolved}@publication_seal",
+            publication_seal_sha256=f"seal_{resolved}",
+            surface_manifest_ref=f"/{parent}/{resolved}@surface_manifest",
+            surface_manifest_sha256=f"manifest_{resolved}",
+            row_identity_ref=f"/{parent}/{resolved}@row_identity",
+            row_identity_sha256=f"rows_{resolved}",
+        )
+
     monkeypatch.setattr(builder, "open_zarr_root", fake_open_zarr_root)
     monkeypatch.setattr(builder, "resolve_zarr_run", fake_resolve_zarr_run)
+    monkeypatch.setattr(
+        builder,
+        "load_chaser_distance_run",
+        fake_load_chaser_distance_run,
+    )
 
 
 def _fake_root() -> FakeRoot:
@@ -147,6 +180,83 @@ def _registry_fixture(path: Path, rows: list[tuple[Any, ...]]) -> None:
                 """,
                 (row[0], row[1], *row[6:]),
             )
+
+
+def test_chaser_manifest_selection_uses_only_detached_verified_authority(
+    monkeypatch,
+) -> None:
+    snapshot = SimpleNamespace(
+        authority_status=builder.VERIFIED_AUTHORITY_STATUS,
+        run_name="sealed_run",
+        run_path="analysis/chaser_distance_runs/sealed_run",
+        publication_seal_ref=(
+            "/analysis/chaser_distance_runs/sealed_run@chaser_distance_publication_seal"
+        ),
+        publication_seal_sha256="a" * 64,
+        surface_manifest_ref=(
+            "/analysis/chaser_distance_runs/sealed_run@chaser_distance_surface_manifest"
+        ),
+        surface_manifest_sha256="b" * 64,
+        row_identity_ref=(
+            "/analysis/chaser_distance_runs/sealed_run@row_identity_contract"
+        ),
+        row_identity_sha256="c" * 64,
+    )
+
+    def reject_generic_selector(*_args, **_kwargs):
+        raise AssertionError("generic selector/raw child access is forbidden")
+
+    def strict_load(root, *, run_name: str):
+        assert root is raw_navigation_trap
+        assert run_name == "latest"
+        return snapshot
+
+    raw_navigation_trap = object()
+    monkeypatch.setattr(builder, "resolve_zarr_run", reject_generic_selector)
+    monkeypatch.setattr(builder, "load_chaser_distance_run", strict_load)
+
+    entry, warning = builder._resolve_run_entry(  # noqa: SLF001
+        raw_navigation_trap,
+        parent_path=("analysis", "chaser_distance_runs"),
+        run_name=None,
+        run_path_prefix="analysis/chaser_distance_runs",
+        required=True,
+        run_label="Chaser-distance run",
+    )
+
+    assert warning is None
+    assert entry["path"] == snapshot.run_path
+    assert entry["source_fingerprint"] == snapshot.publication_seal_sha256
+    assert entry["lineage_hash"] == snapshot.surface_manifest_sha256
+    assert entry["authority_status"] == builder.VERIFIED_AUTHORITY_STATUS
+
+
+def test_chaser_manifest_selection_fails_closed_on_incompatible_publication(
+    monkeypatch,
+) -> None:
+    def reject_generic_selector(*_args, **_kwargs):
+        raise AssertionError("generic selector fallback is forbidden")
+
+    def reject_publication(_root, *, run_name: str):
+        assert run_name == "explicit_run"
+        raise builder.ChaserDistanceReadError("publication seal is stale")
+
+    monkeypatch.setattr(builder, "resolve_zarr_run", reject_generic_selector)
+    monkeypatch.setattr(builder, "load_chaser_distance_run", reject_publication)
+
+    entry, warning = builder._resolve_run_entry(  # noqa: SLF001
+        object(),
+        parent_path="analysis/chaser_distance_runs",
+        run_name="explicit_run",
+        run_path_prefix="analysis/chaser_distance_runs",
+        required=True,
+        run_label="Chaser-distance run",
+    )
+
+    assert entry["present"] is False
+    assert entry["reason"] == "required_run_incompatible"
+    assert entry["fingerprint_status"] == "not_applicable"
+    assert "canonical preflight failed closed" in str(warning)
 
 
 def test_build_manifest_from_explicit_zarr_paths(monkeypatch, tmp_path: Path) -> None:

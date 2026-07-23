@@ -24,9 +24,13 @@ import sqlite3
 from pathlib import Path
 
 import numpy as np
-import zarr
 
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+)
+from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 
 # Canonical epoch keys used across the analyses.
 EPOCHS = ("pre", "chase", "post")
@@ -92,9 +96,20 @@ def latest(group):
     return group[sorted(group.group_keys())[-1]]
 
 
-def open_distance_run(root):
-    """Open the latest `analysis/chaser_distance_runs/<run>` group of a recording zarr."""
-    return latest(nav(root, ["analysis", "chaser_distance_runs"]))
+def open_distance_run(
+    root,
+    *,
+    run_name: str = "latest",
+) -> ChaserDistanceReadSnapshot:
+    """Load one exact, verified canonical chaser-distance snapshot.
+
+    The historical helper returned the lexicographically last raw Zarr child.
+    Normal future-recording analyses must instead cross the typed publication
+    boundary.  Standalone legacy inspection scripts that still index the result
+    as a Zarr group now fail visibly rather than silently guessing a frame.
+    """
+
+    return load_chaser_distance_run(root, run_name=str(run_name))
 
 
 def load_epochs(root) -> dict:
@@ -143,22 +158,90 @@ def resolve_object_roles(root) -> dict:
     return {role_name(o): role_index(o) for o in resolve_object_roles_from_protocol_payload(payload)}
 
 
-def load_dense_kinematics(root, total_frames: int, fields=("speed_smoothed_mm",)):
-    """Dense per-camera-frame arrays from the offline track_kinematics run for id_0.
+_DENSE_TRACK_FIELDS = {
+    "speed_raw_mm": "raw",
+    "speed_filtered_mm": "filtered",
+    "speed_smoothed_mm": "smoothed",
+    "speed_averaged_mm": "averaged",
+}
+
+
+def load_dense_kinematics(
+    root,
+    total_frames: int,
+    fields=("speed_smoothed_mm",),
+    *,
+    track_kinematics_run: str = "latest",
+    track_id: int = 0,
+):
+    """Dense per-acquisition-frame arrays from one verified offline track run.
 
     Returns (dict field->dense array of shape (total_frames,), sample_valid dense bool).
     Immobility/speed metrics MUST use `speed_smoothed_mm` -- raw centroid speed has a
     ~1.6 mm/s noise floor that makes sub-threshold "stillness" measure tracking jitter.
+
+    The legacy-looking field labels are controlled logical metric names, not Zarr
+    paths.  Physical discovery, selector eligibility, coordinate binding, and
+    payload verification are delegated to the strict track-motion reader.
     """
-    tk = latest(nav(root, ["analysis", "track_kinematics_runs", "offline"]))
-    id0 = tk["tracks"][sorted(tk["tracks"].group_keys())[0]]
-    fi = np.asarray(id0["frame_indices"][:], np.int64)
-    m = fi < total_frames
+    frame_count = int(total_frames)
+    if frame_count < 0:
+        raise ValueError("total_frames must be nonnegative.")
+    requested_fields = tuple(dict.fromkeys(str(field) for field in fields))
+    unsupported = tuple(
+        field for field in requested_fields if field not in _DENSE_TRACK_FIELDS
+    )
+    if unsupported:
+        raise ValueError(
+            "Unsupported verified dense-track field(s): "
+            + ", ".join(unsupported)
+        )
+    required_levels = tuple(
+        dict.fromkeys(_DENSE_TRACK_FIELDS[field] for field in requested_fields)
+    )
+    track = load_track_kinematics_track(
+        root,
+        run_name=str(track_kinematics_run),
+        scope="offline",
+        track_id=int(track_id),
+        required_speed_levels=required_levels,
+    )
+    if track.source_acquisition_frame_index is None:
+        raise ValueError(
+            f"Verified track motion {track.track_path} has no acquisition-frame identity."
+        )
+    fi = np.asarray(track.source_acquisition_frame_index, dtype=np.int64).reshape(-1)
+    if np.any(fi < 0) or np.any(fi >= frame_count):
+        raise ValueError(
+            f"Verified acquisition-frame identities in {track.track_path} exceed "
+            f"the declared recording extent [0, {frame_count})."
+        )
+    if np.unique(fi).shape[0] != fi.shape[0]:
+        raise ValueError(
+            f"Verified track motion {track.track_path} repeats acquisition-frame identities."
+        )
+    if track.sample_valid is None:
+        raise ValueError(
+            f"Verified track motion {track.track_path} has no sample_valid surface."
+        )
+    sample_valid = np.asarray(track.sample_valid, dtype=bool).reshape(-1)
+    if sample_valid.shape != fi.shape:
+        raise ValueError(
+            f"Verified sample_valid length {sample_valid.shape[0]} does not match "
+            f"acquisition-frame length {fi.shape[0]}."
+        )
     out = {}
-    for f in fields:
-        dense = np.full(total_frames, np.nan)
-        dense[fi[m]] = np.asarray(id0[f][:], float)[m]
-        out[f] = dense
-    valid = np.zeros(total_frames, bool)
-    valid[fi[m]] = np.asarray(id0["sample_valid"][:], bool)[m]
+    for field in requested_fields:
+        level = _DENSE_TRACK_FIELDS[field]
+        values = np.asarray(track.speed_mm_by_level[level], dtype=np.float64).reshape(-1)
+        if values.shape != fi.shape:
+            raise ValueError(
+                f"Verified {field} length {values.shape[0]} does not match "
+                f"acquisition-frame length {fi.shape[0]}."
+            )
+        dense = np.full(frame_count, np.nan)
+        dense[fi] = values
+        out[field] = dense
+    valid = np.zeros(frame_count, bool)
+    valid[fi] = sample_valid
     return out, valid

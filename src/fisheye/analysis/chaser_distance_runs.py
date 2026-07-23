@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from io import BytesIO
 import json
@@ -21,6 +21,16 @@ import zarr  # noqa: E402
 from fisheye.analysis.chaser_behavior import (
     BEHAVIOR_CLASS_LABELS,
     resolve_configured_chaser_behaviors,
+)
+from fisheye.analysis.chaser_distance_coordinate_publication import (
+    CAMERA_FRAME_KEY_ARRAY,
+    SOURCE_DETECTION_ROW_ARRAY,
+    BoundChaserDistanceSourceContext,
+    ChaserDistanceCoordinateError,
+    activate_chaser_distance_run,
+    derive_chaser_distance_coordinate_arrays,
+    load_chaser_distance_source_context,
+    publish_chaser_distance_coordinate_contract,
 )
 from fisheye.analysis.chaser_contracts import (
     CHASER_SOURCE_SCHEMA_ID,
@@ -159,6 +169,11 @@ class ChaserDistanceResult:
     chaser_source_track_keys: tuple[str, ...] = ()
     chaser_raw_color_rgba: Optional[np.ndarray] = None
     chaser_role_interval_rows: tuple[Mapping[str, Any], ...] = ()
+    coordinate_context: Optional[BoundChaserDistanceSourceContext] = dataclass_field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 def utc_run_name(prefix: str = "chaser_distance") -> str:
@@ -530,7 +545,7 @@ def _windows_from_epoch_run(root: zarr.Group, epoch_run: Optional[str]) -> tuple
     return resolved, path, windows
 
 
-def build_chaser_distance_result(
+def _build_legacy_chaser_distance_result(
     zarr_path: Path,
     *,
     run_name: str,
@@ -754,6 +769,262 @@ def build_chaser_distance_result(
         chaser_raw_color_rgba=chaser_raw_color_rgba,
         chaser_role_interval_rows=chaser_role_interval_rows,
     )
+
+
+def _build_canonical_chaser_distance_result(
+    zarr_path: Path,
+    *,
+    run_name: str,
+    stimulus_run: Optional[str] = None,
+    stimulus_epoch_run: Optional[str] = None,
+    source: str = "active",
+    detect_run: Optional[str] = None,
+    detection_path: Optional[str] = None,
+    threshold_mm: float = 20.0,
+    distribution_bin_width_mm: float = 2.0,
+) -> ChaserDistanceResult:
+    """Build a result only from sealed detection/stimulus coordinate evidence."""
+
+    root = _open_root(zarr_path, mode="r")
+    _stim_group, stim_name, stim_path = _resolve_stimulus_run(root, stimulus_run)
+    if detection_path is not None:
+        explicit_path = str(detection_path).strip().strip("/")
+        explicit_parts = explicit_path.split("/")
+        if (
+            len(explicit_parts) != 2
+            or explicit_parts[0] != "detect_runs"
+            or not explicit_parts[1]
+            or explicit_parts[1] in {".", ".."}
+            or "/".join(explicit_parts) != explicit_path
+        ):
+            raise ChaserDistanceCoordinateError(
+                "Canonical chaser distance requires one exact detect_runs/<run> "
+                "rowset path; refined or inferred paths are unsupported until "
+                "their producer publishes the same strict observation contract."
+            )
+    _detect_group, resolved_detection_path, _source_kind = _resolve_detection_group(
+        root,
+        source=source,
+        detect_run=detect_run,
+        detection_path=detection_path,
+    )
+    context = load_chaser_distance_source_context(
+        root,
+        detection_path=resolved_detection_path,
+        stimulus_run=stim_name,
+    )
+    coordinates = derive_chaser_distance_coordinate_arrays(context)
+    total_frames = int(context.total_frames)
+
+    stimulus_group = root[stim_path]
+    protocol_payload: Mapping[str, Any] = {}
+    try:
+        decoded_payload = json.loads(str(stimulus_group.attrs.get("protocol_json") or "{}"))
+        protocol_payload = decoded_payload if isinstance(decoded_payload, Mapping) else {}
+        configured_behaviors = resolve_configured_chaser_behaviors(protocol_payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        configured_behaviors = ()
+    behavior_by_index = {
+        int(behavior.chaser_index): behavior for behavior in configured_behaviors
+    }
+    chaser_indices = coordinates.chaser_indices.astype(np.int16, copy=True)
+    chaser_behavior_class_id = np.asarray(
+        [
+            (
+                behavior_by_index[int(index)].behavior_class_id
+                if int(index) in behavior_by_index
+                else 0
+            )
+            for index in chaser_indices
+        ],
+        dtype=np.int8,
+    )
+    chaser_behavior_labels = tuple(
+        BEHAVIOR_CLASS_LABELS.get(int(class_id), "unknown")
+        for class_id in chaser_behavior_class_id
+    )
+
+    try:
+        canonical_chasers = canonical_chaser_set_from_protocol_payload(
+            protocol_payload,
+            total_frames=total_frames,
+        )
+    except (TypeError, ValueError):
+        canonical_chasers = None
+    identity_by_index = {
+        int(identity.chaser_index): identity
+        for identity in (
+            canonical_chasers.identities if canonical_chasers is not None else ()
+        )
+    }
+    # The coordinate-axis identity is derived from the exact persisted
+    # chaser_index component, not from optional protocol labels.  Protocol
+    # identities remain non-spatial annotations when available.
+    chaser_stimulus_instance_ids = tuple(
+        f"chaser:{int(index)}" for index in chaser_indices
+    )
+    chaser_source_track_keys = tuple(
+        f"chaser_index:{int(index)}" for index in chaser_indices
+    )
+    chaser_raw_color_rgba = np.asarray(
+        [
+            (
+                identity_by_index[int(index)].raw_color_rgba
+                if int(index) in identity_by_index
+                else (np.nan, np.nan, np.nan, np.nan)
+            )
+            for index in chaser_indices
+        ],
+        dtype=np.float32,
+    )
+    index_by_instance = {
+        identity.stimulus_instance_id: int(identity.chaser_index)
+        for identity in (
+            canonical_chasers.identities if canonical_chasers is not None else ()
+        )
+    }
+    allowed_indices = {int(value) for value in chaser_indices}
+    chaser_role_interval_rows = tuple(
+        {
+            "stimulus_instance_id": f"chaser:{index_by_instance[interval.stimulus_instance_id]}",
+            "chaser_index": index_by_instance[interval.stimulus_instance_id],
+            "behavior_class_id": int(interval.role_class_id),
+            "behavior_class": interval.role,
+            "start_frame": int(interval.start_frame),
+            "end_frame": interval.end_frame,
+            "source": interval.source,
+        }
+        for interval in (
+            canonical_chasers.role_intervals if canonical_chasers is not None else ()
+        )
+        if interval.stimulus_instance_id in index_by_instance
+        and index_by_instance[interval.stimulus_instance_id] in allowed_indices
+    )
+
+    epoch_run_name, epoch_path, windows = _windows_from_epoch_run(
+        root,
+        stimulus_epoch_run,
+    )
+    stimulus_epoch_window_id = (
+        _assign_epoch_ids(total_frames, windows)
+        if windows
+        else np.full(total_frames, -1, dtype=np.int32)
+    )
+    summaries = _summarize_epochs(
+        coordinates.distance_mm,
+        coordinates.fish_valid,
+        coordinates.chaser_valid,
+        windows=windows,
+        threshold_mm=threshold_mm,
+    )
+    distributions = _compute_epoch_distributions(
+        coordinates.distance_mm,
+        coordinates.fish_valid,
+        coordinates.chaser_valid,
+        windows=windows,
+        bin_width_mm=float(distribution_bin_width_mm),
+    )
+
+    arena_matrix = np.asarray(
+        context.stimulus.frame_transform.arena_to_canvas.matrix,
+        dtype=np.float64,
+    )
+    arena_origin_h = arena_matrix @ np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+    if (
+        not np.isfinite(arena_origin_h).all()
+        or abs(float(arena_origin_h[2])) <= 1e-12
+    ):
+        raise ValueError("Exact arena-to-canvas transform has an invalid origin.")
+    arena_origin = (
+        float(arena_origin_h[0] / arena_origin_h[2]),
+        float(arena_origin_h[1] / arena_origin_h[2]),
+    )
+    recording_id = (
+        _attr_text(root.attrs, "recording_id", "recording_name")
+        or Path(zarr_path).stem
+    )
+    return ChaserDistanceResult(
+        zarr_path=str(zarr_path),
+        recording_id=recording_id,
+        run_name=run_name,
+        source_detection_path=context.detection_path,
+        source_detection_kind="canonical_detection_observation",
+        source_stimulus_run=context.stimulus_run,
+        source_stimulus_path=context.stimulus_path,
+        source_stimulus_epoch_run=epoch_run_name,
+        source_stimulus_epoch_path=epoch_path,
+        fps=float(context.fps),
+        total_frames=total_frames,
+        pixels_per_mm_projector=float(context.pixels_per_mm_projector),
+        coordinate_frame="arena_relative_canvas_px",
+        coordinate_origin="arena_top_left",
+        arena_origin_in_canvas_xy=arena_origin,
+        chaser_indices=chaser_indices,
+        chaser_behavior_class_id=chaser_behavior_class_id,
+        chaser_behavior_labels=chaser_behavior_labels,
+        camera_frame_id=coordinates.camera_frame_index,
+        stimulus_frame_num=coordinates.stimulus_frame_num,
+        timestamp_ns=coordinates.timestamp_ns,
+        stimulus_epoch_window_id=stimulus_epoch_window_id,
+        fish_centroid_img_xy=coordinates.fish_centroid_img_xy,
+        fish_centroid_arena_xy=coordinates.fish_centroid_arena_xy,
+        chaser_arena_xy=coordinates.chaser_arena_xy,
+        fish_valid=coordinates.fish_valid,
+        chaser_valid=coordinates.chaser_valid,
+        distance_px=coordinates.distance_px,
+        distance_mm=coordinates.distance_mm,
+        nearest_chaser_index=coordinates.nearest_chaser_index,
+        nearest_distance_mm=coordinates.nearest_distance_mm,
+        windows=windows,
+        epoch_valid_frame_count=summaries[0],
+        epoch_mean_distance_mm=summaries[1],
+        epoch_min_distance_mm=summaries[2],
+        epoch_p05_distance_mm=summaries[3],
+        epoch_p50_distance_mm=summaries[4],
+        epoch_p95_distance_mm=summaries[5],
+        epoch_fraction_within_threshold=summaries[6],
+        threshold_mm=float(threshold_mm),
+        distribution_bin_width_mm=float(distribution_bin_width_mm),
+        histogram_bin_edges_mm=distributions[0],
+        histogram_bin_centers_mm=distributions[1],
+        histogram_counts=distributions[2],
+        histogram_density=distributions[3],
+        chaser_stimulus_instance_ids=chaser_stimulus_instance_ids,
+        chaser_source_track_keys=chaser_source_track_keys,
+        chaser_raw_color_rgba=chaser_raw_color_rgba,
+        chaser_role_interval_rows=chaser_role_interval_rows,
+        coordinate_context=context,
+    )
+
+
+def build_chaser_distance_result(
+    zarr_path: Path,
+    *,
+    run_name: str,
+    stimulus_run: Optional[str] = None,
+    stimulus_epoch_run: Optional[str] = None,
+    source: str = "active",
+    detect_run: Optional[str] = None,
+    detection_path: Optional[str] = None,
+    threshold_mm: float = 20.0,
+    distribution_bin_width_mm: float = 2.0,
+    legacy_compatibility: bool = False,
+) -> ChaserDistanceResult:
+    """Build a future-canonical result, or an explicitly requested legacy one."""
+
+    kwargs = {
+        "run_name": run_name,
+        "stimulus_run": stimulus_run,
+        "stimulus_epoch_run": stimulus_epoch_run,
+        "source": source,
+        "detect_run": detect_run,
+        "detection_path": detection_path,
+        "threshold_mm": threshold_mm,
+        "distribution_bin_width_mm": distribution_bin_width_mm,
+    }
+    if legacy_compatibility:
+        return _build_legacy_chaser_distance_result(zarr_path, **kwargs)
+    return _build_canonical_chaser_distance_result(zarr_path, **kwargs)
 
 
 def _bytes_array(values: Sequence[str], *, width: int = 96) -> np.ndarray:
@@ -1017,7 +1288,28 @@ def write_chaser_distance_run(
     overwrite: bool = False,
     write_png: bool = True,
     write_interactive_spec: bool = True,
+    legacy_compatibility: bool = False,
 ) -> str:
+    canonical_context = result.coordinate_context
+    if canonical_context is None and not legacy_compatibility:
+        raise ValueError(
+            "Canonical chaser-distance publication requires a sealed source "
+            "context from build_chaser_distance_result(); pass "
+            "legacy_compatibility=True only for explicit historical fixtures "
+            "or migration workflows."
+        )
+    if canonical_context is not None and legacy_compatibility:
+        raise ValueError(
+            "A canonical chaser-distance result cannot be downgraded to the "
+            "legacy compatibility writer."
+        )
+    if canonical_context is not None:
+        canonical_context.assert_verified()
+    canonical_coordinates = (
+        derive_chaser_distance_coordinate_arrays(canonical_context)
+        if canonical_context is not None
+        else None
+    )
     root = _open_root(zarr_path, mode="a")
     analysis = root.require_group("analysis")
     parent = require_runs_parent(analysis, PARENT_NAME)
@@ -1025,15 +1317,23 @@ def write_chaser_distance_run(
     if run_name in parent:
         if not overwrite:
             raise ValueError(f"Chaser distance run already exists: analysis/{PARENT_NAME}/{run_name}")
+        if canonical_context is not None:
+            raise ValueError(
+                "Canonical chaser-distance runs are immutable; choose a new "
+                "run name instead of overwrite=True."
+            )
         del parent[run_name]
     run = parent.create_group(run_name)
     mark_run_pending(parent, run_name)
     mark_run_started(run, run_name=run_name, stage="chaser_distance")
+    run.attrs["stage_selector_eligible"] = False
     try:
         instance_ids, track_keys, raw_color_rgba, role_rows = (
             _normalized_chaser_source_contract(result)
         )
         frames = run.require_group("frames")
+        if canonical_coordinates is not None:
+            _write_array(run, CAMERA_FRAME_KEY_ARRAY, result.camera_frame_id)
         _write_array(frames, "camera_frame_id", result.camera_frame_id)
         _write_array(frames, "stimulus_frame_num", result.stimulus_frame_num)
         _write_array(frames, "timestamp_ns", result.timestamp_ns)
@@ -1136,29 +1436,48 @@ def write_chaser_distance_run(
         )
 
         positions = run.require_group("positions")
+        if canonical_coordinates is not None:
+            _write_array(
+                positions,
+                SOURCE_DETECTION_ROW_ARRAY,
+                canonical_coordinates.source_detection_row_index,
+            )
         _write_array(positions, "fish_centroid_img_xy", result.fish_centroid_img_xy)
         _write_array(positions, "fish_centroid_arena_xy", result.fish_centroid_arena_xy)
         _write_array(positions, "chaser_arena_xy", result.chaser_arena_xy)
         _write_array(positions, "fish_valid", result.fish_valid)
         _write_array(positions, "chaser_valid", result.chaser_valid)
         positions.attrs.update(
-            {
-                "fish_centroid_img_xy_coordinate_frame": "source_image_px",
-                "fish_centroid_arena_xy_coordinate_frame": "arena_relative_canvas_px",
-                "fish_centroid_arena_xy_coordinate_origin": "top_left_of_active_arena",
-                "chaser_arena_xy_coordinate_frame": result.coordinate_frame,
-                "chaser_arena_xy_coordinate_origin": result.coordinate_origin,
-                "coordinate_frame": "arena_relative_canvas_px",
-                "coordinate_origin": "top_left_of_active_arena",
-                "x_axis_direction": "right",
-                "y_axis_direction": "down",
-                "axis_order": {
-                    "fish_centroid_img_xy": ["camera_frame", "xy"],
-                    "fish_centroid_arena_xy": ["camera_frame", "xy"],
-                    "chaser_arena_xy": ["camera_frame", "chaser", "xy"],
-                    "chaser_valid": ["camera_frame", "chaser"],
-                },
-            }
+            (
+                {
+                    "coordinate_contract": "canonical_array_specific_v2",
+                    "axis_order": {
+                        "source_detection_row_index": ["camera_frame"],
+                        "fish_centroid_img_xy": ["camera_frame", "xy"],
+                        "fish_centroid_arena_xy": ["camera_frame", "xy"],
+                        "chaser_arena_xy": ["camera_frame", "chaser", "xy"],
+                        "chaser_valid": ["camera_frame", "chaser"],
+                    },
+                }
+                if canonical_coordinates is not None
+                else {
+                    "fish_centroid_img_xy_coordinate_frame": "source_image_px",
+                    "fish_centroid_arena_xy_coordinate_frame": "arena_relative_canvas_px",
+                    "fish_centroid_arena_xy_coordinate_origin": "top_left_of_active_arena",
+                    "chaser_arena_xy_coordinate_frame": result.coordinate_frame,
+                    "chaser_arena_xy_coordinate_origin": result.coordinate_origin,
+                    "coordinate_frame": "arena_relative_canvas_px",
+                    "coordinate_origin": "top_left_of_active_arena",
+                    "x_axis_direction": "right",
+                    "y_axis_direction": "down",
+                    "axis_order": {
+                        "fish_centroid_img_xy": ["camera_frame", "xy"],
+                        "fish_centroid_arena_xy": ["camera_frame", "xy"],
+                        "chaser_arena_xy": ["camera_frame", "chaser", "xy"],
+                        "chaser_valid": ["camera_frame", "chaser"],
+                    },
+                }
+            )
         )
 
         distances = run.require_group("distances")
@@ -1167,15 +1486,26 @@ def write_chaser_distance_run(
         _write_array(distances, "nearest_chaser_index", result.nearest_chaser_index)
         _write_array(distances, "nearest_distance_mm", result.nearest_distance_mm)
         distances.attrs.update(
-            {
-                "distance_px_coordinate_frame": "arena_relative_canvas_px",
-                "distance_mm_conversion": "distance_px / pixels_per_mm_projector",
-                "axis_order": {
-                    "distance_px": ["camera_frame", "chaser"],
-                    "distance_mm": ["camera_frame", "chaser"],
-                    "nearest_distance_mm": ["camera_frame"],
-                },
-            }
+            (
+                {
+                    "coordinate_contract": "canonical_array_specific_v2",
+                    "axis_order": {
+                        "distance_px": ["camera_frame", "chaser"],
+                        "distance_mm": ["camera_frame", "chaser"],
+                        "nearest_distance_mm": ["camera_frame"],
+                    },
+                }
+                if canonical_coordinates is not None
+                else {
+                    "distance_px_coordinate_frame": "arena_relative_canvas_px",
+                    "distance_mm_conversion": "distance_px / pixels_per_mm_projector",
+                    "axis_order": {
+                        "distance_px": ["camera_frame", "chaser"],
+                        "distance_mm": ["camera_frame", "chaser"],
+                        "nearest_distance_mm": ["camera_frame"],
+                    },
+                }
+            )
         )
 
         epoch_summary = run.require_group("epoch_summary")
@@ -1220,18 +1550,35 @@ def write_chaser_distance_run(
         )
 
         git = get_git_info(Path(__file__).resolve().parents[3])
-        source_refs = {
-            "source_detection_path": result.source_detection_path,
-            "source_detection_kind": result.source_detection_kind,
-            "source_stimulus_run": result.source_stimulus_run,
-            "source_stimulus_path": result.source_stimulus_path,
-            "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
-            "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
-        }
+        source_refs = (
+            {
+                "detection_path": result.source_detection_path,
+                "stimulus_path": result.source_stimulus_path,
+                "stimulus_epoch_path": result.source_stimulus_epoch_path,
+            }
+            if canonical_coordinates is not None
+            else {
+                "source_detection_path": result.source_detection_path,
+                "source_detection_kind": result.source_detection_kind,
+                "source_stimulus_run": result.source_stimulus_run,
+                "source_stimulus_path": result.source_stimulus_path,
+                "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
+                "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+            }
+        )
         parameters = {
             "threshold_mm": float(result.threshold_mm),
             "distribution_bin_width_mm": float(result.distribution_bin_width_mm),
-            "coordinate_transform": "source_image_px_to_arena_relative_canvas_px_via_stored_homography",
+            **(
+                {"coordinate_publication": "canonical_array_specific_v2"}
+                if canonical_coordinates is not None
+                else {
+                    "coordinate_transform": (
+                        "source_image_px_to_arena_relative_canvas_px_"
+                        "via_stored_homography"
+                    )
+                }
+            ),
         }
         summary = {
             "chaser_indices": result.chaser_indices.astype(int).tolist(),
@@ -1258,12 +1605,20 @@ def write_chaser_distance_run(
             "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
             "fps": float(result.fps),
             "total_frames": int(result.total_frames),
-            "pixels_per_mm_projector": float(result.pixels_per_mm_projector),
-            "coordinate_frame": "arena_relative_canvas_px",
-            "coordinate_origin": "top_left_of_active_arena",
-            "x_axis_direction": "right",
-            "y_axis_direction": "down",
-            "arena_origin_in_canvas_xy": list(result.arena_origin_in_canvas_xy),
+            **(
+                {
+                    "coordinate_publication_status": "pending_canonical_seal",
+                }
+                if canonical_coordinates is not None
+                else {
+                    "pixels_per_mm_projector": float(result.pixels_per_mm_projector),
+                    "coordinate_frame": "arena_relative_canvas_px",
+                    "coordinate_origin": "top_left_of_active_arena",
+                    "x_axis_direction": "right",
+                    "y_axis_direction": "down",
+                    "arena_origin_in_canvas_xy": list(result.arena_origin_in_canvas_xy),
+                }
+            ),
             "chaser_source_contract": {
                 "schema_id": CHASER_SOURCE_SCHEMA_ID,
                 "schema_version": CHASER_SOURCE_SCHEMA_VERSION,
@@ -1409,6 +1764,21 @@ def write_chaser_distance_run(
                     summary=summary,
                     overwrite=True,
                 )
+        if canonical_context is not None:
+            publish_chaser_distance_coordinate_contract(
+                root,
+                run,
+                source_context=canonical_context,
+            )
+            run.attrs["coordinate_publication_status"] = "sealed_canonical_v2"
+        else:
+            run.attrs.update(
+                {
+                    "coordinate_contract": "legacy_compatibility_v1",
+                    "coordinate_publication_status": "legacy_unsealed",
+                    "stage_selector_eligible": False,
+                }
+            )
         mark_run_complete(
             run,
             parent_group=parent,
@@ -1416,18 +1786,41 @@ def write_chaser_distance_run(
             run_provenance=build_writer_run_provenance(
                 command="fisheye.analysis.chaser_distance_runs",
                 params=parameters,
-                input_run_ids={
-                    "source_detection_path": result.source_detection_path,
-                    "source_detection_kind": result.source_detection_kind,
-                    "source_stimulus_run": result.source_stimulus_run,
-                    "source_stimulus_path": result.source_stimulus_path,
-                    "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
-                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
-                },
+                input_run_ids=(
+                    {
+                        "detection_path": result.source_detection_path,
+                        "stimulus_path": result.source_stimulus_path,
+                        "stimulus_epoch_path": result.source_stimulus_epoch_path,
+                    }
+                    if canonical_coordinates is not None
+                    else {
+                        "source_detection_path": result.source_detection_path,
+                        "source_detection_kind": result.source_detection_kind,
+                        "source_stimulus_run": result.source_stimulus_run,
+                        "source_stimulus_path": result.source_stimulus_path,
+                        "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
+                        "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                    }
+                ),
             ),
         )
-    except Exception as exc:
-        mark_run_failed(run, error=str(exc))
+        if canonical_context is not None:
+            activate_chaser_distance_run(
+                root,
+                parent,
+                run,
+                run_name=run_name,
+            )
+    except BaseException as exc:
+        try:
+            mark_run_failed(
+                run,
+                parent_group=parent,
+                run_name=run_name,
+                error=str(exc),
+            )
+        except Exception:
+            pass
         raise
     return f"analysis/{PARENT_NAME}/{run_name}"
 
@@ -1471,8 +1864,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold-mm", type=float, default=20.0)
     parser.add_argument("--distribution-bin-width-mm", type=float, default=2.0)
     parser.add_argument("--apply", action="store_true", help="Write analysis/chaser_distance_runs/<run>.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing run with the same name.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Historical compatibility only. Canonical runs are immutable and "
+            "require a new --run-name."
+        ),
+    )
     parser.add_argument("--no-png", action="store_true", help="Skip PNG overview artifact.")
+    parser.add_argument(
+        "--legacy-coordinate-compatibility",
+        action="store_true",
+        help=(
+            "Explicit historical-only path that permits unsealed coordinate "
+            "metadata; normal future recording analysis must not use this flag."
+        ),
+    )
     parser.add_argument(
         "--no-interactive-spec",
         action="store_true",
@@ -1494,6 +1902,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         detection_path=args.detection_path,
         threshold_mm=float(args.threshold_mm),
         distribution_bin_width_mm=float(args.distribution_bin_width_mm),
+        legacy_compatibility=bool(args.legacy_coordinate_compatibility),
     )
     path = None
     if args.apply:
@@ -1503,6 +1912,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             overwrite=bool(args.overwrite),
             write_png=not bool(args.no_png),
             write_interactive_spec=not bool(args.no_interactive_spec),
+            legacy_compatibility=bool(args.legacy_coordinate_compatibility),
         )
     payload = _result_payload(result)
     payload["applied_path"] = path

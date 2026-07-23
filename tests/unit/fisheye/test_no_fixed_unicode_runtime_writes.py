@@ -5,9 +5,9 @@ from pathlib import Path
 
 
 _FIXED_UNICODE_PATTERNS = (
-    re.compile(r"dtype\s*=\s*f?['\"]<U\d*", re.IGNORECASE),
-    re.compile(r"np\.dtype\(\s*f?['\"]<U\d*", re.IGNORECASE),
-    re.compile(r"astype\(\s*f?['\"]<U\d*", re.IGNORECASE),
+    re.compile(r"dtype\s*=\s*f?['\"]<U\d*"),
+    re.compile(r"np\.dtype\(\s*f?['\"]<U\d*"),
+    re.compile(r"astype\(\s*f?['\"]<U\d*"),
 )
 
 # Keep this list empty by default. If a compatibility exception is required,

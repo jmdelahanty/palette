@@ -120,6 +120,9 @@ def test_stage_catalog_dependency_and_invalidation_maps_are_canonical() -> None:
     assert deps["arena_assignment"] == ("refined_detect",)
     assert deps["tracks"] == ("arena_assignment",)
     assert invalidates["arena_assignment"] == ("tracks",)
+    assert deps["eye_angles"] == ("subject_shape",)
+    assert "eye_angles" in invalidates["subject_shape"]
+    assert "eye_angles" not in invalidates["refined_keypoints"]
 
     for spec in STAGE_SPECS:
         for dep in spec.depends_on:

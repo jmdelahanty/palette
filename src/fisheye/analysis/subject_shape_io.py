@@ -8,7 +8,7 @@ on a logical component/body-frame surface if the physical layout changes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
@@ -17,13 +17,18 @@ import zarr
 from ..shared.zarr_helpers import (
     first_array_length as _shared_first_array_length,
     first_array_length_in_group as _first_array_length_in_group,
-    normalize_zarr_path as _normalize_path,
     read_zarr_array_mapping,
     safe_int as _safe_int,
     zarr_attrs_dict as _attrs_dict,
     zarr_child_group as _child_group,
     zarr_group_keys as _group_keys,
 )
+from ..shared.subject_shape_coordinate_publication import (
+    BoundSubjectShapeCoordinatePublication,
+    SubjectShapeCoordinatePublicationError,
+    load_persisted_subject_shape_coordinate_publication,
+)
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 
 
 SUBJECT_SHAPE_RUN_PARENT = "analysis/subject_shape_runs"
@@ -113,6 +118,10 @@ class SubjectShapeRunTables:
     row_index: Mapping[str, np.ndarray]
     source_refined_subject_masks: Mapping[str, np.ndarray]
     source_paths: Mapping[str, str]
+    coordinate_publication: BoundSubjectShapeCoordinatePublication | None = field(
+        default=None,
+        repr=False,
+    )
 
     @property
     def schema_version(self) -> int:
@@ -201,37 +210,120 @@ def _subject_shape_option_label(
     return " | ".join(pieces)
 
 
-def resolve_subject_shape_run(
+def _resolve_subject_shape_run_unchecked(
     root: zarr.Group,
     run_name: str | None = None,
+    *,
+    strict_latest: bool = False,
 ) -> tuple[zarr.Group, str, str]:
-    """Resolve one ``analysis/subject_shape_runs`` child from a name, path, or latest."""
+    """Resolve a physical child without granting scientific read authority."""
 
     parent = root.get(SUBJECT_SHAPE_RUN_PARENT)
     if parent is None:
         raise SubjectShapeIOError("No analysis/subject_shape_runs group found.")
 
     if run_name is None or str(run_name).strip().lower() in {"", "latest"}:
-        latest = parent.attrs.get("latest")
-        if isinstance(latest, str) and latest in parent:
-            resolved = latest
+        if strict_latest:
+            resolved = str(
+                resolve_latest_complete_run_name(
+                    parent,
+                    legacy_default=False,
+                )
+                or ""
+            )
+            if not resolved:
+                raise SubjectShapeIOError(
+                    "No stable complete selector-eligible subject-shape run is "
+                    "selected; latest/latest_complete activation may be in "
+                    "progress, so retry the read."
+                )
         else:
-            raise SubjectShapeIOError("No latest subject-shape run is recorded.")
+            latest = parent.attrs.get("latest")
+            if isinstance(latest, str) and latest in parent:
+                resolved = latest
+            else:
+                raise SubjectShapeIOError("No latest subject-shape run is recorded.")
     else:
-        normalized = _normalize_path(str(run_name))
-        parts = normalized.split("/")
-        if normalized.startswith(SUBJECT_SHAPE_RUN_PARENT + "/") and len(parts) >= 3:
-            resolved = parts[2]
+        run_spec = str(run_name).strip()
+        prefix = f"{SUBJECT_SHAPE_RUN_PARENT}/"
+        if "/" not in run_spec:
+            resolved = run_spec
+        elif (
+            run_spec.startswith(prefix)
+            and run_spec[len(prefix) :]
+            and "/" not in run_spec[len(prefix) :]
+        ):
+            resolved = run_spec[len(prefix) :]
         else:
-            resolved = parts[-1]
+            raise SubjectShapeIOError(
+                "Subject-shape run must be a bare child name or the exact path "
+                f"{SUBJECT_SHAPE_RUN_PARENT}/<run>; got {run_name!r}."
+            )
 
-    if not resolved or resolved not in parent:
+    if not resolved or "/" in resolved or resolved not in parent:
         raise SubjectShapeIOError(f"Subject-shape run {run_name!r} not found in analysis/subject_shape_runs.")
     run_path = f"{SUBJECT_SHAPE_RUN_PARENT}/{resolved}"
     run_group = parent[resolved]
     if not isinstance(run_group, zarr.Group):
         raise SubjectShapeIOError(f"{run_path} is not a Zarr group.")
     return run_group, str(resolved), run_path
+
+
+def resolve_subject_shape_run(
+    root: zarr.Group,
+    run_name: str | None = None,
+    *,
+    historical_inspection: bool = False,
+) -> tuple[zarr.Group, str, str]:
+    """Resolve an exact canonical publication, or explicitly inspect history.
+
+    Normal callers cannot obtain a subject-shape child merely because its name
+    is present under the run parent.  The selected child must pass the complete
+    strict publication reload.  ``historical_inspection=True`` is audit and
+    migration scope only and deliberately grants no coordinate authority.
+    """
+
+    if historical_inspection:
+        return _resolve_subject_shape_run_unchecked(root, run_name)
+    run_group, resolved, run_path, _publication = resolve_canonical_subject_shape_run(
+        root,
+        run_name,
+    )
+    return run_group, resolved, run_path
+
+
+def resolve_canonical_subject_shape_run(
+    root: zarr.Group,
+    run_name: str | None = None,
+) -> tuple[
+    zarr.Group,
+    str,
+    str,
+    BoundSubjectShapeCoordinatePublication,
+]:
+    """Resolve one exact run and return its verified coordinate publication.
+
+    This is the proof-carrying form used by scientific consumers that need to
+    bind additional derived semantics to the exact selected publication.  It
+    intentionally has no historical or compatibility mode.
+    """
+
+    run_group, resolved, run_path = _resolve_subject_shape_run_unchecked(
+        root,
+        run_name,
+        strict_latest=True,
+    )
+    try:
+        publication = load_persisted_subject_shape_coordinate_publication(
+            root,
+            run_path,
+        )
+    except SubjectShapeCoordinatePublicationError as exc:
+        raise SubjectShapeIOError(
+            f"Subject-shape run {resolved!r} is not a valid canonical "
+            f"coordinate publication: {exc}"
+        ) from exc
+    return run_group, resolved, run_path, publication
 
 
 def load_subject_shape_run_tables(
@@ -245,10 +337,29 @@ def load_subject_shape_run_tables(
     include_body_frame: bool = True,
     include_row_index: bool = True,
     include_source_refined_subject_masks: bool = True,
+    historical_inspection: bool = False,
 ) -> SubjectShapeRunTables:
-    """Load logical component, relation, body-frame, and lineage arrays."""
+    """Load logical arrays after strict future-normal coordinate preflight.
 
-    run_group, resolved_run, run_path = resolve_subject_shape_run(root, run_name)
+    ``historical_inspection=True`` is intentionally explicit and returns no
+    coordinate authority.  It exists for archive audit/migration only; normal
+    scientific and presentation readers must use the default fail-closed path.
+    """
+
+    coordinate_publication: BoundSubjectShapeCoordinatePublication | None
+    if historical_inspection:
+        run_group, resolved_run, run_path = _resolve_subject_shape_run_unchecked(
+            root,
+            run_name,
+        )
+        coordinate_publication = None
+    else:
+        (
+            run_group,
+            resolved_run,
+            run_path,
+            coordinate_publication,
+        ) = resolve_canonical_subject_shape_run(root, run_name)
     source_paths: dict[str, str] = {"run": run_path}
     requested_components = tuple(str(value) for value in component_names) if component_names is not None else None
     requested_relations = tuple(str(value) for value in relation_names) if relation_names is not None else None
@@ -353,17 +464,26 @@ def load_subject_shape_run_tables(
         row_index=row_index,
         source_refined_subject_masks=source_refined_subject_masks,
         source_paths=source_paths,
+        coordinate_publication=coordinate_publication,
     )
 
 
-def discover_subject_shape_run_options(root: zarr.Group) -> list[SubjectShapeRunOption]:
-    """Return available subject-shape analysis runs from an open Zarr root."""
+def discover_subject_shape_run_options(
+    root: zarr.Group,
+    *,
+    historical_inspection: bool = False,
+) -> list[SubjectShapeRunOption]:
+    """Return selectable canonical runs, or explicit historical audit rows."""
 
     parent = root.get(SUBJECT_SHAPE_RUN_PARENT)
     if parent is None:
         return []
 
-    latest = parent.attrs.get("latest")
+    latest = (
+        parent.attrs.get("latest")
+        if historical_inspection
+        else resolve_latest_complete_run_name(parent, legacy_default=False)
+    )
     options: list[SubjectShapeRunOption] = []
     for run_name in _group_keys(parent):
         try:
@@ -372,6 +492,14 @@ def discover_subject_shape_run_options(root: zarr.Group) -> list[SubjectShapeRun
             continue
         if not isinstance(run_group, zarr.Group):
             continue
+        if not historical_inspection:
+            try:
+                load_persisted_subject_shape_coordinate_publication(
+                    root,
+                    f"{SUBJECT_SHAPE_RUN_PARENT}/{run_name}",
+                )
+            except (SubjectShapeCoordinatePublicationError, KeyError, ValueError):
+                continue
         attrs = _attrs_dict(run_group)
         component_names = _run_component_names(run_group)
         relation_names = _run_relation_names(run_group)
@@ -421,6 +549,7 @@ def load_subject_body_component(
     run_name: str | None = None,
     include_body_frame: bool = False,
     array_names: Optional[Sequence[str]] = None,
+    historical_inspection: bool = False,
 ) -> tuple[SubjectShapeRunTables, SubjectShapeComponentTables]:
     """Load the subject-body component from one subject-shape run."""
 
@@ -433,6 +562,7 @@ def load_subject_body_component(
         include_body_frame=include_body_frame,
         include_row_index=True,
         include_source_refined_subject_masks=True,
+        historical_inspection=historical_inspection,
     )
     return tables, tables.require_component("subject_body")
 

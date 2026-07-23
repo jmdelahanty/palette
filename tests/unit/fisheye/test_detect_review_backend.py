@@ -88,6 +88,16 @@ class _FakeGroup:
             return current
         return self._children[key]
 
+    def __delitem__(self, key: str) -> None:
+        if "/" in key:
+            head, tail = key.split("/", 1)
+            child = self._children[head]
+            if not isinstance(child, _FakeGroup):
+                raise KeyError(key)
+            del child[tail]
+            return
+        del self._children[key]
+
 
 class _FakeArray:
     def __init__(self, data: Any) -> None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Dict, Any, List
+from typing import List, Optional, Sequence
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -23,6 +23,11 @@ import zarr
 from matplotlib.widgets import Slider, Button
 
 from ..pose.schema import PoseSchema, schema_from_metadata, schema_from_package
+from ..shared.keypoint_coordinate_publication import (
+    BoundKeypointCoordinateSurfaces,
+    load_persisted_keypoint_coordinate_surfaces,
+    require_bound_keypoint_coordinate_surfaces,
+)
 from ..shared.zarr_io import open_zarr_root
 
 
@@ -47,6 +52,70 @@ def open_zarr(zarr_path: Path) -> zarr.Group:
     if not zarr_path.exists():
         raise FileNotFoundError(f"Zarr path does not exist: {zarr_path}")
     return open_zarr_root(zarr_path, mode="r")
+
+
+def _text_attr(value: object) -> Optional[str]:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "strict")
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _resolve_canonical_keypoint_selection(
+    root: zarr.Group,
+    explicit: Optional[str],
+) -> str:
+    if "keypoints_runs" not in root:
+        raise RuntimeError("Canonical keypoint viewer requires 'keypoints_runs'.")
+    parent = root["keypoints_runs"]
+    requested = _text_attr(explicit)
+    if requested is not None and requested.lower() not in {"latest"}:
+        if requested.lower() in {
+            "latest_traditional",
+            "traditional",
+            "latest_yolo",
+            "yolo",
+        }:
+            raise RuntimeError(
+                "Method-based keypoint shortcuts are legacy inference. Pass one "
+                "exact canonical run name or use the active canonical run."
+            )
+        if requested not in parent:
+            raise RuntimeError(
+                f"Canonical keypoint run {requested!r} is absent from keypoints_runs."
+            )
+        return requested
+
+    latest_complete = _text_attr(parent.attrs.get("latest_complete"))
+    latest = _text_attr(parent.attrs.get("latest"))
+    root_pointer = _text_attr(root.attrs.get("current_keypoint_group_path"))
+    if latest_complete is None or latest != latest_complete:
+        raise RuntimeError(
+            "Canonical keypoint selection requires matching latest and "
+            "latest_complete selectors."
+        )
+    expected_path = f"keypoints_runs/{latest_complete}"
+    if root_pointer != expected_path:
+        raise RuntimeError(
+            "Canonical keypoint selection requires the exact matching root pointer."
+        )
+    if latest_complete not in parent:
+        raise RuntimeError("Canonical keypoint selector names a missing run.")
+    return latest_complete
+
+
+def _load_canonical_keypoint_view(
+    root: zarr.Group,
+    explicit: Optional[str],
+) -> tuple[str, BoundKeypointCoordinateSurfaces]:
+    run_name = _resolve_canonical_keypoint_selection(root, explicit)
+    surfaces = load_persisted_keypoint_coordinate_surfaces(
+        root,
+        f"keypoints_runs/{run_name}",
+    )
+    return run_name, surfaces
 
 
 def _resolve_latest_by_method(group: zarr.Group, method: str) -> Optional[str]:
@@ -120,8 +189,15 @@ def get_record_for_frame(
     keypoint_run: str,
     crop_run: str,
     labels: Sequence[str],
+    *,
+    legacy_unverified: bool = False,
 ) -> KeypointRecord:
-    """Get keypoint record for a specific frame, handling missing data gracefully."""
+    """Read one historical raw record only through explicit diagnostic mode."""
+    if legacy_unverified is not True:
+        raise RuntimeError(
+            "Raw per-frame keypoint access is legacy-unverified. Use sealed canonical "
+            "surfaces through the interactive viewer or opt in explicitly for diagnosis."
+        )
     
     crop_group = root[f"crop_runs/{crop_run}"]
     frame_indices = crop_group["frame_indices"][:]
@@ -208,7 +284,7 @@ def get_record_for_frame(
                 effective_thresh=None,
                 success=False,
             )
-    except (KeyError, IndexError) as e:
+    except (KeyError, IndexError):
         # Keypoint run doesn't exist or is incomplete, just show the crop
         return KeypointRecord(
             roi_index=int(roi_idx),
@@ -225,6 +301,38 @@ def get_record_for_frame(
         )
 
 
+def _preflight_interactive_keypoint_view(
+    *,
+    keypoint_run: str,
+    crop_run: str,
+    canonical_surfaces: Optional[BoundKeypointCoordinateSurfaces],
+    legacy_unverified: bool,
+) -> Optional[BoundKeypointCoordinateSurfaces]:
+    if canonical_surfaces is None:
+        if legacy_unverified is not True:
+            raise RuntimeError(
+                "Interactive keypoint viewing requires sealed canonical surfaces. "
+                "Raw arrays are available only through explicit legacy-unverified mode."
+            )
+        return None
+    if legacy_unverified is True:
+        raise RuntimeError(
+            "Canonical keypoint evidence and legacy-unverified mode are mutually exclusive."
+        )
+    bound = require_bound_keypoint_coordinate_surfaces(canonical_surfaces)
+    expected_run_path = f"keypoints_runs/{keypoint_run}"
+    expected_crop_path = f"crop_runs/{crop_run}"
+    if bound.context.run_path != expected_run_path:
+        raise RuntimeError(
+            "Canonical keypoint evidence does not match the requested keypoint run."
+        )
+    if bound.context.source.crop_path != expected_crop_path:
+        raise RuntimeError(
+            "Canonical keypoint evidence does not match the requested source crop."
+        )
+    return bound
+
+
 def plot_record_interactive(
     root: zarr.Group,
     keypoint_run: str,
@@ -233,8 +341,16 @@ def plot_record_interactive(
     pose_schema: Optional[PoseSchema],
     start_frame: int = 0,
     keypoint_method: str = "unknown",
+    canonical_surfaces: Optional[BoundKeypointCoordinateSurfaces] = None,
+    legacy_unverified: bool = False,
 ) -> None:
     """Interactive viewer with slider to scroll through frames."""
+    canonical_surfaces = _preflight_interactive_keypoint_view(
+        keypoint_run=keypoint_run,
+        crop_run=crop_run,
+        canonical_surfaces=canonical_surfaces,
+        legacy_unverified=legacy_unverified,
+    )
     
     # Get total number of frames
     n_frames = root["raw_video/images_full"].shape[0]
@@ -255,8 +371,13 @@ def plot_record_interactive(
     if keypoint_run:
         try:
             keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
+            keypoints_roi = (
+                canonical_surfaces.keypoints_roi.coordinate_node
+                if canonical_surfaces is not None
+                else keypoint_group["keypoints_roi"]
+            )
             keypoint_data = {
-                'keypoints_roi': keypoint_group["keypoints_roi"],
+                'keypoints_roi': keypoints_roi,
                 'heading': keypoint_group["heading"],
                 'confidence': keypoint_group["confidence"],
                 'effective_threshold': keypoint_group["effective_threshold"],
@@ -264,6 +385,11 @@ def plot_record_interactive(
             }
             print(f"Loaded keypoint data: {keypoint_run}")
         except (KeyError, IndexError) as e:
+            if canonical_surfaces is not None:
+                raise RuntimeError(
+                    "Canonical keypoint view is missing a required scalar or "
+                    "coordinate surface."
+                ) from e
             print(f"Warning: Could not load keypoint data: {e}")
             keypoint_data = None
     
@@ -299,7 +425,6 @@ def plot_record_interactive(
         
         # --- LEFT PANEL: ROI with keypoints ---
         kp_roi = None
-        heading = None
         if len(roi_indices) > 0:
             # Load crop data (single zarr accesses)
             roi_img = roi_images[roi_idx]
@@ -335,7 +460,6 @@ def plot_record_interactive(
                             f"heading={heading_raw:.1f}° | conf={confidence:.2f} | thresh={thresh:.0f}"
                         )
                         has_keypoints = True
-                        heading = heading_raw if np.isfinite(heading_raw) else None
                 except (KeyError, IndexError):
                     pass
             
@@ -424,21 +548,30 @@ def plot_record_interactive(
         title_text = f"Keypoint Viewer: {keypoint_run}{title_suffix}"
     else:
         title_text = "Keypoint Viewer"
+    if legacy_unverified:
+        title_text = f"LEGACY UNVERIFIED — {title_text}"
     plt.suptitle(title_text, fontsize=12, fontweight='bold')
     plt.show()
 
 
-def main() -> None:
+def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="Visualize traditional keypoint detections with interactive slider."
     )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr directory.")
     parser.add_argument(
         "--keypoint-run",
-        help="Keypoint run name or shortcut (latest, latest_traditional, latest_yolo). Defaults to latest.")
+        help=(
+            "Exact canonical keypoint run (default: active canonical run). "
+            "Method shortcuts are available only in explicit legacy mode."
+        ),
+    )
     parser.add_argument(
         "--crop-run",
-        help="Specific crop run to use alongside keypoints (defaults to latest)."
+        help=(
+            "Exact crop run; canonical mode requires it to equal the keypoint "
+            "run's persisted source crop."
+        ),
     )
     parser.add_argument(
         "--start-frame",
@@ -446,40 +579,69 @@ def main() -> None:
         default=0,
         help="Frame to start viewing from (default: 0).",
     )
+    parser.add_argument(
+        "--allow-legacy-unverified-coordinate-input",
+        action="store_true",
+        help=(
+            "Allow historical raw/latest keypoint and crop selection for visual "
+            "diagnosis only. The viewer is visibly labelled unverified."
+        ),
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     root = open_zarr(args.zarr_path)
-    
-    # Try to get keypoint run
-    try:
-        keypoint_run = get_latest_run(root, "keypoints", args.keypoint_run)
-    except RuntimeError as exc:
-        # Fall back to legacy naming without trailing 's'
+    canonical_surfaces: Optional[BoundKeypointCoordinateSurfaces] = None
+    legacy_unverified = bool(args.allow_legacy_unverified_coordinate_input)
+
+    if legacy_unverified:
+        print(
+            "WARNING: legacy unverified coordinate input enabled; overlays are "
+            "diagnostic and are not coordinate authority."
+        )
         try:
-            keypoint_run = get_latest_run(root, "keypoint", args.keypoint_run)
-        except RuntimeError:
-            print(f"Warning: {exc}")
-            print("Will show crops without keypoints.")
-            keypoint_run = None
+            keypoint_run = get_latest_run(root, "keypoints", args.keypoint_run)
+        except RuntimeError as exc:
+            try:
+                keypoint_run = get_latest_run(root, "keypoint", args.keypoint_run)
+            except RuntimeError:
+                print(f"Warning: {exc}")
+                print("Will show crops without keypoints.")
+                keypoint_run = None
 
-    keypoint_group = None
-    if keypoint_run:
-        if "keypoints_runs" in root and keypoint_run in root["keypoints_runs"]:
-            keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
-        elif "keypoint_runs" in root and keypoint_run in root["keypoint_runs"]:
-            keypoint_group = root[f"keypoint_runs/{keypoint_run}"]
+        keypoint_group = None
+        if keypoint_run:
+            if "keypoints_runs" in root and keypoint_run in root["keypoints_runs"]:
+                keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
+            elif "keypoint_runs" in root and keypoint_run in root["keypoint_runs"]:
+                keypoint_group = root[f"keypoint_runs/{keypoint_run}"]
 
-    crop_run = None
-    if args.crop_run:
-        crop_run = get_latest_run(root, "crop", args.crop_run)
-    elif keypoint_group is not None:
-        source_crop_run = keypoint_group.attrs.get("source_crop_run")
-        if source_crop_run and "crop_runs" in root and source_crop_run in root["crop_runs"]:
-            crop_run = source_crop_run
-
-    if crop_run is None:
-        crop_run = get_latest_run(root, "crop", None)
+        crop_run = None
+        if args.crop_run:
+            crop_run = get_latest_run(root, "crop", args.crop_run)
+        elif keypoint_group is not None:
+            source_crop_run = keypoint_group.attrs.get("source_crop_run")
+            if (
+                source_crop_run
+                and "crop_runs" in root
+                and source_crop_run in root["crop_runs"]
+            ):
+                crop_run = source_crop_run
+        if crop_run is None:
+            crop_run = get_latest_run(root, "crop", None)
+    else:
+        keypoint_run, canonical_surfaces = _load_canonical_keypoint_view(
+            root,
+            args.keypoint_run,
+        )
+        keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
+        crop_path = canonical_surfaces.context.source.crop_path
+        crop_run = crop_path.split("/", 1)[1]
+        if args.crop_run is not None and args.crop_run != crop_run:
+            raise RuntimeError(
+                "Canonical keypoint viewing requires the exact source crop "
+                f"{crop_run!r}; received {args.crop_run!r}."
+            )
     
     # Get keypoint labels if available
     keypoint_method = "unknown"
@@ -507,19 +669,20 @@ def main() -> None:
                 labels = keypoint_group.attrs.get("keypoint_labels", default_labels)
             keypoint_method = keypoint_group.attrs.get("method", "unknown")
 
-    print(f"\nKeypoint Visualizer")
+    print("\nKeypoint Visualizer")
     print(f"  Zarr: {args.zarr_path}")
     print(f"  Keypoint run: {keypoint_run or 'None (will show crops only)'}")
+    print(f"  Coordinate verification: {'legacy unverified' if legacy_unverified else 'canonical_v2'}")
     if keypoint_run:
         print(f"  Keypoint method: {keypoint_method}")
     print(f"  Crop run: {crop_run}")
     if pose_schema:
         print(f"  Pose schema: {pose_schema.name} ({pose_schema.num_keypoints} keypoints)")
-    print(f"\nControls:")
-    print(f"  - Slider: Navigate to specific frame")
-    print(f"  - Buttons: Prev/Next (±1), Prev 10/Next 10 (±10)")
-    print(f"  - Arrow keys: ← → (±1 frame)")
-    print(f"  - Page Up/Down: (±10 frames)")
+    print("\nControls:")
+    print("  - Slider: Navigate to specific frame")
+    print("  - Buttons: Prev/Next (±1), Prev 10/Next 10 (±10)")
+    print("  - Arrow keys: ← → (±1 frame)")
+    print("  - Page Up/Down: (±10 frames)")
     print()
     
     plot_record_interactive(
@@ -530,6 +693,8 @@ def main() -> None:
         pose_schema=pose_schema,
         start_frame=args.start_frame,
         keypoint_method=keypoint_method,
+        canonical_surfaces=canonical_surfaces,
+        legacy_unverified=legacy_unverified,
     )
 
 

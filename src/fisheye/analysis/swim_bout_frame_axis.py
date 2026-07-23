@@ -16,7 +16,15 @@ import numpy as np
 FRAME_AXIS_CONTRACT_ATTR = "frame_axis_contract"
 FRAME_AXIS_CONTRACT_SHA256_ATTR = "frame_axis_contract_sha256"
 FRAME_AXIS_CONTRACT_SCHEMA_ID = "palette.swim_bout_frame_axis_reference"
-FRAME_AXIS_CONTRACT_SCHEMA_VERSION = 1
+FRAME_AXIS_CONTRACT_SCHEMA_VERSION = 2
+FRAME_AXIS_LEGACY_CONTRACT_SCHEMA_VERSION = 1
+FRAME_AXIS_SUPPORTED_CONTRACT_SCHEMA_VERSIONS = frozenset(
+    {
+        FRAME_AXIS_LEGACY_CONTRACT_SCHEMA_VERSION,
+        FRAME_AXIS_CONTRACT_SCHEMA_VERSION,
+    }
+)
+FRAME_AXIS_CANONICAL_IDENTITY_ROLE = "source_acquisition_frame_index"
 
 FRAME_AXIS_STORAGE_REFERENCE = "reference"
 FRAME_AXIS_STORAGE_EMBEDDED = "embedded"
@@ -49,6 +57,7 @@ def build_frame_axis_contract(
     authoritative_path: str,
     source_track_kinematics_run: str,
     track_id: int,
+    source_track_motion_manifest_sha256: str,
     storage_mode: str = FRAME_AXIS_STORAGE_DEFAULT,
     authoritative_dtype: object = "int64",
 ) -> dict[str, Any]:
@@ -66,6 +75,12 @@ def build_frame_axis_contract(
         raise SwimBoutFrameAxisError(
             "Frame-axis references require a resolved track-kinematics run name, not 'latest'."
         )
+    motion_manifest_sha256 = str(source_track_motion_manifest_sha256).strip()
+    if not _is_sha256(motion_manifest_sha256):
+        raise SwimBoutFrameAxisError(
+            "Frame-axis references require the exact source track-motion "
+            "manifest SHA-256 digest."
+        )
 
     frame_values = np.asarray(values, dtype=np.int64).reshape(-1)
     embedded_path = (
@@ -81,10 +96,12 @@ def build_frame_axis_contract(
         "schema_id": FRAME_AXIS_CONTRACT_SCHEMA_ID,
         "schema_version": FRAME_AXIS_CONTRACT_SCHEMA_VERSION,
         "axis_kind": "camera_frame_index",
+        "identity_array_role": FRAME_AXIS_CANONICAL_IDENTITY_ROLE,
         "reference_scope": "same_zarr_root",
         "authoritative_path": normalized_path,
         "source_track_kinematics_run": run_name,
         "track_id": int(track_id),
+        "source_track_motion_manifest_sha256": motion_manifest_sha256,
         "shape": [int(frame_values.size)],
         "frame_count": int(frame_values.size),
         "authoritative_dtype": str(np.dtype(authoritative_dtype)),
@@ -151,11 +168,17 @@ def resolve_swim_bout_frame_axis(
             contract=contract,
             authoritative_path=authoritative_path,
         )
-        return _read_axis(
+        values = _read_axis(
             authoritative,
             label=authoritative_path,
             expected_length=declared_count,
         )
+        _validate_axis_payload(
+            values,
+            contract=contract,
+            label=authoritative_path,
+        )
+        return values
 
     embedded_path = contract.get("embedded_path")
     if embedded_path is None:
@@ -175,11 +198,17 @@ def resolve_swim_bout_frame_axis(
         contract=contract,
         embedded_path=normalized_embedded,
     )
-    return _read_axis(
+    values = _read_axis(
         embedded,
         label=normalized_embedded,
         expected_length=declared_count,
     )
+    _validate_axis_payload(
+        values,
+        contract=contract,
+        label=normalized_embedded,
+    )
+    return values
 
 
 def _validate_contract_identity(
@@ -191,7 +220,11 @@ def _validate_contract_identity(
         raise SwimBoutFrameAxisError(
             f"Unsupported frame-axis contract schema_id {contract.get('schema_id')!r}."
         )
-    if contract.get("schema_version") != FRAME_AXIS_CONTRACT_SCHEMA_VERSION:
+    schema_version = contract.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version not in FRAME_AXIS_SUPPORTED_CONTRACT_SCHEMA_VERSIONS
+    ):
         raise SwimBoutFrameAxisError(
             "Unsupported frame-axis contract schema_version "
             f"{contract.get('schema_version')!r}."
@@ -227,7 +260,7 @@ def _validate_contract_identity(
             "Unsupported frame-axis content hash representation."
         )
     digest = _required_text(contract, "content_sha256")
-    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest.lower()):
+    if not _is_sha256(digest):
         raise SwimBoutFrameAxisError(
             "Frame-axis content_sha256 is not a SHA-256 digest."
         )
@@ -254,10 +287,47 @@ def _validate_contract_identity(
     if _required_text(contract, "resolved_dtype") != "int64":
         raise SwimBoutFrameAxisError("Frame-axis resolved_dtype must be 'int64'.")
 
+    if schema_version == FRAME_AXIS_CONTRACT_SCHEMA_VERSION:
+        if (
+            contract.get("identity_array_role")
+            != FRAME_AXIS_CANONICAL_IDENTITY_ROLE
+        ):
+            raise SwimBoutFrameAxisError(
+                "Canonical frame-axis contracts must declare "
+                "source_acquisition_frame_index identity authority."
+            )
+        source_motion_digest = _required_text(
+            contract,
+            "source_track_motion_manifest_sha256",
+        )
+        if not _is_sha256(source_motion_digest):
+            raise SwimBoutFrameAxisError(
+                "Canonical frame-axis source motion-manifest digest is invalid."
+            )
+        run_motion_digest = run_attrs.get(
+            "source_track_motion_manifest_sha256"
+        )
+        if run_motion_digest is None or str(run_motion_digest) != source_motion_digest:
+            raise SwimBoutFrameAxisError(
+                "Frame-axis source motion manifest disagrees with swim-bout "
+                "run lineage."
+            )
+        expected_leaf = FRAME_AXIS_CANONICAL_IDENTITY_ROLE
+    else:
+        if "identity_array_role" in contract or (
+            "source_track_motion_manifest_sha256" in contract
+        ):
+            raise SwimBoutFrameAxisError(
+                "Historical frame-axis v1 must not claim canonical v2 authority."
+            )
+        expected_leaf = "frame_indices"
+
     authoritative_path = _normalize_contract_path(
         _required_text(contract, "authoritative_path")
     )
-    expected_tail = f"/{source_run}/tracks/id_{contract_track_id}/frame_indices"
+    expected_tail = (
+        f"/{source_run}/tracks/id_{contract_track_id}/{expected_leaf}"
+    )
     if not f"/{authoritative_path}".endswith(expected_tail):
         raise SwimBoutFrameAxisError(
             "Frame-axis authoritative_path disagrees with the declared source run "
@@ -334,6 +404,20 @@ def _read_axis(
     return values
 
 
+def _validate_axis_payload(
+    values: np.ndarray,
+    *,
+    contract: Mapping[str, Any],
+    label: str,
+) -> None:
+    expected = _required_text(contract, "content_sha256")
+    actual = canonical_frame_axis_sha256(values)
+    if actual != expected:
+        raise SwimBoutFrameAxisError(
+            f"Frame-axis payload digest mismatch at {label!r}."
+        )
+
+
 def _optional_node(group: Any, path: str) -> Any | None:
     current = group
     for part in _normalize_contract_path(path).split("/"):
@@ -385,6 +469,13 @@ def _required_nonnegative_int(mapping: Mapping[str, Any], key: str) -> int:
             f"Frame-axis contract field {key!r} must be non-negative."
         )
     return value
+
+
+def _is_sha256(value: object) -> bool:
+    text = str(value).strip()
+    return len(text) == 64 and all(
+        character in "0123456789abcdef" for character in text.lower()
+    )
 
 
 __all__ = [

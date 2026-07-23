@@ -15,6 +15,11 @@ import zarr
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceWindow,
 )
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.epoch_segments import (
     HistogramMetricSpec,
@@ -28,7 +33,6 @@ from fisheye.analysis.track_kinematics_io import (
 )
 from fisheye.shared.arena_geometry import resolve_arena_geometry as _resolve_shared_arena_geometry
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
-from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.shared.system_metadata import get_git_info
 
 SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v1"
@@ -103,16 +107,12 @@ def _attrs_dict(group: zarr.Group) -> dict[str, Any]:
 def _resolve_chaser_distance_run(
     root: zarr.Group,
     run_name: str | None,
-) -> tuple[zarr.Group, str, str]:
-    parent = root.get("analysis/chaser_distance_runs")
-    if parent is None:
-        raise ValueError("Archive has no analysis/chaser_distance_runs group.")
-    resolved = str(run_name or "latest").strip()
-    if not resolved or resolved == "latest":
-        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
-    return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"
+) -> tuple[ChaserDistanceReadSnapshot, str, str]:
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(run_name or "latest").strip() or "latest",
+    )
+    return snapshot, snapshot.run_name, snapshot.run_path
 
 
 def _decode_text_column(data: np.ndarray) -> list[str]:
@@ -1284,7 +1284,14 @@ def build_chaser_epoch_behavior_summary_result(
 ) -> ChaserEpochBehaviorSummaryResult:
     archive = Path(zarr_path)
     root = _open_root(archive, mode="r")
-    run_group, run_name, run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    distance, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    # per_epoch_chaser persists behavior class IDs/labels, so it cannot be
+    # published from the current unsealed protocol-derived role surfaces.
+    distance.require_behavior_authority()
+    run_group = root[run_path]
     attrs = _attrs_dict(run_group)
     fps = float(attrs.get("fps") or 1.0)
     windows = _load_windows(run_group, fps=fps)
@@ -1383,6 +1390,12 @@ def write_chaser_epoch_behavior_summary_component(
     overwrite: bool = False,
 ) -> str:
     root = _open_root(Path(zarr_path), mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name

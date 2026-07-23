@@ -123,11 +123,13 @@ def test_main_emit_paths(
     registry_path = tmp_path / "registry.sqlite"
     registry_path.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(
-        mod,
-        "_discover_zarrs_from_registry",
-        lambda **_kw: [Path("/data/rec_a_analysis.zarr"), Path("/data/rec_b_analysis.zarr")],
-    )
+    captured: dict = {}
+
+    def _discover(**kwargs):
+        captured.update(kwargs)
+        return [Path("/data/rec_a_analysis.zarr"), Path("/data/rec_b_analysis.zarr")]
+
+    monkeypatch.setattr(mod, "_discover_zarrs_from_registry", _discover)
 
     rc = mod.main(
         [
@@ -144,3 +146,4 @@ def test_main_emit_paths(
     lines = [l for l in out.strip().splitlines() if l.strip()]
     assert "/data/rec_a_analysis.zarr" in lines
     assert "/data/rec_b_analysis.zarr" in lines
+    assert captured["skip_existing"] is False

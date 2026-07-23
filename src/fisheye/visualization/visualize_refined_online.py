@@ -9,8 +9,8 @@ and gap interpolation. Matches the style of visualize_refined_detections.py.
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-from typing import Dict, Optional, Tuple
+import copy
+from typing import Any, Dict, Optional
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
@@ -18,7 +18,11 @@ import numpy as np
 import zarr
 from rich.console import Console
 
-REFINED_ONLINE_GROUP = "refined_online_runs"
+from ..refinement.refine_online_detect import (
+    CanonicalOnlineRefinementError,
+    REFINED_ONLINE_GROUP,
+    load_bound_refined_online_coordinate_evidence,
+)
 
 
 def load_stage(
@@ -42,7 +46,6 @@ def load_stage(
     valid_mask = group["valid_mask"][:]
 
     # Get valid positions
-    valid_indices = np.where(valid_mask)[0]
     valid_positions = positions[valid_mask]
     valid_frames = frames[valid_mask]
 
@@ -74,6 +77,91 @@ def load_stage(
     }
 
 
+def load_refined_online_visualization_inputs(
+    root: zarr.Group,
+    *,
+    refined_run: Optional[str] = None,
+) -> dict[str, Any]:
+    """Copy one exact canonical publication, then revalidate its live proof."""
+
+    refined_runs = root.get(REFINED_ONLINE_GROUP)
+    if not isinstance(refined_runs, zarr.Group):
+        raise CanonicalOnlineRefinementError(
+            "No canonical refined_online_runs parent exists in this archive."
+        )
+    resolved = str(refined_run or "").strip()
+    if not resolved:
+        resolved = str(
+            refined_runs.attrs.get("latest_complete")
+            or refined_runs.attrs.get("latest")
+            or ""
+        ).strip()
+    if not resolved or "/" in resolved or resolved not in refined_runs:
+        raise CanonicalOnlineRefinementError(
+            f"Canonical refined-online run {refined_run!r} is unavailable."
+        )
+    refined_group = refined_runs[resolved]
+    if not isinstance(refined_group, zarr.Group):
+        raise CanonicalOnlineRefinementError(
+            f"refined_online_runs/{resolved} is not one run group."
+        )
+    evidence = load_bound_refined_online_coordinate_evidence(root, refined_group)
+    fps_raw = root.attrs.get("fps", 60.0)
+    try:
+        fps = float(fps_raw)
+    except (TypeError, ValueError) as exc:
+        raise CanonicalOnlineRefinementError(
+            f"Refined-online visualization fps is invalid: {exc}."
+        ) from exc
+    if not np.isfinite(fps) or fps <= 0.0:
+        raise CanonicalOnlineRefinementError(
+            "Refined-online visualization requires finite positive fps."
+        )
+
+    attrs = copy.deepcopy(dict(refined_group.attrs))
+    frames = np.asarray(refined_group["camera_frame_ids"][:], dtype=np.int64)
+    original_valid = np.asarray(
+        refined_group["original_valid_mask"][:],
+        dtype=bool,
+    )
+    original_positions = np.full((len(frames), 2), np.nan, dtype=np.float64)
+    datasets: dict[str, dict[str, Any]] = {
+        "original": {
+            "positions": original_positions,
+            "valid_mask": original_valid,
+            "valid_positions": original_positions[original_valid],
+            "valid_frames": frames[original_valid],
+            "time_seconds": frames[original_valid] / fps,
+            "interpolation_mask": None,
+            "total_frames": len(frames),
+            "frames_with_detections": int(original_valid.sum()),
+            "coverage_percent": (
+                float(original_valid.sum() / len(frames) * 100)
+                if len(frames)
+                else 0.0
+            ),
+            "total_detections": int(original_valid.sum()),
+            "stage": "original",
+        },
+        "filtered": load_stage(refined_group["filtered"], frames, fps, "filtered"),
+        "interpolated": load_stage(
+            refined_group["interpolated"],
+            frames,
+            fps,
+            "interpolated",
+        ),
+    }
+    # Discard every copied value if the exact publication changed mid-read.
+    evidence.assert_verified()
+    return {
+        "run_name": resolved,
+        "fps": fps,
+        "attrs": attrs,
+        "frames": frames,
+        "datasets": datasets,
+    }
+
+
 def visualize_refinement_pipeline(
     zarr_path: str,
     refined_run: Optional[str] = None,
@@ -97,73 +185,26 @@ def visualize_refinement_pipeline(
 
     # Open zarr
     root = zarr.open(str(zarr_path), mode="r")
-    fps = root.attrs.get("fps", 60.0)
-
-    if REFINED_ONLINE_GROUP not in root:
-        console.print("[red]Error:[/red] No refined_online_runs found in zarr")
-        return
-
-    refined_runs = root[REFINED_ONLINE_GROUP]
-
-    if refined_run is None:
-        refined_run = refined_runs.attrs.get("latest")
-        if refined_run is None:
-            console.print("[red]Error:[/red] No latest refined run found")
-            return
-
-    if refined_run not in refined_runs:
-        console.print(f"[red]Error:[/red] Refined run '{refined_run}' not found")
-        return
-
-    refined_group = refined_runs[refined_run]
+    inputs = load_refined_online_visualization_inputs(
+        root,
+        refined_run=refined_run,
+    )
+    refined_run = str(inputs["run_name"])
+    refined_attrs = inputs["attrs"]
+    frames = inputs["frames"]
+    datasets = inputs["datasets"]
     console.print(f"\nRefined run: [cyan]{refined_run}[/cyan]")
 
     # Load metadata
-    stimulus_run = refined_group.attrs.get("source_stimulus_run", "unknown")
-    params = refined_group.attrs.get("parameters", {})
+    stimulus_run = refined_attrs.get("source_stimulus_run", "unknown")
+    params = refined_attrs.get("parameters", {})
 
     console.print(f"Source stimulus run: [cyan]{stimulus_run}[/cyan]")
-    console.print(f"\n[bold]Parameters:[/bold]")
+    console.print("\n[bold]Parameters:[/bold]")
     console.print(f"  Window length: {params.get('window_length', 'N/A')}")
     console.print(f"  Polynomial order: {params.get('polyorder', 'N/A')}")
     console.print(f"  Displacement threshold: {params.get('displacement_threshold', 'N/A')} px")
     console.print(f"  Max gap: {params.get('max_gap', 'N/A')} frames")
-
-    # Load frame IDs
-    frames = refined_group["camera_frame_ids"][:]
-
-    # Load original data (construct from masks)
-    original_valid = refined_group["original_valid_mask"][:]
-    original_positions = np.full((len(frames), 2), np.nan, dtype=np.float64)
-
-    # We need to reconstruct original positions from filtered data
-    # Since smoothing was applied, we'll use filtered as our "original" reference
-    filtered_grp = refined_group["filtered"]
-    interp_grp = refined_group["interpolated"]
-
-    # Load stages
-    datasets = {}
-
-    # Original (before smoothing/outlier removal)
-    datasets["original"] = {
-        "positions": original_positions,
-        "valid_mask": original_valid,
-        "valid_positions": original_positions[original_valid],
-        "valid_frames": frames[original_valid],
-        "time_seconds": frames[original_valid] / fps,
-        "interpolation_mask": None,
-        "total_frames": len(frames),
-        "frames_with_detections": int(original_valid.sum()),
-        "coverage_percent": float(original_valid.sum() / len(frames) * 100),
-        "total_detections": int(original_valid.sum()),
-        "stage": "original",
-    }
-
-    # Filtered (after smoothing and outlier removal)
-    datasets["filtered"] = load_stage(filtered_grp, frames, fps, "filtered")
-
-    # Interpolated (after gap filling)
-    datasets["interpolated"] = load_stage(interp_grp, frames, fps, "interpolated")
 
     # Create visualization
     fig = plt.figure(figsize=(20, 14))
@@ -381,7 +422,7 @@ def visualize_refinement_pipeline(
     plt.close(fig)
 
     # Print summary
-    console.print(f"\n[bold]Coverage Summary:[/bold]")
+    console.print("\n[bold]Coverage Summary:[/bold]")
     for stage in ["original", "filtered", "interpolated"]:
         data = datasets[stage]
         console.print(

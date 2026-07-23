@@ -33,6 +33,7 @@ from fisheye.shared.zarr.columnar import (
 from fisheye.analysis.detect_bouts_multi_level import normalize_speed_level
 from fisheye.analysis.eye_angle_io import EyeAngleIOError, load_eye_gaze_frame_series
 from fisheye.analysis.swim_bout_io import load_swim_bout_tables
+from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
@@ -2909,108 +2910,128 @@ def compute_and_save_bout_kinematics(
     else:
         output_path = Path(output_zarr_path)
         output_root = open_zarr_root(output_path, mode="a")
-    track_run_group, track_run_name, track_run_path, resolved_scope = _resolve_track_run(
+    _track_run_group, track_run_name, track_run_path, resolved_scope = _resolve_track_run(
         source_root,
         track_kinematics_run,
         track_scope=track_scope,
     )
-    tracks = track_run_group.get("tracks")
-    if tracks is None or f"id_{int(track_id)}" not in tracks:
-        raise ValueError(f"Track id_{track_id} not found in {track_run_path}.")
-    track_group = tracks[f"id_{int(track_id)}"]
-
-    frames = np.asarray(track_group["frame_indices"][:], dtype=np.int64)
-    if "time_seconds" in track_group:
-        times = np.asarray(track_group["time_seconds"][:], dtype=np.float64)
-    else:
-        fps_for_time = float(track_run_group.attrs.get("fps", 0.0))
-        times = frames.astype(np.float64) / fps_for_time if fps_for_time > 0 else np.arange(frames.size)
-    fps = float(track_run_group.attrs.get("fps", 0.0))
+    track_tables = load_track_kinematics_track(
+        source_root,
+        run_name=track_run_name,
+        scope=resolved_scope,
+        track_id=int(track_id),
+        required_speed_levels=(physical_active_suffix,),
+    )
+    if track_tables.source_acquisition_frame_index is None:
+        raise ValueError(
+            f"Verified track motion {track_tables.track_path} has no acquisition-frame identity."
+        )
+    frames = np.asarray(
+        track_tables.source_acquisition_frame_index,
+        dtype=np.int64,
+    )
+    if track_tables.time_seconds is None:
+        raise ValueError(
+            f"Verified track motion {track_tables.track_path} has no exact time_seconds surface."
+        )
+    times = np.asarray(track_tables.time_seconds, dtype=np.float64)
+    if times.shape != frames.shape:
+        raise ValueError(
+            f"Verified time_seconds shape {times.shape} does not match acquisition-frame shape {frames.shape}."
+        )
+    fps = float(track_tables.run_attrs.get("fps", 0.0))
     if fps <= 0:
         raise ValueError(f"Track kinematics run {track_run_path} has invalid fps={fps!r}.")
-    positions_mm = None
-    positions_px = None
-    physical_speed_mm = None
-    physical_path_distance_mm = None
-    physical_path_distance_px = None
-    delta_seconds = None
+    if track_tables.positions_mm is None:
+        raise ValueError(
+            f"Verified track motion {track_tables.track_path} has no physical positions_mm surface."
+        )
+    if track_tables.positions_px is None:
+        raise ValueError(
+            f"Verified track motion {track_tables.track_path} has no pixel positions_px surface."
+        )
+    positions_mm = np.asarray(track_tables.positions_mm, dtype=np.float64)
+    positions_px = np.asarray(track_tables.positions_px, dtype=np.float64)
+    if positions_mm.shape != (frames.shape[0], 2):
+        raise ValueError(
+            f"Verified positions_mm shape {positions_mm.shape} does not match expected {(frames.shape[0], 2)}."
+        )
+    if positions_px.shape != (frames.shape[0], 2):
+        raise ValueError(
+            f"Verified positions_px shape {positions_px.shape} does not match expected {(frames.shape[0], 2)}."
+        )
     source_position_arrays: dict[str, str] = {}
     source_movement_arrays: dict[str, str] = {}
     source_validity_arrays: dict[str, str] = {}
-    transition_valid = None
-    sample_valid = None
-    if "positions_mm" in track_group:
-        positions_mm = np.asarray(track_group["positions_mm"][:], dtype=np.float64)
-        if positions_mm.shape != (frames.shape[0], 2):
-            raise ValueError(
-                f"positions_mm shape {positions_mm.shape} does not match expected {(frames.shape[0], 2)}."
-            )
-        source_position_arrays["positions_mm"] = f"{track_run_path}/tracks/id_{int(track_id)}/positions_mm"
-    if "positions_px" in track_group:
-        positions_px = np.asarray(track_group["positions_px"][:], dtype=np.float64)
-        if positions_px.shape != (frames.shape[0], 2):
-            raise ValueError(
-                f"positions_px shape {positions_px.shape} does not match expected {(frames.shape[0], 2)}."
-            )
-        source_position_arrays["positions_px"] = f"{track_run_path}/tracks/id_{int(track_id)}/positions_px"
-    physical_speed_array = f"speed_{physical_active_suffix}_mm"
-    if physical_speed_array not in track_group:
-        raise ValueError(
-            f"Physical active speed source {physical_speed_array!r} not found in "
-            f"{track_run_path}/tracks/id_{track_id}."
-        )
-    physical_speed_mm = np.asarray(track_group[physical_speed_array][:], dtype=np.float64)
+    source_position_arrays["positions_mm"] = f"{track_tables.track_path}/positions_mm"
+    source_position_arrays["positions_px"] = f"{track_tables.track_path}/positions_px"
+    physical_speed_array = f"movement/speed/{physical_active_suffix}/mm"
+    physical_speed_mm = np.asarray(
+        track_tables.speed_mm_by_level[physical_active_suffix],
+        dtype=np.float64,
+    )
     if physical_speed_mm.shape[0] != frames.shape[0]:
         raise ValueError(
             f"Physical active speed source {physical_speed_array!r} length "
             f"{physical_speed_mm.shape[0]} does not match frames length {frames.shape[0]}."
         )
     source_movement_arrays["physical_active_speed"] = (
-        f"{track_run_path}/tracks/id_{int(track_id)}/{physical_speed_array}"
+        f"{track_tables.track_path}/{physical_speed_array}"
     )
-    path_distance_mm_array = f"frame_path_distance_{physical_active_suffix}_mm"
-    path_distance_px_array = f"frame_path_distance_{physical_active_suffix}_px"
-    if path_distance_mm_array in track_group:
-        physical_path_distance_mm = np.asarray(track_group[path_distance_mm_array][:], dtype=np.float64)
-        if physical_path_distance_mm.shape[0] != frames.shape[0]:
-            raise ValueError(
-                f"{path_distance_mm_array!r} length {physical_path_distance_mm.shape[0]} "
-                f"does not match frames length {frames.shape[0]}."
-            )
-        source_movement_arrays["physical_active_path_distance_mm"] = (
-            f"{track_run_path}/tracks/id_{int(track_id)}/{path_distance_mm_array}"
+    try:
+        physical_path_distance_mm = np.asarray(
+            track_tables.frame_path_distance_mm_by_level[physical_active_suffix],
+            dtype=np.float64,
         )
-    if path_distance_px_array in track_group:
-        physical_path_distance_px = np.asarray(track_group[path_distance_px_array][:], dtype=np.float64)
-        if physical_path_distance_px.shape[0] != frames.shape[0]:
-            raise ValueError(
-                f"{path_distance_px_array!r} length {physical_path_distance_px.shape[0]} "
-                f"does not match frames length {frames.shape[0]}."
-            )
-        source_movement_arrays["physical_active_path_distance_px"] = (
-            f"{track_run_path}/tracks/id_{int(track_id)}/{path_distance_px_array}"
+        physical_path_distance_px = np.asarray(
+            track_tables.frame_path_distance_px_by_level[physical_active_suffix],
+            dtype=np.float64,
         )
-    if "delta_seconds" in track_group:
-        delta_seconds = np.asarray(track_group["delta_seconds"][:], dtype=np.float64)
-        if delta_seconds.shape[0] != frames.shape[0]:
+    except KeyError as exc:
+        raise ValueError(
+            f"Verified track motion {track_tables.track_path} is missing exact "
+            f"{physical_active_suffix!r} path-distance surfaces."
+        ) from exc
+    for name, values in (
+        ("frame_path_distance_mm", physical_path_distance_mm),
+        ("frame_path_distance_px", physical_path_distance_px),
+    ):
+        if values.shape[0] != frames.shape[0]:
             raise ValueError(
-                f"delta_seconds length {delta_seconds.shape[0]} does not match frames length {frames.shape[0]}."
+                f"Verified {name} length {values.shape[0]} does not match frames length {frames.shape[0]}."
             )
-        source_validity_arrays["delta_seconds"] = f"{track_run_path}/tracks/id_{int(track_id)}/delta_seconds"
-    if "transition_valid" in track_group:
-        transition_valid = np.asarray(track_group["transition_valid"][:], dtype=bool)
-        if transition_valid.shape[0] != frames.shape[0]:
+    path_distance_mm_array = (
+        f"movement/speed/{physical_active_suffix}/frame_path_distance_mm"
+    )
+    path_distance_px_array = (
+        f"movement/speed/{physical_active_suffix}/frame_path_distance_px"
+    )
+    source_movement_arrays["physical_active_path_distance_mm"] = (
+        f"{track_tables.track_path}/{path_distance_mm_array}"
+    )
+    source_movement_arrays["physical_active_path_distance_px"] = (
+        f"{track_tables.track_path}/{path_distance_px_array}"
+    )
+    if track_tables.delta_seconds is None:
+        raise ValueError(f"Verified track motion {track_tables.track_path} has no delta_seconds.")
+    if track_tables.transition_valid is None:
+        raise ValueError(f"Verified track motion {track_tables.track_path} has no transition_valid.")
+    if track_tables.sample_valid is None:
+        raise ValueError(f"Verified track motion {track_tables.track_path} has no sample_valid.")
+    delta_seconds = np.asarray(track_tables.delta_seconds, dtype=np.float64)
+    transition_valid = np.asarray(track_tables.transition_valid, dtype=bool)
+    sample_valid = np.asarray(track_tables.sample_valid, dtype=bool)
+    for name, values in (
+        ("delta_seconds", delta_seconds),
+        ("transition_valid", transition_valid),
+        ("sample_valid", sample_valid),
+    ):
+        if values.shape[0] != frames.shape[0]:
             raise ValueError(
-                f"transition_valid length {transition_valid.shape[0]} does not match frames length {frames.shape[0]}."
+                f"Verified {name} length {values.shape[0]} does not match frames length {frames.shape[0]}."
             )
-        source_validity_arrays["transition_valid"] = f"{track_run_path}/tracks/id_{int(track_id)}/transition_valid"
-    if "sample_valid" in track_group:
-        sample_valid = np.asarray(track_group["sample_valid"][:], dtype=bool)
-        if sample_valid.shape[0] != frames.shape[0]:
-            raise ValueError(
-                f"sample_valid length {sample_valid.shape[0]} does not match frames length {frames.shape[0]}."
-            )
-        source_validity_arrays["sample_valid"] = f"{track_run_path}/tracks/id_{int(track_id)}/sample_valid"
+        source_validity_arrays[name] = f"{track_tables.track_path}/{name}"
+    track_motion_authority = track_tables.authority_record()
 
     pre_window_frames = max(1, int(round(float(pre_window_s) * fps)))
     post_window_frames = max(1, int(round(float(post_window_s) * fps)))
@@ -3019,7 +3040,7 @@ def compute_and_save_bout_kinematics(
         int(math.ceil(float(physical_active_boundary_margin_s) * fps - 1e-9)),
     )
     source_heading_arrays = {
-        heading_level: f"{track_run_path}/tracks/id_{int(track_id)}/{HEADING_LEVEL_TO_ARRAY[heading_level]}"
+        heading_level: f"{track_tables.track_path}/{HEADING_LEVEL_TO_ARRAY[heading_level]}"
         for heading_level in normalized_heading_levels
     }
 
@@ -3049,6 +3070,35 @@ def compute_and_save_bout_kinematics(
             f"Swim-bout run {swim_run_name!r} source_track_kinematics_run={source_track_run!r} "
             f"does not match selected {track_run_path!r}."
         )
+    swim_track_motion_authority = swim_run_attrs.get(
+        "source_track_motion_authority"
+    )
+    if not isinstance(swim_track_motion_authority, Mapping):
+        raise ValueError(
+            f"Swim-bout run {swim_run_name!r} has no typed source track-motion authority."
+        )
+    required_swim_authority = {
+        "schema_id": track_motion_authority["schema_id"],
+        "schema_version": track_motion_authority["schema_version"],
+        "run_ref": track_motion_authority["run_ref"],
+        "track_ref": track_motion_authority["track_ref"],
+        "track_id": track_motion_authority["track_id"],
+        "motion_manifest_sha256": track_motion_authority[
+            "motion_manifest_sha256"
+        ],
+        "positions_px_coordinate_descriptor_sha256": track_motion_authority[
+            "positions_px_coordinate_descriptor_sha256"
+        ],
+        "positions_mm_coordinate_descriptor_sha256": track_motion_authority[
+            "positions_mm_coordinate_descriptor_sha256"
+        ],
+    }
+    for field, expected_value in required_swim_authority.items():
+        if swim_track_motion_authority.get(field) != expected_value:
+            raise ValueError(
+                f"Swim-bout run {swim_run_name!r} source track-motion authority "
+                f"does not match the selected verified track at field {field!r}."
+            )
 
     bouts = swim_payload.bouts
     peak_events: Optional[np.ndarray] = None
@@ -3093,6 +3143,10 @@ def compute_and_save_bout_kinematics(
         "source_track_kinematics_scope": resolved_scope,
         "source_track_kinematics_path": track_run_path,
         "source_track_kinematics_track_path": f"{track_run_path}/tracks/id_{int(track_id)}",
+        "source_track_motion_authority": track_motion_authority,
+        "source_swim_bout_track_motion_authority": dict(
+            swim_track_motion_authority
+        ),
         "source_swim_bout_run": swim_run_name,
         "source_swim_bout_speed_level": source_speed_level,
         "source_swim_bout_path": swim_level_path,
@@ -3233,9 +3287,15 @@ def compute_and_save_bout_kinematics(
     metrics_by_level: dict[str, np.ndarray] = {}
     for heading_level in normalized_heading_levels:
         array_name = HEADING_LEVEL_TO_ARRAY[heading_level]
-        if array_name not in track_group:
-            raise ValueError(f"Heading source array {array_name!r} not found in {track_run_path}/tracks/id_{track_id}.")
-        headings = np.asarray(track_group[array_name][:], dtype=np.float64)
+        heading_values = {
+            "smoothed_heading_degrees": track_tables.smoothed_heading_degrees,
+            "heading_degrees": track_tables.heading_degrees,
+        }[array_name]
+        if heading_values is None:
+            raise ValueError(
+                f"Verified heading source array {array_name!r} is unavailable in {track_tables.track_path}."
+            )
+        headings = np.asarray(heading_values, dtype=np.float64)
         if headings.shape[0] != frames.shape[0]:
             raise ValueError(
                 f"Heading source {array_name!r} length {headings.shape[0]} does not match frames length {frames.shape[0]}."
@@ -3416,6 +3476,26 @@ def compute_and_save_bout_kinematics(
         run_group,
         output_shard_rows=int(output_shard_rows),
     )
+
+    try:
+        current_track_tables = load_track_kinematics_track(
+            source_root,
+            run_name=track_run_name,
+            scope=resolved_scope,
+            track_id=int(track_id),
+            required_speed_levels=(physical_active_suffix,),
+        )
+        if current_track_tables.authority_record() != track_motion_authority:
+            raise ValueError(
+                "Source track-motion authority changed while bout kinematics "
+                "was being computed."
+            )
+    except Exception as exc:
+        run_group.attrs["status"] = "failed"
+        run_group.attrs["failure_stage"] = "source_track_motion_revalidation"
+        run_group.attrs["failure_reason"] = f"{type(exc).__name__}: {exc}"
+        mark_run_failed(run_group, error=f"{type(exc).__name__}: {exc}")
+        raise
 
     run_group.attrs["status"] = "complete"
     mark_run_complete(

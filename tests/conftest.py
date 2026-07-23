@@ -1,9 +1,13 @@
 """Shared pytest fixtures."""
 
-import pytest
 import tempfile
 import shutil
 from pathlib import Path
+
+import pytest
+
+
+pytest_plugins = ["tests.unit.fisheye.chaser_test_fixtures"]
 
 @pytest.fixture
 def temp_dir():

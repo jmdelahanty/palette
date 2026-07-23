@@ -5,11 +5,11 @@ import pytest
 import zarr
 
 from fisheye.shared.coordinate_transform import (
+    apply_homography_xy,
     load_calibration_transform,
     projector_px_to_mm,
     projector_to_camera_mm,
     projector_to_camera_px,
-    resolve_concentric_center_mm,
     visual_angle_deg,
 )
 
@@ -201,3 +201,57 @@ class TestProjectorToCamera:
         pixel_to_mm = 0.5
         result = projector_to_camera_mm(pts, H, pixel_to_mm)
         np.testing.assert_allclose(result, [50.0, 100.0])
+
+
+class TestDirectionNeutralHomography:
+    def test_non_self_inverse_direction_is_the_callers_explicit_choice(self):
+        camera_to_canvas = np.array(
+            [
+                [2.0, 0.25, 11.0],
+                [0.1, 1.5, -7.0],
+                [0.002, -0.001, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        point_camera = np.array([37.0, 19.0], dtype=np.float64)
+
+        point_canvas = apply_homography_xy(point_camera, camera_to_canvas)
+        recovered = apply_homography_xy(
+            point_canvas,
+            np.linalg.inv(camera_to_canvas),
+        )
+
+        np.testing.assert_allclose(recovered, point_camera, rtol=0.0, atol=1e-12)
+        assert not np.allclose(
+            apply_homography_xy(point_camera, np.linalg.inv(camera_to_canvas)),
+            point_canvas,
+        )
+
+    @pytest.mark.parametrize(
+        ("points", "matrix"),
+        [
+            (np.zeros((2, 3)), np.eye(3)),
+            (np.zeros(3), np.eye(3)),
+            (np.zeros((1, 2)), np.eye(2)),
+            (np.zeros((1, 2)), np.full((3, 3), np.nan)),
+        ],
+    )
+    def test_malformed_inputs_fail_closed(self, points, matrix):
+        with pytest.raises(ValueError):
+            apply_homography_xy(points, matrix)
+
+    def test_point_at_infinity_fails_closed(self):
+        matrix = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, -2.0],
+            ]
+        )
+
+        with pytest.raises(ValueError, match="point at infinity"):
+            apply_homography_xy(np.array([2.0, 5.0]), matrix)
+
+    def test_nonfinite_points_must_be_selected_out_by_the_caller(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            apply_homography_xy(np.array([[1.0, np.nan]]), np.eye(3))

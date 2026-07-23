@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fisheye.utils import run_recording_analysis_pipeline as mod
 from fisheye.utils.import_recording_analysis import RecordingAnalysisPlan, RecordingImportOptions, RecordingImportResult
 
@@ -312,6 +314,11 @@ def test_process_pipeline_returns_detect_quality_failure(monkeypatch, tmp_path: 
 
 
 def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        mod,
+        "require_future_normal_refined_keypoint_publication",
+        lambda: None,
+    )
     plan = RecordingAnalysisPlan(
         recording_dir=tmp_path / "rec",
         h5_path=tmp_path / "rec" / "raw" / "session.h5",
@@ -366,3 +373,30 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
     assert result.ok is True
     assert result.dataset_id == "rec:zdataset"
     assert order == ["import", "detect", "detect_quality", "refine", "keypoints", "refine_keypoints", "register"]
+
+
+def test_process_pipeline_rejects_refined_keypoints_before_import(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=tmp_path / "rec" / "raw" / "session.h5",
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+    opts = _opts(tmp_path)
+    opts.refine_keypoints = True
+    imported = False
+
+    def _unexpected_import(*_args, **_kwargs):
+        nonlocal imported
+        imported = True
+        raise AssertionError("import must not run")
+
+    monkeypatch.setattr(mod, "process_recording_import", _unexpected_import)
+
+    with pytest.raises(RuntimeError, match="disabled for future-normal processing"):
+        mod.process_recording_analysis_pipeline(plan, opts, logger=None)
+
+    assert imported is False

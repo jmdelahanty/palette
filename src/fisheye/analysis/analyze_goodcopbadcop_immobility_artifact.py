@@ -27,13 +27,11 @@ import argparse
 import numpy as np
 import zarr
 
-from fisheye.analysis.goodcopbadcop_common import (
-    load_dense_kinematics,
-    load_epochs,
-    open_distance_run,
-    resolve_cohort,
-    resolve_object_roles,
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
+from fisheye.analysis.goodcopbadcop_common import resolve_cohort
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 MID_BAND_MM = (7.0, 18.0)
@@ -45,19 +43,8 @@ MIN_BOUTS = 5
 
 def load(zp: str) -> dict:
     r = zarr.open_group(zp, mode="r")
-    cd = open_distance_run(r)
-    total_frames = int(cd.attrs.get("total_frames"))
-    fps = float(cd.attrs.get("fps") or 100.0)
-    dist = np.asarray(cd["distances"]["distance_mm"][:], float)
-    chaser_valid = np.asarray(cd["positions"]["chaser_valid"][:], bool)
-    b = cd["chaser_bout_response"][sorted(cd["chaser_bout_response"].group_keys())[-1]]["bouts"]
-    bv = np.asarray(b["valid"][:], bool)
-    onsets = np.asarray(b["start_frame"][:], np.int64)[bv]
-    bout = {k: np.asarray(b[k][:], float)[bv] for k in ("peak_speed_mm_s", "path_length_mm", "duration_s")}
-    dense, valid = load_dense_kinematics(r, total_frames, fields=("speed_smoothed_mm", "speed_raw_mm"))
-    return dict(fps=fps, dist=dist, chaser_valid=chaser_valid,
-                speed=dense["speed_smoothed_mm"], speed_raw=dense["speed_raw_mm"], moving_valid=valid,
-                onsets=onsets, bout=bout, roles=resolve_object_roles(r), epochs=load_epochs(r))
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_bout_response")
 
 
 def band_immobile_frac(d, epoch, obj, key, thr) -> float:
@@ -192,6 +179,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             loaded.append(load(zp))
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], type(ex).__name__, ex)
     if not args.sweep_only:

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -433,7 +434,9 @@ def _build_clean_palette_checkout(path: Path) -> None:
 
 def test_release_render_freezes_membership_and_wires_dependency_dag(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PALETTE_PYTHON", sys.executable)
     registry_path = tmp_path / "registry.sqlite"
     registry = Registry(registry_path)
     _seed_dataset(

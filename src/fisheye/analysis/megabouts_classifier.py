@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -11,7 +12,8 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Mapping, Optional, Sequence
+import uuid
 
 import numpy as np
 import zarr
@@ -21,7 +23,10 @@ from fisheye.analysis.bout_classification_runs import (
     BOUT_CLASSIFICATION_SCHEMA_ID,
     BOUT_CLASSIFICATION_SCHEMA_VERSION,
     PER_BOUT_SCHEMA_ID,
+    validate_staged_bout_classification_run,
 )
+from fisheye.shared.coordinate_frame_record import array_payload_sha256
+from fisheye.shared.coordinate_reference import canonical_node_path
 from fisheye.analysis.megabouts_classifier_inputs import (
     DEFAULT_BOUT_DURATION_S,
     DEFAULT_ALIGN_TRAJ_TO_ONSET,
@@ -37,8 +42,26 @@ from fisheye.analysis.megabouts_classifier_inputs import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
+from fisheye.shared.selector_activation import (
+    SelectorActivationError,
+    activate_selector_eligible_run,
+)
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETED_AT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_NAME_ATTR,
+    RUN_STAGE_ATTR,
+    RUN_STARTED_AT_ATTR,
+    RUN_STATUS_COMPLETE,
+    RUN_STATUS_FAILED,
+    RUN_STATUS_RUNNING,
+    mark_run_complete,
+    mark_run_failed,
+    require_runs_parent,
+)
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -54,6 +77,20 @@ PALETTE_PREPARED_INPUT_MODE = "palette_prepared_fixed_windows"
 MEGABOUTS_PREPROCESSED_INPUT_MODE = "megabouts_preprocessed_full_timeseries"
 CATEGORY_LABEL_BYTES_WIDTH = 64
 FAILURE_REASON_BYTES_WIDTH = 128
+BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR = (
+    "bout_classification_publication_owner_uuid"
+)
+BOUT_CLASSIFICATION_PARENT_PUBLICATION_LEASE_ATTR = (
+    "bout_classification_publication_lease"
+)
+BOUT_CLASSIFICATION_PUBLICATION_GENERATION_ATTR = "publication_generation"
+BOUT_CLASSIFICATION_PUBLICATION_POLICY_ATTR = "publication_policy"
+BOUT_CLASSIFICATION_PUBLICATION_POLICY = (
+    "owner_generation_guarded_selectors_then_eligibility_v1"
+)
+BOUT_CLASSIFICATION_PUBLICATION_TOMBSTONE_ATTR = (
+    "bout_classification_publication_tombstone"
+)
 
 
 @dataclass(frozen=True)
@@ -378,30 +415,199 @@ def _resolve_parent(root: zarr.Group) -> zarr.Group:
     return require_runs_parent(analysis, "bout_classification_runs")
 
 
-def write_megabouts_classification_run(
+def _fresh_bout_classification_candidate(
     root: zarr.Group,
     *,
-    run_name: Optional[str],
+    run_name: str,
+    expected_publication_owner_uuid: str,
+) -> zarr.Group:
+    """Return one fresh exact owner-bound public child or fail closed."""
+
+    run_path = f"analysis/bout_classification_runs/{run_name}"
+    candidate = root.get(run_path)
+    if (
+        not isinstance(candidate, zarr.Group)
+        or canonical_node_path(candidate) != run_path
+        or candidate.attrs.get(BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR)
+        != expected_publication_owner_uuid
+    ):
+        raise RuntimeError(
+            "Bout-classification public candidate changed path or exact ownership."
+        )
+    return candidate
+
+
+def _require_fresh_candidate_initialization(
+    root: zarr.Group,
+    *,
+    run_name: str,
+    expected_publication_owner_uuid: str,
+    expected_started_at_utc: str,
+) -> zarr.Group:
+    """Verify the atomic public-child initialization before payload writes."""
+
+    candidate = _fresh_bout_classification_candidate(
+        root,
+        run_name=run_name,
+        expected_publication_owner_uuid=expected_publication_owner_uuid,
+    )
+    expected = {
+        BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR: (
+            expected_publication_owner_uuid
+        ),
+        "stage_selector_eligible": False,
+        RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
+        RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
+        RUN_STARTED_AT_ATTR: expected_started_at_utc,
+        RUN_NAME_ATTR: run_name,
+        RUN_STAGE_ATTR: "bout_classification",
+    }
+    if any(candidate.attrs.get(key) != value for key, value in expected.items()):
+        raise RuntimeError(
+            "Bout-classification public candidate initialization did not persist exactly."
+        )
+    if tuple(candidate.array_keys()) or tuple(candidate.group_keys()):
+        raise RuntimeError(
+            "Bout-classification public candidate was not empty after initialization."
+        )
+    return candidate
+
+
+def _failed_publication_tombstone(
+    *,
+    run_name: str,
+    publication_owner_uuid: str,
+    failed_at_utc: str,
+    failure: BaseException,
+) -> dict[str, object]:
+    return {
+        "schema_id": "palette.bout_classification_publication_tombstone",
+        "schema_version": 1,
+        "failed_at_utc": failed_at_utc,
+        "publication_owner_uuid": publication_owner_uuid,
+        "run_name": run_name,
+        "run_path": f"analysis/bout_classification_runs/{run_name}",
+        "public_path_retained": True,
+        "selector_eligible": False,
+        "retry_policy": "new_immutable_run_name_required",
+        "failure_type": type(failure).__name__,
+        "failure": str(failure),
+    }
+
+
+def _persist_failed_bout_classification_tombstone(
+    root: zarr.Group,
+    *,
+    run_name: str,
+    publication_owner_uuid: str,
+    failure: BaseException,
+) -> list[str]:
+    """Disarm and fresh-verify one exact owned immutable public tombstone."""
+
+    run_path = f"analysis/bout_classification_runs/{run_name}"
+    candidate = root.get(run_path)
+    if candidate is None:
+        return []
+    if not isinstance(candidate, zarr.Group):
+        return [f"failed public path {run_path!r} is not a group"]
+    if (
+        canonical_node_path(candidate) != run_path
+        or candidate.attrs.get(BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR)
+        != publication_owner_uuid
+    ):
+        return ["failed public candidate is not owned by this publication attempt"]
+
+    errors: list[str] = []
+    failed_at_utc = _utc_now()
+    tombstone = _json_safe(
+        _failed_publication_tombstone(
+            run_name=run_name,
+            publication_owner_uuid=publication_owner_uuid,
+            failed_at_utc=failed_at_utc,
+            failure=failure,
+        )
+    )
+
+    try:
+        owned = _fresh_bout_classification_candidate(
+            root,
+            run_name=run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+        )
+        owned.attrs["stage_selector_eligible"] = False
+    except BaseException as exc:  # pragma: no cover - hostile store
+        errors.append(f"selector disarm: {exc}")
+    try:
+        owned = _fresh_bout_classification_candidate(
+            root,
+            run_name=run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+        )
+        if RUN_COMPLETED_AT_ATTR in owned.attrs:
+            del owned.attrs[RUN_COMPLETED_AT_ATTR]
+    except BaseException as exc:  # pragma: no cover - hostile store
+        errors.append(f"clear completed timestamp: {exc}")
+    try:
+        owned = _fresh_bout_classification_candidate(
+            root,
+            run_name=run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+        )
+        parent = root["analysis/bout_classification_runs"]
+        mark_run_failed(
+            owned,
+            parent_group=parent,
+            run_name=run_name,
+            failed_at_utc=failed_at_utc,
+            error=f"{type(failure).__name__}: {failure}",
+        )
+    except BaseException as exc:  # pragma: no cover - hostile store
+        errors.append(f"mark failed: {exc}")
+    try:
+        owned = _fresh_bout_classification_candidate(
+            root,
+            run_name=run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+        )
+        owned.attrs[BOUT_CLASSIFICATION_PUBLICATION_TOMBSTONE_ATTR] = tombstone
+    except BaseException as exc:  # pragma: no cover - hostile store
+        errors.append(f"persist tombstone: {exc}")
+
+    try:
+        fresh = _fresh_bout_classification_candidate(
+            root,
+            run_name=run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+        )
+        parent = root["analysis/bout_classification_runs"]
+        if (
+            fresh.attrs.get("stage_selector_eligible") is not False
+            or fresh.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_FAILED
+            or RUN_COMPLETED_AT_ATTR in fresh.attrs
+            or fresh.attrs.get(BOUT_CLASSIFICATION_PUBLICATION_TOMBSTONE_ATTR)
+            != tombstone
+            or parent.attrs.get("latest") == run_name
+            or parent.attrs.get("latest_complete") == run_name
+        ):
+            raise RuntimeError("failed public tombstone did not persist exactly")
+    except BaseException as exc:  # pragma: no cover - hostile store
+        errors.append(f"verify tombstone: {exc}")
+    return errors
+
+
+def _populate_megabouts_classification_run(
+    root: zarr.Group,
+    *,
+    parent: zarr.Group,
+    run_group: zarr.Group,
+    resolved_run_name: str,
     pack: MegaboutsClassifierInputPack,
     result: MegaboutsClassificationResult,
-    overwrite: bool = False,
     exclude_cs: bool = False,
     command: Optional[str] = None,
 ) -> str:
-    """Persist Megabouts classifier results without mutating source runs."""
+    """Populate one already-owned, selector-ineligible public candidate."""
 
-    parent = _resolve_parent(root)
-    resolved_run_name = str(run_name or _default_run_name())
-    if resolved_run_name in parent:
-        if not overwrite:
-            raise ValueError(
-                f"Bout classification run {resolved_run_name!r} already exists. "
-                "Use --overwrite or choose another --run-name."
-            )
-        del parent[resolved_run_name]
-
-    run_group = parent.create_group(resolved_run_name)
-    mark_run_started(run_group, run_name=resolved_run_name, stage="bout_classification")
     created_at_utc = _utc_now()
     runtime_attrs = _runtime_attrs(result.runtime)
     table = build_per_bout_classification_table(pack, result)
@@ -535,6 +741,204 @@ def write_megabouts_classification_run(
         run_name=resolved_run_name,
         run_provenance=build_run_provenance_from_stage_record(provenance),
     )
+    return resolved_run_name
+
+
+def _activate_megabouts_classification_run(
+    root: zarr.Group,
+    parent: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    expected_publication_owner_uuid: str,
+) -> None:
+    """Expose one immutable, freshly revalidated classification run."""
+
+    run_path = f"analysis/bout_classification_runs/{run_name}"
+
+    def proof() -> tuple[object, ...]:
+        validation = validate_staged_bout_classification_run(
+            root,
+            run_name,
+            strict=True,
+        )
+        if validation.get("ok") is not True:
+            raise RuntimeError(
+                "Bout-classification candidate failed strict activation validation: "
+                f"{validation.get('errors')!r}; {validation.get('warnings')!r}."
+            )
+        candidate = root[run_path]
+        if (
+            candidate.attrs.get(BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR)
+            != expected_publication_owner_uuid
+            or run_group.attrs.get(BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR)
+            != expected_publication_owner_uuid
+            or candidate.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+            != RUN_STATUS_COMPLETE
+            or candidate.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Bout-classification candidate changed ownership, completion, or "
+                "selector eligibility before activation."
+            )
+        per_bout = candidate["per_bout"]
+        field_names = tuple(str(value) for value in per_bout.attrs["field_names"])
+        run_array_names = tuple(sorted(str(name) for name in candidate.array_keys()))
+        run_group_names = tuple(sorted(str(name) for name in candidate.group_keys()))
+        per_bout_array_names = tuple(
+            sorted(str(name) for name in per_bout.array_keys())
+        )
+        per_bout_group_names = tuple(
+            sorted(str(name) for name in per_bout.group_keys())
+        )
+        if (
+            run_array_names
+            or run_group_names != ("per_bout",)
+            or len(field_names) != len(set(field_names))
+            or per_bout_array_names != tuple(sorted(field_names))
+            or per_bout_group_names
+        ):
+            raise RuntimeError(
+                "Bout-classification candidate child inventory is not exact."
+            )
+        field_digests = tuple(
+            (name, array_payload_sha256(per_bout[name])) for name in field_names
+        )
+        field_attrs = {
+            name: _json_safe(dict(per_bout[name].attrs)) for name in field_names
+        }
+        candidate_attrs = {
+            str(key): value
+            for key, value in candidate.attrs.items()
+            if str(key) != "stage_selector_eligible"
+        }
+        metadata_payload = {
+            "candidate_attrs": _json_safe(candidate_attrs),
+            "candidate_array_names": list(run_array_names),
+            "candidate_group_names": list(run_group_names),
+            "per_bout_attrs": _json_safe(dict(per_bout.attrs)),
+            "per_bout_array_names": list(per_bout_array_names),
+            "per_bout_group_names": list(per_bout_group_names),
+            "field_array_attrs": field_attrs,
+        }
+        metadata_digest = hashlib.sha256(
+            json.dumps(
+                metadata_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return (
+            expected_publication_owner_uuid,
+            candidate.attrs.get(RUN_COMPLETION_STATUS_ATTR),
+            metadata_digest,
+            field_digests,
+        )
+
+    try:
+        activate_selector_eligible_run(
+            root,
+            parent,
+            run_group,
+            parent_path="analysis/bout_classification_runs",
+            run_path=run_path,
+            run_name=run_name,
+            owner_attr=BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR,
+            expected_owner_uuid=expected_publication_owner_uuid,
+            policy_attr=BOUT_CLASSIFICATION_PUBLICATION_POLICY_ATTR,
+            generation_attr=BOUT_CLASSIFICATION_PUBLICATION_GENERATION_ATTR,
+            lease_attr=BOUT_CLASSIFICATION_PARENT_PUBLICATION_LEASE_ATTR,
+            policy=BOUT_CLASSIFICATION_PUBLICATION_POLICY,
+            lease_schema_id="palette.bout_classification_publication_lease",
+            proof_loader=proof,
+            selector_attrs=("latest_complete", "latest"),
+        )
+    except SelectorActivationError as exc:
+        raise RuntimeError(
+            f"Bout-classification activation lost exact ownership: {exc}."
+        ) from exc
+
+
+def write_megabouts_classification_run(
+    root: zarr.Group,
+    *,
+    run_name: Optional[str],
+    pack: MegaboutsClassifierInputPack,
+    result: MegaboutsClassificationResult,
+    overwrite: bool = False,
+    exclude_cs: bool = False,
+    command: Optional[str] = None,
+) -> str:
+    """Publish one immutable, owner-guarded Megabouts classification run."""
+
+    parent = _resolve_parent(root)
+    resolved_run_name = str(run_name or _default_run_name()).strip()
+    if not resolved_run_name or "/" in resolved_run_name:
+        raise ValueError("Bout classification run name must be one non-empty child token.")
+    if resolved_run_name in parent:
+        suffix = (
+            " --overwrite cannot replace an immutable public run."
+            if overwrite
+            else ""
+        )
+        raise ValueError(
+            f"Bout classification run {resolved_run_name!r} already exists; "
+            f"choose a new --run-name.{suffix}"
+        )
+
+    publication_owner_uuid = str(uuid.uuid4())
+    started_at_utc = _utc_now()
+    run_group: zarr.Group | None = None
+    try:
+        run_group = parent.create_group(
+            resolved_run_name,
+            attributes={
+                BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR: publication_owner_uuid,
+                "stage_selector_eligible": False,
+                RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
+                RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
+                RUN_STARTED_AT_ATTR: started_at_utc,
+                RUN_NAME_ATTR: resolved_run_name,
+                RUN_STAGE_ATTR: "bout_classification",
+            },
+        )
+        run_group = _require_fresh_candidate_initialization(
+            root,
+            run_name=resolved_run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+            expected_started_at_utc=started_at_utc,
+        )
+        _populate_megabouts_classification_run(
+            root,
+            parent=parent,
+            run_group=run_group,
+            resolved_run_name=resolved_run_name,
+            pack=pack,
+            result=result,
+            exclude_cs=exclude_cs,
+            command=command,
+        )
+        _activate_megabouts_classification_run(
+            root,
+            parent,
+            run_group,
+            run_name=resolved_run_name,
+            expected_publication_owner_uuid=publication_owner_uuid,
+        )
+    except BaseException as exc:
+        cleanup_errors = _persist_failed_bout_classification_tombstone(
+            root,
+            run_name=resolved_run_name,
+            publication_owner_uuid=publication_owner_uuid,
+            failure=exc,
+        )
+        if cleanup_errors:
+            raise RuntimeError(
+                "Bout-classification failure cleanup was incomplete: "
+                f"{cleanup_errors!r}."
+            ) from exc
+        raise
     return resolved_run_name
 
 
@@ -683,7 +1087,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("zarr_path", type=Path, help="Palette zarr archive.")
     parser.add_argument("--run-name", default=None, help="Output analysis/bout_classification_runs/<run> name.")
-    parser.add_argument("--overwrite", action="store_true", help="Replace --run-name if it already exists.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Compatibility flag only; canonical public run names are immutable, "
+            "so an existing --run-name is never replaced."
+        ),
+    )
     parser.add_argument("--tail-posture-view-run", default="latest")
     parser.add_argument("--track-kinematics-run", default="latest")
     parser.add_argument("--track-scope", default="offline")

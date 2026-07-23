@@ -29,7 +29,10 @@ def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
     group.create_array(name, data=data, chunks=data.shape, overwrite=True)
 
 
-def _make_track_kinematics_archive(tmp_path: Path) -> Path:
+def _make_track_kinematics_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
     zarr_path = tmp_path / "recording_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
     analysis = root.create_group("analysis")
@@ -61,6 +64,7 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     )
 
     _write_array(track, "frame_indices", frames)
+    _write_array(track, "source_acquisition_frame_index", frames)
     _write_array(track, "speed_raw_mm", speed)
     _write_array(track, "speed_filtered_mm", speed)
     _write_array(track, "speed_smoothed_mm", speed)
@@ -76,6 +80,84 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_array(track, "sample_valid", np.ones(frames.size, dtype=bool))
     _write_array(track, "positions_px", positions_px)
     _write_array(track, "positions_mm", positions_px * 0.1)
+
+    def _load_verified_track(_zarr_path: Path, _run_name: str, track_id: int = 0):
+        live_root = zarr.open_group(str(zarr_path), mode="r")
+        live_track = live_root[
+            "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"
+        ]
+        live_frames = np.asarray(
+            live_track["source_acquisition_frame_index"][:], dtype=np.int64
+        )
+        speed_levels = {
+            level: np.asarray(live_track[f"speed_{level}_mm"][:])
+            for level in ("raw", "filtered", "smoothed", "averaged")
+        }
+        speed_payload = {
+            "frames": live_frames,
+            **{
+                f"speed_{level}_mm": values
+                for level, values in speed_levels.items()
+            },
+            **{
+                f"frame_path_distance_{level}_{unit}": np.asarray(
+                    live_track[f"frame_path_distance_{level}_{unit}"][:]
+                )
+                for level in ("raw", "filtered", "smoothed")
+                for unit in ("mm", "px")
+            },
+            "delta_seconds": np.asarray(live_track["delta_seconds"][:]),
+            "transition_valid": np.asarray(live_track["transition_valid"][:]),
+            "sample_valid": np.asarray(live_track["sample_valid"][:]),
+        }
+        track_path = (
+            "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"
+        )
+        authority = {
+            "schema_id": "palette.track_motion_read_authority",
+            "schema_version": 1,
+            "run_ref": "/analysis/track_kinematics_runs/offline/tk_1",
+            "track_ref": f"/{track_path}",
+            "track_id": int(track_id),
+            "motion_manifest_ref": (
+                "/analysis/track_kinematics_runs/offline/tk_1"
+                "@track_motion_publication_manifest"
+            ),
+            "motion_manifest_sha256": "a" * 64,
+            "positions_px_ref": f"/{track_path}/positions_px",
+            "positions_px_coordinate_descriptor_sha256": "b" * 64,
+            "positions_mm_ref": f"/{track_path}/positions_mm",
+            "positions_mm_coordinate_descriptor_sha256": "c" * 64,
+            "track_sample_key_ref": f"/{track_path}/track_sample_key",
+            "source_acquisition_frame_index_ref": (
+                f"/{track_path}/source_acquisition_frame_index"
+            ),
+        }
+        return speed_payload, {
+            "fps": 100.0,
+            "pixel_to_mm": 0.1,
+            "n_frames": int(live_frames.size),
+            "track_kinematics_run": "tk_1",
+            "track_kinematics_scope": "offline",
+            "track_id": int(track_id),
+            "positions_mm": np.asarray(live_track["positions_mm"][:]),
+            "positions_px": np.asarray(live_track["positions_px"][:]),
+            "source_array_paths": {
+                "frame_indices": f"{track_path}/frame_indices",
+                "source_acquisition_frame_index": (
+                    f"{track_path}/source_acquisition_frame_index"
+                ),
+            },
+            "source_frame_indices_dtype": "int64",
+            "source_frame_indices_shape": [int(live_frames.size)],
+            "track_motion_authority": authority,
+        }
+
+    monkeypatch.setattr(
+        "fisheye.analysis.detect_bouts_multi_level."
+        "_load_track_kinematics_track_speeds",
+        _load_verified_track,
+    )
     return zarr_path
 
 
@@ -207,8 +289,11 @@ def test_peak_event_detector_splits_two_prominent_peaks_in_one_threshold_blob() 
     assert bouts["end_frame"][0] < bouts["start_frame"][1]
 
 
-def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) -> None:
-    zarr_path = _make_track_kinematics_archive(tmp_path)
+def test_detect_and_save_bouts_records_filtered_default_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path, monkeypatch)
 
     run_name = detect_and_save_bouts(
         zarr_path=zarr_path,
@@ -327,8 +412,11 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     assert intervals["interval_s"].shape == (0,)
 
 
-def test_detect_and_save_bouts_writes_peak_event_metadata(tmp_path: Path) -> None:
-    zarr_path = _make_track_kinematics_archive(tmp_path)
+def test_detect_and_save_bouts_writes_peak_event_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path, monkeypatch)
 
     run_name = detect_and_save_bouts(
         zarr_path=zarr_path,
@@ -396,8 +484,9 @@ def test_json_safe_attr_value_converts_nonfinite_numbers_to_none() -> None:
 
 def test_detect_and_save_bouts_writes_strict_json_metadata_for_optional_peak_attrs(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    zarr_path = _make_track_kinematics_archive(tmp_path)
+    zarr_path = _make_track_kinematics_archive(tmp_path, monkeypatch)
 
     run_name = detect_and_save_bouts(
         zarr_path=zarr_path,
@@ -439,8 +528,11 @@ def test_detect_and_save_bouts_writes_strict_json_metadata_for_optional_peak_att
     assert bad_json == []
 
 
-def test_exponential_candidate_uses_filtered_source_for_physical_metrics(tmp_path: Path) -> None:
-    zarr_path = _make_track_kinematics_archive(tmp_path)
+def test_exponential_candidate_uses_filtered_source_for_physical_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path, monkeypatch)
     root = zarr.open_group(str(zarr_path), mode="r+")
     track = root["analysis"]["track_kinematics_runs"]["offline"]["tk_1"]["tracks"]["id_0"]
     track["transition_valid"][:] = np.asarray([False, *([True] * 11)], dtype=bool)
@@ -522,8 +614,11 @@ def test_threshold_bouts_can_expand_to_local_minimum_boundaries() -> None:
     assert bouts["duration_frames"][0] > bouts["core_duration_frames"][0]
 
 
-def test_detect_and_save_bouts_requires_overwrite_for_existing_run(tmp_path: Path) -> None:
-    zarr_path = _make_track_kinematics_archive(tmp_path)
+def test_detect_and_save_bouts_requires_overwrite_for_existing_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path, monkeypatch)
 
     detect_and_save_bouts(
         zarr_path=zarr_path,

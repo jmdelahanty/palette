@@ -332,14 +332,20 @@ cropped ROI tensors needed by downstream consumers.
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `roi_images` *(conditional)* | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches. Present for `crop_storage_mode=materialized`; may be omitted for `geometry_only` runs. |
-| `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Top-left (x, y) in full-res pixels |
-| `roi_coordinates_ds` | `(n_rois, 2)` | `int32` | Same offsets in downsampled space |
-| `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes (`[cx, cy, w, h]`) |
-| `frame_indices` | `(n_rois,)` | `int32` | Frame index per ROI |
+| `roi_images` | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches. Required for future ordinary runs; absent only on historical `geometry_only` compatibility runs. |
+| `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Source-camera `points_xy` compatibility surface for each ROI top-left. Canonical ordinary runs bind it to the observation `instance_key` rows and exact `source_crop_xywh[:, :2]` payload with a digest-checked derivation; it is directly suitable for source-camera overlay. |
+| `roi_coordinates_ds` *(historical only)* | `(n_rois, 2)` | `int32` | Ambiguous downsampled offsets retained only for legacy reads; future ordinary writers do not reconstruct them from a resolution ratio. |
+| `instance_key` | `(n_rois,)` | `uint64` | Exact observation identity copied from the selected canonical detection rowset. |
+| `source_acquisition_frame_index` | `(n_rois,)` | `int64` | Exact source-acquisition frame identity. |
+| `bbox_norm_coords` | `(n_rois, 4)` | source floating dtype | Exact normalized detector geometry (`[cx, cy, w, h]`) copied from the source. |
+| `bbox_img_xyxy` | `(n_rois, 4)` | source floating dtype | Exact source-camera bounding box. |
+| `centers_img_xy` | `(n_rois, 2)` | source floating dtype | Exact source-camera center. |
+| `source_crop_xywh` | `(n_rois, 4)` | source floating dtype | Source-camera placement of each materialized ROI. |
+| `bbox_roi_xyxy` | `(n_rois, 4)` | source floating dtype | ROI-local bbox with an explicit ROI-to-source-camera transform. |
+| `frame_indices` | `(n_rois,)` | `int64` | Decode index; exactly equal to `source_acquisition_frame_index` for admitted sources. |
 | `frame_counts` | `(n_frames,)` | `int32` | Count of ROIs per frame |
-| `detection_source` | `(n_rois,)` | `int8` | Legacy/support crop label: 0 = accepted detection, 1 = historical interpolated row |
-| `detection_indices` | `(n_rois,)` | `int32` | Physical row index into the resolved `detection_source_path` rowset |
+| `detection_source` *(historical only)* | `(n_rois,)` | `int8` | Legacy/support label for sparse/refined rows. |
+| `detection_indices` | `(n_rois,)` | `int64` | Exact physical row index into the admitted `detect_runs/<run>` rowset. |
 | `source_refined_row_ids` *(optional)* | `(n_rois,)` | `int64` | Stable logical refined-detection row IDs copied from `refined_detect_runs/<run>/instances/refined_row_ids` |
 | `source_detect_row_index` *(optional)* | `(n_rois,)` | `int32` | Raw detect row lineage copied from refined instances when available; `-1` for manual rows |
 
@@ -367,7 +373,7 @@ Attributes:
 - `summary_statistics` (frames with crops, total ROIs, percentage coverage).
 - GPU/environment provenance.
 
-Parent-group pointer semantics during mixed-mode migration:
+Parent-group pointer semantics for historical mixed-mode archives:
 
 - `crop_runs.attrs["latest"]` remains materialized-compatible for backward
   compatibility.
@@ -375,14 +381,21 @@ Parent-group pointer semantics during mixed-mode migration:
 - `crop_runs.attrs["latest_any"]` tracks the latest run regardless of storage
   mode.
 
-Current policy note:
+Future ordinary-writer policy:
 
-- Direct crop writer defaults remain materialized unless a caller passes an
-  explicit storage mode.
-- `crop_batch` defaults analysis archives to `geometry_only` when neither CLI
-  nor config specifies `crop_storage_mode`.
-- Training archives should reject geometry-only crop writes; canonical training
-  crop runs are expected to persist `roi_images`.
+- Direct, batch, Palette CLI, launcher, and flat-cache workflows default to
+  materialized output from an exact `detect_runs/<run>` source.
+- New ordinary crop runs reject `geometry_only` before run creation. Historical
+  geometry-only groups remain explicit read-compatibility surfaces.
+- New ordinary crop runs reject refined and legacy sparse sources until those
+  producers publish an exact canonical row-selection contract.
+- Canonical ordinary crop runs persist `roi_images`, instance identity,
+  acquisition-frame identity, source-camera geometry, ROI-local geometry, and
+  a direction-labelled ROI-to-source-camera transform.
+- A new run remains selector-ineligible while it is written and marked
+  complete. Palette freshly reloads the full persisted ordinary-crop contract,
+  publishes parent selectors while the candidate is still ineligible, and
+  flips eligibility only as the final publication mutation.
 - Many traditional/training/export consumers still require materialized
   `roi_images` even though mixed-mode readers now exist for some ROI-model
   workflows.
@@ -391,15 +404,11 @@ Current policy note:
   `refined_detect_runs/<run>/instances`; crop-run label arrays remain
   compatibility/support surfaces for per-recording and historical stores.
 
-Cropping resolves the ROI source via `crop.source_type` (`detect`, `refined`,
-`filtered`, `interpolated`, `manual`, `auto`) or an explicit
-`crop.source_path` override such as `detect_runs/<run>` or the canonical
-refined path `refined_detect_runs/<run>/instances`. Legacy sparse
-subgroup overrides such as `refined_detect_runs/<run>/manual` remain
-compatibility-only for historical archives. The chosen path is recorded in
-`detection_source_path`.
-`auto` resolves to the canonical curated refined surface when it exists, then
-falls back to the legacy sparse chain only for historical archives.
+Source-resolution helpers can still inspect `refined`, `filtered`,
+`interpolated`, `manual`, and `auto` surfaces for historical tooling. The
+future ordinary writer admits only an exact `detect_runs/<run>` source and
+records it in `detection_source_path`; it does not adapt a refined/sparse rowset
+or silently fall back.
 
 For `geometry_only` crop runs, `source_video_path` or embedded
 `raw_video/images_full` must remain readable from the environment where ROI
@@ -1241,9 +1250,10 @@ Eye geometry arrays are read through `fisheye.shared.eye_geometry_source`, which
 exposes `eye_left`/`eye_right` component data as legacy-compatible
 `(N, 2, ...)` array-like views for callers that have not moved to
 component-native reads yet. Geometry-only consumers such as eye-angle analysis
-may opt into `analysis/subject_shape_runs` as the preferred source; mask/export
-consumers should continue using refined-subject geometry unless they explicitly
-only need derived shape primitives.
+have consumer-specific authority rules: future-normal eye-angle publication
+requires a canonical `analysis/subject_shape_runs` publication and its nested
+assignment-keypoint proof. Mask/export consumers continue using refined-subject
+geometry unless they explicitly need derived shape primitives.
 
 ---
 
@@ -1575,26 +1585,36 @@ Track kinematics results organized by type:
 
 **Structure**: `analysis/track_kinematics_runs/<online|offline>/<run_name>/`
 
-**Run Attributes**:
-- `method`: Analysis method used
-  - `track_kinematics_online`: Raw online data (transformed to camera space)
-  - `track_kinematics_online_refined`: Refined online data (texture space)
-  - `track_kinematics_offline`: Offline detection data
-- `created_at_utc`: Analysis timestamp
-- `fps`: Frame rate used
-- `smoothing_seconds`: Temporal smoothing window
-- `pixel_to_mm`: Calibration used for this run
-  - For `online_refined`: Uses `pixels_per_mm_projector` (texture space)
-  - For `online` and `offline`: Uses `pixels_per_mm_camera` (camera space)
-- `coordinate_space`: "texture" or "camera"
-- `inputs`: Source data references
-  - Online refined: `refined_online_run`, `stimulus_run`, `chaser_index`
-  - Online raw: `stimulus_run`, `chaser_index`
-  - Offline: `detection_run`, `keypoint_run`, `source_tracking_run`, `source_arena_assignment_run`, optional `chaser_metrics` dict (metrics run, stimulus run, chaser index)
-- Offline runs also persist `source_tracking_run` and
-  `source_arena_assignment_run` as top-level attrs for direct lineage lookup.
-- `summary`: Per-track summary statistics
-- `total_distance_px`, `total_distance_mm`: Aggregate distances
+**Future-normal run authority**:
+
+- completion gates: `palette_run_completion_status == "complete"`,
+  `stage_selector_eligible == true`, and
+  `coordinate_binding_status == "bound_canonical_v2"`;
+- `track_motion_publication_manifest`, its SHA-256, and
+  `track_motion_publication_commit`: closed live array/group/attrs and
+  derivation authority;
+- `parameters.coordinate_space`: a direction-explicit controlled space such as
+  `source_camera_image_px` or `arena_relative_canvas_px`, never legacy
+  `"camera"`/`"texture"`;
+- offline `inputs`: exactly `detection_path`, `position_source_path`,
+  `position_source_rowset_path`, `position_source_kind`, `crop_run`,
+  `keypoint_path`, and `tracking_path`, plus only the controlled optional
+  `chaser_metrics` and `swim_bout_run` inputs;
+- offline `keypoint_path` and `tracking_path`: exact two-component run paths
+  (`keypoints_runs/<run>` or `refined_keypoints_runs/<run>`, and
+  `tracking_runs/<run>`); variant/run-name pairs, nested tracking metadata, and
+  reconstructed usability selectors are not future authority;
+- `source_refs`: the exact mechanical projection of `inputs`, validated against
+  the selected crop/detection/keypoint/tracking arrays;
+- `track_motion_input_authority`: digest-bound row alignment and exact input
+  array authority;
+- `physical_coordinate_authority`: the only authority for `positions_mm` and
+  other physical surfaces. A root scalar `pixel_to_mm`, duplicated
+  `physical_calibration`, or resolution ratio cannot authorize them.
+
+Historical run-level `coordinate_space`, `pixel_to_mm`, source-run aliases, and
+flat layouts are inspection/migration metadata only. They are not accepted by
+the normal future reader.
 
 **Shared Root Arrays (offline runs only)**:
 - `camera_frame_ids` (`int64`): Master frame index aligned to all chaser metrics.
@@ -1611,9 +1631,16 @@ Track kinematics results organized by type:
 Consumers map from track-level `frame_indices` into these arrays using `camera_frame_ids` and the `has_offline` mask.
 
 **Per-Track Data** (`tracks/id_<track>/`):
-Each track stores the ordered samples for that ID:
-- `frame_indices` (`int64`), `time_seconds` (`float32`), `detection_indices` (`int64`)
-- `positions_px`, `positions_mm` (`float32`, `[N, 2]`)
+Each track stores ordered samples for that ID. `track_sample_key = (track_id,
+source_acquisition_frame_index)` is primary identity; `source_instance_key` is
+nullable observation lineage, and `source_row_index` is the exact selected
+upstream row. `frame_indices` is only a sealed exact alias of the acquisition
+frame column. Historical `detection_indices` is not in the future-normal
+schema.
+
+- `positions_px`, optional `positions_mm` (`float32`, `[N, 2]`): each array owns
+  a canonical coordinate descriptor and digest. Pixel positions retain the
+  exact selected native frame; millimetres require the typed physical authority.
 - `speed_raw_px`, `speed_raw_mm`: Gap-aware raw speed from validity-filtered frame path-distance increments
 - `speed_filtered_px`, `speed_filtered_mm`: Speed after hysteresis filtering
 - `speed_smoothed_px`, `speed_smoothed_mm`: Speed after temporal smoothing
@@ -1623,6 +1650,10 @@ Each track stores the ordered samples for that ID:
   `acceleration_mm`, `smoothed_acceleration_px`,
   `smoothed_acceleration_mm`, and, where defined for that level,
   `frame_path_distance_px` and `frame_path_distance_mm`.
+  These paths aid discovery only; the sealed surface record supplies units,
+  axis domain, operation, and exact inputs. Flat speed names may remain as
+  sealed compatibility aliases during transition but are never a fallback for
+  the normal logical reader.
 - `speed_derivatives/`: Transitional source-scoped acceleration mirror. Each child group is
   keyed by source speed level: `speed_raw`, `speed_filtered`,
   `speed_smoothed`, `speed_averaged`.
@@ -2087,25 +2118,29 @@ Eye angle analysis results:
   inner chunks and `(131072, 32)` outer shards; consumers resolve named
   channels through `fisheye.analysis.eye_angle_io` rather than persisting
   numeric column positions.
-- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
+- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 6`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
   machine-readable output groups, units, suffixes, derivative arrays, and QA
-  reason-code linkage. Output schema v8 includes
+  reason-code linkage. Output schema v9 includes
   `variant_schema`, mirrored as `eye_angle_variant_schema` in run attrs, for
   UI-selectable angle representations, and links the versioned algorithm
-  contract.
+  contract. Run-schema v6/output-schema v9 additionally make ordered row
+  identity and acquisition time explicit.
 - `eye_angle_algorithm_contract`: versioned computation metadata covering the
   ellipse source/parameter convention, body-frame formulas and resolved
   keypoint indices, axis-ambiguity rule, angle transforms, QA thresholds,
   temporal operators, effective smoothing windows, derivative gap limit, FPS
   source, and unique-detection frame projection.
 - `eye_angle_source_contracts`: exact source paths plus available schema,
-  method, completion, git, and lineage identities for the eye geometry,
-  refined keypoints, and base keypoints. The resolved detection-success and
-  frame-index fallback paths are explicit rather than inferred from run age.
-- Schema v5 exposes canonical major-axis arrays:
+  method, completion, git, and lineage identities for the canonical
+  subject-shape eye geometry and the exact base-keypoint publication sealed by
+  its assignment proof. The canonical authority binds keypoint values,
+  detection success, crop placement, labels, ordered `instance_key`, ordered
+  `source_acquisition_frame_index`, and source frame count. Canonical readers
+  must not reconstruct or select a different keypoint source.
+- The v5 scientific method exposes canonical major-axis arrays:
   `left_major_signed_deg`, `right_major_signed_deg`,
   `vergence_major_signed_deg`, and `version_major_deg`. The major axis is
   resolved into the fish forward half-plane, with `0 deg` aligned to body
@@ -2126,7 +2161,12 @@ Eye angle analysis results:
 - Output schema v8 adds the `eye_angle_algorithm_contract` link and exact
   smoothing, delta, and derivative operator identities without changing the
   v5 scientific method.
-- Schema v5 exposes explicit gaze arrays derived from the resolved major axis:
+- Output schema v9 adds `support/instance_key` and
+  `support/source_acquisition_frame_index`. `support/frame_indices` remains an
+  equality-required compatibility alias of the acquisition-frame array; it is
+  not a second temporal authority.
+- The v5 scientific method exposes explicit gaze arrays derived from the
+  resolved major axis:
   `left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`,
   `right_gaze_signed_deg`, `vergence_gaze_deg`,
   `vergence_gaze_signed_deg`, and `version_gaze_deg`, plus smoothed, delta,
@@ -2134,8 +2174,9 @@ Eye angle analysis results:
   these over legacy `left_deg` / `right_deg` fields for gaze surfaces.
 - `left_gaze_xy` and `right_gaze_xy` are ROI/image-space unit vectors for
   drawing the derived gaze direction.
-- Schema v5 retains `vergence_gaze_deg` as the v3-compatible total/axis
-  separation and adds `left_nasal_gaze_deg`, `right_nasal_gaze_deg`, and
+- The v5 scientific method retains `vergence_gaze_deg` as the v3-compatible
+  total/axis separation and adds `left_nasal_gaze_deg`,
+  `right_nasal_gaze_deg`, and
   `mean_eye_vergence_gaze_deg` for BEAST/Johnson-style mean per-eye vergence.
 - Run attrs include `preferred_angle_family = "gaze"`,
   `preferred_eye_axis = "ellipse_major"`, and
@@ -2144,20 +2185,29 @@ Eye angle analysis results:
   surface; UI selectors should use
   `eye_angle_variant_schema.default_representation` for angle-representation
   defaults.
-- Schema v5 materializes keypoint-derived body-frame support arrays under
+- Run-schema v6 materializes keypoint-derived body-frame support arrays under
   `support/body_frame/` so signed eye angles are anatomical-left-positive and
   convergence polarity is not conflated with ellipse-axis orientation
-  disambiguation.
+  disambiguation. These arrays are recomputed from the exact sealed keypoint
+  payload and success mask; a separately persisted upstream heading is not an
+  input.
 - `qa/roi/*major_axis_marginal` and `qa/frame/major_axis_marginal` are
   non-fatal warning flags for rare cases where the major axis is close to the
   half-plane boundary used for 180 degree ambiguity resolution.
-- Preferred eye geometry source is `analysis/subject_shape_runs/<run>` when it
-  has left/right eye ellipse geometry. Run attrs record
+- Future-normal eye geometry is a complete, selector-eligible
+  `analysis/subject_shape_runs/<run>` publication with left/right eye ellipse
+  geometry and a used assignment-keypoint proof. Run attrs record
   `source_geometry_kind`, `source_subject_shape_run`,
   `source_refined_subject_masks_run`, and `source_refined_eye_run` as
-  applicable.
-- Keypoint lineage uses canonical `source_keypoints_run`; the legacy
-  `source_keypoint_run` alias may be mirrored during migration.
+  applicable. Refined-subject geometry is accepted only on the explicitly
+  requested historical refined-keypoint diagnostic path; that output is
+  permanently `stage_selector_eligible = false` with
+  `publication_scope = "historical_diagnostic_only"`.
+- Canonical keypoint lineage names the exact sealed child in
+  `source_base_keypoints_run` (and canonical `source_keypoints_run`).
+  `source_refined_keypoints_diagnostic_run` is present only for the explicit
+  nonselector diagnostic path. There is no latest-keypoint or refined-keypoint
+  fallback for canonical publication.
 - `source_geometry_kind` normalizes the consumed geometry source as
   `subject_shape_eye_geometry`, `refined_subject_eye_geometry`,
   `legacy_refined_eye_geometry`, or `unknown_eye_geometry`.
@@ -2291,8 +2341,10 @@ Eye geometry in `analysis/subject_shape_runs` is the analysis-facing coherent
 subject-shape surface. Eye contours, ellipse fits, and eye-pair checks may also
 live in `refined_subject_masks_runs` when they are mask-local QC/source
 primitives. `analysis/eye_angle_runs` remains a specialized downstream
-time-series or behavior-facing analysis and should consume subject-shape eye
-geometry when available.
+time-series or behavior-facing analysis. Canonical runs require this
+subject-shape eye geometry and the exact base keypoint child sealed by its
+assignment proof; refined-subject geometry is diagnostic-only for this
+consumer.
 
 Examples that belong here instead of in `refined_subject_masks_runs` as
 canonical outputs:

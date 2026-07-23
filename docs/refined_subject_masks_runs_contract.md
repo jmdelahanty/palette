@@ -2,12 +2,13 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-06-25
+last_verified: 2026-07-19
 -->
 
-Purpose: define the runtime/storage contract for editable, refined
-subject-mask artifacts that hold canonical component masks for body, swim
-bladder, and modern left/right eye refinement under the same component model.
+Purpose: define the runtime/storage contract for refined subject-mask working
+artifacts and immutable scientific snapshots that hold canonical component
+masks for body, swim bladder, and modern left/right eye refinement under the
+same component model.
 
 For the contour/cache ownership and row-local edit propagation policy, see
 [refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md).
@@ -16,8 +17,8 @@ For stable row identity, frame lookup indexes, and optional track identity, see
 
 ## Scope
 
-- Define `refined_subject_masks_runs/<run>` as the canonical refined/editable
-  subject-mask stage.
+- Define `refined_subject_masks_runs/<run>` as the canonical refined
+  subject-mask stage, with an explicit draft-versus-published lifecycle.
 - Support refined body masks and refined swim-bladder masks.
 - Support canonical refined `eye_left` and `eye_right` masks when raw/model
   sources provide assignable eye evidence.
@@ -216,20 +217,66 @@ components as future-only.
 
 ## Interactive Review Save And Apply Semantics
 
-`refined_subject_masks_runs/<run>` is the canonical editable Zarr surface for
-subject-mask review, but browser paint/lasso interactions should not require a
-canonical Zarr rewrite for every small UI action.
+An ineligible draft `refined_subject_masks_runs/<run>` may be the editable Zarr
+surface for subject-mask review, but browser paint/lasso interactions should
+not require a Zarr rewrite for every small UI action. A run becomes a canonical
+scientific snapshot only after publication, completion, and selector
+activation. Published `coordinate_contract = "canonical_v2"` runs are
+immutable: later edits create a new run/revision and republish; they never
+mutate an eligible snapshot in place.
 
 ## Mask Storage Authority And Chunking
 
-Dense `masks_roi` is the authoritative pixel surface for modern editable
-refined subject masks. Compact stores are derived caches:
+Dense `masks_roi` is the authoritative pixel surface for modern refined subject
+masks. Compact stores are derived caches:
 
 - `masks_roi` is the only live review/edit/writeback target.
 - `mask_bitpacked` is an optional fixed-size compact display/publication cache.
 - `mask_rle` is an optional compact archive/fallback display cache.
 - component contours, component metrics, relations, bitpacked masks, and RLE
   are derived from dense masks and can be regenerated.
+
+The edit/publish boundary is strict:
+
+- draft runs remain `stage_selector_eligible = false` and may mark derived
+  products stale after dense edits;
+- publication requires all relevant stale flags explicitly false, seals exact
+  array payloads and producer attrs, then completes and activates the child;
+- a complete eligible canonical-v2 child must not be edited, refreshed, or
+  backfilled in place; maintenance produces a new child with new provenance;
+- future-recording readers use the strict canonical loader and do not invoke a
+  legacy adapter. Historical compatibility remains an explicitly selected
+  reader mode only.
+
+## Array-Specific Coordinate And Measurement Semantics
+
+Array names and nesting do not define coordinate meaning. Every published
+geometry surface carries its own `coordinate_descriptor`; every retained
+scientific scalar, count, fraction, validity, index, area, score, or distance
+surface carries its own `measurement_descriptor`. Both records bind the exact
+array payload, observation row identity, controlled `subject_component`
+authority, derivation, and selected component members where applicable.
+
+The run-level `refined_subject_mask_measurement_authority` is a closed manifest
+of these scalar leaves. It is distinct from coordinate metadata because scalar
+measurements have no spatial origin, X/Y direction, pixel convention, or
+overlay suitability. In particular:
+
+- `metrics/centroid_xy`, `metrics/bbox_xyxy`, ellipses, contours, and
+  `masks_roi` are coordinate/geometry surfaces;
+- `metrics/area_px`, component-local metrics, validity arrays, contour counts,
+  packed offsets/lengths, and eye separation are measurement/semantic surfaces;
+- `relations/eye_pair/metrics/separation_px` is recomputed from the exact
+  `eye_left` and `eye_right` ellipse centers and binds both ellipse coordinate
+  descriptors. It must never receive a coordinate descriptor itself;
+- component-root `area_px` and `mask_present` leaves are exact aliases of their
+  run-level metric columns and bind those run-level measurement descriptors.
+
+Each output component also binds the producer-selected raw mask/probability
+surface through `components/<component>/provenance`, including exact raw run
+path, channel label/index, payload, probability encoding and threshold when
+applicable, binary-derivation method, and finalization policy. A publisher must
+not guess this lineage from whichever raw surface happens to exist.
 
 Training artifacts must also use dense `masks_roi` as the label source of
 truth. Compact mask stores may be read from analysis sources through
@@ -417,9 +464,10 @@ Minimum browser-specific tests:
 ## Assembly And Finalization Semantics
 
 `refined_subject_masks_runs/<run>` is not merely a bag of assembled component
-masks. It is the canonical refined/editable working artifact, and it should be
-treated as valid only after subject-mask refinement/finalization has
-materialized the canonical QA surface.
+masks. Before publication it is a refined/editable working artifact; after
+publication it is an immutable canonical snapshot. It should be treated as
+scientifically valid only after refinement/finalization has materialized the
+canonical QA surface and strict publication has succeeded.
 
 Required behavior:
 
@@ -657,7 +705,7 @@ Required arrays:
   - shape: `(N,)`
   - expected to align with the source crop run
 - physical mask store
-  - modern editable runs must include dense `masks_roi`
+  - modern draft and published runs must include dense `masks_roi`
   - optional compact `mask_bitpacked` and `mask_rle` stores are derived caches
   - consumers should use `fisheye.shared.mask_store.open_mask_store(...)`
     when they need to tolerate historical compact-only archives
@@ -665,11 +713,11 @@ Required arrays:
   - shape: `(N, C, H, W)`
   - dense refined binary masks
   - default compatibility surface for historical readers
-  - live review/edit authority surface for modern editable runs
-  - required for new editable analysis outputs and training artifacts
+  - live review/edit authority surface only while a modern run remains a draft
+  - required for new analysis outputs and training artifacts
   - can be materialized/refreshed from compact `mask_bitpacked` or `mask_rle` with
     `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --apply`
-  - should not be removed from editable analysis or training outputs
+  - should not be removed from draft, published scientific, or training outputs
 - `mask_bitpacked`
   - compact fixed-size exact binary masks
   - schema: `palette_mask_bitpacked_binary_v1`
@@ -884,12 +932,17 @@ Backfill is explicit:
 scripts/py -m fisheye.utils.validate_refined_subject_mask_contract <archive>.zarr --backfill
 ```
 
-The backfill path is intentionally conservative. It may recreate
+The backfill path is intentionally conservative and applies only to historical
+archives or selector-ineligible drafts. It may recreate
 `available_channels` from declared component availability, recreate `masks_roi`
 from component-local mask arrays when channel order is proven by `mask_labels`,
 and derive missing mask metrics or component-local mirrors from existing
 `masks_roi`. It must not split `eyes_union` into left/right eyes, invent review
 state, or fake missing component provenance.
+
+Backfill must refuse a complete selector-eligible canonical-v2 snapshot.
+Repairing or refreshing such a snapshot means creating and publishing a new
+run; future recordings do not depend on a legacy adapter or mutable backfill.
 
 ## Review Payloads
 
@@ -1227,9 +1280,10 @@ Metric-QC policy:
 - Generated metric-QC reason tags use the `needs_review_metric_*` prefix so
   refresh/backfill tools can replace generated tags without deleting manual
   review tags.
-- `scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics` refreshes
-  mask-local metrics and generated metric-QC reason tags for existing refined
-  subject-mask runs without recreating mask pixels.
+- `scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics` may
+  refresh historical or draft runs. For an eligible canonical-v2 snapshot, the
+  equivalent maintenance operation must write a new derived run rather than
+  mutating the published child.
 
 ## Boundary With `analysis/subject_shape_runs`
 

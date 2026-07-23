@@ -19,6 +19,11 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.analysis.chaser_behavior import (
     BEHAVIOR_CLASS_LABELS,
     canonical_behavior_label,
@@ -206,16 +211,15 @@ def _decode_text_column(data: np.ndarray) -> list[str]:
     return [decode_null_terminated_text(value).strip() for value in values.reshape(-1)]
 
 
-def _resolve_chaser_distance_run(root: zarr.Group, run_name: str) -> tuple[zarr.Group, str, str]:
-    parent = root.get("analysis/chaser_distance_runs")
-    if parent is None:
-        raise ValueError("Archive has no analysis/chaser_distance_runs group.")
-    resolved = str(run_name).strip()
-    if not resolved or resolved == "latest":
-        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
-    return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"
+def _resolve_chaser_distance_run(
+    root: zarr.Group,
+    run_name: str,
+) -> tuple[ChaserDistanceReadSnapshot, str, str]:
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(run_name).strip() or "latest",
+    )
+    return snapshot, snapshot.run_name, snapshot.run_path
 
 
 def _resolve_quadrant_occupancy_component(
@@ -1227,20 +1231,28 @@ def build_chaser_near_field_occupancy_result(
         raise ValueError("r_zone_mm must be positive.")
 
     root = _open_root(zarr_path, mode="r")
-    run_group, distance_run_name, distance_run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
-    coordinate_frame = str(run_group.attrs.get("coordinate_frame") or "")
-    coordinate_origin = str(run_group.attrs.get("coordinate_origin") or "")
+    distance, distance_run_name, distance_run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_derived_surface_authority(QUADRANT_OCCUPANCY_PARENT)
+    coordinate_frame = distance.coordinate_space_id
+    coordinate_origin = distance.coordinate_origin
     if coordinate_frame != "arena_relative_canvas_px":
         raise ValueError(
-            f"Chaser near-field occupancy requires coordinate_frame='arena_relative_canvas_px'; got {coordinate_frame!r}."
+            "Chaser near-field occupancy requires typed "
+            f"space_id='arena_relative_canvas_px'; got {coordinate_frame!r}."
         )
-    if coordinate_origin != "top_left_of_active_arena":
+    if coordinate_origin != "arena_top_left":
         raise ValueError(
-            f"Chaser near-field occupancy requires coordinate_origin='top_left_of_active_arena'; got {coordinate_origin!r}."
+            "Chaser near-field occupancy requires typed "
+            f"origin='arena_top_left'; got {coordinate_origin!r}."
         )
-    pixels_per_mm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    if not math.isfinite(pixels_per_mm) or pixels_per_mm <= 0:
-        raise ValueError("Chaser-distance run lacks a positive pixels_per_mm_projector attr.")
+    pixels_per_mm = float(distance.pixels_per_mm_projector)
+    # The live group is used only to resolve the already-selected derived
+    # quadrant component and its arena-geometry dependency, never core distance
+    # arrays or coordinate attrs.
+    run_group = root[distance_run_path]
 
     quadrant_component, quadrant_component_name, quadrant_component_path = (
         _resolve_quadrant_occupancy_component(
@@ -1249,30 +1261,17 @@ def build_chaser_near_field_occupancy_result(
             component_name=quadrant_occupancy_component,
         )
     )
-    if "positions" not in run_group or "distances" not in run_group or "chasers" not in run_group:
-        raise ValueError("Chaser-distance run is missing positions, distances, or chasers group.")
-    positions = run_group["positions"]
-    distances = run_group["distances"]
-    required_positions = ("fish_centroid_arena_xy", "fish_valid", "chaser_valid")
-    missing = [name for name in required_positions if name not in positions]
-    missing += [name for name in ("distance_mm",) if name not in distances]
-    missing += [name for name in ("chaser_index",) if name not in run_group["chasers"]]
-    if missing:
-        raise ValueError(
-            f"Chaser-distance run missing required Chaser near-field occupancy array(s): {missing}"
-        )
-
-    fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float32)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
-    distance_mm = np.asarray(distances["distance_mm"][:], dtype=np.float32)
-    chaser_indices = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.int64)
+    fish_xy = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float32)
+    fish_valid = np.asarray(distance.fish_valid, dtype=bool)
+    chaser_valid = np.asarray(distance.chaser_valid, dtype=bool)
+    distance_mm = np.asarray(distance.distance_mm, dtype=np.float32)
+    chaser_indices = np.asarray(distance.chaser_index, dtype=np.int64)
     total_frames = int(fish_xy.shape[0])
-    total_frames_attr = int(run_group.attrs.get("total_frames", 0) or 0)
-    if total_frames_attr > 0 and total_frames_attr != total_frames:
+    if distance.total_frames != total_frames:
         raise ValueError(
-            "Chaser-distance run frame-axis mismatch: "
-            f"attrs total_frames={total_frames_attr}, fish_centroid_arena_xy length={total_frames}."
+            "Chaser-distance typed frame-axis mismatch: "
+            f"authority total_frames={distance.total_frames}, "
+            f"fish_centroid_arena_xy length={total_frames}."
         )
     expected = {
         "positions/fish_valid": fish_valid.shape[:1],
@@ -1333,7 +1332,7 @@ def build_chaser_near_field_occupancy_result(
         raise ValueError("radial_bin_edges_mm must contain at least two increasing values.")
     radial_centers = ((radial_edges[:-1] + radial_edges[1:]) / 2.0).astype(np.float32)
     cdf_thresholds = _normalize_float_array(cdf_thresholds_mm, name="cdf_thresholds_mm", positive=True)
-    fps = _safe_float(run_group.attrs.get("fps"), 1.0)
+    fps = float(distance.fps)
 
     arrays, diagnostics, compute_warnings = _compute_near_field_arrays(
         chasers=chasers,
@@ -1358,7 +1357,7 @@ def build_chaser_near_field_occupancy_result(
         immobility_speed_threshold_mm_s=float(immobility_speed_threshold_mm_s),
     )
 
-    recording_id = str(run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or Path(zarr_path).stem)
+    recording_id = distance.recording_id
     summary = _build_summary(
         recording_id=recording_id,
         chasers=chasers,
@@ -1397,13 +1396,13 @@ def build_chaser_near_field_occupancy_result(
         source_quadrant_occupancy_component=quadrant_component_name,
         source_quadrant_occupancy_path=quadrant_component_path,
         source_stimulus_run=source_refs.get("source_stimulus_run")
-        or run_group.attrs.get("source_stimulus_run"),
+        or distance.source_stimulus_run,
         source_stimulus_path=source_refs.get("source_stimulus_path")
-        or run_group.attrs.get("source_stimulus_path"),
+        or distance.source_stimulus_path,
         source_stimulus_epoch_run=source_refs.get("source_stimulus_epoch_run")
-        or run_group.attrs.get("source_stimulus_epoch_run"),
+        or distance.source_stimulus_epoch_run,
         source_stimulus_epoch_path=source_refs.get("source_stimulus_epoch_path")
-        or run_group.attrs.get("source_stimulus_epoch_path"),
+        or distance.source_stimulus_epoch_path,
         fps=float(fps),
         total_frames=int(total_frames),
         pixels_per_mm_projector=float(pixels_per_mm),
@@ -1696,6 +1695,12 @@ def write_chaser_near_field_occupancy_component(
     write_interactive_spec: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name

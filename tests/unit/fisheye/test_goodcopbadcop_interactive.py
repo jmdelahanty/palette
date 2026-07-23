@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 
 import numpy as np
-import polars as pl
+import pytest
 import zarr
 
+from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceResult,
     ChaserDistanceWindow,
@@ -25,10 +26,6 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     discover_chaser_dashboard_options,
     load_chaser_dashboard_data,
     load_goodcopbadcop_interactive_data,
-    to_distance_timeseries_dataframe,
-    to_position_dataframe,
-    to_spatial_occupancy_dataframe,
-    to_window_dataframe,
 )
 
 
@@ -263,7 +260,12 @@ def test_chaser_distance_writer_adds_chaser_protocol_interactive_spec(tmp_path: 
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
     result = _make_chaser_result(zarr_path)
 
-    run_path = write_chaser_distance_run(zarr_path, result, overwrite=True)
+    run_path = write_chaser_distance_run(
+        zarr_path,
+        result,
+        overwrite=True,
+        legacy_compatibility=True,
+    )
 
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root[run_path]
@@ -316,42 +318,28 @@ def test_chaser_distance_writer_adds_chaser_protocol_interactive_spec(tmp_path: 
     assert manifest[DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT]["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID
 
 
-def test_chaser_protocol_interactive_loader_builds_plot_dataframes(tmp_path: Path) -> None:
+def test_legacy_chaser_dashboard_is_not_a_normal_read(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
     result = _make_chaser_result(zarr_path)
-    write_chaser_distance_run(zarr_path, result, overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        result,
+        overwrite=True,
+        legacy_compatibility=True,
+    )
 
-    options = discover_chaser_dashboard_options(zarr_path)
-    assert [option.run_name for option in options] == ["chaser_distance_1"]
-
-    data = load_chaser_dashboard_data(zarr_path, run_path=options[0].run_path)
-    assert data.fps == 10.0
-    assert data.distance_mm.shape == (9, 2)
-    assert data.occupancy_normalized is not None
-    assert data.occupancy_normalized.shape == (3, 2, 2)
-    assert data.chaser_color_hex == {0: "#ff0000", 1: "#0000ff"}
-    assert data.chaser_source_img_xy is not None
-    np.testing.assert_allclose(data.chaser_source_img_xy, data.chaser_arena_xy)
-    assert [zone_set.zone_set_id for zone_set in data.spatial_occupancy] == ["image_quadrants_v1"]
-
-    windows_df = to_window_dataframe(data)
-    assert windows_df["label"].to_list() == ["pre_event", "training_event", "post_event"]
-    spatial_df = to_spatial_occupancy_dataframe(data)
-    assert spatial_df["zone_id"].to_list()[:4] == ["top_left", "top_right", "bottom_left", "bottom_right"]
-    assert list(spatial_df.select(["x_min", "y_min", "x_max", "y_max"]).row(0)) == [0.0, 0.0, 10.0, 10.0]
-    assert spatial_df.filter(pl.col("window_label") == "training_event")["frame_count"].to_list() == [5, 6, 7, 8]
-    assert spatial_df.filter(pl.col("window_label") == "post_event")["frame_count"].to_list() == [9, 10, 11, 12]
-
-    distance_df = to_distance_timeseries_dataframe(data)
-    assert "distance_mm_chaser_0" in distance_df.columns
-    assert "distance_mm_chaser_1" in distance_df.columns
-    assert distance_df["time_s"].to_list() == [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-
-    legacy_options = discover_goodcopbadcop_chaser_dashboard_options(zarr_path)
-    assert [option.run_name for option in legacy_options] == ["chaser_distance_1"]
-    legacy_data = load_goodcopbadcop_interactive_data(zarr_path, run_path=legacy_options[0].run_path)
-    assert legacy_data.run_name == data.run_name
-
-    position_df = to_position_dataframe(data)
-    assert position_df["fish_valid"].to_list() == [True, True, True, True, False, True, True, True, True]
-    assert position_df["unit"][0] == "arena_relative_canvas_px"
+    expected_error = "latest_complete|complete coordinate publication"
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
+        discover_chaser_dashboard_options(zarr_path)
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
+        discover_goodcopbadcop_chaser_dashboard_options(zarr_path)
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
+        load_chaser_dashboard_data(
+            zarr_path,
+            run_path="analysis/chaser_distance_runs/chaser_distance_1",
+        )
+    with pytest.raises(ChaserDistanceReadError, match=expected_error):
+        load_goodcopbadcop_interactive_data(
+            zarr_path,
+            run_path="analysis/chaser_distance_runs/chaser_distance_1",
+        )

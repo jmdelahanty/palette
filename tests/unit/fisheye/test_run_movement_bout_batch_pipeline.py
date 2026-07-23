@@ -202,3 +202,6 @@ def test_eye_angle_command_pins_compact_layout() -> None:
 
     layout_idx = cmd.index("--layout")
     assert cmd[layout_idx + 1] == "compact_dense_v2"
+    assert "--keypoint-run" not in cmd
+    diagnostic_idx = cmd.index("--diagnostic-refined-keypoint-run")
+    assert cmd[diagnostic_idx + 1] == "kp"

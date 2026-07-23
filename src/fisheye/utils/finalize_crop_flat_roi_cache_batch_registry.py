@@ -20,8 +20,14 @@ import numpy as np
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.observation_coordinate_publication import (
+    load_persisted_ordinary_crop_observation_geometry,
+)
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
-from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+)
 
 
 @dataclass(frozen=True)
@@ -59,8 +65,10 @@ def _latest_crop_status_by_zarr(run_root: Path) -> dict[str, dict[str, Any]]:
     statuses = _ok_statuses(run_root.glob("per_recording/*/*.crop.*.json"))
     by_zarr: dict[str, dict[str, Any]] = {}
     for _path, payload in statuses:
+        if payload.get("stage") != "crop_materialized":
+            continue
         zarr_path = payload.get("zarr_path")
-        crop_run = payload.get("latest_any")
+        crop_run = payload.get("crop_run")
         if not zarr_path or not crop_run:
             continue
         by_zarr[str(Path(str(zarr_path)).expanduser().resolve())] = payload
@@ -208,7 +216,7 @@ def finalize_crop_flat_roi_cache_batch_registry(
     try:
         for zarr_text, crop_status in sorted(crop_by_zarr.items()):
             zarr_path = Path(zarr_text)
-            crop_run = str(crop_status["latest_any"])
+            crop_run = str(crop_status["crop_run"])
             cache_status = cache_by_zarr.get(zarr_text)
             try:
                 _verify_cache_pair(
@@ -222,10 +230,17 @@ def finalize_crop_flat_roi_cache_batch_registry(
                 if crop_run not in crop_parent:
                     raise RuntimeError(f"Crop run {crop_run!r} missing in {zarr_path}")
                 crop_group = crop_parent[crop_run]
-                if not is_run_complete_in_parent(crop_parent, crop_group):
+                if not is_run_selector_eligible(
+                    crop_group
+                ) or not is_run_complete_in_parent(crop_parent, crop_group):
                     raise RuntimeError(
-                        f"Crop run {crop_run!r} is not marked complete in {zarr_path}"
+                        f"Crop run {crop_run!r} is not complete and selector-eligible "
+                        f"in {zarr_path}"
                     )
+                load_persisted_ordinary_crop_observation_geometry(
+                    root,
+                    f"crop_runs/{crop_run}",
+                )
                 crop_quality_dataset_id, crop_quality_rows = registry.refresh_crop_quality_from_root(
                     root,
                     zarr_path,
@@ -233,7 +248,7 @@ def finalize_crop_flat_roi_cache_batch_registry(
                 dataset_rows = _dataset_rows_for_zarr(registry, zarr_path)
                 dataset_ids = tuple(str(row["dataset_id"]) for row in dataset_rows)
                 coverage_pct = _read_crop_coverage(crop_group)
-                attrs = crop_status.get("latest_any_attrs")
+                attrs = crop_status.get("crop_run_attrs")
                 if not isinstance(attrs, Mapping):
                     attrs = {}
                 crop_signature = attrs.get("crop_signature")

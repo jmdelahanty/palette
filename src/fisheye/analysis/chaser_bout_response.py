@@ -53,17 +53,18 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_distance_io import (
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
     _apply_settle_trim,
-    _decode_text_column,
     _normalize_float_array,
     _open_root,
     _protocol_position_transition_s,
     _read_epochs,
     _resolve_arena_geometry,
     _resolve_chaser_distance_run,
-    _safe_float,
     _wall_mask,
 )
 from fisheye.shared.json_safety import json_attr_safe
@@ -250,6 +251,37 @@ def _resolve_swim_bout_run(root: zarr.Group, run_name: str) -> tuple[zarr.Group,
     if not resolved or resolved not in parent:
         raise ValueError("No usable swim-bout run found; pass --swim-bout-run.")
     return parent[resolved], resolved, f"analysis/swim_bout_runs/{resolved}"
+
+
+def _select_bout_row_mask(
+    bout_start: np.ndarray,
+    bout_end: np.ndarray,
+    *,
+    total_frames: int,
+    signal_id: np.ndarray | None,
+    default_signal_id: Any,
+) -> tuple[np.ndarray, int, str]:
+    """Select valid bout rows from one run's default signal level."""
+
+    keep = (bout_start >= 0) & (bout_end < total_frames) & (bout_end >= bout_start)
+    bout_level_note = "single_level_table_no_signal_id"
+    source_signal_id = -1
+    if signal_id is not None:
+        signal_id = np.asarray(signal_id, dtype=np.int64).reshape(-1)
+        if default_signal_id is None:
+            source_signal_id = int(np.min(signal_id))
+            bout_level_note = (
+                "multi_level_table_no_default_signal_id_attr_fell_back_to_"
+                f"{source_signal_id}"
+            )
+        else:
+            source_signal_id = int(default_signal_id)
+            bout_level_note = (
+                "multi_level_table_filtered_to_default_signal_id_"
+                f"{source_signal_id}"
+            )
+        keep &= signal_id == source_signal_id
+    return keep, source_signal_id, bout_level_note
 
 
 def _resolve_heading(run_group: zarr.Group, *, total_frames: int) -> tuple[np.ndarray, np.ndarray, str]:
@@ -864,37 +896,46 @@ def build_chaser_bout_response_result(
     motion_spread_threshold_mm: float = DEFAULT_MOTION_SPREAD_THRESHOLD_MM,
 ) -> ChaserBoutResponseResult:
     root = _open_root(zarr_path, mode="r")
-    run_group, run_name, run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    distance, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_derived_surface_authority("egocentric_bearing")
 
-    if str(run_group.attrs.get("coordinate_frame") or "") != "arena_relative_canvas_px":
-        raise ValueError("chaser_bout_response requires coordinate_frame='arena_relative_canvas_px'.")
-    pixels_per_mm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    if not math.isfinite(pixels_per_mm) or pixels_per_mm <= 0:
-        raise ValueError("Chaser-distance run lacks a positive pixels_per_mm_projector attr.")
+    if distance.coordinate_space_id != "arena_relative_canvas_px":
+        raise ValueError(
+            "chaser_bout_response requires typed "
+            "space_id='arena_relative_canvas_px'."
+        )
+    pixels_per_mm = float(distance.pixels_per_mm_projector)
 
-    positions = run_group["positions"]
-    chasers = run_group["chasers"]
-    fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64)
-    chaser_xy = np.asarray(positions["chaser_arena_xy"][:], dtype=np.float64)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
-    chaser_indices = np.asarray(chasers["chaser_index"][:], dtype=np.int64).reshape(-1)
+    fish_xy = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float64)
+    chaser_xy = np.asarray(distance.chaser_arena_xy, dtype=np.float64)
+    fish_valid = np.asarray(distance.fish_valid, dtype=bool)
+    chaser_valid = np.asarray(distance.chaser_valid, dtype=bool)
+    chaser_indices = np.asarray(distance.chaser_index, dtype=np.int64).reshape(-1)
     chaser_labels: tuple[str, ...] = ()
-    if "behavior_class_label_bytes" in chasers:
-        chaser_labels = tuple(_decode_text_column(np.asarray(chasers["behavior_class_label_bytes"][:])))
     total_frames = int(fish_xy.shape[0])
+    if total_frames != distance.total_frames:
+        raise ValueError("Typed chaser-distance frame extent is inconsistent.")
 
-    geometry = _resolve_arena_geometry(root, run_group, pixels_per_mm=float(pixels_per_mm))
+    geometry = _resolve_arena_geometry(
+        root,
+        distance,
+        pixels_per_mm=float(pixels_per_mm),
+    )
     if geometry.shape != "circle" or geometry.center_x_px is None or geometry.center_y_px is None:
         raise ValueError(
             "chaser_bout_response requires a circular arena geometry: the virtual controls are "
             "rotations about the arena centre, which is undefined otherwise."
         )
-    fps = _safe_float(run_group.attrs.get("fps"), 1.0)
+    fps = float(distance.fps)
 
-    epochs = _read_epochs(run_group, total_frames=total_frames)
+    epochs = _read_epochs(distance, total_frames=total_frames)
     resolved_settle = (
-        _protocol_position_transition_s(root, run_group) if settle_trim_s is None else max(0.0, float(settle_trim_s))
+        _protocol_position_transition_s(root, distance)
+        if settle_trim_s is None
+        else max(0.0, float(settle_trim_s))
     )
     epochs = _apply_settle_trim(
         epochs,
@@ -906,7 +947,10 @@ def build_chaser_bout_response_result(
         motion_spread_threshold_mm=float(motion_spread_threshold_mm),
     )
 
-    heading, heading_valid, ego_name = _resolve_heading(run_group, total_frames=total_frames)
+    heading, heading_valid, ego_name = _resolve_heading(
+        root[run_path],
+        total_frames=total_frames,
+    )
 
     bout_group, bout_name, bout_path = _resolve_swim_bout_run(root, swim_bout_run)
     table = bout_group.get("tables/bouts") if "tables" in bout_group else None
@@ -914,26 +958,25 @@ def build_chaser_bout_response_result(
         raise ValueError(f"Swim-bout run {bout_name} lacks tables/bouts.")
     bout_start = np.asarray(table["start_frame"][:], dtype=np.int64).reshape(-1)
     bout_end = np.asarray(table["end_frame"][:], dtype=np.int64).reshape(-1)
-    keep = (bout_start >= 0) & (bout_end < total_frames) & (bout_end >= bout_start)
     # A multi-level bout table (detect_bouts_multi_level) concatenates bouts from EVERY speed
     # level -- raw, filtered, smoothed, averaged, exponential -- in one table, tagged by
     # signal_id. Ingesting all of them counts each physical bout up to five times (and mixes
     # jittery raw peaks with smoothed ones). Select the run's default level, which it documents
     # as the one downstream consumers should use. A single-level table has no signal_id column
     # and is kept whole.
-    bout_level_note = "single_level_table_no_signal_id"
-    source_signal_id = -1
     source_level_name = str(bout_group.attrs.get("default_level") or "")
-    if "signal_id" in table:
-        signal_id = np.asarray(table["signal_id"][:], dtype=np.int64).reshape(-1)
-        default_sid_raw = bout_group.attrs.get("default_signal_id")
-        if default_sid_raw is None:
-            source_signal_id = int(np.min(signal_id))
-            bout_level_note = f"multi_level_table_no_default_signal_id_attr_fell_back_to_{source_signal_id}"
-        else:
-            source_signal_id = int(default_sid_raw)
-            bout_level_note = f"multi_level_table_filtered_to_default_signal_id_{source_signal_id}"
-        keep &= signal_id == source_signal_id
+    signal_id = (
+        np.asarray(table["signal_id"][:], dtype=np.int64).reshape(-1)
+        if "signal_id" in table
+        else None
+    )
+    keep, source_signal_id, bout_level_note = _select_bout_row_mask(
+        bout_start,
+        bout_end,
+        total_frames=total_frames,
+        signal_id=signal_id,
+        default_signal_id=bout_group.attrs.get("default_signal_id"),
+    )
     if not np.all(keep):
         bout_start, bout_end = bout_start[keep], bout_end[keep]
     take = lambda name, default=np.nan: (  # noqa: E731
@@ -1000,7 +1043,7 @@ def build_chaser_bout_response_result(
     diagnostics["bouts_ingested"] = int(keep.sum())
     qc = tuple(qc) + (bout_level_note,)
 
-    recording_id = str(run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or Path(zarr_path).stem)
+    recording_id = distance.recording_id
     object_refs = [ref for ref in references if ref.kind == REFERENCE_KIND_OBJECT]
     summary: dict[str, Any] = {"recording_id": recording_id, "n_references": len(references)}
     for e_idx, epoch in enumerate(epochs):
@@ -1187,6 +1230,12 @@ def write_chaser_bout_response_component(
     write_interactive_spec: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     if result.component_name in parent:

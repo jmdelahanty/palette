@@ -241,6 +241,23 @@ def test_resolve_zarr_run_falls_back_to_sorted_last() -> None:
     assert run_group.path == "analysis/stimulus_runs/stimulus_003"
 
 
+def test_resolve_zarr_run_sorted_fallback_skips_explicit_nonselector() -> None:
+    root = _build_root()
+    parent = root["analysis/stimulus_runs"]
+    parent["stimulus_003"].attrs["stage_selector_eligible"] = False
+
+    run_group, run_name = resolve_zarr_run(
+        root,
+        "analysis/stimulus_runs",
+        None,
+        fallback_to_sorted="last",
+        run_label="Stimulus run",
+    )
+
+    assert run_name == "stimulus_002"
+    assert run_group.path == "analysis/stimulus_runs/stimulus_002"
+
+
 def test_resolve_zarr_run_falls_back_to_sorted_first() -> None:
     root = _build_root()
 

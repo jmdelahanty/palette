@@ -199,8 +199,8 @@ Existing analysis outputs already follow this direction:
   `eye_gaze/per_bout_metrics` subgroup with pre/post/within-bout eye-gaze and
   vergence summaries linked to an exact `analysis/eye_angle_runs/<run>` source.
 - `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
-  interpreted relative to heading/keypoint context. Current v5 runs declare
-  `schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
+  interpreted in a keypoint-derived body frame. Current run-schema v6 outputs
+  declare `schema_id = "analysis.eye_angle_runs"`, `schema_version = 6`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and
@@ -208,8 +208,8 @@ Existing analysis outputs already follow this direction:
   Readers should treat explicit `*_major_*` arrays as the canonical
   orientation fields and prefer explicit `*_gaze_*` arrays for biological gaze;
   gaze/minor direction is derived from the resolved major axis. Legacy major
-  and minor names remain compatibility outputs. Schema v5 retains the
-  v3-compatible total axis-separation field
+  and minor names remain compatibility outputs. The v5 scientific method
+  retains the v3-compatible total axis-separation field
   `vergence_gaze_deg` and adds `left_nasal_gaze_deg`,
   `right_nasal_gaze_deg`, and BEAST/Johnson-comparable
   `mean_eye_vergence_gaze_deg`.
@@ -222,13 +222,18 @@ Existing analysis outputs already follow this direction:
   representations (`eye_frame`, `gaze`, `nasal_gaze`, `major`, `centroid`,
   `legacy`) from metadata rather than hardcoded field lists. Output schema v8
   adds the versioned algorithm-contract link and exact temporal-operator
-  identities without changing the run schema or v5 scientific method.
-  Eye-angle writers should prefer `analysis/subject_shape_runs/<run>` eye
-  geometry when a coherent body/eyes/swim shape run exists, and preserve
-  refined-subject/refined-eye fallbacks as explicit lineage. Current v5 runs
-  materialize keypoint-derived `support/body_frame/` arrays and future writers
-  should prefer shared `analysis/subject_shape_runs/<run>/body_frame/` when
-  available.
+  identities. Output schema v9 adds ordered `support/instance_key` and
+  `support/source_acquisition_frame_index`; `support/frame_indices` remains
+  only as an equality-required compatibility alias of the latter.
+  Future-normal writers require canonical eye geometry from one complete,
+  selector-eligible `analysis/subject_shape_runs/<run>` publication. That
+  publication's assignment proof seals the exact base
+  `keypoints_runs/<run>` values, success mask, crop placement, labels, ordered
+  instance identity, acquisition frames, and source frame count. Writers
+  recompute `support/body_frame/` from that sealed keypoint payload; they do
+  not consume a separately persisted upstream heading. Historical refined
+  keypoints are available only through an explicit diagnostic option whose
+  output is permanently nonselector; they are not a canonical fallback.
 - `analysis/stimulus_response_runs/<run>` is the implemented stimulus-aware
   downstream consumer for protocol-step summaries and stimulus-specific
   adapters. Schema 2 defaults to compact-tabular-v2 and is read through

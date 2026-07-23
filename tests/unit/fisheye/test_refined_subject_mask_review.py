@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 
 os.environ.setdefault("OMP_NUM_THREADS", "2")
@@ -8,6 +9,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "2")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.shared.detect_reason_codec import read_reason_labels
@@ -549,7 +551,7 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     np.testing.assert_array_equal(centroid_valid[:, 1], np.asarray([False, False], dtype=bool))
     np.testing.assert_allclose(
         bbox_xyxy[:, 0, :],
-        np.asarray([[1.0, 1.0, 6.0, 6.0], [2.0, 2.0, 5.0, 5.0]], dtype=np.float32),
+        np.asarray([[1.0, 1.0, 7.0, 7.0], [2.0, 2.0, 6.0, 6.0]], dtype=np.float32),
     )
     np.testing.assert_array_equal(bbox_valid[:, 0], np.asarray([True, True], dtype=bool))
     np.testing.assert_array_equal(bbox_valid[:, 1], np.asarray([False, False], dtype=bool))
@@ -659,6 +661,24 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert provenance["inputs"]["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
     assert provenance["inputs"]["source_keypoints_run"] == "refined_kp_001"
     assert provenance["inputs"]["source_keypoint_group"] == "refined_keypoints_runs"
+
+
+def test_legacy_review_seed_writer_fails_closed_for_canonical_sources() -> None:
+    root = _build_subject_review_root()
+    source = replace(
+        mod._load_source_subject_mask_run(root, "subject_masks_001"),
+        canonical_coordinates=True,
+    )
+
+    with pytest.raises(RuntimeError, match="immutable refined revision lifecycle"):
+        mod._open_or_create_refined_subject_run(
+            root,
+            source=source,
+            refined_run="must_not_be_legacy",
+            components=("subject_body", "swim_bladder"),
+        )
+
+    assert "must_not_be_legacy" not in root["refined_subject_masks_runs"]
 
 
 def test_prepare_refined_subject_run_preserves_same_frame_crop_row_lineage(monkeypatch) -> None:
@@ -1379,6 +1399,84 @@ def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> No
     assert swim_provenance.attrs["last_update_mode"] == "create"
 
 
+@pytest.mark.parametrize("tamper", ("unstamped", "inclusive_values"))
+def test_partial_derived_refresh_rejects_noncanonical_bbox_before_write(tamper: str) -> None:
+    root = _build_subject_review_root()
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    if tamper == "unstamped":
+        del refined.group.attrs["bbox_xyxy_convention"]
+        del refined.group.attrs["bbox_xyxy_derivation"]
+        match = "Partial derived refresh would mix"
+    else:
+        bbox = refined.group["metrics/bbox_xyxy"]
+        values = np.asarray(bbox[:], dtype=np.float32)
+        valid = np.asarray(refined.group["metrics/bbox_valid"][:], dtype=bool)
+        values[..., 2:][valid] -= 1.0
+        bbox[:] = values
+        match = "every untargeted bbox cell"
+    masks_before = np.asarray(refined.group["masks_roi"][:], dtype=np.uint8).copy()
+    bbox_before = np.asarray(refined.group["metrics/bbox_xyxy"][:], dtype=np.float32).copy()
+    edited = np.asarray(refined.group["masks_roi"][0:1], dtype=np.uint8).copy()
+    edited[0, 0] = 0
+
+    with pytest.raises(RuntimeError, match=match):
+        mod._apply_refined_subject_roi_rows(
+            source=source,
+            refined=refined,
+            roi_indices=[0],
+            edited_masks_batch=edited,
+            component_names=("subject_body",),
+            derived_update_policy=mod.DERIVED_UPDATE_POLICY_REFRESH,
+        )
+
+    np.testing.assert_array_equal(refined.group["masks_roi"][:], masks_before)
+    np.testing.assert_array_equal(refined.group["metrics/bbox_xyxy"][:], bbox_before)
+
+
+def test_external_writeback_rejects_immutable_canonical_target_before_mutation(
+    tmp_path,
+) -> None:
+    zarr_path = tmp_path / "canonical_writeback_guard.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    refined.group.attrs["coordinate_contract"] = "canonical_v2"
+    refined.group.attrs["refined_subject_mask_publication_owner"] = "a" * 32
+    mask_before = np.asarray(refined.group["masks_roi"][0, 0], dtype=np.uint8).copy()
+    revision_before = 0
+
+    with pytest.raises(RuntimeError, match="immutable canonical publication"):
+        mod.write_refined_subject_mask_edit(
+            zarr_path,
+            refined_run="refined_subject_masks_001",
+            component_name="subject_body",
+            roi_index=0,
+            mask=np.zeros_like(mask_before),
+            expected_row_revision=revision_before,
+        )
+
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    np.testing.assert_array_equal(
+        reopened["refined_subject_masks_runs/refined_subject_masks_001/masks_roi"][0, 0],
+        mask_before,
+    )
+    assert (
+        "row_revision"
+        not in reopened[
+            "refined_subject_masks_runs/refined_subject_masks_001/components/subject_body"
+        ]
+    )
+
+
 def test_format_component_summary_lines_exposes_common_geometry_and_qc() -> None:
     root = _build_subject_review_root()
     _source, refined = mod.prepare_refined_subject_run(
@@ -1398,7 +1496,7 @@ def test_format_component_summary_lines_exposes_common_geometry_and_qc() -> None
 
     assert any("area_px=36.0" in line for line in lines)
     assert any("centroid=(3.5, 3.5)" in line for line in lines)
-    assert any("bbox=[1.0,1.0,6.0,6.0]" in line for line in lines)
+    assert any("bbox=[1.0,1.0,7.0,7.0]" in line for line in lines)
     assert any("components=1" in line for line in lines)
     assert any("sigma_noise=" in line for line in lines)
     assert any("curvature_var=" in line for line in lines)

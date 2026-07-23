@@ -1,4 +1,3 @@
-from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import hashlib
 import json
@@ -8,7 +7,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import h5py
 import numpy as np
@@ -18,7 +17,11 @@ import zarr
 from fisheye.cli.shared_args import add_apply_dry_run_args
 from fisheye.cli.shared_args import add_log_args
 from fisheye.cli.shared_args import add_registry_discovery_args
-from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
+from fisheye.refinement.refine_keypoints import (
+    RefinedKeypointCoordinatePublicationUnavailable,
+    create_refined_keypoint_run,
+    require_future_normal_refined_keypoint_publication,
+)
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
@@ -39,6 +42,9 @@ from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
 from fisheye.registry.model_resolution import Candidate
 from fisheye.registry.model_resolution import load_candidates, load_target_profile, resolve_recording_id
 from fisheye.shared.zarr_recording_context import infer_recording_context
+from fisheye.shared.pose_model_schema_binding import (
+    resolve_registered_pose_model_schema_binding,
+)
 
 try:
     from rich.console import Console
@@ -1101,6 +1107,10 @@ def _candidate_payload(item: Candidate) -> Dict[str, Any]:
         "run_id": item.run_id,
         "set_id": item.set_id,
         "model_path": item.model_path,
+        "model_sha256": item.model_sha256,
+        "manifest_path": item.manifest_path,
+        "manifest_sha256": item.manifest_sha256,
+        "skeleton_id": item.skeleton_id,
         "score": item.weighted_score,
         "created_utc": item.created_utc,
         "status": item.status,
@@ -1145,10 +1155,16 @@ def _resolve_registry_model_for_plan(
             set_id_filter=set_id_filter,
             include_non_success=include_non_success,
         )
+        best = _pick_best_candidate(candidates, require_unique=require_unique)
+        model_pose_schema_binding = resolve_registered_pose_model_schema_binding(
+            registry,
+            run_id=best.run_id,
+            expected_set_id=best.set_id,
+            expected_model_path=best.model_path,
+            expected_model_sha256=best.model_sha256,
+        )
     finally:
         registry.close()
-
-    best = _pick_best_candidate(candidates, require_unique=require_unique)
     selected_payload = _candidate_payload(best)
     candidate_payloads = [_candidate_payload(item) for item in candidates[: max(0, int(top_k))]]
     invocation_args = argparse.Namespace(
@@ -1194,6 +1210,9 @@ def _resolve_registry_model_for_plan(
             "candidate_models": candidate_payloads,
             "output_zarr": str(plan.zarr_path),
         },
+    )
+    payload.setdefault("artifacts", {})["model_pose_schema_binding"] = (
+        model_pose_schema_binding
     )
     return ResolvedModel(model_path=str(best.model_path), payload=payload)
 
@@ -1275,10 +1294,16 @@ def _run_yolo(
     config: Dict[str, Any],
     quiet: bool,
     model_path_override: Optional[str] = None,
+    model_pose_schema_binding_override: Optional[Mapping[str, Any]] = None,
     registry: Optional[Path] = None,
 ) -> str:
     params = config.get("keypoints", {})
     model_path = model_path_override or params.get("model") or params.get("model_path")
+    model_pose_schema_binding = (
+        model_pose_schema_binding_override
+        if model_pose_schema_binding_override is not None
+        else params.get("model_pose_schema_binding")
+    )
     if not model_path:
         raise ValueError("YOLO keypoints require 'model' or 'model_path' in config.")
     if quiet and Console is not None:
@@ -1287,6 +1312,7 @@ def _run_yolo(
             return detect_keypoints_yolo(
                 zarr_path=zarr_path,
                 model_path=model_path,
+                model_pose_schema_binding=model_pose_schema_binding,
                 run_name=params.get("run_name"),
                 crop_run=params.get("crop_run"),
                 batch_size=params.get("batch_size", 256),
@@ -1308,6 +1334,7 @@ def _run_yolo(
     return detect_keypoints_yolo(
         zarr_path=zarr_path,
         model_path=model_path,
+        model_pose_schema_binding=model_pose_schema_binding,
         run_name=params.get("run_name"),
         crop_run=params.get("crop_run"),
         batch_size=params.get("batch_size", 256),
@@ -1437,6 +1464,8 @@ def _run_plan(
     retry_include_fish_present_no_keypoints: bool = False,
     retry_force_new: bool = False,
 ) -> Dict[str, Any]:
+    if refine or refine_only:
+        require_future_normal_refined_keypoint_publication()
     payload: Dict[str, Any] = {
         "recording": str(plan.recording_dir),
         "zarr": str(plan.zarr_path),
@@ -1565,6 +1594,14 @@ def _run_plan(
                 config,
                 quiet=quiet,
                 model_path_override=(resolved_model.model_path if resolved_model else None),
+                model_pose_schema_binding_override=(
+                    resolved_model.payload.get("artifacts", {}).get(
+                        "model_pose_schema_binding"
+                    )
+                    if resolved_model is not None
+                    and isinstance(resolved_model.payload.get("artifacts"), dict)
+                    else None
+                ),
                 registry=registry_path_for_keypoints,
             )
         else:
@@ -1588,11 +1625,6 @@ def _run_plan(
             )
             updated_keypoint_outputs = True
             if resolved_model is not None:
-                write_keypoint_model_resolution_provenance(
-                    zarr_path=plan.zarr_path,
-                    run_name=run_name,
-                    payload=resolved_model.payload,
-                )
                 selected = (
                     resolved_model.payload.get("selected", {})
                     if isinstance(resolved_model.payload.get("selected"), dict)
@@ -1779,12 +1811,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--refine",
         action="store_true",
-        help="Run refine_keypoints immediately after keypoints detection.",
+        help=(
+            "Request refine_keypoints after detection. Future-normal publication "
+            "currently fails closed until the refined coordinate contract exists."
+        ),
     )
     parser.add_argument(
         "--refine-only",
         action="store_true",
-        help="Refine existing keypoints runs without re-running keypoint detection.",
+        help=(
+            "Request legacy refinement delegation without detection; publication "
+            "currently fails closed unless the diagnostic-only CLI is used directly."
+        ),
     )
     parser.add_argument(
         "--no-refine-post-audit",
@@ -1902,6 +1940,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.set_defaults(require_crop=True)
 
     args = parser.parse_args(argv)
+    if args.refine or args.refine_only:
+        try:
+            require_future_normal_refined_keypoint_publication()
+        except RefinedKeypointCoordinatePublicationUnavailable as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
     if args.auto_approve_perfect and args.auto_approve_min_usable_rate is not None:
         print(
             "Error: use either --auto-approve-perfect or --auto-approve-min-usable-rate, not both.",

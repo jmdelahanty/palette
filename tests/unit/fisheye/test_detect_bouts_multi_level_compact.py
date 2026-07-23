@@ -177,14 +177,18 @@ def test_source_path_contract_prefers_grouped_track_arrays() -> None:
     )
 
     paths = detect_bouts_multi_level._resolved_track_source_array_paths(
-        root,
         SimpleNamespace(
-            scope="offline",
-            run_name="tk_run",
-            track_id=0,
+            authority_status="verified_canonical_track_motion_v1",
             track_path=(
                 "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0"
             ),
+            speed_mm_by_level={"filtered": object(), "averaged": object()},
+            frame_path_distance_mm_by_level={"filtered": object()},
+            delta_seconds=None,
+            transition_valid=None,
+            sample_valid=None,
+            positions_mm=None,
+            positions_px=None,
         ),
     )
 
@@ -195,7 +199,7 @@ def test_source_path_contract_prefers_grouped_track_arrays() -> None:
         "/movement/speed/filtered/frame_path_distance_mm"
     )
     assert paths["speed_mm"]["speed_averaged"].endswith(
-        "/speed_averaged_mm"
+        "/movement/speed/averaged/mm"
     )
 
 
@@ -210,6 +214,7 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
             "schema_id": "palette.swim_bout_runs",
             "schema_version": 7,
             "source_track_kinematics_run": "tk_run",
+            "source_track_motion_manifest_sha256": "a" * 64,
             "track_id": 0,
             "default_level": "speed_exponential",
         }
@@ -226,10 +231,12 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
     frame_axis_contract = build_frame_axis_contract(
         frames,
         authoritative_path=(
-            "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0/frame_indices"
+            "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0/"
+            "source_acquisition_frame_index"
         ),
         source_track_kinematics_run="tk_run",
         track_id=0,
+        source_track_motion_manifest_sha256="a" * 64,
         storage_mode=FRAME_AXIS_STORAGE_EMBEDDED,
     )
     run.attrs[FRAME_AXIS_CONTRACT_ATTR] = frame_axis_contract
@@ -318,6 +325,7 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
         .create_group("id_0")
     )
     source_track.create_array("frame_indices", data=frames)
+    source_track.create_array("source_acquisition_frame_index", data=frames)
     speed = np.asarray([0, 0, 1, 1, 0, 0, 2, 2, 0, 0, 0, 0], dtype=np.float64)
     transition_valid = np.ones(frames.size, dtype=bool)
     transition_valid[0] = False
@@ -351,7 +359,43 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
                 "frame_indices": (
                     "analysis/track_kinematics_runs/offline/tk_run/"
                     "tracks/id_0/frame_indices"
-                )
+                ),
+                "source_acquisition_frame_index": (
+                    "analysis/track_kinematics_runs/offline/tk_run/"
+                    "tracks/id_0/source_acquisition_frame_index"
+                ),
+            },
+            "track_motion_authority": {
+                "schema_id": "palette.track_motion_read_authority",
+                "schema_version": 1,
+                "run_ref": "/analysis/track_kinematics_runs/offline/tk_run",
+                "track_ref": (
+                    "/analysis/track_kinematics_runs/offline/tk_run/tracks/id_0"
+                ),
+                "track_id": 0,
+                "motion_manifest_ref": (
+                    "/analysis/track_kinematics_runs/offline/tk_run"
+                    "@track_motion_publication_manifest"
+                ),
+                "motion_manifest_sha256": "a" * 64,
+                "positions_px_ref": (
+                    "/analysis/track_kinematics_runs/offline/tk_run/"
+                    "tracks/id_0/positions_px"
+                ),
+                "positions_px_coordinate_descriptor_sha256": "b" * 64,
+                "positions_mm_ref": (
+                    "/analysis/track_kinematics_runs/offline/tk_run/"
+                    "tracks/id_0/positions_mm"
+                ),
+                "positions_mm_coordinate_descriptor_sha256": "c" * 64,
+                "track_sample_key_ref": (
+                    "/analysis/track_kinematics_runs/offline/tk_run/"
+                    "tracks/id_0/track_sample_key"
+                ),
+                "source_acquisition_frame_index_ref": (
+                    "/analysis/track_kinematics_runs/offline/tk_run/"
+                    "tracks/id_0/source_acquisition_frame_index"
+                ),
             },
             "source_frame_indices_dtype": "int64",
             "source_frame_indices_shape": [frames.size],
@@ -387,11 +431,16 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
     frame_axis_contract = run.attrs[FRAME_AXIS_CONTRACT_ATTR]
     assert frame_axis_contract["storage_mode"] == "reference"
     assert frame_axis_contract["authoritative_path"] == (
-        "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0/frame_indices"
+        "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0/"
+        "source_acquisition_frame_index"
     )
     assert frame_axis_contract["shape"] == [frames.size]
     assert frame_axis_contract["authoritative_dtype"] == "int64"
     assert run.attrs["provenance"]["frame_axis_contract"] == frame_axis_contract
+    assert run.attrs["source_track_motion_manifest_sha256"] == "a" * 64
+    assert run.attrs["provenance"]["inputs"]["source_track_motion_authority"][
+        "motion_manifest_sha256"
+    ] == "a" * 64
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.bouts.size > 0
     np.testing.assert_array_equal(payload.series["frame_indices"], frames)
