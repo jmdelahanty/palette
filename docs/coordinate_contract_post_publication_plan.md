@@ -296,6 +296,58 @@ performs about twenty real reloads, passed in 3m27s with the shared cache warm;
 the ordinary coherent-writer regression passed from the other module against
 the same entry in 34.93s.
 
+### Observation and subject-mask publication extension
+
+Status: implemented and locally validated on 2026-07-23.
+
+Shard 8 exposed the same shared-root validation fanout in observation geometry
+and raw/refined subject-mask publication. The motivating two-row profiles were
+not processing meaningful image volume:
+
+- one refined-mask activation test made 779,684,374 calls, including about
+  680,000 persisted-proof checks, 208,000 acquisition-frame validations, and
+  416,000 import-ownership validations; and
+- one crop-ROI publication test made 814,859,186 calls, with about 272 of 274
+  profiled seconds below persisted-proof verification.
+
+The extension gives each standalone high-level observation publication/load
+call a fresh operation scope. Raw and refined subject-mask prepare, publish,
+strict-load, completed-ineligible-load, and activation calls now do the same.
+Nested calls still join an owning writer's explicit scope. In particular, the
+refined finalizer retains its existing combined prepare/publication phase and
+closes it before completion. Raw subject-mask activation now closes and freshly
+rechecks its completed-child proof before acquiring the parent lease or writing
+selectors. No proof survives an operation, lifecycle transition, or activation
+commit point.
+
+Proof-heavy fixture construction is also explicitly scoped in the observation
+and directed-transform tests. This removes redundant setup validation while
+leaving every tested publisher, loader, mutation, and rollback call in its own
+fresh operation. It is not a persistent fixture cache and does not share trust
+between tests.
+
+Same-workstation results were:
+
+| Path | Unscoped/previous | Scoped implementation |
+|---|---:|---:|
+| Representative crop-ROI + refined activation pair | 227.25 s | 20.17 s |
+| Complete observation publication module | 87.79 s before fixture scoping | 18.55 s |
+| Refined publication + proof-session lifecycle modules | historical slowest tests alone exceeded 13m | 16.52 s for all 38 tests |
+| CI shard 8 pytest body | 29m17s | 4m26s |
+
+The exact shard-8 assignment still contained the directed-transform,
+observation-publication, and refined-mask-publication modules; small supporting
+file membership changed when the deterministic source-weight sharder was
+recomputed. The end-to-end result was 528 passed, one skipped, and 14 expected
+failures in 266.94 seconds. The focused observation/raw/refined publication run
+passed all 104 tests, and the directed-transform suite passed all 96 tests.
+
+The retained regression coverage includes same-shape payload tampering,
+descriptor and authority swaps, a fresh activation payload scan, concurrent
+selector and publication-epoch mutation, interrupted activation rollback,
+alien parent-state preservation, and the rule that child eligibility remains
+the final commit mutation.
+
 ## Work package 1: close normal-path calibration coverage
 
 This is the first scientific implementation priority.

@@ -106,6 +106,7 @@ from fisheye.shared.pixel_frame_authority import (
     require_source_camera_pixel_frame_authority,
     require_trusted_coordinate_attrs,
 )
+from fisheye.shared.proof_verification import proof_verification_operation
 from fisheye.shared.transform_authority import (
     TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     load_bound_transform_authority,
@@ -571,6 +572,7 @@ class BoundDetectionFrameEvidence:
         require_bound_detection_frame_evidence(self)
 
 
+@proof_verification_operation
 def build_bound_detection_frame_evidence(
     *,
     source_camera_frame: BoundPixelFrameAuthority,
@@ -644,6 +646,7 @@ def build_bound_detection_frame_evidence(
     )
 
 
+@proof_verification_operation
 def require_bound_detection_frame_evidence(
     value: Any,
 ) -> BoundDetectionFrameEvidence:
@@ -749,6 +752,7 @@ def _detection_backend_result_projection_record(
     }
 
 
+@proof_verification_operation
 def publish_detection_backend_result_projection(
     rowset_node: Any,
     bbox_norm_node: Any,
@@ -771,6 +775,7 @@ def publish_detection_backend_result_projection(
     )
 
 
+@proof_verification_operation
 def load_detection_backend_result_projection(
     rowset_node: Any,
     bbox_norm_node: Any,
@@ -800,6 +805,7 @@ def load_detection_backend_result_projection(
     return bound
 
 
+@proof_verification_operation
 def derive_detection_source_camera_geometry(
     bbox_norm_coords: Any,
     *,
@@ -1169,6 +1175,7 @@ def _verified_detection_source_lineage(
     return verified
 
 
+@proof_verification_operation
 def publish_detection_observation_geometry(
     rowset_node: Any,
     key_node: Any,
@@ -1317,6 +1324,7 @@ def publish_detection_observation_geometry(
         raise
 
 
+@proof_verification_operation
 def load_detection_observation_geometry(
     rowset_node: Any,
     key_node: Any,
@@ -1742,6 +1750,7 @@ def _copied_descriptor(
     )
 
 
+@proof_verification_operation
 def publish_crop_observation_geometry(
     rowset_node: Any,
     key_node: Any,
@@ -1864,6 +1873,7 @@ def publish_crop_observation_geometry(
         raise
 
 
+@proof_verification_operation
 def load_crop_observation_geometry(
     rowset_node: Any,
     key_node: Any,
@@ -2063,6 +2073,7 @@ def _require_crop_roi_bbox_edge_frame_path(
         )
 
 
+@proof_verification_operation
 def publish_crop_roi_bbox_edge_reference_extent(
     frame_node: Any,
     roi_images_node: Any,
@@ -2098,6 +2109,7 @@ def publish_crop_roi_bbox_edge_reference_extent(
         raise
 
 
+@proof_verification_operation
 def load_crop_roi_bbox_edge_reference_extent(
     frame_node: Any,
     roi_images_node: Any,
@@ -2366,6 +2378,7 @@ def _crop_roi_record(
     }
 
 
+@proof_verification_operation
 def publish_crop_roi_geometry(
     source_crop_xywh_node: Any,
     bbox_roi_xyxy_node: Any,
@@ -2507,6 +2520,7 @@ def publish_crop_roi_geometry(
         raise
 
 
+@proof_verification_operation
 def load_crop_roi_geometry(
     source_crop_xywh_node: Any,
     bbox_roi_xyxy_node: Any,
@@ -2890,6 +2904,7 @@ def _detection_observation_cardinality_record(
     }
 
 
+@proof_verification_operation
 def publish_detection_observation_cardinality(
     rowset: Any,
     *,
@@ -3062,6 +3077,7 @@ def _detection_instance_key_derivation_record(
     }
 
 
+@proof_verification_operation
 def publish_detection_instance_key_derivation(
     rowset: Any,
     key_node: Any,
@@ -3334,6 +3350,7 @@ def _empty_detection_observation_record(
     }
 
 
+@proof_verification_operation
 def publish_empty_detection_observation_declaration(
     rowset: Any,
     *,
@@ -3638,6 +3655,7 @@ def _load_persisted_detection_observation_geometry(
     return geometry
 
 
+@proof_verification_operation
 def load_persisted_detection_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -3716,6 +3734,7 @@ def _load_persisted_crop_observation_geometry(
     )
 
 
+@proof_verification_operation
 def load_persisted_crop_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -3860,6 +3879,7 @@ def _load_persisted_ordinary_crop_observation_geometry(
     return crop
 
 
+@proof_verification_operation
 def load_persisted_ordinary_crop_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -3873,6 +3893,7 @@ def load_persisted_ordinary_crop_observation_geometry(
     )
 
 
+@proof_verification_operation
 def load_persisted_source_camera_position_surface(
     root_node: Any,
     rowset_path: str,
