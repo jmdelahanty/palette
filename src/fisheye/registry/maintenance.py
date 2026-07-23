@@ -572,7 +572,7 @@ def _is_nested_zarr_subpath(path: str) -> bool:
 
 
 def _is_zarr_root_path(path: Path) -> bool:
-    return (path / "zarr.json").exists() or (path / ".zgroup").exists()
+    return (path / "zarr.json").is_file()
 
 
 def _collect_invalid_dataset_candidates(

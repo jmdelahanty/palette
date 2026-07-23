@@ -391,7 +391,6 @@ def test_resolve_review_session_targets_frame_and_roi_indices() -> None:
 
 def test_open_group_uses_non_consolidated_for_mutable_root_calls(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
-    monkeypatch.setattr(zarr_io, "LocalStore", None)
 
     class _FakeRoot:
         def __init__(self) -> None:
@@ -405,9 +404,24 @@ def test_open_group_uses_non_consolidated_for_mutable_root_calls(monkeypatch) ->
 
     root = zarr_io.open_zarr_root("/tmp/ignored.zarr", mode="a")
     assert root is not None
-    assert any(
-        kw.get("use_consolidated") is False or kw.get("consolidated") is False for kw in calls
-    )
+    assert calls == [
+        {
+            "mode": "a",
+            "use_consolidated": False,
+            "zarr_format": 3,
+        }
+    ]
+
+
+def test_open_group_rejects_zarr_v2_before_mutation(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "legacy.zarr"
+    zarr_path.mkdir()
+    (zarr_path / ".zgroup").write_text('{"zarr_format": 2}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Zarr format 2 is unsupported"):
+        zarr_io.open_zarr_root(zarr_path, mode="a")
+
+    assert not (zarr_path / "zarr.json").exists()
 
 
 def test_load_roi_payload_includes_points_and_image_metadata() -> None:

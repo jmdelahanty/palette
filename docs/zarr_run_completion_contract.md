@@ -1,7 +1,7 @@
 # Zarr Run Completion Contract
 
 Status: active  
-Last verified: 2026-06-25
+Last verified: 2026-07-20
 
 Palette run parents such as `detect_runs`, `crop_runs`,
 `refined_detect_runs`, `keypoints_runs`, and nested `quality_reports` must not
@@ -17,6 +17,14 @@ Run groups that opt into this contract set:
 - `palette_run_completed_at_utc` when complete
 - `palette_run_name`
 - `palette_run_stage`
+- `stage_selector_eligible = false | true`
+
+Future-normal public writers also mint an immutable publication-owner UUID.
+The exact attribute name is run-family specific until a shared publication
+schema is adopted, but it must be written in the same first metadata operation
+as `stage_selector_eligible = false`. A writer may mutate the public child only
+while that freshly resolved child still has the UUID minted by the current
+attempt.
 
 Run parent groups may set:
 
@@ -24,11 +32,40 @@ Run parent groups may set:
 - `latest_complete`: explicit latest complete run pointer.
 - `latest_pending`: newest started run that is not complete yet.
 
-New contract-aware writers should create the run group, immediately mark the
-run `running`, and set `latest_pending`. They should not move `latest` to the
-new run until the run is complete. On success, writers call
-`mark_run_complete(..., parent_group=<parent>, run_name=<name>)`, which updates
-both `latest_complete` and `latest`.
+For future-normal publication, a public run name is immutable from its first
+successful creation. Writers must use this order:
+
+1. Choose a new, unoccupied public child name.
+2. Atomically create it with its owner UUID and literal
+   `stage_selector_eligible = false`. Include the `running` completion state in
+   that operation when supported; otherwise stamp it immediately inside the
+   same failure guard, before any payload write.
+3. Write the payload, coordinate/measurement descriptors, row identity, and
+   exact lineage.
+4. Freshly re-resolve the canonical path and owner, validate the exact child
+   inventory and payload, then mark the child `complete` while it remains
+   selector-ineligible.
+5. Acquire the run parent's owner/generation lease and advance the complete
+   selectors while the child remains ineligible. Revalidate the fresh child
+   after the selector writes.
+6. Make `stage_selector_eligible = true` the literal commit write. No fallible
+   validation, metadata write, registry update, or console/logging operation
+   may follow that commit.
+
+`mark_run_complete` is therefore a completion marker, not sufficient authority
+to publish a future-normal run. A hardened writer uses a family validator and
+guarded selector activation after completion. Post-commit reporting must be
+nonthrowing and registry publication must independently preflight the committed
+run.
+
+Each transaction has exactly one selector-rollback authority. A run-family
+activation receipt snapshots the live predecessor state when it acquires its
+lease, after any long copy or validation interval. When such a receipt exists,
+the generic atomic publisher's pre-copy parent snapshot must be disabled for
+selector rollback; the two mechanisms must never be composed as fallbacks. If
+the exact receipt rollback itself cannot be verified, the transaction fails
+loudly and leaves the owned child ineligible. It must not restore an older
+pre-copy snapshot that could erase an intervening publication.
 
 Writers that create refined outputs in multiple phases must call
 `mark_run_complete` only after every required array, component subgroup,
@@ -56,7 +93,8 @@ contract:
 
 - the caller must pass a readable Zarr root;
 - the helper must resolve the named run group under the expected run parent;
-- the run group must satisfy `is_run_complete(..., legacy_default=True)`.
+- the run group must satisfy the parent-scoped completion rule; and
+- a present `stage_selector_eligible` marker must be literal `true`.
 
 If any of those checks fail, the helper refuses to write an `ok`
 `recording_step_status` row. Non-`ok` statuses may bypass run-group validation
@@ -86,12 +124,52 @@ scripts/py -m fisheye.utils.report_stage_array_validation_shadow \
 
 ## Read Rule
 
-Contract-aware readers should resolve default inputs with
-`resolve_latest_complete_run_name(parent, legacy_default=True)`.
+Future-normal readers resolve default inputs with
+`resolve_latest_complete_run_name(parent, legacy_default=False)`. Canonical
+resolution requires:
+
+- both `latest` and `latest_complete` are present and name the same exact
+  child;
+- that child is complete; and
+- that child has literal `stage_selector_eligible = true`.
+
+Any selector disagreement is an in-progress or invalid handoff, not permission
+to resurrect whichever older pointer still resolves. Readers return a
+retry/fail-closed result. Explicit run paths still require the selected child's
+completion, eligibility, schema, lineage, and consumer-specific contract.
 
 Legacy runs without completion attrs are treated as complete for compatibility.
-Runs that opt into `palette.zarr_run_completion.v1` are considered usable only
-when `palette_run_completion_status == "complete"`.
+That behavior is available only through an explicit, testable compatibility
+path such as `legacy_default=True`; it is not the normal policy for recordings
+created after the canonical cutover. Runs that opt into
+`palette.zarr_run_completion.v1` are usable only when completion and literal
+selector eligibility both pass.
+
+## Failed Publication Tombstones
+
+A failed public publication is retained as an immutable tombstone. It is not a
+new scientific array or a legacy-coordinate adapter. It is the same public run
+child, marked so that no scientific reader may select it. A verified tombstone
+has at least:
+
+- the originally minted publication-owner UUID;
+- `palette_run_completion_status = "failed"`;
+- literal `stage_selector_eligible = false`;
+- no completed timestamp;
+- failure time/reason and a versioned tombstone record; and
+- a retry policy requiring a new immutable run name.
+
+The child may retain partial payload arrays for diagnosis. Readers ignore or
+reject it, and an operator can inspect it only by exact path. Writers must not
+delete it, rename another child over it, or reinterpret it as a new attempt.
+Cleanup must freshly resolve the canonical path and prove the original owner
+before every mutation; a stale in-memory group handle is not ownership proof.
+
+Only hidden same-parent staging children may be deleted after failed physical
+installation. Once a canonical public child exists, including a failed child,
+its name is permanently occupied. This policy means healthy future archives
+can contain occasional failed-attempt tombstones without requiring any legacy
+reader adapter.
 
 ## Safety Check
 
@@ -115,10 +193,15 @@ The completion attributes remain the generic compatibility contract for every
 run family. Hardened analysis materializers additionally use
 `palette.atomic_run_group_publisher` version 1: compute in node-local storage,
 copy to a hidden same-parent sibling, verify the physical inventory, atomically
-rename the sibling to the final run name, mark completion, update pointers, and
-roll back the target and parent attributes after any failure.
+install a newly owner-bound and selector-ineligible public child, validate and
+mark it complete, perform a guarded selector handoff, and commit eligibility
+last. Failure before public installation may delete only the hidden staging
+child. Failure after public installation retains an owner-bound, ineligible
+tombstone and conditionally restores only parent attributes still proven to
+belong to the failed publication epoch.
 
 Readers must still enforce completion because historical and non-materialized
 writers may use only the attr contract. Atomic installation prevents a new
-production analysis run from becoming visible under its final path while it is
-being populated; completion controls whether default resolution may select it.
+production analysis run from appearing partially copied under its final path.
+Completion, exact contract validation, consistent selectors, and the final
+eligibility bit jointly control whether a default reader may select it.

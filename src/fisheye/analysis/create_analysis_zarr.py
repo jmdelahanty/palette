@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,11 @@ from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
-from fisheye.shared.import_video_metadata import probe_video_metadata, write_video_metadata
+from fisheye.shared.import_video_metadata import (
+    probe_video_metadata,
+    publish_external_video_acquisition_authority,
+    write_video_metadata,
+)
 from fisheye.shared.recording_preflight import preflight_gate_reason
 
 from .import_stimulus_to_zarr import import_stimulus_to_zarr
@@ -203,6 +208,22 @@ def _ensure_archive(plan: CreationPlan) -> None:
         attrs.setdefault("source_path", str(plan.video_path))
     if plan.recording_dir is not None:
         attrs.setdefault("recording_path", str(plan.recording_dir))
+        attrs.setdefault("recording_id", plan.recording_dir.name)
+        manifest_path = plan.recording_dir / "recording_manifest.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("recording_manifest.json must contain an object.")
+            camera_id = manifest.get("camera_id")
+            if isinstance(camera_id, str) and camera_id.strip():
+                camera_id = camera_id.strip()
+                existing = attrs.get("camera_id")
+                if existing not in (None, "", camera_id):
+                    raise ValueError(
+                        "Existing archive camera_id conflicts with recording_manifest.json."
+                    )
+                attrs["camera_id"] = camera_id
+                attrs.setdefault("recording_manifest_path", str(manifest_path))
     root.attrs.put(attrs)
 
 
@@ -218,6 +239,7 @@ def _apply_video_metadata(plan: CreationPlan, *, overwrite: bool) -> dict[str, i
         import_purpose="analysis",
         recording_path=plan.recording_dir,
     )
+    publish_external_video_acquisition_authority(root)
     return {
         "root_attrs_updated": len(updates.get("root", {})),
         "raw_video_attrs_updated": len(updates.get("raw_video", {})),

@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from fisheye.utils import validate_imported_run_group as mod
-from fisheye.utils.run_detection_artifact import REQUIRED_DETECT_ARRAYS, tree_hash
+from fisheye.utils.run_detection_artifact import (
+    DETECTION_ARTIFACT_LAYOUT,
+    REQUIRED_DETECT_ARRAYS,
+    tree_hash,
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -78,7 +82,7 @@ def _write_imported_detect_run(
 
     digest = tree_hash(run_group)
     manifest = {
-        "layout": "detect_yolo_sparse_v1",
+        "layout": DETECTION_ARTIFACT_LAYOUT,
         "target_archive_path": str(zarr_path.resolve()),
         "target_group_path": f"{run_family_path}/{run_name}",
         "run_family": "detect_runs",
@@ -105,7 +109,7 @@ def _write_imported_detect_run(
         "run_family": "detect_runs",
         "run_family_path": run_family_path,
         "run_name": run_name,
-        "layout": "detect_yolo_sparse_v1",
+        "layout": DETECTION_ARTIFACT_LAYOUT,
         "final_path": str(run_group.resolve()),
         "manifest": manifest,
     }

@@ -31,14 +31,13 @@ from matplotlib.patches import Circle
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
-    latest,
-    load_epochs,
-    nav,
     resolve_cohort,
-    resolve_object_roles,
+)
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
 from fisheye.analysis.analyze_goodcopbadcop_per_fish import spatial_avoidance_did
-from fisheye.shared.arena_geometry import resolve_arena_geometry
 
 NEAR_MM = 15.0
 BINS = 44
@@ -46,22 +45,8 @@ BINS = 44
 
 def load_positions(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
-    roles = resolve_object_roles(r)
-    agg, inr = roles["aggressive"], roles["inert"]
-    fish = np.asarray(cd["positions"]["fish_centroid_arena_xy"][:], float)
-    fvalid = np.asarray(cd["positions"]["fish_valid"][:], bool)
-    chas = np.asarray(cd["positions"]["chaser_arena_xy"][:], float)
-    cvalid = np.asarray(cd["positions"]["chaser_valid"][:], bool)
-    ppm = float(cd.attrs.get("pixels_per_mm_projector"))
-    geo, _ = resolve_arena_geometry(r, cd, pixels_per_mm=ppm)
-    cx, cy = geo.center_x_px, geo.center_y_px
-    if cx is None:
-        raise ValueError("no arena geometry")
-    return {"fx": (fish[:, 0] - cx) / ppm, "fy": (fish[:, 1] - cy) / ppm, "fvalid": fvalid,
-            "agg_x": (chas[:, agg, 0] - cx) / ppm, "agg_y": (chas[:, agg, 1] - cy) / ppm, "agg_valid": cvalid[:, agg],
-            "inr_x": (chas[:, inr, 0] - cx) / ppm, "inr_y": (chas[:, inr, 1] - cy) / ppm, "inr_valid": cvalid[:, inr],
-            "radius_mm": geo.radius_px / ppm, "epochs": load_epochs(r)}
+    distance = load_chaser_distance_run(r)
+    distance.require_behavior_authority()
 
 
 def epoch_slice(valid, rng):
@@ -88,6 +73,8 @@ def main() -> None:
         for rid, zp in cohort:
             try:
                 od = spatial_avoidance_did(zp).get("occ_did", np.nan)
+            except ChaserDistanceReadError:
+                raise
             except Exception:
                 od = np.nan
             if np.isfinite(od):
@@ -103,6 +90,8 @@ def main() -> None:
     for ri, (rid, zp, ol) in enumerate(selected):
         try:
             d = load_positions(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], ex)
             continue

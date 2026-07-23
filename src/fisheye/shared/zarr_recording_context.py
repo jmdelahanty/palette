@@ -13,23 +13,12 @@ from fisheye.shared.source_video_metadata import (
 
 def _read_attrs(group_dir: Path) -> dict[str, object]:
     zarr_json = group_dir / "zarr.json"
-    if zarr_json.exists():
-        try:
-            payload = json.loads(zarr_json.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        attrs = payload.get("attributes")
-        return attrs if isinstance(attrs, dict) else {}
-
-    zattrs = group_dir / ".zattrs"
-    if zattrs.exists():
-        try:
-            payload = json.loads(zattrs.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    return {}
+    try:
+        payload = json.loads(zarr_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    attrs = payload.get("attributes")
+    return attrs if isinstance(attrs, dict) else {}
 
 
 def _norm_text(value: Any) -> Optional[str]:

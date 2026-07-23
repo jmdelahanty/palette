@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import sys
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from contextlib import nullcontext
+from functools import wraps
 from pathlib import Path
 from queue import Queue
 from threading import Thread
 from typing import Any, Dict, Optional, Sequence, Tuple
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -48,8 +52,26 @@ from ..shared.subject_mask_chunks import (
     subject_mask_storage_chunks,
 )
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
+from ..shared.subject_mask_coordinate_publication import (
+    SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+    SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+    SUBJECT_MASK_PUBLICATION_OWNER_ATTR,
+    SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+    _activate_validated_subject_mask_coordinate_surfaces,
+    capture_subject_mask_coordinate_publication_checkpoint,
+    load_persisted_subject_mask_crop_source,
+    prepare_subject_mask_coordinate_context,
+    publish_subject_mask_coordinate_surfaces,
+    require_direct_subject_mask_crop_pixel_source,
+    rollback_subject_mask_coordinate_publication,
+    selected_subject_mask_crop_values,
+)
 from ..shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
     mark_run_complete,
+    mark_run_failed,
     mark_run_started,
     note_pending_latest,
     require_runs_parent,
@@ -86,6 +108,274 @@ MASK_PROBS_SHARDING_SCHEMA = "palette.subject_mask_probability_postpack.v1"
 MASK_PROBS_DIRECT_SHARDING_SCHEMA = (
     "palette.subject_mask_probability_double_buffered_shards.v1"
 )
+_SUBJECT_MASK_SELECTOR_ATTRS = (
+    "latest",
+    "latest_complete",
+    "latest_pending",
+    "authoritative_run",
+    "authoritative_run_provenance",
+    SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+    SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+    SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+)
+
+
+def _snapshot_selected_attrs(
+    node: Any,
+    names: Sequence[str],
+) -> dict[str, tuple[bool, Any]]:
+    attrs = getattr(node, "attrs", None)
+    if attrs is None or not hasattr(attrs, "keys"):
+        raise RuntimeError("Cannot snapshot subject-mask selector attrs.")
+    return {
+        name: (name in attrs, copy.deepcopy(attrs.get(name)))
+        for name in names
+    }
+
+
+def _restore_owned_subject_mask_selectors(
+    parent: Any,
+    snapshot: dict[str, tuple[bool, Any]],
+    *,
+    run_name: str | None,
+    owner_token: str | None,
+) -> None:
+    """Restore only selector values still visibly owned by this attempt."""
+
+    if run_name is None or owner_token is None:
+        return
+    attrs = parent.attrs
+    failures: list[str] = []
+    lease = attrs.get(SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR)
+    lease_owned = (
+        isinstance(lease, dict)
+        and lease.get("run_path") == f"subject_mask_runs/{run_name}"
+        and lease.get("publication_owner") == owner_token
+    )
+    lease_present, lease_snapshot = snapshot[
+        SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR
+    ]
+    if (
+        lease is not None
+        and not lease_owned
+        and (not lease_present or lease != lease_snapshot)
+    ):
+        raise RuntimeError(
+            "Subject-mask parent publication lease was replaced by a foreign "
+            "attempt; refusing silent selector rollback."
+        )
+    for name in ("latest", "latest_complete", "latest_pending"):
+        try:
+            if attrs.get(name) != run_name:
+                continue
+            present, value = snapshot[name]
+            if present:
+                attrs[name] = copy.deepcopy(value)
+            else:
+                del attrs[name]
+            if present and attrs.get(name) != value:
+                raise RuntimeError("restored value differs from snapshot")
+            if not present and name in attrs:
+                raise RuntimeError("owned selector survived rollback")
+        except BaseException as exc:  # pragma: no cover - hostile store
+            failures.append(f"{name}: {exc}")
+    if lease_owned:
+        for name in (
+            SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
+            SUBJECT_MASK_PUBLICATION_POLICY_ATTR,
+            SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
+        ):
+            try:
+                present, value = snapshot[name]
+                if present:
+                    attrs[name] = copy.deepcopy(value)
+                elif name in attrs:
+                    del attrs[name]
+                if present and attrs.get(name) != value:
+                    raise RuntimeError("restored value differs from snapshot")
+                if not present and name in attrs:
+                    raise RuntimeError("owned publication state survived rollback")
+            except BaseException as exc:  # pragma: no cover - hostile store
+                failures.append(f"{name}: {exc}")
+    if failures:
+        raise RuntimeError(
+            "Subject-mask owned selector rollback was incomplete: "
+            f"{failures!r}."
+        )
+
+
+class _SubjectMaskAttemptFailureBoundary:
+    """Fail one newly created subject-mask attempt closed across the writer."""
+
+    def __init__(self) -> None:
+        self.root: Any | None = None
+        self.parent: Any | None = None
+        self.run: Any | None = None
+        self.run_name: str | None = None
+        self.run_path: str | None = None
+        self.parent_selector_snapshot: dict[str, tuple[bool, Any]] | None = None
+        self.crop_source: Any | None = None
+        self.coordinate_checkpoint: Any | None = None
+        self.owner_token: str | None = None
+        self.finalized = False
+
+    def prepare(self, *, root: Any, parent: Any) -> None:
+        if self.root is not None or self.parent is not None:
+            raise RuntimeError(
+                "A subject-mask attempt cannot bind more than one run parent."
+            )
+        self.root = root
+        self.parent = parent
+        self.parent_selector_snapshot = _snapshot_selected_attrs(
+            parent,
+            _SUBJECT_MASK_SELECTOR_ATTRS,
+        )
+        self.owner_token = uuid4().hex
+
+    def bind_run(self, run: Any, run_name: str) -> None:
+        if self.run is not None:
+            raise RuntimeError("A subject-mask attempt cannot bind more than one run.")
+        if (
+            self.owner_token is None
+            or run.attrs.get(SUBJECT_MASK_PUBLICATION_OWNER_ATTR)
+            != self.owner_token
+        ):
+            raise RuntimeError(
+                "Subject-mask child did not persist its atomic publication owner."
+            )
+        self.run = run
+        self.run_name = str(run_name)
+        self.run_path = str(getattr(run, "path", "")).strip("/") or None
+
+    def bind_crop_source(self, crop_source: Any) -> None:
+        self.crop_source = crop_source
+
+    def close_crop_source(self) -> None:
+        if self.crop_source is None:
+            return
+        self.crop_source.close()
+        self.crop_source = None
+
+    def bind_coordinate_checkpoint(self, checkpoint: Any) -> None:
+        self.coordinate_checkpoint = checkpoint
+
+    def fresh_parent(self) -> Any:
+        if self.parent is None:
+            raise RuntimeError("Subject-mask publication parent is not bound.")
+        path = str(getattr(self.parent, "path", "")).strip("/")
+        if self.root is not None and path:
+            try:
+                parent = self.root[path]
+            except BaseException as exc:
+                raise RuntimeError(
+                    "Subject-mask publication parent disappeared."
+                ) from exc
+            self.parent = parent
+        return self.parent
+
+    def require_owned_run(self) -> Any:
+        if (
+            self.parent is None
+            or self.run_name is None
+            or self.owner_token is None
+        ):
+            raise RuntimeError("Subject-mask publication ownership is not bound.")
+        try:
+            run = self.fresh_parent()[self.run_name]
+        except BaseException as exc:
+            raise RuntimeError(
+                "Subject-mask publication child disappeared."
+            ) from exc
+        if run.attrs.get(SUBJECT_MASK_PUBLICATION_OWNER_ATTR) != self.owner_token:
+            raise RuntimeError(
+                "Subject-mask publication child was replaced by another owner."
+            )
+        self.run = run
+        return run
+
+    def mark_finalized(self) -> None:
+        self.finalized = True
+        self.coordinate_checkpoint = None
+
+    def fail(self, original: BaseException) -> None:
+        failures: list[str] = []
+        if self.run is not None and not self.finalized:
+            try:
+                run_for_failure = self.require_owned_run()
+            except BaseException:
+                # The child disappeared or now belongs to a different attempt.
+                # Touch neither that replacement nor selectors that now resolve
+                # to it; this is concurrent state, not a rollback target.
+                run_for_failure = None
+            if run_for_failure is not None and self.coordinate_checkpoint is not None:
+                if run_for_failure.attrs.get("stage_selector_eligible") is not True:
+                    try:
+                        rollback_subject_mask_coordinate_publication(
+                            self.coordinate_checkpoint
+                        )
+                    except BaseException as exc:  # pragma: no cover - hostile store
+                        failures.append(f"coordinate publication: {exc}")
+            publication_committed = (
+                run_for_failure is not None
+                and run_for_failure.attrs.get("stage_selector_eligible") is True
+            )
+            if run_for_failure is not None and not publication_committed:
+                try:
+                    run_for_failure.attrs["stage_selector_eligible"] = False
+                    mark_run_failed(
+                        run_for_failure,
+                        parent_group=None,
+                        run_name=self.run_name,
+                        error=f"subject-mask writer failed: {original}",
+                    )
+                    run_for_failure.attrs["stage_selector_eligible"] = False
+                except BaseException as exc:  # pragma: no cover - hostile store
+                    failures.append(f"run completion: {exc}")
+            if (
+                run_for_failure is not None
+                and not publication_committed
+                and self.parent_selector_snapshot is not None
+            ):
+                try:
+                    _restore_owned_subject_mask_selectors(
+                        self.fresh_parent(),
+                        self.parent_selector_snapshot,
+                        run_name=self.run_name,
+                        owner_token=self.owner_token,
+                    )
+                except BaseException as exc:  # pragma: no cover - hostile store
+                    failures.append(f"owned parent selectors: {exc}")
+        if self.crop_source is not None:
+            try:
+                self.close_crop_source()
+            except BaseException as exc:  # pragma: no cover - hostile source
+                failures.append(f"crop source close: {exc}")
+        if failures:
+            raise RuntimeError(
+                "Subject-mask attempt failed and fail-closed rollback was incomplete: "
+                f"{failures!r}."
+            ) from original
+
+
+_ACTIVE_SUBJECT_MASK_ATTEMPT: ContextVar[
+    _SubjectMaskAttemptFailureBoundary | None
+] = ContextVar("active_subject_mask_attempt", default=None)
+
+
+def _fail_closed_subject_mask_attempt(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        boundary = _SubjectMaskAttemptFailureBoundary()
+        token = _ACTIVE_SUBJECT_MASK_ATTEMPT.set(boundary)
+        try:
+            return function(*args, **kwargs)
+        except BaseException as exc:
+            boundary.fail(exc)
+            raise
+        finally:
+            _ACTIVE_SUBJECT_MASK_ATTEMPT.reset(token)
+
+    return wrapped
 
 
 @dataclass(frozen=True)
@@ -242,23 +532,26 @@ def _compute_spatial_metrics_from_binary_tensor(
         y_int,
         torch.full((1, 1, height), height, device=mask.device, dtype=torch.int32),
     ).amin(dim=2)
-    y_max = torch.where(
+    y_max_exclusive = torch.where(
         row_has_mask,
-        y_int,
-        torch.full((1, 1, height), -1, device=mask.device, dtype=torch.int32),
+        y_int + 1,
+        torch.zeros((1, 1, height), device=mask.device, dtype=torch.int32),
     ).amax(dim=2)
     x_min = torch.where(
         col_has_mask,
         x_int,
         torch.full((1, 1, width), width, device=mask.device, dtype=torch.int32),
     ).amin(dim=2)
-    x_max = torch.where(
+    x_max_exclusive = torch.where(
         col_has_mask,
-        x_int,
-        torch.full((1, 1, width), -1, device=mask.device, dtype=torch.int32),
+        x_int + 1,
+        torch.zeros((1, 1, width), device=mask.device, dtype=torch.int32),
     ).amax(dim=2)
 
-    bbox_xyxy = torch.stack((x_min, y_min, x_max, y_max), dim=2).to(dtype=torch.float32)
+    bbox_xyxy = torch.stack(
+        (x_min, y_min, x_max_exclusive, y_max_exclusive),
+        dim=2,
+    ).to(dtype=torch.float32)
     bbox_xyxy = torch.where(valid.unsqueeze(2), bbox_xyxy, torch.zeros_like(bbox_xyxy))
     return {
         "centroid_xy": centroid_xy,
@@ -308,7 +601,12 @@ def _compute_channel_spatial_metrics(binary_masks: np.ndarray) -> dict[str, np.n
         centroid_xy[row_idx, 1] = float(ys.mean())
         centroid_valid[row_idx] = True
         bbox_xyxy[row_idx] = np.asarray(
-            [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())],
+            [
+                float(xs.min()),
+                float(ys.min()),
+                float(xs.max() + 1),
+                float(ys.max() + 1),
+            ],
             dtype=np.float32,
         )
         bbox_valid[row_idx] = True
@@ -448,7 +746,24 @@ def _prepare_run_group(
 ) -> Tuple[zarr.Group, str]:
     if output_parent not in SUBJECT_MASK_OUTPUT_PARENTS:
         raise ValueError(f"output_parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {output_parent!r}.")
-    parent = require_runs_parent(root, output_parent)
+    parent = require_runs_parent(
+        root,
+        output_parent,
+        completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    )
+    boundary = _ACTIVE_SUBJECT_MASK_ATTEMPT.get()
+    if boundary is not None:
+        boundary.prepare(root=root, parent=parent)
+        assert boundary.parent_selector_snapshot is not None
+        selector_snapshot = boundary.parent_selector_snapshot
+        assert boundary.owner_token is not None
+        owner_token = boundary.owner_token
+    else:
+        selector_snapshot = _snapshot_selected_attrs(
+            parent,
+            _SUBJECT_MASK_SELECTOR_ATTRS,
+        )
+        owner_token = uuid4().hex
     resolved_name = run_name
     if resolved_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
@@ -458,10 +773,54 @@ def _prepare_run_group(
         while resolved_name in parent:
             resolved_name = f"{base_name}_{suffix:03d}"
             suffix += 1
+    target_selectors = tuple(
+        selector
+        for selector in ("latest", "latest_complete", "authoritative_run")
+        if parent.attrs.get(selector) == str(resolved_name)
+    )
+    if resolved_name not in parent and target_selectors:
+        raise ValueError(
+            f"Refusing to create {output_parent}/{resolved_name}: stale selector(s) "
+            f"{target_selectors!r} already name the missing child."
+        )
+    pending = parent.attrs.get("latest_pending")
+    if (
+        output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
+        and pending is not None
+        and pending != ""
+        and (resolved_name not in parent or pending != str(resolved_name))
+    ):
+        raise ValueError(
+            f"Refusing to start {output_parent}/{resolved_name}: latest_pending "
+            f"is already owned by {pending!r}."
+        )
     if resolved_name in parent:
         if not overwrite:
             raise ValueError(
                 f"{output_parent}/{resolved_name} already exists. Pass --overwrite to replace it."
+            )
+        existing = parent[resolved_name]
+        selected_by = tuple(
+            selector
+            for selector in (
+                "latest",
+                "latest_complete",
+                "latest_pending",
+                "authoritative_run",
+            )
+            if parent.attrs.get(selector) == str(resolved_name)
+        )
+        if (
+            existing.attrs.get(RUN_COMPLETION_STATUS_ATTR) == RUN_STATUS_COMPLETE
+            or selected_by
+        ):
+            reason = (
+                "it is complete"
+                if not selected_by
+                else f"it is selected by {', '.join(selected_by)}"
+            )
+            raise ValueError(
+                f"Refusing to overwrite {output_parent}/{resolved_name}: {reason}."
             )
         assert_subject_mask_run_unreferenced(
             root,
@@ -469,10 +828,85 @@ def _prepare_run_group(
             base_parent_name=output_parent,
         )
         del parent[resolved_name]
-    run_group = parent.create_group(resolved_name)
+    sentinel_attrs = {
+        "stage_selector_eligible": False,
+        SUBJECT_MASK_PUBLICATION_OWNER_ATTR: owner_token,
+    }
+    run_group = parent.create_group(
+        resolved_name,
+        attributes=sentinel_attrs,
+    )
+    if (
+        run_group.attrs.get("stage_selector_eligible") is not False
+        or run_group.attrs.get(SUBJECT_MASK_PUBLICATION_OWNER_ATTR) != owner_token
+    ):
+        raise RuntimeError(
+            "Subject-mask child did not persist its atomic fail-closed sentinel."
+        )
+    if boundary is not None:
+        boundary.bind_run(run_group, str(resolved_name))
     mark_run_started(run_group, run_name=str(resolved_name), stage="subject_masks")
-    note_pending_latest(parent, str(resolved_name))
+    if output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
+        note_pending_latest(parent, str(resolved_name))
+    verify_parent = boundary.fresh_parent() if boundary is not None else parent
+    for selector in (
+        "latest",
+        "latest_complete",
+        "authoritative_run",
+        "authoritative_run_provenance",
+    ):
+        present, value = selector_snapshot[selector]
+        if (selector in verify_parent.attrs) is not present or (
+            present and verify_parent.attrs.get(selector) != value
+        ):
+            raise RuntimeError(
+                "Subject-mask setup observed concurrent parent-selector mutation."
+            )
+    if (
+        output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
+        and verify_parent.attrs.get("latest_pending") != str(resolved_name)
+    ):
+        raise RuntimeError("Subject-mask attempt did not retain its pending selector.")
     return run_group, str(resolved_name)
+
+
+def _write_canonical_subject_mask_selection(
+    run_group: zarr.Group,
+    source: Any,
+) -> dict[str, np.ndarray]:
+    """Persist the exact full canonical crop selection used by inference."""
+
+    row_count = int(source.crop_geometry.row_identity.leading_dimension)
+    rows = np.arange(row_count, dtype="<i8")
+    selected = selected_subject_mask_crop_values(source, rows)
+    row_chunks = (max(1, min(row_count, 4096)),)
+    placement_chunks = (row_chunks[0], 4)
+    run_group.create_array(
+        "source_crop_row_ids",
+        data=selected["source_crop_row_ids"],
+        chunks=row_chunks,
+        overwrite=True,
+    )
+    run_group.create_array(
+        "instance_key",
+        data=np.asarray(selected["instance_key"], dtype="<u8"),
+        chunks=row_chunks,
+        overwrite=True,
+    )
+    run_group.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray(selected["source_acquisition_frame_index"], dtype="<i8"),
+        chunks=row_chunks,
+        overwrite=True,
+    )
+    placement = np.ascontiguousarray(selected["source_crop_xywh"])
+    run_group.create_array(
+        "source_crop_xywh",
+        data=placement,
+        chunks=placement_chunks,
+        overwrite=True,
+    )
+    return selected
 
 
 def _output_parent_from_args(args: argparse.Namespace) -> str:
@@ -1459,6 +1893,7 @@ def _resolve_registry_checkpoint(
     return Path(selected.model_path).expanduser().resolve(), payload
 
 
+@_fail_closed_subject_mask_attempt
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
@@ -1467,6 +1902,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     console.print("[bold cyan]Running U-Net subject-mask inference[/bold cyan]\n")
 
     output_parent = _output_parent_from_args(args)
+    canonical_output = output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
     if (
         args.roi_work_package_manifest is not None
         and not _is_shard_output_parent(output_parent)
@@ -1481,6 +1917,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise ValueError(
             "Subset subject-mask inference does not consume assignment keypoints. "
             "Bind the complete refined-keypoint run during mask finalization."
+        )
+    if canonical_output and args.roi_cache_manifest is not None:
+        raise ValueError(
+            "Canonical subject-mask inference requires direct persisted crop "
+            "roi_images and rejects ROI cache manifests."
         )
 
     checkpoint_value = args.checkpoint_option or args.checkpoint
@@ -1500,8 +1941,41 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise ValueError(
             "U-Net subject-mask inference requires a checkpoint path or --resolve-model-from-registry."
         )
+    selected_model = (
+        model_resolution_payload.get("selected", {})
+        if model_resolution_payload is not None
+        else {}
+    )
+    if not isinstance(selected_model, dict):
+        selected_model = {}
+    registry_checkpoint_hash = (
+        selected_model.get("model_sha256")
+        if isinstance(selected_model.get("model_sha256"), str)
+        else None
+    )
+    checkpoint_artifact_before_load = fingerprint_artifact(
+        checkpoint_path,
+        role="subject_mask_unet_checkpoint",
+        registry_hash=registry_checkpoint_hash,
+    )
     device = _resolve_device(args.device)
     model, checkpoint = _load_checkpoint(checkpoint_path, device)
+    checkpoint_artifact_after_load = fingerprint_artifact(
+        checkpoint_path,
+        role="subject_mask_unet_checkpoint",
+        registry_hash=registry_checkpoint_hash,
+    )
+    artifact_identity_fields = ("path", "fingerprint_scheme", "sha256", "size_bytes", "mtime_ns")
+    if any(
+        checkpoint_artifact_before_load.get(name)
+        != checkpoint_artifact_after_load.get(name)
+        for name in artifact_identity_fields
+    ):
+        raise RuntimeError(
+            "Subject-mask checkpoint changed while it was being loaded; refusing "
+            "to publish ambiguous model lineage."
+        )
+    checkpoint_artifact = checkpoint_artifact_before_load
 
     label_schema_id, mask_labels = _resolve_checkpoint_schema(checkpoint)
 
@@ -1519,7 +1993,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         crop_source = CropImageSource.open(
             root,
             crop_run=args.crop_run,
-            zarr_path=zarr_path,
+            # Canonical publication must retain the archive-root identity of the
+            # exact crop_runs/<run>/roi_images owner.
+            zarr_path=None if canonical_output else zarr_path,
             roi_cache_policy=args.roi_cache_policy,
             roi_live_acceleration=args.roi_live_acceleration,
             roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
@@ -1528,13 +2004,81 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
             console=console,
         )
+    boundary = _ACTIVE_SUBJECT_MASK_ATTEMPT.get()
+    if boundary is not None:
+        boundary.bind_crop_source(crop_source)
     crop_group = crop_source.crop_group
     crop_run_name = crop_source.crop_run_name
     selected_crop_rows = getattr(crop_source, "source_crop_row_ids", None)
     total_rois = int(crop_source.total_rois)
     if total_rois == 0:
-        crop_source.close()
+        if boundary is not None:
+            boundary.close_crop_source()
+        else:  # pragma: no cover - public writer is boundary-decorated
+            crop_source.close()
         raise ValueError("ROI image array is empty; nothing to segment.")
+    canonical_crop_source = None
+    canonical_selected: dict[str, np.ndarray] | None = None
+    if canonical_output:
+        canonical_crop_path = f"crop_runs/{crop_run_name}"
+        if str(getattr(crop_group, "path", "")).strip("/") != canonical_crop_path:
+            raise ValueError(
+                "Canonical subject-mask inference requires the exact selected "
+                f"persisted crop rowset at {canonical_crop_path!r}."
+            )
+        if selected_crop_rows is not None:
+            raise ValueError(
+                "Canonical subject-mask inference requires the direct complete "
+                "materialized crop rowset and rejects selected-row proxy sources."
+            )
+        if (
+            getattr(crop_source, "storage_mode", None) != "materialized"
+            or getattr(crop_source, "frame_source_kind", None) != "roi_images"
+            or getattr(crop_source, "roi_read_mode", None) != "materialized_crop_run"
+            or bool(getattr(crop_source, "roi_cache_used", False))
+        ):
+            raise ValueError(
+                "Canonical subject-mask inference requires direct root-owned "
+                "materialized roi_images; caches, live/composite pixels, and work "
+                "packages are unsupported."
+            )
+        canonical_crop_source = load_persisted_subject_mask_crop_source(
+            root,
+            canonical_crop_path,
+        )
+        require_direct_subject_mask_crop_pixel_source(
+            canonical_crop_source,
+            getattr(crop_source, "_roi_images", None),
+        )
+        canonical_rows = np.arange(
+            canonical_crop_source.crop_geometry.row_identity.leading_dimension,
+            dtype="<i8",
+        )
+        canonical_selected = selected_subject_mask_crop_values(
+            canonical_crop_source,
+            canonical_rows,
+        )
+        active_placement = np.asarray(crop_source.roi_coordinates_full)
+        source_placement = canonical_selected["source_crop_xywh"]
+        active_frames = np.asarray(crop_source.frame_indices, dtype="<i8")
+        expected_roi_shape = (
+            int(canonical_crop_source.roi_frame.endpoint.height),
+            int(canonical_crop_source.roi_frame.endpoint.width),
+        )
+        if (
+            total_rois != int(canonical_rows.shape[0])
+            or tuple(map(int, crop_source.roi_shape)) != expected_roi_shape
+            or active_placement.shape != source_placement[:, :2].shape
+            or not np.array_equal(active_placement, source_placement[:, :2])
+            or not np.array_equal(
+                active_frames,
+                canonical_selected["source_acquisition_frame_index"],
+            )
+        ):
+            raise ValueError(
+                "Active crop pixels/rows do not equal the exact persisted canonical "
+                "crop selection, placement, ROI extent, and acquisition mapping."
+            )
     roi_height, roi_width = map(int, crop_source.roi_shape)
     model_input_size = int(args.model_input_size) if args.model_input_size is not None else max(roi_height, roi_width)
     model_input_transform = resolve_model_input_transform(
@@ -1551,7 +2095,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             mask_labels=mask_labels,
         )
     except Exception:
-        crop_source.close()
+        if boundary is not None:
+            boundary.close_crop_source()
+        else:  # pragma: no cover - public writer is boundary-decorated
+            crop_source.close()
         raise
 
     env_info = get_environment_info(
@@ -1570,17 +2117,55 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     shard_attrs = _shard_attrs_from_args(args, output_parent=output_parent)
     timing_profiler = InferenceTimingProfiler(enabled=bool(args.profile_timings))
+    canonical_coordinate_context = None
 
     try:
-        if selected_crop_rows is not None:
-            copy_selected_crop_row_lineage_arrays(
+        if canonical_crop_source is not None:
+            assert canonical_selected is not None
+            written_selection = _write_canonical_subject_mask_selection(
                 run_group,
-                crop_group,
-                selected_crop_rows,
+                canonical_crop_source,
             )
+            for name in (
+                "source_crop_row_ids",
+                "instance_key",
+                "source_acquisition_frame_index",
+                "source_crop_xywh",
+            ):
+                if not np.array_equal(written_selection[name], canonical_selected[name]):
+                    raise RuntimeError(
+                        f"Canonical subject-mask selection changed while writing {name}."
+                    )
+            run_group.attrs["mask_labels"] = list(mask_labels)
+            run_group.attrs["label_schema_id"] = label_schema_id
+            run_group.attrs["model_input_transform"] = model_input_transform.to_attrs()
+            run_group.attrs["mask_probability_threshold"] = 0.5
+            run_group.attrs["source_checkpoint"] = str(checkpoint_path)
+            run_group.attrs["subject_mask_model_artifact"] = checkpoint_artifact
+            if boundary is None or boundary.owner_token is None:
+                raise RuntimeError("Canonical subject-mask preflight lacks ownership.")
+            canonical_coordinate_context = prepare_subject_mask_coordinate_context(
+                root,
+                f"subject_mask_runs/{resolved_run_name}",
+                expected_publication_owner=boundary.owner_token,
+                crop_path=f"crop_runs/{crop_run_name}",
+                mask_labels=mask_labels,
+                model_input_transform=model_input_transform,
+                model_artifact=checkpoint_artifact,
+                mask_probability_threshold=0.5,
+            )
+            # Preflight reloads through the root; keep using that exact handle.
+            run_group = boundary.require_owned_run()
         else:
-            copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
-            write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
+            if selected_crop_rows is not None:
+                copy_selected_crop_row_lineage_arrays(
+                    run_group,
+                    crop_group,
+                    selected_crop_rows,
+                )
+            else:
+                copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
+                write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
         if getattr(crop_source, "pixel_materialization_id", None) is not None:
             if selected_crop_rows is None:
                 raise ValueError("Package-backed subject-mask inference lacks selected crop rows.")
@@ -1591,17 +2176,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 shard_rows=int(args.mask_probs_shard_rois or DEFAULT_MASK_PROBS_SHARD_ROIS),
                 root=root,
             )
-        _copy_detection_source_array(
-            run_group,
-            crop_group,
-            source_crop_row_ids=selected_crop_rows,
-        )
-        if "detection_source" not in run_group:
-            run_group.create_array(
-                "detection_source",
-                data=np.zeros((total_rois,), dtype=np.int8),
-                overwrite=True,
+        if not canonical_output:
+            _copy_detection_source_array(
+                run_group,
+                crop_group,
+                source_crop_row_ids=selected_crop_rows,
             )
+            if "detection_source" not in run_group:
+                run_group.create_array(
+                    "detection_source",
+                    data=np.zeros((total_rois,), dtype=np.int8),
+                    overwrite=True,
+                )
 
         duration = _write_subject_mask_outputs(
             run_group,
@@ -1622,7 +2208,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             timing_profiler=timing_profiler,
         )
     finally:
-        crop_source.close()
+        if boundary is not None:
+            boundary.close_crop_source()
+        else:  # pragma: no cover - public writer is boundary-decorated
+            crop_source.close()
 
     created_at = datetime.now(timezone.utc).isoformat()
     crop_snapshot_attrs = build_source_crop_snapshot_attrs(
@@ -1686,6 +2275,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "binary_masks_source": (
                 "threshold(mask_probs_roi, threshold=0.5)" if args.write_masks_roi else "not_materialized"
             ),
+            "bbox_xyxy_convention": "pixel_edge_half_open",
+            "bbox_xyxy_derivation": "foreground_half_open_pixel_edges_xyxy_v1",
             "input_format": "gray",
             "model_input_transform": model_input_transform.to_attrs(),
             "model_input_transform_name": model_input_transform.name,
@@ -1898,35 +2489,77 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         },
     )
     write_stage_provenance(run_group, provenance)
-    checkpoint_hash = selected.get("model_sha256") if isinstance(selected.get("model_sha256"), str) else None
     run_provenance = append_input_artifacts(
         build_run_provenance_from_stage_record(provenance),
-        [
-            fingerprint_artifact(
-                checkpoint_path,
-                role="subject_mask_unet_checkpoint",
-                registry_hash=checkpoint_hash,
-            )
-        ],
+        [checkpoint_artifact],
     )
+    run_path = f"{output_parent}/{resolved_run_name}"
+    published_coordinate_surfaces = None
+    if canonical_coordinate_context is not None:
+        if boundary is None:
+            raise RuntimeError("Canonical subject-mask publication lacks its failure boundary.")
+        run_group = boundary.require_owned_run()
+        coordinate_checkpoint = (
+            capture_subject_mask_coordinate_publication_checkpoint(
+                root,
+                run_path,
+                expected_publication_owner=boundary.owner_token,
+            )
+        )
+        if boundary is not None:
+            boundary.bind_coordinate_checkpoint(coordinate_checkpoint)
+        published_coordinate_surfaces = publish_subject_mask_coordinate_surfaces(
+            root,
+            run_path,
+            expected_publication_owner=boundary.owner_token,
+        )
+        # Publication writes through fresh root-resolved handles.  Complete only
+        # through another fresh handle so descriptors cannot be lost.
+        run_group = boundary.require_owned_run()
     mark_run_complete(
         run_group,
-        parent_group=root[output_parent],
+        # Canonical activation owns selector publication after a fresh exact
+        # coordinate reload.  Shards remain deliberately unselected.
+        parent_group=None,
         run_name=resolved_run_name,
         run_provenance=run_provenance,
     )
     if shard_output:
         run_group.attrs["registry_status_deferred_reason"] = "collection_shard_not_canonical_stage_output"
-    if not args.defer_registry_status and not shard_output:
-        emit_subject_mask_stage_completion(
+    if canonical_coordinate_context is not None:
+        assert boundary is not None
+        assert published_coordinate_surfaces is not None
+        run_group = boundary.require_owned_run()
+        assert boundary.parent_selector_snapshot is not None
+        assert boundary.owner_token is not None
+        _activate_validated_subject_mask_coordinate_surfaces(
             root,
-            zarr_path,
-            run_group=run_group,
+            root[output_parent],
+            published_coordinate_surfaces,
             run_name=resolved_run_name,
-            source=_SUBJECT_MASKS_STATUS_SOURCE,
-            console=console,
-            invalidate_on_ok=True,
+            publication_owner_token=boundary.owner_token,
+            selector_snapshot=boundary.parent_selector_snapshot,
         )
+        run_group = boundary.require_owned_run()
+    if boundary is not None:
+        boundary.mark_finalized()
+
+    if not args.defer_registry_status and not shard_output:
+        try:
+            emit_subject_mask_stage_completion(
+                root,
+                zarr_path,
+                run_group=run_group,
+                run_name=resolved_run_name,
+                source=_SUBJECT_MASKS_STATUS_SOURCE,
+                console=console,
+                invalidate_on_ok=True,
+            )
+        except Exception as exc:  # telemetry is explicitly post-commit
+            console.print(
+                "[yellow]Warning:[/yellow] canonical subject-mask output is "
+                f"committed, but registry/status telemetry failed: {exc}"
+            )
 
     console.print(
         f"\n[green]✓[/green] U-Net subject masks written to "

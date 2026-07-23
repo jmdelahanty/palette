@@ -15,7 +15,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import zarr
-
 from fisheye.analysis.chaser_bout_response import (
     REFERENCE_KIND_OBJECT,
     REFERENCE_KIND_VIRTUAL,
@@ -32,6 +31,9 @@ from fisheye.analysis.chaser_escape_events import (
     write_chaser_escape_events_component,
 )
 from tests.unit.fisheye.test_chaser_radial_occupancy import ARENA_CENTER_MM, _make_archive
+
+
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 FPS = 10.0

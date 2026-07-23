@@ -36,6 +36,9 @@ from fisheye.analysis.chaser_bout_response import (
     DEFAULT_VIRTUAL_ROTATIONS_DEG,
 )
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_distance_io import (
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.analysis.chaser_egocentric_bearing import (
     ANGLE_CONVENTION,
     _load_configured_chaser_behavior_labels,
@@ -724,7 +727,15 @@ def build_chaser_gaze_tracking_result(
     bearing_bin_edges_deg: Sequence[float] = DEFAULT_BEARING_BIN_EDGES_DEG,
 ) -> ChaserGazeTrackingResult:
     root = open_zarr_root(zarr_path, mode="r")
-    distance_run_group, distance_run_name, distance_run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    distance_snapshot, distance_run_name, distance_run_path = (
+        _resolve_chaser_distance_run(root, chaser_distance_run)
+    )
+    # Gaze-lock outputs and event tables assign behavior roles to observations.
+    # Those protocol-derived role surfaces are not yet sealed by the canonical
+    # chaser-distance publication, so this role-dependent consumer must stop at
+    # the typed boundary instead of falling back to protocol_json or raw attrs.
+    distance_snapshot.require_behavior_authority()
+    distance_run_group = root[distance_run_path]
     ego_group, ego_name = _resolve_egocentric_component(distance_run_group, egocentric_component)
     eye_group, eye_name, eye_path = _resolve_eye_run(root, eye_angle_run)
     _metadata_eye_convention(eye_group)
@@ -1183,6 +1194,12 @@ def write_chaser_gaze_tracking_component(
     write_png: bool = True,
 ) -> str:
     root = open_zarr_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     distance_run = root[result.chaser_distance_run_path]
     parent = distance_run.require_group(COMPONENT_PARENT_NAME)
     if result.component_name in parent:

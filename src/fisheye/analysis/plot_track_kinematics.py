@@ -10,11 +10,12 @@ import argparse
 import hashlib
 import json
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterable, Optional, Tuple, List
+from typing import Any, Iterable, List, Mapping, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,6 +46,13 @@ POSITION_XY_TRACE_RENDERER = "palette-core-position-xy-trace-v1"
 POSITION_XY_TRACE_RENDERER_VERSION = "1"
 POSITION_XY_TRACE_PNG_PREFIX = "position_xy_trace"
 DEFAULT_SWIM_BOUT_OVERLAY_SPEED_LEVEL = "exponential"
+TRACK_KINEMATICS_VISUALIZATION_RUN_SCHEMA_ID = (
+    "palette.track_kinematics_visualization_run"
+)
+TRACK_KINEMATICS_VISUALIZATION_RUN_SCHEMA_VERSION = 1
+TRACK_KINEMATICS_VISUALIZATION_RUNS_PATH = (
+    "analysis/track_kinematics_visualization_runs"
+)
 
 
 @dataclass
@@ -106,14 +114,6 @@ def resolve_track_kinematics_runs(
             return None
         return group.get(name)
 
-    def iter_runs() -> Iterable[Tuple[str, str, zarr.Group]]:
-        if include_online and online_parent is not None:
-            for name in online_parent.group_keys():
-                yield ("online", name, online_parent[name])
-        if include_offline and offline_parent is not None:
-            for name in offline_parent.group_keys():
-                yield ("offline", name, offline_parent[name])
-
     def resolve_requested(name: str) -> Optional[Tuple[str, str, zarr.Group]]:
         if "/" in name:
             prefix, run = name.split("/", 1)
@@ -158,13 +158,6 @@ def resolve_track_kinematics_runs(
         if latest_offline and latest_offline in offline_parent:
             preferred.append(("offline", latest_offline, offline_parent[latest_offline]))
 
-    # legacy attribute storing path like 'online/run'
-    legacy_latest = parent.attrs.get("latest")
-    if legacy_latest and isinstance(legacy_latest, str):
-        resolved = resolve_requested(legacy_latest)
-        if resolved and resolved not in preferred:
-            preferred.append(resolved)
-
     seen = set()
     for run_type, name, group in preferred:
         key = (run_type, name)
@@ -173,11 +166,6 @@ def resolve_track_kinematics_runs(
         seen.add(key)
         console.print(f"Using track kinematics run: [cyan]{run_type}/{name}[/cyan]")
         runs.append((f"{run_type}/{name}", group))
-
-    if not runs:
-        console.print("[yellow]No track kinematics runs resolved via 'latest'; scanning available runs.[/yellow]")
-        for run_type, name, group in iter_runs():
-            runs.append((f"{run_type}/{name}", group))
 
     return runs
 
@@ -219,24 +207,45 @@ def resolve_track(group: zarr.Group, track_id: Optional[int], console: Console) 
 
 
 def pick_units(
-    run_group: zarr.Group,
-    track_group: zarr.Group,
-    track_tables: Optional[TrackKinematicsTrackTables] = None,
+    track_tables: TrackKinematicsTrackTables,
 ) -> tuple[str, np.ndarray, np.ndarray]:
-    pixel_to_mm = run_group.attrs.get("pixel_to_mm")
-    positions_mm = (
-        track_tables.positions_mm
-        if track_tables is not None and track_tables.positions_mm is not None
-        else track_group["positions_mm"][:]
-    )
-    if pixel_to_mm and np.isfinite(positions_mm).any():
-        return "mm", positions_mm[:, 0], positions_mm[:, 1]
-    positions_px = (
-        track_tables.positions_px
-        if track_tables is not None and track_tables.positions_px is not None
-        else track_group["positions_px"][:]
-    )
-    return "px", positions_px[:, 0], positions_px[:, 1]
+    """Choose one native coordinate surface from verified descriptor evidence."""
+
+    positions_mm = track_tables.positions_mm
+    mm_descriptor = track_tables.positions_mm_descriptor
+    if positions_mm is not None and mm_descriptor is not None:
+        if (
+            mm_descriptor.space_id != "physical_mm"
+            or mm_descriptor.geometry_type != "point_xy"
+            or mm_descriptor.components != ("x", "y")
+            or mm_descriptor.component_units != ("mm", "mm")
+        ):
+            raise ValueError(
+                f"{track_tables.track_path}/positions_mm has unsupported "
+                "physical point semantics."
+            )
+        if np.isfinite(positions_mm).any():
+            values = np.asarray(positions_mm, dtype=np.float64)
+            return "mm", values[:, 0], values[:, 1]
+
+    positions_px = track_tables.positions_px
+    px_descriptor = track_tables.positions_px_descriptor
+    if positions_px is None or px_descriptor is None:
+        raise ValueError(
+            f"{track_tables.track_path} has no verified native position surface."
+        )
+    if (
+        px_descriptor.geometry_type != "point_xy"
+        or px_descriptor.components != ("x", "y")
+        or px_descriptor.component_units != ("px", "px")
+        or not str(px_descriptor.space_id).endswith("_px")
+    ):
+        raise ValueError(
+            f"{track_tables.track_path}/positions_px has unsupported native "
+            "pixel point semantics."
+        )
+    values = np.asarray(positions_px, dtype=np.float64)
+    return "px", values[:, 0], values[:, 1]
 
 
 def resolve_swim_bout_spans(
@@ -593,7 +602,10 @@ def compute_offline_chaser_distance(
     return times, values, smoothed, unit
 
 
-def _format_processing_metadata(run_group: zarr.Group) -> str:
+def _format_processing_metadata(
+    run_group: zarr.Group,
+    track_tables: TrackKinematicsTrackTables,
+) -> str:
     """Extract and format processing metadata from run_group attributes."""
     attrs = run_group.attrs
 
@@ -616,8 +628,9 @@ def _format_processing_metadata(run_group: zarr.Group) -> str:
     hysteresis_low = params.get("hysteresis_low_px") or attrs.get("hysteresis_low_px")
     hysteresis_min = params.get("hysteresis_min_frames") or attrs.get("hysteresis_min_frames")
 
-    # Coordinate space
-    coord_space = params.get("coordinate_space") or attrs.get("coordinate_space", "unknown")
+    descriptor = track_tables.positions_px_descriptor
+    if descriptor is None:
+        raise ValueError("Verified track tables omit their pixel descriptor.")
 
     # Build metadata text
     lines = []
@@ -632,9 +645,9 @@ def _format_processing_metadata(run_group: zarr.Group) -> str:
         if smoothing_method == "savitzky_golay" and savgol_polyorder is not None:
             lines.append(f"Smoothing: Savitzky-Golay (order {savgol_polyorder})")
         elif smoothing_method == "savitzky_golay":
-            lines.append(f"Smoothing: Savitzky-Golay")
+            lines.append("Smoothing: Savitzky-Golay")
         else:
-            lines.append(f"Smoothing: Moving average")
+            lines.append("Smoothing: Moving average")
 
     if hysteresis_enabled:
         hyst_parts = []
@@ -651,7 +664,10 @@ def _format_processing_metadata(run_group: zarr.Group) -> str:
     else:
         lines.append("Hysteresis: disabled")
 
-    lines.append(f"Coordinate space: {coord_space}")
+    lines.append(
+        "Coordinate profile: "
+        f"{descriptor.profile_id} ({descriptor.space_id})"
+    )
 
     return " | ".join(lines)
 
@@ -681,15 +697,16 @@ def _position_xy_artifact_name(track_id: int) -> str:
 
 def _render_position_xy_trace_png(
     *,
-    run_group: zarr.Group,
-    track_group: zarr.Group,
+    track_tables: TrackKinematicsTrackTables,
     track_id: int,
     artifact_dpi: int,
 ) -> bytes:
     """Render stimulus-independent X/Y position traces for one track."""
 
-    time_seconds = np.asarray(track_group["time_seconds"][:], dtype=np.float64)
-    unit_label, pos_x, pos_y = pick_units(run_group, track_group)
+    if track_tables.time_seconds is None:
+        raise ValueError("Verified track tables omit time_seconds.")
+    time_seconds = np.asarray(track_tables.time_seconds, dtype=np.float64)
+    unit_label, pos_x, pos_y = pick_units(track_tables)
     pos_x = np.asarray(pos_x, dtype=np.float64)
     pos_y = np.asarray(pos_y, dtype=np.float64)
     if time_seconds.shape[0] != pos_x.shape[0] or pos_x.shape != pos_y.shape:
@@ -720,9 +737,21 @@ def _render_position_xy_trace_png(
     return buffer.getvalue()
 
 
-def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.Group, track_id: int) -> dict[str, str]:
+def _track_source_paths(
+    run_name: str,
+    track_tables: TrackKinematicsTrackTables,
+) -> dict[str, str]:
+    """Return only paths authorized by the verified motion publication."""
+
     run_path = f"analysis/track_kinematics_runs/{run_name}"
-    track_path = f"{run_path}/tracks/id_{int(track_id)}"
+    track_path = track_tables.track_path
+    if (
+        run_path != track_tables.run_path
+        or int(track_tables.track_id) < 0
+        or track_path
+        != f"{run_path}/tracks/id_{int(track_tables.track_id)}"
+    ):
+        raise ValueError("Track visualization source identity is inconsistent.")
     source_paths: dict[str, str] = {
         "run": run_path,
         "track": track_path,
@@ -733,87 +762,91 @@ def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.
         "smoothed": "speed_smoothed",
         "averaged": "speed_averaged",
     }
-    movement = track_group.get("movement")
-    speed_parent = movement.get("speed") if movement is not None else None
-    if speed_parent is not None:
-        for level_name, flat_prefix in movement_speed_levels.items():
-            if level_name not in speed_parent:
-                continue
-            level_group = speed_parent[level_name]
-            movement_path = f"{track_path}/movement/speed/{level_name}"
-            for unit in ("px", "mm"):
-                if unit in level_group:
-                    source_paths[f"{flat_prefix}_{unit}"] = f"{movement_path}/{unit}"
-                accel_key = f"acceleration_{unit}"
-                if accel_key in level_group:
-                    if level_name == "smoothed":
-                        source_paths[accel_key] = f"{movement_path}/{accel_key}"
-                    source_paths[f"{flat_prefix}_{accel_key}"] = f"{movement_path}/{accel_key}"
-                smooth_accel_key = f"smoothed_acceleration_{unit}"
-                if smooth_accel_key in level_group:
-                    if level_name == "smoothed":
-                        source_paths[smooth_accel_key] = f"{movement_path}/{smooth_accel_key}"
-                    source_paths[f"{flat_prefix}_{smooth_accel_key}"] = (
-                        f"{movement_path}/{smooth_accel_key}"
+    for level_name, flat_prefix in movement_speed_levels.items():
+        movement_path = f"{track_path}/movement/speed/{level_name}"
+        for unit, speeds, accelerations, smoothed_accelerations, distances in (
+            (
+                "px",
+                track_tables.speed_px_by_level,
+                track_tables.acceleration_px_by_level,
+                track_tables.smoothed_acceleration_px_by_level,
+                track_tables.frame_path_distance_px_by_level,
+            ),
+            (
+                "mm",
+                track_tables.speed_mm_by_level,
+                track_tables.acceleration_mm_by_level,
+                track_tables.smoothed_acceleration_mm_by_level,
+                track_tables.frame_path_distance_mm_by_level,
+            ),
+        ):
+            if level_name in speeds:
+                source_paths[f"{flat_prefix}_{unit}"] = (
+                    f"{movement_path}/{unit}"
+                )
+            acceleration_key = f"acceleration_{unit}"
+            if level_name in accelerations:
+                source_paths[f"{flat_prefix}_{acceleration_key}"] = (
+                    f"{movement_path}/{acceleration_key}"
+                )
+                if level_name == "smoothed":
+                    source_paths[acceleration_key] = (
+                        f"{movement_path}/{acceleration_key}"
                     )
-                path_key = f"frame_path_distance_{unit}"
-                if path_key in level_group:
-                    source_paths[f"{flat_prefix}_{path_key}"] = (
-                        f"{movement_path}/{path_key}"
+            smoothed_key = f"smoothed_acceleration_{unit}"
+            if level_name in smoothed_accelerations:
+                source_paths[f"{flat_prefix}_{smoothed_key}"] = (
+                    f"{movement_path}/{smoothed_key}"
+                )
+                if level_name == "smoothed":
+                    source_paths[smoothed_key] = (
+                        f"{movement_path}/{smoothed_key}"
                     )
-                    source_paths[f"frame_path_distance_{level_name}_{unit}"] = (
-                        f"{movement_path}/{path_key}"
-                    )
+            distance_key = f"frame_path_distance_{unit}"
+            if level_name in distances:
+                source_paths[f"{flat_prefix}_{distance_key}"] = (
+                    f"{movement_path}/{distance_key}"
+                )
+                source_paths[f"frame_path_distance_{level_name}_{unit}"] = (
+                    f"{movement_path}/{distance_key}"
+                )
 
-    track_arrays = (
-        "time_seconds",
-        "frame_indices",
-        "positions_px",
-        "positions_mm",
-        "speed_raw_px",
-        "speed_raw_mm",
-        "speed_filtered_px",
-        "speed_filtered_mm",
-        "speed_smoothed_px",
-        "speed_smoothed_mm",
-        "speed_averaged_px",
-        "speed_averaged_mm",
-        "acceleration_px",
-        "acceleration_mm",
-        "smoothed_heading_degrees",
-        "smoothed_acceleration_px",
-        "smoothed_acceleration_mm",
-        "delta_heading_degrees",
-        "angular_velocity_deg_s",
-        "angular_velocity_raw_deg_s",
-        "angular_speed_raw_deg_s",
-        "delta_heading_smoothed_degrees",
-        "angular_velocity_smoothed_deg_s",
-        "angular_speed_smoothed_deg_s",
-        "cumulative_path_distance_px",
-        "cumulative_path_distance_mm",
-        "sample_valid",
-        "sample_reason_code",
-        "transition_valid",
-        "transition_reason_code",
-    )
-    for name in track_arrays:
-        if name in track_group and name not in source_paths:
+    optional_values = {
+        "positions_px": track_tables.positions_px,
+        "positions_mm": track_tables.positions_mm,
+        "time_seconds": track_tables.time_seconds,
+        "frame_indices": track_tables.frame_indices,
+        "source_acquisition_frame_index": (
+            track_tables.source_acquisition_frame_index
+        ),
+        "track_sample_key": track_tables.track_sample_key,
+        "smoothed_heading_degrees": track_tables.smoothed_heading_degrees,
+        "delta_heading_degrees": track_tables.delta_heading_degrees,
+        "angular_velocity_deg_s": track_tables.angular_velocity_deg_s,
+        "angular_speed_raw_deg_s": track_tables.angular_speed_raw_deg_s,
+        "delta_heading_smoothed_degrees": (
+            track_tables.delta_heading_smoothed_degrees
+        ),
+        "angular_velocity_smoothed_deg_s": (
+            track_tables.angular_velocity_smoothed_deg_s
+        ),
+        "angular_speed_smoothed_deg_s": (
+            track_tables.angular_speed_smoothed_deg_s
+        ),
+        "cumulative_path_distance_px": (
+            track_tables.cumulative_path_distance_px
+        ),
+        "cumulative_path_distance_mm": (
+            track_tables.cumulative_path_distance_mm
+        ),
+        "sample_valid": track_tables.sample_valid,
+        "sample_reason_code": track_tables.sample_reason_code,
+        "transition_valid": track_tables.transition_valid,
+        "transition_reason_code": track_tables.transition_reason_code,
+    }
+    for name, values in optional_values.items():
+        if values is not None:
             source_paths[name] = f"{track_path}/{name}"
-
-    run_arrays = (
-        "distance_to_target_px",
-        "distance_to_target_mm",
-        "distance_to_target_smoothed_px",
-        "distance_to_target_smoothed_mm",
-        "distance_to_target_interpolated_px",
-        "distance_to_target_interpolated_mm",
-        "camera_frame_ids",
-        "has_offline",
-    )
-    for name in run_arrays:
-        if name in run_group:
-            source_paths[name] = f"{run_path}/{name}"
     return source_paths
 
 
@@ -830,8 +863,7 @@ def _compact_series(items: Iterable[Optional[dict[str, str]]]) -> list[dict[str,
 def _build_track_interactive_spec(
     *,
     run_name: str,
-    run_group: zarr.Group,
-    track_group: zarr.Group,
+    track_tables: TrackKinematicsTrackTables,
     track_id: int,
     source_paths: dict[str, str],
     bins: int,
@@ -841,7 +873,7 @@ def _build_track_interactive_spec(
     distance_series_present: bool,
     stimulus_run: Optional[str],
 ) -> dict[str, Any]:
-    unit_label, _pos_x, _pos_y = pick_units(run_group, track_group)
+    unit_label, _pos_x, _pos_y = pick_units(track_tables)
     speed_unit_suffix = "_mm" if unit_label == "mm" else "_px"
     accel_path = "smoothed_acceleration_mm" if unit_label == "mm" else "smoothed_acceleration_px"
     cumulative_path = "cumulative_path_distance_mm" if unit_label == "mm" else "cumulative_path_distance_px"
@@ -963,6 +995,7 @@ def _build_track_interactive_spec(
         "run_name": run_name,
         "track_id": int(track_id),
         "renderer": TRACK_KINEMATICS_PLOT_RENDERER,
+        "track_motion_authority": track_tables.authority_record(),
         "source_paths": source_paths,
         "panels": panels,
         "overlays": {
@@ -980,9 +1013,9 @@ def _build_track_interactive_spec(
 def write_track_kinematics_plot_artifacts(
     *,
     zarr_path: Optional[Path],
-    run_group: zarr.Group,
+    artifact_run_group: zarr.Group,
     run_name: str,
-    track_group: zarr.Group,
+    track_tables: TrackKinematicsTrackTables,
     track_id: int,
     png_bytes: bytes,
     bins: int,
@@ -996,7 +1029,8 @@ def write_track_kinematics_plot_artifacts(
     command: Optional[str] = None,
 ) -> None:
     png_artifact_name, spec_artifact_name = _track_artifact_names(track_id)
-    source_paths = _track_source_paths(run_name, track_group, run_group, track_id)
+    source_paths = _track_source_paths(run_name, track_tables)
+    track_motion_authority = track_tables.authority_record()
     source_runs: dict[str, Any] = {"track_kinematics": run_name}
     if stimulus_run:
         source_runs["stimulus"] = stimulus_run
@@ -1008,6 +1042,13 @@ def write_track_kinematics_plot_artifacts(
         "swim_bout_run": swim_bout_requested,
         "speed_level": speed_level,
         "distance_overlay": bool(distance_series_present),
+        "position_profile_id": (
+            track_tables.positions_mm_descriptor.profile_id
+            if track_tables.positions_mm_descriptor is not None
+            and track_tables.positions_mm is not None
+            and np.isfinite(track_tables.positions_mm).any()
+            else track_tables.positions_px_descriptor.profile_id
+        ),
     }
     signature = _artifact_signature(
         {
@@ -1019,6 +1060,7 @@ def write_track_kinematics_plot_artifacts(
             "track_id": int(track_id),
             "source_paths": source_paths,
             "source_runs": source_runs,
+            "track_motion_authority": track_motion_authority,
             "parameters": parameters,
         }
     )
@@ -1039,6 +1081,7 @@ def write_track_kinematics_plot_artifacts(
             "zarr_path": str(zarr_path) if zarr_path is not None else None,
             "source_paths": source_paths,
             "source_runs": source_runs,
+            "track_motion_authority": track_motion_authority,
             "track_id": int(track_id),
             "run_name": run_name,
         },
@@ -1058,7 +1101,7 @@ def write_track_kinematics_plot_artifacts(
     )
 
     write_png_visualization_artifact(
-        run_group,
+        artifact_run_group,
         png_artifact_name,
         png_bytes,
         description="Track kinematics summary PNG",
@@ -1075,6 +1118,7 @@ def write_track_kinematics_plot_artifacts(
             "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
             "track_id": int(track_id),
             "run_name": run_name,
+            "track_motion_authority": track_motion_authority,
             "provenance": provenance,
         },
     )
@@ -1097,16 +1141,16 @@ def write_track_kinematics_plot_artifacts(
                 "positions_px": source_paths.get("positions_px"),
             },
             "parameters": position_xy_parameters,
+            "track_motion_authority": track_motion_authority,
         }
     )
     position_xy_png = _render_position_xy_trace_png(
-        run_group=run_group,
-        track_group=track_group,
+        track_tables=track_tables,
         track_id=track_id,
         artifact_dpi=artifact_dpi,
     )
     write_png_visualization_artifact(
-        run_group,
+        artifact_run_group,
         position_xy_name,
         position_xy_png,
         description="Stimulus-independent X/Y position traces",
@@ -1127,13 +1171,13 @@ def write_track_kinematics_plot_artifacts(
             "plot_schema_id": POSITION_XY_TRACE_PLOT_SCHEMA_ID,
             "track_id": int(track_id),
             "run_name": run_name,
+            "track_motion_authority": track_motion_authority,
             "provenance": provenance,
         },
     )
     spec = _build_track_interactive_spec(
         run_name=run_name,
-        run_group=run_group,
-        track_group=track_group,
+        track_tables=track_tables,
         track_id=track_id,
         source_paths=source_paths,
         bins=bins,
@@ -1144,7 +1188,7 @@ def write_track_kinematics_plot_artifacts(
         stimulus_run=stimulus_run,
     )
     write_interactive_plot_spec_artifact(
-        run_group,
+        artifact_run_group,
         spec_artifact_name,
         spec,
         description="Track kinematics interactive plot spec",
@@ -1160,23 +1204,253 @@ def write_track_kinematics_plot_artifacts(
             "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
             "track_id": int(track_id),
             "run_name": run_name,
+            "track_motion_authority": track_motion_authority,
             "provenance": provenance,
         },
     )
-    console.print(
-        "[green]Wrote zarr visualization artifacts:[/green] "
-        f"visualizations/{png_artifact_name}, visualizations/{spec_artifact_name}, "
-        f"visualizations/{position_xy_name}"
+    del console  # Publication/activation reporting belongs to the outer lifecycle.
+
+
+def _restore_selector_attr(attrs: Any, name: str, prior: Any) -> None:
+    if prior is None:
+        if name in attrs:
+            del attrs[name]
+    else:
+        attrs[name] = prior
+
+
+def _validate_track_visualization_run(
+    run_group: zarr.Group,
+    *,
+    track_id: int,
+    source_authority: dict[str, Any],
+    expected_source_paths: Mapping[str, str],
+) -> None:
+    """Validate one closed immutable visualization payload before activation."""
+
+    attrs = dict(run_group.attrs)
+    if (
+        attrs.get("schema_id") != TRACK_KINEMATICS_VISUALIZATION_RUN_SCHEMA_ID
+        or attrs.get("schema_version")
+        != TRACK_KINEMATICS_VISUALIZATION_RUN_SCHEMA_VERSION
+        or attrs.get("source_track_motion_authority") != source_authority
+        or attrs.get("track_id") != int(track_id)
+    ):
+        raise ValueError("Track visualization run authority attrs are invalid.")
+    if sorted(str(name) for name in run_group.group_keys()) != ["visualizations"]:
+        raise ValueError("Track visualization run group inventory is not closed.")
+    if list(run_group.array_keys()):
+        raise ValueError("Track visualization run contains unexpected root arrays.")
+
+    png_name, spec_name = _track_artifact_names(track_id)
+    position_name = _position_xy_artifact_name(track_id)
+    visualizations = run_group["visualizations"]
+    if sorted(str(name) for name in visualizations.array_keys()) != sorted(
+        [png_name, position_name]
+    ) or sorted(str(name) for name in visualizations.group_keys()) != [spec_name]:
+        raise ValueError("Track visualization artifact inventory is not closed.")
+    manifest = attrs.get("visualizations")
+    if not isinstance(manifest, dict) or set(manifest) != {
+        png_name,
+        position_name,
+        spec_name,
+    }:
+        raise ValueError("Track visualization manifest is incomplete.")
+
+    for name in (png_name, position_name):
+        node = visualizations[name]
+        payload = np.asarray(node[:], dtype=np.uint8).tobytes()
+        node_attrs = dict(node.attrs)
+        digest = hashlib.sha256(payload).hexdigest()
+        manifest_entry = manifest.get(name)
+        artifact_source_paths = (
+            dict(expected_source_paths)
+            if name == png_name
+            else {
+                "time_seconds": expected_source_paths.get("time_seconds"),
+                "positions_mm": expected_source_paths.get("positions_mm"),
+                "positions_px": expected_source_paths.get("positions_px"),
+            }
+        )
+        if (
+            digest != node_attrs.get("content_sha256")
+            or node_attrs.get("track_motion_authority") != source_authority
+            or node_attrs.get("source_paths") != artifact_source_paths
+            or node_attrs.get("track_id") != int(track_id)
+            or not isinstance(manifest_entry, Mapping)
+            or manifest_entry.get("content_sha256") != digest
+            or manifest_entry.get("byte_length") != len(payload)
+            or manifest_entry.get("artifact_schema_id")
+            != node_attrs.get("artifact_schema_id")
+        ):
+            raise ValueError(f"Visualization PNG {name!r} failed integrity validation.")
+    spec_group = visualizations[spec_name]
+    if list(spec_group.group_keys()) or list(spec_group.array_keys()) != [
+        "spec_json"
+    ]:
+        raise ValueError("Track visualization interactive spec inventory is not closed.")
+    spec_bytes = np.asarray(spec_group["spec_json"][:], dtype=np.uint8).tobytes()
+    spec_attrs = dict(spec_group.attrs)
+    spec_array_attrs = dict(spec_group["spec_json"].attrs)
+    spec_digest = hashlib.sha256(spec_bytes).hexdigest()
+    spec_manifest_entry = manifest.get(spec_name)
+    if (
+        spec_digest != spec_attrs.get("content_sha256")
+        or spec_array_attrs.get("content_sha256")
+        != spec_attrs.get("content_sha256")
+        or spec_attrs.get("track_motion_authority") != source_authority
+        or spec_attrs.get("source_paths") != dict(expected_source_paths)
+        or spec_attrs.get("track_id") != int(track_id)
+        or not isinstance(spec_manifest_entry, Mapping)
+        or spec_manifest_entry.get("content_sha256") != spec_digest
+        or spec_manifest_entry.get("byte_length") != len(spec_bytes)
+        or spec_manifest_entry.get("artifact_schema_id")
+        != spec_attrs.get("artifact_schema_id")
+    ):
+        raise ValueError("Track visualization interactive spec failed validation.")
+    spec = json.loads(spec_bytes.decode("utf-8"))
+    if (
+        spec.get("track_motion_authority") != source_authority
+        or spec.get("source_paths") != dict(expected_source_paths)
+        or spec.get("track_id") != int(track_id)
+    ):
+        raise ValueError(
+            "Interactive spec source authority, paths, or track identity is invalid."
+        )
+
+
+def publish_track_kinematics_plot_artifacts(
+    *,
+    root: zarr.Group,
+    zarr_path: Optional[Path],
+    run_name: str,
+    track_tables: TrackKinematicsTrackTables,
+    track_id: int,
+    png_bytes: bytes,
+    bins: int,
+    artifact_dpi: int,
+    swim_bout_label: Optional[str],
+    swim_bout_requested: Optional[str],
+    speed_level: str,
+    distance_series_present: bool,
+    stimulus_run: Optional[str],
+    console: Console,
+    command: Optional[str] = None,
+) -> str:
+    """Publish visualizations beside, never inside, a sealed motion run."""
+
+    authority = track_tables.authority_record()
+    expected_source_paths = _track_source_paths(run_name, track_tables)
+    family = root.require_group(TRACK_KINEMATICS_VISUALIZATION_RUNS_PATH)
+    scope_parent = family.require_group(track_tables.scope)
+    source_parent = scope_parent.require_group(track_tables.run_name)
+    tracks_parent = source_parent.require_group("tracks")
+    track_parent = tracks_parent.require_group(f"id_{int(track_id)}")
+    owner = str(uuid.uuid4())
+    created = datetime.now(timezone.utc)
+    render_name = (
+        f"render_{created.strftime('%Y%m%dT%H%M%S%fZ')}_{owner[:12]}"
     )
+    prior_latest = track_parent.attrs.get("latest")
+    prior_latest_complete = track_parent.attrs.get("latest_complete")
+    render_group = track_parent.create_group(render_name)
+    render_group.attrs.update(
+        {
+            "schema_id": TRACK_KINEMATICS_VISUALIZATION_RUN_SCHEMA_ID,
+            "schema_version": TRACK_KINEMATICS_VISUALIZATION_RUN_SCHEMA_VERSION,
+            "publication_attempt_id": owner,
+            "palette_run_completion_status": "writing",
+            "stage_selector_eligible": False,
+            "source_track_motion_authority": authority,
+            "source_track_kinematics_run": run_name,
+            "track_id": int(track_id),
+            "created_at_utc": created.isoformat(),
+            "renderer": TRACK_KINEMATICS_PLOT_RENDERER,
+            "renderer_version": TRACK_KINEMATICS_RENDERER_VERSION,
+        }
+    )
+    try:
+        write_track_kinematics_plot_artifacts(
+            zarr_path=zarr_path,
+            artifact_run_group=render_group,
+            run_name=run_name,
+            track_tables=track_tables,
+            track_id=track_id,
+            png_bytes=png_bytes,
+            bins=bins,
+            artifact_dpi=artifact_dpi,
+            swim_bout_label=swim_bout_label,
+            swim_bout_requested=swim_bout_requested,
+            speed_level=speed_level,
+            distance_series_present=distance_series_present,
+            stimulus_run=stimulus_run,
+            console=console,
+            command=command,
+        )
+        _validate_track_visualization_run(
+            render_group,
+            track_id=track_id,
+            source_authority=authority,
+            expected_source_paths=expected_source_paths,
+        )
+        current = load_track_kinematics_track(
+            root,
+            run_name=track_tables.run_name,
+            scope=track_tables.scope,
+            track_id=track_id,
+            required_speed_levels=("raw", "smoothed"),
+        )
+        if current.authority_record() != authority:
+            raise ValueError(
+                "Track-motion authority changed while rendering visualizations."
+            )
+        render_group.attrs["palette_run_completion_status"] = "complete"
+        _validate_track_visualization_run(
+            render_group,
+            track_id=track_id,
+            source_authority=authority,
+            expected_source_paths=expected_source_paths,
+        )
+        track_parent.attrs["latest"] = render_name
+        track_parent.attrs["latest_complete"] = render_name
+        render_group.attrs["stage_selector_eligible"] = True
+    except BaseException:
+        owned = (
+            render_name in track_parent
+            and track_parent[render_name].attrs.get("publication_attempt_id")
+            == owner
+        )
+        if owned:
+            if track_parent.attrs.get("latest") == render_name:
+                _restore_selector_attr(
+                    track_parent.attrs,
+                    "latest",
+                    prior_latest,
+                )
+            if track_parent.attrs.get("latest_complete") == render_name:
+                _restore_selector_attr(
+                    track_parent.attrs,
+                    "latest_complete",
+                    prior_latest_complete,
+                )
+            del track_parent[render_name]
+        raise
+
+    render_path = f"{track_parent.path}/{render_name}"
+    console.print(
+        "[green]Published immutable visualization run:[/green] "
+        f"{render_path}"
+    )
+    return render_path
 
 
 def plot_track(
     run_group: zarr.Group,
-    track_group: zarr.Group,
     track_id: int,
     save_path: Optional[Path],
     bins: int,
     console: Console,
+    track_tables: TrackKinematicsTrackTables,
     run_name: Optional[str] = None,
     swim_bouts: Optional[List[Tuple[float, float]]] = None,
     swim_bout_label: Optional[str] = None,
@@ -1184,47 +1458,45 @@ def plot_track(
     render_png: bool = False,
     artifact_dpi: int = 150,
     show: bool = True,
-    track_tables: Optional[TrackKinematicsTrackTables] = None,
 ) -> Optional[bytes]:
-    if track_tables is not None and track_tables.time_seconds is not None:
-        time_seconds = track_tables.time_seconds
-    else:
-        time_seconds = track_group["time_seconds"][:]
+    if track_tables.time_seconds is None:
+        raise ValueError("Verified track tables omit time_seconds.")
+    time_seconds = np.asarray(track_tables.time_seconds, dtype=np.float64)
+    speed_raw_px = track_tables.speed_px_by_level.get("raw")
+    speed_raw_mm = track_tables.speed_mm_by_level.get("raw")
+    speed_filtered_px = track_tables.speed_px_by_level.get("filtered")
+    speed_filtered_mm = track_tables.speed_mm_by_level.get("filtered")
+    speed_smoothed_px = track_tables.speed_px_by_level.get("smoothed")
+    speed_smoothed_mm = track_tables.speed_mm_by_level.get("smoothed")
+    speed_averaged_px = track_tables.speed_px_by_level.get("averaged")
+    speed_averaged_mm = track_tables.speed_mm_by_level.get("averaged")
+    if speed_raw_px is None or speed_smoothed_px is None:
+        raise ValueError(
+            "Verified track is missing required raw/smoothed pixel speed surfaces."
+        )
 
-    def _speed(level: str, unit: str, fallback_name: str) -> Optional[np.ndarray]:
-        if track_tables is not None:
-            source = track_tables.speed_mm_by_level if unit == "mm" else track_tables.speed_px_by_level
-            value = source.get(level)
-            if value is not None:
-                return value
-        return track_group[fallback_name][:] if fallback_name in track_group else None
-
-    speed_raw_px = _speed("raw", "px", "speed_raw_px")
-    speed_raw_mm = _speed("raw", "mm", "speed_raw_mm")
-    speed_filtered_px = _speed("filtered", "px", "speed_filtered_px")
-    speed_filtered_mm = _speed("filtered", "mm", "speed_filtered_mm")
-    speed_smoothed_px = _speed("smoothed", "px", "speed_smoothed_px")
-    speed_smoothed_mm = _speed("smoothed", "mm", "speed_smoothed_mm")
-    speed_averaged_px = _speed("averaged", "px", "speed_averaged_px")
-    speed_averaged_mm = _speed("averaged", "mm", "speed_averaged_mm")
-    if speed_raw_px is None or speed_raw_mm is None or speed_smoothed_px is None or speed_smoothed_mm is None:
-        raise ValueError("Track is missing required raw/smoothed speed arrays for plotting.")
-
-    if track_tables is not None and track_tables.smoothed_heading_degrees is not None:
-        smoothed_heading_deg = track_tables.smoothed_heading_degrees
-    else:
-        smoothed_heading_deg = track_group["smoothed_heading_degrees"][:]
-    if track_tables is not None:
-        smoothed_accel_px = track_tables.smoothed_acceleration_px_by_level.get("smoothed")
-        smoothed_accel_mm = track_tables.smoothed_acceleration_mm_by_level.get("smoothed")
-    else:
-        smoothed_accel_px = smoothed_accel_mm = None
+    smoothed_heading_deg = track_tables.smoothed_heading_degrees
+    if smoothed_heading_deg is None:
+        raise ValueError("Verified track tables omit smoothed heading.")
+    smoothed_accel_px = (
+        track_tables.smoothed_acceleration_px_by_level.get("smoothed")
+    )
+    smoothed_accel_mm = (
+        track_tables.smoothed_acceleration_mm_by_level.get("smoothed")
+    )
     if smoothed_accel_px is None:
-        smoothed_accel_px = track_group["smoothed_acceleration_px"][:]
-    if smoothed_accel_mm is None:
-        smoothed_accel_mm = track_group["smoothed_acceleration_mm"][:]
+        raise ValueError("Verified track tables omit smoothed pixel acceleration.")
 
-    unit_label, pos_x, pos_y = pick_units(run_group, track_group, track_tables)
+    unit_label, pos_x, pos_y = pick_units(track_tables)
+    pos_x = np.array(pos_x, dtype=np.float64, copy=True)
+    pos_y = np.array(pos_y, dtype=np.float64, copy=True)
+    if track_tables.sample_valid is None:
+        raise ValueError("Verified track tables omit sample validity.")
+    sample_valid = np.asarray(track_tables.sample_valid, dtype=bool)
+    if sample_valid.shape != time_seconds.shape:
+        raise ValueError("Track time and sample-validity row counts disagree.")
+    pos_x[~sample_valid] = np.nan
+    pos_y[~sample_valid] = np.nan
     def _has_finite(values: Optional[np.ndarray]) -> bool:
         return values is not None and np.isfinite(values).any()
 
@@ -1245,7 +1517,9 @@ def plot_track(
     speed_label = f"Speed ({unit_label}/s)" if unit_label in {"mm", "px"} else "Speed"
     accel = (
         smoothed_accel_mm
-        if unit_label == "mm" and np.isfinite(smoothed_accel_mm).any()
+        if unit_label == "mm"
+        and smoothed_accel_mm is not None
+        and np.isfinite(smoothed_accel_mm).any()
         else smoothed_accel_px
     )
     accel_label = f"Acceleration ({unit_label}/s^2)" if unit_label in {"mm", "px"} else "Acceleration"
@@ -1349,15 +1623,17 @@ def plot_track(
     heading_ax.set_title("Heading over time (smoothed)")
     heading_ax.grid(alpha=0.3)
 
-    if track_tables is not None and track_tables.cumulative_path_distance_mm is not None:
+    if track_tables.cumulative_path_distance_mm is not None:
         cumulative = track_tables.cumulative_path_distance_mm
     else:
-        cumulative = track_group["cumulative_path_distance_mm"][:]
-    if not (np.isfinite(cumulative).any() and unit_label == "mm"):
-        if track_tables is not None and track_tables.cumulative_path_distance_px is not None:
+        cumulative = None
+    if cumulative is None or not (
+        np.isfinite(cumulative).any() and unit_label == "mm"
+    ):
+        if track_tables.cumulative_path_distance_px is not None:
             cumulative = track_tables.cumulative_path_distance_px
         else:
-            cumulative = track_group["cumulative_path_distance_px"][:]
+            raise ValueError("Verified track tables omit cumulative pixel path.")
         cumulative_label = "Cumulative path distance (px)"
     else:
         cumulative_label = "Cumulative path distance (mm)"
@@ -1400,7 +1676,7 @@ def plot_track(
     fig.suptitle(title)
 
     # Add processing metadata at the bottom
-    metadata_text = _format_processing_metadata(run_group)
+    metadata_text = _format_processing_metadata(run_group, track_tables)
     fig.text(
         0.5, 0.01,
         metadata_text,
@@ -1475,15 +1751,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         action="store_true",
         default=True,
         help=(
-            "Persist a PNG snapshot and interactive plot spec under the selected "
-            "track_kinematics run's visualizations group (default)."
+            "Publish an immutable sibling visualization run without mutating "
+            "the selected sealed track-motion run (default)."
         ),
     )
     parser.add_argument(
         "--no-write-zarr-artifacts",
         dest="write_zarr_artifacts",
         action="store_false",
-        help="Do not persist plot artifacts to the track_kinematics run.",
+        help="Do not publish a sibling visualization run.",
     )
     parser.add_argument(
         "--artifact-dpi",
@@ -1550,7 +1826,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     for run_name, run_group in runs:
         console.print(f"\n[bold]Plotting track kinematics run:[/bold] {run_name}")
         try:
-            track_id, track_group = resolve_track(run_group, args.track_id, console)
+            track_id, _track_group = resolve_track(
+                run_group,
+                args.track_id,
+                console,
+            )
         except ValueError as exc:
             console.print(f"[yellow]Warning:[/yellow] {exc}")
             continue
@@ -1572,58 +1852,37 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             safe_run_name = run_name.replace("/", "_")
             dest = dest.with_name(f"{dest.stem}_{safe_run_name}{dest.suffix}")
 
+        # Distance overlays remain disabled until their exact coordinate/physical
+        # authority is exposed through a typed reader.  The visualization must
+        # not recover them from run attrs or an arbitrary metrics fallback.
         distance_series = None
-        stim_run_name = resolve_stimulus_run(root, run_group)
-        if stim_run_name:
-            if run_name.startswith("online/"):
-                distance_series = compute_online_chaser_distance(
-                    zarr_path,
-                    stim_run_name,
-                    run_group,
-                    track_group,
-                    track_id,
-                    console,
-                )
-            elif run_name.startswith("offline/"):
-                distance_series = compute_offline_chaser_distance(
-                    zarr_path,
-                    stim_run_name,
-                    run_group,
-                    track_group,
-                    track_id,
-                    console,
-                )
-        else:
-            console.print(
-                "[yellow]Warning:[/yellow] Unable to resolve stimulus run for distance overlay."
-            )
+        stim_run_name = None
 
         show_plot = bool(args.show or (not dest and not args.write_zarr_artifacts))
         png_bytes = plot_track(
-            run_group,
-            track_group,
-            track_id,
-            dest,
-            args.bins,
-            console,
-            run_name,
+            run_group=run_group,
+            track_id=track_id,
+            save_path=dest,
+            bins=args.bins,
+            console=console,
+            track_tables=track_tables,
+            run_name=run_name,
             swim_bouts=swim_spans,
             swim_bout_label=swim_label,
             distance_series=distance_series,
             render_png=bool(args.write_zarr_artifacts),
             artifact_dpi=int(args.artifact_dpi),
             show=show_plot,
-            track_tables=track_tables,
         )
         if args.write_zarr_artifacts:
             if png_bytes is None:
                 console.print("[yellow]Warning:[/yellow] No PNG bytes were rendered; skipping zarr artifacts.")
                 continue
-            write_track_kinematics_plot_artifacts(
+            publish_track_kinematics_plot_artifacts(
+                root=root,
                 zarr_path=zarr_path,
-                run_group=run_group,
                 run_name=run_name,
-                track_group=track_group,
+                track_tables=track_tables,
                 track_id=track_id,
                 png_bytes=png_bytes,
                 bins=int(args.bins),

@@ -29,6 +29,12 @@ from fisheye.refinement.finalize_subject_masks import (
 )
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.tune.refined_subject_mask_review import _load_source_subject_mask_run
 
 
@@ -112,9 +118,14 @@ def _copy_context_arrays(
     fixture_rows = np.arange(row_count, dtype=np.int64)
 
     source_crop = source_root[f"crop_runs/{target_crop_run}"]
-    crop_parent = target_root.create_group("crop_runs")
+    crop_parent = require_runs_parent(
+        target_root,
+        "crop_runs",
+        completion_epoch=COMPLETION_EPOCH_STRICT,
+    )
     crop_parent.attrs["latest"] = _FIXTURE_CROP_RUN
     crop = crop_parent.create_group(_FIXTURE_CROP_RUN)
+    mark_run_started(crop, run_name=_FIXTURE_CROP_RUN, stage="benchmark_crop_fixture")
     crop.attrs.update(dict(source_crop.attrs))
     crop.attrs.update(
         {
@@ -141,9 +152,18 @@ def _copy_context_arrays(
 
     source_keypoints = source_root[f"{assignment_keypoint_group}/{assignment_keypoints_run}"]
     selected_keypoint_rows = _keypoint_selected_rows(source_keypoints, target_crop_rows)
-    keypoint_parent = target_root.create_group(assignment_keypoint_group)
+    keypoint_parent = require_runs_parent(
+        target_root,
+        assignment_keypoint_group,
+        completion_epoch=COMPLETION_EPOCH_STRICT,
+    )
     keypoint_parent.attrs["latest"] = _FIXTURE_KEYPOINT_RUN
     keypoints = keypoint_parent.create_group(_FIXTURE_KEYPOINT_RUN)
+    mark_run_started(
+        keypoints,
+        run_name=_FIXTURE_KEYPOINT_RUN,
+        stage="benchmark_keypoint_fixture",
+    )
     keypoints.attrs.update(dict(source_keypoints.attrs))
     keypoints.attrs.update(
         {
@@ -171,9 +191,18 @@ def _copy_context_arrays(
     keypoints.create_array("source_crop_row_ids", data=fixture_rows, overwrite=True)
 
     source_shard = source_root[f"subject_mask_shard_runs/{source_shard_run}"]
-    subject_parent = target_root.create_group("subject_mask_runs")
+    subject_parent = require_runs_parent(
+        target_root,
+        "subject_mask_runs",
+        completion_epoch=COMPLETION_EPOCH_STRICT,
+    )
     subject_parent.attrs["latest"] = _FIXTURE_RUN
     subject_run = subject_parent.create_group(_FIXTURE_RUN)
+    mark_run_started(
+        subject_run,
+        run_name=_FIXTURE_RUN,
+        stage="benchmark_subject_mask_fixture",
+    )
     subject_run.attrs.update(dict(source_shard.attrs))
     subject_run.attrs.update(
         {
@@ -221,6 +250,18 @@ def _copy_context_arrays(
     available = source_shard.get("available_channels")
     if available is not None:
         subject_run.create_array("available_channels", data=np.asarray(available[:]), overwrite=True)
+
+    mark_run_complete(crop, parent_group=crop_parent, run_name=_FIXTURE_CROP_RUN)
+    mark_run_complete(
+        keypoints,
+        parent_group=keypoint_parent,
+        run_name=_FIXTURE_KEYPOINT_RUN,
+    )
+    mark_run_complete(
+        subject_run,
+        parent_group=subject_parent,
+        run_name=_FIXTURE_RUN,
+    )
 
     return {
         "row_count": row_count,

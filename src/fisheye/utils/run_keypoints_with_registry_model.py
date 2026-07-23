@@ -20,13 +20,15 @@ from fisheye.detection.detect_keypoints_yolo import (
     DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     DEFAULT_KEYPOINT_OUTPUT_PARENT,
     DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
-    DEFAULT_POSE_SCHEMA_NAME,
     KEYPOINT_OUTPUT_PARENTS,
     detect_keypoints_yolo,
 )
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.flat_roi_cache import open_flat_roi_cache
+from fisheye.shared.pose_model_schema_binding import (
+    resolve_registered_pose_model_schema_binding,
+)
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.registry.model_resolution import Candidate, TargetProfile, load_candidates, load_target_profile, resolve_recording_id
 
@@ -318,6 +320,9 @@ def build_keypoint_resolution_payload(
             "set_id": item.set_id,
             "model_path": item.model_path,
             "model_sha256": item.model_sha256,
+            "manifest_path": item.manifest_path,
+            "manifest_sha256": item.manifest_sha256,
+            "skeleton_id": item.skeleton_id,
             "score": item.weighted_score,
             "created_utc": item.created_utc,
             "status": item.status,
@@ -522,7 +527,7 @@ def run_keypoints_with_registry_model(
     run_name: Optional[str] = None,
     output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
     crop_run: Optional[str] = None,
-    pose_schema: str = DEFAULT_POSE_SCHEMA_NAME,
+    pose_schema: Optional[str] = None,
     batch_size: int = 256,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
@@ -649,6 +654,33 @@ def run_keypoints_with_registry_model(
             keypoint_parent=output_parent,
         )
 
+    try:
+        binding_registry = Registry(registry_path)
+        try:
+            model_pose_schema_binding = resolve_registered_pose_model_schema_binding(
+                binding_registry,
+                run_id=best.run_id,
+                expected_set_id=best.set_id,
+                expected_model_path=best.model_path,
+                expected_model_sha256=best.model_sha256,
+            )
+        finally:
+            binding_registry.close()
+    except Exception as exc:
+        return _failure_result(
+            reason="model_pose_schema_binding_failed",
+            error=str(exc),
+            remediation=(
+                "Repair or replace the selected registry model's hash-bound training "
+                "manifest/skeleton metadata; canonical inference will not infer an "
+                "ordered keypoint axis from cardinality or defaults."
+            ),
+            recording_dir=resolved_recording_dir,
+            output_path=output_path,
+            registry_path=registry_path,
+            keypoint_parent=output_parent,
+        )
+
     payload = build_keypoint_resolution_payload(
         args=payload_args,
         argv=argv,
@@ -660,6 +692,9 @@ def run_keypoints_with_registry_model(
         selected=best,
         candidates=candidates,
         top_k=int(top_k),
+    )
+    payload.setdefault("artifacts", {})["model_pose_schema_binding"] = (
+        model_pose_schema_binding
     )
     selected_payload = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
     selected_model_path = selected_payload.get("model_path") if isinstance(selected_payload.get("model_path"), str) else None
@@ -721,6 +756,7 @@ def run_keypoints_with_registry_model(
             output_parent=output_parent,
             crop_run=crop_run,
             pose_schema=pose_schema,
+            model_pose_schema_binding=model_pose_schema_binding,
             batch_size=batch_size,
             device=resolved_device,
             imgsz=imgsz,
@@ -747,12 +783,17 @@ def run_keypoints_with_registry_model(
         )
         if not keypoint_run:
             raise RuntimeError("Keypoint inference did not create a run; model resolution provenance cannot be written.")
-        write_keypoint_model_resolution_provenance(
-            zarr_path=output_path,
-            run_name=keypoint_run,
-            payload=payload,
-            output_parent=output_parent,
-        )
+        # Canonical publication is immutable after completion. Its selected
+        # registry run/set are already in run provenance and the exact
+        # model-schema binding is digest-sealed in the coordinate context.
+        # Legacy collection shards may retain the historical post-write annotation.
+        if output_parent != DEFAULT_KEYPOINT_OUTPUT_PARENT:
+            write_keypoint_model_resolution_provenance(
+                zarr_path=output_path,
+                run_name=keypoint_run,
+                payload=payload,
+                output_parent=output_parent,
+            )
     except Exception as exc:
         return _failure_result(
             reason="keypoint_inference_failed",
@@ -815,10 +856,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--pose-schema",
         type=str,
-        default=DEFAULT_POSE_SCHEMA_NAME,
+        default=None,
         help=(
-            "Pose schema from configs/fisheye/pose_schemas to stamp on the output run. "
-            f"Defaults to detect_keypoints_yolo's default ({DEFAULT_POSE_SCHEMA_NAME}) when omitted."
+            "Optional package-schema consistency assertion. Canonical ordered "
+            "labels are resolved from the selected model's hash-bound training manifest."
         ),
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Optional keypoint batch size override.")

@@ -69,7 +69,16 @@ def record_registry_training_run(
     final_metrics: Optional[dict[str, Any]],
     pose_schema: Optional[dict[str, Any]] = None,
     export_artifacts: Optional[dict[str, Any]] = None,
+    expected_manifest_sha256: Optional[str] = None,
 ) -> None:
+    actual_manifest_sha256 = safe_sha256_file(manifest_path)
+    if expected_manifest_sha256 is not None:
+        expected_digest = str(expected_manifest_sha256).strip().lower()
+        if actual_manifest_sha256 != expected_digest:
+            raise ValueError(
+                "Pose training manifest content changed after its schema authority "
+                "was resolved."
+            )
     registry = None
     try:
         registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
@@ -91,7 +100,7 @@ def record_registry_training_run(
             model_path=model_path,
             metrics_path=metrics_path,
             config_sha256=safe_sha256_file(config_path),
-            manifest_sha256=safe_sha256_file(manifest_path),
+            manifest_sha256=actual_manifest_sha256,
             model_sha256=safe_sha256_file(model_path),
             metrics_sha256=safe_sha256_file(metrics_path),
             status=status,

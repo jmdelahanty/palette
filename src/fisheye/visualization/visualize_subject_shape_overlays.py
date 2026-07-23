@@ -13,9 +13,17 @@ import zarr
 from skimage.measure import find_contours
 from skimage.morphology import skeletonize
 
+from fisheye.analysis.subject_shape_io import (
+    SubjectShapeIOError,
+    resolve_canonical_subject_shape_run,
+)
 from fisheye.analysis.subject_shape_runs import _longest_skeleton_endpoint_path_xy
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.mask_store import MaskStore, open_mask_store
+from fisheye.shared.subject_shape_coordinate_publication import (
+    BoundSubjectShapeCoordinatePublication,
+    require_translation_only_refined_placement,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 
 
@@ -35,6 +43,9 @@ class SubjectShapeOverlayContext:
     refined_group: zarr.Group
     label_map: dict[str, int]
     mask_store: MaskStore
+    coordinate_publication: BoundSubjectShapeCoordinatePublication
+    source_camera_offset_xy: np.ndarray
+    source_crop_row_ids: np.ndarray
     crop_source: CropImageSource | None = None
 
 
@@ -44,39 +55,39 @@ def _open_zarr(zarr_path: Path) -> zarr.Group:
     return open_zarr_root(zarr_path, mode="r")
 
 
-def _resolve_shape_run(root: zarr.Group, shape_run: str | None) -> tuple[str, zarr.Group]:
-    analysis = root.get("analysis")
-    if analysis is None or "subject_shape_runs" not in analysis:
-        raise ValueError("Archive has no analysis/subject_shape_runs group.")
-    parent = analysis["subject_shape_runs"]
-    run_name = str(shape_run or parent.attrs.get("latest") or "")
-    if not run_name:
-        candidates = sorted(str(name) for name in parent.keys())
-        if not candidates:
-            raise ValueError("analysis/subject_shape_runs has no runs.")
-        run_name = candidates[-1]
-    if run_name not in parent:
-        raise ValueError(f"analysis/subject_shape_runs/{run_name} not found.")
-    return run_name, parent[run_name]
+def _resolve_shape_run(
+    root: zarr.Group,
+    shape_run: str | None,
+) -> tuple[str, zarr.Group, BoundSubjectShapeCoordinatePublication]:
+    try:
+        group, run_name, _run_path, publication = (
+            resolve_canonical_subject_shape_run(root, shape_run)
+        )
+    except SubjectShapeIOError as exc:
+        raise ValueError(str(exc)) from exc
+    return run_name, group, publication
 
 
 def _resolve_refined_run(
     root: zarr.Group,
-    shape_group: zarr.Group,
+    publication: BoundSubjectShapeCoordinatePublication,
     refined_run: str | None,
 ) -> tuple[str, zarr.Group]:
-    parent = root.get("refined_subject_masks_runs")
-    if parent is None:
-        raise ValueError("Archive has no refined_subject_masks_runs group.")
-    run_name = str(refined_run or shape_group.attrs.get("source_refined_subject_masks_run") or parent.attrs.get("latest") or "")
-    if not run_name:
-        candidates = sorted(str(name) for name in parent.keys())
-        if not candidates:
-            raise ValueError("refined_subject_masks_runs has no runs.")
-        run_name = candidates[-1]
-    if run_name not in parent:
-        raise ValueError(f"refined_subject_masks_runs/{run_name} not found.")
-    return run_name, parent[run_name]
+    source_path = publication.source.context.run_path
+    run_name = source_path.rsplit("/", 1)[-1]
+    if refined_run is not None:
+        requested = str(refined_run).strip().strip("/").rsplit("/", 1)[-1]
+        if requested != run_name:
+            raise ValueError(
+                "Subject-shape overlays require the exact refined-mask authority "
+                f"{run_name!r}; requested {requested!r}."
+            )
+    # Identity, not Python handle identity, is sealed by the publication.
+    # Resolve the live exact child for bounded mask reads after preflight.
+    group = root.get(source_path)
+    if not isinstance(group, zarr.Group):
+        raise ValueError(f"Canonical refined-mask source {source_path!r} is missing.")
+    return run_name, group
 
 
 def _label_index_map(refined_group: zarr.Group) -> dict[str, int]:
@@ -84,6 +95,33 @@ def _label_index_map(refined_group: zarr.Group) -> dict[str, int]:
     if not isinstance(labels, (list, tuple)):
         raise ValueError("Refined subject-mask run is missing mask_labels.")
     return {str(label): int(idx) for idx, label in enumerate(labels)}
+
+
+def _canonical_crop_run_name(
+    publication: BoundSubjectShapeCoordinatePublication,
+    requested_crop_run: str | None,
+) -> str:
+    crop_path = str(publication.source.context.source.source.crop_path).strip("/")
+    prefix = "crop_runs/"
+    if not crop_path.startswith(prefix) or not crop_path[len(prefix) :]:
+        raise ValueError(
+            "Canonical subject-shape authority does not name one exact crop_runs child."
+        )
+    authoritative = crop_path[len(prefix) :]
+    if "/" in authoritative:
+        raise ValueError(
+            "Canonical subject-shape crop authority is not one exact crop run."
+        )
+    if requested_crop_run is not None:
+        requested = str(requested_crop_run).strip().strip("/")
+        if requested.startswith(prefix):
+            requested = requested[len(prefix) :]
+        if requested != authoritative:
+            raise ValueError(
+                "Subject-shape overlays require the exact crop authority "
+                f"{authoritative!r}; requested {requested!r}."
+            )
+    return authoritative
 
 
 def open_subject_shape_overlay_context(
@@ -95,20 +133,42 @@ def open_subject_shape_overlay_context(
     use_crop_images: bool = True,
 ) -> SubjectShapeOverlayContext:
     root = _open_zarr(zarr_path)
-    shape_run_name, shape_group = _resolve_shape_run(root, shape_run)
-    refined_run_name, refined_group = _resolve_refined_run(root, shape_group, refined_run)
+    shape_run_name, shape_group, publication = _resolve_shape_run(root, shape_run)
+    refined_run_name, refined_group = _resolve_refined_run(
+        root,
+        publication,
+        refined_run,
+    )
+    source_camera_offset_xy, _edge_offset = require_translation_only_refined_placement(
+        publication.source
+    )
     label_map = _label_index_map(refined_group)
     mask_store = open_mask_store(
         refined_group,
         source_path=f"refined_subject_masks_runs/{refined_run_name}",
         prefer="dense",
     )
+    source_crop_row_ids = np.asarray(
+        shape_group["source_crop_row_ids"][:],
+        dtype=np.int64,
+    )
+    if (
+        source_crop_row_ids.ndim != 1
+        or int(source_crop_row_ids.shape[0]) != int(mask_store.n_rows)
+        or np.any(source_crop_row_ids < 0)
+    ):
+        raise ValueError(
+            "Canonical subject-shape source_crop_row_ids must be a non-negative "
+            "one-dimensional array aligned with the sealed observation rows."
+        )
     crop_source: CropImageSource | None = None
     if use_crop_images:
-        try:
-            crop_source = CropImageSource.open(root, crop_run=crop_run, zarr_path=zarr_path)
-        except Exception:
-            crop_source = None
+        authoritative_crop_run = _canonical_crop_run_name(publication, crop_run)
+        crop_source = CropImageSource.open(
+            root,
+            crop_run=authoritative_crop_run,
+            zarr_path=zarr_path,
+        )
     return SubjectShapeOverlayContext(
         root=root,
         shape_run_name=shape_run_name,
@@ -117,6 +177,12 @@ def open_subject_shape_overlay_context(
         refined_group=refined_group,
         label_map=label_map,
         mask_store=mask_store,
+        coordinate_publication=publication,
+        source_camera_offset_xy=np.asarray(
+            source_camera_offset_xy,
+            dtype=np.float64,
+        ),
+        source_crop_row_ids=source_crop_row_ids,
         crop_source=crop_source,
     )
 
@@ -165,6 +231,25 @@ def _row_value(group: zarr.Group, path: str, row: int, default: object = None) -
         return default
 
 
+def _overlay_position_value(
+    ctx: SubjectShapeOverlayContext,
+    path: str,
+    row: int,
+    default: object = None,
+) -> object:
+    """Project canonical source-camera points into the exact ROI background."""
+
+    value = _row_value(ctx.shape_group, path, row, default)
+    if value is default:
+        return default
+    array = np.asarray(value)
+    if array.ndim < 1 or array.shape[-1] != 2:
+        raise ValueError(f"Overlay position surface {path!r} is not XY geometry.")
+    if int(row) < 0 or int(row) >= int(ctx.source_camera_offset_xy.shape[0]):
+        raise IndexError(f"Row {row} is outside the sealed crop-placement authority.")
+    return array.astype(np.float64) - ctx.source_camera_offset_xy[int(row)]
+
+
 def _mask_for(ctx: SubjectShapeOverlayContext, row: int, label: str) -> np.ndarray | None:
     idx = ctx.label_map.get(label)
     if idx is None:
@@ -176,11 +261,21 @@ def _mask_for(ctx: SubjectShapeOverlayContext, row: int, label: str) -> np.ndarr
 
 
 def _base_image(ctx: SubjectShapeOverlayContext, row: int, subject_body: np.ndarray | None) -> tuple[np.ndarray, str]:
-    if ctx.crop_source is not None and 0 <= int(row) < ctx.crop_source.total_rois:
-        try:
-            return _normalize_image(ctx.crop_source[int(row)]), f"crop:{ctx.crop_source.crop_run_name}"
-        except Exception:
-            pass
+    if ctx.crop_source is not None:
+        if int(row) < 0 or int(row) >= int(ctx.source_crop_row_ids.shape[0]):
+            raise IndexError(
+                f"Subject-shape row {row} is outside the sealed source-crop row mapping."
+            )
+        crop_row = int(ctx.source_crop_row_ids[int(row)])
+        if crop_row < 0 or crop_row >= int(ctx.crop_source.total_rois):
+            raise IndexError(
+                f"Sealed source crop row {crop_row} for subject-shape row {row} is "
+                f"outside crop run {ctx.crop_source.crop_run_name!r}."
+            )
+        return (
+            _normalize_image(ctx.crop_source[crop_row]),
+            f"crop:{ctx.crop_source.crop_run_name}:row={crop_row}",
+        )
     if subject_body is not None:
         return np.asarray(subject_body, dtype=np.float32) * 0.55, "subject_body_mask"
     raise ValueError("No crop image or subject-body mask available for overlay background.")
@@ -522,11 +617,20 @@ def _plot_skeleton(
     _scatter_skeleton_points(ax, unused, label="unused skeleton branches", alpha=0.9, size=5.0)
 
 
-def _plot_body_frame(ax: plt.Axes, shape_group: zarr.Group, row: int) -> None:
-    valid = bool(_row_value(shape_group, "body_frame/valid", row, False))
+def _plot_body_frame(ax: plt.Axes, ctx: SubjectShapeOverlayContext, row: int) -> None:
+    shape_group = ctx.shape_group
+    valid = bool(_row_value(shape_group, "body_frame/axis_valid", row, False))
     if not valid:
         return
-    origin = np.asarray(_row_value(shape_group, "body_frame/origin_xy", row, [np.nan, np.nan]), dtype=np.float64)
+    origin = np.asarray(
+        _overlay_position_value(
+            ctx,
+            "body_frame/origin_xy",
+            row,
+            [np.nan, np.nan],
+        ),
+        dtype=np.float64,
+    )
     forward = np.asarray(_row_value(shape_group, "body_frame/forward_axis_xy", row, [np.nan, np.nan]), dtype=np.float64)
     left = np.asarray(_row_value(shape_group, "body_frame/left_axis_xy", row, [np.nan, np.nan]), dtype=np.float64)
     if origin.shape != (2,) or forward.shape != (2,) or not np.all(np.isfinite(origin)) or not np.all(np.isfinite(forward)):
@@ -620,7 +724,12 @@ def render_subject_shape_overlay(
     centerline_valid = bool(_row_value(shape, "components/subject_body/centerline_valid", row, False))
     _plot_centerline(
         ax,
-        _row_value(shape, "components/subject_body/centerline_xy", row, None),
+        _overlay_position_value(
+            ctx,
+            "components/subject_body/centerline_xy",
+            row,
+            None,
+        ),
         valid=centerline_valid,
     )
     bspline_drawn = False
@@ -630,7 +739,12 @@ def render_subject_shape_overlay(
     if show_bspline:
         bspline_drawn = _plot_polyline(
             ax,
-            _row_value(shape, "components/subject_body/bspline_sample_xy", row, None),
+            _overlay_position_value(
+                ctx,
+                "components/subject_body/bspline_sample_xy",
+                row,
+                None,
+            ),
             label="B-spline sample",
             color="#ff1744",
             linewidth=1.8,
@@ -640,7 +754,12 @@ def render_subject_shape_overlay(
     if show_spline_control_points:
         control_points_drawn = _scatter_points(
             ax,
-            _row_value(shape, "components/subject_body/bspline_control_points_xy", row, None),
+            _overlay_position_value(
+                ctx,
+                "components/subject_body/bspline_control_points_xy",
+                row,
+                None,
+            ),
             label="B-spline control points",
             color="#ff80ab",
             marker="D",
@@ -650,7 +769,12 @@ def render_subject_shape_overlay(
     if show_tail_samples:
         tail_samples_drawn = _scatter_points(
             ax,
-            _row_value(shape, "components/subject_body/tail_sample_xy", row, None),
+            _overlay_position_value(
+                ctx,
+                "components/subject_body/tail_sample_xy",
+                row,
+                None,
+            ),
             label="tail samples",
             color="#18ffff",
             marker="o",
@@ -660,13 +784,32 @@ def render_subject_shape_overlay(
     if show_tail_normals:
         tail_normals_drawn = _plot_tail_normals(
             ax,
-            _row_value(shape, "components/subject_body/tail_sample_xy", row, None),
+            _overlay_position_value(
+                ctx,
+                "components/subject_body/tail_sample_xy",
+                row,
+                None,
+            ),
             _row_value(shape, "components/subject_body/tail_normal_xy", row, None),
         )
-    _plot_body_frame(ax, shape, row)
+    _plot_body_frame(ax, ctx, row)
     snout_array = _get_array_or_none(shape, "components/subject_body/snout_tip_xy")
-    snout_xy = _row_value(shape, "components/subject_body/snout_tip_xy", row, None) if snout_array is not None else None
-    head_xy = _row_value(shape, "components/subject_body/head_endpoint_xy", row, None)
+    snout_xy = (
+        _overlay_position_value(
+            ctx,
+            "components/subject_body/snout_tip_xy",
+            row,
+            None,
+        )
+        if snout_array is not None
+        else None
+    )
+    head_xy = _overlay_position_value(
+        ctx,
+        "components/subject_body/head_endpoint_xy",
+        row,
+        None,
+    )
     if snout_array is not None:
         _plot_point(
             ax,
@@ -678,7 +821,12 @@ def render_subject_shape_overlay(
         )
     _plot_point(
         ax,
-        _row_value(shape, "components/swim_bladder/caudal_contour_point_xy", row, None),
+        _overlay_position_value(
+            ctx,
+            "components/swim_bladder/caudal_contour_point_xy",
+            row,
+            None,
+        ),
         color="#ffeb3b",
         marker="*",
         label="caudal swim anchor",
@@ -703,14 +851,24 @@ def render_subject_shape_overlay(
         )
     _plot_point(
         ax,
-        _row_value(shape, "components/subject_body/tail_base_xy", row, None),
+        _overlay_position_value(
+            ctx,
+            "components/subject_body/tail_base_xy",
+            row,
+            None,
+        ),
         color="#ffd54f",
         marker="o",
         label="tail base",
     )
     _plot_point(
         ax,
-        _row_value(shape, "components/subject_body/tail_tip_xy", row, None),
+        _overlay_position_value(
+            ctx,
+            "components/subject_body/tail_tip_xy",
+            row,
+            None,
+        ),
         color="#e040fb",
         marker="x",
         label="tail tip",

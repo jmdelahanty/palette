@@ -26,7 +26,6 @@ under threat. Ties to the escape result: fewer TOTAL bouts during chase but 12x 
 """
 from __future__ import annotations
 import argparse
-import json
 import os
 from pathlib import Path
 
@@ -37,6 +36,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import resolve_cohort as cohort
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 FIGURES_DIR = Path(os.environ.get("PALETTE_RECORDINGS_ROOT", "/nvme1/recordings")) / "figures"
@@ -54,21 +57,8 @@ PANELS = [("rate", "Bouts per validly-tracked minute", "bouts/min"),
 
 def load(zp):
     r = zarr.open_group(zp, mode="r")
-    cd = r["analysis/chaser_distance_runs"][sorted(r["analysis/chaser_distance_runs"].group_keys())[-1]]
-    fps = float(cd.attrs.get("fps") or 100.0)
-    fvalid = np.asarray(cd["positions"]["fish_valid"][:], bool)
-    b = cd["chaser_bout_response"][sorted(cd["chaser_bout_response"].group_keys())[-1]]["bouts"]
-    bv = np.asarray(b["valid"][:], bool)
-    bs = np.asarray(b["start_frame"][:], np.int64)[bv]
-    bdur = np.asarray(b["duration_s"][:], float)[bv]
-    bpk = np.asarray(b["peak_speed_mm_s"][:], float)[bv]
-    w = r["analysis/stimulus_epoch_runs"][sorted(r["analysis/stimulus_epoch_runs"].group_keys())[-1]]["windows"]
-    ep = {}
-    for s, e, lab in zip(np.asarray(w["start_frame"][:]), np.asarray(w["end_frame"][:]),
-                         [x.tobytes().decode("utf-8", "ignore").strip("\x00") for x in np.asarray(w["label_bytes"][:])]):
-        k = "pre" if "pre" in lab.lower() else ("chase" if ("train" in lab.lower() or "chase" in lab.lower()) else "post")
-        ep[k] = (int(s), int(e))
-    return dict(fps=fps, fvalid=fvalid, bs=bs, bdur=bdur, bpk=bpk, ep=ep)
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_bout_response")
 
 
 def epoch_bouts(d, epk):
@@ -94,6 +84,8 @@ def plot_cohort(recs, example_sub, out):
     for rid, zp in recs:
         try:
             d = load(zp); row = {ep: epoch_bouts(d, ep) for ep in EPOCHS}
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # noqa: BLE001
             print("skip", rid.split("_GoodCop")[0], ex); continue
         vals = {ep: dict(rate=row[ep]["rate"], dur=_median(row[ep]["dur"]),

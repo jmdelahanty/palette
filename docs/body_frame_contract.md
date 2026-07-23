@@ -1,8 +1,8 @@
 # Body Frame Contract
 <!-- contract-meta
-version: 1
-status: draft
-last_verified: 2026-04-28
+version: 2
+status: active
+last_verified: 2026-07-19
 -->
 
 Purpose: define a shared fish-relative coordinate-frame contract that can be
@@ -49,8 +49,63 @@ Version 1 defines a two-dimensional fish anatomical frame:
 - `forward_axis`: a unit vector pointing tail/body posterior toward head/anterior.
 - `left_axis`: a unit vector perpendicular to `forward_axis`, pointing toward
   anatomical left.
-- `heading_deg`: the scalar heading implied by `forward_axis`.
-- `valid`: whether the frame was resolved for the row/sample.
+- `axis_valid`: whether the frame was resolved for the row/sample.
+
+`heading_deg` is a derived scalar presentation/analysis surface, not part of
+the canonical version-1 body-frame geometry record. Consumers may derive it
+from `forward_axis_xy` using the fixed angle convention below. If a producer
+also persists a heading array, that array requires its own row-bound contract;
+its presence does not establish body-frame authority.
+
+Subject-shape method v11 implements that additional contract as
+`palette.subject_shape_row_bound_heading_semantics`. It digest-binds the exact
+`heading_deg`, `forward_axis_xy`, and `axis_valid` arrays, the forward-axis
+coordinate descriptor, fish body-frame record, and row identity. It declares
+degrees, zero along source-camera positive X, positive rotation after the
+source-camera Y flip, and NaN for invalid rows. Readers must validate this
+record; a plausible scalar range or the array name is not evidence.
+
+### Canonical version-1 derivation authority
+
+A canonical body-frame record is not established by plausible orthonormal
+arrays alone. The frame must bind the exact source coordinate payload, its
+canonical row identity, the labeled source schema, method-specific validity or
+polarity arrays, the controlled estimator record, and the owning producer
+manifest. Every payload is path-, dtype-, shape-, and content-digest-bound in
+the same archive.
+
+For `keypoint_head_axis` and `mask_component_axis`, version 1 uses exactly:
+
+```text
+origin  = (eye_left + eye_right) / 2
+forward = normalize(origin - swim_bladder)
+left    = the source-axis-aware perpendicular to forward
+```
+
+The row is valid only when all three labeled anchors are valid and finite, the
+forward vector is non-degenerate, and
+`dot(eye_left - eye_right, left) > 0`. The last check resolves the perpendicular
+using labeled anatomical side; a numerically orthonormal but oppositely labeled
+axis is invalid.
+
+For `body_spline_with_anchor_polarity`, version 1 chooses the spline endpoint
+nearest the eye midpoint as anterior and the farther endpoint as posterior,
+then uses `normalize(anterior - posterior)`. Equal endpoint distances,
+non-finite inputs, inconsistent eye-side polarity, or a forward axis that does
+not point from the swim-bladder anchor toward the eye midpoint make the row
+invalid. A different spline estimator requires a new controlled formula ID or
+schema version.
+
+For every method, invalid rows use `axis_valid = false` and all-NaN origin and
+axis geometry. Writers must rederive these values from the bound inputs; they
+must not certify caller-provided geometry from norm and orthogonality checks
+alone.
+
+The body-frame row identity is the exact identity of its source coordinate
+rowset. An observation source uses `observation_instance/instance_key`; a
+track-sample source uses `track_sample/track_sample_key`. Neither key is a
+biological `subject_id`, and a same-length identity array is not a substitute
+for the bound source identity.
 
 The default semantic anchors for the current fish layout are:
 
@@ -62,12 +117,38 @@ does not require masks.
 
 ## Coordinate Convention
 
-Stored `*_xy` arrays use the same pixel coordinate space as their source rows:
+Stored `*_xy` arrays remain bound to the exact frame authority of their source.
+Canonical version-1 estimator source descriptors accept only:
 
-- `x` increases rightward
-- `y` increases downward
-- coordinates must be isotropic pixels such as ROI or image pixels, not
-  non-square normalized coordinates
+- `source_camera_image_px.top_left_y_down.v1`
+- `physical_mm.source_camera_y_down.v1`
+
+Both profiles use source-camera `+x` right and `+y` down. ROI-local,
+model-input, normalized, arena-relative, canvas, projector, and generic
+`image_pixels` inputs are not accepted by version 1, even when their numeric
+ranges or axes look compatible. A future profile may admit one only through a
+typed, direction-labelled transform lineage and a new controlled contract.
+
+Array descriptors remain geometry-specific:
+
+- a source-camera `origin_xy` is `point_xy` in
+  `source_camera_image_px.top_left_y_down.v1`, with pixel units, continuous
+  convention, and direct source-camera overlay status
+- `forward_axis_xy` and `left_axis_xy` are unitless `vector_xy` in the narrow
+  `source_camera_image_px.unit_vector_y_down.v1` profile, with
+  `pixel_convention = "not_applicable"` and overlay status `not_suitable`;
+  axes are directions, not drawable camera points
+- a mask-component centroid source with physical shape `(N, C, 2)` is
+  `point_xy` plus `collection_axis.role = "subject_component"`, cardinality
+  `C`, and the exact digest-bound component-label authority
+- uncollected `points_xy` is reserved for `(N, P, 2)` point sequences. A
+  multi-point-per-component surface `(N, C, P, 2)` requires a separately
+  defined shape rule and must not reuse the centroid collection contract
+
+The coordinate descriptors and body-frame record share the exact bound row
+identity, but they are distinct authorities. `instance_key` says which
+observation a row represents; it does not encode component labels, anatomical
+polarity, coordinate space, or frame axes.
 
 `heading_deg` uses the existing keypoint heading convention:
 
@@ -88,9 +169,9 @@ forward_coordinate = dot(vector_xy, forward_axis_xy)
 left_coordinate    = dot(vector_xy, left_axis_xy)
 ```
 
-where `vector_xy` is measured in the same image/ROI coordinate space as the
-stored axes. This makes anatomical left positive without rotating or rewriting
-the source image.
+where `vector_xy` is measured in the same bound source-camera-pixel or
+source-camera-physical frame as the stored axes. This makes anatomical left
+positive without rotating or rewriting the source image.
 
 ## Schema Placement
 
@@ -150,27 +231,24 @@ For row-aligned runs:
 ```text
 analysis/subject_shape_runs/<run>/
   attrs:
-    body_frame_schema_id              "fish_anatomical_body_frame"
-    body_frame_schema_version         1
-    body_frame_estimator              "keypoint_head_axis" | "mask_component_axis" | "body_spline_with_anchor_polarity"
-    body_frame_estimator_version      integer or stable string
-    body_frame_coordinate_space       "roi_pixels" | "image_pixels"
-    body_frame_angle_convention       "math_ccw_degrees_after_y_flip"
-    body_frame_source_refs            dict of exact keypoint/mask/shape sources
+    fish_anatomical_body_frame         sealed typed frame record
+    fish_anatomical_body_frame_sha256  digest of the exact frame record
   body_frame/
     origin_xy                         (N, 2)
     forward_axis_xy                   (N, 2)
     left_axis_xy                      (N, 2)
-    heading_deg                       (N,)
-    valid                             (N,)
-    failure_reason_bytes              (N, width) optional uint8 utf8-null-terminated tags
-    failure_reason                    (N,) optional compatibility string array
-    midline_xy                        (N, P, 2) optional for spline/centerline estimators
-    midline_valid                     (N,) optional
-    arclength_px                      (N,) optional
+    axis_valid                        (N,)
 ```
 
-Writers may omit optional arrays they cannot validate.
+Those four arrays are mandatory and content-digest-bound by the frame record;
+invalid rows have `axis_valid == false` and all-NaN values in all three geometry
+arrays. Heading, failure reasons, midlines, and arclengths may be persisted as
+separate derived surfaces, but they are not optional members of the canonical
+body-frame geometry record and do not inherit its authority implicitly.
+
+In subject-shape method v11, a historical sibling `valid` may remain only as
+an explicitly declared compatibility alias of `axis_valid`; it is not the
+field authorized by the sealed frame record.
 
 The body-frame origin is estimator-defined. For the current
 `mask_component_axis` estimator, `origin_xy` is the eye-pair midpoint. That
@@ -274,8 +352,9 @@ Recommended failure reasons:
 - `midline_fit_failed`
 - `source_row_stale`
 
-Downstream analyses must consult `valid` and reason arrays rather than
-inferring all failure from NaN values.
+Downstream analyses must consult `axis_valid` rather than infer validity only
+from NaN values. Failure-reason arrays, when present under a separate derived
+contract, may refine diagnostics but cannot override `axis_valid`.
 
 ## Relationship To Heading
 
@@ -331,12 +410,13 @@ Long term:
 
 ## Open Questions
 
-- Which origin should be preferred for each downstream family: eye midpoint,
-  swim bladder, body centroid, or spline arclength zero?
-- Should `left_axis_xy` be stored explicitly, or always derived from
-  `forward_axis_xy` plus side anchors?
-- Should body-frame arrays be row-aligned to refined mask rows, keypoint rows,
-  track samples, or all of the above through separate projection steps?
+- A future schema may add origins other than the version-1 eye-pair midpoint;
+  it must use a new controlled origin/formula contract.
+- `left_axis_xy` is mandatory in version 1 and is rederived from exact labeled
+  source anchors; changing that materialization requires a new schema version.
+- Version 1 may bind either an observation `instance_key` rowset or a
+  `track_sample_key` rowset. Cross-rowset projection is a separate explicit
+  operation and cannot be inferred from equal row counts.
 - What approval/quality threshold is required before a mask/spline-derived
   body frame supersedes a keypoint-derived fallback?
 

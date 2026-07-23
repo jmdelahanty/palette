@@ -22,9 +22,10 @@ def test_refine_keypoints_cli_forwards_run_name(monkeypatch, tmp_path) -> None:
             "--config",
             str(tmp_path / "missing.yaml"),
             "--no-post-audit",
+            "--allow-legacy-unverified-diagnostic-output",
         ]
     )
 
     assert captured["keypoint_run"] == "keypoints_custom"
     assert captured["run_name"] == "refined_custom"
-
+    assert captured["allow_legacy_unverified_diagnostic_output"] is True

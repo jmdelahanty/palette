@@ -8750,7 +8750,7 @@ def scan_paths(
 
 
 def _is_zarr_root(path: Path) -> bool:
-    return (path / "zarr.json").exists() or (path / ".zgroup").exists()
+    return (path / "zarr.json").is_file()
 
 
 def _is_empty_zarr_stub(path: Path) -> bool:
@@ -8759,7 +8759,7 @@ def _is_empty_zarr_stub(path: Path) -> bool:
     if not path.is_dir() or not _is_zarr_root(path):
         return False
 
-    metadata_names = {"zarr.json", ".zgroup", ".zattrs", ".zmetadata"}
+    metadata_names = {"zarr.json"}
     try:
         non_metadata_children = [child for child in path.iterdir() if child.name not in metadata_names]
     except OSError:
@@ -8767,25 +8767,16 @@ def _is_empty_zarr_stub(path: Path) -> bool:
     if non_metadata_children:
         return False
 
-    if (path / ".zattrs").exists():
-        try:
-            attrs = json.loads((path / ".zattrs").read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        if attrs:
-            return False
-
     zarr_json = path / "zarr.json"
-    if zarr_json.exists():
-        try:
-            data = json.loads(zarr_json.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        attrs = data.get("attributes")
-        if isinstance(attrs, Mapping) and attrs:
-            return False
-        if attrs is not None and not isinstance(attrs, Mapping):
-            return False
+    try:
+        data = json.loads(zarr_json.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    attrs = data.get("attributes")
+    if isinstance(attrs, Mapping) and attrs:
+        return False
+    if attrs is not None and not isinstance(attrs, Mapping):
+        return False
 
     return True
 

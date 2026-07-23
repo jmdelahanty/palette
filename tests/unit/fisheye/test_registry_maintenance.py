@@ -71,6 +71,7 @@ from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from tests.unit.fisheye._eye_mask_registry_seed import insert_eye_mask_performance
+from tests.unit.fisheye.registry_test_fixtures import registry_from_empty_template
 
 
 def _create_quality_zarr(path: Path) -> None:
@@ -1301,7 +1302,7 @@ def test_is_nested_zarr_subpath() -> None:
 
 
 def test_schema_has_fk_indexes_for_skeleton_columns(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     expected_indexes = {
         "idx_training_sets_skeleton_id",
         "idx_training_runs_skeleton_id",
@@ -1323,7 +1324,7 @@ def test_schema_has_fk_indexes_for_skeleton_columns(tmp_path: Path) -> None:
 
 
 def test_schema_has_training_task_type_columns_and_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
 
     set_cols = {
         str(row["name"])
@@ -1350,7 +1351,7 @@ def test_schema_has_training_task_type_columns_and_indexes(tmp_path: Path) -> No
 
 
 def test_training_task_type_inferred_and_backfilled(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
 
     registry.upsert_training_set(
         set_id="detect_example_v001",
@@ -1397,7 +1398,7 @@ def test_training_task_type_inferred_and_backfilled(tmp_path: Path) -> None:
 
 
 def test_schema_has_detect_performance_table_views_and_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     table = registry.conn.execute(
         """
         SELECT name
@@ -1456,7 +1457,7 @@ def test_schema_has_detect_performance_table_views_and_indexes(tmp_path: Path) -
 
 
 def test_schema_has_keypoint_performance_table_views_and_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     table = registry.conn.execute(
         """
         SELECT name
@@ -1505,7 +1506,7 @@ def test_schema_has_keypoint_performance_table_views_and_indexes(tmp_path: Path)
 
 
 def test_schema_has_eye_mask_performance_table_views_and_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     table = registry.conn.execute(
         """
         SELECT name
@@ -1556,7 +1557,7 @@ def test_schema_has_eye_mask_performance_table_views_and_indexes(tmp_path: Path)
 
 
 def test_schema_has_eye_mask_quality_table_views_and_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     table = registry.conn.execute(
         """
         SELECT name
@@ -1607,7 +1608,7 @@ def test_schema_has_eye_mask_quality_table_views_and_indexes(tmp_path: Path) -> 
 
 
 def test_schema_has_subject_mask_performance_table_views_and_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     table = registry.conn.execute(
         """
         SELECT name
@@ -1710,7 +1711,7 @@ def test_schema_has_subject_mask_performance_table_views_and_indexes(tmp_path: P
 
 
 def test_schema_has_subject_mask_component_quality_table_views_and_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     table = registry.conn.execute(
         """
         SELECT name
@@ -1782,7 +1783,7 @@ def test_schema_has_subject_mask_component_quality_table_views_and_indexes(tmp_p
 
 
 def test_schema_has_phase2_subject_dish_cross_tables(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     expected_tables = {
         "crosses",
         "dishes",
@@ -1803,7 +1804,7 @@ def test_schema_has_phase2_subject_dish_cross_tables(tmp_path: Path) -> None:
 
 
 def test_schema_has_phase6_subject_indexes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     expected_indexes = {
         "idx_crosses_genotype",
         "idx_subjects_dish_id",
@@ -1825,7 +1826,7 @@ def test_schema_has_phase6_subject_indexes(tmp_path: Path) -> None:
 
 
 def test_schema_has_recording_subject_overview_view(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     rows = registry.conn.execute(
         """
         SELECT name
@@ -1839,7 +1840,7 @@ def test_schema_has_recording_subject_overview_view(tmp_path: Path) -> None:
 
 
 def test_schema_has_dataset_context_current_view(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     rows = registry.conn.execute(
         """
         SELECT name
@@ -1853,7 +1854,7 @@ def test_schema_has_dataset_context_current_view(tmp_path: Path) -> None:
 
 
 def test_schema_has_recording_step_status_tables_and_views(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     table_rows = registry.conn.execute(
         """
         SELECT name
@@ -1906,7 +1907,7 @@ def test_schema_has_recording_step_status_tables_and_views(tmp_path: Path) -> No
 
 
 def test_recording_step_status_latest_view_includes_dataset_context(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     dataset_path = tmp_path / "recording_a_training.zarr"
     registry.upsert_dataset(
         dataset_id="dataset_a",
@@ -1969,7 +1970,7 @@ def test_recording_step_status_latest_view_includes_dataset_context(tmp_path: Pa
 def test_recording_step_status_latest_prefers_recording_and_normalized_lineage_context(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_ctx",
         session_uuid="session_ctx",
@@ -2209,7 +2210,7 @@ def _seed_source_recording_with_canonical_context(
 
 
 def test_recording_step_status_wide_prefers_canonical_context(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     _seed_source_recording_with_canonical_context(registry, root=tmp_path)
     registry.conn.execute(
         """
@@ -2246,7 +2247,7 @@ def test_recording_step_status_wide_prefers_canonical_context(tmp_path: Path) ->
 
 
 def test_recording_overview_falls_back_to_dataset_context_current_dish_design(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_ctx",
         session_uuid="session_ctx",
@@ -2303,7 +2304,7 @@ def test_recording_overview_falls_back_to_dataset_context_current_dish_design(tm
 
 
 def test_recording_performance_views_prefer_dataset_context_current(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = _seed_source_recording_with_canonical_context(registry, root=tmp_path)
     zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
     registry.upsert_detect_performance(
@@ -2561,7 +2562,7 @@ def test_recording_performance_views_prefer_dataset_context_current(tmp_path: Pa
 
 
 def test_recording_step_overview_reports_non_ok_steps(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_a",
         session_uuid="session_a",
@@ -2633,7 +2634,7 @@ def test_recording_step_overview_reports_non_ok_steps(tmp_path: Path) -> None:
 
 
 def test_recording_step_status_wide_view_formats_check_recording_steps_columns(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_a",
         session_uuid="session_a",
@@ -2886,7 +2887,7 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
 
 
 def test_recording_step_status_wide_view_renders_source_freshness_states(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_stale",
         session_uuid="session_stale",
@@ -3076,7 +3077,7 @@ def test_recording_step_status_wide_view_renders_source_freshness_states(tmp_pat
 
 
 def test_recording_step_status_wide_view_tracks_warn_on_unassigned_rows(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_track_warn",
         session_uuid="session_track_warn",
@@ -3144,7 +3145,7 @@ def test_recording_step_status_wide_view_tracks_warn_on_unassigned_rows(tmp_path
 
 
 def test_recording_step_status_wide_view_tracks_warn_even_for_high_unassigned_rate(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_track_block",
         session_uuid="session_track_block",
@@ -3214,7 +3215,7 @@ def test_recording_step_status_wide_view_tracks_warn_even_for_high_unassigned_ra
 def test_recording_step_status_wide_view_exposes_multi_subject_tracking_readiness(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_multi_subject_ready",
         session_uuid="session_multi_subject_ready",
@@ -3310,7 +3311,7 @@ def test_recording_step_status_wide_view_exposes_multi_subject_tracking_readines
 
 
 def test_recording_subject_overview_exposes_genotype_and_dpf(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute(
         """
         INSERT INTO recordings (
@@ -3391,7 +3392,7 @@ def test_recording_subject_overview_exposes_genotype_and_dpf(tmp_path: Path) -> 
 
 
 def test_dataset_context_current_prefers_recording_and_normalized_subject_context(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_a",
         session_uuid="session_a",
@@ -3535,7 +3536,7 @@ def test_dataset_context_current_prefers_recording_and_normalized_subject_contex
 
 
 def test_dataset_context_current_handles_multi_subject_recordings(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_multi",
         session_uuid="session_multi",
@@ -3668,7 +3669,7 @@ def test_dataset_context_current_handles_multi_subject_recordings(tmp_path: Path
 def test_dataset_context_current_exposes_legacy_provenance_biology_as_compatibility_only(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_legacy",
         session_uuid="session_legacy",
@@ -3754,7 +3755,7 @@ def test_dataset_context_current_exposes_legacy_provenance_biology_as_compatibil
 def test_upsert_provenance_keeps_legacy_recording_context_snapshot_without_recording_row(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_snapshot",
         session_uuid="session_snapshot",
@@ -3800,7 +3801,7 @@ def test_upsert_provenance_keeps_legacy_recording_context_snapshot_without_recor
 def test_upsert_provenance_does_not_create_duplicate_recording_context_when_recording_exists(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_canonical",
         session_uuid="session_canonical",
@@ -3890,7 +3891,7 @@ def test_upsert_provenance_does_not_create_duplicate_recording_context_when_reco
 def test_upsert_provenance_freezes_existing_legacy_recording_context_after_recording_backfill(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_freeze",
         session_uuid="session_freeze",
@@ -3993,7 +3994,7 @@ def test_upsert_provenance_freezes_existing_legacy_recording_context_after_recor
 
 
 def test_backfill_recording_entities_and_integrity_for_behavior_manifest(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     recording_dir = (
         tmp_path
         / "recordings"
@@ -4090,7 +4091,7 @@ def test_backfill_recording_entities_and_integrity_for_behavior_manifest(tmp_pat
 
 
 def test_backfill_subject_dish_cross_entities_from_source_provenance(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "session_a" / "zarr" / "session_a_training.zarr"
     registry.upsert_dataset(
         dataset_id="session_a:z111",
@@ -4205,7 +4206,7 @@ def test_backfill_subject_dish_cross_entities_from_source_provenance(tmp_path: P
 def test_backfill_subject_dish_cross_entities_prefers_normalized_lineage_over_conflicting_provenance(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     dataset_id = "session_a:z111"
     recording_id = "session_a"
     registry.upsert_dataset(
@@ -4355,7 +4356,7 @@ def test_backfill_subject_dish_cross_entities_prefers_normalized_lineage_over_co
 def test_backfill_subject_dish_cross_entities_enriches_matching_normalized_subject_from_provenance(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     dataset_id = "session_b:z111"
     recording_id = "session_b"
     registry.upsert_dataset(
@@ -4473,7 +4474,7 @@ def test_backfill_subject_dish_cross_entities_enriches_matching_normalized_subje
 
 
 def test_backfill_subjects_from_recording_subjects(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "session_a" / "zarr" / "session_a_training.zarr"
     registry.upsert_dataset(
         dataset_id="session_a:z111",
@@ -4557,7 +4558,7 @@ def test_backfill_subjects_from_recording_subjects(tmp_path: Path) -> None:
 
 
 def test_backfill_subjects_reports_dish_conflict(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     for index, dish_id in enumerate(("dish-001", "dish-002"), start=1):
         dataset_id = f"session_a:z11{index}"
         recording_id = f"session_{index}"
@@ -4621,7 +4622,7 @@ def test_backfill_subjects_reports_dish_conflict(tmp_path: Path) -> None:
 
 
 def test_backfill_subjects_supports_same_subject_across_multiple_recordings(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute(
         """
         INSERT INTO dishes (dish_id, created_utc, updated_utc)
@@ -4701,7 +4702,7 @@ def test_backfill_subjects_supports_same_subject_across_multiple_recordings(tmp_
 
 
 def test_backfill_subjects_supports_multiple_subjects_in_one_recording(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_multi",
         session_uuid="recording_multi",
@@ -4770,7 +4771,7 @@ def test_backfill_subjects_supports_multiple_subjects_in_one_recording(tmp_path:
 
 
 def test_backfill_subjects_ignores_conflicting_legacy_fish_id_alias(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_alias",
         session_uuid="recording_alias",
@@ -4870,7 +4871,7 @@ def test_backfill_subjects_ignores_conflicting_legacy_fish_id_alias(tmp_path: Pa
 
 
 def test_register_from_root_disambiguates_dataset_id_for_same_session_uuid(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_a = tmp_path / "recordings" / "session_a" / "zarr" / "a.zarr"
     zarr_b = tmp_path / "recordings" / "session_a" / "zarr" / "b.zarr"
     zarr_a.parent.mkdir(parents=True, exist_ok=True)
@@ -4901,7 +4902,7 @@ def test_register_from_root_disambiguates_dataset_id_for_same_session_uuid(tmp_p
 
 
 def test_register_from_root_maps_days_post_fertilization_to_dpf(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "session_dpf" / "zarr" / "session_dpf_training.zarr"
     zarr_path.parent.mkdir(parents=True, exist_ok=True)
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -4939,7 +4940,7 @@ def test_register_from_root_maps_days_post_fertilization_to_dpf(tmp_path: Path) 
 
 
 def test_backfill_dataset_lineage_from_training_set_membership(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source_a = tmp_path / "recording_a.zarr"
     source_b = tmp_path / "recording_b.zarr"
     merged = tmp_path / "training" / "datasets" / "detect_set_v001" / "zarr" / "detect_set_v001_merged.zarr"
@@ -4972,7 +4973,7 @@ def test_backfill_dataset_lineage_from_training_set_membership(tmp_path: Path) -
 
 
 def test_integrity_flags_merged_dataset_missing_lineage(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     merged = tmp_path / "training" / "datasets" / "pose_set_v001" / "zarr" / "pose_set_v001_merged.zarr"
     registry.upsert_dataset("pose_set_v001_merged", session_uuid="pose_set_v001_merged", zarr_path=merged)
 
@@ -4983,7 +4984,7 @@ def test_integrity_flags_merged_dataset_missing_lineage(tmp_path: Path) -> None:
 
 
 def test_integrity_flags_dataset_lineage_cycle(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     dataset_a = tmp_path / "a.zarr"
     dataset_b = tmp_path / "b.zarr"
     registry.upsert_dataset("dataset_a", session_uuid="dataset_a", zarr_path=dataset_a)
@@ -5006,7 +5007,7 @@ def test_integrity_flags_dataset_lineage_cycle(tmp_path: Path) -> None:
 
 
 def test_integrity_flags_derived_dataset_missing_recording_id_single_parent(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     child = tmp_path / "derived.zarr"
     registry.upsert_dataset(
@@ -5036,7 +5037,7 @@ def test_integrity_flags_derived_dataset_missing_recording_id_single_parent(tmp_
 
 
 def test_integrity_flags_derived_dataset_non_null_recording_id_multi_parent(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source_a = tmp_path / "source_a.zarr"
     source_b = tmp_path / "source_b.zarr"
     child = tmp_path / "derived.zarr"
@@ -5074,7 +5075,7 @@ def test_integrity_flags_derived_dataset_non_null_recording_id_multi_parent(tmp_
 
 
 def test_integrity_accepts_derived_dataset_single_parent_matching_recording_id(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     child = tmp_path / "derived.zarr"
     registry.upsert_dataset(
@@ -5106,7 +5107,7 @@ def test_integrity_accepts_derived_dataset_single_parent_matching_recording_id(t
 
 
 def test_integrity_ignores_source_protocol_name_legacy_snapshot_mismatch(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     registry.upsert_dataset(
         "source_a",
@@ -5142,7 +5143,7 @@ def test_integrity_ignores_source_protocol_name_legacy_snapshot_mismatch(tmp_pat
 
 
 def test_integrity_flags_source_subject_count_invalid(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     registry.upsert_dataset(
         "source_a",
@@ -5178,7 +5179,7 @@ def test_integrity_flags_source_subject_count_invalid(tmp_path: Path) -> None:
 
 
 def test_integrity_ignores_source_dish_design_legacy_snapshot_mismatch(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     registry.upsert_dataset(
         "source_a",
@@ -5225,7 +5226,7 @@ def test_integrity_ignores_source_dish_design_legacy_snapshot_mismatch(tmp_path:
 
 
 def test_integrity_accepts_source_protocol_and_subject_count_consistent(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     registry.upsert_dataset(
         "source_a",
@@ -5274,7 +5275,7 @@ def test_integrity_accepts_source_protocol_and_subject_count_consistent(tmp_path
 
 
 def test_integrity_flags_required_view_missing(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute("DROP VIEW IF EXISTS recording_overview;")
     registry.conn.commit()
 
@@ -5285,7 +5286,7 @@ def test_integrity_flags_required_view_missing(tmp_path: Path) -> None:
 
 
 def test_integrity_flags_required_view_query_error(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute("DROP VIEW IF EXISTS recording_overview;")
     registry.conn.execute(
         """
@@ -5302,7 +5303,7 @@ def test_integrity_flags_required_view_query_error(tmp_path: Path) -> None:
 
 
 def test_integrity_flags_required_view_missing_recording_subject_overview(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute("DROP VIEW IF EXISTS recording_subject_overview;")
     registry.conn.commit()
 
@@ -5313,7 +5314,7 @@ def test_integrity_flags_required_view_missing_recording_subject_overview(tmp_pa
 
 
 def test_integrity_flags_required_view_missing_dataset_context_current(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute("DROP VIEW IF EXISTS dataset_context_current;")
     registry.conn.commit()
 
@@ -5324,7 +5325,7 @@ def test_integrity_flags_required_view_missing_dataset_context_current(tmp_path:
 
 
 def test_integrity_flags_dataset_context_current_cardinality_mismatch(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         "dataset_a",
         session_uuid="dataset_a",
@@ -5348,7 +5349,7 @@ def test_integrity_flags_dataset_context_current_cardinality_mismatch(tmp_path: 
 
 
 def test_integrity_flags_missing_source_run_projections(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         "dataset_a",
         session_uuid="dataset_a",
@@ -5434,7 +5435,7 @@ def test_integrity_flags_missing_source_run_projections(tmp_path: Path) -> None:
 
 
 def test_integrity_accepts_valid_source_run_projections(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         "dataset_a",
         session_uuid="dataset_a",
@@ -5541,7 +5542,7 @@ def test_integrity_accepts_valid_source_run_projections(tmp_path: Path) -> None:
 
 
 def test_integrity_flags_recording_subject_missing_subject(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute(
         """
         INSERT INTO recordings (
@@ -5595,7 +5596,7 @@ def test_integrity_flags_recording_subject_missing_subject(tmp_path: Path) -> No
 def test_integrity_allows_same_subject_across_recordings_with_different_observed_dishes(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.executemany(
         """
         INSERT INTO recordings (
@@ -5678,7 +5679,7 @@ def test_integrity_allows_same_subject_across_recordings_with_different_observed
 
 
 def test_integrity_flags_recording_subject_cross_mismatch_dish(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.conn.execute(
         """
         INSERT INTO recordings (
@@ -5742,7 +5743,7 @@ def test_integrity_flags_recording_subject_cross_mismatch_dish(tmp_path: Path) -
 
 
 def test_dataset_lineage_self_edge_rejected_by_db_trigger(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     dataset_a = tmp_path / "a.zarr"
     registry.upsert_dataset("dataset_a", session_uuid="dataset_a", zarr_path=dataset_a)
     with pytest.raises(sqlite3.IntegrityError, match="self-edge"):
@@ -5759,7 +5760,7 @@ def test_dataset_lineage_self_edge_rejected_by_db_trigger(tmp_path: Path) -> Non
 
 
 def test_dataset_lineage_audit_summary_counts(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source_a = tmp_path / "recording_a.zarr"
     merged = tmp_path / "training" / "datasets" / "pose_set_v001" / "zarr" / "pose_set_v001_merged.zarr"
     registry.upsert_dataset("source_a", session_uuid="source_a", zarr_path=source_a)
@@ -5787,7 +5788,7 @@ def test_dataset_lineage_audit_summary_counts(tmp_path: Path) -> None:
 
 
 def test_remap_training_set_dataset_ids_maps_legacy_source_ids(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     source_a = tmp_path / "recording_a_training.zarr"
     source_b = tmp_path / "recording_b_training.zarr"
     merged = tmp_path / "training" / "datasets" / "detect_set_v001" / "zarr" / "detect_set_v001_merged.zarr"
@@ -5851,7 +5852,7 @@ def test_remap_training_set_dataset_ids_maps_legacy_source_ids(tmp_path: Path) -
 
 
 def test_collect_and_delete_invalid_candidates(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     good = tmp_path / "good.zarr"
     nested = tmp_path / "good.zarr" / "detect_runs"
     nested_zarr = tmp_path / "good.zarr" / "subset.zarr"
@@ -5889,7 +5890,7 @@ def test_collect_and_delete_invalid_candidates(tmp_path: Path) -> None:
 
 
 def test_collect_candidates_can_infer_missing_without_status(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset("missing_active", session_uuid=None, zarr_path=tmp_path / "not_there.zarr")
     nested_path = tmp_path / "recording.zarr" / "detect_runs"
     nested_path.mkdir(parents=True)
@@ -5912,7 +5913,7 @@ def test_collect_candidates_can_infer_missing_without_status(tmp_path: Path) -> 
 
 
 def test_collect_missing_dataset_candidates_excludes_nested_only(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset("missing_active", session_uuid=None, zarr_path=tmp_path / "not_there.zarr")
     nested_path = tmp_path / "recording.zarr" / "detect_runs"
     nested_path.mkdir(parents=True)
@@ -5936,7 +5937,7 @@ def test_collect_missing_dataset_candidates_excludes_nested_only(tmp_path: Path)
 
 
 def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.record_training_run(
         run_id="run_failed",
         set_id="set_a",
@@ -6009,7 +6010,7 @@ def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
 
 
 def test_collect_stale_in_progress_run_candidates_filters_by_age_and_task(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.record_training_run(
         run_id="run_pose_stale",
         set_id="pose_set_v001",
@@ -6096,7 +6097,7 @@ def test_collect_stale_in_progress_run_candidates_filters_by_age_and_task(tmp_pa
 
 
 def test_reconcile_stale_in_progress_runs_marks_failed_with_audit_payload(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     run_id = "run_pose_stale"
     registry.record_training_run(
         run_id=run_id,
@@ -6183,7 +6184,7 @@ def test_normalize_run_ids_supports_repeat_and_comma_input() -> None:
 
 
 def test_resolve_existing_run_ids_splits_existing_and_missing(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.record_training_run(
         run_id="run_exists",
         set_id="set_a",
@@ -6206,7 +6207,7 @@ def test_normalize_set_ids_supports_repeat_and_comma_input() -> None:
 
 
 def test_collect_set_delete_candidates_and_linked_runs(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_training_set(
         set_id="set_empty",
         name="empty",
@@ -6278,7 +6279,7 @@ def test_is_safe_artifact_path_blocks_recordings_and_outside(tmp_path: Path) -> 
 
 
 def test_collect_run_artifact_paths_and_delete_plan(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     run_id = "run_cleanup"
     run_dir = tmp_path / "models" / run_id
     weights_dir = run_dir / "weights"
@@ -6339,7 +6340,7 @@ def test_collect_set_artifact_paths_includes_model_task_subdirs(tmp_path: Path) 
 
 
 def test_collect_and_delete_empty_training_sets(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_training_set(
         set_id="set_empty_1",
         name="empty one",
@@ -6401,7 +6402,7 @@ def test_collect_and_delete_empty_training_sets(tmp_path: Path) -> None:
 
 
 def test_backfill_model_tables_from_legacy_rows(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     config = tmp_path / "cfg.yaml"
     model = tmp_path / "best.pt"
     metrics = tmp_path / "results.csv"
@@ -6498,7 +6499,7 @@ def test_backfill_model_tables_from_legacy_rows(tmp_path: Path) -> None:
 
 
 def test_backfill_keypoint_quality_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "quality_sample.zarr"
     _create_quality_zarr(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -6536,7 +6537,7 @@ def test_backfill_keypoint_quality_dry_run_and_apply(tmp_path: Path) -> None:
 
 
 def test_refresh_keypoint_quality_deletes_stale_rows(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "quality_refresh.zarr"
     _create_quality_zarr(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -6570,7 +6571,7 @@ def test_backfill_keypoint_profiles_dry_run_and_apply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_profile" / "zarr" / "rec_profile_analysis.zarr"
     fake_root = _create_keypoint_profile_zarr(zarr_path, zarr_use="analysis")
     monkeypatch.setattr(
@@ -6640,7 +6641,7 @@ def test_backfill_keypoint_profiles_handles_missing_get_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_profile_get_miss" / "zarr" / "rec_profile_get_miss_training.zarr"
     _create_fake_zarr_store(zarr_path)
     root = _GetMissFakeGroup(attrs={"session_uuid": "keypoint_profile_session", "zarr_purpose": "training"})
@@ -6704,7 +6705,7 @@ def test_backfill_keypoint_profiles_prefers_profile_run_attrs_for_lineage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_profile_attrs" / "zarr" / "rec_profile_attrs_training.zarr"
     fake_root = _create_keypoint_profile_zarr(zarr_path, zarr_use="training")
     analysis = fake_root.get("analysis")
@@ -6783,7 +6784,7 @@ def test_backfill_keypoint_profiles_scope_defaults_to_source_all_uses(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     analysis_path = tmp_path / "recordings" / "rec_profile_a" / "zarr" / "rec_profile_a_analysis.zarr"
     training_path = tmp_path / "recordings" / "rec_profile_b" / "zarr" / "rec_profile_b_training.zarr"
     fake_analysis = _create_keypoint_profile_zarr(analysis_path, zarr_use="analysis")
@@ -6852,7 +6853,7 @@ def test_refresh_keypoint_profiles_deletes_stale_rows_and_is_deterministic(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_profile" / "zarr" / "rec_profile_refresh.zarr"
     fake_root = _create_keypoint_profile_zarr(zarr_path, zarr_use="analysis")
     monkeypatch.setattr(
@@ -6978,7 +6979,7 @@ def test_extract_eye_mask_profile_rows_for_maintenance_prefers_profile_run_attrs
 
 
 def test_backfill_keypoint_performance_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     _create_keypoint_performance_zarr(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -7024,7 +7025,7 @@ def test_backfill_keypoint_performance_dry_run_and_apply(tmp_path: Path) -> None
 
 
 def test_backfill_keypoint_performance_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
     _create_keypoint_performance_zarr(analysis_path)
@@ -7096,7 +7097,7 @@ def test_main_no_action_message_includes_profile_flags() -> None:
 
 
 def test_retired_eye_mask_registry_backfills_fail_closed(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     try:
         for helper, kwargs in (
             (
@@ -7124,7 +7125,7 @@ def test_retired_eye_mask_registry_backfills_fail_closed(tmp_path: Path) -> None
 
 
 def test_register_from_root_does_not_write_retired_eye_mask_registry_rows(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_eye_retired" / "zarr" / "rec_eye_retired_analysis.zarr"
     _create_eye_mask_performance_zarr(zarr_path)
 
@@ -7141,7 +7142,7 @@ def test_register_from_root_does_not_write_retired_eye_mask_registry_rows(tmp_pa
 
 
 def test_retired_eye_mask_registry_writer_methods_fail_closed(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     try:
         for method_name in (
             "upsert_eye_mask_performance",
@@ -7178,7 +7179,7 @@ def test_main_backfill_keypoint_profiles_wiring_and_summary(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     registry_path = tmp_path / "registry.sqlite"
-    Registry(registry_path).close()
+    registry_from_empty_template(registry_path).close()
     calls: list[Dict[str, object]] = []
 
     def _fake_backfill(
@@ -7230,7 +7231,7 @@ def test_backfill_detect_quality_refresh_apply_is_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "detect_quality" / "zarr" / "detect_quality_analysis.zarr"
     roots_by_path = {
         str(zarr_path): _create_detect_quality_fake_zarr(
@@ -7294,7 +7295,7 @@ def test_backfill_detect_quality_refresh_apply_deletes_rows_when_source_disappea
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "detect_quality" / "zarr" / "detect_quality_analysis.zarr"
     roots_by_path = {
         str(zarr_path): _create_detect_quality_fake_zarr(
@@ -7353,7 +7354,7 @@ def test_backfill_detect_quality_refresh_dry_run_and_apply_counts_are_determinis
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "detect_quality" / "zarr" / "detect_quality_analysis.zarr"
     roots_by_path = {
         str(zarr_path): _create_detect_quality_fake_zarr(
@@ -7434,7 +7435,7 @@ def test_backfill_detect_quality_refresh_dry_run_and_apply_counts_are_determinis
 
 
 def test_backfill_detect_performance_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     _create_detect_performance_zarr(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -7476,7 +7477,7 @@ def test_backfill_detect_performance_dry_run_and_apply(tmp_path: Path) -> None:
 
 
 def test_backfill_detect_performance_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
     _create_detect_performance_zarr(analysis_path)
@@ -7540,7 +7541,7 @@ def test_backfill_detect_performance_scope_defaults_to_source_analysis(tmp_path:
 
 
 def test_backfill_crop_quality_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     _create_crop_quality_zarr(zarr_path)
     dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
@@ -7589,7 +7590,7 @@ def test_backfill_crop_quality_uses_non_consolidated_attrs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     _create_crop_quality_zarr(zarr_path)
     dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
@@ -7664,7 +7665,7 @@ def test_backfill_crop_quality_uses_non_consolidated_attrs(
 
 
 def test_backfill_crop_quality_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
     _create_crop_quality_zarr(analysis_path)
@@ -7728,7 +7729,7 @@ def test_backfill_crop_quality_scope_defaults_to_source_analysis(tmp_path: Path)
 
 
 def test_backfill_detect_performance_handles_with_and_without_detect_runs(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     with_detect_path = tmp_path / "recordings" / "rec_with" / "zarr" / "rec_with_analysis.zarr"
     without_detect_path = tmp_path / "recordings" / "rec_without" / "zarr" / "rec_without_analysis.zarr"
     _create_detect_performance_zarr(with_detect_path)
@@ -7785,7 +7786,7 @@ def test_backfill_detect_performance_handles_with_and_without_detect_runs(tmp_pa
 
 
 def test_backfill_detect_performance_refresh_dry_run_is_deterministic(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     _create_detect_performance_zarr(zarr_path)
     dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
@@ -8146,7 +8147,7 @@ def test_extract_subject_mask_rows_use_exact_rle_presence_union(tmp_path: Path) 
 
 
 def test_backfill_subject_mask_performance_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_subject_a" / "zarr" / "rec_subject_a_analysis.zarr"
     _create_subject_mask_registry_zarr(zarr_path)
     dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
@@ -8229,7 +8230,7 @@ def test_backfill_subject_mask_performance_dry_run_and_apply(tmp_path: Path) -> 
 
 
 def test_register_from_root_preserves_end_to_end_subject_mask_lineage_chain(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "lineage_rec" / "zarr" / "lineage_rec_analysis.zarr"
     _create_end_to_end_lineage_zarr(zarr_path)
 
@@ -8330,7 +8331,7 @@ def test_register_from_root_preserves_end_to_end_subject_mask_lineage_chain(tmp_
 
 
 def test_backfill_subject_mask_component_quality_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_subject_b" / "zarr" / "rec_subject_b_analysis.zarr"
     _create_subject_mask_registry_zarr(zarr_path)
     dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
@@ -8435,7 +8436,7 @@ def test_backfill_subject_mask_component_quality_dry_run_and_apply(tmp_path: Pat
 
 
 def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw_changes(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_subject_c" / "zarr" / "rec_subject_c_analysis.zarr"
     _create_subject_mask_registry_zarr(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="a")
@@ -8536,7 +8537,7 @@ def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw
 def test_subject_mask_component_latest_prefers_available_partial_refined_runs(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         "dataset_partial",
         session_uuid="session_partial",
@@ -8746,7 +8747,7 @@ def test_subject_mask_component_latest_prefers_available_partial_refined_runs(
 def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preserve_native_priority(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
 
     registry.upsert_dataset(
         "dataset_eye_only",
@@ -9069,7 +9070,7 @@ def test_backfill_recording_step_status_dry_run_no_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_a" / "zarr" / "rec_step_a_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     monkeypatch.setattr(
@@ -9121,7 +9122,7 @@ def test_backfill_recording_step_status_apply_and_convergent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_a" / "zarr" / "rec_step_a_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     monkeypatch.setattr(
@@ -9329,7 +9330,7 @@ def test_backfill_preserves_operator_inferred_calibration_until_zarr_has_scale(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_a" / "zarr" / "rec_step_a_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     monkeypatch.setattr(
@@ -9421,7 +9422,7 @@ def test_backfill_recording_step_status_marks_refined_keypoints_stale_when_sourc
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_b" / "zarr" / "rec_step_b_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     keypoints_parent = fake_root["keypoints_runs"]
@@ -9489,7 +9490,7 @@ def test_backfill_recording_step_status_marks_refined_detect_stale_when_source_m
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_c" / "zarr" / "rec_step_c_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     detect_parent = fake_root["detect_runs"]
@@ -9556,7 +9557,7 @@ def test_backfill_recording_step_status_accepts_current_refined_detect_collectio
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_collection" / "zarr" / "rec_step_collection_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     refined_parent = fake_root["refined_detect_runs"]
@@ -9624,7 +9625,7 @@ def test_backfill_recording_step_status_projects_manifest_only_clipped_collectio
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     recording_id = "recording_manifest_collection"
     collection_id = "refined_detect_collection_001"
     zarr_path = (
@@ -9702,7 +9703,7 @@ def test_backfill_recording_step_status_preserves_ok_quality_for_per_clip_collec
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     recording_id = "recording_per_clip_collection"
     collection_id = "refined_detect_collection_legacy_quality"
     dataset_id = "dataset_per_clip_collection"
@@ -9788,7 +9789,7 @@ def test_backfill_recording_step_status_fails_closed_for_invalid_clipped_collect
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     recording_id = "recording_invalid_collection"
     collection_id = "refined_detect_collection_invalid"
     dataset_id = "dataset_invalid_collection"
@@ -9855,7 +9856,7 @@ def test_backfill_recording_step_status_marks_eye_masks_stale_when_source_mismat
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_d" / "zarr" / "rec_step_d_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     keypoints_parent = fake_root["keypoints_runs"]
@@ -9934,7 +9935,7 @@ def test_backfill_recording_step_status_marks_refined_eye_masks_stale_when_sourc
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_e" / "zarr" / "rec_step_e_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     eye_masks_parent = fake_root["eye_masks_runs"]
@@ -10007,7 +10008,7 @@ def test_backfill_recording_step_status_marks_refined_subject_masks_stale_when_s
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_f" / "zarr" / "rec_step_f_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     subject_masks_parent = fake_root["subject_mask_runs"]
@@ -10080,7 +10081,7 @@ def test_backfill_recording_step_status_marks_subject_shape_stale_when_refined_s
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_shape_stale" / "zarr" / "rec_step_shape_stale_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     refined_subject_parent = fake_root["refined_subject_masks_runs"]
@@ -10161,7 +10162,7 @@ def test_backfill_recording_step_status_marks_eye_angles_stale_when_refined_keyp
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_eye_kp_stale" / "zarr" / "rec_step_eye_kp_stale_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     refined_keypoints_parent = fake_root["refined_keypoints_runs"]
@@ -10239,7 +10240,7 @@ def test_backfill_recording_step_status_accepts_eye_angle_legacy_keypoint_source
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_eye_legacy_source" / "zarr" / "rec_step_eye_legacy_source_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     eye_group = fake_root["analysis"]["eye_angle_runs"]["eye_angle_001"]
@@ -10287,7 +10288,7 @@ def test_backfill_recording_step_status_marks_eye_angles_stale_when_refined_subj
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_eye_masks_stale" / "zarr" / "rec_step_eye_masks_stale_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     refined_subject_parent = fake_root["refined_subject_masks_runs"]
@@ -10356,7 +10357,7 @@ def test_backfill_recording_step_status_marks_tail_behavior_stale_when_subject_s
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_tail_stale" / "zarr" / "rec_step_tail_stale_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     subject_shape_parent = fake_root["analysis"]["subject_shape_runs"]
@@ -10442,7 +10443,7 @@ def test_backfill_recording_step_status_marks_modern_eye_angles_stale_when_subje
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = (
         tmp_path
         / "recordings"
@@ -10509,7 +10510,7 @@ def test_backfill_recording_step_status_marks_bout_kinematics_stale_when_swim_bo
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_bout_kin_stale" / "zarr" / "rec_step_bout_kin_stale_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     swim_bout_parent = fake_root["analysis"]["swim_bout_runs"]
@@ -10581,7 +10582,7 @@ def test_backfill_recording_step_status_marks_stimulus_response_stale_when_stimu
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_response_stale" / "zarr" / "rec_step_response_stale_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     stimulus_parent = fake_root["analysis"]["stimulus_runs"]
@@ -10648,7 +10649,7 @@ def test_backfill_recording_step_status_marks_bout_classification_stale_when_swi
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_step_classifier_stale" / "zarr" / "rec_step_classifier_stale_analysis.zarr"
     fake_root = _create_recording_step_status_zarr(zarr_path)
     swim_bout_parent = fake_root["analysis"]["swim_bout_runs"]
@@ -10728,7 +10729,7 @@ def test_backfill_recording_step_status_scoped_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     zarr_a = tmp_path / "recordings" / "scope_a" / "zarr" / "scope_a_analysis.zarr"
     zarr_b = tmp_path / "recordings" / "scope_b" / "zarr" / "scope_b_training.zarr"
     fake_root_a = _create_recording_step_status_zarr(zarr_a)
@@ -10793,7 +10794,7 @@ def test_backfill_recording_step_status_scoped_filters(
 
 
 def test_check_registry_integrity_passes_for_valid_rows(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     cfg = tmp_path / "cfg.yaml"
     model = tmp_path / "best.pt"
     metrics = tmp_path / "results.csv"
@@ -10841,7 +10842,7 @@ def test_check_registry_integrity_passes_for_valid_rows(tmp_path: Path) -> None:
 
 
 def test_check_registry_integrity_reports_missing_detection_model_rows(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("cfg", encoding="utf-8")
     registry.record_training_run(
@@ -10865,7 +10866,7 @@ def test_check_registry_integrity_reports_missing_detection_model_rows(tmp_path:
 
 
 def test_check_registry_integrity_reports_missing_artifact_files(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("cfg", encoding="utf-8")
     model = tmp_path / "missing_best.pt"
@@ -10907,7 +10908,7 @@ def test_check_registry_integrity_reports_missing_artifact_files(tmp_path: Path)
 
 
 def test_check_registry_integrity_reports_trt_plugin_contract_mismatch(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
+    registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     cfg = tmp_path / "cfg.yaml"
     model = tmp_path / "best.pt"
     metrics = tmp_path / "results.csv"
@@ -10969,6 +10970,8 @@ def test_check_registry_integrity_reports_trt_plugin_contract_mismatch(tmp_path:
 
 
 def test_registry_schema_version_initialized(tmp_path: Path) -> None:
+    # This test explicitly exercises first-time schema initialization. Most
+    # registry tests clone the identical initialized schema for speed.
     registry = Registry(tmp_path / "registry.sqlite")
     latest_version = max(version for version, _name, _fn in registry._schema_migrations())
     row = registry.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()

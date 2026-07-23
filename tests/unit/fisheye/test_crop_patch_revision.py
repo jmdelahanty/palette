@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.utils.patch_crops_from_refined import _build_patch_audit_entry, _patch_crop_run
@@ -89,6 +90,68 @@ def test_patch_crop_run_bumps_revision_and_signature(tmp_path) -> None:
     assert signature["crop_revision"] == 1
     assert signature["detection_source_path"] == "refined_detect_runs/refined_001/manual"
     assert signature["detection_source_type"] == "manual"
+
+
+@pytest.mark.parametrize(
+    "claim_location",
+    ["run", "array"],
+)
+@pytest.mark.parametrize("apply", [False, True])
+def test_patch_crop_run_refuses_canonical_in_place_mutation(
+    tmp_path,
+    claim_location: str,
+    apply: bool,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "canonical.zarr"), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array(
+        "images_full",
+        data=np.arange(36, dtype=np.uint8).reshape(1, 6, 6),
+        overwrite=True,
+    )
+    crop = root.create_group("crop_runs").create_group("canonical")
+    crop.attrs["roi_size"] = [4, 4]
+    crop.create_array(
+        "roi_images",
+        data=np.zeros((1, 4, 4), dtype=np.uint8),
+        overwrite=True,
+    )
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.asarray([[0, 0]], dtype=np.int32),
+        overwrite=True,
+    )
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.asarray([[0.5, 0.5, 0.2, 0.2]], dtype=np.float32),
+        overwrite=True,
+    )
+    if claim_location == "run":
+        crop.attrs["coordinate_contract"] = "canonical_v2"
+    else:
+        crop["bbox_norm_coords"].attrs["coordinate_descriptor"] = {
+            "schema_id": "palette.coordinate_descriptor"
+        }
+
+    detect = root.create_group("manual_detect")
+    detect.create_array(
+        "frame_indices",
+        data=np.asarray([0], dtype=np.int64),
+        overwrite=True,
+    )
+    detect.create_array(
+        "bbox_norm_coords",
+        data=np.asarray([[0.25, 0.25, 0.2, 0.2]], dtype=np.float32),
+        overwrite=True,
+    )
+    original_pixels = np.asarray(crop["roi_images"][:]).copy()
+    original_box = np.asarray(crop["bbox_norm_coords"][:]).copy()
+
+    with pytest.raises(RuntimeError, match="new derived crop run"):
+        _patch_crop_run(root, crop, detect, [0], apply=apply)
+
+    np.testing.assert_array_equal(crop["roi_images"][:], original_pixels)
+    np.testing.assert_array_equal(crop["bbox_norm_coords"][:], original_box)
 
 
 def test_patch_crop_run_prefers_refined_row_identity_over_stale_roi_index(tmp_path) -> None:

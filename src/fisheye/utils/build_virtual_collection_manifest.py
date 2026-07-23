@@ -11,6 +11,14 @@ import sqlite3
 from typing import Any
 from urllib.parse import quote
 
+from fisheye.analysis.chaser_distance_io import (
+    CHASER_DISTANCE_READ_AUTHORITY_SCHEMA_ID,
+    CHASER_DISTANCE_READ_AUTHORITY_SCHEMA_VERSION,
+    VERIFIED_AUTHORITY_STATUS,
+    ChaserDistanceReadError,
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+)
 from fisheye.shared.batch_logging import utc_now_z as _utc_now
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import resolve_zarr_run
@@ -194,6 +202,48 @@ def _absent_run_entry(*, required: bool, reason: str) -> dict[str, Any]:
     }
 
 
+def _verified_chaser_run_entry(
+    snapshot: ChaserDistanceReadSnapshot,
+    *,
+    required: bool,
+    selection: str,
+) -> dict[str, Any]:
+    """Describe a chaser run only from detached, payload-verified authority."""
+
+    if snapshot.authority_status != VERIFIED_AUTHORITY_STATUS:
+        raise ChaserDistanceReadError(
+            "Virtual-collection selection requires verified chaser-distance authority."
+        )
+    return {
+        "present": True,
+        "run_id": snapshot.run_name,
+        "path": snapshot.run_path,
+        "required": required,
+        "selection": selection,
+        "schema_id": CHASER_DISTANCE_READ_AUTHORITY_SCHEMA_ID,
+        "schema_version": CHASER_DISTANCE_READ_AUTHORITY_SCHEMA_VERSION,
+        "method": None,
+        "method_version": None,
+        "source_revision": None,
+        "source_fingerprint": snapshot.publication_seal_sha256,
+        "fingerprint_status": "complete",
+        "lineage_hash": snapshot.surface_manifest_sha256,
+        "authority_status": snapshot.authority_status,
+        "publication_seal_ref": snapshot.publication_seal_ref,
+        "publication_seal_sha256": snapshot.publication_seal_sha256,
+        "surface_manifest_ref": snapshot.surface_manifest_ref,
+        "surface_manifest_sha256": snapshot.surface_manifest_sha256,
+        "row_identity_ref": snapshot.row_identity_ref,
+        "row_identity_sha256": snapshot.row_identity_sha256,
+    }
+
+
+def _parent_path_text(parent_path: str | Sequence[str]) -> str:
+    if isinstance(parent_path, str):
+        return parent_path.strip("/")
+    return "/".join(str(part).strip("/") for part in parent_path)
+
+
 def _resolve_run_entry(
     root: Any,
     *,
@@ -204,6 +254,28 @@ def _resolve_run_entry(
     run_label: str,
 ) -> tuple[dict[str, Any], str | None]:
     selection = "explicit" if run_name else "resolved_latest"
+    if _parent_path_text(parent_path) == "analysis/chaser_distance_runs":
+        # A collection manifest can become downstream discovery/scientific
+        # authority. Chaser selection therefore pays the full canonical
+        # payload-verification cost and records only detached typed evidence;
+        # generic selectors and raw child attrs are not compatibility paths.
+        try:
+            snapshot = load_chaser_distance_run(
+                root,
+                run_name=str(run_name or "latest"),
+            )
+        except ChaserDistanceReadError as exc:
+            reason = "required_run_incompatible" if required else "not_generated"
+            entry = _absent_run_entry(required=required, reason=reason)
+            return entry, f"{run_label}: canonical preflight failed closed: {exc}"
+        return (
+            _verified_chaser_run_entry(
+                snapshot,
+                required=required,
+                selection=selection,
+            ),
+            None,
+        )
     try:
         group, resolved = resolve_zarr_run(
             root,

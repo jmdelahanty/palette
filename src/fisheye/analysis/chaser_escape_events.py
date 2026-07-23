@@ -81,13 +81,15 @@ from fisheye.analysis.chaser_bout_response import (
     BoutReference,
 )
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_distance_io import (
+    reject_unsealed_chaser_derived_publication,
+)
 from fisheye.analysis.chaser_escape_freeze_summary import (
     _controller_trial_segments,
     _dense_controller_state,
     _load_chaser_states,
     _resolve_trigger_radius,
     _select_trial_trigger,
-    _source_stimulus_path,
 )
 from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
@@ -95,7 +97,6 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _open_root,
     _resolve_arena_geometry,
     _resolve_chaser_distance_run,
-    _safe_float,
 )
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
@@ -350,27 +351,39 @@ def build_chaser_escape_events_result(
     min_events_for_trace: int = DEFAULT_MIN_EVENTS_FOR_TRACE,
 ) -> ChaserEscapeEventsResult:
     root = _open_root(zarr_path, mode="r")
-    run_group, run_name, run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    distance_run, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance_run.require_derived_surface_authority("chaser_bout_response")
 
-    pixels_per_mm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    if not math.isfinite(pixels_per_mm) or pixels_per_mm <= 0:
-        raise ValueError("Chaser-distance run lacks a positive pixels_per_mm_projector attr.")
-    fps = _safe_float(run_group.attrs.get("fps"), math.nan)
-    if not math.isfinite(fps) or fps <= 0:
-        raise ValueError("Chaser-distance run lacks a positive fps attr.")
+    pixels_per_mm = float(distance_run.pixels_per_mm_projector)
+    fps = float(distance_run.fps)
 
-    bout_component, bout_name, bout_path = _resolve_bout_response(run_group, run_path, bout_response_component)
+    bout_component, bout_name, bout_path = _resolve_bout_response(
+        root[run_path],
+        run_path,
+        bout_response_component,
+    )
     references = _read_references(bout_component)
     epochs = _read_epochs_from_component(bout_component)
 
-    positions = run_group["positions"]
-    fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_xy = np.asarray(positions["chaser_arena_xy"][:], dtype=np.float64)
-    chaser_indices = np.asarray(run_group["chasers/chaser_index"][:], dtype=np.int64).reshape(-1)
+    fish_xy = np.asarray(distance_run.fish_centroid_arena_xy, dtype=np.float64)
+    fish_valid = np.asarray(distance_run.fish_valid, dtype=bool)
+    chaser_xy = np.asarray(distance_run.chaser_arena_xy, dtype=np.float64)
+    chaser_indices = np.asarray(
+        distance_run.chaser_index,
+        dtype=np.int64,
+    ).reshape(-1)
     total_frames = int(fish_xy.shape[0])
+    if total_frames != distance_run.total_frames:
+        raise ValueError("Typed chaser-distance frame extent is inconsistent.")
 
-    geometry = _resolve_arena_geometry(root, run_group, pixels_per_mm=float(pixels_per_mm))
+    geometry = _resolve_arena_geometry(
+        root,
+        distance_run,
+        pixels_per_mm=float(pixels_per_mm),
+    )
     if geometry.shape != "circle" or geometry.center_x_px is None or geometry.center_y_px is None:
         raise ValueError(
             "chaser_escape_events requires a circular arena geometry: the virtual references "
@@ -579,9 +592,12 @@ def build_chaser_escape_events_result(
     hab_slope_any = math.nan
 
     try:
-        _stim_run, stim_path = _source_stimulus_path(run_group)
+        stim_path = distance_run.source_stimulus_path
         chaser_states = _load_chaser_states(root, stim_path)
-        stim_frames = np.asarray(run_group["frames/stimulus_frame_num"][:], dtype=np.int64)
+        stim_frames = np.asarray(
+            distance_run.stimulus_frame_num,
+            dtype=np.int64,
+        )
         # Trials belong to the chaser that actually chases. Objects that never move have no
         # trials, so pick the chaser the controller marks active rather than assuming index 0.
         active_index = int(chaser_indices[0])
@@ -792,7 +808,7 @@ def build_chaser_escape_events_result(
         "source_bout_response_component": str(bout_name),
     }
 
-    recording_id = str(root.attrs.get("recording_id") or root.attrs.get("recording_name") or Path(zarr_path).stem)
+    recording_id = distance_run.recording_id
     status = "ok" if n_events else "no_escape_events"
 
     return ChaserEscapeEventsResult(
@@ -951,6 +967,12 @@ def write_chaser_escape_events_component(
     write_png: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     if result.component_name in parent:

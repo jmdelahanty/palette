@@ -15,7 +15,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import zarr
@@ -186,6 +186,8 @@ def _build_rows(
     required_intended_use: Optional[str],
     force: bool,
     visuals_dpi: int,
+    refined_run: Optional[str],
+    allow_legacy_latest_fallback: bool,
 ) -> List[FinalizeRow]:
     rows: List[FinalizeRow] = []
     approved_state_norm = approved_state.strip().lower()
@@ -224,15 +226,23 @@ def _build_rows(
             continue
         row.parent_name = parent_name
 
-        parent_attrs = _read_zarr_attrs(parent_path / "zarr.json")
-        latest_refined_run = _decode_text(parent_attrs.get("latest"))
-        if latest_refined_run is None:
-            row.reason = "no_latest_refined_run"
+        if refined_run is not None:
+            row.refined_run = refined_run
+        elif allow_legacy_latest_fallback:
+            parent_attrs = _read_zarr_attrs(parent_path / "zarr.json")
+            latest_refined_run = _decode_text(parent_attrs.get("latest"))
+            if latest_refined_run is None:
+                row.reason = "no_latest_refined_run"
+                rows.append(row)
+                continue
+            row.refined_run = latest_refined_run
+        else:
+            row.reason = "exact_refined_run_required"
             rows.append(row)
             continue
-        row.refined_run = latest_refined_run
 
-        run_path = parent_path / latest_refined_run
+        assert row.refined_run is not None
+        run_path = parent_path / row.refined_run
         run_attrs = _read_zarr_attrs(run_path / "zarr.json")
         if not run_attrs:
             row.reason = "missing_refined_run_attrs"
@@ -351,6 +361,17 @@ def _finalize_row(row: FinalizeRow, *, visuals_dpi: int, force: bool) -> str:
         dpi=visuals_dpi,
         show=False,
     )
+    expected_verification = "legacy_unverified_diagnostic"
+    if (
+        quality_meta.get("coordinate_verification") != expected_verification
+        or refinement_meta.get("coordinate_verification") != expected_verification
+        or quality_meta.get("source_camera_overlay_authority") is not False
+        or refinement_meta.get("source_camera_overlay_authority") is not False
+    ):
+        raise RuntimeError(
+            "Refusing to persist refined-keypoint diagnostics without explicit "
+            "unverified-coordinate and no-overlay-authority metadata."
+        )
 
     vis_group = refined_group.require_group("visualizations")
     finalized_at = _utc_now()
@@ -371,6 +392,8 @@ def _finalize_row(row: FinalizeRow, *, visuals_dpi: int, force: bool) -> str:
         "source_keypoints_run": row.source_keypoints_run,
         "source_crop_run": row.source_crop_run,
         "source_detect_run": row.source_detect_run,
+        "coordinate_verification": expected_verification,
+        "source_camera_overlay_authority": False,
     }
 
     _write_png_artifact(
@@ -401,6 +424,8 @@ def _finalize_row(row: FinalizeRow, *, visuals_dpi: int, force: bool) -> str:
             "description": spec["description"],
             "artifact_signature": row.artifact_signature,
             "finalized_at_utc": finalized_at,
+            "coordinate_verification": expected_verification,
+            "source_camera_overlay_authority": False,
         }
     refined_group.attrs["visualizations"] = manifest
     return "rendered"
@@ -443,6 +468,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="DPI for rendered finalized PNG artifacts (default: 150).",
     )
     parser.add_argument("--force", action="store_true", help="Re-render even when artifact signature is unchanged.")
+    parser.add_argument(
+        "--allow-legacy-latest-fallback",
+        action="store_true",
+        help=(
+            "Explicitly permit parent-latest selection for historical unverified "
+            "refined-keypoint diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--refined-run",
+        help=(
+            "Exact refined-keypoint diagnostic child to finalize. This is the "
+            "default-safe selection mode and does not consult a parent selector."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Plan only (default behavior).")
     parser.add_argument("--apply", action="store_true", help="Write/update artifacts.")
     parser.add_argument("--json-report", type=Path, help="Optional JSON report output path.")
@@ -450,6 +490,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.apply and args.dry_run:
         raise SystemExit("Choose either --apply or --dry-run, not both.")
+    refined_run = _decode_text(args.refined_run)
+    if refined_run is not None and (
+        refined_run in {".", ".."}
+        or "/" in refined_run
+        or "\\" in refined_run
+    ):
+        parser.error("--refined-run must be one exact child name, not a path")
+    if refined_run is not None and args.allow_legacy_latest_fallback:
+        parser.error(
+            "--refined-run and --allow-legacy-latest-fallback are mutually exclusive"
+        )
     apply = bool(args.apply)
 
     roots = _resolve_roots(list(args.paths))
@@ -461,6 +512,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         required_intended_use=args.required_intended_use,
         force=bool(args.force),
         visuals_dpi=int(args.visuals_dpi),
+        refined_run=refined_run,
+        allow_legacy_latest_fallback=bool(args.allow_legacy_latest_fallback),
     )
 
     scanned = len(rows)

@@ -8,7 +8,6 @@ from typing import Sequence
 import numpy as np
 import pytest
 import zarr
-
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceResult,
     ChaserDistanceWindow,
@@ -27,6 +26,9 @@ from fisheye.analysis.chaser_radial_occupancy import (
 )
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
+
+
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 PPM = 2.0  # pixels per mm
@@ -148,7 +150,12 @@ def _make_archive(
         histogram_counts=np.zeros((n_w, n_chasers, 2), dtype=np.uint32),
         histogram_density=np.zeros((n_w, n_chasers, 2), dtype=np.float32),
     )
-    write_chaser_distance_run(zarr_path, result, overwrite=True)
+    write_chaser_distance_run(
+        zarr_path,
+        result,
+        overwrite=True,
+        legacy_compatibility=True,
+    )
     return zarr_path
 
 
@@ -612,7 +619,7 @@ def test_write_component_requires_overwrite(tmp_path: Path) -> None:
         write_chaser_radial_occupancy_component(zarr_path, result, overwrite=False, write_png=False)
 
 
-def test_rejects_wrong_coordinate_frame(tmp_path: Path) -> None:
+def test_ignores_stale_legacy_coordinate_frame_attr(tmp_path: Path) -> None:
     rng = np.random.default_rng(41)
     n = 200
     fish = _sample_uniform_in_disc(rng, n, radius_mm=ARENA_RADIUS_MM)
@@ -622,8 +629,11 @@ def test_rejects_wrong_coordinate_frame(tmp_path: Path) -> None:
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     root["analysis/chaser_distance_runs/chaser_distance_1"].attrs["coordinate_frame"] = "camera_px"
 
-    with pytest.raises(ValueError, match="coordinate_frame"):
-        build_chaser_radial_occupancy_result(zarr_path, chaser_distance_run="chaser_distance_1")
+    result = build_chaser_radial_occupancy_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+    )
+    assert result.coordinate_frame == "arena_relative_canvas_px"
 
 
 def test_missing_arena_geometry_is_fatal(tmp_path: Path) -> None:

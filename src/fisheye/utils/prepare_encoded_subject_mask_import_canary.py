@@ -14,6 +14,12 @@ import numpy as np
 import zarr
 
 from fisheye.shared.refined_subject_mask_encoded_chunks import prepare_global_mask_chunk_grid
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils.import_refined_subject_mask_clip_packages import (
     _load_package,
     _validate_package_schema,
@@ -74,13 +80,20 @@ def prepare_canary(
             raise ValueError(f"Canary packages do not share one source_crop_run: {crop_runs!r}")
 
     root = zarr.open_group(str(output_zarr), mode="w")
-    crop = root.require_group("crop_runs").create_group(crop_runs[0])
+    crop_parent = require_runs_parent(
+        root,
+        "crop_runs",
+        completion_epoch=COMPLETION_EPOCH_STRICT,
+    )
+    crop = crop_parent.create_group(crop_runs[0])
+    mark_run_started(crop, run_name=crop_runs[0], stage="encoded_mask_import_canary")
     crop.create_array(
         "source_crop_row_ids",
         data=sorted_ids,
         chunks=(max(1, min(16384, int(sorted_ids.shape[0]))),),
         overwrite=True,
     )
+    mark_run_complete(crop, parent_group=crop_parent, run_name=crop_runs[0])
     grid = prepare_global_mask_chunk_grid(
         zarr_path=output_zarr,
         crop_run=crop_runs[0],

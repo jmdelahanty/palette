@@ -287,6 +287,15 @@ Examples:
 """,
     )
     parser.add_argument("--model", required=True, help="Path to trained YOLO pose model (.pt)")
+    parser.add_argument(
+        "--model-pose-schema-binding",
+        type=Path,
+        required=False,
+        help=(
+            "Digest-bound JSON mapping from the model to its ordered pose schema; "
+            "required for canonical direct-model inference."
+        ),
+    )
     parser.add_argument("--zarr", required=True, help="Path to FishEye Zarr archive")
     parser.add_argument("--run-name", help="Optional custom run name inside keypoints_runs")
     parser.add_argument("--crop-run", help="Optional crop run name to use (defaults to latest)")
@@ -370,6 +379,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_name = detect_keypoints_yolo(
             zarr_path=str(zarr_path),
             model_path=args.model,
+            model_pose_schema_binding=args.model_pose_schema_binding,
             run_name=args.run_name,
             crop_run=args.crop_run,
             batch_size=args.batch_size,

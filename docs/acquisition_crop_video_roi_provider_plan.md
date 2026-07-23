@@ -41,8 +41,10 @@ This plan complements:
 - `append_acquisition_crop_video_training` can decode sampled acquisition crop
   video frames into a normal materialized `crop_runs/<run>` inside
   `*_training.zarr`.
-- `import_acquisition_detections_to_detect_run` can import acquisition-time crop
-  recorder boxes as a normal `detect_runs/<run>`.
+- `import_acquisition_detections_to_detect_run` can retain acquisition-time crop
+  recorder boxes only as an explicit, selector-free
+  `detection_artifact_runs/<run>`. It cannot create a normal `detect_runs` child
+  until an exact canonical acquisition identity/coordinate binding path exists.
 - `CropImageSource` can read acquisition crop-video-backed geometry-only crop
   runs directly from `source_crop_video_frame_indices`.
 - `CropImageSource` can also read hybrid acquisition crop runs where some rows

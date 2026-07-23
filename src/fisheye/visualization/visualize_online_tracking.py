@@ -8,46 +8,153 @@ position data to help identify tracking artifacts, gaps, and movement patterns.
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
-import zarr
 from rich.console import Console
 
 from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
-from fisheye.shared.calibration import load_run_calibration
 
 
-def load_coordinate_transform(root: zarr.Group, stimulus_run: str, console: Console) -> float:
-    """Load texture-to-camera coordinate transformation scale factor.
+@dataclass(frozen=True)
+class _VerifiedOnlineTrackingSurface:
+    """Copied native online positions plus their still-live authority."""
 
-    Args:
-        root: Root zarr group
-        stimulus_run: Name of stimulus run
-        console: Rich console for output
+    positions: np.ndarray
+    camera_frame_ids: np.ndarray
+    timestamp_ns: np.ndarray
+    width_px: int
+    height_px: int
+    space_id: str
+    profile_id: str
+    handoff: Any = field(repr=False, compare=False)
 
-    Returns:
-        Scale factor for transforming texture coordinates to camera coordinates
+
+def _verified_online_tracking_surface(bundle: Any) -> _VerifiedOnlineTrackingSurface:
+    """Resolve only the canonical arena-relative target-position surface.
+
+    This diagnostic deliberately stays in the array's native frame.  A scalar
+    resolution ratio cannot stand in for the persisted directed transform to a
+    source camera, and an unrelated track run cannot supply physical units.
     """
-    try:
-        calibration = load_run_calibration(root, stimulus_run)
-        scale = calibration.texture_to_camera_scale
-        if calibration.source.startswith("calibration/"):
-            console.print(
-                f"[cyan]Loaded calibration ({calibration.source}): texture_to_camera_scale = {scale:.6f}"
-            )
-        elif calibration.source == "coordinate_transform":
-            console.print(
-                f"[cyan]Loaded coordinate transform attribute: texture_to_camera_scale = {scale:.6f}"
-            )
-        else:
-            console.print("[yellow]Warning:[/yellow] Using default texture_to_camera_scale = 1.0")
-        return float(scale)
-    except Exception as exc:
-        console.print(f"[yellow]Warning:[/yellow] Failed to load calibration: {exc}")
-        return 1.0
+
+    handoff = getattr(bundle, "online_coordinate_handoff", None)
+    if handoff is None:
+        raise ValueError(
+            "Online tracking visualization requires a canonical typed "
+            "coordinate handoff."
+        )
+    handoff.assert_verified()
+    descriptor = handoff.coordinate_descriptor.descriptor
+    extent = descriptor.reference_extent
+    width = extent.width
+    height = extent.height
+    if (
+        descriptor.profile_id
+        != "arena_relative_canvas_px.top_left_y_down.v1"
+        or descriptor.space_id != "arena_relative_canvas_px"
+        or descriptor.geometry_type != "point_xy"
+        or descriptor.components != ("x", "y")
+        or descriptor.component_units != ("px", "px")
+        or descriptor.source_camera_overlay.status != "requires_transform"
+        or not descriptor.source_camera_overlay.transform_refs
+        or extent.units != "px"
+        or isinstance(width, bool)
+        or isinstance(height, bool)
+        or not isinstance(width, (int, float))
+        or not isinstance(height, (int, float))
+        or not float(width).is_integer()
+        or not float(height).is_integer()
+        or int(width) <= 0
+        or int(height) <= 0
+    ):
+        raise ValueError(
+            "Online target positions do not have the supported canonical "
+            "arena-relative canvas point semantics."
+        )
+
+    raw_positions = bundle.online.get("target_position_xy")
+    if raw_positions is None:
+        raise ValueError("Canonical online metrics omit target_position_xy.")
+    positions = np.array(raw_positions, dtype=np.float64, copy=True, order="C")
+    camera_frame_ids = np.array(
+        bundle.camera_frame_ids,
+        dtype=np.int64,
+        copy=True,
+        order="C",
+    )
+    timestamp_ns = np.array(
+        bundle.timestamp_ns,
+        dtype=np.int64,
+        copy=True,
+        order="C",
+    )
+    row_count = camera_frame_ids.shape[0]
+    if (
+        camera_frame_ids.ndim != 1
+        or timestamp_ns.shape != (row_count,)
+        or positions.shape != (row_count, 2)
+    ):
+        raise ValueError(
+            "Canonical online positions, camera-frame identity, and timestamps "
+            "must have one exact shared row count."
+        )
+    if row_count and (
+        np.any(np.diff(camera_frame_ids) <= 0)
+        or int(camera_frame_ids[0]) < 0
+    ):
+        raise ValueError(
+            "Canonical online camera-frame identifiers must be strictly "
+            "increasing nonnegative integers."
+        )
+
+    finite = np.isfinite(positions).all(axis=1)
+    if np.any(
+        (positions[finite, 0] < 0.0)
+        | (positions[finite, 0] > float(width))
+        | (positions[finite, 1] < 0.0)
+        | (positions[finite, 1] > float(height))
+    ):
+        raise ValueError(
+            "Canonical online target positions fall outside their exact "
+            "reference extent."
+        )
+
+    # Recheck after every value/descriptor copy so a concurrent replacement
+    # cannot return a mixed snapshot.
+    handoff.assert_verified()
+    return _VerifiedOnlineTrackingSurface(
+        positions=positions,
+        camera_frame_ids=camera_frame_ids,
+        timestamp_ns=timestamp_ns,
+        width_px=int(width),
+        height_px=int(height),
+        space_id=str(descriptor.space_id),
+        profile_id=str(descriptor.profile_id),
+        handoff=handoff,
+    )
+
+
+def _plot_axis(
+    surface: _VerifiedOnlineTrackingSurface,
+) -> tuple[np.ndarray, str, Optional[float]]:
+    """Return a proved time axis, or camera-frame identity when time is absent."""
+
+    timestamps = surface.timestamp_ns
+    if (
+        timestamps.size
+        and np.all(timestamps >= 0)
+        and np.all(np.diff(timestamps) >= 0)
+    ):
+        seconds = (timestamps - timestamps[0]).astype(np.float64) / 1e9
+        return seconds, "Elapsed acquisition time (seconds)", float(seconds[-1])
+    return (
+        surface.camera_frame_ids.astype(np.float64),
+        "Camera frame ID",
+        None,
+    )
 
 
 def visualize_online_tracking(
@@ -71,7 +178,7 @@ def visualize_online_tracking(
     if console is None:
         console = Console()
 
-    console.print(f"\n[bold cyan]Online Tracking Visualization[/bold cyan]")
+    console.print("\n[bold cyan]Online Tracking Visualization[/bold cyan]")
     console.print(f"Zarr: {zarr_path}")
 
     # Load metrics bundle
@@ -84,21 +191,11 @@ def visualize_online_tracking(
     stimulus_run_name = bundle.provenance.get("stimulus_run")
     console.print(f"Stimulus run: [cyan]{stimulus_run_name}[/cyan]")
 
-    # Load coordinate transformation
-    root = zarr.open(str(zarr_path), mode="r")
-    texture_to_camera_scale = load_coordinate_transform(root, stimulus_run_name, console)
-
-    # Extract online target positions
-    target_pos_x_raw = bundle.online.get("target_pos_x")
-    target_pos_y_raw = bundle.online.get("target_pos_y")
-
-    if target_pos_x_raw is None or target_pos_y_raw is None:
-        console.print("[red]Error:[/red] No target position data in online metrics")
-        return
-
-    target_pos_x = np.asarray(target_pos_x_raw, dtype=np.float64) * texture_to_camera_scale
-    target_pos_y = np.asarray(target_pos_y_raw, dtype=np.float64) * texture_to_camera_scale
-    camera_frames = bundle.camera_frame_ids
+    surface = _verified_online_tracking_surface(bundle)
+    target_pos_x = surface.positions[:, 0]
+    target_pos_y = surface.positions[:, 1]
+    camera_frames = surface.camera_frame_ids
+    plot_axis, plot_axis_label, duration_seconds = _plot_axis(surface)
 
     # Identify valid (non-NaN) positions
     valid_mask = np.isfinite(target_pos_x) & np.isfinite(target_pos_y)
@@ -135,36 +232,21 @@ def visualize_online_tracking(
     valid_displacement = consecutive & ~large_jumps & np.isfinite(displacement)
     total_distance_px = displacement[valid_displacement].sum()
 
-    # Get FPS for time conversion
-    fps = root.attrs.get("fps", 60.0)
-    duration_seconds = n_total_frames / fps
-
-    # Estimate pixel-to-mm conversion if available
-    pixel_to_mm = 1.0
-    if "analysis" in root and "track_kinematics_runs" in root["analysis"]:
-        track_kinematics_runs = root["analysis/track_kinematics_runs"]
-        # Try to find pixel_to_mm from any recent run
-        for run_type in ["online", "offline"]:
-            if run_type in track_kinematics_runs:
-                for run_name in track_kinematics_runs[run_type].group_keys():
-                    run_group = track_kinematics_runs[run_type][run_name]
-                    if "pixel_to_mm" in run_group.attrs:
-                        pixel_to_mm = float(run_group.attrs["pixel_to_mm"])
-                        break
-                if pixel_to_mm != 1.0:
-                    break
-
-    total_distance_mm = total_distance_px * pixel_to_mm
-
-    console.print(f"\n[bold]Statistics:[/bold]")
+    console.print("\n[bold]Statistics:[/bold]")
     console.print(f"  Total frames: {n_total_frames}")
     console.print(f"  Valid positions: {n_valid_frames} ({coverage_pct:.1f}%)")
     console.print(f"  Consecutive transitions: {n_consecutive}")
     console.print(f"  Frame gaps: {n_gaps}")
     console.print(f"  Large jumps (>{jump_threshold}px): {n_large_jumps}")
-    console.print(f"  Total distance: {total_distance_px:.1f} px ({total_distance_mm:.1f} mm)")
-    console.print(f"  Duration: {duration_seconds:.1f} seconds")
-    console.print(f"  Coordinate space: camera (scale={texture_to_camera_scale:.6f})")
+    console.print(f"  Total distance: {total_distance_px:.1f} px")
+    if duration_seconds is not None:
+        console.print(f"  Duration: {duration_seconds:.3f} seconds")
+    else:
+        console.print("  Duration: unavailable (no complete timestamp authority)")
+    console.print(
+        "  Coordinate space: "
+        f"{surface.space_id} ({surface.width_px}x{surface.height_px}px)"
+    )
 
     # Create visualization
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -172,10 +254,12 @@ def visualize_online_tracking(
     # Plot 1: Trajectory colored by time
     ax = axes[0, 0]
     scatter = ax.scatter(valid_x, valid_y, c=valid_frames, cmap='viridis', s=2, alpha=0.7)
-    ax.set_xlabel('X Position (pixels, camera space)')
-    ax.set_ylabel('Y Position (pixels, camera space)')
+    ax.set_xlabel('X position (px, arena-relative canvas)')
+    ax.set_ylabel('Y position (px, arena-relative canvas)')
     ax.set_title('Target Trajectory (colored by frame number)')
     ax.set_aspect('equal')
+    ax.set_xlim(0, surface.width_px)
+    ax.set_ylim(surface.height_px, 0)
     ax.grid(True, alpha=0.3)
     plt.colorbar(scatter, ax=ax, label='Camera Frame ID')
 
@@ -188,11 +272,11 @@ def visualize_online_tracking(
 
     # Plot 2: Position components over time
     ax = axes[0, 1]
-    time_seconds = valid_frames / fps
-    ax.plot(time_seconds, valid_x, 'b-', alpha=0.7, linewidth=0.5, label='X')
-    ax.plot(time_seconds, valid_y, 'r-', alpha=0.7, linewidth=0.5, label='Y')
-    ax.set_xlabel('Time (seconds)')
-    ax.set_ylabel('Position (pixels, camera space)')
+    valid_plot_axis = plot_axis[valid_indices]
+    ax.plot(valid_plot_axis, valid_x, 'b-', alpha=0.7, linewidth=0.5, label='X')
+    ax.plot(valid_plot_axis, valid_y, 'r-', alpha=0.7, linewidth=0.5, label='Y')
+    ax.set_xlabel(plot_axis_label)
+    ax.set_ylabel('Position (px, arena-relative canvas)')
     ax.set_title('Position Components Over Time')
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -216,7 +300,7 @@ def visualize_online_tracking(
                 ax.axvspan(gap_start, gap_end, alpha=0.3, color='blue',
                           ymin=0.2, ymax=0.8)
 
-    ax.set_xlabel('Camera Frame ID')
+    ax.set_xlabel('Aligned camera-metadata row')
     ax.set_yticks([])
     ax.set_title('Frame Coverage (Green=detected, Red=missing, Blue=large gaps)')
     ax.set_xlim(0, n_total_frames)
@@ -230,7 +314,7 @@ def visualize_online_tracking(
 
     if displacement.size > 0:
         # Plot all displacements
-        time_displacement = valid_frames[1:] / fps
+        time_displacement = valid_plot_axis[1:]
         ax.plot(time_displacement, displacement, 'b-', alpha=0.5, linewidth=0.5,
                 label='All transitions')
 
@@ -250,7 +334,7 @@ def visualize_online_tracking(
                       color='orange', s=50, marker='x', zorder=6,
                       label=f'Large jumps (>{jump_threshold}px)')
 
-        ax.set_xlabel('Time (seconds)')
+        ax.set_xlabel(plot_axis_label)
         ax.set_ylabel('Displacement (pixels)')
         ax.set_title('Frame-to-Frame Displacement')
         ax.legend()
@@ -270,6 +354,7 @@ def visualize_online_tracking(
 
     plt.tight_layout()
 
+    surface.handoff.assert_verified()
     if output_path:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         console.print(f"[green]Saved plot to {output_path}[/green]")

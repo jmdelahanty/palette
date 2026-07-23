@@ -3,7 +3,7 @@
 <!-- contract-meta
 version: 2
 status: active
-last_verified: 2026-07-01
+last_verified: 2026-07-20
 -->
 
 Purpose: define the current operator-facing source-of-truth contract for Palette
@@ -87,7 +87,7 @@ authoritative representation.
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape and shared body-frame surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
 | Tail kinematics | ordered tail geometry from `analysis/subject_shape_runs` or future keypoint-derived tail posture | none; derived deterministic analysis layer | `analysis/tail_kinematics_runs/<run>` for body-frame tail angles, lateral deflections, and curvature summaries; Megabouts/ZebraZoom/Stytra views are adapters | tail traces must reference exact geometry source and record angle/sign/unit conventions |
-| Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"`, run schema v5, and output schema v8 | current runs prefer subject-shape eye geometry when available, use resolved major-axis orientation as canonical, derive gaze/minor-axis arrays plus BEAST/Bianco-compatible surfaces, expose `eye_angle_variant_schema` for UI representation selection, and persist versioned algorithm/source contracts with exact geometry, keypoint, body-frame, and temporal-operator lineage |
+| Eye angles | canonical subject-shape eye geometry plus the exact base keypoints sealed by its assignment proof | none; specialized deterministic analysis layer | historical refined-keypoint input is explicit diagnostic-only and produces a permanently nonselector run | `analysis/eye_angle_runs/<run>` run schema v6/output schema v9; canonical rows persist ordered `support/instance_key` and `support/source_acquisition_frame_index`, with `support/frame_indices` as an equality-required compatibility alias; body frame and heading are recomputed from the sealed keypoints rather than read from upstream |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -159,12 +159,14 @@ Current rules:
 - Mask-level eye geometry and export consumers should use subject-shape or
   refined-subject eye components. Historical refined-eye groups can be inspected
   directly, but are not part of the live resolver path.
-- Eye-angle analysis is a specialized downstream consumer. It now opts into
-  `analysis/subject_shape_runs` as the preferred eye-geometry source when
-  left/right eye ellipse geometry is present, records
+- Eye-angle analysis is a specialized downstream consumer. Future-normal
+  publication requires a complete, selector-eligible
+  `analysis/subject_shape_runs` eye-geometry source with left/right ellipse
+  geometry and a used assignment proof for one exact base-keypoint child. It
+  records
   `source_geometry_kind`, and writes `schema_id = "analysis.eye_angle_runs"`
-  plus `eye_angle_output_schema` to describe its current output groups. Schema
-  v5 makes `preferred_angle_family="gaze"`,
+  with run schema v6 plus output schema v9. The v5 scientific method makes
+  `preferred_angle_family="gaze"`,
   `preferred_eye_axis="ellipse_major"`, and `support/body_frame/` explicit.
   The major axis is canonical, while gaze/minor direction is derived from the
   resolved major axis; legacy major/minor arrays are retained for compatibility
@@ -173,7 +175,11 @@ Current rules:
   centroid, or legacy representations from metadata. It also
   keeps `vergence_gaze_deg` as the v3-compatible total/axis-separation
   aggregate while adding `mean_eye_vergence_gaze_deg` for Johnson/BEAST-style
-  mean per-eye convergence.
+  mean per-eye convergence. Canonical runs copy the proof-bound ordered
+  `instance_key` and acquisition-frame axis into `support/`; the legacy
+  `frame_indices` name is an equality-required alias. A persisted upstream
+  heading is not an input. Refined keypoints can be used only by explicit
+  diagnostic request, and that output never becomes selector eligible.
 
 The target steady state is one segmentation orchestration surface that writes
 one coherent probability-backed `subject_mask_runs/<run>` snapshot with
@@ -252,8 +258,9 @@ desired design:
   second pass that flags rows without overwriting spatial masks.
 - `analysis/subject_shape_runs` has a coherent body/eyes/swim writer with
   materialized `body_frame/`, snout-anchored centerline, B-spline, and tail
-  geometry outputs. `analysis/eye_angle_runs` and
-  `analysis/tail_kinematics_runs` now consume those surfaces when available;
+  geometry outputs. Canonical `analysis/eye_angle_runs` requires that surface
+  and its sealed assignment-keypoint proof.
+  `analysis/tail_kinematics_runs` consumes subject-shape surfaces when available;
   additional downstream consumers remain open.
 - Subject-shape length stability QC is defined as a downstream analysis layer,
   but body/tail length distribution summaries, temporal delta flags, and

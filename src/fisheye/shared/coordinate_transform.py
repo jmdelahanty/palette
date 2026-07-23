@@ -1,13 +1,14 @@
-"""
-Projector-to-camera coordinate transforms.
+"""Historical calibration lookup plus direction-neutral homography math.
 
-Uses the homography matrix stored in ``analysis/calibration/`` to transform
-points from projector/texture space (358x358) to camera space (4512x4512),
-then converts to millimetres using the camera-space ``pixel_to_mm``
-calibration.
+The lookup helpers in this module are legacy compatibility surfaces.  They do
+not prove a transform direction, selected camera, or reference extent and must
+not authorize a future-normal coordinate publication.  Canonical callers load
+a typed directed-transform record and pass its already validated numerical
+matrix to :func:`apply_homography_xy`.
 
-The homography maps projector -> camera.  To go the other direction
-(camera -> projector), invert the matrix.
+The historical ``projector_to_camera_*`` names remain for explicit legacy
+inspection callers.  Their names describe the caller's assertion; they are not
+coordinate authority.
 """
 
 from __future__ import annotations
@@ -169,42 +170,91 @@ def load_calibration_transform(
     return result
 
 
-def projector_to_camera_px(
-    points_proj: np.ndarray,
-    homography: np.ndarray,
+def apply_homography_xy(
+    points_xy: np.ndarray,
+    matrix: np.ndarray,
+    *,
+    denominator_epsilon: float = 1e-12,
 ) -> np.ndarray:
-    """Transform points from projector space to camera pixel space.
+    """Apply one already direction-validated 3x3 homography to XY points.
+
+    This function deliberately has no source/destination space names.  Those
+    semantics belong to the persisted directed-transform authority used by the
+    caller.  Malformed inputs and points whose homogeneous denominator is zero
+    fail closed instead of being coerced to a plausible finite coordinate.
 
     Parameters
     ----------
-    points_proj : (N, 2) or (2,) float
-        XY coordinates in projector/texture pixels.
-    homography : (3, 3) float
-        Projector-to-camera homography matrix.
+    points_xy : (N, 2) or (2,) float
+        XY coordinates in the transform record's declared source space.
+    matrix : (3, 3) float
+        Homography payload from that exact directed-transform record.
+    denominator_epsilon : float
+        Strict positive absolute threshold below which homogeneous ``w`` is
+        treated as undefined.
 
     Returns
     -------
-    points_cam : same shape as input, float64
-        XY coordinates in camera pixels.
+    transformed_xy : same shape as input, float64
+        XY coordinates in the transform record's declared destination space.
     """
-    pts = np.asarray(points_proj, dtype=np.float64)
+    pts = np.asarray(points_xy, dtype=np.float64)
     single = pts.ndim == 1
     if single:
+        if pts.shape != (2,):
+            raise ValueError("A single homography point must have shape (2,).")
         pts = pts.reshape(1, 2)
+    elif pts.ndim != 2 or pts.shape[1] != 2:
+        raise ValueError("Homography points must have shape (N, 2) or (2,).")
+
+    transform = np.asarray(matrix, dtype=np.float64)
+    if transform.shape != (3, 3) or not np.isfinite(transform).all():
+        raise ValueError("Homography matrix must be one finite 3x3 array.")
+    if (
+        isinstance(denominator_epsilon, (bool, np.bool_))
+        or not np.isscalar(denominator_epsilon)
+        or not np.isfinite(float(denominator_epsilon))
+        or float(denominator_epsilon) <= 0.0
+    ):
+        raise ValueError("denominator_epsilon must be one finite positive scalar.")
+
+    if pts.size == 0:
+        return np.empty_like(pts, dtype=np.float64)
+    if not np.isfinite(pts).all():
+        raise ValueError("Homography points must be finite; select valid rows first.")
 
     # Homogeneous coordinates.
     ones = np.ones((pts.shape[0], 1), dtype=np.float64)
     homogeneous = np.hstack([pts, ones])  # (N, 3)
-    transformed = (homography @ homogeneous.T).T  # (N, 3)
+    transformed = (transform @ homogeneous.T).T  # (N, 3)
 
     # Normalize by w.
     w = transformed[:, 2:3]
-    w = np.where(np.abs(w) < 1e-12, 1.0, w)
+    if not np.isfinite(transformed).all() or np.any(
+        np.abs(w) <= float(denominator_epsilon)
+    ):
+        raise ValueError(
+            "Homography maps at least one point to an undefined point at infinity."
+        )
     result = transformed[:, :2] / w
 
     if single:
         return result.ravel()
     return result
+
+
+def projector_to_camera_px(
+    points_proj: np.ndarray,
+    homography: np.ndarray,
+) -> np.ndarray:
+    """Apply a caller-asserted projector-to-camera homography.
+
+    This is a historical compatibility wrapper.  The function name does not
+    validate direction or calibration lineage; future-normal callers must load
+    those semantics from a typed directed-transform record first.
+    """
+
+    return apply_homography_xy(points_proj, homography)
 
 
 def projector_to_camera_mm(
@@ -317,6 +367,7 @@ def resolve_concentric_center_mm(
 
 
 __all__ = [
+    "apply_homography_xy",
     "load_calibration_transform",
     "projector_to_camera_px",
     "projector_to_camera_mm",

@@ -33,7 +33,10 @@ from ..tracking.crop import crop_detections, infer_detection_source_type
 from ..tracking.arena_assignment import assign_arenas_spatial
 from ..refinement.refine_detect import create_refined_run
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
-from ..refinement.refine_keypoints import create_refined_keypoint_run
+from ..refinement.refine_keypoints import (
+    create_refined_keypoint_run,
+    require_future_normal_refined_keypoint_publication,
+)
 from ..registry.stage_catalog import canonical_stage_id
 from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
@@ -327,6 +330,9 @@ class Pipeline:
         
         # Display pipeline plan
         self._display_pipeline_plan(stages_to_run)
+
+        if 'keypoints_refine' in stages_to_run:
+            require_future_normal_refined_keypoint_publication()
         
         if self.config.dry_run:
             self.console.print("[yellow]Dry run mode - no processing performed[/yellow]")
@@ -541,6 +547,8 @@ class Pipeline:
             force_cpu=self.config.force_cpu,
             verbose=self.config.verbose
         )
+        if int(results.get('total_crops', 0) or 0) <= 0 or not results.get('run_name'):
+            raise RuntimeError("Crop produced no committed canonical run.")
         
         # Display results with source info
         source_label = results.get('detection_source_type', source_type)
@@ -584,6 +592,7 @@ class Pipeline:
             run_name = detect_keypoints_yolo(
                 zarr_path=self.config.zarr_path,
                 model_path=model_path,
+                model_pose_schema_binding=params.get('model_pose_schema_binding'),
                 run_name=params.get('run_name'),
                 crop_run=params.get('crop_run'),
                 batch_size=params.get('batch_size', 256),
@@ -611,6 +620,7 @@ class Pipeline:
 
     def _run_keypoints_refine(self) -> None:
         """Run keypoint refinement stage."""
+        require_future_normal_refined_keypoint_publication()
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
 
@@ -1379,11 +1389,9 @@ Examples:
         default=None,
         choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         help=(
-            "Detection source stage for cropping (default: config value). "
-            "'auto' prefers the canonical current refined surface and falls back "
-            "to raw detect; 'refined' requires the canonical curated refined "
-            "surface. 'manual'/'filtered'/'interpolated' are legacy sparse "
-            "compatibility modes for older archives."
+            "Detection source stage for cropping (default: config value, now "
+            "detect). Future ordinary crop writes require an exact detect source; "
+            "auto/refined/sparse resolutions fail closed."
         )
     )
 
@@ -1392,9 +1400,8 @@ Examples:
         type=str,
         default=None,
         help=(
-            "Explicit detection source path inside the zarr (e.g. "
-            "detect_runs/<run> or the canonical refined path "
-            "refined_detect_runs/<run>/instances)"
+            "Explicit future-canonical detection source path inside the zarr: "
+            "detect_runs/<run>"
         )
     )
 

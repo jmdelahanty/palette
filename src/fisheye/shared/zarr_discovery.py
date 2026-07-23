@@ -42,7 +42,7 @@ def _candidate_key(path: Path) -> str:
 
 
 def _is_zarr_root(path: Path) -> bool:
-    return (path / "zarr.json").is_file() or (path / ".zgroup").is_file()
+    return (path / "zarr.json").is_file()
 
 
 def _explicit_zarr_candidate(

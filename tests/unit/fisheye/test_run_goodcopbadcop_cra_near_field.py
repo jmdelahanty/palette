@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fisheye.utils import run_goodcopbadcop_cra_near_field as mod
+from fisheye.utils import run_chaser_near_field_occupancy as generic_mod
 
 
 def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, tmp_path: Path) -> None:
@@ -16,7 +17,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
         calls["build_kwargs"] = kwargs
         return SimpleNamespace(
             chaser_distance_run_name="chaser_distance_1",
-            source_cra_primary_endpoint_component="object_relative_pre_post_v1",
+            source_quadrant_occupancy_component="object_relative_pre_post_v1",
             geometry_status="circle",
             summary={
                 "approach_p05_delta_agg": -1.25,
@@ -32,8 +33,8 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
         calls["write_kwargs"] = kwargs
         return "analysis/chaser_distance_runs/chaser_distance_1/cra_near_field/object_relative_near_field_v1"
 
-    monkeypatch.setattr(mod, "build_cra_near_field_result", fake_build)
-    monkeypatch.setattr(mod, "write_cra_near_field_component", fake_write)
+    monkeypatch.setattr(generic_mod, "build_chaser_near_field_occupancy_result", fake_build)
+    monkeypatch.setattr(generic_mod, "write_chaser_near_field_occupancy_component", fake_write)
 
     rows = mod.run_for_targets(
         [
@@ -46,7 +47,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
             }
         ],
         chaser_distance_run="latest",
-        cra_primary_endpoint_component="latest",
+        quadrant_occupancy_component="latest",
         component_name="object_relative_near_field_v1",
         r_zone_mm=4.0,
         r_in_mm=4.0,
@@ -65,7 +66,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
     assert calls["build_path"] == zarr_path
     assert calls["build_kwargs"] == {
         "chaser_distance_run": "latest",
-        "cra_primary_endpoint_component": "latest",
+        "quadrant_occupancy_component": "latest",
         "component_name": "object_relative_near_field_v1",
         "r_zone_mm": 4.0,
         "r_in_mm": 4.0,
@@ -90,9 +91,9 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
             "detect_run": "detect_1",
             "refined_run": "refined_1",
             "chaser_distance_run": "chaser_distance_1",
-            "cra_primary_endpoint_component": "object_relative_pre_post_v1",
+            "quadrant_occupancy_component": "object_relative_pre_post_v1",
             "component_name": "object_relative_near_field_v1",
-            "cra_near_field_path": "analysis/chaser_distance_runs/chaser_distance_1/cra_near_field/object_relative_near_field_v1",
+            "chaser_near_field_occupancy_path": "analysis/chaser_distance_runs/chaser_distance_1/cra_near_field/object_relative_near_field_v1",
             "geometry_status": "circle",
             "status": "computed",
             "error": None,

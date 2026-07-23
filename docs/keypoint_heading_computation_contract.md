@@ -368,8 +368,11 @@ Meaning:
 
 ## Recommended Adoption Path
 
-1. New keypoint and refined-keypoint runs should carry canonical
-   `pose_schema.metadata.heading_computation` via their packaged pose schema.
+1. New canonical model keypoint runs should carry
+   `pose_schema.metadata.heading_computation` from the controlled heading policy
+   attached to their digest-bound, authoritative ordered-label binding.
+   Traditional/non-model producers may continue to obtain the same controlled
+   policy from their explicit packaged pose schema.
 2. Existing runs can be backfilled in place with
    `scripts/py -m fisheye.utils.backfill_keypoint_heading_computation`.
 3. Use `heading_computation_override` only for explicit run-level differences

@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import zarr
-
+import fisheye.analysis.chaser_response_regimes as regimes_module
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
 from fisheye.analysis.chaser_response_regimes import (
     COMPONENT_PARENT_NAME,
@@ -24,8 +25,91 @@ from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFA
 from tests.unit.fisheye.test_chaser_radial_occupancy import ARENA_CENTER_MM, _make_archive
 
 
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
+
+
 FPS = 10.0
 CX = CY = ARENA_CENTER_MM  # 50 mm
+
+
+def _install_verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _load_verified_track(
+        root: zarr.Group,
+        *,
+        run_name: str = "latest",
+        scope: str = "offline",
+        track_id: int = 0,
+        required_speed_levels: tuple[str, ...] = (),
+    ) -> SimpleNamespace:
+        assert run_name == "latest"
+        assert scope == "offline"
+        assert track_id == 0
+        assert required_speed_levels == ("smoothed",)
+        parent = root["analysis/chaser_distance_runs"]
+        distance_run_name = str(
+            parent.attrs.get("latest") or sorted(parent.group_keys())[-1]
+        )
+        distance_run = parent[distance_run_name]
+        positions = distance_run["positions"]
+        fish_px = np.asarray(
+            positions["fish_centroid_arena_xy"][:], dtype=np.float64
+        )
+        sample_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
+        pixels_per_mm = float(distance_run.attrs["pixels_per_mm_projector"])
+        fps = float(distance_run.attrs["fps"])
+        fish_mm = fish_px / pixels_per_mm
+        speed = np.full(fish_mm.shape[0], np.nan, dtype=np.float64)
+        transition_valid = np.zeros(fish_mm.shape[0], dtype=bool)
+        if fish_mm.shape[0] > 1:
+            speed[1:] = np.linalg.norm(np.diff(fish_mm, axis=0), axis=1) * fps
+            transition_valid[1:] = (
+                sample_valid[:-1]
+                & sample_valid[1:]
+                & np.isfinite(fish_mm[:-1]).all(axis=1)
+                & np.isfinite(fish_mm[1:]).all(axis=1)
+            )
+        run_ref = "/analysis/track_kinematics_runs/offline/verified_test"
+        track_ref = f"{run_ref}/tracks/id_0"
+        authority = {
+            "schema_id": "palette.track_motion_read_authority",
+            "schema_version": 1,
+            "run_ref": run_ref,
+            "track_ref": track_ref,
+            "track_id": 0,
+            "motion_manifest_ref": (
+                f"{run_ref}@track_motion_publication_manifest"
+            ),
+            "motion_manifest_sha256": "a" * 64,
+            "positions_px_ref": f"{track_ref}/positions_px",
+            "positions_px_coordinate_descriptor_sha256": "b" * 64,
+            "positions_mm_ref": f"{track_ref}/positions_mm",
+            "positions_mm_coordinate_descriptor_sha256": "c" * 64,
+            "track_sample_key_ref": f"{track_ref}/track_sample_key",
+            "source_acquisition_frame_index_ref": (
+                f"{track_ref}/source_acquisition_frame_index"
+            ),
+        }
+        return SimpleNamespace(
+            track_path=track_ref.removeprefix("/"),
+            source_acquisition_frame_index=np.arange(
+                fish_mm.shape[0], dtype=np.int64
+            ),
+            speed_mm_by_level={"smoothed": speed},
+            sample_valid=sample_valid,
+            transition_valid=transition_valid,
+            authority_record=lambda: dict(authority),
+        )
+
+    monkeypatch.setattr(
+        regimes_module,
+        "load_track_kinematics_track",
+        _load_verified_track,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_verified_track_reader(monkeypatch)
 
 
 def _set_protocol(zarr_path: Path, *, chaser_radius_mm: float = 2.0) -> None:
@@ -98,6 +182,94 @@ def test_freeze_curve_recovers_a_close_range_freeze(tmp_path: Path) -> None:
     centers = r.distance_bin_centers_mm
     near_bin = int(np.argmin(np.abs(centers - 3.5)))
     assert float(r.immobile_fraction[0, 0, near_bin]) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_verified_speed_uses_destination_frame_transition_anchor(
+    tmp_path: Path,
+) -> None:
+    fish = np.asarray(
+        [[CX + 10.0, CY], [CX + 10.0, CY], [CX + 11.0, CY]],
+        dtype=np.float64,
+    )
+    chaser = np.tile(np.asarray([CX, CY]), (3, 1))
+    z = _build(tmp_path, fish, chaser, name="transition_anchor.zarr")
+
+    result = build_chaser_response_regimes_result(
+        z,
+        chaser_distance_run="chaser_distance_1",
+        min_band_frames=1,
+        min_bin_frames=1,
+    )
+
+    distance_bin = int(
+        np.flatnonzero(
+            (result.distance_bin_edges_mm[:-1] <= 10.0)
+            & (result.distance_bin_edges_mm[1:] > 10.0)
+        )[0]
+    )
+    assert result.frame_count[0, 0, distance_bin] == 2
+    assert result.immobile_fraction[0, 0, distance_bin] == pytest.approx(0.5)
+    assert result.moving_fraction[0, 0, distance_bin] == pytest.approx(0.5)
+
+
+def test_verified_track_failure_does_not_fall_back_to_raw_centroid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fish, chaser, valid = _freeze_then_flee(n_near=20, n_far=10)
+    z = _build(
+        tmp_path,
+        fish,
+        chaser,
+        fish_valid=valid,
+        name="tampered_track.zarr",
+    )
+    monkeypatch.setattr(
+        regimes_module,
+        "load_track_kinematics_track",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("track motion manifest mismatch")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="manifest mismatch"):
+        build_chaser_response_regimes_result(
+            z,
+            chaser_distance_run="chaser_distance_1",
+            min_bin_frames=1,
+        )
+
+
+def test_raw_centroid_requires_explicit_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fish, chaser, valid = _freeze_then_flee(n_near=20, n_far=10)
+    z = _build(
+        tmp_path,
+        fish,
+        chaser,
+        fish_valid=valid,
+        name="explicit_raw.zarr",
+    )
+    monkeypatch.setattr(
+        regimes_module,
+        "load_track_kinematics_track",
+        lambda *_args, **_kwargs: pytest.fail("strict track reader must not run"),
+    )
+
+    result = build_chaser_response_regimes_result(
+        z,
+        chaser_distance_run="chaser_distance_1",
+        min_bin_frames=1,
+        immobility_signal_mode="raw_centroid_explicit",
+    )
+
+    assert result.source_track_motion_authority is None
+    assert result.diagnostics["immobility_signal_source"] == (
+        "raw_centroid_explicit"
+    )
+    assert "immobility_signal_explicit_raw_centroid" in result.qc_warnings
 
 
 def test_escape_gain_is_the_fish_velocity_along_the_chaser_axis(tmp_path: Path) -> None:
@@ -332,6 +504,15 @@ def test_write_component_round_trips(tmp_path: Path) -> None:
     component = root[path]
     assert component.attrs["schema_id"] == SCHEMA_ID
     assert component.attrs["status"] == "computed"
+    assert component.attrs["source_refs"]["source_track_motion_authority"] == (
+        r.source_track_motion_authority
+    )
+    assert component.attrs["parameters"]["immobility_signal_mode"] == (
+        "verified_track_motion"
+    )
+    assert component.attrs["parameters"]["immobility_signal_source"] == (
+        "track_motion.movement/speed/smoothed/mm"
+    )
 
     n_bins = int(r.distance_bin_centers_mm.shape[0])
     regimes = component["regimes"]

@@ -2,13 +2,13 @@
 
 <!-- design-meta
 status: accepted
-last_updated: 2026-05-11
+last_updated: 2026-07-20
 -->
 
 ## Purpose
 
 `analysis/eye_angle_runs` stores dense ROI- and frame-aligned eye-angle time
-series. The current hierarchical layout is readable, but it materializes many
+series. The historical hierarchical layout is readable, but it materializes many
 related scalar outputs as one array per name under `angles/roi` and
 `angles/frame`, plus QA arrays and vector outputs in separate groups. This
 creates a large Zarr metadata fanout for data that is naturally dense.
@@ -31,8 +31,8 @@ analysis/eye_angle_runs/<run>/
   attrs:
     layout = "compact_dense_v2"
     schema_id = "analysis.eye_angle_runs"
-    schema_version = 5
-    eye_angle_output_schema.schema_version = 8
+    schema_version = 6
+    eye_angle_output_schema.schema_version = 9
     eye_angle_algorithm_contract.schema_version = 1
 
   angle_channel_index/
@@ -71,7 +71,9 @@ analysis/eye_angle_runs/<run>/
   frame_qa                       # bool/int, shape (n_frames, n_qa_channels)
 
   support/
-    frame_indices
+    instance_key
+    source_acquisition_frame_index
+    frame_indices                  # equality-required compatibility alias
     time_seconds
     frame_time_seconds
     ellipse_major
@@ -92,6 +94,8 @@ maps for both layouts:
 tables.roi["left_eye_angle_deg"]
 tables.frame["left_gaze_deg"]
 tables.qa_frame["valid_frame"]
+tables.support["instance_key"]
+tables.support["source_acquisition_frame_index"]
 tables.support["frame_indices"]
 tables.source_paths["analysis/eye_angle_runs/<run>/angles/frame/left_gaze_deg"]
 ```
@@ -159,11 +163,31 @@ Keep QA dense and explicit:
 Support arrays remain semantically grouped because they are not just angle
 variants:
 
-- ROI/frame mapping: `frame_indices`, `time_seconds`, `frame_time_seconds`
+- ROI identity/time mapping: `instance_key`,
+  `source_acquisition_frame_index`, `frame_indices`, `time_seconds`,
+  `frame_time_seconds`. `source_acquisition_frame_index` is canonical and
+  `frame_indices` must contain exactly equal values as a compatibility alias.
 - Ellipse geometry: `ellipse_major`, `ellipse_minor`, `ellipse_ratio`
 - Body-frame support: `body_frame/origin_xy`, `body_frame/forward_axis_xy`,
   `body_frame/left_axis_xy`, `body_frame/heading_deg`, `body_frame/valid`,
   `body_frame/failure_reason_bytes`
+
+## Canonical Input Boundary
+
+Compact-dense-v2 changes physical output layout, not source eligibility.
+Future-normal eye-angle publication requires one complete, selector-eligible
+`analysis/subject_shape_runs/<run>` eye-geometry source. Its assignment proof
+must seal the exact base `keypoints_runs/<run>` values, success mask, crop
+placement, keypoint labels, ordered `instance_key`, ordered acquisition-frame
+index, and source frame count. The writer reloads that exact child and fails
+closed on any disagreement; it does not choose a latest keypoint run.
+
+The body frame and output heading are computed from the sealed keypoints and
+success mask. A separately persisted upstream heading is not an input.
+Historical refined keypoints can be requested only through the explicit
+diagnostic option, and the resulting eye-angle run remains permanently
+nonselector. Compact layout support does not make that diagnostic source
+canonical.
 
 ## Reader Migration Status
 

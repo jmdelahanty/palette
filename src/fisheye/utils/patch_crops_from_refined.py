@@ -1,8 +1,9 @@
 """Patch crop ROIs in-place using refined detections for flagged frames.
 
-This is intended for small, targeted fixes where detection counts per frame do
-NOT change. It rewrites the affected crop ROIs (and coordinates) in the chosen
-crop run while preserving the rest of the dataset.
+This is a historical compatibility tool for small, targeted fixes where
+detection counts per frame do NOT change. It rewrites the affected crop ROIs
+and coordinates only on unstamped legacy runs. Canonical publications are
+immutable and must be corrected by creating a new derived crop run.
 """
 
 from __future__ import annotations
@@ -27,6 +28,44 @@ from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
 )
+
+
+_CANONICAL_COORDINATE_ATTRS = (
+    "coordinate_descriptor",
+    "coordinate_descriptor_sha256",
+)
+
+
+def _refuse_canonical_in_place_patch(crop_group: zarr.Group) -> None:
+    """Keep immutable canonical coordinate publications out of this legacy tool."""
+
+    attrs = crop_group.attrs
+    canonical_run = (
+        attrs.get("coordinate_contract") == "canonical_v2"
+        or attrs.get("coordinate_binding_status") == "bound_canonical_v2"
+    )
+    canonical_arrays = tuple(
+        name
+        for name in (
+            "roi_images",
+            "roi_coordinates_full",
+            "source_crop_xywh",
+            "bbox_norm_coords",
+            "bbox_img_xyxy",
+            "bbox_roi_xyxy",
+        )
+        if name in crop_group
+        and any(
+            attr_name in crop_group[name].attrs
+            for attr_name in _CANONICAL_COORDINATE_ATTRS
+        )
+    )
+    if canonical_run or canonical_arrays:
+        raise RuntimeError(
+            "Refusing to patch a canonical crop run in place. Create a new "
+            "derived crop run so coordinate descriptors, row identity, pixel "
+            "payloads, and derivation digests remain immutable."
+        )
 
 
 @dataclass(frozen=True)
@@ -420,6 +459,7 @@ def _patch_crop_run(
     source_refined_run: Optional[str] = None,
     flag_entries: Optional[Sequence[Mapping[str, object]]] = None,
 ) -> Dict[str, object]:
+    _refuse_canonical_in_place_patch(crop_group)
     source_frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
     bbox_norm = detect_group["bbox_norm_coords"][:]
 

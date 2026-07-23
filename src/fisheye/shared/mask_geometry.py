@@ -76,7 +76,8 @@ def batch_mask_spatial_metrics(masks: np.ndarray) -> dict[str, np.ndarray]:
 
     The final two axes are interpreted as ``(H, W)``. Any leading dimensions are
     preserved, so callers can pass either ``(N,H,W)`` component masks or
-    ``(N,C,H,W)`` multi-component masks.
+    ``(N,C,H,W)`` multi-component masks. Bounding boxes use half-open pixel-edge
+    bounds ``[x_min, y_min, x_max_exclusive, y_max_exclusive]``.
     """
 
     binary = np.asarray(masks, dtype=np.uint8) > 0
@@ -108,13 +109,13 @@ def batch_mask_spatial_metrics(masks: np.ndarray) -> dict[str, np.ndarray]:
         y_indices = np.arange(height, dtype=np.int32).reshape(1, height)
         x_indices = np.arange(width, dtype=np.int32).reshape(1, width)
         y_min = np.where(row_has_mask, y_indices, height).min(axis=1)
-        y_max = np.where(row_has_mask, y_indices, -1).max(axis=1)
+        y_max_exclusive = np.where(row_has_mask, y_indices + 1, 0).max(axis=1)
         x_min = np.where(col_has_mask, x_indices, width).min(axis=1)
-        x_max = np.where(col_has_mask, x_indices, -1).max(axis=1)
+        x_max_exclusive = np.where(col_has_mask, x_indices + 1, 0).max(axis=1)
         bbox_xyxy_flat[:, 0] = x_min.astype(np.float32, copy=False)
         bbox_xyxy_flat[:, 1] = y_min.astype(np.float32, copy=False)
-        bbox_xyxy_flat[:, 2] = x_max.astype(np.float32, copy=False)
-        bbox_xyxy_flat[:, 3] = y_max.astype(np.float32, copy=False)
+        bbox_xyxy_flat[:, 2] = x_max_exclusive.astype(np.float32, copy=False)
+        bbox_xyxy_flat[:, 3] = y_max_exclusive.astype(np.float32, copy=False)
         bbox_xyxy_flat[~mask_present_flat] = 0.0
 
     return {

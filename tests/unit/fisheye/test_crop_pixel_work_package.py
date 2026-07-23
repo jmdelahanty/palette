@@ -272,11 +272,14 @@ def test_inference_cli_packages_are_mutually_exclusive_and_shard_only(
             "model.pt",
             "--output-parent",
             "keypoint_shard_runs",
+            "--coordinate-contract-mode",
+            "legacy_noncanonical",
             "--roi-work-package-manifest",
             str(package_path),
         ]
     )
     assert keypoint_args.roi_work_package_manifest == package_path
+    assert keypoint_args.coordinate_contract_mode == "legacy_noncanonical"
     with pytest.raises(SystemExit):
         keypoint_parser().parse_args(
             [
@@ -294,6 +297,7 @@ def test_inference_cli_packages_are_mutually_exclusive_and_shard_only(
             "missing.zarr",
             "missing.pt",
             roi_work_package_manifest=package_path,
+            coordinate_contract_mode="legacy_noncanonical",
         )
 
     mask_args = mask_parser().parse_args(

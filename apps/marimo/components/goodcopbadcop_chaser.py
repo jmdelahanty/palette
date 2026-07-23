@@ -9,6 +9,10 @@ from typing import Any, Mapping, Optional
 import numpy as np
 import polars as pl
 
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    load_chaser_distance_run,
+)
 from fisheye.analysis.chaser_gaze_tracking import (
     SCHEMA_ID as CHASER_GAZE_TRACKING_SCHEMA_ID,
     SUMMARY_PNG_ARTIFACT_NAME as CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
@@ -171,54 +175,14 @@ def available_chaser_analysis_ids(
     zarr_path: Path | str,
     option: InteractiveSpecOption,
 ) -> tuple[str, ...]:
-    """Return analysis choices supported by persisted evidence in one run."""
+    """Hide unsealed dashboard/component choices after exact base preflight."""
 
-    source_paths = option.spec.get("source_paths")
-    paths = source_paths if isinstance(source_paths, Mapping) else {}
-    available: list[str] = []
-    if "distance_mm" in paths:
-        available.extend(["distance", "epoch_summary"])
-    if "egocentric_bearing_deg" in paths:
-        available.extend(["egocentric_bearing", "polar_distance"])
-    if "egocentric_fish_heading_deg" in paths:
-        available.append("fish_heading")
-    if "egocentric_alignment_cos" in paths:
-        available.append("alignment")
-    if "fish_centroid_arena_xy" in paths:
-        available.append("position_heatmap")
-    if "detection_occupancy_heatmap_normalized" in paths:
-        available.append("detection_occupancy")
-    if "detection_spatial_occupancy" in paths:
-        available.append("spatial_occupancy")
-
-    run_path = _owning_chaser_distance_run_path(option)
-    try:
-        root = open_zarr_root(Path(zarr_path), mode="r")
-        run = root[run_path]
-        component_names = set(run.group_keys())
-        components = run.get("components")
-        if components is not None:
-            component_names.update(components.group_keys())
-    except Exception:
-        component_names = set()
-    if any(
-        "chaser_quadrant_occupancy" in name
-        or "cra_primary" in name
-        or "object_relative" in name
-        for name in component_names
-    ):
-        available.append("cra_quadrant")
-    if any("near_field" in name for name in component_names):
-        available.append("cra_near_field")
-    if any("escape" in name or "freeze" in name for name in component_names):
-        available.append("escape_freeze")
-    if discover_chaser_gaze_tracking_components(
-        zarr_path,
-        distance_run_path=run_path,
-    ):
-        available.append("gaze_tracking")
-    available.extend(["static_artifacts", "provenance"])
-    return tuple(dict.fromkeys(available))
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    _load_exact_chaser_distance_snapshot(
+        root,
+        _owning_chaser_distance_run_path(option),
+    )
+    return ()
 
 
 def _owning_chaser_distance_run_path(option: InteractiveSpecOption) -> str:
@@ -227,6 +191,35 @@ def _owning_chaser_distance_run_path(option: InteractiveSpecOption) -> str:
         if parts[index] == "analysis" and parts[index + 1] == "chaser_distance_runs":
             return "/".join(parts[: index + 3])
     return option.run_path
+
+
+def _chaser_distance_run_name_from_path(path: str) -> str:
+    parts = [part for part in str(path).strip("/").split("/") if part]
+    for index in range(len(parts) - 2):
+        if parts[index : index + 2] == ["analysis", "chaser_distance_runs"]:
+            name = parts[index + 2]
+            if name not in {".", ".."}:
+                return name
+    raise ValueError(
+        "Chaser component path must be under analysis/chaser_distance_runs/<run>."
+    )
+
+
+def _load_exact_chaser_distance_snapshot(
+    root: Any,
+    path: str | None,
+) -> ChaserDistanceReadSnapshot:
+    requested = (
+        _chaser_distance_run_name_from_path(path)
+        if path is not None
+        else "latest"
+    )
+    snapshot = load_chaser_distance_run(root, run_name=requested)
+    if path is not None:
+        expected = f"analysis/chaser_distance_runs/{requested}"
+        if snapshot.run_path != expected:
+            raise ValueError("Chaser component selection changed run paths.")
+    return snapshot
 
 
 def _group_names(group: Any) -> tuple[str, ...]:
@@ -251,107 +244,13 @@ def discover_chaser_gaze_tracking_components(
     max_distance_runs: int = 100,
     max_components_per_run: int = 100,
 ) -> tuple[dict[str, Any], ...]:
-    """Discover complete gaze components through the bounded chaser family.
-
-    This does not recursively walk the recording and does not read array
-    values. The latest-complete component for each distance run sorts first.
-    """
+    """Hide gaze components until they publish independent sealed authority."""
 
     if max_distance_runs < 1 or max_components_per_run < 1:
         raise ValueError("Gaze discovery limits must be positive.")
     root = open_zarr_root(Path(zarr_path), mode="r")
-    if distance_run_path:
-        requested_parts = [
-            part for part in str(distance_run_path).strip("/").split("/") if part
-        ]
-        normalized_run_path = str(distance_run_path).strip("/")
-        for index in range(len(requested_parts) - 2):
-            if (
-                requested_parts[index] == "analysis"
-                and requested_parts[index + 1] == "chaser_distance_runs"
-            ):
-                normalized_run_path = "/".join(requested_parts[: index + 3])
-                break
-        distance_paths = (normalized_run_path,)
-    else:
-        family_path = "analysis/chaser_distance_runs"
-        try:
-            family = root[family_path]
-        except Exception:
-            return ()
-        distance_paths = tuple(
-            f"{family_path}/{name}"
-            for name in _group_names(family)[: int(max_distance_runs)]
-        )
-
-    rows: list[dict[str, Any]] = []
-    for run_path in distance_paths:
-        gaze_parent_path = join_path(run_path, "gaze_tracking")
-        try:
-            gaze_parent = root[gaze_parent_path]
-        except Exception:
-            continue
-        component_names = _group_names(gaze_parent)[: int(max_components_per_run)]
-        latest_complete = str(
-            gaze_parent.attrs.get("latest_complete")
-            or gaze_parent.attrs.get("latest")
-            or ""
-        )
-        for component_name in component_names:
-            component_path = join_path(gaze_parent_path, component_name)
-            try:
-                component = root[component_path]
-            except Exception:
-                continue
-            attrs = getattr(component, "attrs", {})
-            status = str(attrs.get("status") or attrs.get("completion_status") or "")
-            schema_id = str(attrs.get("schema_id") or "")
-            if status.casefold() != "complete" or schema_id != CHASER_GAZE_TRACKING_SCHEMA_ID:
-                continue
-            required_groups = {"recording_summary", "object_vs_virtual"}
-            if not required_groups.issubset(set(_group_names(component))):
-                continue
-            artifact_path = join_path(
-                component_path,
-                "visualizations",
-                CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
-            )
-            try:
-                artifact = root[artifact_path]
-                has_summary_png = str(
-                    getattr(artifact, "attrs", {}).get("media_type") or ""
-                ) == "image/png"
-            except Exception:
-                has_summary_png = False
-            summary = _mapping_attr(component, "summary")
-            rows.append(
-                {
-                    "component_path": component_path,
-                    "component_name": component_name,
-                    "distance_run_path": run_path,
-                    "recording_id": str(attrs.get("recording_id") or ""),
-                    "status": status,
-                    "schema_id": schema_id,
-                    "created_at_utc": str(attrs.get("created_at_utc") or ""),
-                    "frame_count": int(summary.get("frame_count") or 0),
-                    "chaser_count": int(summary.get("chaser_count") or 0),
-                    "lock_on_event_count": int(summary.get("lock_on_event_count") or 0),
-                    "virtual_reference_count": int(summary.get("virtual_reference_count") or 0),
-                    "summary_png_path": artifact_path,
-                    "has_summary_png": has_summary_png,
-                    "is_latest_complete": component_name == latest_complete,
-                }
-            )
-    return tuple(
-        sorted(
-            rows,
-            key=lambda row: (
-                not bool(row["is_latest_complete"]),
-                str(row["distance_run_path"]),
-                str(row["component_name"]),
-            ),
-        )
-    )
+    _load_exact_chaser_distance_snapshot(root, distance_run_path)
+    return ()
 
 
 def _decode_text_rows(values: np.ndarray) -> tuple[str, ...]:
@@ -373,10 +272,14 @@ def load_chaser_gaze_tracking_view(
     zarr_path: Path | str,
     component_path: str,
 ) -> ChaserGazeTrackingView:
-    """Load one complete gaze component without reading framewise arrays."""
+    """Reject gaze reads until the exact component has sealed authority."""
 
     normalized_path = str(component_path).strip("/")
     root = open_zarr_root(Path(zarr_path), mode="r")
+    distance = _load_exact_chaser_distance_snapshot(root, normalized_path)
+    distance.require_derived_surface_authority(
+        normalized_path.split(distance.run_path + "/", 1)[-1]
+    )
     component = root[normalized_path]
     attrs = getattr(component, "attrs", {})
     status = str(attrs.get("status") or attrs.get("completion_status") or "")

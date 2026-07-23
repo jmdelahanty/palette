@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis import tail_posture_view_runs as mod
+from fisheye.analysis import subject_shape_io
 from fisheye.shared.detect_reason_codec import decode_reason_bytes
 
 
@@ -22,6 +25,13 @@ def _patch_provenance(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        subject_shape_io,
+        "load_persisted_subject_shape_coordinate_publication",
+        lambda _root, _run_path: SimpleNamespace(
+            manifest=SimpleNamespace(record_sha256="a" * 64)
+        ),
+    )
+    monkeypatch.setattr(
         mod,
         "get_environment_info",
         lambda **kwargs: {  # noqa: ARG005
@@ -35,6 +45,35 @@ def _patch_provenance(monkeypatch) -> None:
             },
         },
     )
+    monkeypatch.setattr(
+        mod,
+        "publish_tail_posture_coordinate_surfaces",
+        lambda _root, run_group: run_group.attrs.__setitem__(
+            "tail_coordinate_publication_manifest_sha256", "9" * 64
+        ),
+    )
+
+    def _activate(
+        _root,
+        parent,
+        run_group,
+        *,
+        run_name,
+        expected_publication_owner_uuid,
+        additional_selector_attrs=(),
+    ):
+        assert expected_publication_owner_uuid == run_group.attrs[
+            mod.TAIL_PUBLICATION_OWNER_ATTR
+        ]
+        assert run_group.attrs["palette_run_completion_status"] == "complete"
+        assert run_group.attrs["stage_selector_eligible"] is False
+        parent.attrs["latest_complete"] = run_name
+        parent.attrs["latest"] = run_name
+        for name in additional_selector_attrs:
+            parent.attrs[name] = run_name
+        run_group.attrs["stage_selector_eligible"] = True
+
+    monkeypatch.setattr(mod, "activate_tail_coordinate_publication", _activate)
 
 
 def _source_arrays() -> dict[str, np.ndarray]:
@@ -107,10 +146,21 @@ def _build_shape_root() -> zarr.Group:
     shape = parent.create_group("shape_001")
     shape.attrs["source_refined_subject_masks_run"] = "refined_001"
 
-    row_index = shape.create_group("row_index")
-    row_index.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
-    row_index.create_array("detection_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
-    row_index.create_array("source_refined_row_ids", data=np.asarray([100, 101], dtype=np.int64), overwrite=True)
+    shape.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([10, 11], dtype=np.int32),
+        overwrite=True,
+    )
+    shape.create_array(
+        "source_crop_row_ids",
+        data=np.asarray([100, 101], dtype=np.int64),
+        overwrite=True,
+    )
+    shape.create_array(
+        "instance_key",
+        data=np.asarray([1000, 1001], dtype=np.uint64),
+        overwrite=True,
+    )
 
     components = shape.create_group("components")
     body = components.create_group("subject_body")
@@ -123,6 +173,68 @@ def _build_shape_root() -> zarr.Group:
     body.create_array("tail_sample_failure_reason_bytes", data=mod._encode_reasons(["ok", "ok"]), overwrite=True)
     body.create_array("bspline_failure_reason_bytes", data=mod._encode_reasons(["ok", "ok"]), overwrite=True)
     return root
+
+
+def test_normal_tail_posture_writer_rejects_unpublished_subject_shape_source() -> None:
+    root = _build_shape_root()
+
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError,
+        match="not a valid canonical coordinate publication",
+    ):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name="posture_rejected",
+            dry_run=True,
+        )
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_tail_posture_existing_name_is_immutable_and_unchanged(
+    overwrite: bool,
+) -> None:
+    root = zarr.group()
+    parent = root.require_group("analysis/tail_posture_view_runs")
+    existing = parent.create_group("posture_existing")
+    existing.attrs.update(
+        {
+            mod.TAIL_PUBLICATION_OWNER_ATTR: (
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+            "sentinel": "preserve",
+        }
+    )
+    existing.create_array("sentinel_values", data=np.asarray([7, 8], dtype=np.int16))
+    parent.attrs.update(
+        {"latest": "posture_existing", "latest_complete": "posture_existing"}
+    )
+    before_attrs = dict(existing.attrs)
+    before_parent = dict(parent.attrs)
+    before_values = np.asarray(existing["sentinel_values"][:]).copy()
+
+    with pytest.raises(ValueError, match="immutable"):
+        mod._prepare_run_group(
+            root,
+            target_run="posture_existing",
+            shape_run_name="shape",
+            shape_group=root.require_group("analysis/subject_shape_runs/shape"),
+            source_subject_shape_publication_manifest_sha256="a" * 64,
+            row_count=2,
+            view_family="family",
+            head_source="head_endpoint_xy",
+            keypoint_count=5,
+            source_tail_kinematics_run=None,
+            stage_command="fixture",
+            publication_owner_uuid="22222222-2222-4222-8222-222222222222",
+            overwrite=overwrite,
+        )
+
+    assert dict(existing.attrs) == before_attrs
+    assert dict(parent.attrs) == before_parent
+    np.testing.assert_array_equal(existing["sentinel_values"][:], before_values)
 
 
 def test_write_tail_posture_view_run_group_writes_schema_and_arrays(monkeypatch) -> None:
@@ -149,21 +261,212 @@ def test_write_tail_posture_view_run_group_writes_schema_and_arrays(monkeypatch)
     assert run.attrs["keypoint_count"] == 11
     assert run.attrs["angle_count"] == 10
     assert run.attrs["source_subject_shape_run"] == "shape_001"
+    assert run.attrs["source_subject_shape_publication_manifest_sha256"] == "a" * 64
     assert run.attrs["source_tail_kinematics_run"] == "tail_001"
-    assert run["frame_index"][:].tolist() == [10, 11]
-    assert run["row_index"]["frame_indices"][:].tolist() == [10, 11]
+    assert run["source_acquisition_frame_index"][:].tolist() == [10, 11]
+    assert run["instance_key"][:].tolist() == [1000, 1001]
     assert np.asarray(run["tail_keypoints_xy"][:], dtype=np.float32).shape == (2, 11, 2)
     assert np.asarray(run["tail_angle_rad"][:], dtype=np.float32).shape == (2, 10)
     np.testing.assert_allclose(np.asarray(run["tail_angle_rad"][:], dtype=np.float32), 0.0, atol=1e-7)
     assert run.attrs["provenance"]["stage"] == "analysis.tail_posture_view_runs"
+    assert (
+        run.attrs["provenance"]["inputs"][
+            "source_subject_shape_publication_manifest_sha256"
+        ]
+        == "a" * 64
+    )
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_tail_posture_retry_never_invalidates_existing_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    overwrite: bool,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    mod.write_tail_posture_view_run_group(
+        root,
+        subject_shape_run="shape_001",
+        run_name="posture_immutable",
+    )
+    parent = root["analysis/tail_posture_view_runs"]
+    existing = parent["posture_immutable"]
+    before_attrs = dict(existing.attrs)
+    before_parent = dict(parent.attrs)
+    before_values = np.asarray(existing["tail_angle_rad"][:]).copy()
+
+    with pytest.raises(ValueError, match="immutable"):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name="posture_immutable",
+            overwrite=overwrite,
+        )
+
+    assert dict(existing.attrs) == before_attrs
+    assert dict(parent.attrs) == before_parent
+    np.testing.assert_array_equal(existing["tail_angle_rad"][:], before_values)
+
+
+def test_tail_posture_publication_failure_leaves_owned_tombstone_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    monkeypatch.setattr(
+        mod,
+        "publish_tail_posture_coordinate_surfaces",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected publication failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="injected publication failure"):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name="posture_failed",
+        )
+
+    parent = root["analysis/tail_posture_view_runs"]
+    failed = parent["posture_failed"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert parent.attrs.get("latest") != "posture_failed"
+    assert parent.attrs.get("latest_complete") != "posture_failed"
+
+
+def test_tail_posture_early_lifecycle_failure_retains_owned_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    observed_owner: list[str] = []
+
+    def fail_started(run_group, **_kwargs):
+        owner = run_group.attrs.get(mod.TAIL_PUBLICATION_OWNER_ATTR)
+        assert isinstance(owner, str) and owner
+        assert run_group.attrs.get("stage_selector_eligible") is False
+        observed_owner.append(owner)
+        raise RuntimeError("injected early posture lifecycle failure")
+
+    monkeypatch.setattr(mod, "mark_run_started", fail_started)
+
+    with pytest.raises(RuntimeError, match="injected early posture lifecycle failure"):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name="posture_early_failed",
+        )
+
+    failed = root["analysis/tail_posture_view_runs/posture_early_failed"]
+    assert failed.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR] == observed_owner[0]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    parent = root["analysis/tail_posture_view_runs"]
+    assert parent.attrs.get("latest") != "posture_early_failed"
+    assert parent.attrs.get("latest_complete") != "posture_early_failed"
+
+
+def test_tail_posture_persist_then_raise_create_recovers_owned_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    run_name = "posture_create_ambiguous"
+    parent = root.require_group("analysis/tail_posture_view_runs")
+    parent.attrs["latest_pending"] = run_name
+    original_create = mod._create_tail_posture_public_candidate
+
+    def persist_then_raise(parent, *, run_name, publication_owner_uuid):
+        original_create(
+            parent,
+            run_name=run_name,
+            publication_owner_uuid=publication_owner_uuid,
+        )
+        raise RuntimeError("injected posture create acknowledgement loss")
+
+    monkeypatch.setattr(
+        mod,
+        "_create_tail_posture_public_candidate",
+        persist_then_raise,
+    )
+
+    with pytest.raises(RuntimeError, match="create acknowledgement loss"):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name=run_name,
+        )
+
+    failed = root[f"analysis/tail_posture_view_runs/{run_name}"]
+    owner = failed.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR]
+    tombstone = failed.attrs[mod.TAIL_PUBLICATION_TOMBSTONE_ATTR]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    assert tombstone["publication_owner_uuid"] == owner
+    assert tombstone["run_family"] == "tail_posture_view"
+    assert parent.attrs["latest_pending"] == run_name
+
+
+def test_tail_posture_failure_cleanup_never_clobbers_recreated_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    parent = root.require_group("analysis/tail_posture_view_runs")
+    run_name = "posture_cleanup_takeover"
+    original_write = mod._write_tail_posture_failure_attr
+    takeover_injected = False
+
+    monkeypatch.setattr(
+        mod,
+        "publish_tail_posture_coordinate_surfaces",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected posture source failure")
+        ),
+    )
+
+    def hostile_write(attrs, name, value):
+        nonlocal takeover_injected
+        original_write(attrs, name, value)
+        if name == "stage_selector_eligible" and not takeover_injected:
+            takeover_injected = True
+            del parent[run_name]
+            parent.create_group(
+                run_name,
+                attributes={
+                    mod.TAIL_PUBLICATION_OWNER_ATTR: "alien-posture-owner",
+                    "palette_run_completion_status": "complete",
+                    "stage_selector_eligible": True,
+                    "sentinel": "successor-preserved",
+                },
+            )
+
+    monkeypatch.setattr(mod, "_write_tail_posture_failure_attr", hostile_write)
+
+    with pytest.raises(RuntimeError, match="injected posture source failure"):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name=run_name,
+        )
+
+    successor = parent[run_name]
+    assert takeover_injected is True
+    assert successor.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR] == "alien-posture-owner"
+    assert successor.attrs["palette_run_completion_status"] == "complete"
+    assert successor.attrs["stage_selector_eligible"] is True
+    assert successor.attrs["sentinel"] == "successor-preserved"
+    assert mod.TAIL_PUBLICATION_TOMBSTONE_ATTR not in successor.attrs
 
 
 def test_write_tail_posture_view_run_group_copies_instance_key_lineage(monkeypatch) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
-    shape_row_index = root["analysis"]["subject_shape_runs"]["shape_001"]["row_index"]
-    shape_row_index.create_array("instance_key", data=np.asarray([11, 22], dtype=np.uint64), overwrite=True)
-    shape_row_index.create_array("source_crop_row_ids", data=np.asarray([5, 6], dtype=np.int64), overwrite=True)
+    shape = root["analysis"]["subject_shape_runs"]["shape_001"]
+    shape.create_array("instance_key", data=np.asarray([11, 22], dtype=np.uint64), overwrite=True)
+    shape.create_array("source_crop_row_ids", data=np.asarray([5, 6], dtype=np.int64), overwrite=True)
 
     mod.write_tail_posture_view_run_group(
         root,
@@ -173,24 +476,42 @@ def test_write_tail_posture_view_run_group_copies_instance_key_lineage(monkeypat
     )
 
     run = root["analysis"]["tail_posture_view_runs"]["megabouts_view_001"]
-    assert run["row_index"]["instance_key"][:].tolist() == [11, 22]
-    assert run["row_index"]["source_crop_row_ids"][:].tolist() == [5, 6]
+    assert run["instance_key"][:].tolist() == [11, 22]
+    assert run["source_crop_row_ids"][:].tolist() == [5, 6]
     assert "instance_key" in run.attrs["row_lineage_copied"]
     assert "source_crop_row_ids" in run.attrs["row_lineage_copied"]
 
 
-def test_write_tail_posture_view_run_group_reports_instance_key_missing_for_legacy_sources(monkeypatch) -> None:
+def test_write_tail_posture_view_run_group_rejects_missing_direct_instance_key(monkeypatch) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
 
-    mod.write_tail_posture_view_run_group(
-        root,
-        subject_shape_run="shape_001",
-        run_name="megabouts_view_001",
-        source_tail_kinematics_run="tail_001",
-    )
+    del root["analysis/subject_shape_runs/shape_001/instance_key"]
 
-    run = root["analysis"]["tail_posture_view_runs"]["megabouts_view_001"]
-    assert "instance_key" not in run["row_index"]
-    assert "instance_key" in run.attrs["row_lineage_missing"]
-    assert "source_crop_row_ids" in run.attrs["row_lineage_missing"]
+    with pytest.raises(subject_shape_io.SubjectShapeIOError, match="direct 'instance_key'"):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name="megabouts_view_001",
+            source_tail_kinematics_run="tail_001",
+        )
+
+
+def test_write_tail_posture_view_rejects_acquisition_frame_alias(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    values = np.asarray(shape["source_acquisition_frame_index"][:])
+    del shape["source_acquisition_frame_index"]
+    shape.create_array("frame_indices", data=values)
+
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError,
+        match="source_acquisition_frame_index",
+    ):
+        mod.write_tail_posture_view_run_group(
+            root,
+            subject_shape_run="shape_001",
+            run_name="megabouts_view_001",
+            source_tail_kinematics_run="tail_001",
+        )

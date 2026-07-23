@@ -19,7 +19,6 @@ import sqlite3
 import numpy as np
 import pytest
 import zarr
-
 from fisheye.analysis.chaser_escape_events import (
     build_chaser_escape_events_result,
     write_chaser_escape_events_component,
@@ -32,10 +31,12 @@ from fisheye.visualization.chaser_habituation_figures import (
 )
 from tests.unit.fisheye.test_chaser_escape_events import (
     EPOCH_FRAMES,
-    N_CYCLES,
     THRESHOLD,
     _build,
 )
+
+
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 PNG_MAGIC = b"\x89PNG"
@@ -44,7 +45,11 @@ PNG_MAGIC = b"\x89PNG"
 def _archive(tmp_path: Path, *, name: str, recording_id: str | None = None, **kw) -> Path:
     z = _build(tmp_path, name=name, **kw)
     if recording_id is not None:
-        zarr.open_group(str(z), mode="a", use_consolidated=False).attrs["recording_id"] = recording_id
+        root = zarr.open_group(str(z), mode="a", use_consolidated=False)
+        root.attrs["recording_id"] = recording_id
+        root["analysis/chaser_distance_runs/chaser_distance_1"].attrs[
+            "recording_id"
+        ] = recording_id
     r = build_chaser_escape_events_result(z, chaser_distance_run="chaser_distance_1",
                                           peak_speed_threshold_mm_s=THRESHOLD)
     write_chaser_escape_events_component(z, r, overwrite=True, write_png=False)

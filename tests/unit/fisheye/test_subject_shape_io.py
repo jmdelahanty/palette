@@ -90,7 +90,7 @@ def _make_subject_shape_archive(tmp_path: Path) -> zarr.Group:
 def test_discover_subject_shape_run_options_uses_latest_and_shape_metadata(tmp_path: Path) -> None:
     root = _make_subject_shape_archive(tmp_path)
 
-    options = discover_subject_shape_run_options(root)
+    options = discover_subject_shape_run_options(root, historical_inspection=True)
 
     assert len(options) == 1
     option = options[0]
@@ -109,7 +109,11 @@ def test_discover_subject_shape_run_options_uses_latest_and_shape_metadata(tmp_p
 def test_load_subject_shape_run_tables_reads_logical_groups(tmp_path: Path) -> None:
     root = _make_subject_shape_archive(tmp_path)
 
-    tables = load_subject_shape_run_tables(root, run_name="analysis/subject_shape_runs/shape_1")
+    tables = load_subject_shape_run_tables(
+        root,
+        run_name="analysis/subject_shape_runs/shape_1",
+        historical_inspection=True,
+    )
 
     assert tables.run_name == "shape_1"
     assert tables.run_path == "analysis/subject_shape_runs/shape_1"
@@ -140,6 +144,7 @@ def test_load_subject_body_component_can_limit_to_body_and_body_frame(tmp_path: 
         run_name="latest",
         include_body_frame=True,
         array_names=("tail_sample_xy", "tail_sample_valid"),
+        historical_inspection=True,
     )
 
     assert tables.component_names == ("subject_body",)
@@ -156,9 +161,95 @@ def test_resolve_subject_shape_run_rejects_missing_run(tmp_path: Path) -> None:
         resolve_subject_shape_run(root, "missing_shape")
 
 
+@pytest.mark.parametrize(
+    "run_spec",
+    (
+        "garbage/shape_1",
+        "analysis/subject_shape_runs/shape_1/extra",
+    ),
+)
+def test_subject_shape_run_rejects_nonexact_explicit_path(
+    tmp_path: Path,
+    run_spec: str,
+) -> None:
+    root = _make_subject_shape_archive(tmp_path)
+
+    with pytest.raises(SubjectShapeIOError, match="bare child name or the exact path"):
+        resolve_subject_shape_run(root, run_spec, historical_inspection=True)
+
+
+@pytest.mark.parametrize(
+    ("latest", "latest_complete", "new_eligible"),
+    (
+        ("shape_1", "shape_2", True),
+        ("shape_2", "shape_1", True),
+        ("shape_2", "shape_2", False),
+    ),
+)
+def test_subject_shape_latest_fails_closed_during_selector_handoff(
+    tmp_path: Path,
+    latest: str,
+    latest_complete: str,
+    new_eligible: bool,
+) -> None:
+    root = _make_subject_shape_archive(tmp_path)
+    parent = root["analysis/subject_shape_runs"]
+    old = parent["shape_1"]
+    old.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+    new = parent.create_group("shape_2")
+    new.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": new_eligible,
+        }
+    )
+    parent.attrs.update(
+        {
+            "latest": latest,
+            "latest_complete": latest_complete,
+        }
+    )
+
+    with pytest.raises(SubjectShapeIOError, match="No stable complete selector-eligible"):
+        resolve_subject_shape_run(root, "latest")
+
+
 def test_require_component_reports_available_components(tmp_path: Path) -> None:
     root = _make_subject_shape_archive(tmp_path)
-    tables = load_subject_shape_run_tables(root, component_names=("subject_body",), relation_names=())
+    tables = load_subject_shape_run_tables(
+        root,
+        component_names=("subject_body",),
+        relation_names=(),
+        historical_inspection=True,
+    )
 
     with pytest.raises(SubjectShapeIOError, match="available components: subject_body"):
         tables.require_component("swim_bladder")
+
+
+def test_future_reader_rejects_roi_only_historical_run_without_explicit_inspection(
+    tmp_path: Path,
+) -> None:
+    root = _make_subject_shape_archive(tmp_path)
+
+    assert discover_subject_shape_run_options(root) == []
+    with pytest.raises(
+        SubjectShapeIOError,
+        match="not a valid canonical coordinate publication",
+    ):
+        resolve_subject_shape_run(root, "shape_1")
+    with pytest.raises(SubjectShapeIOError, match="not a valid canonical coordinate publication"):
+        load_subject_shape_run_tables(root, run_name="shape_1")
+
+    group, name, path = resolve_subject_shape_run(
+        root,
+        "shape_1",
+        historical_inspection=True,
+    )
+    assert isinstance(group, zarr.Group)
+    assert (name, path) == ("shape_1", "analysis/subject_shape_runs/shape_1")

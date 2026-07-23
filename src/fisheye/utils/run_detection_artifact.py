@@ -16,9 +16,8 @@ import shutil
 import sys
 import tarfile
 import time
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import pyarrow.compute as pc
@@ -35,7 +34,13 @@ except Exception:  # pragma: no cover - rich is optional at import time
 
 
 ARTIFACT_SCHEMA = "palette_run_group_artifact_v1"
-RUN_FAMILY = "detect_runs"
+RUN_FAMILY = "detection_artifact_runs"
+DETECTION_ARTIFACT_LAYOUT = "detection_artifact_sparse_v1"
+DETECTION_ARTIFACT_FAMILY_CONTRACT = "palette.detection_artifact_family.v1"
+UNBOUND_DETECTION_ARTIFACT_COORDINATE_CONTRACT = (
+    "unbound_detection_artifact_v1"
+)
+DO_NOT_SET_LATEST = "do_not_set_latest"
 DECODE_BACKEND_CHOICES = (
     "auto",
     "pynvvc_luma_rgb",
@@ -49,12 +54,13 @@ LATEST_POLICY_CHOICES = (
     "set_latest_if_newer",
     "set_latest_explicit",
 )
+ARTIFACT_CLI_LATEST_POLICY_CHOICES = (DO_NOT_SET_LATEST,)
 REQUIRED_DETECT_ARRAYS = (
     "frame_indices",
     "bbox_norm_coords",
     "scores",
     "class_ids",
-    "instance_key",
+    "artifact_row_id",
     "n_detections",
     "frame_counts",
 )
@@ -127,11 +133,76 @@ def required_arrays_report(run_group_dir: Path) -> dict[str, Any]:
         if not present:
             missing.append(name)
     attrs_present = (run_group_dir / "zarr.json").exists()
+    forbidden_arrays = [
+        name
+        for name in ("instance_key",)
+        if (run_group_dir / name / "zarr.json").exists()
+    ]
     return {
-        "status": "pass" if attrs_present and not missing else "fail",
+        "status": (
+            "pass"
+            if attrs_present and not missing and not forbidden_arrays
+            else "fail"
+        ),
         "run_group_zarr_json_present": attrs_present,
         "arrays": arrays,
         "missing_arrays": missing,
+        "forbidden_arrays": forbidden_arrays,
+    }
+
+
+def artifact_run_metadata_report(run_group_dir: Path) -> dict[str, Any]:
+    """Validate the explicit non-selector contract on a scratch artifact run."""
+
+    errors: list[str] = []
+    zarr_json = run_group_dir / "zarr.json"
+    attrs: dict[str, Any] = {}
+    if not zarr_json.exists():
+        errors.append("run-group zarr.json is missing")
+    else:
+        try:
+            payload = _read_json_strict(zarr_json)
+        except Exception as exc:
+            errors.append(f"run-group zarr.json is invalid: {exc}")
+        else:
+            raw_attrs = payload.get("attributes") if isinstance(payload, dict) else None
+            if not isinstance(raw_attrs, dict):
+                errors.append("run-group attributes must be an object")
+            else:
+                attrs = raw_attrs
+    expected = {
+        "coordinate_contract_mode": "artifact_unbound",
+        "coordinate_contract": UNBOUND_DETECTION_ARTIFACT_COORDINATE_CONTRACT,
+        "stage_selector_eligible": False,
+        "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+        "palette_run_completion_status": "complete",
+        "palette_run_stage": "detection_artifact",
+    }
+    for name, value in expected.items():
+        if attrs.get(name) != value:
+            errors.append(
+                f"{name} must be {value!r}, got {attrs.get(name)!r}"
+            )
+    forbidden = tuple(
+        name
+        for name in attrs
+        if name
+        in {
+            "detection_acquisition_frame_mapping",
+            "row_identity_contract",
+            "source_row_temporal_authority",
+        }
+        or str(name).startswith("instance_key_")
+    )
+    if forbidden:
+        errors.append(
+            "unbound artifact carries trusted coordinate records: "
+            f"{forbidden!r}"
+        )
+    return {
+        "status": "pass" if not errors else "fail",
+        "expected": expected,
+        "errors": errors,
     }
 
 
@@ -347,6 +418,11 @@ def build_detection_artifact(
 
     if latest_policy not in LATEST_POLICY_CHOICES:
         raise ValueError(f"latest_policy must be one of {LATEST_POLICY_CHOICES}")
+    if latest_policy != DO_NOT_SET_LATEST:
+        raise ValueError(
+            "Detection artifacts are non-selector inputs; latest and authoritative "
+            "promotion policies are forbidden."
+        )
     if not video_path.exists():
         raise FileNotFoundError(f"video path does not exist: {video_path}")
     if not target_zarr.exists():
@@ -389,15 +465,12 @@ def build_detection_artifact(
             "recording_frame_index together for stable instance_key minting."
         )
     canonical_recording_identity = _canonical_recording_identity(target_zarr)
-    parent_frame_mapping = (
+    if recording_frame_index is not None:
         _load_parent_frame_mapping(
             recording_frame_index,
             camera_serial=str(camera_serial),
             clip_id=str(clip_id),
         )
-        if recording_frame_index is not None
-        else None
-    )
     _write_json(
         artifact_dir / "logs" / "job_context.json",
         {
@@ -414,6 +487,9 @@ def build_detection_artifact(
                 if recording_frame_index is not None
                 else None
             ),
+            "coordinate_contract_mode": "artifact_unbound",
+            "run_family": RUN_FAMILY,
+            "stage_selector_eligible": False,
         },
     )
     (artifact_dir / "logs" / "command.log").write_text(command_text + "\n", encoding="utf-8")
@@ -445,6 +521,9 @@ def build_detection_artifact(
                 if recording_frame_index is not None
                 else None
             ),
+            "coordinate_contract_mode": "artifact_unbound",
+            "run_family": RUN_FAMILY,
+            "stage_selector_eligible": False,
         },
         input_run_ids={
             "model_registry_set_id": model_registry_set_id,
@@ -472,13 +551,8 @@ def build_detection_artifact(
             run_name=run_name,
             model_sha256=model_sha256,
             run_provenance=run_provenance,
-            instance_key_recording_identity=canonical_recording_identity,
-            instance_key_frame_indices=parent_frame_mapping,
-            instance_key_frame_mapping_source=(
-                str(recording_frame_index.expanduser().resolve())
-                if recording_frame_index is not None
-                else None
-            ),
+            coordinate_contract_mode="artifact_unbound",
+            output_run_family=RUN_FAMILY,
         )
     artifact_timing["detect_yolo_seconds_total"] = time.perf_counter() - detect_start
 
@@ -495,9 +569,14 @@ def build_detection_artifact(
     arrays_start = time.perf_counter()
     arrays_report = required_arrays_report(run_group_dir)
     artifact_timing["required_array_validation_seconds_total"] = time.perf_counter() - arrays_start
+    metadata_report = artifact_run_metadata_report(run_group_dir)
     validation_write_start = time.perf_counter()
     _write_json(artifact_dir / "validation" / "strict_json_report.json", strict_report)
     _write_json(artifact_dir / "validation" / "array_presence_report.json", arrays_report)
+    _write_json(
+        artifact_dir / "validation" / "artifact_run_metadata_report.json",
+        metadata_report,
+    )
     artifact_timing["validation_report_write_seconds_total"] = (
         time.perf_counter() - validation_write_start
     )
@@ -520,9 +599,12 @@ def build_detection_artifact(
         "intended_target_group_path": intended_target_group_path,
         "run_family": RUN_FAMILY,
         "run_name": run_name,
-        "layout": "detect_yolo_sparse_v1",
+        "layout": DETECTION_ARTIFACT_LAYOUT,
         "schema_version": 1,
         "latest_policy": latest_policy,
+        "selector_policy": "never_select_or_promote_v1",
+        "artifact_family_contract": DETECTION_ARTIFACT_FAMILY_CONTRACT,
+        "stage_selector_eligible": False,
         "artifact_scope": clip_context.get("scope", "archive_top_level"),
         "clip_context": clip_context,
         "source_inputs": [
@@ -554,6 +636,7 @@ def build_detection_artifact(
         "validation": {
             "strict_json": strict_report["status"],
             "required_arrays": arrays_report["status"],
+            "artifact_run_metadata": metadata_report["status"],
             "canonical_write": "not_performed",
         },
     }
@@ -568,7 +651,11 @@ def build_detection_artifact(
     summary = {
         "status": (
             "ok"
-            if strict_report["status"] == "pass" and arrays_report["status"] == "pass"
+            if (
+                strict_report["status"] == "pass"
+                and arrays_report["status"] == "pass"
+                and metadata_report["status"] == "pass"
+            )
             else "failed"
         ),
         "artifact_dir": str(artifact_dir),
@@ -583,6 +670,7 @@ def build_detection_artifact(
         "artifact_timing": artifact_timing,
         "strict_json": strict_report,
         "required_arrays": arrays_report,
+        "artifact_run_metadata": metadata_report,
     }
     _write_json(artifact_dir / "artifact_summary.json", summary)
     return summary
@@ -621,7 +709,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference")
     parser.add_argument(
         "--latest-policy",
-        choices=LATEST_POLICY_CHOICES,
+        choices=ARTIFACT_CLI_LATEST_POLICY_CHOICES,
         default="do_not_set_latest",
         help="Importer latest policy recorded in the package manifest",
     )

@@ -14,7 +14,12 @@ from typing import Any, Optional, Sequence
 import zarr
 
 from ...analysis import stimulus_response as response_writer
+from ...analysis.stimulus_response_coordinate_authority import (
+    STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_ID,
+    STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_VERSION,
+)
 from ...shared.json_safety import json_attr_safe
+from ...shared.stimulus_coordinate_contract import canonical_mapping_digest
 from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
@@ -122,12 +127,30 @@ def _validate_stimulus_response_run(path: Path) -> dict[str, Any]:
         errors.append("invalid schema_version")
     if str(attrs.get("layout")) != "compact_tabular_v2":
         errors.append("production stimulus-response layout must be compact_tabular_v2")
-    if str(attrs.get("method_version")) != "stimulus_response.v2":
+    if str(attrs.get("method_version")) != "stimulus_response.v3":
         errors.append("invalid method_version")
     if str(attrs.get("row_axis")) != "stimulus_steps":
         errors.append("invalid row_axis")
-    if not isinstance(attrs.get("source_refs"), dict):
+    source_refs = attrs.get("source_refs")
+    if not isinstance(source_refs, dict):
         errors.append("missing source_refs")
+    else:
+        coordinate_lineage = source_refs.get("stimulus_coordinate_lineage")
+        if not isinstance(coordinate_lineage, dict):
+            errors.append("missing stimulus_coordinate_lineage")
+        elif (
+            coordinate_lineage.get("schema_id")
+            != STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_ID
+            or coordinate_lineage.get("schema_version")
+            != STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_VERSION
+            or not isinstance(coordinate_lineage.get("record_sha256"), str)
+        ):
+            errors.append("invalid stimulus_coordinate_lineage")
+        else:
+            lineage_payload = dict(coordinate_lineage)
+            lineage_digest = lineage_payload.pop("record_sha256")
+            if canonical_mapping_digest(lineage_payload) != lineage_digest:
+                errors.append("stale stimulus_coordinate_lineage digest")
     if not isinstance(attrs.get("parameters"), dict):
         errors.append("missing parameters")
     for required in ("step_index", "global_per_fish"):
@@ -174,14 +197,43 @@ def publish_stimulus_response_run(
                 fallback_command="stimulus_response_materializer",
             ),
         )
+        parent.attrs["latest_complete"] = plan.run_name
+        parent.attrs["latest"] = plan.run_name
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/stimulus_response_runs"]
+        run_group = parent[plan.run_name]
         if (
             str(parent.attrs.get("latest")) != plan.run_name
             or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
         ):
-            raise RuntimeError("Stimulus-response parent pointers were not updated.")
+            raise RuntimeError(
+                "Stimulus-response run was not persisted complete and ineligible "
+                "behind its parent pointers."
+            )
+
+    def activate(
+        _root: zarr.Group,
+        parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if (
+            str(parent.attrs.get("latest")) != plan.run_name
+            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
+            or run_group.attrs.get("stage_selector_eligible") is not False
+        ):
+            raise RuntimeError(
+                "Stimulus-response activation requires one complete, ineligible run."
+            )
+        try:
+            run_group.attrs["stage_selector_eligible"] = True
+        except BaseException:
+            if run_group.attrs.get("stage_selector_eligible") is True:
+                return
+            raise
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -192,16 +244,21 @@ def publish_stimulus_response_run(
             lock_suffix="stimulus-response-publish",
             publish_schema_id=PUBLISH_SCHEMA_ID,
             policy="node_local_compute_atomic_run_group_publish",
-            rollback_policy="remove_new_target_and_restore_parent_attrs_on_any_failure",
+            rollback_policy=(
+                "retain_failed_public_tombstone_leave_unleased_parent_state_untouched"
+            ),
         ),
         copy_backend=copy_backend,
         validate_run=validate,
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        activate_run=activate,
         payload_metadata={
             "copy_backend": copy_backend,
-            "promotion_policy": "completion_last_then_latest_pointer_update",
+            "promotion_policy": (
+                "complete_ineligible_then_pointers_then_eligibility_final"
+            ),
             "materialization": json_attr_safe(materialization_payload),
         },
     )

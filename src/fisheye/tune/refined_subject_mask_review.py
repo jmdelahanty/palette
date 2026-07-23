@@ -56,6 +56,10 @@ from ..shared.provenance_attrs import (
     resolve_source_keypoints_run,
 )
 from ..shared.refined_subject_component_contours import mark_component_rows_updated
+from ..shared.refined_subject_mask_mutation import (
+    require_mutable_refined_subject_mask_group,
+    resolve_mutable_refined_subject_mask_run,
+)
 from ..shared.row_lineage import (
     copy_row_lineage_arrays_from_sources,
     resolve_source_crop_row_ids,
@@ -158,6 +162,90 @@ SIGMA_NOISE_SMOOTHING_SIGMA = 3.0
 CURVATURE_VAR_SMOOTHING_SIGMA = 3.0
 CURVATURE_VAR_STEP = 5
 REFINED_EYE_COMPONENTS = ("eye_left", "eye_right")
+REFINED_BBOX_XYXY_CONVENTION = "pixel_edge_half_open"
+REFINED_BBOX_XYXY_DERIVATION = "foreground_half_open_pixel_edges_xyxy_v1"
+def _reject_immutable_canonical_refined_target(
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+) -> None:
+    """Reject future-normal targets before any legacy materialization/mutation."""
+
+    require_mutable_refined_subject_mask_group(run_group, run_name=run_name)
+
+
+def _stamp_full_half_open_bbox_contract(run_group: zarr.Group) -> None:
+    run_group.attrs["bbox_xyxy_convention"] = REFINED_BBOX_XYXY_CONVENTION
+    run_group.attrs["bbox_xyxy_derivation"] = REFINED_BBOX_XYXY_DERIVATION
+
+
+def _require_half_open_bbox_refresh_contract(
+    run_group: zarr.Group,
+    *,
+    allowed_dirty_cells: Sequence[tuple[int, int]] = (),
+) -> None:
+    if (
+        run_group.attrs.get("bbox_xyxy_convention")
+        != REFINED_BBOX_XYXY_CONVENTION
+        or run_group.attrs.get("bbox_xyxy_derivation")
+        != REFINED_BBOX_XYXY_DERIVATION
+    ):
+        raise RuntimeError(
+            "Partial derived refresh would mix half-open bbox rows into an unstamped "
+            "or historical bbox_xyxy array. Full-recompute into a newly half-open-stamped "
+            "run before applying row-level derived refreshes."
+        )
+    metrics = run_group.get("metrics")
+    masks = run_group.get("masks_roi")
+    if metrics is None or masks is None or "bbox_xyxy" not in metrics or "bbox_valid" not in metrics:
+        raise RuntimeError(
+            "Partial derived refresh requires a complete pre-existing bbox_xyxy/bbox_valid "
+            "surface backed by dense masks_roi."
+        )
+    mask_values = np.asarray(masks[:], dtype=np.uint8)
+    if mask_values.ndim != 4:
+        raise RuntimeError("Partial derived refresh requires masks_roi shape (N,C,H,W).")
+    row_count, component_count = (int(mask_values.shape[0]), int(mask_values.shape[1]))
+    expected = batch_mask_spatial_metrics(
+        mask_values.reshape((-1, int(mask_values.shape[2]), int(mask_values.shape[3])))
+    )
+    expected_bbox = np.asarray(expected["bbox_xyxy"], dtype=np.float32).reshape(
+        (row_count, component_count, 4)
+    )
+    expected_valid = np.asarray(expected["bbox_valid"], dtype=bool).reshape(
+        (row_count, component_count)
+    )
+    actual_bbox = np.asarray(metrics["bbox_xyxy"][:], dtype=np.float32)
+    actual_valid = np.asarray(metrics["bbox_valid"][:], dtype=bool)
+    if actual_bbox.shape != expected_bbox.shape or actual_valid.shape != expected_valid.shape:
+        raise RuntimeError(
+            "Partial derived refresh requires the entire existing bbox surface to be "
+            "an exact half-open derivation of the pre-edit masks. Use a full all-component "
+            "metric recompute to establish the canonical bbox contract."
+        )
+    untouched = np.ones((row_count, component_count), dtype=bool)
+    for row_idx, component_idx in allowed_dirty_cells:
+        row = int(row_idx)
+        component = int(component_idx)
+        if row < 0 or row >= row_count or component < 0 or component >= component_count:
+            raise RuntimeError(
+                "Partial derived refresh received an out-of-bounds dirty bbox cell: "
+                f"row={row}, component={component}."
+            )
+        untouched[row, component] = False
+    if (
+        not np.array_equal(
+            actual_bbox[untouched],
+            expected_bbox[untouched],
+            equal_nan=True,
+        )
+        or not np.array_equal(actual_valid[untouched], expected_valid[untouched])
+    ):
+        raise RuntimeError(
+            "Partial derived refresh requires every untargeted bbox cell to remain an "
+            "exact half-open derivation of dense masks_roi. Use a full all-component "
+            "metric recompute to repair unrelated bbox drift."
+        )
 
 
 @dataclass(frozen=True)
@@ -167,7 +255,7 @@ class SourceSubjectMaskRun:
     crop_run: str
     source_crop_snapshot: dict[str, object]
     masks_roi: Any
-    detection_source: Any
+    detection_source: Any | None
     mask_labels: tuple[str, ...]
     available_channels: np.ndarray
     frame_indices: Any | None
@@ -187,6 +275,7 @@ class SourceSubjectMaskRun:
     probability_thresholds: tuple[float, ...] = ()
     probability_encoding: Optional[str] = None
     probabilities_roi: Any | None = None
+    canonical_coordinates: bool = False
 
 
 class _ThresholdedProbabilityMaskArray:
@@ -1253,8 +1342,28 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     if run_name not in parent:
         raise RuntimeError(f"subject_mask_runs/{run_name} not found.")
     group = parent[run_name]
-    crop_run = str(group.attrs.get("source_crop_run") or "")
-    if not crop_run:
+    canonical_coordinates = group.attrs.get("coordinate_contract") == "canonical_v2"
+    canonical_surfaces = None
+    if canonical_coordinates:
+        from ..shared.subject_mask_coordinate_publication import (
+            load_persisted_subject_mask_coordinate_surfaces,
+        )
+
+        canonical_surfaces = load_persisted_subject_mask_coordinate_surfaces(
+            root,
+            f"subject_mask_runs/{run_name}",
+        )
+        crop_path = str(canonical_surfaces.context.source.crop_path)
+        crop_run = crop_path.split("/", 1)[1]
+        declared_crop_run = group.attrs.get("source_crop_run")
+        if declared_crop_run is not None and str(declared_crop_run) != crop_run:
+            raise RuntimeError(
+                f"subject_mask_runs/{run_name} source_crop_run disagrees with its "
+                "bound canonical crop authority."
+            )
+    else:
+        crop_run = str(group.attrs.get("source_crop_run") or "")
+    if not crop_run and not canonical_coordinates:
         crop_parent = root.get("crop_runs")
         crop_run = _resolve_latest_run(crop_parent, "crop_runs")
     crop_group = root.get(f"crop_runs/{crop_run}") if crop_run else None
@@ -1333,6 +1442,10 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     def _lineage_array(name: str) -> Any | None:
         if name in group:
             return group[name]
+        if canonical_coordinates:
+            if name == "frame_indices":
+                return group.get("source_acquisition_frame_index")
+            return None
         if crop_group is not None:
             return crop_group.get(name)
         return None
@@ -1352,7 +1465,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         crop_run=crop_run,
         source_crop_snapshot=source_crop_snapshot,
         masks_roi=masks_roi,
-        detection_source=group["detection_source"],
+        detection_source=group.get("detection_source"),
         mask_labels=mask_labels,
         available_channels=np.asarray(available[:], dtype=bool),
         frame_indices=frame_indices,
@@ -1382,6 +1495,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         probability_thresholds=probability_thresholds,
         probability_encoding=probability_encoding,
         probabilities_roi=probabilities_roi,
+        canonical_coordinates=canonical_coordinates,
     )
 
 
@@ -1545,6 +1659,16 @@ def _load_refined_subject_component_source(
         raise RuntimeError(
             f"refined_subject_masks_runs/{refined_run} does not contain component {component_name!r}."
         )
+    canonical_coordinates = refined.group.attrs.get("coordinate_contract") == "canonical_v2"
+    if canonical_coordinates:
+        from ..shared.refined_subject_mask_coordinate_publication import (
+            load_persisted_refined_subject_mask_coordinate_surfaces,
+        )
+
+        load_persisted_refined_subject_mask_coordinate_surfaces(
+            root,
+            f"refined_subject_masks_runs/{refined_run}",
+        )
     masks_roi = refined.group.get("masks_roi")
     if masks_roi is None:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing masks_roi.")
@@ -1616,6 +1740,7 @@ def _load_refined_subject_component_source(
         ),
         mask_surface_kind="refined_subject_component",
         mask_surface_path=f"refined_subject_masks_runs/{refined_run}/masks_roi[{component_name}]",
+        canonical_coordinates=canonical_coordinates,
     )
 
 
@@ -1741,6 +1866,12 @@ def _create_refined_subject_run_from_component_seeds(
     extra_attrs: Optional[Mapping[str, object]] = None,
     provenance_inputs: Optional[Mapping[str, object]] = None,
 ) -> RefinedSubjectMaskRun:
+    if reference_source.canonical_coordinates:
+        raise RuntimeError(
+            "Canonical coordinate-bound mask sources require an immutable refined "
+            "revision lifecycle. Create the new run through finalize_subject_masks; "
+            "the legacy in-place review seeding writer is intentionally disabled."
+        )
     total_rois = int(reference_source.masks_roi.shape[0])
     height = int(reference_source.masks_roi.shape[2])
     width = int(reference_source.masks_roi.shape[3])
@@ -1807,6 +1938,7 @@ def _create_refined_subject_run_from_component_seeds(
     metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], chunks=metric_chunks, overwrite=True)
     metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], chunks=metric_chunks_4, overwrite=True)
     metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], chunks=metric_chunks, overwrite=True)
+    _stamp_full_half_open_bbox_contract(run_group)
     created = _utc_now()
 
     for comp_idx, component_name in enumerate(component_names):
@@ -1999,7 +2131,11 @@ def _open_or_create_refined_subject_run(
             target_run = _default_refined_run_name()
 
     if target_run in refined_parent:
-        run_group = refined_parent[target_run]
+        run_group = resolve_mutable_refined_subject_mask_run(root, str(target_run))
+        _reject_immutable_canonical_refined_target(
+            run_group,
+            run_name=str(target_run),
+        )
         labels_raw = run_group.attrs.get("mask_labels")
         if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
             raise RuntimeError(f"refined_subject_masks_runs/{target_run} missing usable mask_labels attr.")
@@ -2041,6 +2177,7 @@ def _open_or_create_refined_subject_run(
         if needs_metric_backfill or needs_component_backfill:
             masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
         geometry_metrics = None
+        created_full_bbox = "bbox_xyxy" not in metrics
         if "mask_present" not in metrics or "area_px" not in metrics:
             if masks_np is None:
                 masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
@@ -2086,6 +2223,8 @@ def _open_or_create_refined_subject_run(
                     chunks=metric_chunks,
                     overwrite=True,
                 )
+        if created_full_bbox and "bbox_xyxy" in metrics:
+            _stamp_full_half_open_bbox_contract(run_group)
         if "edit_applied" not in run_group:
             run_group.create_array(
                 "edit_applied",
@@ -2176,7 +2315,11 @@ def _open_existing_refined_subject_run(
     if refined_parent is None or str(refined_run) not in refined_parent:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
 
-    run_group = refined_parent[str(refined_run)]
+    run_group = resolve_mutable_refined_subject_mask_run(root, str(refined_run))
+    _reject_immutable_canonical_refined_target(
+        run_group,
+        run_name=str(refined_run),
+    )
     labels_raw = run_group.attrs.get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
@@ -2289,6 +2432,10 @@ def apply_component_review_status(
     notes: Optional[str],
     zarr_path: str | Path | None = None,
 ) -> tuple[Dict[str, object], Dict[str, object]]:
+    _reject_immutable_canonical_refined_target(
+        refined,
+        run_name=str(refined_run),
+    )
     existing_component_reviews = dict(refined.attrs.get("component_review_statuses") or {})
     component_reviews = dict(existing_component_reviews)
     component_payload = _review_payload(
@@ -2666,6 +2813,10 @@ def _apply_refined_subject_roi_rows(
     compute_workers: int = 1,
     derived_update_policy: str = DERIVED_UPDATE_POLICY_AUTHORITY_ONLY,
 ) -> tuple[int, ...]:
+    _reject_immutable_canonical_refined_target(
+        refined.group,
+        run_name=str(refined.run_name),
+    )
     if component_sources is None:
         if source is None:
             raise RuntimeError("component_sources or source is required.")
@@ -2680,6 +2831,15 @@ def _apply_refined_subject_roi_rows(
         raise ValueError(
             f"Unsupported derived_update_policy {derived_update_policy!r}; "
             f"expected one of {DERIVED_UPDATE_POLICIES}."
+        )
+    if resolved_derived_policy == DERIVED_UPDATE_POLICY_REFRESH:
+        _require_half_open_bbox_refresh_contract(
+            run_group,
+            allowed_dirty_cells=tuple(
+                (row_idx, int(refined.component_to_index[component_name]))
+                for row_idx in normalized_rows
+                for component_name in normalized_components
+            ),
         )
     resolved_reason = str(update_reason or f"{update_mode}_refined_subject_mask_edit")
     resolved_method = str(update_method or DEFAULT_RUN_METHOD)
@@ -2773,6 +2933,10 @@ def save_refined_subject_roi(
     component_sources: Optional[Mapping[str, SourceSubjectMaskRun]] = None,
     component_names: Optional[Sequence[str]] = None,
 ) -> None:
+    _reject_immutable_canonical_refined_target(
+        refined.group,
+        run_name=str(refined.run_name),
+    )
     _apply_refined_subject_roi_rows(
         component_sources=(
             dict(component_sources)
@@ -2933,7 +3097,7 @@ def _resolve_refined_subject_apply_context(
     if refined_parent is None or str(refined_run) not in refined_parent:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
 
-    existing_run = refined_parent[str(refined_run)]
+    existing_run = resolve_mutable_refined_subject_mask_run(root, str(refined_run))
     refined = _open_existing_refined_subject_run(root, str(refined_run))
     labels_raw = refined.component_names
 
@@ -3232,7 +3396,11 @@ def sync_refined_subject_mask_metadata(
     if refined_parent is None or str(refined_run) not in refined_parent:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
 
-    existing_run = refined_parent[str(refined_run)]
+    existing_run = resolve_mutable_refined_subject_mask_run(root, str(refined_run))
+    _reject_immutable_canonical_refined_target(
+        existing_run,
+        run_name=str(refined_run),
+    )
     labels_raw = existing_run.attrs.get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
@@ -3330,6 +3498,10 @@ def check_refined_subject_source_updates(
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
 
     existing_run = refined_parent[str(refined_run)]
+    _reject_immutable_canonical_refined_target(
+        existing_run,
+        run_name=str(refined_run),
+    )
     labels_raw = existing_run.attrs.get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")

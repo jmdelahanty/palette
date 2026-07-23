@@ -4,12 +4,16 @@ Updated to use zarr-first parameter resolution.
 """
 
 import argparse
+from contextvars import ContextVar
+from functools import wraps
+import hashlib
+import json
 import time
 import sys
 import numpy as np
 import zarr
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple, List, Any
+from typing import Dict, Optional, Tuple, Any
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn
 
@@ -20,25 +24,102 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 
-from ..shared.instance_keys import (
-    instance_key_attrs,
-    mint_detection_instance_keys,
-    resolve_recording_identity,
-)
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.run_provenance import build_run_provenance_from_stage_record
+from ..shared.detection_producer_lifecycle import (
+    DETECTION_ARTIFACT_RUN_FAMILY,
+    DetectionProducerAttempt,
+    UNBOUND_ARTIFACT_RUN_BINDING_KEY,
+    build_unbound_artifact_run_binding,
+    publish_artifact_payload_inventory_seal,
+    publish_empty_artifact_observation_proof,
+    stamp_unbound_artifact_numeric_semantics,
+)
 from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 from ..shared.zarr_run_completion import (
-    mark_run_complete,
-    mark_run_started,
-    note_pending_latest,
-    require_runs_parent,
     resolve_authoritative_run_name,
 )
 from ..shared.system_metadata import get_git_info, get_platform_info
-from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 
-def _require_imported_detection_inputs(root: zarr.Group, latest_bg_run: str) -> None:
+
+_ACTIVE_DETECTION_ATTEMPT: ContextVar[DetectionProducerAttempt | None] = (
+    ContextVar("traditional_detection_attempt", default=None)
+)
+
+
+def _with_detection_attempt_rollback(function):
+    """Restore exact selector state if a bound producer attempt raises."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        token = _ACTIVE_DETECTION_ATTEMPT.set(None)
+        try:
+            return function(*args, **kwargs)
+        except BaseException as exc:
+            attempt = _ACTIVE_DETECTION_ATTEMPT.get()
+            if attempt is not None:
+                attempt.fail(exc)
+            raise
+        finally:
+            _ACTIVE_DETECTION_ATTEMPT.reset(token)
+
+    return wrapped
+
+_ARRAY_FINGERPRINT_SCHEMA = "palette.ndarray_axis0_sha256.v1"
+_TRADITIONAL_SOURCE_LINEAGE_ATTR = "artifact_source_lineage"
+_TRADITIONAL_SOURCE_LINEAGE_SCHEMA = (
+    "palette.traditional_detection_artifact_source_lineage.v1"
+)
+
+
+def _canonical_mapping_sha256(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _stamp_traditional_artifact_semantics(
+    run: Any,
+    *,
+    reference_width: int,
+    reference_height: int,
+    source_frame_count: int,
+    source_lineage_sha256: str,
+) -> None:
+    profiles = {
+        "artifact_row_id": "traditional.artifact_row_id.v1",
+        "frame_indices": "traditional.frame_indices.v1",
+        "bbox_norm_coords": "traditional.bbox_norm_cxcywh.v1",
+        "scores": "traditional.scores.v1",
+        "class_ids": "traditional.class_ids.v1",
+        "frame_counts": "traditional.frame_counts.v1",
+        "n_detections": "traditional.n_detections.v1",
+    }
+    if set(run.keys()) != set(profiles):
+        raise ValueError(
+            "Traditional artifact semantic inventory does not match live arrays."
+        )
+    for name, profile_id in profiles.items():
+        stamp_unbound_artifact_numeric_semantics(
+            run[name],
+            semantic_profile_id=profile_id,
+            reference_node_path="raw_video/images_ds",
+            reference_width=reference_width,
+            reference_height=reference_height,
+            source_frame_count=source_frame_count,
+            source_sha256=source_lineage_sha256,
+        )
+
+
+def _require_imported_detection_inputs(
+    root: zarr.Group,
+    latest_bg_run: str,
+) -> tuple[Any, Any, tuple[int, int]]:
     raw_video = root.get("raw_video")
     if raw_video is None or "images_ds" not in raw_video:
         raise ValueError(
@@ -53,6 +134,91 @@ def _require_imported_detection_inputs(root: zarr.Group, latest_bg_run: str) -> 
     if "background_ds" not in background_parent[latest_bg_run]:
         raise ValueError(
             f"Traditional detection requires background_runs/{latest_bg_run}/background_ds."
+        )
+    images_ds = raw_video["images_ds"]
+    background_ds = background_parent[latest_bg_run]["background_ds"]
+    images_shape = tuple(int(value) for value in images_ds.shape)
+    background_shape = tuple(int(value) for value in background_ds.shape)
+    if len(images_shape) != 3 or len(background_shape) != 2:
+        raise ValueError(
+            "Traditional detection requires images_ds shaped (frames, height, width) "
+            "and background_ds shaped (height, width)."
+        )
+    if images_shape[0] <= 0:
+        raise ValueError(
+            "Traditional detection requires raw_video/images_ds to contain at "
+            "least one source frame."
+        )
+    image_hw = images_shape[-2:]
+    if background_shape != image_hw:
+        raise ValueError(
+            "Traditional detection requires exact images_ds/background_ds H/W "
+            f"equality; images_ds={image_hw}, background_ds={background_shape}."
+        )
+    return images_ds, background_ds, image_hw
+
+
+def _array_content_fingerprint(array: Any) -> str:
+    """Hash one stable array payload without materializing the full video."""
+
+    before_shape = tuple(int(value) for value in array.shape)
+    before_dtype = np.dtype(array.dtype)
+    if before_dtype.hasobject:
+        raise ValueError("Traditional source arrays cannot use object dtype.")
+    header = {
+        "schema_id": _ARRAY_FINGERPRINT_SCHEMA,
+        "dtype": before_dtype.str,
+        "shape": list(before_shape),
+    }
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    digest.update(b"\x00")
+    if before_shape:
+        raw_chunks = getattr(array, "chunks", None)
+        first_chunk = (
+            int(raw_chunks[0])
+            if isinstance(raw_chunks, (tuple, list)) and raw_chunks
+            else 1
+        )
+        step = max(1, first_chunk)
+        for start in range(0, before_shape[0], step):
+            stop = min(start + step, before_shape[0])
+            values = np.asarray(array[start:stop])
+            expected_shape = (stop - start, *before_shape[1:])
+            if values.shape != expected_shape or values.dtype != before_dtype:
+                raise ValueError(
+                    "Traditional source array changed shape or dtype during fingerprinting."
+                )
+            digest.update(np.ascontiguousarray(values).tobytes(order="C"))
+    else:
+        values = np.asarray(array[...])
+        if values.shape != () or values.dtype != before_dtype:
+            raise ValueError(
+                "Traditional scalar source changed during fingerprinting."
+            )
+        digest.update(np.ascontiguousarray(values).tobytes(order="C"))
+    if (
+        tuple(int(value) for value in array.shape) != before_shape
+        or np.dtype(array.dtype) != before_dtype
+    ):
+        raise ValueError(
+            "Traditional source array metadata changed during fingerprinting."
+        )
+    return digest.hexdigest()
+
+
+def _require_array_fingerprint(
+    array: Any,
+    *,
+    expected: str,
+    label: str,
+) -> None:
+    if _array_content_fingerprint(array) != expected:
+        raise ValueError(
+            f"{label} changed while traditional detection was running; refusing "
+            "to persist lineage for unstable pixels."
         )
 
 
@@ -130,7 +296,7 @@ def get_detection_parameters(
                         'roi': [int(v) for v in roi],
                     })
                     if console:
-                        console.print(f"[green]✓ Using rectangular dish mask from zarr[/green]")
+                        console.print("[green]✓ Using rectangular dish mask from zarr[/green]")
             elif shape == 'circle' and 'detected_circle' in mask_data:
                 circle = mask_data['detected_circle']
                 detect_params['dish_mask'].update({
@@ -139,13 +305,13 @@ def get_detection_parameters(
                     'radius': circle['radius'],
                 })
                 if console:
-                    console.print(f"[green]✓ Using circular dish mask from zarr[/green]")
+                    console.print("[green]✓ Using circular dish mask from zarr[/green]")
     
     # No tuned parameters found - using config
     if param_source == 'config_default' and console:
-        console.print(f"[yellow]⚠️  Using default config parameters - consider tuning first[/yellow]")
-        console.print(f"  Run: python -m fisheye --tune mask")
-        console.print(f"  Run: python -m fisheye --tune detect")
+        console.print("[yellow]⚠️  Using default config parameters - consider tuning first[/yellow]")
+        console.print("  Run: python -m fisheye --tune mask")
+        console.print("  Run: python -m fisheye --tune detect")
     
     return detect_params, param_source
 
@@ -210,8 +376,12 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
     se4 = disk(detect_params['se4_radius'])
 
     root = zarr.open(zarr_path, mode='r')
-    images_ds_chunk = root['raw_video/images_ds'][chunk_slice]
-    background_ds = root[f'background_runs/{latest_bg_run}/background_ds'][:]
+    images_ds, background_node, _image_hw = _require_imported_detection_inputs(
+        root,
+        latest_bg_run,
+    )
+    images_ds_chunk = images_ds[chunk_slice]
+    background_ds = background_node[:]
     ds_img_shape = images_ds_chunk.shape[1:]
 
     chunk_len = images_ds_chunk.shape[0]
@@ -219,8 +389,6 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
     
     all_bbox_norms = []
     all_frame_indices = []
-
-    _require_imported_detection_inputs(root, latest_bg_run)
 
     for i in range(chunk_len):
         frame_idx = frame_start + i
@@ -261,6 +429,203 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
     return chunk_slice, all_frame_indices, all_bbox_norms
 
 
+def _require_exact_detection_chunk_plan(
+    chunk_slices: list[slice],
+    *,
+    total_frames: int,
+) -> None:
+    """Require one ordered, nonoverlapping plan covering the full source domain."""
+
+    frame_count = int(total_frames)
+    if frame_count <= 0:
+        raise ValueError("Traditional detection requires a positive source frame domain.")
+    if frame_count - 1 > np.iinfo(np.int32).max:
+        raise ValueError(
+            "Traditional detection frame_indices cannot represent this source domain "
+            "exactly as int32."
+        )
+    if not chunk_slices:
+        raise ValueError("Traditional detection chunk plan is empty.")
+    cursor = 0
+    for index, chunk_slice in enumerate(chunk_slices):
+        if type(chunk_slice) is not slice or chunk_slice.step not in (None, 1):
+            raise ValueError(
+                f"Traditional detection chunk {index} is not a unit-step slice."
+            )
+        if type(chunk_slice.start) is not int or type(chunk_slice.stop) is not int:
+            raise ValueError(
+                f"Traditional detection chunk {index} lacks exact integer bounds."
+            )
+        if chunk_slice.start != cursor or not (
+            chunk_slice.start < chunk_slice.stop <= frame_count
+        ):
+            raise ValueError(
+                "Traditional detection chunks must be ordered, nonoverlapping, and "
+                "exactly contiguous over the source frame domain."
+            )
+        cursor = chunk_slice.stop
+    if cursor != frame_count:
+        raise ValueError(
+            "Traditional detection chunks do not cover the exact source frame domain."
+        )
+
+
+def _validate_detection_chunk_result(
+    result: Any,
+    *,
+    expected_slice: slice,
+    total_frames: int,
+    result_index: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate one worker result before it can contribute rows or identity."""
+
+    if type(result) is not tuple or len(result) != 3:
+        raise ValueError(
+            f"Traditional detection worker result {result_index} must be one "
+            "three-item tuple."
+        )
+    returned_slice, raw_frames, raw_bboxes = result
+    if (
+        type(returned_slice) is not slice
+        or returned_slice.start != expected_slice.start
+        or returned_slice.stop != expected_slice.stop
+        or returned_slice.step not in (None, 1)
+    ):
+        raise ValueError(
+            f"Traditional detection worker result {result_index} returned the "
+            "wrong source slice."
+        )
+
+    frames_raw = np.asarray(raw_frames)
+    if frames_raw.ndim != 1:
+        raise ValueError(
+            f"Traditional detection worker result {result_index} frame indices "
+            "must be rank 1."
+        )
+    if frames_raw.size and frames_raw.dtype.kind not in "iu":
+        raise ValueError(
+            f"Traditional detection worker result {result_index} frame indices "
+            "must be exact integers."
+        )
+    frames = frames_raw.astype(np.int64, copy=False)
+
+    bboxes_raw = np.asarray(raw_bboxes)
+    if frames.size == 0 and bboxes_raw.size == 0:
+        bboxes = np.empty((0, 4), dtype=np.float64)
+    else:
+        if (
+            bboxes_raw.ndim != 2
+            or bboxes_raw.shape[1] != 4
+            or bboxes_raw.dtype.kind not in "fiu"
+        ):
+            raise ValueError(
+                f"Traditional detection worker result {result_index} bboxes must "
+                "have exact numeric shape (N, 4)."
+            )
+        bboxes = bboxes_raw.astype(np.float64, copy=False)
+    if bboxes.shape[0] != frames.shape[0]:
+        raise ValueError(
+            f"Traditional detection worker result {result_index} bbox/frame "
+            "cardinality does not agree."
+        )
+    if frames.size:
+        if (
+            np.any(frames < int(expected_slice.start))
+            or np.any(frames >= int(expected_slice.stop))
+            or np.any(frames < 0)
+            or np.any(frames >= int(total_frames))
+        ):
+            raise ValueError(
+                f"Traditional detection worker result {result_index} contains a "
+                "frame outside its exact source slice/domain."
+            )
+        if frames.size > 1 and np.any(np.diff(frames) < 0):
+            raise ValueError(
+                f"Traditional detection worker result {result_index} frame rows "
+                "are not ordered by source frame."
+            )
+    if bboxes.size:
+        if not np.isfinite(bboxes).all():
+            raise ValueError(
+                f"Traditional detection worker result {result_index} contains "
+                "non-finite normalized bbox values."
+            )
+        cx, cy, width, height = bboxes.T
+        tolerance = 1e-12
+        invalid = (
+            (width <= 0.0)
+            | (height <= 0.0)
+            | (width > 1.0 + tolerance)
+            | (height > 1.0 + tolerance)
+            | (cx < 0.0)
+            | (cx > 1.0)
+            | (cy < 0.0)
+            | (cy > 1.0)
+            | (cx - width * 0.5 < -tolerance)
+            | (cx + width * 0.5 > 1.0 + tolerance)
+            | (cy - height * 0.5 < -tolerance)
+            | (cy + height * 0.5 > 1.0 + tolerance)
+        )
+        if np.any(invalid):
+            raise ValueError(
+                f"Traditional detection worker result {result_index} contains an "
+                "invalid normalized bbox extent."
+            )
+    return frames, bboxes
+
+
+def _validate_and_aggregate_detection_results(
+    results: Any,
+    *,
+    chunk_slices: list[slice],
+    total_frames: int,
+    console: Console,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate exact worker coverage, then concatenate trusted numeric rows."""
+
+    _require_exact_detection_chunk_plan(
+        chunk_slices,
+        total_frames=total_frames,
+    )
+    if type(results) is not tuple or len(results) != len(chunk_slices):
+        raise ValueError(
+            "Traditional detection requires exactly one worker result for every "
+            "requested source slice."
+        )
+    frame_chunks: list[np.ndarray] = []
+    bbox_chunks: list[np.ndarray] = []
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        aggregate_task = progress.add_task(
+            "[cyan]Validating detections...", total=len(results)
+        )
+        for result_index, (expected_slice, result) in enumerate(
+            zip(chunk_slices, results, strict=True)
+        ):
+            frames, bboxes = _validate_detection_chunk_result(
+                result,
+                expected_slice=expected_slice,
+                total_frames=total_frames,
+                result_index=result_index,
+            )
+            frame_chunks.append(frames)
+            bbox_chunks.append(bboxes)
+            progress.advance(aggregate_task)
+    if not frame_chunks:
+        return (
+            np.empty((0,), dtype=np.int32),
+            np.empty((0, 4), dtype=np.float64),
+        )
+    frames = np.concatenate(frame_chunks).astype(np.int32, copy=False)
+    bboxes = np.concatenate(bbox_chunks).astype(np.float64, copy=False)
+    return frames, bboxes
+
+
+@_with_detection_attempt_rollback
 def detect_fish(
     zarr_path: str,
     config_path: Optional[str] = "pipeline_config.yaml",
@@ -268,8 +633,16 @@ def detect_fish(
     num_workers: Optional[int] = None,
     console: Optional[Console] = None,
     show_progress: bool = True,
+    artifact_only: bool = False,
 ) -> Dict[str, Any]:
     """Detect fish in video frames using blob detection."""
+    if not artifact_only:
+        raise ValueError(
+            "Traditional detection cannot publish a selectable canonical detect run: "
+            "raw_video/images_ds lacks exact acquisition transform authority. "
+            "Pass artifact_only=True (CLI: --artifact-only) to write an explicit "
+            "nonselector detection_artifact_runs output."
+        )
     if console is None:
         console = Console()
     
@@ -301,33 +674,33 @@ def detect_fish(
     latest_bg_run = resolve_authoritative_run_name(root["background_runs"])
     if latest_bg_run is None:
         raise ValueError("Traditional detection requires a complete background run.")
-    _require_imported_detection_inputs(root, latest_bg_run)
+    images_ds, background_node, ds_img_shape = _require_imported_detection_inputs(
+        root,
+        latest_bg_run,
+    )
+    images_ds_sha256 = _array_content_fingerprint(images_ds)
+    background_ds_sha256 = _array_content_fingerprint(background_node)
     console.print(f"Using background: [cyan]{latest_bg_run}[/cyan]")
     
-    # Create detect runs group
-    parent_group = require_runs_parent(root, 'detect_runs')
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
     run_name = f"detect_{timestamp}"
-    detect_group = parent_group.create_group(run_name)
-    mark_run_started(detect_group, run_name=run_name, stage="detect")
-    note_pending_latest(parent_group, run_name)
-    
-    console.print(f"Created new run: [cyan]detect_runs/{run_name}[/cyan]")
     
     # Create dish mask
     mask_params = detect_params.get('dish_mask', {})
-    background_ds = root[f'background_runs/{latest_bg_run}/background_ds'][:]
-    ds_img_shape = background_ds.shape
     mask = create_dish_mask(mask_params, ds_img_shape, console)
     
     # Get video info
-    num_images = root['raw_video/images_ds'].shape[0]
-    chunk_size = root['raw_video/images_ds'].chunks[0]
+    num_images = images_ds.shape[0]
+    chunk_size = images_ds.chunks[0]
     
     console.print(f"Processing {num_images} frames in chunks of {chunk_size}")
     
     # Create dask tasks
     chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
+    _require_exact_detection_chunk_plan(
+        chunk_slices,
+        total_frames=num_images,
+    )
     console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks for detection...")
     
     delayed_tasks = [detect_chunk_delayed(zarr_path, s, detect_params, mask, latest_bg_run) for s in chunk_slices]
@@ -340,40 +713,81 @@ def detect_fish(
     
     console.print("Writing detection results to Zarr...")
     
-    # Collect all results
-    all_frame_indices: List[int] = []
-    all_bboxes: List[List[float]] = []
-    
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
+    frame_indices_np, bboxes_np = _validate_and_aggregate_detection_results(
+        results,
+        chunk_slices=chunk_slices,
+        total_frames=num_images,
         console=console,
-    ) as progress:
-        aggregate_task = progress.add_task(
-            "[cyan]Aggregating detections...", total=len(results)
-        )
-        for slc, frame_idxs, bboxes in results:
-            if frame_idxs:
-                all_frame_indices.extend(frame_idxs)
-                all_bboxes.extend(bboxes)
-            progress.advance(aggregate_task)
-    
-    total_detections = len(all_frame_indices)
+    )
+    total_detections = int(frame_indices_np.shape[0])
     console.print(f"Aggregating {total_detections} total detections...")
+    _require_array_fingerprint(
+        images_ds,
+        expected=images_ds_sha256,
+        label="raw_video/images_ds",
+    )
+    _require_array_fingerprint(
+        background_node,
+        expected=background_ds_sha256,
+        label=f"background_runs/{latest_bg_run}/background_ds",
+    )
+    source_lineage = {
+        "schema_id": _TRADITIONAL_SOURCE_LINEAGE_SCHEMA,
+        "status": "unbound_artifact_provenance_only",
+        "frame_source": {
+            "node_path": "raw_video/images_ds",
+            "content_sha256": images_ds_sha256,
+            "content_sha256_kind": _ARRAY_FINGERPRINT_SCHEMA,
+            "shape": [int(value) for value in images_ds.shape],
+            "dtype": np.dtype(images_ds.dtype).str,
+        },
+        "background_source": {
+            "node_path": f"background_runs/{latest_bg_run}/background_ds",
+            "content_sha256": background_ds_sha256,
+            "content_sha256_kind": _ARRAY_FINGERPRINT_SCHEMA,
+            "shape": [int(value) for value in background_node.shape],
+            "dtype": np.dtype(background_node.dtype).str,
+        },
+        "algorithm": "traditional_blob_detection_unchanged_v1",
+        "source_camera_binding_status": "unbound",
+        UNBOUND_ARTIFACT_RUN_BINDING_KEY: build_unbound_artifact_run_binding(
+            manifest_id="traditional_detection.v1",
+            reference_node_path="raw_video/images_ds",
+            reference_width=int(ds_img_shape[1]),
+            reference_height=int(ds_img_shape[0]),
+            source_frame_count=int(num_images),
+        ),
+    }
+    source_lineage_sha256 = _canonical_mapping_sha256(source_lineage)
+
+    # ``images_ds`` does not yet carry one array-bound transform into the
+    # published acquisition camera authority.  Keep the scientifically useful
+    # blob output as an explicit nonselector artifact; do not let normalized
+    # downsample coordinates masquerade as a normal source-camera detect run.
+    attempt = DetectionProducerAttempt.begin_unbound_artifact(
+        root,
+        run_name=run_name,
+        semantic_manifest_id="traditional_detection.v1",
+        strict_integrity_required=True,
+    )
+    _ACTIVE_DETECTION_ATTEMPT.set(attempt)
+    detect_group = attempt.run
+    console.print(
+        f"Created nonselector artifact: [cyan]{DETECTION_ARTIFACT_RUN_FAMILY}/{run_name}[/cyan]"
+    )
     
+    artifact_row_id = np.arange(total_detections, dtype=np.uint64)
+    artifact_row_chunk = max(1, min(max(1, total_detections), 16384))
+    detect_group.create_array(
+        "artifact_row_id",
+        data=artifact_row_id,
+        chunks=(artifact_row_chunk,),
+        overwrite=True,
+    )
+
     # Write core detection arrays
-    recording_identity = resolve_recording_identity(root.attrs, fallback_path=zarr_path)
     if total_detections > 0:
-        frame_indices_np = np.array(all_frame_indices, dtype='i4')
-        bboxes_np = np.array(all_bboxes, dtype='f8')
         class_ids_np = np.zeros(total_detections, dtype=np.int32)
-        instance_keys = mint_detection_instance_keys(
-            recording_identity=recording_identity,
-            frame_indices=frame_indices_np,
-            bbox_norm_coords=bboxes_np,
-            class_ids=class_ids_np,
-        )
         
         det_chunk = min(chunk_size * 4, total_detections)
 
@@ -402,16 +816,12 @@ def detect_fish(
             chunks=(det_chunk,),
             overwrite=True
         )
-        detect_group.create_array(
-            'instance_key',
-            data=instance_keys,
-            chunks=(det_chunk,),
-            overwrite=True
-        )
-        
         # Compute and store frame counts for visualization
         console.print("Computing frame counts for visualization...")
-        frame_counts = np.bincount(frame_indices_np, minlength=num_images)
+        frame_counts = np.bincount(
+            frame_indices_np,
+            minlength=num_images,
+        ).astype(np.int32)
         create_geometry_preload_array(
             detect_group,
             'frame_counts',
@@ -428,10 +838,13 @@ def detect_fish(
     else:
         # No detections found
         detect_group.create_array('frame_indices', data=np.empty((0,), dtype='i4'), overwrite=True)
-        detect_group.create_array('bbox_norm_coords', data=np.empty((0, 4), dtype='f8'), overwrite=True)
+        detect_group.create_array(
+            'bbox_norm_coords',
+            data=np.empty((0, 4), dtype='f8'),
+            overwrite=True,
+        )
         detect_group.create_array('scores', data=np.empty((0,), dtype=np.float32), overwrite=True)
         detect_group.create_array('class_ids', data=np.empty((0,), dtype=np.int32), overwrite=True)
-        detect_group.create_array('instance_key', data=np.empty((0,), dtype=np.uint64), overwrite=True)
         frame_counts_empty = np.zeros(num_images, dtype='i4')
         create_geometry_preload_array(
             detect_group,
@@ -439,6 +852,60 @@ def detect_fish(
             data=frame_counts_empty,
             overwrite=True
         )
+        create_geometry_preload_array(
+            detect_group,
+            'n_detections',
+            data=frame_counts_empty,
+            overwrite=True,
+        )
+
+    detect_group.attrs[_TRADITIONAL_SOURCE_LINEAGE_ATTR] = source_lineage
+    detect_group.attrs[f"{_TRADITIONAL_SOURCE_LINEAGE_ATTR}_sha256"] = (
+        source_lineage_sha256
+    )
+    _stamp_traditional_artifact_semantics(
+        detect_group,
+        reference_width=int(ds_img_shape[1]),
+        reference_height=int(ds_img_shape[0]),
+        source_frame_count=int(num_images),
+        source_lineage_sha256=source_lineage_sha256,
+    )
+
+    if total_detections == 0:
+        publish_empty_artifact_observation_proof(
+            detect_group,
+            source_frame_count=int(num_images),
+            row_array_names=(
+                "artifact_row_id",
+                "frame_indices",
+                "bbox_norm_coords",
+                "scores",
+                "class_ids",
+            ),
+            full_domain_evidence={
+                "coverage_status": "full_source_domain_validated",
+                "source_array_ref": "/raw_video/images_ds",
+                "source_array_content_sha256": images_ds_sha256,
+                "background_array_ref": (
+                    f"/background_runs/{latest_bg_run}/background_ds"
+                ),
+                "background_array_content_sha256": background_ds_sha256,
+                "source_frame_count": int(num_images),
+                "worker_slice_plan": [
+                    [int(chunk.start), int(chunk.stop)] for chunk in chunk_slices
+                ],
+                "validated_worker_result_count": len(results),
+                "validated_observation_row_count": 0,
+                "algorithm": "traditional_blob_detection_unchanged_v1",
+            },
+        )
+    payload_inventory = publish_artifact_payload_inventory_seal(
+        detect_group,
+        source_frame_count=int(num_images),
+    )
+    payload_inventory_sha256 = detect_group.attrs[
+        "artifact_payload_inventory_seal_sha256"
+    ]
 
     # Calculate statistics
     if total_detections > 0:
@@ -479,16 +946,22 @@ def detect_fish(
         'method': 'blob',
         'detection_method': 'blob',
         'detection_source': 'zarr_video',  # Blob uses imported video in zarr
+        'source_geometry_status': 'unbound_downsample_artifact',
+        'source_geometry_reason': (
+            'raw_video/images_ds lacks an exact persisted transform into the '
+            'acquisition source-camera authority'
+        ),
         'total_frames': num_images,
         'has_raw_video': True,
-        **instance_key_attrs(recording_identity),
-        
         # Detection parameters (method-specific)
         'parameters': detect_params,
         'parameter_source': param_source,
         
         # Background subtraction info (method-specific)
         'source_background_run': latest_bg_run,
+        'source_images_ds_content_sha256': images_ds_sha256,
+        'source_background_ds_content_sha256': background_ds_sha256,
+        'source_array_fingerprint_schema': _ARRAY_FINGERPRINT_SCHEMA,
         
         # Processing info
         'dask_scheduler': scheduler,
@@ -551,43 +1024,53 @@ def detect_fish(
             'config_path': config_path,
         },
         inputs={
-            'frame_source': 'zarr',
+            'frame_source': 'raw_video/images_ds',
+            'frame_source_content_sha256': images_ds_sha256,
             'source_video_path': root.attrs.get('source_video_path'),
             'source_background_run': latest_bg_run,
+            'source_background_array': (
+                f'background_runs/{latest_bg_run}/background_ds'
+            ),
+            'source_background_content_sha256': background_ds_sha256,
+        },
+        artifacts={
+            'run_path': f'{DETECTION_ARTIFACT_RUN_FAMILY}/{run_name}',
+            'bbox_norm_coords': (
+                f'{DETECTION_ARTIFACT_RUN_FAMILY}/{run_name}/bbox_norm_coords'
+            ),
+            'artifact_payload_inventory_seal_sha256': (
+                payload_inventory_sha256
+            ),
+            'artifact_payload_row_count': payload_inventory['row_count'],
         },
     )
     write_stage_provenance(detect_group, provenance_record)
-    mark_run_complete(
-        detect_group,
-        parent_group=parent_group,
-        run_name=run_name,
+    _require_array_fingerprint(
+        images_ds,
+        expected=images_ds_sha256,
+        label="raw_video/images_ds",
+    )
+    _require_array_fingerprint(
+        background_node,
+        expected=background_ds_sha256,
+        label=f"background_runs/{latest_bg_run}/background_ds",
+    )
+    attempt.complete(
         run_provenance=build_run_provenance_from_stage_record(provenance_record),
     )
-    
-    # Run quality analysis
-    console.print("\n[bold]Running detection quality analysis...[/bold]")
-    try:
-        quality_report = analyze_detect_quality(
-            zarr_path=zarr_path,
-            run_name=run_name,
-            jump_threshold=100.0
-        )
-        
-        save_quality_report(zarr_path, quality_report, console=console)
-        
-        # Print quick quality summary
-        score = quality_report['quality_score']
-        console.print(f"Quality Grade: [bold]{score['grade']}[/bold] ({score['overall_score']:.1f}/100)")
-        console.print(f"  Artifacts found: {quality_report['artifacts']['total_artifacts']}")
-        
-    except Exception as e:
-        console.print(f"[yellow]Quality analysis failed: {e}[/yellow]")
+    console.print(
+        "[yellow]Skipped canonical detect-quality publication:[/yellow] "
+        "traditional geometry is retained as a nonselector artifact."
+    )
 
     return {
         'duration_seconds': duration,
         'total_detections': total_detections,
         'frames_with_detections': frames_with_detections,
         'run_name': run_name,
+        'run_path': f'{DETECTION_ARTIFACT_RUN_FAMILY}/{run_name}',
+        'output_parent': DETECTION_ARTIFACT_RUN_FAMILY,
+        'stage_selector_eligible': False,
         'parameter_source': param_source
     }
 
@@ -597,7 +1080,11 @@ def detect_fish(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run traditional blob-based detection on a Palette Zarr archive."
+        description=(
+            "Run traditional blob detection as a nonselector detection artifact. "
+            "The path cannot publish a normal detect run until images_ds carries "
+            "an exact acquisition transform."
+        )
     )
     parser.add_argument(
         "--zarr-path",
@@ -625,6 +1112,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable the Dask progress bar (useful when embedding in other progress displays).",
     )
+    parser.add_argument(
+        "--artifact-only",
+        action="store_true",
+        help=(
+            "Explicitly permit an unbound nonselector detection_artifact_runs output."
+        ),
+    )
     return parser
 
 
@@ -641,13 +1135,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             num_workers=args.num_workers,
             console=console,
             show_progress=not args.no_dask_progress,
+            artifact_only=bool(args.artifact_only),
         )
     except Exception as exc:
         console.print(f"[bold red]Detection failed:[/bold red] {exc}")
         return 1
 
     console.print(
-        f"[green]Done.[/green] Run '{result['run_name']}' "
+        f"[green]Done.[/green] Artifact '{result['run_path']}' "
         f"with {result['total_detections']} detections "
         f"({result['frames_with_detections']} frames)."
     )

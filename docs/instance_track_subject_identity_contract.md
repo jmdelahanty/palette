@@ -27,6 +27,9 @@ mutable multi-recording project file is not the source of truth.
 | `instance_key` | one observation | Content-derived detection-observation identity, minted at detect/manual-add origin and copied downstream. It is not an animal identity. |
 | `refined_row_id` | one curated detect run | Stable logical identity for one mutable curated instance row. It is not physical row position. |
 | `track_id` | one `tracking_runs/<run>` | Run-local temporal trajectory identity. A bare `track_id` is never globally unique. |
+| `track_sample_key` | one track-kinematics row | Exact pair `(track_id, acquisition_frame_index)` identifying one sample of a run-local trajectory. It is not an observation key or a biological identity. |
+| `source_instance_key` | track-sample lineage | Nullable reference to the exact immediate-source observation. It is derived mechanically when the source row identity is `instance_key`; it is never the track row's primary identity. |
+| `stimulus_state_key` | one stimulus state row | Producer-defined compound state identity preserved by stimulus import and online refinement. It is not a camera-frame or observation identity. |
 | `subject_id` | registry/global biology | Optional known biological identity. Tracking alone must not silently infer it. |
 
 The globally addressable forms are:
@@ -34,7 +37,13 @@ The globally addressable forms are:
 - observation: `(recording_id, instance_key)`;
 - curated row: `(recording_id, refined_detect_run, refined_row_id)`;
 - trajectory: `(recording_id, tracking_run, track_id)`;
+- track sample: `(recording_id, track_kinematics_run, track_id,
+  acquisition_frame_index)`;
 - biological identity: `subject_id`.
+
+Coordinate-frame, transform, calibration, and provenance records have their own
+digest-bound record identities. Those records describe authorities; they are not
+row keys and must not be substituted for any identity above.
 
 ## Canonical Stage Separation
 
@@ -67,6 +76,26 @@ New keyed consumers join by `instance_key`. Physical row equality is a storage
 fast path, not the identity contract. Legacy runs without keys remain readable
 through an explicitly labeled `legacy_positional` mode, but a keyed source must
 not silently consume a legacy tracking run.
+
+That rule is specific to observation-aligned assignment rows in
+`tracking_runs`. It does not make `instance_key` the primary identity of a
+derived trajectory sample. Every new `track_kinematics_runs/<run>/tracks/id_*`
+rowset uses `track_sample_key = (track_id, acquisition_frame_index)` as its
+primary row identity. Canonical temporal-lineage version 1 also persists:
+
+- a unique `source_row_index` selecting the exact immediate-source row;
+- `source_acquisition_frame_index`, exactly equal to both the selected source
+  mapping and `track_sample_key[:, 1]`;
+- exact-only `source_frame_interpolation` with left = right = target and weight
+  zero; and
+- structured nullable `source_instance_key`, mechanically derived for an
+  observation source and canonical null for every other source-identity domain.
+
+Track-stage interpolation is not permitted in this version. Refined or
+interpolated positions must be materialized upstream with their own row identity
+and acquisition-frame mapping before track kinematics selects them. A bare
+`frame_indices` array, matching row count, or plausible numerical range cannot
+establish track-sample identity.
 
 This rule applies to generic cross-stage row-lineage comparisons as well as
 tracking. If exactly one source exposes `instance_key`, validation fails closed;

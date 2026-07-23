@@ -49,9 +49,9 @@ Options:
   --mem-gb N                Memory per job in GB (default: 32)
   --registry PATH           Registry sqlite path (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --config PATH             Crop config YAML path
-  --source-type TYPE        Detection source type (detect/filtered/interpolated/manual/preferred/auto)
-  --source-path PATH        Explicit detection source path
-  --preferred-policy POLICY Policy for preferred/auto source selection
+  --source-type TYPE        Detection source type (default: detect; future writes require detect)
+  --source-path PATH        Exact detection source path (detect_runs/<run>)
+  --selection-policy POLICY Legacy auto-source selection policy (fails closed for future writes)
   --scheduler NAME          Dask scheduler (processes/threads/distributed)
   --num-workers N           Dask worker count
   --acceleration {auto,gpu,cpu}  GPU/CPU acceleration mode
@@ -91,7 +91,7 @@ while [[ $# -gt 0 ]]; do
     --config) CONFIG="$2"; shift 2;;
     --source-type) SOURCE_TYPE="$2"; shift 2;;
     --source-path) SOURCE_PATH="$2"; shift 2;;
-    --preferred-policy) PREFERRED_POLICY="$2"; shift 2;;
+    --selection-policy|--preferred-policy) PREFERRED_POLICY="$2"; shift 2;;
     --scheduler) SCHEDULER="$2"; shift 2;;
     --num-workers) NUM_WORKERS="$2"; shift 2;;
     --acceleration) ACCELERATION="$2"; shift 2;;
@@ -243,7 +243,7 @@ EXTRA_ARGS=(--apply --zarr-use "$ZAR_USE")
 if [[ -n "$CONFIG" ]]; then EXTRA_ARGS+=(--config "$CONFIG"); fi
 if [[ -n "$SOURCE_TYPE" ]]; then EXTRA_ARGS+=(--source-type "$SOURCE_TYPE"); fi
 if [[ -n "$SOURCE_PATH" ]]; then EXTRA_ARGS+=(--source-path "$SOURCE_PATH"); fi
-if [[ -n "$PREFERRED_POLICY" ]]; then EXTRA_ARGS+=(--preferred-policy "$PREFERRED_POLICY"); fi
+if [[ -n "$PREFERRED_POLICY" ]]; then EXTRA_ARGS+=(--selection-policy "$PREFERRED_POLICY"); fi
 if [[ -n "$SCHEDULER" ]]; then EXTRA_ARGS+=(--scheduler "$SCHEDULER"); fi
 if [[ -n "$NUM_WORKERS" ]]; then EXTRA_ARGS+=(--num-workers "$NUM_WORKERS"); fi
 if [[ -n "$ACCELERATION" ]]; then EXTRA_ARGS+=(--acceleration "$ACCELERATION"); fi

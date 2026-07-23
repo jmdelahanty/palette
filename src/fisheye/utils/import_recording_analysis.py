@@ -19,7 +19,11 @@ import zarr
 
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
-from fisheye.shared.import_video_metadata import probe_video_metadata, write_video_metadata
+from fisheye.shared.import_video_metadata import (
+    probe_video_metadata,
+    publish_external_video_acquisition_authority,
+    write_video_metadata,
+)
 from fisheye.shared.recording_preflight import preflight_gate_reason
 
 
@@ -173,6 +177,7 @@ def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dic
         import_purpose="analysis",
         recording_path=plan.recording_dir,
     )
+    publish_external_video_acquisition_authority(root)
     h5_updates = _write_source_h5_fingerprint(root, plan.h5_path, overwrite=overwrite)
     return {
         "root_attrs_updated": len(updates.get("root", {})) + h5_updates["root_attrs_updated"],

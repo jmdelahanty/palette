@@ -9,13 +9,16 @@ import math
 import os
 import socket
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from PIL import Image, ImageDraw, ImageFont
 
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
+)
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
@@ -29,6 +32,7 @@ DEFAULT_CHASER_DISTANCE_RUN = "goodcopbadcop_chaser_distance_v1_20260617"
 DEFAULT_DETECTION_OCCUPANCY_RUN = "goodcopbadcop_detection_occupancy_v1_20260617"
 DEFAULT_TRACK_KINEMATICS_RUN = "goodcopbadcop_tk_hyst4_low2_latch_s005"
 DEFAULT_EGOCENTRIC_COMPONENT = "track_offline_goodcopbadcop_tk_hyst4_low2_latch_s005_id_0_smoothed"
+CHASER_DISTANCE_PARENT = "analysis/chaser_distance_runs"
 
 
 @dataclass(frozen=True)
@@ -245,6 +249,35 @@ def default_goodcopbadcop_artifact_specs(
     )
 
 
+def _chaser_artifact_request(path: str) -> tuple[str, str] | None:
+    """Return the exact run and relative artifact path for a chaser spec."""
+
+    normalized = _normalize_path(path)
+    prefix = CHASER_DISTANCE_PARENT + "/"
+    if not normalized.startswith(prefix):
+        return None
+    suffix = normalized[len(prefix) :]
+    parts = suffix.split("/")
+    if len(parts) < 2 or not parts[0] or any(part in {".", ".."} for part in parts):
+        raise ChaserDistanceReadError(
+            "A chaser montage artifact must identify one exact run child and one "
+            "relative artifact path."
+        )
+    return parts[0], "/".join(parts[1:])
+
+
+def _reject_unsealed_chaser_artifact(
+    root: Any,
+    *,
+    run_name: str,
+    relative_path: str,
+) -> None:
+    """Preflight and reject artifacts not protected by the canonical run seal."""
+
+    distance = load_chaser_distance_run(root, run_name=run_name)
+    distance.require_derived_surface_authority(relative_path)
+
+
 def _load_recording_tiles(
     source: SourceRecording,
     specs: Sequence[MontageArtifactSpec],
@@ -281,22 +314,34 @@ def _load_recording_tiles(
         return tiles, missing
     for spec in specs:
         try:
-            _, png_bytes = load_png_artifact_bytes(root, spec.path)
-            image = Image.open(BytesIO(png_bytes)).convert("RGB")
-            image.load()
-            tiles.append(
-                LoadedTile(
-                    artifact_id=spec.artifact_id,
-                    label=spec.label,
-                    path=spec.path,
-                    image=image,
-                    error=None,
+            chaser_request = _chaser_artifact_request(spec.path)
+            if chaser_request is not None:
+                run_name, relative_path = chaser_request
+                _reject_unsealed_chaser_artifact(
+                    root,
+                    run_name=run_name,
+                    relative_path=relative_path,
                 )
-            )
+            else:
+                _, png_bytes = load_png_artifact_bytes(root, spec.path)
+                image = Image.open(BytesIO(png_bytes)).convert("RGB")
+                image.load()
+                tiles.append(
+                    LoadedTile(
+                        artifact_id=spec.artifact_id,
+                        label=spec.label,
+                        path=spec.path,
+                        image=image,
+                        error=None,
+                    )
+                )
         except Exception as exc:
             if fail_on_missing:
                 raise
-            message = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, ChaserDistanceReadError):
+                message = f"canonical chaser artifact preflight failed closed: {exc}"
+            else:
+                message = f"{type(exc).__name__}: {exc}"
             tiles.append(
                 LoadedTile(
                     artifact_id=spec.artifact_id,

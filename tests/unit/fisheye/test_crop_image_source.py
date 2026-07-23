@@ -243,6 +243,25 @@ def test_resolve_crop_run_prefers_latest_any_for_mixed_mode_reader() -> None:
     assert run_name == "crop_geometry"
 
 
+def test_implicit_crop_resolution_skips_selector_ineligible_pointer_target() -> None:
+    root = _make_root()
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs.update(
+        {
+            "latest_any": "crop_staged",
+            "latest": "crop_previous",
+            "latest_materialized": "crop_previous",
+        }
+    )
+    staged = crop_parent.create_group("crop_staged")
+    staged.attrs["stage_selector_eligible"] = False
+    crop_parent.create_group("crop_previous")
+
+    _parent, _group, run_name = resolve_crop_run(root)
+
+    assert run_name == "crop_previous"
+
+
 def test_crop_image_source_reads_materialized_roi_batches() -> None:
     root = _make_root()
     crop_parent = root.create_group("crop_runs")

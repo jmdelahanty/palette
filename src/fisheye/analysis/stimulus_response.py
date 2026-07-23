@@ -30,17 +30,10 @@ from fisheye.shared.citrus_enums import (
     EVENT_LOOM_MANUAL_START,
     EVENT_STEP_START,
     EVENT_STEP_END,
-    STIMULUS_MODE,
     load_event_types,
     load_stimulus_modes,
 )
-from fisheye.shared.coordinate_transform import (
-    load_calibration_transform,
-    projector_px_to_mm,
-    projector_to_camera_mm,
-    resolve_concentric_center_mm,
-    visual_angle_deg,
-)
+from fisheye.shared.coordinate_transform import visual_angle_deg
 from fisheye.shared.json_safety import (
     decode_null_terminated_text,
     json_attr_safe,
@@ -60,7 +53,6 @@ from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.track_kinematics_io import (
-    list_track_ids,
     load_track_kinematics_track,
     resolve_track_kinematics_run,
 )
@@ -79,6 +71,10 @@ from fisheye.analysis.stimulus_response_concentric_omr import (
     CONCENTRIC_RADIAL_OMR_METHOD_VERSION,
     ConcentricRadialOMRStepData,
     compute_step_concentric_radial_omr_metrics,
+)
+from fisheye.analysis.stimulus_response_coordinate_authority import (
+    StimulusResponseCoordinateAuthority,
+    load_stimulus_response_coordinate_authority,
 )
 # OMR metrics are implemented in a dedicated module, but re-exported here so
 # existing callers can keep importing from fisheye.analysis.stimulus_response.
@@ -150,57 +146,202 @@ _json_safe_attr_value = json_attr_safe
 _json_safe_attrs = json_attr_safe_mapping
 
 
+_VERIFIED_TRACK_MOTION_LINEAGE_SEAL = object()
+
+
+@dataclass(frozen=True, init=False)
+class VerifiedTrackMotionLineage:
+    """Live proof that one exact track-motion publication remains unchanged."""
+
+    record: Mapping[str, Any]
+    run_path: str
+    manifest_sha256: str
+    track_ids: tuple[int, ...]
+    fps: float
+    _bound_run: Any = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        record: Mapping[str, Any],
+        run_path: str,
+        manifest_sha256: str,
+        track_ids: Sequence[int],
+        fps: float,
+        bound_run: Any,
+        _verification_seal: object | None = None,
+    ) -> None:
+        if _verification_seal is not _VERIFIED_TRACK_MOTION_LINEAGE_SEAL:
+            raise ValueError(
+                "Track-motion lineage must be minted by the strict live loader."
+            )
+        object.__setattr__(self, "record", dict(record))
+        object.__setattr__(self, "run_path", str(run_path).strip("/"))
+        object.__setattr__(self, "manifest_sha256", str(manifest_sha256))
+        object.__setattr__(
+            self,
+            "track_ids",
+            tuple(int(value) for value in track_ids),
+        )
+        object.__setattr__(self, "fps", float(fps))
+        object.__setattr__(self, "_bound_run", bound_run)
+        object.__setattr__(self, "_seal", _verification_seal)
+
+    def assert_verified(self) -> None:
+        if self._seal is not _VERIFIED_TRACK_MOTION_LINEAGE_SEAL:
+            raise ValueError("Track-motion lineage proof is not loader sealed.")
+        self._bound_run.assert_verified()
+        expected = _expected_track_motion_lineage_record(self._bound_run)
+        if (
+            str(getattr(self._bound_run.run_group, "path", "")).strip("/")
+            != self.run_path
+            or self._bound_run.manifest_sha256 != self.manifest_sha256
+            or tuple(
+                int(track.track_id) for track in self._bound_run.tracks
+            )
+            != self.track_ids
+            or not math.isclose(
+                float(expected["source_fps"]),
+                self.fps,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            or _json_safe_attr_value(dict(self.record)) != expected
+        ):
+            raise ValueError("Track-motion lineage changed after it was loaded.")
+
+    @property
+    def physical_authority(self) -> Any:
+        """Return the exact physical authority sealed into the track run."""
+
+        return self._bound_run.position_bindings.physical_authority
+
+
+def _manifest_track_run_derivation(bound: Any) -> Mapping[str, Any]:
+    binding = bound.manifest.get("run_derivation")
+    record = binding.get("record") if isinstance(binding, Mapping) else None
+    if not isinstance(record, Mapping):
+        raise ValueError("Verified track-motion manifest lacks run derivation.")
+    return record
+
+
+def _expected_track_motion_lineage_record(bound: Any) -> Dict[str, Any]:
+    derivation_record = _manifest_track_run_derivation(bound)
+    source_refs = (
+        derivation_record.get("source_refs")
+        if isinstance(derivation_record, Mapping)
+        else None
+    )
+    parameters = derivation_record.get("parameters")
+    run_path = str(getattr(bound.run_group, "path", "")).strip("/")
+    digest = bound.manifest_sha256
+    track_ids = tuple(int(track.track_id) for track in bound.tracks)
+    try:
+        fps = float(parameters["fps"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Verified track-motion derivation lacks exact canonical fps."
+        ) from exc
+    if (
+        not run_path
+        or not isinstance(source_refs, Mapping)
+        or not isinstance(parameters, Mapping)
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or not track_ids
+        or track_ids != tuple(sorted(set(track_ids)))
+        or not np.isfinite(fps)
+        or fps <= 0
+    ):
+        raise ValueError("Verified track-motion lineage record is incomplete.")
+    return {
+        "schema_id": "palette.stimulus_response.track_motion_lineage",
+        "schema_version": 1,
+        "source_track_motion_run_ref": f"/{run_path}",
+        "source_track_motion_manifest_ref": (
+            f"/{run_path}@track_motion_publication_manifest"
+        ),
+        "source_track_motion_manifest_sha256": digest,
+        "source_track_ids": list(track_ids),
+        "source_fps": fps,
+        "source_refs": _json_safe_attr_value(dict(source_refs)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Input loading
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_upstream_lineage(kin_group) -> Dict[str, Any]:
-    """Read the track_kinematics run's upstream provenance for embedding."""
-    lineage: Dict[str, Any] = {}
-    attrs = kin_group.attrs if hasattr(kin_group, "attrs") else {}
+def _load_verified_track_motion_lineage(
+    root: zarr.Group,
+    kin_group: zarr.Group,
+) -> VerifiedTrackMotionLineage:
+    """Reload one sealed run and extract source refs from its bound manifest."""
 
-    # Direct lineage attrs written by track_kinematics.
-    for key in (
-        "source_tracking_run",
-        "source_arena_assignment_run",
-        "method",
-        "fps",
-        "pixel_to_mm",
-        "coordinate_space",
-    ):
-        val = attrs.get(key)
-        if val is not None:
-            lineage[key] = val
+    from fisheye.analysis.track_kinematics import load_bound_track_motion_run
 
-    # The inputs dict (if present) has the full upstream chain.
-    inputs = attrs.get("inputs")
-    if isinstance(inputs, dict):
-        for key in (
-            "detection_run",
-            "detection_path",
-            "detection_variant",
-            "source_detect_run",
-            "keypoint_run",
-            "keypoint_variant",
-            "base_keypoint_run",
-            "crop_run",
+    bound = load_bound_track_motion_run(root, kin_group)
+    record = _expected_track_motion_lineage_record(bound)
+    run_path = str(record["source_track_motion_run_ref"]).strip("/")
+    manifest_sha256 = str(record["source_track_motion_manifest_sha256"])
+    track_ids = tuple(int(value) for value in record["source_track_ids"])
+    fps = float(record["source_fps"])
+    evidence = VerifiedTrackMotionLineage(
+        record=record,
+        run_path=run_path,
+        manifest_sha256=manifest_sha256,
+        track_ids=track_ids,
+        fps=fps,
+        bound_run=bound,
+        _verification_seal=_VERIFIED_TRACK_MOTION_LINEAGE_SEAL,
+    )
+    evidence.assert_verified()
+    return evidence
+
+
+def _snapshot_upstream_lineage(
+    root: zarr.Group,
+    kin_group,
+    tracks: Sequence[Any],
+) -> VerifiedTrackMotionLineage:
+    """Bind downstream lineage to one freshly verified track-motion run."""
+
+    if not tracks:
+        raise ValueError("Track-motion lineage requires at least one verified track.")
+    evidence = _load_verified_track_motion_lineage(
+        root,
+        kin_group,
+    )
+    run_path = evidence.run_path
+    manifest_sha256 = evidence.manifest_sha256
+    observed_track_ids: list[int] = []
+    for track in tracks:
+        if (
+            getattr(track, "authority_status", None)
+            != "verified_canonical_track_motion_v1"
+            or getattr(track, "motion_manifest_sha256", None) != manifest_sha256
+            or str(getattr(track, "run_path", "")).strip("/") != run_path
         ):
-            val = inputs.get(key)
-            if val is not None:
-                lineage[key] = val
-
-    # Provenance contract info if available.
-    prov = attrs.get("provenance")
-    if isinstance(prov, dict):
-        contract = prov.get("contract")
-        if isinstance(contract, dict):
-            lineage["provenance_contract"] = contract
-        git = prov.get("git")
-        if isinstance(git, dict):
-            lineage["kinematics_git_commit"] = git.get("commit")
-
-    return lineage
+            raise ValueError(
+                "Stimulus-response inputs do not share one freshly verified "
+                "track-motion publication."
+            )
+        try:
+            observed_track_ids.append(int(getattr(track, "track_id")))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Stimulus-response inputs do not share one freshly verified "
+                "track-motion publication."
+            ) from exc
+    if tuple(observed_track_ids) != evidence.track_ids:
+        raise ValueError(
+            "Stimulus-response track inventory differs from the freshly verified "
+            "track-motion publication."
+        )
+    evidence.assert_verified()
+    return evidence
 
 
 def load_track_data(
@@ -209,7 +350,7 @@ def load_track_data(
     kinematics_type: str = "offline",
     kinematics_run: Optional[str] = None,
     console: Optional[Console] = None,
-) -> Tuple[List[DenseTrack], str, int, Dict[str, Any]]:
+) -> Tuple[List[DenseTrack], str, int, VerifiedTrackMotionLineage]:
     """Load track kinematics and expand sparse arrays to dense frame-aligned representation.
 
     Returns
@@ -220,9 +361,8 @@ def load_track_data(
         Resolved kinematics run name.
     n_frames : int
         Total frames (max frame_index + 1 across all tracks).
-    upstream_lineage : dict
-        Snapshot of the kinematics run's upstream provenance (detection run,
-        keypoint run, crop run, tracking run, etc.).
+    upstream_lineage : VerifiedTrackMotionLineage
+        Live exact-run proof plus the persisted lineage record.
     """
     console = console or Console()
 
@@ -232,11 +372,12 @@ def load_track_data(
         scope=kinematics_type,
     )
 
-    fps = float(kin_group.attrs.get("fps", 30.0))
-
-    track_ids = list_track_ids(kin_group)
-    if not track_ids:
-        raise ValueError(f"No tracks found in {run_path}/")
+    initial_lineage = _load_verified_track_motion_lineage(root, kin_group)
+    if initial_lineage.run_path != run_path:
+        raise ValueError("Resolved track run differs from its strict bound child.")
+    kin_group = initial_lineage._bound_run.run_group
+    fps = initial_lineage.fps
+    track_ids = initial_lineage.track_ids
 
     # First pass: determine total frame span and validate inputs.
     max_frame = 0
@@ -315,7 +456,7 @@ def load_track_data(
             cumulative_path_distance_mm=cumulative_path_distance_mm,
         ))
 
-    upstream_lineage = _snapshot_upstream_lineage(kin_group)
+    upstream_lineage = _snapshot_upstream_lineage(root, kin_group, sparse_tracks)
 
     console.print(
         f"  Loaded {len(tracks)} track(s) from {run_path}/ "
@@ -986,8 +1127,6 @@ def compute_concentric_per_fish(
 ) -> Dict[str, np.ndarray]:
     """Per-fish centering summary for one CONCENTRIC_GRATING step."""
     n_fish = len(tracks)
-    sf, ef = step.start_frame, step.end_frame
-
     dist = per_frame["distance_to_center_mm"]
     r_speed = per_frame["radial_speed_mm_s"]
     r_heading = per_frame["radial_heading_angle_deg"]
@@ -1188,43 +1327,60 @@ def reconstruct_loom_trials(
 
 def resolve_loom_center_mm(
     step: ProtocolStep,
-    calibration: Dict[str, Any],
+    coordinate_authority: StimulusResponseCoordinateAuthority,
 ) -> Optional[Tuple[float, float]]:
-    """Resolve the looming dot center in camera-space mm.
-
-    For target_side=0, uses texture center (179, 179) via homography.
-    Falls back to arena center if homography is unavailable.
-    """
+    """Resolve a looming-dot center in exact source-camera millimetres."""
     params = flatten_stimulus_params(step.stimulus_params)
 
-    # Pre-computed mm coordinates.
+    # Direct physical coordinates are accepted only with an explicit frame.
     cx_mm = params.get("loom_center_x_mm")
     cy_mm = params.get("loom_center_y_mm")
     if cx_mm is not None and cy_mm is not None:
-        return (float(cx_mm), float(cy_mm))
+        frame = params.get("loom_center_coordinate_frame")
+        if frame != "source_camera_physical_mm":
+            raise ValueError(
+                "loom_center_{x,y}_mm requires "
+                "loom_center_coordinate_frame='source_camera_physical_mm'."
+            )
+        return float(cx_mm), float(cy_mm)
 
     target_side = int(params.get("target_side", 0))
+    if target_side != 0:
+        # Citrus target-side placement for left/right is not currently
+        # materialized as a typed coordinate surface. Do not substitute the
+        # arena center and publish a plausible but incorrect distance.
+        return None
+    return coordinate_authority.arena_center_mm()
 
-    if target_side == 0:
-        # Center of 358×358 texture → homography → camera mm.
-        if (calibration["homography"] is not None
-                and calibration["pixel_to_mm"] is not None):
-            texture_center = np.array([179.0, 179.0])
-            pt_mm = projector_to_camera_mm(
-                texture_center,
-                calibration["homography"],
-                calibration["pixel_to_mm"],
+
+def resolve_concentric_center_mm(
+    step: ProtocolStep,
+    coordinate_authority: StimulusResponseCoordinateAuthority,
+) -> Tuple[float, float]:
+    """Resolve the concentric texture center in source-camera millimetres."""
+
+    params = flatten_stimulus_params(step.stimulus_params)
+    center_attrs = (
+        step.stimulus_params.get("concentric_grating", {})
+        if isinstance(step.stimulus_params, dict)
+        else {}
+    )
+    if not isinstance(center_attrs, dict):
+        center_attrs = {}
+    cx_mm = center_attrs.get("center_x_mm", params.get("center_x_mm"))
+    cy_mm = center_attrs.get("center_y_mm", params.get("center_y_mm"))
+    if cx_mm is not None and cy_mm is not None:
+        frame = center_attrs.get(
+            "center_coordinate_frame",
+            params.get("center_coordinate_frame"),
+        )
+        if frame != "source_camera_physical_mm":
+            raise ValueError(
+                "Concentric center_x_mm/center_y_mm requires "
+                "center_coordinate_frame='source_camera_physical_mm'."
             )
-            return (float(pt_mm[0]), float(pt_mm[1]))
-
-    # Fallback: arena center.
-    if (calibration["arena_center_px"] is not None
-            and calibration["pixel_to_mm"] is not None):
-        cx_cam, cy_cam = calibration["arena_center_px"]
-        return (cx_cam * calibration["pixel_to_mm"],
-                cy_cam * calibration["pixel_to_mm"])
-
-    return None
+        return float(cx_mm), float(cy_mm)
+    return coordinate_authority.arena_center_mm()
 
 
 def compute_loom_per_frame(
@@ -1911,9 +2067,10 @@ def write_stimulus_response_run(
     source_kinematics_run: str,
     source_kinematics_type: str,
     source_stimulus_run: str,
-    source_bout_run: Optional[str] = None,
-    upstream_lineage: Optional[Dict[str, Any]] = None,
     parameters: Dict[str, Any],
+    source_bout_run: Optional[str] = None,
+    upstream_lineage: Optional[VerifiedTrackMotionLineage] = None,
+    coordinate_authority: Optional[StimulusResponseCoordinateAuthority] = None,
     run_name: Optional[str] = None,
     overwrite: bool = False,
     layout: str = STIMULUS_RESPONSE_LAYOUT_DEFAULT,
@@ -1922,6 +2079,77 @@ def write_stimulus_response_run(
 ) -> str:
     """Write stimulus response run to zarr."""
     console = console or Console()
+    if (
+        not isinstance(upstream_lineage, VerifiedTrackMotionLineage)
+        or upstream_lineage._seal is not _VERIFIED_TRACK_MOTION_LINEAGE_SEAL
+    ):
+        raise ValueError(
+            "Stimulus-response publication requires live verified track-motion lineage."
+        )
+    upstream_lineage.assert_verified()
+    if not isinstance(coordinate_authority, StimulusResponseCoordinateAuthority):
+        raise ValueError(
+            "Stimulus-response publication requires typed selected-stimulus "
+            "coordinate authority."
+        )
+    coordinate_authority.assert_verified()
+    coordinate_authority.assert_track_physical_authority(
+        upstream_lineage.physical_authority
+    )
+    if coordinate_authority.stimulus_run != source_stimulus_run:
+        raise ValueError(
+            "Stimulus-response source run conflicts with its coordinate authority."
+        )
+    lineage_parts = upstream_lineage.run_path.split("/")
+    if (
+        len(lineage_parts) != 4
+        or lineage_parts[:2] != ["analysis", "track_kinematics_runs"]
+        or lineage_parts[2] != source_kinematics_type
+        or lineage_parts[3] != source_kinematics_run
+    ):
+        raise ValueError(
+            "Stimulus-response source run/type arguments conflict with verified lineage."
+        )
+    fish_id_values = np.asarray(global_metrics.get("fish_id"))
+    if (
+        fish_id_values.ndim != 1
+        or fish_id_values.dtype.kind not in "iu"
+        or fish_id_values.dtype.kind == "b"
+    ):
+        raise ValueError(
+            "Stimulus-response global fish_id must be one exact integer track inventory."
+        )
+    payload_track_ids = tuple(int(value) for value in fish_id_values.tolist())
+    if (
+        not payload_track_ids
+        or payload_track_ids != tuple(sorted(set(payload_track_ids)))
+        or payload_track_ids != upstream_lineage.track_ids
+    ):
+        raise ValueError(
+            "Stimulus-response fish IDs conflict with verified track-motion lineage."
+        )
+    try:
+        parameter_fps = float(parameters["fps"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Stimulus-response parameters require the exact verified track fps."
+        ) from exc
+    if (
+        not np.isfinite(parameter_fps)
+        or parameter_fps <= 0
+        or not math.isclose(
+            parameter_fps,
+            upstream_lineage.fps,
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+    ):
+        raise ValueError(
+            "Stimulus-response fps conflicts with verified track-motion lineage."
+        )
+    upstream_lineage_record = _json_safe_attr_value(
+        dict(upstream_lineage.record)
+    )
     if layout not in {STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1, STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}:
         raise ValueError(
             "Unsupported stimulus_response layout "
@@ -1945,7 +2173,7 @@ def write_stimulus_response_run(
     mark_run_started(run_group, run_name=run_name, stage="stimulus_response")
 
     # Provenance.
-    fish_ids = global_metrics["fish_id"].tolist()
+    fish_ids = list(payload_track_ids)
     inputs_dict: Dict[str, Any] = {
         "source_track_kinematics_run": (
             f"analysis/track_kinematics_runs/{source_kinematics_type}/"
@@ -1977,8 +2205,10 @@ def write_stimulus_response_run(
                 archive_identity["session_uuid"] = str(val) if isinstance(val, bytes) else val
     if archive_identity:
         inputs_dict["archive"] = archive_identity
-    if upstream_lineage:
-        inputs_dict["upstream_lineage"] = upstream_lineage
+    inputs_dict["upstream_lineage"] = upstream_lineage_record
+    inputs_dict["stimulus_coordinate_lineage"] = _json_safe_attr_value(
+        dict(coordinate_authority.record)
+    )
 
     safe_parameters = _json_safe_attr_value(parameters)
     safe_inputs = _json_safe_attr_value(inputs_dict)
@@ -1996,7 +2226,7 @@ def write_stimulus_response_run(
         "schema_id": STIMULUS_RESPONSE_SCHEMA_ID,
         "schema_version": STIMULUS_RESPONSE_SCHEMA_VERSION,
         "method": "stimulus_response",
-        "method_version": "stimulus_response.v2",
+        "method_version": "stimulus_response.v3",
         "row_axis": "stimulus_steps",
         "layout": layout,
         "parameters": safe_parameters,
@@ -2032,6 +2262,8 @@ def write_stimulus_response_run(
             f"  Wrote stimulus_response_runs/{run_name}/ "
             f"({len(steps)} steps, {len(fish_ids)} fish, layout {layout})"
         )
+        upstream_lineage.assert_verified()
+        coordinate_authority.assert_verified()
         mark_run_complete(
             run_group,
             parent_group=parent,
@@ -2215,6 +2447,8 @@ def write_stimulus_response_run(
         f"  Wrote stimulus_response_runs/{run_name}/ "
         f"({len(steps)} steps, {len(fish_ids)} fish)"
     )
+    upstream_lineage.assert_verified()
+    coordinate_authority.assert_verified()
     mark_run_complete(
         run_group,
         parent_group=parent,
@@ -2430,7 +2664,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     console = Console()
-    console.print(f"\n[bold]Stimulus Response Analysis[/bold]")
+    console.print("\n[bold]Stimulus Response Analysis[/bold]")
     console.print(f"  Archive: {args.zarr_path}")
 
     root = open_zarr_root(args.zarr_path, mode="r")
@@ -2449,16 +2683,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         console=console,
     )
 
-    fps_attr = root.get("analysis", {})
-    kin_parent = f"analysis/track_kinematics_runs/{args.track_kinematics_type}"
-    kin_group, _ = resolve_zarr_run(root, kin_parent, run_name=kin_run)
-    fps = float(kin_group.attrs.get("fps", 30.0))
+    fps = upstream_lineage.fps
 
     steps, stim_run, protocol = parse_protocol_steps(
         root,
         stimulus_run=args.stimulus_run,
         fps=fps,
         console=console,
+    )
+    coordinate_authority = load_stimulus_response_coordinate_authority(
+        root,
+        stimulus_run=stim_run,
+        track_physical_authority=upstream_lineage.physical_authority,
     )
 
     # Compute metrics.
@@ -2484,40 +2720,40 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     concentric_center_sources: Dict[int, str] = {}
     for step in steps:
         if step.stimulus_mode == _CONCENTRIC_GRATING:
-            cg_attrs = (
-                step.stimulus_params.get("concentric_grating", {})
-                if isinstance(step.stimulus_params, dict) else {}
-            )
-            if not isinstance(cg_attrs, dict):
-                cg_attrs = {}
-            center_params = flatten_stimulus_params(step.stimulus_params)
-            center_params.update(cg_attrs)
             center = resolve_concentric_center_mm(
-                root,
-                center_params,
-                stimulus_run=stim_run,
+                step,
+                coordinate_authority,
             )
-            if center is not None:
-                concentric_centers[step.index] = center
-                concentric_center_sources[step.index] = str(
-                    cg_attrs.get("center_mm_source")
-                    or cg_attrs.get("center_source")
-                    or "resolve_concentric_center_mm"
-                )
-            else:
-                console.print(
-                    f"  [yellow]Warning: could not resolve center for step {step.index}; "
-                    f"skipping concentric metrics.[/yellow]"
-                )
+            concentric_centers[step.index] = center
+            concentric_center_sources[step.index] = (
+                "typed_arena_center_projected_to_source_camera_physical_mm_v1"
+            )
 
     concentric_arena_radius_mm: Optional[float] = None
     if concentric_centers:
         _center_unused, arena_extent, _source_unused = _resolve_omr_arena_geometry_mm(
-            root,
-            stim_run,
+            coordinate_authority,
             np.array([1.0, 0.0], dtype=np.float64),
         )
         concentric_arena_radius_mm = arena_extent
+
+    # Resolve grating arena geometry before parallel dispatch so Dask workers
+    # receive only immutable numeric values and never reopen Zarr authorities.
+    grating_arena_geometry: Dict[
+        int,
+        Tuple[Tuple[float, float], float, str],
+    ] = {}
+    for step in steps:
+        if step.stimulus_mode != _MOVING_GRATING:
+            continue
+        direction = resolve_grating_direction(
+            step,
+            args.camera_to_projector_offset_deg,
+        )
+        grating_arena_geometry[step.index] = _resolve_omr_arena_geometry_mm(
+            coordinate_authority,
+            _grating_direction_vector(direction),
+        )
 
     # Resolve loom calibration and events before parallel dispatch.
     loom_onset_events: Dict[int, List[int]] = {}
@@ -2525,26 +2761,27 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     loom_cal: Dict[str, Any] = {}
     has_loom_steps = any(s.stimulus_mode == _LOOMING_DOT for s in steps)
     if has_loom_steps:
-        cal = load_calibration_transform(root, stimulus_run=stim_run)
         loom_cal = {
-            "pixels_per_mm_projector": cal.get("pixels_per_mm_projector"),
-            "z_eff_mm": cal.get("z_eff_mm"),
+            "pixels_per_mm_projector": coordinate_authority.pixels_per_mm_projector,
+            "z_eff_mm": coordinate_authority.z_eff_mm,
         }
         loom_onset_events = _load_loom_onset_events(root, stim_run, steps)
         for step in steps:
             if step.stimulus_mode == _LOOMING_DOT:
-                center = resolve_loom_center_mm(step, cal)
-                if center is not None:
-                    loom_centers[step.index] = center
-                else:
-                    console.print(
-                        f"  [yellow]Warning: could not resolve loom center for step "
-                        f"{step.index}; skipping loom metrics.[/yellow]"
+                center = resolve_loom_center_mm(step, coordinate_authority)
+                if center is None:
+                    raise ValueError(
+                        f"Loom step {step.index} uses an unmaterialized non-center "
+                        "target placement."
                     )
+                loom_centers[step.index] = center
+        if loom_cal.get("pixels_per_mm_projector") is None:
+            raise ValueError(
+                "Loom analysis requires selected projector pixels-per-mm authority."
+            )
         if loom_cal.get("z_eff_mm") is None:
-            console.print(
-                "  [yellow]Warning: z_eff_mm not in calibration; "
-                "visual angle will be zeros.[/yellow]"
+            raise ValueError(
+                "Loom analysis requires selected effective viewing-distance authority."
             )
 
     # --- Parallel per-step computation via Dask ---
@@ -2584,11 +2821,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             omr = None
             if not args.no_omr:
                 arena_center_mm, arena_axis_extent_mm, arena_geometry_source = (
-                    _resolve_omr_arena_geometry_mm(
-                        root,
-                        stim_run,
-                        _grating_direction_vector(grating_dir),
-                    )
+                    grating_arena_geometry[step.index]
                 )
                 omr = compute_step_omr_metrics(
                     tracks,
@@ -2813,6 +3046,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         source_stimulus_run=stim_run,
         source_bout_run=bout_run_name,
         upstream_lineage=upstream_lineage,
+        coordinate_authority=coordinate_authority,
         parameters=parameters,
         run_name=args.run_name,
         overwrite=args.overwrite,

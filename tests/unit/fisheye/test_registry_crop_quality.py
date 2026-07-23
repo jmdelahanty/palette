@@ -347,7 +347,10 @@ def test_crop_step_status_defer_env_skips_registry_write(monkeypatch, tmp_path: 
     assert called is False
 
 
-def test_finalize_crop_flat_roi_cache_batch_registry_syncs_crop_status(tmp_path: Path) -> None:
+def test_finalize_crop_flat_roi_cache_batch_registry_syncs_crop_status(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     registry_path = tmp_path / "registry.sqlite"
     zarr_path = tmp_path / "recordings" / "rec_finalizer" / "zarr" / "rec_finalizer_analysis.zarr"
     _create_crop_archive(zarr_path, session_uuid="rec_finalizer_uuid")
@@ -355,6 +358,11 @@ def test_finalize_crop_flat_roi_cache_batch_registry_syncs_crop_status(tmp_path:
     root = zarr.open_group(str(zarr_path), mode="a")
     crop_parent = root["crop_runs"]
     mark_run_complete(crop_parent["crop_new"], parent_group=crop_parent, run_name="crop_new")
+    monkeypatch.setattr(
+        "fisheye.utils.finalize_crop_flat_roi_cache_batch_registry."
+        "load_persisted_ordinary_crop_observation_geometry",
+        lambda *_args, **_kwargs: object(),
+    )
 
     run_root = tmp_path / "batch_run"
     status_dir = run_root / "per_recording" / "rec_finalizer"
@@ -371,13 +379,13 @@ def test_finalize_crop_flat_roi_cache_batch_registry_syncs_crop_status(tmp_path:
 
     crop_status = {
         "status": "ok",
-        "stage": "crop_geometry",
+        "stage": "crop_materialized",
         "job_id": "crop123",
         "host": "pytest-host",
         "finished_at_utc": "2026-06-22T00:00:00+00:00",
         "zarr_path": str(zarr_path.resolve()),
-        "latest_any": "crop_new",
-        "latest_any_attrs": {
+        "crop_run": "crop_new",
+        "crop_run_attrs": {
             "crop_storage_mode": "materialized",
             "detection_source_type": "manual",
             "detection_source_path": "refined_detect_runs/refined_001/manual",

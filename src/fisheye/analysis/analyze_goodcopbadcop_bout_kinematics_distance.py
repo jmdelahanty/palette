@@ -27,10 +27,11 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
-    load_epochs,
-    open_distance_run,
     resolve_cohort,
-    resolve_object_roles,
+)
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
@@ -51,22 +52,8 @@ plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.rig
 
 def load(zp: str):
     r = zarr.open_group(zp, mode="r")
-    cd = open_distance_run(r)
-    dist = np.asarray(cd["distances"]["distance_mm"][:], float)
-    b = cd["chaser_bout_response"][sorted(cd["chaser_bout_response"].group_keys())[-1]]["bouts"]
-    bv = np.asarray(b["valid"][:], bool)
-    bs = np.asarray(b["start_frame"][:], np.int64)[bv]
-    kin = {k: np.asarray(b[k][:], float)[bv] for k in KIN_FIELDS}
-    kin["turn_deg"] = np.abs(kin["turn_deg"])
-    roles = resolve_object_roles(r)
-    epochs = load_epochs(r)
-    static = np.zeros(dist.shape[0], bool)
-    for key in ("pre", "post"):
-        if key in epochs:
-            s, e = epochs[key]
-            static[s:e + 1] = True
-    keep = static[bs]  # bouts whose onset falls in a static epoch
-    return dist, bs[keep], {k: v[keep] for k, v in kin.items()}, roles
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_bout_response")
 
 
 def main() -> None:
@@ -82,6 +69,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             dist, bs, kin, roles = load(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], ex)
             continue

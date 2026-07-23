@@ -42,10 +42,11 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
-    latest,
-    nav,
     resolve_cohort,
-    resolve_object_roles,
+)
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
@@ -71,35 +72,8 @@ def load(zp: str):
     'steering_excess': (3,9) and the distance centres, or None if unavailable.
     """
     r = zarr.open_group(zp, mode="r")
-    cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
-    if "chaser_bout_response" not in list(cd.group_keys()):
-        return None
-    b = latest(cd["chaser_bout_response"])
-    roles = resolve_object_roles(r)
-    agg = roles["aggressive"]
-    ref = b["references"]
-    chaser_index = np.asarray(ref["chaser_index"][:])
-    parent = np.asarray(ref["parent_chaser_index"][:])
-    hits = np.where(chaser_index == agg)[0]
-    if hits.size == 0:
-        return None
-    agg_ref = int(hits[0])
-    virt_refs = np.where(parent == agg)[0]
-    if virt_refs.size == 0:
-        return None
-    bn = b["binned"]
-    centers = np.asarray(b["config"]["distance_bin_centers_mm"][:], float)
-    out = {"centers": centers, "metrics": {}}
-    for key, _, _ in FRAME_METRICS:
-        arr = np.asarray(bn[key][:], float)  # (3, n_ref, 9)
-        obj = arr[:, agg_ref, :]                       # (3, 9)
-        virt = np.nanmean(arr[:, virt_refs, :], axis=1)  # (3, 9)
-        out["metrics"][key] = {"object": obj, "virtual": virt}
-    # precomputed object-minus-virtual steering, object axis is 0/1 == chaser_index
-    ov = b["object_vs_virtual"]
-    steer = np.asarray(ov["steering_excess_by_band"][:], float)  # (3, 2, 9)
-    out["steering_excess"] = steer[:, agg, :] if agg < steer.shape[1] else np.full((3, 9), np.nan)
-    return out
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_bout_response")
 
 
 def cohort_stack(loaded):
@@ -147,6 +121,8 @@ def main() -> None:
     for rid, zp in resolve_cohort():
         try:
             d = load(zp)
+        except ChaserDistanceReadError:
+            raise
         except Exception as ex:  # pragma: no cover
             print("skip", rid.split("_GoodCop")[0], type(ex).__name__, ex)
             continue

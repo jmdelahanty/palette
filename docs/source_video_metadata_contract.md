@@ -110,5 +110,5 @@ Current migration status is tracked in `docs/source_video_metadata_migration.md`
 
 ## Zarr representation
 
-The contract is attribute-based and works for Zarr v2 and v3. In Zarr v3 the root
-attributes are stored inside `zarr.json`; this contract does not introduce `.zattrs`.
+Palette persists this contract only in Zarr v3. Root attributes are stored inside
+`zarr.json`; the contract does not introduce or read Zarr-v2 `.zattrs` metadata.

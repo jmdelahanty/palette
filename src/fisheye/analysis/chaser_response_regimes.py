@@ -46,10 +46,14 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadSnapshot,
+    reject_unsealed_chaser_derived_publication,
+)
+from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
     _apply_settle_trim,
-    _decode_text_column,
     _get_group_by_path,
     _normalize_float_array,
     _open_root,
@@ -97,6 +101,10 @@ DEFAULT_MIN_BAND_FRAMES = 50
 # Same problem one level down: a per-bin curve point over a handful of frames swings wildly
 # and reads as structure. Points below this are NaN; frame_count still carries the support.
 DEFAULT_MIN_BIN_FRAMES = 20
+IMMOBILITY_SIGNAL_MODES = (
+    "verified_track_motion",
+    "raw_centroid_explicit",
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +129,7 @@ class ChaserResponseRegimesResult:
     chaser_distance_run_path: str
     source_stimulus_run: str | None
     source_stimulus_path: str | None
+    source_track_motion_authority: dict[str, Any] | None
     fps: float
     total_frames: int
     pixels_per_mm_projector: float
@@ -167,11 +176,16 @@ class ChaserResponseRegimesResult:
     diagnostics: dict[str, Any]
 
 
-def _protocol_chaser_radii_mm(root: zarr.Group, run_group: zarr.Group, *, n_chasers: int) -> np.ndarray:
+def _protocol_chaser_radii_mm(
+    root: zarr.Group,
+    distance: ChaserDistanceReadSnapshot,
+    *,
+    n_chasers: int,
+) -> np.ndarray:
     """Per-chaser dot radius from the protocol; the distance floor lives here, not in the fish."""
 
     out = np.full(int(n_chasers), np.nan, dtype=np.float32)
-    source_path = str(run_group.attrs.get("source_stimulus_path") or "").strip()
+    source_path = str(distance.source_stimulus_path or "").strip()
     stim_group = _get_group_by_path(root, source_path) if source_path else None
     if stim_group is None:
         return out
@@ -339,9 +353,10 @@ def _compute_regime_arrays(
             speed = np.hypot(v_fish[:, 0], v_fish[:, 1])
             # Immobile/moving are decided on the smoothed signal when available -- raw centroid
             # jitter (~1.6 mm/s floor) straddles the 1 mm/s threshold. Computed speed still feeds
-            # the reported mean/median. Aligned to the earlier frame of each transition.
+            # the reported mean/median. Canonical track speeds are transition metrics anchored
+            # to the destination acquisition frame, so transition t->t+1 uses sample t+1.
             im_speed = (
-                np.asarray(immobility_speed[slc], dtype=np.float64)[:-1]
+                np.asarray(immobility_speed[slc], dtype=np.float64)[1:]
                 if immobility_speed is not None else speed
             )
 
@@ -530,47 +545,72 @@ def _build_summary(
     return summary
 
 
-def _load_smoothed_immobility_speed(root, total_frames: int) -> tuple[Optional[np.ndarray], str]:
+def _load_smoothed_immobility_speed(
+    root: zarr.Group,
+    total_frames: int,
+) -> tuple[np.ndarray, str, dict[str, Any]]:
     """Dense per-frame smoothed physical speed (mm/s) from the offline track_kinematics run,
     aligned to the chaser-distance frame axis, for the immobile/moving classification.
 
     Thresholding the RAW centroid speed is unreliable: its jitter noise floor (~1.6 mm/s)
     straddles the 1 mm/s immobility threshold, so "immobile fraction" partly measures tracking
     noise rather than stillness. ``speed_smoothed_mm`` separates bouts from between-bout stillness
-    cleanly (deadbanded to 0 between bouts). Returns (dense_speed, source); (None, 'raw_centroid')
-    if the track-kinematics run is absent -- the caller then falls back to computed speed and warns.
+    cleanly (deadbanded to 0 between bouts). This normal scientific path requires a
+    freshly verified canonical track-motion publication. Missing or invalid authority
+    is an error; raw-centroid analysis is available only through the caller's explicit
+    ``raw_centroid_explicit`` mode.
     """
-
-    def _child(group, name):
-        try:
-            return group[name] if name in list(group.group_keys()) else None
-        except Exception:  # noqa: BLE001
-            return None
-
-    try:
-        node = root
-        for part in ("analysis", "track_kinematics_runs", "offline"):
-            node = _child(node, part)
-            if node is None:
-                return None, "raw_centroid"
-        runs = sorted(node.group_keys())
-        if not runs:
-            return None, "raw_centroid"
-        tracks = _child(node[runs[-1]], "tracks")
-        track_ids = sorted(tracks.group_keys()) if tracks is not None else []
-        if not track_ids:
-            return None, "raw_centroid"
-        track = tracks[track_ids[0]]
-        if "speed_smoothed_mm" not in track or "frame_indices" not in track:
-            return None, "raw_centroid"
-        fi = np.asarray(track["frame_indices"][:], dtype=np.int64).reshape(-1)
-        ss = np.asarray(track["speed_smoothed_mm"][:], dtype=np.float64).reshape(-1)
-        dense = np.full(int(total_frames), np.nan, dtype=np.float64)
-        keep = (fi >= 0) & (fi < int(total_frames)) & (np.arange(fi.shape[0]) < ss.shape[0])
-        dense[fi[keep]] = ss[keep]
-        return dense, "track_kinematics.speed_smoothed_mm"
-    except Exception:  # noqa: BLE001 -- never fail the component over the signal upgrade
-        return None, "raw_centroid"
+    frame_count = int(total_frames)
+    track = load_track_kinematics_track(
+        root,
+        run_name="latest",
+        scope="offline",
+        track_id=0,
+        required_speed_levels=("smoothed",),
+    )
+    if track.source_acquisition_frame_index is None:
+        raise ValueError(
+            f"Verified track motion {track.track_path} has no acquisition-frame identity."
+        )
+    if track.sample_valid is None or track.transition_valid is None:
+        raise ValueError(
+            f"Verified track motion {track.track_path} lacks sample/transition validity."
+        )
+    frames = np.asarray(
+        track.source_acquisition_frame_index,
+        dtype=np.int64,
+    ).reshape(-1)
+    speed = np.asarray(
+        track.speed_mm_by_level["smoothed"],
+        dtype=np.float64,
+    ).reshape(-1)
+    sample_valid = np.asarray(track.sample_valid, dtype=bool).reshape(-1)
+    transition_valid = np.asarray(track.transition_valid, dtype=bool).reshape(-1)
+    if not (
+        frames.shape == speed.shape == sample_valid.shape == transition_valid.shape
+    ):
+        raise ValueError(
+            f"Verified track motion {track.track_path} has inconsistent frame, "
+            "speed, and validity lengths."
+        )
+    if np.any(frames < 0) or np.any(frames >= frame_count):
+        raise ValueError(
+            f"Verified acquisition-frame identities in {track.track_path} exceed "
+            f"the chaser-distance extent [0, {frame_count})."
+        )
+    if np.unique(frames).shape[0] != frames.shape[0]:
+        raise ValueError(
+            f"Verified track motion {track.track_path} repeats acquisition-frame identities."
+        )
+    dense = np.full(frame_count, np.nan, dtype=np.float64)
+    usable = sample_valid & transition_valid & np.isfinite(speed)
+    dense[frames[usable]] = speed[usable]
+    authority = track.authority_record()
+    return (
+        dense,
+        "track_motion.movement/speed/smoothed/mm",
+        authority,
+    )
 
 
 def build_chaser_response_regimes_result(
@@ -590,51 +630,48 @@ def build_chaser_response_regimes_result(
     min_bin_frames: float = DEFAULT_MIN_BIN_FRAMES,
     settle_trim_s: float | None = None,
     motion_spread_threshold_mm: float = 1.0,
+    immobility_signal_mode: str = "verified_track_motion",
 ) -> ChaserResponseRegimesResult:
     if float(moving_speed_threshold_mm_s) < float(immobility_speed_threshold_mm_s):
         raise ValueError("moving_speed_threshold_mm_s must be >= immobility_speed_threshold_mm_s.")
     if not float(far_distance_mm) > float(near_distance_mm):
         raise ValueError("far_distance_mm must be greater than near_distance_mm.")
+    normalized_immobility_mode = str(immobility_signal_mode).strip()
+    if normalized_immobility_mode not in IMMOBILITY_SIGNAL_MODES:
+        raise ValueError(
+            f"Unsupported immobility_signal_mode {immobility_signal_mode!r}; "
+            f"expected one of: {', '.join(IMMOBILITY_SIGNAL_MODES)}."
+        )
 
     root = _open_root(zarr_path, mode="r")
-    run_group, run_name, run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    distance, run_name, run_path = _resolve_chaser_distance_run(
+        root,
+        chaser_distance_run,
+    )
+    distance.require_stimulus_protocol_authority(
+        "chaser radii and position-transition timing"
+    )
 
-    coordinate_frame = str(run_group.attrs.get("coordinate_frame") or "")
-    coordinate_origin = str(run_group.attrs.get("coordinate_origin") or "")
+    coordinate_frame = distance.coordinate_space_id
+    coordinate_origin = distance.coordinate_origin
     if coordinate_frame != "arena_relative_canvas_px":
         raise ValueError(
-            f"Chaser response regimes requires coordinate_frame='arena_relative_canvas_px'; got {coordinate_frame!r}."
+            "Chaser response regimes requires typed "
+            f"space_id='arena_relative_canvas_px'; got {coordinate_frame!r}."
         )
-    pixels_per_mm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
-    if not math.isfinite(pixels_per_mm) or pixels_per_mm <= 0:
-        raise ValueError("Chaser-distance run lacks a positive pixels_per_mm_projector attr.")
+    pixels_per_mm = float(distance.pixels_per_mm_projector)
 
-    if "positions" not in run_group or "distances" not in run_group or "chasers" not in run_group:
-        raise ValueError("Chaser-distance run is missing positions, distances, or chasers group.")
-    positions = run_group["positions"]
-    distances = run_group["distances"]
-    chasers = run_group["chasers"]
-    missing = [
-        name
-        for name in ("fish_centroid_arena_xy", "chaser_arena_xy", "fish_valid", "chaser_valid")
-        if name not in positions
-    ]
-    missing += [name for name in ("distance_mm",) if name not in distances]
-    missing += [name for name in ("chaser_index",) if name not in chasers]
-    if missing:
-        raise ValueError(f"Chaser-distance run missing required array(s) for response regimes: {missing}")
-
-    fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float32)
-    chaser_xy = np.asarray(positions["chaser_arena_xy"][:], dtype=np.float32)
-    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
-    chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
-    distance_mm = np.asarray(distances["distance_mm"][:], dtype=np.float32)
-    chaser_indices = np.asarray(chasers["chaser_index"][:], dtype=np.int64).reshape(-1)
+    fish_xy = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float32)
+    chaser_xy = np.asarray(distance.chaser_arena_xy, dtype=np.float32)
+    fish_valid = np.asarray(distance.fish_valid, dtype=bool)
+    chaser_valid = np.asarray(distance.chaser_valid, dtype=bool)
+    distance_mm = np.asarray(distance.distance_mm, dtype=np.float32)
+    chaser_indices = np.asarray(distance.chaser_index, dtype=np.int64).reshape(-1)
     behavior_labels: tuple[str, ...] = ()
-    if "behavior_class_label_bytes" in chasers:
-        behavior_labels = tuple(_decode_text_column(np.asarray(chasers["behavior_class_label_bytes"][:])))
 
     total_frames = int(fish_xy.shape[0])
+    if total_frames != distance.total_frames:
+        raise ValueError("Typed chaser-distance frame extent is inconsistent.")
     if chaser_xy.ndim != 3 or chaser_xy.shape[0] != total_frames or chaser_xy.shape[2] != 2:
         raise ValueError("positions/chaser_arena_xy must have shape (frame, chaser, xy).")
     if distance_mm.shape != (total_frames, chaser_xy.shape[1]):
@@ -642,10 +679,12 @@ def build_chaser_response_regimes_result(
     if chaser_indices.shape[0] != distance_mm.shape[1]:
         raise ValueError("chasers/chaser_index length does not match distance columns.")
 
-    fps = _safe_float(run_group.attrs.get("fps"), 1.0)
-    epochs = _read_epochs(run_group, total_frames=total_frames)
+    fps = float(distance.fps)
+    epochs = _read_epochs(distance, total_frames=total_frames)
     resolved_settle_trim_s = (
-        _protocol_position_transition_s(root, run_group) if settle_trim_s is None else max(0.0, float(settle_trim_s))
+        _protocol_position_transition_s(root, distance)
+        if settle_trim_s is None
+        else max(0.0, float(settle_trim_s))
     )
     epochs = _apply_settle_trim(
         epochs,
@@ -661,9 +700,23 @@ def build_chaser_response_regimes_result(
     if edges.shape[0] < 2 or not np.all(np.diff(edges.astype(np.float64)) > 0):
         raise ValueError("distance_bin_edges_mm must contain at least two increasing values.")
     centers = ((edges[:-1] + edges[1:]) / 2.0).astype(np.float32)
-    radii = _protocol_chaser_radii_mm(root, run_group, n_chasers=int(chaser_indices.shape[0]))
+    radii = _protocol_chaser_radii_mm(
+        root,
+        distance,
+        n_chasers=int(chaser_indices.shape[0]),
+    )
 
-    immobility_speed, immobility_signal_source = _load_smoothed_immobility_speed(root, total_frames)
+    source_track_motion_authority: dict[str, Any] | None
+    if normalized_immobility_mode == "verified_track_motion":
+        (
+            immobility_speed,
+            immobility_signal_source,
+            source_track_motion_authority,
+        ) = _load_smoothed_immobility_speed(root, total_frames)
+    else:
+        immobility_speed = None
+        immobility_signal_source = "raw_centroid_explicit"
+        source_track_motion_authority = None
 
     arrays, tracking, diagnostics, qc_warnings = _compute_regime_arrays(
         epochs=epochs,
@@ -690,10 +743,13 @@ def build_chaser_response_regimes_result(
     )
     diagnostics = dict(diagnostics)
     diagnostics["immobility_signal_source"] = immobility_signal_source
-    if immobility_speed is None:
-        qc_warnings = tuple(qc_warnings) + ("immobility_signal_fallback_raw_centroid",)
+    diagnostics["immobility_signal_mode"] = normalized_immobility_mode
+    if normalized_immobility_mode == "raw_centroid_explicit":
+        qc_warnings = tuple(qc_warnings) + (
+            "immobility_signal_explicit_raw_centroid",
+        )
 
-    recording_id = str(run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or Path(zarr_path).stem)
+    recording_id = distance.recording_id
     summary = _build_summary(
         recording_id=recording_id,
         epochs=epochs,
@@ -710,8 +766,9 @@ def build_chaser_response_regimes_result(
         component_name=str(component_name),
         chaser_distance_run_name=run_name,
         chaser_distance_run_path=run_path,
-        source_stimulus_run=run_group.attrs.get("source_stimulus_run"),
-        source_stimulus_path=run_group.attrs.get("source_stimulus_path"),
+        source_stimulus_run=distance.source_stimulus_run,
+        source_stimulus_path=distance.source_stimulus_path,
+        source_track_motion_authority=source_track_motion_authority,
         fps=float(fps),
         total_frames=int(total_frames),
         pixels_per_mm_projector=float(pixels_per_mm),
@@ -869,6 +926,7 @@ def _source_refs(result: ChaserResponseRegimesResult) -> dict[str, Any]:
         "source_chaser_distance_path": result.chaser_distance_run_path,
         "source_stimulus_run": result.source_stimulus_run,
         "source_stimulus_path": result.source_stimulus_path,
+        "source_track_motion_authority": result.source_track_motion_authority,
     }
 
 
@@ -884,6 +942,12 @@ def _parameters(result: ChaserResponseRegimesResult) -> dict[str, Any]:
         "settle_trim_s": result.settle_trim_s,
         "chaser_radius_mm": result.chaser_radius_mm,
         "velocity_estimator": result.diagnostics.get("velocity_estimator"),
+        "immobility_signal_mode": result.diagnostics.get(
+            "immobility_signal_mode"
+        ),
+        "immobility_signal_source": result.diagnostics.get(
+            "immobility_signal_source"
+        ),
     }
 
 
@@ -920,6 +984,12 @@ def write_chaser_response_regimes_component(
     write_interactive_spec: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
+    reject_unsealed_chaser_derived_publication(
+        root,
+        run_name=result.chaser_distance_run_name,
+        run_path=result.chaser_distance_run_path,
+        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    )
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name
@@ -1217,6 +1287,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-band-frames", type=float, default=DEFAULT_MIN_BAND_FRAMES)
     parser.add_argument("--min-bin-frames", type=float, default=DEFAULT_MIN_BIN_FRAMES)
     parser.add_argument("--settle-trim-s", type=float, default=None)
+    parser.add_argument(
+        "--immobility-signal-mode",
+        choices=IMMOBILITY_SIGNAL_MODES,
+        default="verified_track_motion",
+        help=(
+            "Use sealed smoothed track motion (default), or explicitly request "
+            "the raw centroid transition estimator."
+        ),
+    )
     parser.add_argument("--apply", action="store_true", help="Write the response-regimes component.")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-png", action="store_true")
@@ -1241,6 +1320,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         min_band_frames=float(args.min_band_frames),
         min_bin_frames=float(args.min_bin_frames),
         settle_trim_s=None if args.settle_trim_s is None else float(args.settle_trim_s),
+        immobility_signal_mode=str(args.immobility_signal_mode),
     )
     applied_path = None
     if args.apply:

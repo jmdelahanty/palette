@@ -14,7 +14,7 @@ PUBLIC_CACHE_DIR=""
 LOG_DIR=""
 RUN_ID=""
 WORKFLOW_ID=""
-SOURCE_TYPE="refined"
+SOURCE_TYPE="detect"
 SOURCE_PATH=""
 SELECTION_POLICY="full_recording"
 FORCE_NEW=0
@@ -49,7 +49,7 @@ usage() {
   cat <<'USAGE'
 Usage: submit_crop_flat_roi_cache_batches_bsub.sh [options]
 
-Submit one crop-geometry + flat-ROI-cache LSF workflow per analysis zarr. This
+Submit one canonical materialized-crop + flat-ROI-cache LSF workflow per analysis zarr. This
 is a thin fan-out wrapper around scripts/submit_crop_flat_roi_cache_bsub.sh.
 
 Discovery:
@@ -65,7 +65,7 @@ Crop/cache:
   --workflow-id ID            Shared workflow namespace under --public-cache-root
   --public-cache-root PATH    Shared cache root (default: /nrs/johnson/palette_staging/flat_roi_cache)
   --public-cache-dir PATH     Explicit shared cache publish dir; overrides root/workflow_id/roi_cache
-  --source-type TYPE          Crop detection source type (default: refined)
+  --source-type TYPE          Crop detection source type (default: detect)
   --source-path PATH          Explicit detection source path
   --selection-policy POLICY   Crop selection policy (default: full_recording)
   --force-new                 Force new crop runs

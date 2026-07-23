@@ -351,7 +351,7 @@ def test_legacy_parent_warns_once_when_accepting_unmarked_child() -> None:
     assert len(matching) == 1
 
 
-def test_strict_parent_stray_unmarked_group_cannot_win_latest_resolution() -> None:
+def test_strict_parent_rejects_disagreeing_selector_pair() -> None:
     parent = FakeGroup(
         attrs={
             COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
@@ -366,7 +366,35 @@ def test_strict_parent_stray_unmarked_group_cannot_win_latest_resolution() -> No
     mark_run_complete(complete, parent_group=parent, run_name="run_001")
     parent.attrs["latest"] = "zzz_debug"
 
-    assert resolve_latest_complete_run_name(parent) == "run_001"
+    assert resolve_latest_complete_run_name(parent) is None
+
+
+@pytest.mark.parametrize(
+    ("latest", "latest_complete"),
+    (("old", "candidate"), ("candidate", "old")),
+)
+def test_canonical_latest_resolver_rejects_each_intermediate_selector_handoff(
+    latest: str,
+    latest_complete: str,
+) -> None:
+    parent = FakeGroup(
+        attrs={
+            COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
+            "latest": latest,
+            "latest_complete": latest_complete,
+        }
+    )
+    old = FakeGroup(attrs={"stage_selector_eligible": True})
+    candidate = FakeGroup(attrs={"stage_selector_eligible": False})
+    parent["old"] = old
+    parent["candidate"] = candidate
+    mark_run_complete(old, run_name="old")
+    mark_run_complete(candidate, run_name="candidate")
+
+    assert resolve_latest_complete_run_name(parent) is None
+    assert (
+        resolve_latest_complete_run_name(parent, legacy_default=True) == "old"
+    )
 
 
 def test_latest_resolver_skips_incomplete_contract_run() -> None:
@@ -382,6 +410,45 @@ def test_latest_resolver_skips_incomplete_contract_run() -> None:
     assert resolve_latest_complete_run_name(parent) == "old"
 
 
+def test_canonical_latest_resolver_never_guesses_during_selector_handoff() -> None:
+    parent = FakeGroup(
+        attrs={
+            COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
+            "latest": "candidate",
+            "latest_complete": "candidate",
+        }
+    )
+    prior = FakeGroup()
+    candidate = FakeGroup(attrs={"stage_selector_eligible": False})
+    parent["zzz_never_selected_prior"] = prior
+    parent["candidate"] = candidate
+    mark_run_complete(prior, run_name="zzz_never_selected_prior")
+    mark_run_complete(candidate, run_name="candidate")
+
+    assert resolve_latest_complete_run_name(parent) is None
+
+
+def test_explicit_legacy_compatibility_can_scan_unselected_children() -> None:
+    parent = FakeGroup(
+        attrs={
+            COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
+            "latest": "candidate",
+            "latest_complete": "candidate",
+        }
+    )
+    prior = FakeGroup()
+    candidate = FakeGroup(attrs={"stage_selector_eligible": False})
+    parent["legacy_prior"] = prior
+    parent["candidate"] = candidate
+    mark_run_complete(prior, run_name="legacy_prior")
+    mark_run_complete(candidate, run_name="candidate")
+
+    assert (
+        resolve_latest_complete_run_name(parent, legacy_default=True)
+        == "legacy_prior"
+    )
+
+
 def test_mark_complete_publishes_latest_and_latest_complete() -> None:
     parent = FakeGroup()
     run = FakeGroup()
@@ -393,6 +460,52 @@ def test_mark_complete_publishes_latest_and_latest_complete() -> None:
     assert is_run_complete(run) is True
     assert parent.attrs["latest"] == "run_001"
     assert parent.attrs["latest_complete"] == "run_001"
+
+
+def test_nonselector_complete_run_never_escapes_into_stage_selection() -> None:
+    parent = FakeGroup()
+    normal = FakeGroup()
+    auxiliary = FakeGroup(attrs={"stage_selector_eligible": False})
+    parent["normal"] = normal
+    parent["zzz_auxiliary"] = auxiliary
+    mark_run_complete(normal, parent_group=parent, run_name="normal")
+    mark_run_started(
+        auxiliary,
+        run_name="zzz_auxiliary",
+        stage="crop_compatibility",
+    )
+    mark_run_pending(parent, "zzz_auxiliary")
+
+    mark_run_complete(
+        auxiliary,
+        parent_group=parent,
+        run_name="zzz_auxiliary",
+    )
+
+    assert parent.attrs["latest"] == "normal"
+    assert parent.attrs["latest_complete"] == "normal"
+    assert "latest_pending" not in parent.attrs
+    assert resolve_latest_complete_run_name(parent) == "normal"
+    with pytest.raises(ValueError, match="not eligible"):
+        set_authoritative_run(parent, "zzz_auxiliary", approved_by="jeremy")
+
+    parent.attrs.clear()
+    assert resolve_latest_complete_run_name(parent) == "normal"
+
+
+def test_malformed_selector_eligibility_marker_fails_closed() -> None:
+    parent = FakeGroup()
+    normal = FakeGroup()
+    malformed = FakeGroup(attrs={"stage_selector_eligible": "true"})
+    parent["normal"] = normal
+    parent["zzz_malformed"] = malformed
+    mark_run_complete(normal, parent_group=parent, run_name="normal")
+    mark_run_complete(malformed, parent_group=parent, run_name="zzz_malformed")
+
+    assert parent.attrs["latest"] == "normal"
+    assert resolve_latest_complete_run_name(parent) == "normal"
+    with pytest.raises(ValueError, match="not eligible"):
+        set_authoritative_run(parent, "zzz_malformed", approved_by="jeremy")
 
 
 def test_epoch_two_mark_complete_refuses_missing_run_provenance() -> None:
@@ -689,6 +802,46 @@ def test_emit_stage_completion_refuses_incomplete_opted_in_run(tmp_path: Path) -
     )
 
     assert wrote is False
+
+
+def test_emit_stage_completion_refuses_complete_ineligible_run(tmp_path: Path) -> None:
+    root = FakeGroup()
+    detect_parent = FakeGroup()
+    run = FakeGroup()
+    root["detect_runs"] = detect_parent
+    detect_parent["detect_001"] = run
+    mark_run_started(run, run_name="detect_001", stage="detect")
+    _add_valid_detect_arrays(run)
+    mark_run_complete(run, parent_group=None, run_name="detect_001")
+    run.attrs["stage_selector_eligible"] = False
+
+    called = False
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    def _upsert(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="detect",
+        status="ok",
+        source="unit_test",
+        run_name="detect_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=_upsert,
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is False
+    assert called is False
 
 
 def test_emit_stage_completion_refuses_unmarked_run_under_strict_parent(tmp_path: Path) -> None:

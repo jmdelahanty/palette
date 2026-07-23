@@ -40,6 +40,8 @@ def test_detect_keypoints_yolo_accepts_mask_threshold() -> None:
     assert "roi_live_gpu_chunk_frames" in params
     assert "input_mode" in params
     assert "model_input_transform_mode" in params
+    assert "coordinate_contract_mode" in params
+    assert params["coordinate_contract_mode"].default == "canonical"
     assert "profile_timings" in params
     assert "keypoint_roi_shard_rows" in params
     assert "keypoint_frame_shard_rows" in params
@@ -56,7 +58,43 @@ def test_keypoint_cli_defaults_to_sharding_and_supports_regular_chunk_opt_out() 
 
     assert default_args.keypoint_roi_shard_rows == DEFAULT_KEYPOINT_ROI_SHARD_ROWS
     assert default_args.keypoint_frame_shard_rows == DEFAULT_KEYPOINT_FRAME_SHARD_ROWS
+    assert default_args.coordinate_contract_mode == "canonical"
     assert regular_args.keypoint_roi_shard_rows is None
+
+
+def test_keypoint_cli_requires_explicit_legacy_mode_for_collection_shards() -> None:
+    parser = yolo_mod._build_arg_parser()
+    args = parser.parse_args(
+        [
+            "archive.zarr",
+            "--model",
+            "pose.pt",
+            "--output-parent",
+            "keypoint_shard_runs",
+            "--coordinate-contract-mode",
+            "legacy_noncanonical",
+        ]
+    )
+
+    assert args.coordinate_contract_mode == "legacy_noncanonical"
+
+
+def test_canonical_keypoint_mode_rejects_collection_shard_before_io() -> None:
+    with pytest.raises(ValueError, match="Collection shards must explicitly use"):
+        detect_keypoints_yolo(
+            "missing.zarr",
+            "missing.pt",
+            output_parent="keypoint_shard_runs",
+        )
+
+
+def test_final_keypoint_parent_rejects_legacy_mode_before_io() -> None:
+    with pytest.raises(ValueError, match="Final keypoints_runs are canonical-only"):
+        detect_keypoints_yolo(
+            "missing.zarr",
+            "missing.pt",
+            coordinate_contract_mode="legacy_noncanonical",
+        )
 
 
 def test_resolve_full_image_shape_prefers_raw_video_shape() -> None:

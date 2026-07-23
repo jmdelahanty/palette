@@ -6,7 +6,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 import zarr
@@ -14,10 +14,16 @@ import zarr
 from fisheye.shared.zarr.columnar import read_columnar_dataset
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+    resolve_latest_complete_run_name,
+)
 
 BOUT_CLASSIFICATION_SCHEMA_ID = "analysis.bout_classification_runs"
 BOUT_CLASSIFICATION_SCHEMA_VERSION = 1
 PER_BOUT_SCHEMA_ID = f"{BOUT_CLASSIFICATION_SCHEMA_ID}.per_bout"
+BOUT_CLASSIFICATION_RUN_PARENT = "analysis/bout_classification_runs"
 
 REQUIRED_RUN_ATTRS = (
     "schema_id",
@@ -73,26 +79,72 @@ def _require_group(parent: zarr.Group, name: str) -> zarr.Group:
     return group
 
 
+def _resolve_bout_classification_run(
+    root: zarr.Group,
+    run_name: str = "latest",
+    *,
+    expected_selector_eligible: bool,
+) -> tuple[zarr.Group, str, str]:
+    """Resolve one exact complete normal or staged classification run."""
+
+    analysis = _require_group(root, "analysis")
+    parent = _require_group(analysis, "bout_classification_runs")
+    spec = str(run_name or "latest").strip()
+    implicit = spec.lower() == "latest"
+    prefix = f"{BOUT_CLASSIFICATION_RUN_PARENT}/"
+    if implicit:
+        resolved = resolve_latest_complete_run_name(parent, legacy_default=False)
+    elif "/" not in spec:
+        resolved = spec
+    elif (
+        spec.startswith(prefix)
+        and spec[len(prefix) :]
+        and "/" not in spec[len(prefix) :]
+    ):
+        resolved = spec[len(prefix) :]
+    else:
+        raise ValueError(
+            "Bout classification run must be a bare child name or the exact path "
+            f"{BOUT_CLASSIFICATION_RUN_PARENT}/<run>; got {run_name!r}."
+        )
+    if implicit and not resolved:
+        raise ValueError(
+            "No stable complete selector-eligible bout classification run is selected; "
+            "selector activation may be in progress, so retry the read."
+        )
+    if not resolved or str(resolved) not in parent:
+        raise ValueError(f"Bout classification run {run_name!r} not found.")
+    resolved_name = str(resolved)
+    run_group = parent[resolved_name]
+    run_path = f"{BOUT_CLASSIFICATION_RUN_PARENT}/{resolved_name}"
+    if not isinstance(run_group, zarr.Group):
+        raise ValueError(f"{run_path} is not a Zarr group.")
+    if not is_run_complete_in_parent(parent, run_group, legacy_default=False):
+        raise ValueError(f"Bout classification run {resolved_name!r} is not complete.")
+    if expected_selector_eligible:
+        if not is_run_selector_eligible(run_group):
+            raise ValueError(
+                f"Bout classification run {resolved_name!r} is not selector-eligible."
+            )
+    elif run_group.attrs.get("stage_selector_eligible") is not False:
+        raise ValueError(
+            f"Bout classification run {resolved_name!r} is not an exact staged "
+            "selector-ineligible candidate."
+        )
+    return run_group, resolved_name, run_path
+
+
 def resolve_bout_classification_run(
     root: zarr.Group,
     run_name: str = "latest",
 ) -> tuple[zarr.Group, str, str]:
-    """Resolve a bout-classification run by name, path, or ``latest``."""
+    """Resolve one complete selector-eligible run by controlled name or path."""
 
-    analysis = _require_group(root, "analysis")
-    parent = _require_group(analysis, "bout_classification_runs")
-    spec = str(run_name or "latest").strip().strip("/")
-    if spec.startswith("analysis/bout_classification_runs/"):
-        parts = spec.split("/")
-        resolved = parts[2] if len(parts) >= 3 else ""
-    elif spec == "latest":
-        resolved = parent.attrs.get("latest")
-    else:
-        resolved = spec
-    if not resolved or str(resolved) not in parent:
-        raise ValueError(f"Bout classification run {run_name!r} not found.")
-    resolved_name = str(resolved)
-    return parent[resolved_name], resolved_name, f"analysis/bout_classification_runs/{resolved_name}"
+    return _resolve_bout_classification_run(
+        root,
+        run_name,
+        expected_selector_eligible=True,
+    )
 
 
 def load_bout_classification_table(run_group: zarr.Group) -> np.ndarray:
@@ -135,23 +187,21 @@ def _probability_summary(values: np.ndarray) -> dict[str, object]:
     }
 
 
-def validate_bout_classification_run(
+def _validate_bout_classification_run(
     root: zarr.Group,
     run_name: str = "latest",
     *,
     strict: bool = False,
+    staged_candidate: bool,
 ) -> dict[str, object]:
-    """Validate the generic bout-classification run contract.
-
-    Non-strict mode treats newer provenance/conversion attrs as warnings so
-    early canary runs remain readable. Strict mode requires those recommended
-    fields too.
-    """
-
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        run_group, resolved_name, run_path = resolve_bout_classification_run(root, run_name)
+        run_group, resolved_name, run_path = _resolve_bout_classification_run(
+            root,
+            run_name,
+            expected_selector_eligible=not staged_candidate,
+        )
     except Exception as exc:
         return {
             "ok": False,
@@ -237,6 +287,47 @@ def validate_bout_classification_run(
         "errors": errors,
         "warnings": warnings,
     }
+
+
+def validate_bout_classification_run(
+    root: zarr.Group,
+    run_name: str = "latest",
+    *,
+    strict: bool = False,
+) -> dict[str, object]:
+    """Validate one complete selector-eligible classification publication.
+
+    Non-strict mode treats newer provenance/conversion attrs as warnings so
+    early canary runs remain readable. Strict mode requires those recommended
+    fields too.
+    """
+
+    return _validate_bout_classification_run(
+        root,
+        run_name,
+        strict=strict,
+        staged_candidate=False,
+    )
+
+
+def validate_staged_bout_classification_run(
+    root: zarr.Group,
+    run_name: str,
+    *,
+    strict: bool = False,
+) -> dict[str, object]:
+    """Validate an exact complete candidate before its eligibility commit.
+
+    This helper is reserved for the publication writer's activation proof.
+    Normal readers must use :func:`validate_bout_classification_run`.
+    """
+
+    return _validate_bout_classification_run(
+        root,
+        run_name,
+        strict=strict,
+        staged_candidate=True,
+    )
 
 
 def summarize_bout_classification_run(

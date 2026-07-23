@@ -10,13 +10,18 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from fisheye.utils.import_run_group_artifact import SUPPORTED_LAYOUTS
-from fisheye.utils.run_detection_artifact import required_arrays_report, strict_json_report, tree_hash
+from fisheye.utils.run_detection_artifact import (
+    DETECTION_ARTIFACT_LAYOUT,
+    required_arrays_report,
+    strict_json_report,
+    tree_hash,
+)
 
 
 MUTABLE_CHILDREN_BY_LAYOUT = {
     # Existing Palette detect-quality reports are appended under the raw detect
     # run. The imported model-output core remains fingerprinted separately.
-    "detect_yolo_sparse_v1": ("quality_reports",),
+    DETECTION_ARTIFACT_LAYOUT: ("quality_reports",),
 }
 
 

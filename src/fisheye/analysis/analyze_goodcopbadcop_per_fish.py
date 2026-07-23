@@ -55,11 +55,11 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.goodcopbadcop_common import (
     figures_dir,
-    latest,
-    load_epochs,
-    nav,
     resolve_cohort,
-    resolve_object_roles,
+)
+from fisheye.analysis.chaser_distance_io import (
+    ChaserDistanceReadError,
+    load_chaser_distance_run,
 )
 from fisheye.analysis.analyze_goodcopbadcop_escape import load as escape_load, escape_rate
 from fisheye.analysis.analyze_goodcopbadcop_radial_turn_direction import load_rows as steer_load, _shell_mean
@@ -80,17 +80,8 @@ def _early_late(dmap):
 
 def learning_index(zp):
     r = zarr.open_group(zp, mode="r")
-    cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
-    et = latest(cd["chaser_escape_events"])["trials"]
-    o = np.asarray(et["ordinal"][:], int)
-    esc = np.asarray(et["escape_rate_per_valid_s"][:], float)
-    ef = latest(cd["chaser_escape_freeze"])
-    fo = np.asarray(ef["trials"]["trial_ordinal"][:], int)
-    ff = np.asarray(ef["trial_metrics"]["freeze_low_speed_fraction"][:], float)
-    ee, el = _early_late({int(a): b for a, b in zip(o, esc)})
-    fe, fl = _early_late({int(a): b for a, b in zip(fo, ff)})
-    return {"esc_early": ee, "esc_late": el, "esc_delta": el - ee,
-            "frz_early": fe, "frz_late": fl, "frz_delta": fl - fe}
+    distance = load_chaser_distance_run(r)
+    distance.require_derived_surface_authority("chaser_escape_events")
 
 
 def escape_fold(zp):
@@ -174,35 +165,9 @@ def spatial_avoidance_did(zp):
     more than the blue one). occ_did = post - pre of that: >0 = the fish singles out the
     aggressive object more after training -- learned, wall-preference-immune.
     """
-    thr = 15.0
     r = zarr.open_group(zp, mode="r")
-    cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
-    roles = resolve_object_roles(r)
-    agg, inr = roles["aggressive"], roles["inert"]
-    fish = np.asarray(cd["positions"]["fish_centroid_arena_xy"][:], float)
-    fvalid = np.asarray(cd["positions"]["fish_valid"][:], bool)
-    chas = np.asarray(cd["positions"]["chaser_arena_xy"][:], float)
-    cvalid = np.asarray(cd["positions"]["chaser_valid"][:], bool)
-    ppm = float(cd.attrs.get("pixels_per_mm_projector"))
-    dA = np.hypot(fish[:, 0] - chas[:, agg, 0], fish[:, 1] - chas[:, agg, 1]) / ppm
-    dI = np.hypot(fish[:, 0] - chas[:, inr, 0], fish[:, 1] - chas[:, inr, 1]) / ppm
-    epochs = load_epochs(r)
-    out = {}
-    for name in ("pre", "post"):
-        if name not in epochs:
-            out[f"occ_agg_{name}"] = out[f"occ_inert_{name}"] = out[f"agg_spec_{name}"] = np.nan
-            continue
-        s, e = epochs[name]
-        mA = fvalid & cvalid[:, agg] & np.isfinite(dA); mA[:s] = False; mA[e + 1:] = False
-        mI = fvalid & cvalid[:, inr] & np.isfinite(dI); mI[:s] = False; mI[e + 1:] = False
-        na = float(np.mean(dA[mA] < thr)) if mA.sum() > 100 else np.nan
-        ni = float(np.mean(dI[mI] < thr)) if mI.sum() > 100 else np.nan
-        out[f"occ_agg_{name}"] = na
-        out[f"occ_inert_{name}"] = ni
-        out[f"agg_spec_{name}"] = (ni - na) if (np.isfinite(na) and np.isfinite(ni)) else np.nan
-    out["occ_did"] = (out["agg_spec_post"] - out["agg_spec_pre"]
-                      if np.isfinite(out.get("agg_spec_post", np.nan)) and np.isfinite(out.get("agg_spec_pre", np.nan)) else np.nan)
-    return out
+    distance = load_chaser_distance_run(r)
+    distance.require_behavior_authority()
 
 
 def spearman(a, b):
@@ -236,6 +201,8 @@ def main() -> None:
             try:
                 rec.update(fn(zp))
                 got_any = True
+            except ChaserDistanceReadError:
+                raise
             except Exception:
                 pass
         if got_any:

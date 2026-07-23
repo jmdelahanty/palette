@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,6 +23,11 @@ from rich.console import Console
 from scipy.ndimage import gaussian_filter
 
 from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
+from fisheye.analysis.track_kinematics_io import (
+    list_track_ids,
+    load_track_kinematics_track,
+    resolve_track_kinematics_run,
+)
 from fisheye.shared.citrus_enums import EXPERIMENT_EVENT_TYPE, EVENT_NAME_TO_ID
 
 
@@ -40,6 +45,16 @@ class TrainingPeriods:
     train_end_ns: Optional[int] = None
     post_start_ns: Optional[int] = None
     post_end_ns: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class VerifiedHeatmapPositions:
+    frames: np.ndarray
+    positions: np.ndarray
+    reference_width: int
+    reference_height: int
+    run_label: str
+    track_motion_authorities: tuple[dict[str, Any], ...]
 
 
 def _to_python(value):
@@ -210,25 +225,97 @@ def _determine_periods(
     )
 
 
-def _collect_positions(movement_run: zarr.Group) -> Tuple[np.ndarray, np.ndarray]:
-    tracks_group = movement_run["tracks"]
-    track_ids = movement_run["track_ids"][:]
+def _track_run_spec(value: Optional[str]) -> tuple[str, str]:
+    spec = str(value or "latest").strip().strip("/")
+    parts = spec.split("/")
+    if spec.startswith("analysis/track_kinematics_runs/") and len(parts) == 4:
+        return parts[2], parts[3]
+    if len(parts) == 2 and parts[0] in {"online", "offline"}:
+        return parts[0], parts[1]
+    if len(parts) == 1:
+        return "offline", parts[0]
+    raise ValueError(
+        "Track kinematics run must be a bare offline run name, "
+        "'<scope>/<run>', or its canonical analysis path."
+    )
+
+
+def _collect_positions(
+    root: zarr.Group,
+    run_spec: Optional[str],
+    console: Console,
+) -> VerifiedHeatmapPositions:
+    scope, requested_name = _track_run_spec(run_spec)
+    run_group, resolved_name, _run_path = resolve_track_kinematics_run(
+        root,
+        run_name=requested_name,
+        scope=scope,
+    )
+    track_ids = list_track_ids(run_group)
+    if not track_ids:
+        raise ValueError("Verified track-motion run contains no tracks.")
     frames_list: List[np.ndarray] = []
     positions_list: List[np.ndarray] = []
+    authorities: list[dict[str, Any]] = []
+    reference_extent: tuple[int, int] | None = None
+    manifest_sha256: str | None = None
     for track_id in track_ids:
-        track = tracks_group[f"id_{int(track_id)}"]
-        frames = track["frame_indices"][:]
-        positions = track["positions_px"][:]
-        frames_list.append(frames.astype(np.int64, copy=False))
-        positions_list.append(positions.astype(np.float64, copy=False))
-    if not frames_list:
-        raise ValueError("Track kinematics run contains no track data.")
+        track = load_track_kinematics_track(
+            root,
+            run_name=resolved_name,
+            scope=scope,
+            track_id=int(track_id),
+            required_speed_levels=(),
+        )
+        positions, width, height = track.require_direct_source_camera_positions_px()
+        if track.source_acquisition_frame_index is None or track.sample_valid is None:
+            raise ValueError(
+                f"Verified track motion {track.track_path} lacks frame/sample identity."
+            )
+        frames = np.asarray(
+            track.source_acquisition_frame_index,
+            dtype=np.int64,
+        ).reshape(-1)
+        positions = np.asarray(positions, dtype=np.float64)
+        sample_valid = np.asarray(track.sample_valid, dtype=bool).reshape(-1)
+        if positions.shape != (frames.shape[0], 2) or sample_valid.shape != frames.shape:
+            raise ValueError(
+                f"Verified track motion {track.track_path} has inconsistent position rows."
+            )
+        if reference_extent is None:
+            reference_extent = (width, height)
+            manifest_sha256 = track.motion_manifest_sha256
+        elif reference_extent != (width, height):
+            raise ValueError(
+                "Verified track positions disagree on source-camera reference dimensions."
+            )
+        if track.motion_manifest_sha256 != manifest_sha256:
+            raise ValueError(
+                "Track-motion authority changed while collecting heatmap positions."
+            )
+        usable = sample_valid & np.isfinite(positions).all(axis=1)
+        frames_list.append(frames[usable])
+        positions_list.append(positions[usable])
+        authorities.append(track.authority_record())
     frames = np.concatenate(frames_list)
     positions = np.concatenate(positions_list)
-    order = np.argsort(frames)
+    order = np.argsort(frames, kind="stable")
     frames = frames[order]
     positions = positions[order]
-    return frames, positions
+    assert reference_extent is not None
+    label = f"{scope}/{resolved_name}"
+    console.log(
+        "[cyan]Using verified track_kinematics_run:[/cyan] "
+        f"{label} ({reference_extent[0]}×{reference_extent[1]} source-camera px)"
+    )
+    return VerifiedHeatmapPositions(
+        frames=frames,
+        positions=positions,
+        reference_width=reference_extent[0],
+        reference_height=reference_extent[1],
+        run_label=label,
+        track_motion_authorities=tuple(authorities),
+    )
 
 
 def _compute_period_heatmaps(
@@ -418,9 +505,6 @@ def _create_heatmap(
 
 
 def _resolve_latest(parent: zarr.Group, run_name: Optional[str], label: str, console: Console) -> Tuple[zarr.Group, str]:
-    if label == "track_kinematics_run":
-        return _resolve_track_kinematics_run(parent, run_name, console)
-
     if run_name:
         if run_name not in parent:
             raise ValueError(f"{label} '{run_name}' not found.")
@@ -434,83 +518,6 @@ def _resolve_latest(parent: zarr.Group, run_name: Optional[str], label: str, con
         raise ValueError(f"{label} '{latest}' referenced by 'latest' is missing.")
     console.log(f"[cyan]Using {label}:[/cyan] {latest} (latest)")
     return parent[latest], latest
-
-
-def _resolve_track_kinematics_run(
-    parent: zarr.Group, run_name: Optional[str], console: Console
-) -> Tuple[zarr.Group, str]:
-    online_parent = parent.get("online")
-    offline_parent = parent.get("offline")
-
-    def lookup(sub_parent: Optional[zarr.Group], name: str) -> Optional[zarr.Group]:
-        if sub_parent is None:
-            return None
-        return sub_parent.get(name)
-
-    def resolve_name(name: str) -> Optional[Tuple[zarr.Group, str]]:
-        if "/" in name:
-            prefix, rest = name.split("/", 1)
-            if prefix == "online":
-                group = lookup(online_parent, rest)
-                if group is not None:
-                    return group, f"online/{rest}"
-            elif prefix == "offline":
-                group = lookup(offline_parent, rest)
-                if group is not None:
-                    return group, f"offline/{rest}"
-            return None
-        group = lookup(online_parent, name)
-        if group is not None:
-            return group, f"online/{name}"
-        group = lookup(offline_parent, name)
-        if group is not None:
-            return group, f"offline/{name}"
-        return None
-
-    if run_name:
-        resolved = resolve_name(run_name)
-        if resolved is None:
-            raise ValueError(f"track_kinematics_run '{run_name}' not found.")
-        group, label = resolved
-        console.log(f"[cyan]Using track_kinematics_run:[/cyan] {label}")
-        return group, label
-
-    candidates: list[Tuple[zarr.Group, str]] = []
-
-    if online_parent is not None:
-        latest_online = online_parent.attrs.get("latest")
-        if isinstance(latest_online, str):
-            resolved = resolve_name(f"online/{latest_online}")
-            if resolved is not None:
-                candidates.append(resolved)
-
-    if offline_parent is not None:
-        latest_offline = offline_parent.attrs.get("latest")
-        if isinstance(latest_offline, str):
-            resolved = resolve_name(f"offline/{latest_offline}")
-            if resolved is not None:
-                candidates.append(resolved)
-
-    legacy_latest = parent.attrs.get("latest")
-    if isinstance(legacy_latest, str):
-        resolved = resolve_name(legacy_latest)
-        if resolved is not None and resolved not in candidates:
-            candidates.append(resolved)
-
-    if not candidates:
-        console.log("[yellow]No track kinematics runs referenced by 'latest'; scanning available runs.[/yellow]")
-        for subgroup, prefix in ((online_parent, "online"), (offline_parent, "offline")):
-            if subgroup is None:
-                continue
-            for name in subgroup.group_keys():
-                candidates.append((subgroup[name], f"{prefix}/{name}"))
-
-    if not candidates:
-        raise ValueError("No track kinematics runs found under analysis/track_kinematics_runs.")
-
-    group, label = candidates[0]
-    console.log(f"[cyan]Using track_kinematics_run:[/cyan] {label}")
-    return group, label
 
 
 def _format_duration(start_ns: Optional[int], end_ns: Optional[int]) -> str:
@@ -539,15 +546,13 @@ def plot_training_heatmaps(
     if analysis is None:
         raise ValueError("Archive missing 'analysis' group.")
 
-    movement_parent = analysis.get("track_kinematics_runs")
-    if movement_parent is None or not movement_parent:
-        raise ValueError("No track kinematics runs found under analysis/track_kinematics_runs.")
-    movement_run_group, track_kinematics_run_name = _resolve_latest(
-        movement_parent,
+    console.log("[bold]Loading verified source-camera track positions...[/bold]")
+    verified_positions = _collect_positions(
+        root,
         track_kinematics_run_name,
-        "track_kinematics_run",
         console,
     )
+    track_kinematics_run_name = verified_positions.run_label
 
     stimulus_parent = analysis.get("stimulus_runs")
     if stimulus_parent is None or not stimulus_parent:
@@ -565,14 +570,14 @@ def plot_training_heatmaps(
         raise ValueError("Stimulus metadata missing 'triggering_camera_frame_id'.")
     camera_frames_all = camera_frames_all.astype(np.int64, copy=False)
 
-    console.log("[bold]Loading track kinematics run positions...[/bold]")
-    frames, positions = _collect_positions(movement_run_group)
+    frames = verified_positions.frames
+    positions = verified_positions.positions
 
     periods = _determine_periods(events, stim_to_camera, camera_frames_all, console)
 
     console.log("[bold]Computing heatmaps...[/bold]")
-    width = int(root.attrs.get("width", 4512))
-    height = int(root.attrs.get("height", 4512))
+    width = verified_positions.reference_width
+    height = verified_positions.reference_height
 
     period_specs = [
         ("pre_training", periods.pre_start, periods.pre_end, periods.pre_start_ns, periods.pre_end_ns),
@@ -608,6 +613,18 @@ def plot_training_heatmaps(
             f"bin size {bin_size}px, smoothing σ={smooth_sigma}"
         ),
     )
+    current_positions = _collect_positions(
+        root,
+        verified_positions.run_label,
+        console,
+    )
+    if (
+        current_positions.track_motion_authorities
+        != verified_positions.track_motion_authorities
+    ):
+        raise ValueError(
+            "Track-motion authority changed while rendering training heatmaps."
+        )
     _save_or_show(fig, save_path, suffix="", show=show, console=console)
 
     if include_chaser:
@@ -617,14 +634,41 @@ def plot_training_heatmaps(
             stimulus_run=stimulus_run_name,
             chaser_index=chaser_index,
         )
+        handoff = bundle.online_coordinate_handoff
+        if handoff is None:
+            raise ValueError(
+                "Chaser heatmaps require a canonical typed online coordinate handoff."
+            )
+        handoff.assert_verified()
+        descriptor = handoff.coordinate_descriptor.descriptor
+        extent = descriptor.reference_extent
+        chaser_width = extent.width
+        chaser_height = extent.height
+        if (
+            descriptor.geometry_type != "point_xy"
+            or descriptor.components != ("x", "y")
+            or descriptor.component_units != ("px", "px")
+            or isinstance(chaser_width, bool)
+            or isinstance(chaser_height, bool)
+            or not isinstance(chaser_width, (int, float))
+            or not isinstance(chaser_height, (int, float))
+            or not float(chaser_width).is_integer()
+            or not float(chaser_height).is_integer()
+            or int(chaser_width) <= 0
+            or int(chaser_height) <= 0
+            or extent.units != "px"
+        ):
+            raise ValueError(
+                "Canonical chaser positions have unsupported point/reference semantics."
+            )
         chaser_frames = bundle.camera_frame_ids
         online_positions = _stack_online_positions(bundle.online)
-        offline_positions = bundle.offline.get("chaser_position_px")
-
-        dataset_specs = [
-            ("online", online_positions, "Online chaser telemetry"),
-            ("offline", offline_positions, "Offline chaser metrics"),
-        ]
+        dataset_specs = [("online", online_positions, "Online chaser telemetry")]
+        if bundle.offline.get("chaser_position_px") is not None:
+            console.log(
+                "[yellow]Skipping offline chaser_position_px: it has no "
+                "array-specific canonical coordinate authority.[/yellow]"
+            )
         for suffix_name, positions_dataset, description in dataset_specs:
             if positions_dataset is None:
                 console.log(f"[yellow]Skipping {suffix_name} chaser heatmaps – positions unavailable.[/yellow]")
@@ -633,8 +677,8 @@ def plot_training_heatmaps(
                 frames=chaser_frames,
                 positions=positions_dataset,
                 period_specs=period_specs,
-                width=width,
-                height=height,
+                width=int(chaser_width),
+                height=int(chaser_height),
                 bin_size=bin_size,
                 smooth_sigma=smooth_sigma,
             )
@@ -650,13 +694,14 @@ def plot_training_heatmaps(
                 heatmaps=heatmaps_ds,
                 coverage_info=coverage_ds,
                 period_specs=period_specs,
-                width=width,
-                height=height,
+                width=int(chaser_width),
+                height=int(chaser_height),
                 title=(
                     f"Chaser Heatmaps ({description}) – stimulus run {stimulus_run_name}, chaser index {chaser_index}\n"
                     f"bin size {bin_size}px, smoothing σ={smooth_sigma}"
                 ),
             )
+            handoff.assert_verified()
             suffix_path = f"_chaser_{suffix_name}"
             _save_or_show(fig_ds, save_path, suffix=suffix_path, show=show, console=console)
 
