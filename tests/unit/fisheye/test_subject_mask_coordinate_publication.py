@@ -536,6 +536,52 @@ def test_activation_revalidates_payload_instead_of_trusting_published_proof(
     assert run.attrs["stage_selector_eligible"] is False
 
 
+def test_activation_closes_completed_child_proof_before_parent_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, parent, run = _subject_fixture(monkeypatch, fresh=True)
+    _prepare_context(root)
+    published = _publish(root)
+    selector_snapshot = _selector_snapshot(parent)
+    parent.attrs["latest_pending"] = "s1"
+    mark_run_complete(run, parent_group=None, run_name="s1")
+    original_finish = publication_module.finish_proof_verification
+    original_acquire = publication_module._acquire_parent_publication_lease
+    proof_closed = False
+
+    def finish_before_parent_mutation() -> None:
+        nonlocal proof_closed
+        original_finish()
+        proof_closed = True
+
+    def acquire_after_proof_close(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        assert proof_closed is True
+        return original_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(
+        publication_module,
+        "finish_proof_verification",
+        finish_before_parent_mutation,
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "_acquire_parent_publication_lease",
+        acquire_after_proof_close,
+    )
+
+    _activate_validated_subject_mask_coordinate_surfaces(
+        root,
+        parent,
+        published,
+        run_name="s1",
+        publication_owner_token=_owner(run),
+        selector_snapshot=selector_snapshot,
+    )
+
+    assert proof_closed is True
+    assert run.attrs["stage_selector_eligible"] is True
+
+
 def test_subject_fixture_clones_do_not_mutate_each_other_or_the_template(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

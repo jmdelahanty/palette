@@ -85,6 +85,7 @@ from fisheye.shared.pixel_frame_authority import (
     stamp_selected_canvas_pixel_frame_authority,
     stamp_source_camera_pixel_frame_authority,
 )
+from fisheye.shared.proof_verification import proof_verification_operation
 from fisheye.shared.selected_calibration import (
     CANONICAL_AXES,
     CANONICAL_COORDINATE_ORIGIN,
@@ -413,6 +414,7 @@ def _materialize_encoded_physical_objects(node: FakeArray) -> list[Path]:
     return paths
 
 
+@proof_verification_operation
 def _world(*, convention: str = "continuous", archive_token: object = _ARCHIVE_TOKEN):
     matrix = np.asarray(
         [[0.8, 0.02, 5.0], [-0.01, 0.7, 7.0], [0.0001, -0.0002, 1.0]],

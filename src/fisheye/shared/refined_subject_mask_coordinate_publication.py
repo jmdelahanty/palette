@@ -94,7 +94,10 @@ from fisheye.shared.pixel_frame_authority import (
     stamp_crop_placement_ownership,
     stamp_roi_pixel_frame_authority,
 )
-from fisheye.shared.proof_verification import finish_proof_verification
+from fisheye.shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
+)
 from fisheye.shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_COORDINATE_DERIVATION_ATTR,
     SUBJECT_MASK_SURFACE_INVENTORY_ATTR,
@@ -1531,6 +1534,7 @@ class BoundRefinedSubjectMaskCoordinateContext:
         object.__setattr__(self, "_seal", _verification_seal)
 
 
+@proof_verification_operation
 def prepare_refined_subject_mask_coordinate_context(
     root: Any,
     run_path: str,
@@ -4026,6 +4030,7 @@ def _surface_evidence(
     return required_nodes, specs, ragged, measurements, payloads, structure_inventory
 
 
+@proof_verification_operation
 def publish_refined_subject_mask_coordinate_surfaces(
     root: Any,
     run_path: str,
@@ -4315,6 +4320,7 @@ def _load_refined_subject_mask_coordinate_surfaces(
     )
 
 
+@proof_verification_operation
 def load_persisted_refined_subject_mask_coordinate_surfaces(
     root: Any,
     run_path: str,
@@ -4352,6 +4358,7 @@ def require_bound_refined_subject_mask_coordinate_surfaces(
     return current
 
 
+@proof_verification_operation
 def _load_completed_ineligible_refined_subject_mask_coordinate_surfaces(
     root: Any,
     run_path: str,
@@ -4452,6 +4459,7 @@ def _restore_owned_parent_state(
         raise RuntimeError(f"Refined selector rollback was incomplete: {failures!r}.")
 
 
+@proof_verification_operation
 def _activate_validated_refined_subject_mask_coordinate_surfaces(
     root: Any,
     run_parent: Any,

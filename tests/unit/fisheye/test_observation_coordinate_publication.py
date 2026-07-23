@@ -45,6 +45,7 @@ from fisheye.shared.pixel_frame_authority import (
     stamp_roi_pixel_frame_authority,
     stamp_source_camera_pixel_frame_authority,
 )
+from fisheye.shared.proof_verification import proof_verification_operation
 from fisheye.shared.transform_authority import (
     TRANSFORM_AUTHORITY_PIXEL_EDGE_ATTR,
     stamp_crop_placement_transform_authority,
@@ -62,6 +63,7 @@ from tests.unit.fisheye.test_directed_transform_chain import (
 )
 
 
+@proof_verification_operation
 def _frame_evidence(world):
     token = world["archive_token"]
     bbox_camera = stamp_source_camera_pixel_frame_authority(
@@ -592,6 +594,7 @@ def _crop_copy(world, source, *, wrong_keys: bool = False):
     return rowset, key, source_rows, source_frames, bbox_norm, bbox_img, centers
 
 
+@proof_verification_operation
 def _crop_roi(world, crop, *, roi_height: int = 40, alter_bbox: bool = False):
     token = world["archive_token"]
     placements_values = np.asarray(

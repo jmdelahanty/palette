@@ -82,6 +82,10 @@ from fisheye.shared.pixel_frame_authority import (
     stamp_roi_pixel_frame_authority,
     stamp_source_camera_pixel_frame_authority,
 )
+from fisheye.shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
+)
 from fisheye.shared.row_lineage import ROW_LINEAGE_ARRAYS
 from fisheye.shared.transform_authority import (
     TRANSFORM_AUTHORITY_ATTR,
@@ -1176,6 +1180,7 @@ class BoundSubjectMaskCoordinateContext:
         object.__setattr__(self, "_seal", _verification_seal)
 
 
+@proof_verification_operation
 def prepare_subject_mask_coordinate_context(
     root_node: Any,
     run_path: str,
@@ -2625,6 +2630,7 @@ def rollback_subject_mask_coordinate_publication(
     )
 
 
+@proof_verification_operation
 def publish_subject_mask_coordinate_surfaces(
     root_node: Any,
     run_path: str,
@@ -2793,6 +2799,7 @@ def _load_subject_mask_coordinate_surfaces(
     )
 
 
+@proof_verification_operation
 def load_persisted_subject_mask_coordinate_surfaces(
     root_node: Any,
     run_path: str,
@@ -2808,6 +2815,7 @@ def load_persisted_subject_mask_coordinate_surfaces(
     )
 
 
+@proof_verification_operation
 def _load_completed_ineligible_subject_mask_coordinate_surfaces(
     root_node: Any,
     run_path: str,
@@ -2823,6 +2831,7 @@ def _load_completed_ineligible_subject_mask_coordinate_surfaces(
     )
 
 
+@proof_verification_operation
 def _activate_validated_subject_mask_coordinate_surfaces(
     root_node: Any,
     run_parent: Any,
@@ -2883,6 +2892,10 @@ def _activate_validated_subject_mask_coordinate_surfaces(
     _require_selector_snapshot_unchanged(active_parent, selector_snapshot)
     if active_parent.attrs.get("latest_pending") != str(run_name):
         _fail("Subject-mask pending selector changed before activation.")
+    # Close and freshly recheck the completed-child proof before the first
+    # parent mutation. Proof reuse is a validation optimization and must never
+    # authorize selector publication from stale evidence.
+    finish_proof_verification()
     lease = _acquire_parent_publication_lease(
         active_parent,
         selector_snapshot,
