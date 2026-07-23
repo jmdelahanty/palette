@@ -47,16 +47,26 @@ PROOF_HEAVY_TEST_FILE_NAMES = frozenset(
 )
 PROOF_HEAVY_TEST_COST_MULTIPLIER = 6
 
+# Hosted CI on 2026-07-22 measured these suites far above what their source
+# sizes predict: refine-online took about 20m42s and subject-shape publication
+# about 11m.  Keep the overrides narrow and evidence-based so the greedy
+# assignment cannot place both long suites on one worker again.
+PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES = {
+    "test_refine_online_coordinate_contract.py": 30,
+    "test_subject_shape_coordinate_publication.py": 12,
+}
+
 
 def estimated_test_file_cost(path: Path) -> int:
     """Return one deterministic relative runtime estimate for ``path``."""
 
     size = path.stat().st_size
-    multiplier = (
-        PROOF_HEAVY_TEST_COST_MULTIPLIER
-        if path.name in PROOF_HEAVY_TEST_FILE_NAMES
-        else 1
-    )
+    multiplier = 1
+    if path.name in PROOF_HEAVY_TEST_FILE_NAMES:
+        multiplier = PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES.get(
+            path.name,
+            PROOF_HEAVY_TEST_COST_MULTIPLIER,
+        )
     return max(1, size) * multiplier
 
 

@@ -6,6 +6,8 @@ import pytest
 
 from scripts.ci_pytest_shard import (
     PROOF_HEAVY_TEST_COST_MULTIPLIER,
+    PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES,
+    REPOSITORY_ROOT,
     assign_test_file_shards,
     discover_test_files,
     estimated_test_file_cost,
@@ -45,7 +47,7 @@ def test_discover_test_files_excludes_non_test_modules(tmp_path: Path) -> None:
 def test_estimated_cost_weights_proof_heavy_publication_suites(tmp_path: Path) -> None:
     ordinary = _test_file(tmp_path / "test_ordinary.py", size=100)
     proof_heavy = _test_file(
-        tmp_path / "test_subject_shape_coordinate_publication.py",
+        tmp_path / "test_keypoint_coordinate_publication.py",
         size=100,
     )
 
@@ -53,6 +55,34 @@ def test_estimated_cost_weights_proof_heavy_publication_suites(tmp_path: Path) -
     assert estimated_test_file_cost(proof_heavy) == (
         100 * PROOF_HEAVY_TEST_COST_MULTIPLIER
     )
+
+
+@pytest.mark.parametrize(
+    ("file_name", "multiplier"),
+    sorted(PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES.items()),
+)
+def test_estimated_cost_uses_measured_proof_heavy_override(
+    tmp_path: Path,
+    file_name: str,
+    multiplier: int,
+) -> None:
+    test_file = _test_file(tmp_path / file_name, size=100)
+
+    assert estimated_test_file_cost(test_file) == 100 * multiplier
+
+
+def test_measured_long_suites_are_separate_in_current_twelve_shard_assignment() -> None:
+    test_files = discover_test_files(REPOSITORY_ROOT / "tests")
+    shards = assign_test_file_shards(test_files, shard_count=12)
+    owners = {
+        path.name: shard_index
+        for shard_index, shard in enumerate(shards)
+        for path in shard
+        if path.name in PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES
+    }
+
+    assert owners.keys() == PROOF_HEAVY_TEST_COST_MULTIPLIER_OVERRIDES.keys()
+    assert len(set(owners.values())) == len(owners)
 
 
 def test_proof_heavy_files_are_distributed_before_ordinary_fill(tmp_path: Path) -> None:
