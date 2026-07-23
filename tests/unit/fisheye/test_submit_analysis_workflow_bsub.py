@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 
 
 SCRIPT = (
@@ -16,8 +18,15 @@ def _build_clean_palette_checkout(path: Path) -> None:
     scripts_dir = path / "scripts"
     scripts_dir.mkdir(parents=True)
     scripts_py = scripts_dir / "py"
-    scripts_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    scripts_py.write_text(
+        "#!/usr/bin/env bash\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
     scripts_py.chmod(0o755)
+    package = path / "src" / "fisheye" / "__init__.py"
+    package.parent.mkdir(parents=True)
+    package.write_text("# fixture package\n", encoding="utf-8")
     module = path / "src" / "fisheye" / "utils" / "execute_analysis_workflow.py"
     module.parent.mkdir(parents=True)
     module.write_text("# fixture\n", encoding="utf-8")
@@ -111,6 +120,13 @@ def test_submit_analysis_workflow_records_requested_and_runtime_resources(
             "LSB_DJOB_NUMPROC": "5",
         }
     )
+    rogue_package = tmp_path / "rogue" / "fisheye"
+    rogue_package.mkdir(parents=True)
+    (rogue_package / "__init__.py").write_text(
+        "# wrong checkout\n",
+        encoding="utf-8",
+    )
+    job_env["PYTHONPATH"] = str(rogue_package.parent)
     subprocess.run(["bash", str(job_script)], check=True, env=job_env)
 
     runtime = (run_dir / "runtime_environment.txt").read_text(encoding="utf-8")
@@ -122,6 +138,7 @@ def test_submit_analysis_workflow_records_requested_and_runtime_resources(
     assert "allocated_slots=5" in runtime
     assert "cpu_model=" in runtime
     assert "cpu_model=unknown" not in runtime
+    assert f"fisheye_source_file={palette_repo / 'src/fisheye/__init__.py'}" in runtime
 
     status = (run_dir / "status.txt").read_text(encoding="utf-8")
     assert "status=complete" in status

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+import numpy as np
 import zarr
 
 from ...analysis import detect_bouts_multi_level as bout_writer
@@ -140,6 +141,7 @@ def _validate_swim_bout_run(path: Path, *, source_zarr: Path) -> dict[str, Any]:
         "indexes/signal_variants",
         "tables/bouts",
         "signals/detector_signal_mm_s",
+        "signals/detector_signal_signal_ids",
     ):
         if group.get(required) is None:
             errors.append(f"missing {required}")
@@ -150,6 +152,45 @@ def _validate_swim_bout_run(path: Path, *, source_zarr: Path) -> dict[str, Any]:
         frame_count = int(detector.shape[1])
     elif detector is not None:
         errors.append("detector signal must be a two-dimensional array")
+
+    default_signal_id = attrs.get("default_signal_id")
+    default_detector_row = None
+    default_detector_finite_count = None
+    detector_signal_ids = group.get("signals/detector_signal_signal_ids")
+    if default_signal_id is None:
+        errors.append("missing default_signal_id")
+    elif not isinstance(detector_signal_ids, zarr.Array):
+        errors.append("detector signal IDs must be an array")
+    elif not isinstance(detector, zarr.Array) or detector.ndim != 2:
+        pass
+    elif detector_signal_ids.ndim != 1 or int(detector_signal_ids.shape[0]) != int(
+        detector.shape[0]
+    ):
+        errors.append("detector signal IDs do not align with detector rows")
+    else:
+        try:
+            selected_signal_id = int(default_signal_id)
+            signal_ids = np.asarray(detector_signal_ids[:], dtype=np.int64)
+            matching_rows = np.flatnonzero(signal_ids == selected_signal_id)
+            if matching_rows.size != 1:
+                errors.append(
+                    "default_signal_id must select exactly one detector row"
+                )
+            else:
+                default_detector_row = int(matching_rows[0])
+                default_values = np.asarray(
+                    detector[default_detector_row, :],
+                    dtype=np.float32,
+                )
+                default_detector_finite_count = int(
+                    np.count_nonzero(np.isfinite(default_values))
+                )
+                if default_detector_finite_count == 0:
+                    errors.append(
+                        "default detector signal has no finite physical samples"
+                    )
+        except (TypeError, ValueError, OverflowError) as exc:
+            errors.append(f"invalid default detector selection: {exc}")
 
     contract = attrs.get("frame_axis_contract")
     if not isinstance(contract, dict):
@@ -180,6 +221,9 @@ def _validate_swim_bout_run(path: Path, *, source_zarr: Path) -> dict[str, Any]:
         "schema_version": attrs.get("schema_version"),
         "layout": attrs.get("layout"),
         "detector_frame_count": frame_count,
+        "default_signal_id": default_signal_id,
+        "default_detector_row": default_detector_row,
+        "default_detector_finite_count": default_detector_finite_count,
         "resolved_axis_count": axis_count,
     }
 

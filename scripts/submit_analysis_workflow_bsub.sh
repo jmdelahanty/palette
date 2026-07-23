@@ -173,6 +173,26 @@ if [[ -n "\$(git status --porcelain)" ]]; then
   printf 'Refusing dirty Palette checkout on the execution host.\n' >&2
   exit 2
 fi
+
+# The palette-py311 environment may contain an editable installation from a
+# different checkout.  Pin imports to the same cluster-visible source tree
+# whose Git commit was verified above, then prove that the imported package
+# actually resolved there before doing any scientific work.
+export PYTHONPATH="\${PALETTE_REPO}/src:\${PALETTE_REPO}\${PYTHONPATH:+:\${PYTHONPATH}}"
+EXPECTED_FISHEYE_DIR="\$(cd "\${PALETTE_REPO}/src/fisheye" && pwd -P)"
+ACTUAL_FISHEYE_FILE="\$(scripts/py -c '
+from pathlib import Path
+import fisheye
+print(Path(fisheye.__file__).resolve())
+')"
+case "\${ACTUAL_FISHEYE_FILE}" in
+  "\${EXPECTED_FISHEYE_DIR}"/*) ;;
+  *)
+    printf 'Palette source mismatch: expected fisheye below %s, imported %s\n' \
+      "\${EXPECTED_FISHEYE_DIR}" "\${ACTUAL_FISHEYE_FILE}" >&2
+    exit 2
+    ;;
+esac
 [[ -n "\${LSB_JOBID:-}" ]] || {
   printf 'Refusing analysis execution outside an LSF allocation.\n' >&2
   exit 2
@@ -226,6 +246,7 @@ runtime_environment_tmp="\${RUNTIME_ENVIRONMENT_FILE}.tmp.\$\$"
   printf 'cpu_architecture=%s\n' "\$(uname -m)"
   printf 'cpu_logical_count=%s\n' "\${CPU_LOGICAL_COUNT}"
   printf 'kernel_release=%s\n' "\$(uname -r)"
+  printf 'fisheye_source_file=%s\n' "\${ACTUAL_FISHEYE_FILE}"
 } >"\${runtime_environment_tmp}"
 mv "\${runtime_environment_tmp}" "\${RUNTIME_ENVIRONMENT_FILE}"
 

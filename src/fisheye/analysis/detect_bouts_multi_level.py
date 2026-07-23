@@ -2676,6 +2676,26 @@ def _metric_inputs_for_level(
     }
 
 
+def _require_finite_default_detector_signal(
+    values: np.ndarray,
+    *,
+    default_level: str,
+    track_kinematics_run: str,
+    track_id: int,
+) -> int:
+    """Require a usable physical signal while permitting valid zero activity."""
+
+    finite_count = int(np.count_nonzero(np.isfinite(np.asarray(values))))
+    if finite_count == 0:
+        raise ValueError(
+            "Default swim-bout detector signal has no finite physical samples: "
+            f"level={default_level!r}, "
+            f"track_kinematics_run={track_kinematics_run!r}, "
+            f"track_id={track_id}. Refusing to persist an empty completed run."
+        )
+    return finite_count
+
+
 def detect_and_save_bouts(
     zarr_path: Path,
     run_name: Optional[str],
@@ -2875,6 +2895,12 @@ def detect_and_save_bouts(
         phase_durations_s,
         "build_exponential_response",
         phase_started_at,
+    )
+    _require_finite_default_detector_signal(
+        speeds[f"{default_level_key}_mm"],
+        default_level=default_level_key,
+        track_kinematics_run=str(metadata["track_kinematics_run"]),
+        track_id=track_id,
     )
     path_distance_level_source = {
         **PATH_DISTANCE_LEVEL_SOURCE,
