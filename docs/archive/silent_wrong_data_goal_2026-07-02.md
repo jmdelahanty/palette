@@ -112,7 +112,7 @@ Item 7 validation:
   `(Y - 16) * 255 / 219`.
 - [x] Sampled up to four frames and 262,144 pixels per surface, using strided zarr
   selection so large image arrays are not fully materialized.
-- [x] Wrote `docs/diagnostics/pixel_decode_exposure_census_2026-07-02.md`.
+- [x] Wrote `docs/archive/pixel_decode_exposure_census_2026-07-02.md`.
 - [x] Headline finding: no sampled model-facing training surface showed the
   limited-range expansion lattice.
 
@@ -195,7 +195,7 @@ PYTHONPATH=/home/delahantyj@hhmi.org/gitrepos/palette-silent-wrong-data/src \
     direct-Y-like, range-expanded-like, or indeterminate.
   - [x] Use limited-range expansion signature: unreachable intensity comb from
     `(Y - 16) * 255 / 219` plus clamped lows.
-  - [x] Commit report as `docs/diagnostics/pixel_decode_exposure_census_2026-07-02.md`.
+  - [x] Commit report as `docs/archive/pixel_decode_exposure_census_2026-07-02.md`.
 
 ## Reporting Requirements
 

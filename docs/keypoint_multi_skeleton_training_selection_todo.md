@@ -205,6 +205,6 @@ Longer-term:
 ## Related Docs
 
 - [keypoint_multi_skeleton_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_multi_skeleton_todo.md)
-- [traditional_v2_keypoint_migration_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/traditional_v2_keypoint_migration_design.md)
+- [traditional_v2_keypoint_migration_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/traditional_v2_keypoint_migration_design.md)
 - [keypoint_training_workflow.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_training_workflow.md)
 - [keypoint_training_refined_run_tie_fix_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_training_refined_run_tie_fix_todo.md)

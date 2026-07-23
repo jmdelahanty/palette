@@ -24,7 +24,7 @@ That working integration lives in:
 
 - `src/fisheye/utils/run_sam_subject_masks.py`
 - `src/fisheye/utils/run_sam_subject_masks_batch.py`
-- `docs/sam3_colleague_handoff.md`
+- `docs/archive/sam3_colleague_handoff.md`
 - `docs/sam3_subject_mask_canary_plan.md`
 
 The existing verified workflow did not require modifying SAM3 dataloaders,
@@ -247,7 +247,7 @@ Prefer Palette's native subject-mask models if:
 
 ## Related Docs
 
-- `docs/sam3_colleague_handoff.md`
+- `docs/archive/sam3_colleague_handoff.md`
 - `docs/sam3_subject_mask_canary_plan.md`
 - `docs/subject_mask_training_artifact_contract.md`
 - `docs/subject_mask_runs_contract.md`

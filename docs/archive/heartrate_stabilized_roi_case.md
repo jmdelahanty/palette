@@ -202,7 +202,7 @@ interpreting pixel-level support.
 This is not a new frame-domain problem. It is a concrete consumer of several
 existing contracts and diagnostics:
 
-- `docs/diagnostics/realtime_offline_detection_comparison_design_2026-06-17.md`
+- `docs/archive/realtime_offline_detection_comparison_design_2026-06-17.md`
   records that `derived/external_crop_recorder/*_crop_meta.csv` is the primary
   realtime crop-recorder source, and that acquisition `recording_frame_id` is
   1-based while Palette offline `frame_indices` are 0-based.

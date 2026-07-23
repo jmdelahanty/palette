@@ -23,7 +23,7 @@ and 2.4 mm small -- plausibly the refraction stack, which a flat design circle d
 Reading the nominal circle put 56% of the post-period frames "outside the arena", which
 ``cra_near_field._thigmotaxis_for_phase`` then silently dropped from its numerator but not its
 denominator -- turning a 0.37 -> 0.87 thigmotaxis increase into 0.354 -> 0.353. See
-``docs/diagnostics/arena_calibration_and_thigmotaxis_2026-07-14.md``.
+``docs/archive/arena_calibration_and_thigmotaxis_2026-07-14.md``.
 
 So: resolve from the dish mask. Fall back to the nominal circle only when there is no mask, and
 say so in QC.

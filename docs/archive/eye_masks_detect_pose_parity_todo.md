@@ -13,7 +13,7 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
   - Canonical source for `frame_indices`/`detection_indices`/`frame_counts` is
     the source crop run; keypoint arrays are validation/fallback only.
   - Covers both `eye_masks_runs` and `refined_eye_masks_runs`.
-  - Contract doc: `docs/eye_mask_row_mapping_contract.md`.
+  - Contract doc: `docs/archive/eye_mask_row_mapping_contract.md`.
 
 - [x] Canonicalize eye-mask provenance attribute names across all producers/consumers.
   - Today we mix `source_keypoint_run` and `source_keypoints_run` across traditional/YOLO/U-Net/refine paths.

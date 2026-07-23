@@ -86,7 +86,7 @@ Keypoint GPU and scheduler provenance:
 
 Eye-mask lineage arrays (`frame_indices`, `detection_indices`, `frame_counts`,
 `source_refined_row_ids`, `source_detect_row_index`) follow the contract in
-`docs/eye_mask_row_mapping_contract.md`:
+`docs/archive/eye_mask_row_mapping_contract.md`:
 
 - segmentation writes should anchor lineage to source crop runs;
 - keypoint lineage arrays are used for cross-check/fallback compatibility;

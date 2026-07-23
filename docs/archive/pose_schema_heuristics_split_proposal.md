@@ -236,4 +236,4 @@ stage-local tuning surface.
 - [keypoint_heading_computation_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_heading_computation_contract.md)
 - [keypoint_multi_skeleton_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_multi_skeleton_todo.md)
 - [keypoint_derived_metric_schema_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_derived_metric_schema_contract.md)
-- [traditional_v2_keypoint_migration_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/traditional_v2_keypoint_migration_design.md)
+- [traditional_v2_keypoint_migration_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/traditional_v2_keypoint_migration_design.md)

@@ -24,7 +24,7 @@ For the current gap summary, see
 For the current implementation priority list, see
 [repo_wide_staleness_implementation_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_implementation_todo.md).
 For the crop mixed-mode design background, see
-[crop_live_view_vs_materialized_stream_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crop_live_view_vs_materialized_stream_design.md).
+[crop_live_view_vs_materialized_stream_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/crop_live_view_vs_materialized_stream_design.md).
 
 ## Short Answer
 

@@ -5,7 +5,7 @@ crop storage support, while keeping training artifacts materialized and allowing
 analysis crop planning to default to geometry-only where readers are ready.
 
 Design reference:
-- `docs/crop_live_view_vs_materialized_stream_design.md`
+- `docs/archive/crop_live_view_vs_materialized_stream_design.md`
 - `docs/geometry_live_gpu_design_note.md`
 
 Date anchored: 2026-03-06.

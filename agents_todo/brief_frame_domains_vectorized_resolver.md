@@ -6,7 +6,7 @@
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 **Read first:** `docs/archive/HANDOFF_2026-07-05.md` operating-notes section, then
-`docs/diagnostics/frame_domains_consumer_census_2026-07-05.md` (the census this slice
+`docs/archive/frame_domains_consumer_census_2026-07-05.md` (the census this slice
 unblocks). Ground rules: local `sun` is ground truth; fresh worktree on
 `agent/frame-domains-vectorized` from CURRENT `sun`; env
 `~/miniconda3/envs/palette-py311/bin/python` (conda; never uv, never a `.venv`); sync

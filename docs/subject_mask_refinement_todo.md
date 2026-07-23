@@ -111,7 +111,7 @@ breaking the current eye tools before the unified model is ready.
   full-size short smoke run showed that direct `eye_left` / `eye_right`
   prediction can collapse into "both eyes in both channels" even when the
   exported target channels are distinct. This reinforces the design boundary in
-  [eye_subject_mask_unification_design.md](eye_subject_mask_unification_design.md):
+  [eye_subject_mask_unification_design.md](archive/eye_subject_mask_unification_design.md):
   raw models should favor visually identifiable eye masks (`eyes_union` or
   unordered instances), while biological LR identity should be assigned by a
   geometry-aware subject-mask refinement/finalization step when orientation
@@ -1085,7 +1085,7 @@ This means the registry should eventually answer questions like:
   - shared review payload schema
   - shared registry component rows
   - optional shared refined-mask storage
-  See [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md).
+  See [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/eye_subject_mask_unification_design.md).
 - [x] Decide whether `refined_eye_masks_runs` becomes:
   - a specialized derivative of `refined_subject_masks_runs`, or
   - a long-lived sibling artifact with aligned component semantics
@@ -1095,7 +1095,7 @@ This means the registry should eventually answer questions like:
 - [x] Add a non-destructive migration/backfill plan when the target becomes
       clear.
   See the migration phases in
-  [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md).
+  [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/eye_subject_mask_unification_design.md).
 - [x] Implement `eyes_union -> eye_left/eye_right` assignment inside
       refined-subject finalization using declared assignment keypoint lineage.
 - [x] Materialize eye geometry and eye-pair relation metrics from refined

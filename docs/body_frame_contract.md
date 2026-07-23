@@ -422,7 +422,7 @@ Long term:
 
 ## Related Documents
 
-- [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [body_spline_tail_anchor_design.md](archive/body_spline_tail_anchor_design.md)
 - [keypoint_heading_computation_contract.md](keypoint_heading_computation_contract.md)
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)

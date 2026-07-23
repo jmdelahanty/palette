@@ -87,7 +87,7 @@ legally or practically shared** (no license, stub README, zero-dependency packag
    RLE for downstream readers. Route all dense mutation through one stale-marking helper, or add a
    finalize-time invariant. (Related to a finding in the earlier `sun`-diff review:
    whole-store stale marker can never be cleared by per-component refresh —
-   see `docs/diagnostics/code_review_goodcopbadcop_dashboard_2026-06-20.md`.)
+   see `docs/archive/code_review_goodcopbadcop_dashboard_2026-06-20.md`.)
 6. **Contracts documented/audited, not enforced** (unchanged thesis). Stage-array validation
    *raises* for exactly one stage (`shared/stage_complete.py:64` allowlist = `{detect_quality}`);
    pixel-contract parity is opt-in (`--required-pixel-contract-name`, default off); the
@@ -192,6 +192,6 @@ of the later ones.
 
 ---
 
-*Companion report: `docs/diagnostics/code_review_goodcopbadcop_dashboard_2026-06-20.md`
+*Companion report: `docs/archive/code_review_goodcopbadcop_dashboard_2026-06-20.md`
 (focused review of the `sun`-branch GoodCopBadCop dashboard + component-scoped RLE refresh diff).
 Prior whole-repo review: `docs/diagnostics/codebase_review_2026-06-10.md`.*

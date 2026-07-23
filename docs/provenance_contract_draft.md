@@ -41,7 +41,7 @@ Out of scope:
   - end-to-end workflow sequencing and lineage expectations.
 - `docs/recording_analysis_pipeline_contract.md`
   - stage orchestration contract that consumes provenance.
-- `docs/eye_mask_row_mapping_contract.md`
+- `docs/archive/eye_mask_row_mapping_contract.md`
   - eye-mask lineage array contract referenced by eye-mask refinement inputs.
 
 ## Canonical Run-Level Contract

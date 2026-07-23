@@ -339,7 +339,7 @@ Sections:
 - **Resolution direction:** update code (remove dead paths) or note retained for tests.
 
 ### 3.7 Crimson manual contract is `status: historical` describing legacy paths (load-bearing for Crimson interop)
-- **Doc:** `docs/crimson_refined_detect_manual_contract.md` (`status: historical`, last_verified 2026-04-15).
+- **Doc:** `docs/archive/crimson_refined_detect_manual_contract.md` (`status: historical`, last_verified 2026-04-15).
 - **Code:** No Palette writer creates `manual` subgroups for new runs. Legacy writer in `src/fisheye/tune/detect_review.py`. Crimson C++ side still expects this format.
 - **Resolution direction:** update doc — publish a sparse-first Crimson manual write contract.
 
@@ -426,7 +426,7 @@ Sections:
 - **Resolution direction:** unclear (ship code or remove doc step).
 
 ### 4.5 Eye-mask row-mapping contract attr name mismatch (metadata)
-- **Doc:** `docs/eye_mask_row_mapping_contract.md:53–56` uses `source_eye_masks_run`.
+- **Doc:** `docs/archive/eye_mask_row_mapping_contract.md:53–56` uses `source_eye_masks_run`.
 - **Code:** writers use `source_eye_run` (singular). `eye_mask_training_artifact_contract.md:115` agrees with code.
 - **Resolution direction:** update doc.
 
@@ -441,7 +441,7 @@ Sections:
 - **Resolution direction:** verify.
 
 ### 4.8 `pose_schema_heuristics_split_proposal.md` status header stale (cosmetic)
-- **Doc:** `docs/pose_schema_heuristics_split_proposal.md:7` says "design proposal, not active contract"; body claims packaged profiles already exist.
+- **Doc:** `docs/archive/pose_schema_heuristics_split_proposal.md:7` says "design proposal, not active contract"; body claims packaged profiles already exist.
 - **Resolution direction:** update doc (status: partially shipped).
 
 ### 4.9 Heading-computation contract vs runtime resolver — aligned (no drift)

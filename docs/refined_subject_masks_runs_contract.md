@@ -1495,7 +1495,7 @@ This contract is intentionally non-destructive.
 
 - [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md)
 - [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md)
-- [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md)
+- [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/eye_subject_mask_unification_design.md)
 - [subject_mask_refinement_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_refinement_todo.md)
 - [derived_analysis_run_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/derived_analysis_run_contract.md)
 - [subject_shape_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_shape_runs_contract.md)

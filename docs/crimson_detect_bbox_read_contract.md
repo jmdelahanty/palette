@@ -197,6 +197,6 @@ Focused Palette and Crimson fixtures cover:
 
 - `docs/video_pixel_model_input_contract.md`
 - `docs/coordinate_metadata_framework.md`
-- `docs/keypoint_refined_coordinate_space_incident_2026-03-04.md`
-- `docs/crimson_refined_detect_manual_contract.md`
+- `docs/archive/keypoint_refined_coordinate_space_incident_2026-03-04.md`
+- `docs/archive/crimson_refined_detect_manual_contract.md`
 - `docs/clipped_recording_consumer_mapping_contract.md`

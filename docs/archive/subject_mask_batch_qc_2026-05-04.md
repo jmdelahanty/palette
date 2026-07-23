@@ -5,7 +5,7 @@ Generated after `scripts/run_subject_mask_batch_pipeline --apply --run-label bat
 ## Execution Summary
 
 - Batch report: `/tmp/subject_mask_batch_apply.json`
-- Markdown report: `docs/diagnostics/subject_mask_batch_2026-05-04.md`
+- Markdown report: `docs/archive/subject_mask_batch_2026-05-04.md`
 - Planned archives: 47
 - Inference status: 45 `ok`, 2 `not_requested` (existing raw subject-mask runs)
 - Finalization status: 47 `ok`
@@ -24,7 +24,7 @@ overwrote `refined_subject_masks_smart_finalizer_batch_20260504` only; it reused
 the existing raw subject-mask runs and did not rerun U-Net inference.
 
 - Refresh report: `/tmp/subject_mask_gate_refresh_apply.json`
-- Markdown report: `docs/diagnostics/subject_mask_gate_refresh_2026-05-04.md`
+- Markdown report: `docs/archive/subject_mask_gate_refresh_2026-05-04.md`
 - Planned archives: 47
 - Inference status: 47 `not_requested`
 - Finalization status: 47 `ok`

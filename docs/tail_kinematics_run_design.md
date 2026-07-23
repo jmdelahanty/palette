@@ -474,7 +474,7 @@ Sleepyfish tail run it reduced total files from 1,686 to 145 and reduced a
 checksum-validated node-local-to-PRFS publication from 13.70 seconds to 2.41
 seconds. Random-row and 1,024-row window reads were unchanged; the bounded full
 scan increased from 3.95 to 6.26 seconds. See
-`docs/diagnostics/tail_kinematics_sharding_benchmark.md`.
+`docs/archive/tail_kinematics_sharding_benchmark.md`.
 
 Current subject-shape sources are still physically chunked, so the first
 staging implementation copies all required source chunk files. It will
