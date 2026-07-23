@@ -62,52 +62,56 @@ Deferred:
 - [x] Generate the detection-family schema inventory.
 - [x] Classify `detection_artifact_runs` as deferred quarantined evidence.
 - [x] Record `float32` as the first canonical detection-geometry dtype.
-- [ ] Commit the dtype decision and this execution checklist as a checkpoint.
+- [x] Commit the dtype decision and this execution checklist as a checkpoint
+      (`eb94f885`).
 
 Exit gate:
 
-- [ ] Working tree is clean at a named commit before canonical detection schema
-      implementation begins.
+- [x] Working tree was clean at named checkpoint `eb94f885` before the producer
+      and consumer census began.
 
 ## Phase 1 — Canonical Detection Consumer And Producer Census
 
 Trace every current producer and consumer of the canonical detection arrays.
 Record code paths separately from documentation and historical compatibility.
 
-- [ ] Census Palette writers for every `detect_runs/<run>` array.
-- [ ] Census Palette readers, validators, refiners, crop builders, exporters,
+- [x] Census Palette writers for every `detect_runs/<run>` array.
+- [x] Census Palette readers, validators, refiners, crop builders, exporters,
       training promotion, diagnostics, and review tools.
-- [ ] Census Crimson reads and current typed-probe fallbacks through the shared
+- [x] Census Crimson reads and current typed-probe fallbacks through the shared
       Palette–Crimson contract or Crimson source review.
-- [ ] Record which consumers read whole arrays, frame windows, individual frames,
+- [x] Record which consumers read whole arrays, frame windows, individual frames,
       or observation rows.
-- [ ] Record whether readers assume rows are ordered contiguously by frame.
-- [ ] Record every missing-value, empty-run, fill-value, and sentinel assumption.
-- [ ] Record all current dtype alternatives as compatibility evidence rather
+- [x] Record whether readers assume rows are ordered contiguously by frame.
+- [x] Record every missing-value, empty-run, fill-value, and sentinel assumption.
+- [x] Record all current dtype alternatives as compatibility evidence rather
       than candidate canonical dtypes.
 
 Resolve these questions explicitly:
 
-- [ ] Is `bbox_norm_coords` the authoritative geometry representation?
-- [ ] Are `bbox_img_xyxy` and `centers_img_xy` required materialized derivatives,
+- [x] Is `bbox_norm_coords` the authoritative geometry representation?
+- [x] Are `bbox_img_xyxy` and `centers_img_xy` required materialized derivatives,
       optional caches, or reader-derived values?
-- [ ] Are `frame_counts` and `n_detections` true aliases, and if so which name is
+- [x] Are `frame_counts` and `n_detections` true aliases, and if so which name is
       canonical?
-- [ ] Should canonical storage add `frame_row_offsets` with shape
+- [x] Should canonical storage add `frame_row_offsets` with shape
       `[n_frames + 1]` for direct frame-to-row lookup?
-- [ ] What ordering guarantee applies to detection rows?
-- [ ] What are the legal class-ID range, signedness, and missing-value rules?
-- [ ] Which arrays are required for an empty but valid detection run?
+- [x] What ordering guarantee applies to detection rows?
+- [x] What are the legal class-ID range, signedness, and missing-value rules?
+- [x] Which arrays are required for an empty but valid detection run?
 
 Deliverable:
 
-- [ ] Check in one authoritative array-role table with columns for path, dtype,
+- [x] Check in one authoritative array-role table with columns for path, dtype,
       shape, authority, requiredness, access pattern, producer, and consumers.
 
 Exit gate:
 
-- [ ] No unresolved authority, alias, indexing, ordering, dtype, or sentinel
+- [x] No unresolved authority, alias, indexing, ordering, dtype, or sentinel
       question remains for the first canonical schema.
+
+Phase 1 evidence and decisions are recorded in
+[`diagnostics/canonical_detection_producer_consumer_census_2026-07-23.md`](diagnostics/canonical_detection_producer_consumer_census_2026-07-23.md).
 
 ## Phase 2 — Versioned Canonical Detection Stage Schema
 
