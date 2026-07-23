@@ -123,6 +123,67 @@ Rules for new schema versions:
 - benchmarks fail before timing when source, plan, and decoded destination
   dtypes disagree.
 
+### How To Choose A Dtype
+
+Choose a dtype from the scientific and operational contract rather than from
+the values observed in one archive. For each array:
+
+1. define its legal range, units, and signedness;
+2. define the maximum acceptable quantization error in meaningful units such as
+   pixels, degrees, seconds, or confidence;
+3. account for nulls, missing-value sentinels, and out-of-range behavior;
+4. identify whether errors can accumulate through interpolation, geometry,
+   aggregation, or model training;
+5. verify that Palette, Zarr/TensorStore, NumPy, and Crimson support the exact
+   representation without repeated probing or implicit casts;
+6. compare compressed bytes, decode cost, and working-memory cost on
+   representative data;
+7. require behavioral checks for thresholding, ranking, joins, cropping, and
+   other discrete decisions that could change after quantization.
+
+Storage dtype and compute dtype may differ, but that is a distinct versioned
+representation. For example, a future fixed-point integer coordinate could be
+decoded to `float32` for computation. Its scale, offset, range, rounding, and
+overflow behavior would belong to the logical contract rather than being an
+undocumented reader convention.
+
+### Detection Geometry Decision
+
+The first canonical detection contract uses exact `float32` for continuous
+bounding-box and center geometry:
+
+- `bbox_norm_coords`;
+- `bbox_img_xyxy`;
+- `centers_img_xy`.
+
+For a normalized coordinate over a `4512`-pixel image, representative spacing
+near the upper end of `[0, 1]` is:
+
+| Representation | Approximate pixel spacing | Approximate maximum rounding error |
+| --- | ---: | ---: |
+| `float32` | `4512 * 2^-24 = 0.000269 px` | `0.000135 px` |
+| `float16` | `4512 * 2^-11 = 2.203 px` | `1.102 px` |
+| normalized `uint16` | `4512 / 65535 = 0.06885 px` | `0.03443 px` |
+
+Floating-point spacing varies with magnitude; this table uses the largest
+adjacent interval below `1.0` for normalized values. Integer quantization has
+uniform spacing but requires an explicit encoding contract.
+
+`float32` is intentionally conservative: it is comfortably below meaningful
+image precision, directly supported by Palette and Crimson, and avoids adding a
+quantization adapter while the shared schemas are still being established.
+Current canonical-detection writers and archives that carry `float64` geometry
+are an explicit transition/legacy representation; they are not evidence that
+the new canonical contract should remain `float64`.
+
+Experiments with `float16`, normalized `uint16`, or fixed-point `uint16` are
+deferred until the canonical storage specifications and their consumers are
+complete. Any later adoption requires a new schema version or representation
+ID, quantified reconstruction error, and proof that downstream selection,
+threshold, IoU, crop, review, and training behavior remains acceptable. This
+deferral applies to detection geometry only; other scientific arrays receive
+their own range and error-budget decisions.
+
 ## Metadata And Crimson
 
 The archive-level schema/capability manifest lists concrete path bindings and
@@ -155,6 +216,9 @@ exact dtype validation, axis constraints, JSON manifest export, and direct
 creation of storage-planner intents without changing production writers.
 
 ## Implementation Priority
+
+The phase-gated execution plan is
+[`canonical_detection_storage_implementation_checklist.md`](canonical_detection_storage_implementation_checklist.md).
 
 The first implementation wave targets current and future-facing authorities:
 

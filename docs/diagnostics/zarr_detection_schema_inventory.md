@@ -16,6 +16,14 @@ The current `DETECT_SPEC` is therefore orientation evidence, not an authoritativ
 The completed Sleepyfish refined-detection snapshot contains `36` sharded arrays, including publication lineage that is absent from the `25` subgroup bindings in the current StageSpec.
 `detection_artifact_runs` is classified as immutable, selector-ineligible quarantined evidence with run-local identity. It remains in the inventory for compatibility and diagnostics, but it is deferred from the future-facing storage implementation and benchmark waves.
 
+## Accepted Future-Facing Decisions
+
+| Decision | Canonical target | Current runtime | Current disposition | Revisit |
+| --- | --- | --- | --- | --- |
+| canonical_detection_continuous_geometry_dtype.v1 | float32 | float64 | explicit_legacy_transition | canonical_storage_specs_complete |
+
+Canonical detection bounding boxes and centers use exact `float32` in the first storage contract. Current `float64` writers and archives remain explicit transition evidence until migrated; they do not change the accepted target. `float16` and quantized `uint16` representations are deferred and require a new version plus numerical and behavioral validation.
+
 ## Current Runtime Variants
 
 | Variant | Path | Arrays | Lifecycle | Compared declaration |
@@ -271,7 +279,10 @@ The completed Sleepyfish refined-detection snapshot contains `36` sharded arrays
 
 ## Contract Checklist
 
-- [ ] Decide the canonical raw-detection bbox dtype and version it explicitly.
+Execution order and exit gates are maintained in `docs/canonical_detection_storage_implementation_checklist.md`.
+
+- [x] Use exact `float32` for first-generation canonical detection bounding boxes and centers; treat current `float64` as an explicit transition representation.
+- [x] Defer `float16` and quantized integer detection geometry until canonical storage specs are complete; require a new schema version and behavioral benchmarks before adoption.
 - [x] Classify `detection_artifact_runs` separately from canonical `detect_runs` as immutable, selector-ineligible quarantined evidence with run-local identity.
 - [ ] Add a StageSpec for immutable `detect_quality_runs` snapshots; do not conflate it with nested historical reports.
 - [ ] Decide whether dense refined root arrays remain the editable authority or become a compatibility projection of `instances`.

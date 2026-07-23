@@ -909,9 +909,38 @@ def build_detection_document(
     evidence_roles: dict[str, int] = defaultdict(int)
     for row in schema_evidence:
         evidence_roles[str(row["affiliation_role"])] += 1
+    accepted_target_decisions = [
+        {
+            "decision_id": "canonical_detection_continuous_geometry_dtype.v1",
+            "status": "accepted",
+            "scope": [
+                "detect_runs/<run>/bbox_norm_coords",
+                "detect_runs/<run>/bbox_img_xyxy",
+                "detect_runs/<run>/centers_img_xy",
+            ],
+            "canonical_dtype": "float32",
+            "current_runtime_dtype": "float64",
+            "current_runtime_disposition": "explicit_legacy_transition",
+            "rationale": (
+                "Prefer the interoperable precision-safe baseline while canonical "
+                "storage schemas and consumers are being completed."
+            ),
+            "deferred_representations": [
+                "float16",
+                "uint16_normalized",
+                "uint16_fixed_point",
+            ],
+            "revisit_after": "canonical_storage_specs_complete",
+            "change_policy": (
+                "A smaller representation requires a new schema version or "
+                "representation ID plus quantified error and downstream-behavior "
+                "benchmarks."
+            ),
+        }
+    ]
     return {
         "schema_id": "palette.zarr_detection_schema_inventory",
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "review_inventory_not_accepted_contract",
         "generation_policy": (
             "deterministic projection of the static repository census plus explicitly "
@@ -943,6 +972,7 @@ def build_detection_document(
         },
         "declared_variants": declared,
         "current_runtime_variants": runtime,
+        "accepted_target_decisions": accepted_target_decisions,
         "conflicts": conflicts,
         "downstream_lineage": downstream,
         "dated_physical_observations": observations,
@@ -978,10 +1008,12 @@ def render_detection_inventory(document: Mapping[str, object]) -> str:
     conflicts = document["conflicts"]
     observations = document["dated_physical_observations"]
     downstream = document["downstream_lineage"]
+    target_decisions = document["accepted_target_decisions"]
     assert isinstance(variants, Sequence)
     assert isinstance(conflicts, Sequence)
     assert isinstance(observations, Sequence)
     assert isinstance(downstream, Sequence)
+    assert isinstance(target_decisions, Sequence)
     lines = [
         "# Palette Detection-Family Zarr Schema Inventory",
         "",
@@ -1014,9 +1046,45 @@ def render_detection_inventory(document: Mapping[str, object]) -> str:
         "for compatibility and diagnostics, but it is deferred from the future-facing "
         "storage implementation and benchmark waves.",
         "",
-        "## Current Runtime Variants",
+        "## Accepted Future-Facing Decisions",
         "",
     ]
+    lines.extend(
+        _markdown_table(
+            [
+                (
+                    item["decision_id"],
+                    item["canonical_dtype"],
+                    item["current_runtime_dtype"],
+                    item["current_runtime_disposition"],
+                    item["revisit_after"],
+                )
+                for item in target_decisions
+                if isinstance(item, Mapping)
+            ],
+            (
+                "Decision",
+                "Canonical target",
+                "Current runtime",
+                "Current disposition",
+                "Revisit",
+            ),
+        )
+    )
+    lines.extend(
+        [
+            "",
+            "Canonical detection bounding boxes and centers use exact `float32` in "
+            "the first storage contract. Current `float64` writers and archives "
+            "remain explicit transition evidence until migrated; they do not change "
+            "the accepted target. `float16` and quantized `uint16` representations "
+            "are deferred and require a new version plus numerical and behavioral "
+            "validation.",
+            "",
+        "## Current Runtime Variants",
+        "",
+        ]
+    )
     lines.extend(
         _markdown_table(
             [
@@ -1129,7 +1197,10 @@ def render_detection_inventory(document: Mapping[str, object]) -> str:
             "",
             "## Contract Checklist",
             "",
-            "- [ ] Decide the canonical raw-detection bbox dtype and version it explicitly.",
+            "Execution order and exit gates are maintained in `docs/canonical_detection_storage_implementation_checklist.md`.",
+            "",
+            "- [x] Use exact `float32` for first-generation canonical detection bounding boxes and centers; treat current `float64` as an explicit transition representation.",
+            "- [x] Defer `float16` and quantized integer detection geometry until canonical storage specs are complete; require a new schema version and behavioral benchmarks before adoption.",
             "- [x] Classify `detection_artifact_runs` separately from canonical `detect_runs` as immutable, selector-ineligible quarantined evidence with run-local identity.",
             "- [ ] Add a StageSpec for immutable `detect_quality_runs` snapshots; do not conflate it with nested historical reports.",
             "- [ ] Decide whether dense refined root arrays remain the editable authority or become a compatibility projection of `instances`.",

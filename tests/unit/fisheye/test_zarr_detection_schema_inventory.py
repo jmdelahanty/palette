@@ -78,6 +78,41 @@ def test_detection_inventory_exposes_known_declaration_conflicts() -> None:
     )
 
 
+def test_detection_inventory_records_accepted_float32_geometry_target() -> None:
+    document = _build()["detection_document"]
+
+    assert document["schema_version"] == 3
+    assert document["accepted_target_decisions"] == [
+        {
+            "decision_id": "canonical_detection_continuous_geometry_dtype.v1",
+            "status": "accepted",
+            "scope": [
+                "detect_runs/<run>/bbox_norm_coords",
+                "detect_runs/<run>/bbox_img_xyxy",
+                "detect_runs/<run>/centers_img_xy",
+            ],
+            "canonical_dtype": "float32",
+            "current_runtime_dtype": "float64",
+            "current_runtime_disposition": "explicit_legacy_transition",
+            "rationale": (
+                "Prefer the interoperable precision-safe baseline while canonical "
+                "storage schemas and consumers are being completed."
+            ),
+            "deferred_representations": [
+                "float16",
+                "uint16_normalized",
+                "uint16_fixed_point",
+            ],
+            "revisit_after": "canonical_storage_specs_complete",
+            "change_policy": (
+                "A smaller representation requires a new schema version or "
+                "representation ID plus quantified error and downstream-behavior "
+                "benchmarks."
+            ),
+        }
+    ]
+
+
 def test_detection_inventory_records_dated_sleepyfish_physical_layouts() -> None:
     document = _build()["detection_document"]
     observations = {

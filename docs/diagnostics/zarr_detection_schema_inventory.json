@@ -1,4 +1,26 @@
 {
+  "accepted_target_decisions": [
+    {
+      "canonical_dtype": "float32",
+      "change_policy": "A smaller representation requires a new schema version or representation ID plus quantified error and downstream-behavior benchmarks.",
+      "current_runtime_disposition": "explicit_legacy_transition",
+      "current_runtime_dtype": "float64",
+      "decision_id": "canonical_detection_continuous_geometry_dtype.v1",
+      "deferred_representations": [
+        "float16",
+        "uint16_normalized",
+        "uint16_fixed_point"
+      ],
+      "rationale": "Prefer the interoperable precision-safe baseline while canonical storage schemas and consumers are being completed.",
+      "revisit_after": "canonical_storage_specs_complete",
+      "scope": [
+        "detect_runs/<run>/bbox_norm_coords",
+        "detect_runs/<run>/bbox_img_xyxy",
+        "detect_runs/<run>/centers_img_xy"
+      ],
+      "status": "accepted"
+    }
+  ],
   "conflicts": [
     {
       "array_name": null,
@@ -8409,7 +8431,7 @@
     }
   ],
   "schema_id": "palette.zarr_detection_schema_inventory",
-  "schema_version": 2,
+  "schema_version": 3,
   "scope": {
     "downstream_lineage_arrays": [
       "artifact_row_id",

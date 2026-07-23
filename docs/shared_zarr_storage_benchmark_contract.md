@@ -74,6 +74,17 @@ destination dtype disagree.
 Legacy alternatives remain explicit, version-keyed reader adapters. They are
 not candidates that Crimson probes repeatedly when opening a current archive.
 
+The first canonical detection-storage benchmark holds continuous detection
+geometry at exact `float32`. It compares chunking, sharding, codecs, metadata,
+and publication behavior without mixing in representation changes. `float16`
+and quantized integer geometry are deferred until the canonical storage specs
+are complete. A later representation study must use a new schema version or
+representation ID and add numerical-error plus downstream-behavior acceptance
+tests; it is not another storage-profile candidate in the initial sweep.
+
+The detection-specific benchmark and publication gates are tracked in
+[`canonical_detection_storage_implementation_checklist.md`](canonical_detection_storage_implementation_checklist.md).
+
 ## Parameter Matrix
 
 Initial inner-chunk sweep:
