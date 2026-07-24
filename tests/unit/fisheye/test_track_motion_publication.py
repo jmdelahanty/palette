@@ -1216,6 +1216,17 @@ def test_full_motion_recomputes_summary_values_and_inventory(
         mod._build_track_motion_publication_manifest(root, run, positions)
 
 
+def test_acceleration_summary_uses_persisted_float32_reduction_domain() -> None:
+    values = np.linspace(-1000.0, 1000.0, 1_182_938, dtype=np.float32)
+
+    mean, standard_deviation = mod._acceleration_summary_statistics(values)
+
+    assert mean == float(np.mean(values))
+    assert standard_deviation == float(np.std(values))
+    assert mean != float(np.mean(values.astype(np.float64)))
+    assert standard_deviation != float(np.std(values.astype(np.float64)))
+
+
 def test_motion_seal_accepts_materializer_storage_and_dynamic_staging_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

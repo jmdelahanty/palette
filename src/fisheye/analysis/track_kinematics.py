@@ -3206,6 +3206,17 @@ def _compute_speed_derivatives(
     }
 
 
+def _acceleration_summary_statistics(values: np.ndarray) -> tuple[float, float]:
+    """Summarize acceleration in its persisted public float32 domain."""
+
+    persisted = np.asarray(values, dtype=np.float32)
+    finite = persisted[np.isfinite(persisted)]
+    if not finite.size:
+        nan = float("nan")
+        return nan, nan
+    return float(np.mean(finite)), float(np.std(finite))
+
+
 def build_track_datasets(
     track_ids: np.ndarray,
     frames: np.ndarray,
@@ -3713,9 +3724,9 @@ def build_track_datasets(
             heading_mean_deg = float("nan")
             heading_consistency = float("nan")
 
-        accel_finite = smoothed_accel_px[np.isfinite(smoothed_accel_px)]
-        mean_accel_px = float(np.mean(accel_finite)) if accel_finite.size else float("nan")
-        accel_std_px = float(np.std(accel_finite)) if accel_finite.size else float("nan")
+        mean_accel_px, accel_std_px = _acceleration_summary_statistics(
+            smoothed_accel_px
+        )
         mean_accel_mm = mean_accel_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(mean_accel_px) else float("nan")
         accel_std_mm = accel_std_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(accel_std_px) else float("nan")
 
@@ -8438,20 +8449,11 @@ def _validate_motion_core_numeric_invariants(
         expected_summary["heading_resultant"] = float("nan")
 
     default_derivative = derivatives[DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL]
-    summary_acceleration = np.asarray(
-        default_derivative["smoothed_acceleration_px"],
-        dtype=np.float64,
-    )
-    finite_acceleration = summary_acceleration[np.isfinite(summary_acceleration)]
-    expected_summary["mean_acceleration_px"] = (
-        float(np.mean(finite_acceleration))
-        if finite_acceleration.size
-        else float("nan")
-    )
-    expected_summary["acceleration_std_px"] = (
-        float(np.std(finite_acceleration))
-        if finite_acceleration.size
-        else float("nan")
+    (
+        expected_summary["mean_acceleration_px"],
+        expected_summary["acceleration_std_px"],
+    ) = _acceleration_summary_statistics(
+        np.asarray(default_derivative["smoothed_acceleration_px"])
     )
     expected_summary["keypoint_success_rate"] = (
         float(np.mean(keypoint_success))
