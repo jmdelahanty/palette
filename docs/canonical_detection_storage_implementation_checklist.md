@@ -118,15 +118,16 @@ Phase 1 evidence and decisions are recorded in
 - [ ] Add a versioned stage/run schema type that binds concrete paths to logical
       `ArrayContract` versions.
 - [ ] Define the canonical run schema ID and version.
-- [ ] Define symbolic dimensions such as `n_frames` and `n_detections`.
+- [ ] Define symbolic dimensions such as `n_frames` and `n_instances`.
 - [ ] Define exact contracts for all accepted canonical arrays.
 - [ ] Use exact `float32` for bounding boxes and centers.
 - [ ] Define axis names, coordinate spaces, units, fill/null semantics, and
       requiredness.
 - [ ] Define row identity through `instance_key` and acquisition-frame lineage.
 - [ ] Define frame-index bounds and the accepted row-ordering invariant.
-- [ ] Define count/offset cardinality invariants.
-- [ ] Define equality or derivation rules for retained aliases and caches.
+- [ ] Define instance/offset cardinality invariants.
+- [ ] Exclude `frame_counts` and `n_detections` from canonical bindings; define
+      their derivation only in explicit compatibility adapters.
 - [ ] Define the valid zero-observation representation.
 - [ ] Serialize the schema and concrete bindings into JSON-safe manifest records.
 - [ ] Represent existing `float64` archives through an explicit compatibility
@@ -137,7 +138,8 @@ Tests:
 - [ ] Exact dtype acceptance and rejection.
 - [ ] Shape and symbolic-dimension validation.
 - [ ] Frame-bound and row-order validation.
-- [ ] Count/offset consistency.
+- [ ] Instance/offset consistency.
+- [ ] Compatibility count derivation from offsets.
 - [ ] Derived-array consistency where required.
 - [ ] Empty-run validation.
 - [ ] Manifest round-trip and stable schema identity.

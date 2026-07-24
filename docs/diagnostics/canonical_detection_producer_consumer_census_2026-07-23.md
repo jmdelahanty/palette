@@ -16,12 +16,12 @@ Date: 2026-07-23
 | What are `bbox_img_xyxy` and `centers_img_xy`? | Required materialized, integrity-checked projections in the canonical run. They are derived, but they are not optional caches: crop publication consumes them and the coordinate contract verifies exact equality to the normalized authority. |
 | Are `frame_counts` and `n_detections` aliases? | Yes. Current writers write the same values and validators require equality. `n_detections` is the legacy name. |
 | Should the future contract add `frame_row_offsets`? | Yes. Exact `int64`, shape `(n_frames + 1,)`, required and authoritative for frame-to-row slicing. |
-| Is `frame_counts` still required? | No in the target logical contract. It is `diff(frame_row_offsets)` and is an optional transition cache while Palette consumers migrate. |
-| Is `n_detections` still written? | Only by an explicit legacy-compatibility publication profile until Crimson's legacy reader is replaced. It is not part of the new canonical core. |
+| Is `frame_counts` still required? | No. It is exactly `diff(frame_row_offsets)` and is excluded from the canonical schema. Compatibility adapters may synthesize it while Palette consumers migrate. |
+| Is `n_detections` still written? | Never by the canonical schema. A separate legacy-compatibility publication adapter may materialize it until Crimson's legacy reader is replaced. |
 | What row order is guaranteed? | Rows are contiguous in nondecreasing `frame_indices` order. Within one frame, persisted producer order is stable but has no ranking semantics. Consumers identify rows by `instance_key`, not row position. |
 | How is an empty frame represented? | By `frame_row_offsets[f] == frame_row_offsets[f + 1]`. There is no sentinel observation row. |
-| How is an empty run represented? | Every row array has zero rows; `frame_row_offsets` has `n_frames + 1` zero values; any transition `frame_counts`/`n_detections` array has `n_frames` zero values. |
-| Are null/sentinel rows allowed in raw canonical detections? | No. Raw canonical row arrays are dense and fully materialized. Physical Zarr fill values have no missing-value meaning. |
+| How is an empty run represented? | Every instance array has zero rows and `frame_row_offsets` has `n_frames + 1` zero values. |
+| Are null/sentinel rows allowed in raw canonical detections? | No. Sparse canonical instance columns are fully materialized only for present instances. Physical Zarr fill values have no missing-value meaning. |
 
 The new physical name is deliberately `frame_row_offsets`. Existing refined
 detection stores use `frame_offsets`; that path is compatibility evidence, not a
@@ -91,9 +91,12 @@ semantic producers:
 
 ## Target Canonical Array Roles
 
-`N` is the detection-row count and `F` is the complete acquisition-frame count.
-Continuous geometry changes from the current `float64` representation to the
-already accepted `float32` vNext representation.
+The canonical model is a sparse instance table plus its minimum frame-to-row
+index. `N` is the instance-row count and `F` is the complete acquisition-frame
+count. A frame can own zero, one, or many instance rows. No dense one-row-per-
+frame authoring convention is part of this schema. Continuous geometry changes
+from the current `float64` representation to the already accepted `float32`
+vNext representation.
 
 | Path | Target dtype and shape | Role | Required | Intended read shape | Producer | Principal consumers |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -106,8 +109,12 @@ already accepted `float32` vNext representation.
 | `class_ids` | `int32 (N,)` | Model taxonomy index | yes | row-aligned with boxes | canonical detector | identity, refine, training, Crimson |
 | `instance_key` | `uint64 (N,)` | Stable row identity derived from recording, frame, bbox, and class | yes | row windows / keyed joins | canonical detector identity minting | all modern downstream lineage |
 | `frame_row_offsets` | `int64 (F+1,)` | Authoritative CSR-style frame-to-row index | yes | eager once or two-value frame lookup | canonical detector index builder | Crimson and any per-frame reader |
-| `frame_counts` | `int32 (F,)` | `diff(frame_row_offsets)` transition cache | no | eager / frame windows | compatibility profile | current Palette compatibility |
-| `n_detections` | `int32 (F,)` | Exact legacy alias of `frame_counts` | legacy profile only | eager | legacy compatibility profile | current Crimson compatibility |
+
+`frame_counts` and `n_detections` are not rows in this table because they are
+not canonical arrays. A compatibility adapter can expose
+`diff(frame_row_offsets)` as `frame_counts`, and a legacy Crimson publication
+adapter can expose the same values as `n_detections`, without adding either path
+to the canonical schema or manifest bindings.
 
 `bbox_img_xyxy` and `centers_img_xy` are intentionally redundant. The coordinate
 module describes all three geometry surfaces as deliberately persisted and
@@ -219,17 +226,19 @@ Current canonical publication already requires all zero-row arrays with exact
 dtypes and full-length zero count vectors for a valid empty observation run
 (`src/fisheye/shared/observation_coordinate_publication.py:3144-3228`). The new
 contract preserves those row shapes, changes continuous geometry to `float32`,
-adds the all-zero `(F+1,)` offset array, and treats count arrays according to the
-selected transition/legacy profile.
+and adds the all-zero `(F+1,)` offset array. Compatibility adapters are
+responsible for any old count-vector representation.
 
 ## Phase 2 Consequences
 
 1. Add exact contracts for every target row above, including
    `frame_row_offsets`; do not reuse the current incomplete `DETECT_SPEC`.
-2. Make the canonical core require offsets and treat counts as derived profile
-   bindings: optional `frame_counts`, legacy-only `n_detections`.
+2. Make the canonical schema contain only sparse instance arrays and required
+   offsets; exclude both count-vector paths and their bindings.
 3. Add a compatibility adapter from existing raw count arrays and refined
-   `frame_offsets` to the one logical frame-row-offset contract.
+   `frame_offsets` to the one logical frame-row-offset contract. Reverse
+   compatibility views may derive old count vectors from offsets without making
+   them canonical.
 4. Enforce frame-contiguous ordering in the writer and validator before offsets
    are published.
 5. Give Crimson one exact schema-version path that reads consolidated manifest
