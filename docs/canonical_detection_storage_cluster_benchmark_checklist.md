@@ -321,8 +321,8 @@ Exit gate:
       changed.
 - [x] Measure actual resource use and revise future block defaults to one CPU
       slot and a 30-minute limit; the site enforces about 15 GB per slot.
-- [ ] Submit the remaining bounded `200,000`-frame repetitions.
-- [ ] Summarize variability before expanding to full duration.
+- [x] Submit the remaining bounded `200,000`-frame repetitions.
+- [x] Summarize variability before expanding to full duration.
 
 Exit gate:
 
@@ -338,9 +338,9 @@ Exit gate:
 - [ ] Carry only the Pareto frontier and required controls to full duration.
 - [ ] Run full-duration materialization, publication, and read workloads.
 - [ ] Benchmark parallel publication only for finalists.
-- [ ] Report median, p95 where meaningful, dispersion, trial order, and host
+- [x] Report median, p95 where meaningful, dispersion, trial order, and host
       identity rather than only the fastest observation.
-- [ ] Compare object count, local write, PRFS publication, PRFS reads, and peak
+- [x] Compare object count, local write, PRFS publication, PRFS reads, and peak
       memory as separate dimensions.
 - [ ] Select the fewest-object candidate that satisfies all predeclared
       correctness, latency, throughput, and resource gates.
