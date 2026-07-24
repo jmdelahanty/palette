@@ -104,14 +104,14 @@ unless the operator explicitly requests retention.
 - [x] Validate every destination array by exact digest.
 - [x] Require fresh destinations below a benchmark-only root.
 - [x] Record initial 200,000-frame regular-versus-sharded smoke evidence.
-- [ ] Separate reusable source preparation, candidate execution, workload
+- [x] Separate reusable source preparation, candidate execution, workload
       execution, reporting, and CLI orchestration from the initial diagnostic.
-- [ ] Preserve the existing single-candidate CLI as a thin adapter.
-- [ ] Add JSON validation for the common benchmark envelope.
+- [x] Preserve the existing single-candidate CLI as a thin adapter.
+- [x] Add JSON validation for the common benchmark envelope.
 
 Exit gate:
 
-- [ ] A matrix runner can invoke one candidate without importing CLI parsing or
+- [x] A matrix runner can invoke one candidate without importing CLI parsing or
       duplicating storage, schema, codec, or digest logic.
 
 ## Phase 1 — Cluster-Visible Safe Fixture
@@ -136,29 +136,29 @@ Exit gate:
 
 ## Phase 2 — Matrix Planning And Deduplication
 
-- [ ] Add versioned matrix, scale, candidate, repetition, and workload models.
-- [ ] Define initial frame scales: `200,000` and the full representative
+- [x] Add versioned matrix, scale, candidate, repetition, and workload models.
+- [x] Define initial frame scales: `200,000` and the full representative
       `1,188,000` frames.
-- [ ] Define inner-chunk targets: `128 KiB`, `512 KiB`, `1 MiB`, and `2 MiB`.
-- [ ] Define regular and indexed-sharded layouts.
-- [ ] Define shard targets: `8 MiB`, `32 MiB`, `128 MiB`, and `512 MiB` where
+- [x] Define inner-chunk targets: `128 KiB`, `512 KiB`, `1 MiB`, and `2 MiB`.
+- [x] Define regular and indexed-sharded layouts.
+- [x] Define shard targets: `8 MiB`, `32 MiB`, `128 MiB`, and `512 MiB` where
       they produce distinct physical plans.
-- [ ] Resolve every candidate through the shared storage planner.
-- [ ] Fingerprint the complete stage plan, codec profile, logical schema, and
+- [x] Resolve every candidate through the shared storage planner.
+- [x] Fingerprint the complete stage plan, codec profile, logical schema, and
       scale.
-- [ ] Deduplicate labels that resolve to identical physical plans.
-- [ ] Explain every removed duplicate in `matrix.json`.
-- [ ] Reject raw per-array chunk or shard row overrides.
-- [ ] Emit exact expected destinations and collision results in plan-only mode.
-- [ ] Generate a deterministic balanced trial order from a recorded seed.
-- [ ] Ensure regular and sharded layouts appear in early and late positions
+- [x] Deduplicate labels that resolve to identical physical plans.
+- [x] Explain every removed duplicate in `matrix.json`.
+- [x] Reject raw per-array chunk or shard row overrides.
+- [x] Emit exact expected destinations and collision results in plan-only mode.
+- [x] Generate a deterministic balanced trial order from a recorded seed.
+- [x] Ensure regular and sharded layouts appear in early and late positions
       across repetitions.
-- [ ] Record correctness gates and performance tolerances before executing the
+- [x] Record correctness gates and performance tolerances before executing the
       measured matrix.
 
 Exit gate:
 
-- [ ] The planner produces a stable, JSON-safe set of unique physical cases
+- [x] The planner produces a stable, JSON-safe set of unique physical cases
       without reading or writing Zarr payloads.
 
 ## Phase 3 — Stage And Local Canonical Preparation
@@ -304,8 +304,8 @@ Exit gate:
 
 ## Phase 8 — Cluster Smoke And Bounded Rollout
 
-- [ ] Render and review one complete plan with no submission.
-- [ ] Run one small local end-to-end fixture outside the sandbox.
+- [x] Render and review one complete plan with no submission.
+- [x] Run one small local end-to-end fixture outside the sandbox.
 - [ ] Submit one `200,000`-frame scale/repetition block.
 - [ ] Verify stage-in, scratch use, candidate order, reports, publish paths,
       validation, cleanup, and finalizer evidence.

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Mapping
+import json
+from typing import Any, Mapping
 
 from fisheye.shared.zarr.array_contracts import ArrayContract
 from fisheye.shared.zarr.storage_intent import AccessPattern, StoragePlan
@@ -162,6 +163,10 @@ CORE_BENCHMARK_WORKLOADS = {
 }
 
 
+BENCHMARK_RESULT_SCHEMA_ID = "palette.storage_benchmark"
+BENCHMARK_RESULT_SCHEMA_VERSION = 1
+
+
 @dataclass(frozen=True)
 class StorageBenchmarkCase:
     """One schema-, plan-, phase-, and workload-locked benchmark case."""
@@ -243,8 +248,8 @@ def benchmark_result_envelope(
     """Build the common JSON result envelope used by benchmark adapters."""
 
     return {
-        "schema_id": "palette.storage_benchmark",
-        "schema_version": 1,
+        "schema_id": BENCHMARK_RESULT_SCHEMA_ID,
+        "schema_version": BENCHMARK_RESULT_SCHEMA_VERSION,
         **case.as_manifest(),
         "source_identity": dict(source_identity),
         "environment": dict(environment),
@@ -252,3 +257,139 @@ def benchmark_result_envelope(
         "summary": dict(summary),
         "validation": dict(validation),
     }
+
+
+def validate_benchmark_result_envelope(
+    value: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return exact structural errors for one common benchmark result.
+
+    This intentionally validates the shared promotion-facing envelope without
+    imposing a dataset-specific result model. Dataset adapters may add fields,
+    but the schema identity, logical/storage linkage, workload compatibility,
+    and declared trial metrics are mandatory.
+    """
+
+    errors: list[str] = []
+    required_mappings = (
+        "logical_schema",
+        "storage_plan",
+        "source_identity",
+        "environment",
+        "workload",
+        "summary",
+        "validation",
+    )
+    if value.get("schema_id") != BENCHMARK_RESULT_SCHEMA_ID:
+        errors.append(
+            f"schema_id must be {BENCHMARK_RESULT_SCHEMA_ID!r}."
+        )
+    if value.get("schema_version") != BENCHMARK_RESULT_SCHEMA_VERSION:
+        errors.append(
+            f"schema_version must be {BENCHMARK_RESULT_SCHEMA_VERSION}."
+        )
+    if not isinstance(value.get("case_id"), str) or not str(
+        value.get("case_id", "")
+    ).strip():
+        errors.append("case_id must be a non-empty string.")
+    try:
+        phase = BenchmarkPhase(value.get("phase"))
+    except (TypeError, ValueError):
+        phase = None
+        errors.append("phase must be a known benchmark phase.")
+
+    mappings: dict[str, Mapping[str, Any]] = {}
+    for field in required_mappings:
+        item = value.get(field)
+        if not isinstance(item, Mapping):
+            errors.append(f"{field} must be a mapping.")
+        else:
+            mappings[field] = item
+
+    trials = value.get("trials")
+    if not isinstance(trials, list) or not trials:
+        errors.append("trials must be a non-empty list.")
+        trial_mappings: list[Mapping[str, Any]] = []
+    else:
+        trial_mappings = []
+        for index, trial in enumerate(trials):
+            if not isinstance(trial, Mapping):
+                errors.append(f"trials[{index}] must be a mapping.")
+            else:
+                trial_mappings.append(trial)
+
+    logical_schema = mappings.get("logical_schema", {})
+    storage_plan = mappings.get("storage_plan", {})
+    if logical_schema.get("id") != storage_plan.get("logical_schema_id"):
+        errors.append("logical schema ID does not match the storage plan.")
+    if logical_schema.get("version") != storage_plan.get(
+        "logical_schema_version"
+    ):
+        errors.append("logical schema version does not match the storage plan.")
+
+    workload = mappings.get("workload", {})
+    workload_phases = workload.get("phases")
+    if phase is not None and (
+        not isinstance(workload_phases, list)
+        or phase.value not in workload_phases
+    ):
+        errors.append("phase is not supported by the declared workload.")
+    access_patterns = workload.get("access_patterns")
+    plan_access = storage_plan.get("access_pattern")
+    if (
+        not isinstance(access_patterns, list)
+        or plan_access not in access_patterns
+    ):
+        errors.append(
+            "storage-plan access pattern is not supported by the workload."
+        )
+
+    required_metrics = workload.get("required_metrics")
+    if not isinstance(required_metrics, list) or not all(
+        isinstance(metric, str) and metric for metric in required_metrics
+    ):
+        errors.append("workload required_metrics must be a list of names.")
+    else:
+        for index, trial in enumerate(trial_mappings):
+            missing = [metric for metric in required_metrics if metric not in trial]
+            if missing:
+                errors.append(
+                    f"trials[{index}] is missing required metrics: "
+                    + ", ".join(missing)
+                    + "."
+                )
+
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"envelope is not strict JSON-safe: {exc}.")
+    return tuple(errors)
+
+
+def require_benchmark_result_envelope(value: Mapping[str, Any]) -> None:
+    """Raise when a common benchmark result violates the v1 contract."""
+
+    errors = validate_benchmark_result_envelope(value)
+    if errors:
+        raise ValueError("Invalid benchmark result envelope: " + "; ".join(errors))
+
+
+__all__ = [
+    "ALL_ACCESS_PATTERNS",
+    "BENCHMARK_RESULT_SCHEMA_ID",
+    "BENCHMARK_RESULT_SCHEMA_VERSION",
+    "CORE_BENCHMARK_WORKLOADS",
+    "EAGER_FULL_READ_V1",
+    "FULL_SCAN_READ_V1",
+    "INDEXED_RANGE_READ_V1",
+    "PER_ROW_RANDOM_READ_V1",
+    "PUBLISH_VALIDATE_V1",
+    "WINDOWED_ROWS_READ_V1",
+    "WRITE_MATERIALIZATION_V1",
+    "BenchmarkPhase",
+    "BenchmarkWorkloadContract",
+    "StorageBenchmarkCase",
+    "benchmark_result_envelope",
+    "require_benchmark_result_envelope",
+    "validate_benchmark_result_envelope",
+]

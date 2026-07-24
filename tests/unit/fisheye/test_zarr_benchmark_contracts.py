@@ -14,6 +14,8 @@ from fisheye.shared.zarr.benchmark_contracts import (
     BenchmarkPhase,
     StorageBenchmarkCase,
     benchmark_result_envelope,
+    require_benchmark_result_envelope,
+    validate_benchmark_result_envelope,
 )
 from fisheye.shared.zarr.storage_intent import AccessPattern, WriteMode
 from fisheye.shared.zarr.storage_planner import plan_storage
@@ -93,3 +95,59 @@ def test_common_result_envelope_is_json_safe_and_schema_linked() -> None:
         "palette.array.keypoints_img"
     )
     assert json.loads(json.dumps(result)) == result
+
+
+def test_common_result_envelope_validator_accepts_declared_metrics() -> None:
+    case = StorageBenchmarkCase(
+        case_id="keypoints_img__published_http_v1__windowed",
+        phase=BenchmarkPhase.READ,
+        array_contract=KEYPOINTS_IMG_V1,
+        storage_plan=_keypoint_plan(),
+        workload=WINDOWED_ROWS_READ_V1,
+    )
+    result = benchmark_result_envelope(
+        case,
+        source_identity={"digest": "abc"},
+        environment={"storage_tier": "local"},
+        trials=[
+            {
+                "read_seconds": 1.0,
+                "requested_rows": 1024,
+                "decoded_bytes": None,
+                "transferred_bytes": None,
+                "request_count": None,
+            }
+        ],
+        summary={"median_seconds": 1.0},
+        validation={"exact_dtype": True, "decoded_match": True},
+    )
+
+    assert validate_benchmark_result_envelope(result) == ()
+    require_benchmark_result_envelope(result)
+
+
+def test_common_result_envelope_validator_reports_linkage_and_metric_errors() -> None:
+    case = StorageBenchmarkCase(
+        case_id="keypoints_img__published_http_v1__windowed",
+        phase=BenchmarkPhase.READ,
+        array_contract=KEYPOINTS_IMG_V1,
+        storage_plan=_keypoint_plan(),
+        workload=WINDOWED_ROWS_READ_V1,
+    )
+    result = benchmark_result_envelope(
+        case,
+        source_identity={"digest": "abc"},
+        environment={"storage_tier": "local"},
+        trials=[{"read_seconds": float("nan")}],
+        summary={"median_seconds": 1.0},
+        validation={"exact_dtype": True},
+    )
+    result["logical_schema"]["version"] = 2
+
+    errors = validate_benchmark_result_envelope(result)
+
+    assert "logical schema version does not match the storage plan." in errors
+    assert any("missing required metrics" in error for error in errors)
+    assert any("strict JSON-safe" in error for error in errors)
+    with pytest.raises(ValueError, match="Invalid benchmark result envelope"):
+        require_benchmark_result_envelope(result)

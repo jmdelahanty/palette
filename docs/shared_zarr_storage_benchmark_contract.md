@@ -201,11 +201,11 @@ state and cache-eviction support must be explicit.
 
 ## Result Schema
 
-The common envelope is `palette.storage_benchmark.v1`:
+The common envelope is `palette.storage_benchmark` with `schema_version: 1`:
 
 ```json
 {
-  "schema_id": "palette.storage_benchmark.v1",
+  "schema_id": "palette.storage_benchmark",
   "case_id": "keypoints_img__published_http_v1__chunk_1m__shard_32m",
   "phase": "read",
   "logical_schema": {"id": "...", "version": 1},
@@ -248,7 +248,7 @@ the appropriate result.
       plan contract.
 - [x] Add a read-only actual-versus-proposed layout comparison.
 - [ ] Add logical schema IDs and canonical dtype descriptors per array path.
-- [ ] Add the common benchmark result envelope and JSON validation.
+- [x] Add the common benchmark result envelope and JSON validation.
 
 ### Adapt Existing Benchmarks
 
