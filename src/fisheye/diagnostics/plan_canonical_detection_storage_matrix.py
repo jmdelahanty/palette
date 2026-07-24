@@ -45,6 +45,7 @@ def _plan(args: argparse.Namespace, *, occupied: Sequence[Path] = ()):
         scales=args.scale,
         destination_root=args.destination_root,
         repetitions=args.repetitions,
+        repetition_start=args.repetition_start,
         seed=args.seed,
         occupied_destinations=occupied,
     )
@@ -62,6 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="ID:N_FRAMES:N_INSTANCES:SOURCE_WIDTH:SOURCE_HEIGHT; repeatable",
     )
     parser.add_argument("--repetitions", type=int, default=5)
+    parser.add_argument("--repetition-start", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20_260_724)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)

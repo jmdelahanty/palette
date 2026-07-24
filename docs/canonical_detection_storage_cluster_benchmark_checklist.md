@@ -250,20 +250,21 @@ Local and published reads are different benchmark tiers and must remain
 separate in reports.
 
 - [ ] Run each read workload in a fresh subprocess for process-cold timing.
-- [ ] Repeat within the process for warm timing.
+- [x] Run each storage tier's ordered read suite in a fresh subprocess.
+- [x] Repeat each workload within the process for warm timing.
 - [x] Do not label OS or shared-filesystem cache state cold unless cache control
       is both real and recorded.
 - [x] Measure direct and consolidated metadata opening separately.
 - [x] Read the complete eager `frame_row_offsets` index.
-- [ ] Read two adjacent offsets followed by the selected per-frame instance
+- [x] Read two adjacent offsets followed by the selected per-frame instance
       slice.
-- [ ] Run deterministic random-frame reads.
-- [ ] Run sequential frame windows and 700-FPS traversal.
-- [ ] Run contiguous and random observation-row reads used by joins.
+- [x] Run deterministic random-frame reads.
+- [x] Run sequential frame windows and 700-FPS traversal.
+- [x] Run contiguous and random observation-row reads used by joins.
 - [x] Run complete-array scans.
 - [x] Use identical frame, row, window, order, and seed inputs for every
       candidate.
-- [ ] Record latency distributions, logical bytes returned, decoded bytes where
+- [x] Record latency distributions, logical bytes returned, decoded bytes where
       observable, request/range count where observable, and throughput.
 - [x] Run local-scratch workloads before cleanup.
 - [x] Run PRFS workloads only against successfully published benchmark outputs.

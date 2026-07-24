@@ -66,7 +66,12 @@ def _scale() -> BenchmarkScale:
     )
 
 
-def _plan(tmp_path: Path):
+def _plan(
+    tmp_path: Path,
+    *,
+    repetitions: int = 1,
+    repetition_start: int = 0,
+):
     benchmark_root = tmp_path / "benchmarks"
     workflow_root = (
         benchmark_root
@@ -82,7 +87,8 @@ def _plan(tmp_path: Path):
         palette_repo=_clean_palette_repo(tmp_path),
         recording_identity="sleepyfish_cam2010095",
         scales=(_scale(),),
-        repetitions=1,
+        repetitions=repetitions,
+        repetition_start=repetition_start,
         seed=20_260_724,
         queue="short",
         ncores=2,
@@ -129,6 +135,24 @@ def test_cluster_plan_is_one_cpu_array_block_plus_success_finalizer(
     assert finalizer.dependency is not None
     assert finalizer.dependency.upstream_job_keys == ("benchmark_blocks",)
     assert finalizer.metadata["profile_promotion"] is False
+
+
+def test_cluster_plan_continues_balanced_repetitions_without_index_zero(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path, repetitions=4, repetition_start=1)
+
+    blocks, _finalizer = plan.workflow.jobs
+    assert blocks.execution_group is not None
+    assert [
+        task.metadata["repetition_index"]
+        for task in blocks.execution_group.tasks
+    ] == [1, 2, 3, 4]
+    assert all(
+        "repetition_000" not in output
+        for task in blocks.execution_group.tasks
+        for output in task.expected_outputs
+    )
 
 
 def test_materialize_and_apply_submit_exact_dependency_with_fake_runner(

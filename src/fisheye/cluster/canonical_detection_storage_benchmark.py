@@ -129,6 +129,7 @@ def build_plan(
     recording_identity: str,
     scales: Sequence[BenchmarkScale],
     repetitions: int,
+    repetition_start: int,
     seed: int,
     queue: str,
     ncores: int,
@@ -163,6 +164,7 @@ def build_plan(
         scales=scales,
         destination_root=workflow / "candidates",
         repetitions=int(repetitions),
+        repetition_start=int(repetition_start),
         seed=int(seed),
     )
     matrix_manifest = matrix.as_manifest()
@@ -432,6 +434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--recording-identity", required=True)
     parser.add_argument("--scale", required=True, action="append", type=_parse_scale)
     parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument("--repetition-start", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20_260_724)
     parser.add_argument("--queue", default="short")
     parser.add_argument("--ncores", type=int, default=1)
@@ -452,6 +455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         recording_identity=args.recording_identity,
         scales=args.scale,
         repetitions=args.repetitions,
+        repetition_start=args.repetition_start,
         seed=args.seed,
         queue=args.queue,
         ncores=args.ncores,

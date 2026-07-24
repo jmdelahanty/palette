@@ -40,12 +40,19 @@ def _scales() -> tuple[BenchmarkScale, ...]:
     )
 
 
-def _matrix(destination_root: Path, *, repetitions: int = 5, occupied=()):
+def _matrix(
+    destination_root: Path,
+    *,
+    repetitions: int = 5,
+    repetition_start: int = 0,
+    occupied=(),
+):
     return plan_canonical_detection_benchmark_matrix(
         matrix_id="sleepyfish_detection_v1",
         scales=_scales(),
         destination_root=destination_root,
         repetitions=repetitions,
+        repetition_start=repetition_start,
         seed=20_260_724,
         occupied_destinations=occupied,
     )
@@ -144,6 +151,33 @@ def test_detection_matrix_records_exact_destination_collisions(tmp_path: Path) -
         if trial.destination_collision
     ]
     assert [Path(trial.destination) for trial in collisions] == [occupied]
+
+
+def test_detection_matrix_can_continue_at_nonzero_repetition_index(
+    tmp_path: Path,
+) -> None:
+    matrix = _matrix(tmp_path, repetitions=4, repetition_start=1)
+
+    by_scale = {
+        scale.scale_id: [
+            repetition.repetition_index
+            for repetition in matrix.repetitions
+            if repetition.scale_id == scale.scale_id
+        ]
+        for scale in _scales()
+    }
+    assert by_scale == {
+        "frames_200k": [1, 2, 3, 4],
+        "frames_full": [1, 2, 3, 4],
+    }
+    assert all(
+        "repetition_000" not in trial.destination
+        for repetition in matrix.repetitions
+        for trial in repetition.trials
+    )
+
+    with pytest.raises(ValueError, match="repetition_start"):
+        _matrix(tmp_path, repetitions=1, repetition_start=-1)
 
 
 def test_matrix_manifest_fingerprint_rejects_serialized_drift(tmp_path: Path) -> None:

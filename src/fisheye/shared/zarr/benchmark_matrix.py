@@ -468,6 +468,7 @@ def plan_storage_benchmark_matrix(
     candidate_requests: Sequence[StorageCandidateRequest],
     workloads: Sequence[MatrixWorkload],
     repetitions: int,
+    repetition_start: int = 0,
     seed: int,
     destination_root: Path,
     resolve_stage_plan: Callable[
@@ -480,8 +481,10 @@ def plan_storage_benchmark_matrix(
     """Resolve, deduplicate, and order a storage matrix without payload I/O."""
 
     resolved_matrix_id = _require_identifier(matrix_id, field="matrix_id")
-    if int(repetitions) <= 0:
+    if type(repetitions) is not int or repetitions <= 0:
         raise ValueError("repetitions must be positive.")
+    if type(repetition_start) is not int or repetition_start < 0:
+        raise ValueError("repetition_start must be a nonnegative exact integer.")
     scales_tuple = tuple(scales)
     requests_tuple = tuple(candidate_requests)
     workloads_tuple = tuple(workloads)
@@ -541,7 +544,10 @@ def plan_storage_benchmark_matrix(
         scale_candidates = [
             candidate for candidate in retained if candidate.scale_id == scale.scale_id
         ]
-        for repetition_index in range(int(repetitions)):
+        for repetition_index in range(
+            repetition_start,
+            repetition_start + repetitions,
+        ):
             ordered = _balanced_order(
                 scale_candidates,
                 repetition_index=repetition_index,

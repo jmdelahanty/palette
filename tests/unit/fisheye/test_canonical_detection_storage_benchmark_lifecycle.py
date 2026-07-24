@@ -27,6 +27,9 @@ from fisheye.shared.zarr.canonical_detection_benchmark import (
 from fisheye.shared.zarr.detection_benchmark_matrix import (
     plan_canonical_detection_benchmark_matrix,
 )
+from fisheye.shared.zarr.detection_benchmark_access import (
+    require_detection_consumer_workloads,
+)
 from fisheye.shared.zarr.detection_benchmark_reads import (
     benchmark_detection_candidate_reads,
 )
@@ -129,7 +132,22 @@ def test_real_zarr_lifecycle_stages_writes_publishes_and_reads_exactly(
             storage_tier="test_shared_filesystem",
         )
         assert publication["exact_relative_path_size_content_match"] is True
+        assert reads["schema_version"] == 2
+        assert len(reads["direct_open_trials"]) == 2
+        assert len(reads["consolidated_open_trials"]) == 2
         assert all(bool(item["exact"]) for item in reads["arrays"])
+        assert all(len(item["window_trials"]) == 2 for item in reads["arrays"])
+        assert all(len(item["full_trials"]) == 2 for item in reads["arrays"])
+        require_detection_consumer_workloads(reads["consumer_workloads"])
+        assert reads["consumer_workloads"]["random_frame_slices"][
+            "frame_indices"
+        ] == [3, 2, 4, 1, 0]
+        assert all(
+            trial["requested_frames"] == 5
+            for trial in reads["consumer_workloads"][
+                "sequential_frame_windows"
+            ]["passes"]
+        )
         assert (published.stat().st_mode & 0o777) == 0o555
         assert all(
             (path.stat().st_mode & 0o777) == (0o555 if path.is_dir() else 0o444)
@@ -177,13 +195,70 @@ def test_finalizer_requires_exact_planned_order_and_evidence(tmp_path: Path) -> 
         field: workflow / "evidence" / f"{field}.json"
         for field in (
             "local_write_report",
+            "local_read_report",
             "publication_report",
             "prfs_read_report",
         )
     }
-    for path in evidence_paths.values():
+    def consumer_workloads() -> dict[str, object]:
+        passes = [
+            {
+                "exact": True,
+                "consumer_seconds": 0.02,
+                "read_seconds": 0.01,
+                "p95_frame_seconds": 0.001,
+                "p95_range_seconds": 0.001,
+                "p95_window_seconds": 0.001,
+                "frames_per_second": 1_000.0,
+            },
+            {
+                "exact": True,
+                "consumer_seconds": 0.01,
+                "read_seconds": 0.005,
+                "p95_frame_seconds": 0.0005,
+                "p95_range_seconds": 0.0005,
+                "p95_window_seconds": 0.0005,
+                "frames_per_second": 2_000.0,
+            },
+        ]
+        return {
+            "schema_id": "palette.canonical_detection_consumer_read_workloads",
+            "schema_version": 1,
+            "eager_frame_row_offsets": {"passes": passes},
+            "random_frame_slices": {"passes": passes},
+            "random_observation_ranges": {"passes": passes},
+            "sequential_frame_windows": {"passes": passes},
+        }
+
+    def read_report() -> dict[str, object]:
+        trials = [
+            {"seconds": 0.01},
+            {"seconds": 0.005},
+        ]
+        return {
+            "schema_version": 2,
+            "direct_open_trials": trials,
+            "consolidated_open_trials": trials,
+            "arrays": [{"exact": True}],
+            "consumer_workloads": consumer_workloads(),
+        }
+
+    local_write = {
+        "timing": {"total_seconds": 0.5},
+        "physical": {"payload_file_count": 8, "apparent_bytes": 1024},
+    }
+    publication_report = {
+        "timing": {"copy_seconds": 0.1, "publication_seconds": 0.2}
+    }
+    reports = {
+        "local_write_report": local_write,
+        "local_read_report": read_report(),
+        "publication_report": publication_report,
+        "prfs_read_report": read_report(),
+    }
+    for field, path in evidence_paths.items():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}", encoding="utf-8")
+        path.write_text(json.dumps(reports[field]), encoding="utf-8")
     block_path = workflow / "reports" / "blocks" / "frames_5_repetition_000.json"
     block_path.parent.mkdir(parents=True)
     block_path.write_text(
@@ -194,11 +269,18 @@ def test_finalizer_requires_exact_planned_order_and_evidence(tmp_path: Path) -> 
                 "total_seconds": 1.0,
                 "candidates": [
                     {
+                        "position": 0,
                         "candidate_id": candidate_id,
                         "physical_fingerprint": candidate["physical_fingerprint"],
                         "published_candidate": str(published),
+                        "subprocess_seconds": 0.75,
+                        "local_read_subprocess_seconds": 0.2,
+                        "prfs_read_subprocess_seconds": 0.25,
                         **{key: str(value) for key, value in evidence_paths.items()},
-                        "prfs_reads": {"all_exact": True},
+                        "prfs_reads": {
+                            "all_exact": True,
+                            "consumer_workloads_exact": True,
+                        },
                     }
                 ],
             }
@@ -220,7 +302,15 @@ def test_finalizer_requires_exact_planned_order_and_evidence(tmp_path: Path) -> 
         "selector_updates": 0,
         "training_artifacts": 0,
         "profile_promoted": False,
+        "balanced_repetition_count": 1,
+        "candidate_reduction_count": 1,
     }
+    assert aggregate["schema_version"] == 2
+    assert aggregate["selection"]["performed"] is False
+    assert aggregate["selection"]["reason"] == "insufficient_balanced_repetitions"
+    assert aggregate["candidate_reductions"][0]["metric_reductions"][
+        "publication.total_seconds"
+    ]["median"] == 0.2
 
 
 def test_tiny_block_runs_one_fixed_staging_candidate_and_copy_back(

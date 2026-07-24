@@ -12,10 +12,8 @@ from fisheye.shared.zarr.canonical_detection_benchmark import (
     load_canonical_detection_benchmark_input,
     write_detection_benchmark_candidate,
 )
-from fisheye.shared.zarr.detection_storage import plan_canonical_detection_storage
-from fisheye.shared.zarr.storage_profiles import (
-    PUBLISHED_HTTP_V1,
-    make_benchmark_storage_profile,
+from fisheye.shared.zarr.detection_benchmark_planning import (
+    plan_detection_benchmark_candidate,
 )
 
 
@@ -36,19 +34,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.layout == "sharded" and args.shard_bytes is None:
         parser.error("--shard-bytes is required for sharded candidates")
-    shard_bytes = (
-        int(args.shard_bytes)
-        if args.shard_bytes is not None
-        else max(PUBLISHED_HTTP_V1.target_shard_bytes, int(args.chunk_bytes))
-    )
-    profile = make_benchmark_storage_profile(
-        target_chunk_bytes=int(args.chunk_bytes),
-        target_shard_bytes=shard_bytes,
-        shard_immutable=args.layout == "sharded",
-    )
-    plans = plan_canonical_detection_storage(
+    plans = plan_detection_benchmark_candidate(
         benchmark_input.dimensions,
-        profile=profile,
+        target_chunk_bytes=int(args.chunk_bytes),
+        target_shard_bytes=args.shard_bytes,
+        layout=args.layout,
     )
     if not args.apply:
         print(

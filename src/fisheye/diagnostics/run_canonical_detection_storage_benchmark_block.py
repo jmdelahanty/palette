@@ -27,19 +27,13 @@ from fisheye.shared.zarr.benchmark_matrix import (
 )
 from fisheye.shared.zarr.benchmark_publication import publish_benchmark_candidate
 from fisheye.shared.zarr.canonical_detection_benchmark import (
-    load_canonical_detection_benchmark_input,
     load_detection_benchmark_input,
 )
-from fisheye.shared.zarr.detection_benchmark_reads import (
-    benchmark_detection_candidate_reads,
+from fisheye.shared.zarr.detection_benchmark_access import (
+    require_detection_consumer_workloads,
 )
 from fisheye.shared.zarr.detection_benchmark_staging import (
     prepare_canonical_detection_benchmark_staging,
-)
-from fisheye.shared.zarr.detection_storage import plan_canonical_detection_storage
-from fisheye.shared.zarr.storage_profiles import (
-    PUBLISHED_HTTP_V1,
-    make_benchmark_storage_profile,
 )
 
 
@@ -176,31 +170,6 @@ def _scale_dimensions(matrix: Mapping[str, Any], scale_id: str) -> dict[str, int
     return {str(key): int(value) for key, value in matches[0]["dimensions"].items()}
 
 
-def _plans_for_candidate(
-    benchmark_input,
-    candidate: Mapping[str, Any],
-):
-    request = candidate.get("request")
-    if not isinstance(request, Mapping):
-        raise ValueError("Matrix candidate lacks a byte-budget request.")
-    chunk_bytes = int(request["target_chunk_bytes"])
-    raw_shard_bytes = request.get("target_shard_bytes")
-    shard_bytes = (
-        int(raw_shard_bytes)
-        if raw_shard_bytes is not None
-        else max(PUBLISHED_HTTP_V1.target_shard_bytes, chunk_bytes)
-    )
-    profile = make_benchmark_storage_profile(
-        target_chunk_bytes=chunk_bytes,
-        target_shard_bytes=shard_bytes,
-        shard_immutable=str(request["layout"]) == "sharded",
-    )
-    return plan_canonical_detection_storage(
-        benchmark_input.dimensions,
-        profile=profile,
-    )
-
-
 def run_benchmark_block(
     *,
     matrix_path: Path,
@@ -326,7 +295,6 @@ def run_benchmark_block(
             scratch_root=scratch_root,
         )
         del legacy_input
-        benchmark_input = load_canonical_detection_benchmark_input(canonical_staging)
         partial["canonical_staging"] = staging_report
 
         candidate_records: list[dict[str, object]] = []
@@ -372,31 +340,106 @@ def run_benchmark_block(
             ):
                 raise RuntimeError(f"Local candidate validation failed: {candidate_id}")
 
+            local_read_report = (
+                scratch_root / "reports" / f"{candidate_id}.local-read.json"
+            )
+            local_read_command = [
+                str(palette_repo.expanduser().resolve() / "scripts" / "py"),
+                "-m",
+                "fisheye.diagnostics.run_canonical_detection_storage_reads",
+                str(canonical_staging),
+                str(local_candidate),
+                "--report",
+                str(local_read_report),
+                "--storage-tier",
+                "node_local_scratch",
+                "--chunk-bytes",
+                str(request["target_chunk_bytes"]),
+                "--layout",
+                str(request["layout"]),
+                "--read-seed",
+                str(matrix["seed"]),
+            ]
+            if request.get("target_shard_bytes") is not None:
+                local_read_command.extend(
+                    ["--shard-bytes", str(request["target_shard_bytes"])]
+                )
+            local_read_started = time.perf_counter()
+            local_read_completed = subprocess.run(
+                local_read_command,
+                cwd=str(palette_repo.expanduser().resolve()),
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            local_read_subprocess_seconds = float(
+                time.perf_counter() - local_read_started
+            )
+            local_reads = _read_json(local_read_report)
+            require_detection_consumer_workloads(local_reads["consumer_workloads"])
+            if not all(bool(item.get("exact")) for item in local_reads["arrays"]):
+                raise RuntimeError(
+                    f"Local read candidate validation failed: {candidate_id}"
+                )
+
             published = Path(str(trial["destination"])).expanduser().resolve()
             publication = publish_benchmark_candidate(
                 source=local_candidate,
                 destination=published,
                 workflow_root=workflow,
             )
-            plans = _plans_for_candidate(benchmark_input, candidate)
-            prfs_reads = benchmark_detection_candidate_reads(
-                benchmark_input,
-                candidate=published,
-                plans=plans,
-                storage_tier="shared_prfs",
+            prfs_read_report = (
+                scratch_root / "reports" / f"{candidate_id}.prfs-read.json"
             )
+            read_command = [
+                str(palette_repo.expanduser().resolve() / "scripts" / "py"),
+                "-m",
+                "fisheye.diagnostics.run_canonical_detection_storage_reads",
+                str(canonical_staging),
+                str(published),
+                "--report",
+                str(prfs_read_report),
+                "--storage-tier",
+                "shared_prfs",
+                "--chunk-bytes",
+                str(request["target_chunk_bytes"]),
+                "--layout",
+                str(request["layout"]),
+                "--read-seed",
+                str(matrix["seed"]),
+            ]
+            if request.get("target_shard_bytes") is not None:
+                read_command.extend(
+                    ["--shard-bytes", str(request["target_shard_bytes"])]
+                )
+            read_started = time.perf_counter()
+            read_completed = subprocess.run(
+                read_command,
+                cwd=str(palette_repo.expanduser().resolve()),
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            read_subprocess_seconds = float(time.perf_counter() - read_started)
+            prfs_reads = _read_json(prfs_read_report)
+            require_detection_consumer_workloads(prfs_reads["consumer_workloads"])
+            if not all(bool(item.get("exact")) for item in prfs_reads["arrays"]):
+                raise RuntimeError(f"PRFS candidate validation failed: {candidate_id}")
             evidence_base = published.with_suffix("")
             local_evidence_path = Path(f"{evidence_base}.local-write.json")
+            local_read_evidence_path = Path(f"{evidence_base}.local-read.json")
             publication_path = Path(f"{evidence_base}.publication.json")
             read_path = Path(f"{evidence_base}.prfs-read.json")
             for evidence_path in (
                 local_evidence_path,
+                local_read_evidence_path,
                 publication_path,
                 read_path,
             ):
                 if evidence_path.exists():
                     raise FileExistsError(f"Candidate evidence exists: {evidence_path}")
             write_json_snapshot(local_evidence_path, local_result)
+            write_json_snapshot(local_read_evidence_path, local_reads)
             write_json_snapshot(publication_path, publication)
             write_json_snapshot(read_path, prfs_reads)
             candidate_records.append(
@@ -409,9 +452,18 @@ def run_benchmark_block(
                     "subprocess_seconds": subprocess_seconds,
                     "subprocess_stdout": completed.stdout,
                     "subprocess_stderr": completed.stderr,
+                    "local_read_command": local_read_command,
+                    "local_read_subprocess_seconds": local_read_subprocess_seconds,
+                    "local_read_subprocess_stdout": local_read_completed.stdout,
+                    "local_read_subprocess_stderr": local_read_completed.stderr,
+                    "prfs_read_command": read_command,
+                    "prfs_read_subprocess_seconds": read_subprocess_seconds,
+                    "prfs_read_subprocess_stdout": read_completed.stdout,
+                    "prfs_read_subprocess_stderr": read_completed.stderr,
                     "local_candidate": str(local_candidate),
                     "published_candidate": str(published),
                     "local_write_report": str(local_evidence_path),
+                    "local_read_report": str(local_read_evidence_path),
                     "publication_report": str(publication_path),
                     "prfs_read_report": str(read_path),
                     "publication": publication,
@@ -423,6 +475,7 @@ def run_benchmark_block(
                         "all_exact": all(
                             bool(item["exact"]) for item in prfs_reads["arrays"]
                         ),
+                        "consumer_workloads_exact": True,
                     },
                 }
             )

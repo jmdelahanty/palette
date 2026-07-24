@@ -21,12 +21,12 @@ from fisheye.shared.zarr.benchmark_matrix import (
     plan_storage_benchmark_matrix,
 )
 from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
-from fisheye.shared.zarr.detection_storage import plan_canonical_detection_storage
+from fisheye.shared.zarr.detection_benchmark_planning import (
+    plan_detection_benchmark_candidate,
+)
 from fisheye.shared.zarr.storage_profiles import (
     KIB,
     MIB,
-    PUBLISHED_HTTP_V1,
-    make_benchmark_storage_profile,
 )
 
 
@@ -42,6 +42,22 @@ INITIAL_DETECTION_MATRIX_WORKLOADS = tuple(
         WINDOWED_ROWS_READ_V1,
         FULL_SCAN_READ_V1,
     )
+) + (
+    MatrixWorkload(
+        workload_id="palette.detection_read.random_frame_slices.v1",
+        phases=("read",),
+        access_patterns=("eager", "windowed"),
+    ),
+    MatrixWorkload(
+        workload_id="palette.detection_read.random_observation_ranges.v1",
+        phases=("read",),
+        access_patterns=("windowed",),
+    ),
+    MatrixWorkload(
+        workload_id="palette.detection_read.sequential_frame_windows.v1",
+        phases=("read",),
+        access_patterns=("eager", "windowed"),
+    ),
 )
 
 INITIAL_DETECTION_CORRECTNESS_GATES = {
@@ -110,19 +126,11 @@ def _resolve_detection_stage_plan(
     scale: BenchmarkScale,
     request: StorageCandidateRequest,
 ) -> Mapping[str, object]:
-    shard_target = (
-        request.target_shard_bytes
-        if request.target_shard_bytes is not None
-        else max(PUBLISHED_HTTP_V1.target_shard_bytes, request.target_chunk_bytes)
-    )
-    profile = make_benchmark_storage_profile(
-        target_chunk_bytes=request.target_chunk_bytes,
-        target_shard_bytes=shard_target,
-        shard_immutable=request.layout is BenchmarkLayout.SHARDED,
-    )
-    return plan_canonical_detection_storage(
+    return plan_detection_benchmark_candidate(
         _canonical_dimensions(scale),
-        profile=profile,
+        target_chunk_bytes=request.target_chunk_bytes,
+        target_shard_bytes=request.target_shard_bytes,
+        layout=request.layout.value,
     ).as_manifest()
 
 
@@ -132,6 +140,7 @@ def plan_canonical_detection_benchmark_matrix(
     scales: Sequence[BenchmarkScale],
     destination_root: Path,
     repetitions: int = 5,
+    repetition_start: int = 0,
     seed: int = 20_260_724,
     occupied_destinations: Iterable[Path] = (),
     candidate_requests: Sequence[StorageCandidateRequest] | None = None,
@@ -148,6 +157,7 @@ def plan_canonical_detection_benchmark_matrix(
         ),
         workloads=INITIAL_DETECTION_MATRIX_WORKLOADS,
         repetitions=repetitions,
+        repetition_start=repetition_start,
         seed=seed,
         destination_root=destination_root,
         resolve_stage_plan=_resolve_detection_stage_plan,
