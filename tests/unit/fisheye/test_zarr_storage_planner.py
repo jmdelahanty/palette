@@ -274,8 +274,13 @@ def test_plan_is_deterministic_and_contract_is_json_safe() -> None:
     assert payload["policy_version"] == "palette.storage_planner.v1"
     assert payload["logical_shape"] == [1_000_000, 5, 2]
     assert payload["logical_dtype"] == "float64"
+    assert payload["access_unit_shape"] == [1, 5, 2]
+    assert payload["growth_axis"] == 0
+    assert payload["shard_axes"] == [0, 1, 2]
     assert payload["access_pattern"] == "windowed"
     assert payload["write_mode"] == "immutable"
+    assert payload["estimated_shard_count"] == 3
+    assert payload["estimated_regular_chunk_objects"] == 0
 
 
 def test_read_only_report_compares_observed_and_proposed_layouts() -> None:

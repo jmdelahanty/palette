@@ -156,23 +156,26 @@ Exit gate:
 
 ## Phase 3 — Storage Intents And Planning Report
 
-- [ ] Assign an access pattern to every canonical array.
-- [ ] Assign immutable write mode to raw canonical detection publication.
-- [ ] Define access units for per-observation and per-frame reads.
-- [ ] Produce a `StoragePlan` for every array from exact shape and dtype.
-- [ ] Verify that inner chunks are derived from byte budgets.
-- [ ] Verify that outer shards contain whole inner chunks.
-- [ ] Estimate logical bytes, chunk count, shard count, and metadata/object count.
-- [ ] Produce a representative report for approximately `1.18M` frames and its
+- [x] Assign an access pattern to every canonical array.
+- [x] Assign immutable write mode to raw canonical detection publication.
+- [x] Define access units for per-observation and per-frame reads.
+- [x] Produce a `StoragePlan` for every array from exact shape and dtype.
+- [x] Verify that inner chunks are derived from byte budgets.
+- [x] Verify that outer shards contain whole inner chunks.
+- [x] Estimate logical bytes, chunk count, shard count, and metadata/object count.
+- [x] Produce a representative report for approximately `1.18M` frames and its
       observed detection-row cardinality.
-- [ ] Record any small arrays that intentionally remain a single chunk/object.
-- [ ] Confirm planned worker partitions own complete, non-overlapping physical
+- [x] Record any small arrays that intentionally remain a single chunk/object.
+- [x] Confirm planned worker partitions own complete, non-overlapping physical
       chunks and shards.
 
 Exit gate:
 
-- [ ] Every canonical array has an explainable plan tied to its logical schema,
+- [x] Every canonical array has an explainable plan tied to its logical schema,
       access pattern, and byte size; no writer-specific row literal is required.
+
+Phase 3 evidence is recorded in
+[`diagnostics/canonical_detection_storage_plan_2026-07-24.md`](diagnostics/canonical_detection_storage_plan_2026-07-24.md).
 
 ## Phase 4 — Safe Detection Storage Benchmarks
 

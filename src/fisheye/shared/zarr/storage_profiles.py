@@ -60,6 +60,26 @@ class StorageProfile:
             return int(self.per_row_target_shard_bytes)
         return int(self.target_shard_bytes)
 
+    def as_manifest(self) -> dict[str, object]:
+        """Return the exact JSON-safe byte and object budgets."""
+
+        return {
+            "schema_id": "palette.storage_profile",
+            "schema_version": 1,
+            "profile_id": self.profile_id,
+            "target_chunk_bytes": self.target_chunk_bytes,
+            "min_chunk_bytes": self.min_chunk_bytes,
+            "max_chunk_bytes": self.max_chunk_bytes,
+            "eager_max_bytes": self.eager_max_bytes,
+            "target_shard_bytes": self.target_shard_bytes,
+            "per_row_target_shard_bytes": self.per_row_target_shard_bytes,
+            "max_shard_bytes": self.max_shard_bytes,
+            "max_payload_objects": self.max_payload_objects,
+            "codec_profile_id": self.codec_profile_id,
+            "shard_immutable": self.shard_immutable,
+            "shard_owned_appends": self.shard_owned_appends,
+        }
+
 
 SCRATCH_COMPUTE_V1 = StorageProfile(
     profile_id="scratch_compute_v1",

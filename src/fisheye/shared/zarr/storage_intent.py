@@ -192,6 +192,9 @@ class StoragePlan:
     logical_schema_version: int | None
     logical_shape: tuple[int, ...]
     logical_dtype: str
+    access_unit_shape: tuple[int, ...]
+    growth_axis: int | None
+    shard_axes: tuple[int, ...]
     access_pattern: str
     write_mode: str
     chunk_shape: tuple[int, ...] | None
@@ -214,6 +217,18 @@ class StoragePlan:
 
         return self.shard_shape is not None
 
+    @property
+    def estimated_shard_count(self) -> int:
+        """Return the number of indexed-shard payload objects."""
+
+        return self.estimated_payload_objects if self.is_sharded else 0
+
+    @property
+    def estimated_regular_chunk_objects(self) -> int:
+        """Return the number of unsharded chunk payload objects."""
+
+        return 0 if self.is_sharded else self.estimated_payload_objects
+
     def as_dict(self) -> dict[str, object]:
         """Return a JSON-safe resolved storage contract."""
 
@@ -228,6 +243,9 @@ class StoragePlan:
             "logical_schema_version": self.logical_schema_version,
             "logical_shape": list(self.logical_shape),
             "logical_dtype": self.logical_dtype,
+            "access_unit_shape": list(self.access_unit_shape),
+            "growth_axis": self.growth_axis,
+            "shard_axes": list(self.shard_axes),
             "access_pattern": self.access_pattern,
             "write_mode": self.write_mode,
             "chunk_shape": list(self.chunk_shape) if self.chunk_shape else None,
@@ -239,6 +257,10 @@ class StoragePlan:
             "chunk_grid_shape": list(self.chunk_grid_shape),
             "estimated_chunk_count": self.estimated_chunk_count,
             "estimated_payload_objects": self.estimated_payload_objects,
+            "estimated_shard_count": self.estimated_shard_count,
+            "estimated_regular_chunk_objects": (
+                self.estimated_regular_chunk_objects
+            ),
             "object_budget_satisfied": self.object_budget_satisfied,
             "shard_byte_budget_satisfied": self.shard_byte_budget_satisfied,
             "write_ownership": self.write_ownership,
