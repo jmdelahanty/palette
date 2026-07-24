@@ -738,8 +738,25 @@ def _track_kinematics_source_refs(
             refs["source_chaser_index"] = int(chaser_index)
         return refs
 
+    detection_value = inputs.get("detection_path")
+    if detection_value not in (None, ""):
+        detection_value = str(detection_value)
+        detection_prefix = "source_detect_run:"
+        if detection_value.startswith(detection_prefix):
+            detection_run_id = detection_value[len(detection_prefix) :]
+            if (
+                not detection_run_id
+                or detection_run_id != detection_run_id.strip()
+                or "/" in detection_run_id
+            ):
+                raise ValueError(
+                    "source_detect_run detection lineage must identify one "
+                    "controlled run ID."
+                )
+            refs["source_detection_run_id"] = detection_run_id
+        else:
+            refs["source_detection_path"] = detection_value
     for source_key in (
-        "detection_path",
         "position_source_path",
         "position_source_rowset_path",
     ):
@@ -5359,6 +5376,8 @@ def _validate_online_input_inventory(
 def _motion_run_derivation_record(
     run_group: Any,
     positions: BoundTrackPositionBindings,
+    *,
+    authoritative_root: Any | None = None,
 ) -> dict[str, Any]:
     record = {
         name: copy.deepcopy(run_group.attrs[name])
@@ -5519,15 +5538,75 @@ def _motion_run_derivation_record(
                 "Offline crop_run does not identify the exact sealed position "
                 "rowset."
             )
-        exact_detection_path = _canonical_crop_detection_rowset_path(source)
-        if (
-            record["source_refs"].get("source_detection_path")
-            != exact_detection_path
-        ):
-            raise ValueError(
-                "Offline detection_path does not identify the exact detection "
-                "rowset bound by the canonical crop selection."
+        source_keypoint_crop_path = record["source_refs"].get(
+            "source_keypoint_crop_path"
+        )
+        source_tracking_rowset_path = record["source_refs"].get(
+            "source_tracking_rowset_path"
+        )
+        uses_successor_lineage = (
+            source_keypoint_crop_path is not None
+            and source_tracking_rowset_path is not None
+            and source_tracking_rowset_path != expected_rowset
+        )
+        if uses_successor_lineage:
+            if authoritative_root is None:
+                raise ValueError(
+                    "Verified coordinate-successor track finalization requires the "
+                    "authoritative archive root."
+                )
+            mapped_rowset = load_collection_proxy_successor_source_rowset(
+                authoritative_root,
+                expected_rowset,
             )
+            if (
+                mapped_rowset != source_tracking_rowset_path
+                or source_keypoint_crop_path != source_tracking_rowset_path
+            ):
+                raise ValueError(
+                    "Coordinate-successor mapping does not identify the exact "
+                    "keypoint/tracking source rowset."
+                )
+            detection_run_id = record["source_refs"].get(
+                "source_detection_run_id"
+            )
+            if (
+                not isinstance(detection_run_id, str)
+                or not detection_run_id
+                or record["source_refs"].get("source_detection_path") is not None
+            ):
+                raise ValueError(
+                    "Coordinate-successor lineage requires one logical source "
+                    "detection run ID, not a single detection rowset path."
+                )
+            keypoint_path = record["source_refs"].get("source_keypoint_path")
+            keypoint_group = _resolve_motion_input_node(
+                authoritative_root,
+                f"/{keypoint_path}",
+            )
+            if (
+                archive_identity(keypoint_group)
+                != archive_identity(authoritative_root)
+                or keypoint_group.attrs.get("source_crop_run")
+                != source_keypoint_crop_path.split("/", 1)[1]
+                or keypoint_group.attrs.get("source_detect_run")
+                != detection_run_id
+            ):
+                raise ValueError(
+                    "Selected keypoint run does not bind the exact historical "
+                    "rowset and detection-run lineage declared by the successor."
+                )
+        else:
+            exact_detection_path = _canonical_crop_detection_rowset_path(source)
+            if (
+                record["source_refs"].get("source_detection_path")
+                != exact_detection_path
+                or record["source_refs"].get("source_detection_run_id") is not None
+            ):
+                raise ValueError(
+                    "Offline detection_path does not identify the exact detection "
+                    "rowset bound by the canonical crop selection."
+                )
     else:
         _validate_online_input_inventory(
             method=record["method"],
@@ -8232,7 +8311,11 @@ def _build_track_motion_publication_manifest(
     )
     include_physical = physical_record is not None
     source_authority = _motion_source_authority_record(positions)
-    run_derivation = _motion_run_derivation_record(run_group, positions)
+    run_derivation = _motion_run_derivation_record(
+        run_group,
+        positions,
+        authoritative_root=authoritative_root,
+    )
     run_root_attrs = _motion_run_root_attrs_record(run_group, positions)
     manifest_context: dict[str, Any] = {
         "source_authority": source_authority,

@@ -1458,6 +1458,82 @@ def test_manifest_rejects_coherent_detection_path_outside_crop_lineage(
         )
 
 
+def test_manifest_accepts_verified_merged_rowset_coordinate_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset = "crop_runs/historical_collection"
+    detection_run_id = "finalized_collection_proxy:collection_1"
+    keypoint = root["keypoints_runs"]["kp_1"]
+    keypoint.attrs.update(
+        {
+            "source_crop_run": "historical_collection",
+            "source_detect_run": detection_run_id,
+        }
+    )
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs.update(
+        {
+            "detection_path": f"source_detect_run:{detection_run_id}",
+            "keypoint_source_crop_run": "historical_collection",
+            "tracking_source_rowset_path": historical_rowset,
+        }
+    )
+    _replace_motion_derivation_inputs(run, inputs)
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    manifest = mod._build_track_motion_publication_manifest(
+        root,
+        run,
+        sealed.position_bindings,
+    )
+
+    refs = manifest["run_derivation"]["record"]["source_refs"]
+    assert refs["source_detection_run_id"] == detection_run_id
+    assert "source_detection_path" not in refs
+    assert refs["source_tracking_rowset_path"] == historical_rowset
+
+
+def test_manifest_rejects_successor_that_maps_to_another_historical_rowset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    detection_run_id = "finalized_collection_proxy:collection_1"
+    root["keypoints_runs"]["kp_1"].attrs.update(
+        {
+            "source_crop_run": "historical_collection",
+            "source_detect_run": detection_run_id,
+        }
+    )
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs.update(
+        {
+            "detection_path": f"source_detect_run:{detection_run_id}",
+            "keypoint_source_crop_run": "historical_collection",
+            "tracking_source_rowset_path": "crop_runs/historical_collection",
+        }
+    )
+    _replace_motion_derivation_inputs(run, inputs)
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _rowset_path: "crop_runs/another_collection",
+    )
+
+    with pytest.raises(ValueError, match="does not identify the exact"):
+        mod._build_track_motion_publication_manifest(
+            root,
+            run,
+            sealed.position_bindings,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
