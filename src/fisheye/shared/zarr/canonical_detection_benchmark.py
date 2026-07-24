@@ -36,6 +36,7 @@ from fisheye.shared.zarr.benchmark_runtime import (
 from fisheye.shared.zarr.canonical_detection_benchmark_input import (
     CanonicalDetectionBenchmarkInput,
     build_canonical_detection_benchmark_input,
+    load_canonical_detection_benchmark_input,
     load_detection_benchmark_input,
 )
 from fisheye.shared.zarr.detection_schema import CANONICAL_DETECTION_SCHEMA_V1
@@ -446,6 +447,7 @@ __all__ = [
     "build_detection_benchmark_report",
     "build_canonical_detection_benchmark_input",
     "consolidate_and_open_detection_benchmark_candidate",
+    "load_canonical_detection_benchmark_input",
     "load_detection_benchmark_input",
     "materialize_detection_benchmark_candidate",
     "require_safe_benchmark_destination",

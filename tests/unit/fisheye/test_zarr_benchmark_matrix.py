@@ -9,6 +9,7 @@ from fisheye.shared.zarr.benchmark_matrix import (
     BenchmarkLayout,
     BenchmarkScale,
     StorageCandidateRequest,
+    require_storage_benchmark_matrix_manifest,
 )
 from fisheye.shared.zarr.detection_benchmark_matrix import (
     initial_detection_candidate_requests,
@@ -143,3 +144,13 @@ def test_detection_matrix_records_exact_destination_collisions(tmp_path: Path) -
         if trial.destination_collision
     ]
     assert [Path(trial.destination) for trial in collisions] == [occupied]
+
+
+def test_matrix_manifest_fingerprint_rejects_serialized_drift(tmp_path: Path) -> None:
+    manifest = _matrix(tmp_path, repetitions=1).as_manifest()
+
+    require_storage_benchmark_matrix_manifest(manifest)
+    manifest["seed"] = int(manifest["seed"]) + 1
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        require_storage_benchmark_matrix_manifest(manifest)

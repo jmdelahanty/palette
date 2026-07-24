@@ -193,8 +193,56 @@ def load_detection_benchmark_input(
     )
 
 
+def load_canonical_detection_benchmark_input(
+    source_group_path: Path,
+) -> CanonicalDetectionBenchmarkInput:
+    """Load one exact canonical staging group without legacy conversion."""
+
+    source_path = source_group_path.expanduser().resolve()
+    metadata_path = source_path / "zarr.json"
+    if not metadata_path.is_file():
+        raise ValueError(f"Canonical staging group is not Zarr v3: {source_path}")
+    source = zarr.open_group(
+        str(source_path),
+        mode="r",
+        use_consolidated=True,
+    )
+    logical_schema = source.attrs.get("logical_schema")
+    if not isinstance(logical_schema, Mapping):
+        raise ValueError("Canonical staging group lacks logical_schema metadata.")
+    dimensions_payload = logical_schema.get("dimensions")
+    if not isinstance(dimensions_payload, Mapping):
+        raise ValueError("Canonical staging logical schema lacks dimensions.")
+    dimensions = CanonicalDetectionDimensions(
+        n_frames=int(dimensions_payload["n_frames"]),
+        n_instances=int(dimensions_payload["n_instances"]),
+        source_width=int(dimensions_payload["source_width"]),
+        source_height=int(dimensions_payload["source_height"]),
+    )
+    arrays = {
+        path: np.asarray(source[path][:])
+        for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths
+    }
+    upstream_identity = source.attrs.get("benchmark_input_source_identity")
+    if not isinstance(upstream_identity, Mapping):
+        raise ValueError(
+            "Canonical staging group lacks benchmark_input_source_identity."
+        )
+    return CanonicalDetectionBenchmarkInput(
+        dimensions=dimensions,
+        arrays=arrays,
+        source_identity={
+            "canonical_staging_group": str(source_path),
+            "canonical_staging_metadata_sha256": sha256_file(metadata_path),
+            "source_open_mode": "read_only_consolidated_metadata",
+            "upstream_source_identity": dict(upstream_identity),
+        },
+    )
+
+
 __all__ = [
     "CanonicalDetectionBenchmarkInput",
     "build_canonical_detection_benchmark_input",
+    "load_canonical_detection_benchmark_input",
     "load_detection_benchmark_input",
 ]

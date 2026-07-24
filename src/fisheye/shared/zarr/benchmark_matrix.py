@@ -370,6 +370,66 @@ class StorageBenchmarkMatrix:
         return payload
 
 
+def require_storage_benchmark_matrix_manifest(
+    manifest: Mapping[str, object],
+) -> None:
+    """Reject a serialized benchmark matrix whose declared digest has drifted."""
+
+    if manifest.get("schema_id") != MATRIX_SCHEMA_ID:
+        raise ValueError("Unsupported storage benchmark matrix schema.")
+    if manifest.get("schema_version") != MATRIX_SCHEMA_VERSION:
+        raise ValueError("Unsupported storage benchmark matrix schema version.")
+    declared = manifest.get("matrix_fingerprint")
+    if not isinstance(declared, str) or not declared:
+        raise ValueError("Storage benchmark matrix lacks a fingerprint.")
+    payload = dict(manifest)
+    payload.pop("matrix_fingerprint", None)
+    actual = _canonical_sha256(payload)
+    if actual != declared:
+        raise ValueError(
+            "Storage benchmark matrix fingerprint does not match its contents."
+        )
+    _require_identifier(str(manifest.get("matrix_id", "")), field="matrix_id")
+    scales = manifest.get("scales")
+    candidates = manifest.get("candidates")
+    repetitions = manifest.get("repetitions")
+    if not isinstance(scales, list) or not isinstance(candidates, list):
+        raise ValueError("Storage benchmark matrix lacks scales or candidates.")
+    if not isinstance(repetitions, list):
+        raise ValueError("Storage benchmark matrix lacks repetitions.")
+    for scale in scales:
+        if not isinstance(scale, Mapping):
+            raise ValueError("Storage benchmark matrix scale must be an object.")
+        _require_identifier(str(scale.get("scale_id", "")), field="scale_id")
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("Storage benchmark matrix candidate must be an object.")
+        _require_identifier(
+            str(candidate.get("candidate_id", "")),
+            field="candidate_id",
+        )
+    for repetition in repetitions:
+        if not isinstance(repetition, Mapping):
+            raise ValueError("Storage benchmark matrix repetition must be an object.")
+        _require_identifier(
+            str(repetition.get("scale_id", "")),
+            field="scale_id",
+        )
+        repetition_index = repetition.get("repetition_index")
+        if type(repetition_index) is not int or repetition_index < 0:
+            raise ValueError("repetition_index must be a nonnegative exact integer.")
+        trials = repetition.get("trials")
+        if not isinstance(trials, list):
+            raise ValueError("Storage benchmark repetition lacks trials.")
+        for trial in trials:
+            if not isinstance(trial, Mapping):
+                raise ValueError("Storage benchmark trial must be an object.")
+            _require_identifier(
+                str(trial.get("candidate_id", "")),
+                field="candidate_id",
+            )
+
+
 def _balanced_order(
     candidates: Sequence[ResolvedStorageCandidate],
     *,
@@ -539,4 +599,5 @@ __all__ = [
     "StorageCandidateRequest",
     "physical_stage_plan_payload",
     "plan_storage_benchmark_matrix",
+    "require_storage_benchmark_matrix_manifest",
 ]

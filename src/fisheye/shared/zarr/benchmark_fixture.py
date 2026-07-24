@@ -200,7 +200,7 @@ def _write_json_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
         handle.write(rendered + "\n")
 
 
-def _freeze_tree(root: Path) -> None:
+def freeze_tree(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         if path.is_symlink():
             raise ValueError(f"Cannot freeze a symlinked fixture path: {path}")
@@ -208,7 +208,7 @@ def _freeze_tree(root: Path) -> None:
     os.chmod(root, 0o555)
 
 
-def _thaw_tree_for_cleanup(root: Path) -> None:
+def thaw_tree_for_cleanup(root: Path) -> None:
     """Restore owner write bits only for an unpublished temporary tree."""
 
     os.chmod(root, 0o755)
@@ -275,12 +275,12 @@ def publish_benchmark_fixture(
             },
         }
         _write_json_exclusive(temporary / "fixture_manifest.json", manifest)
-        _freeze_tree(temporary)
+        freeze_tree(temporary)
         temporary.rename(resolved_destination)
         return manifest
     except BaseException:
         if temporary.exists():
-            _thaw_tree_for_cleanup(temporary)
+            thaw_tree_for_cleanup(temporary)
             shutil.rmtree(temporary)
         raise
 
@@ -290,9 +290,11 @@ __all__ = [
     "FIXTURE_MANIFEST_SCHEMA_VERSION",
     "TREE_DIGEST_SCHEMA_ID",
     "TreeInventory",
+    "freeze_tree",
     "inventory_tree",
     "load_noncanonical_source_manifest",
     "plan_benchmark_fixture",
     "publish_benchmark_fixture",
     "require_safe_fixture_destination",
+    "thaw_tree_for_cleanup",
 ]
