@@ -3051,6 +3051,24 @@ def _compute_heading_turning(
     return delta_heading, angular_velocity, angular_speed
 
 
+def _compute_turning_from_persisted_smoothed_heading(
+    smoothed_heading_degrees: np.ndarray,
+    delta_seconds_full: np.ndarray,
+    *,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Derive turning from the authoritative public float32 heading parent."""
+
+    persisted_parent = np.asarray(smoothed_heading_degrees, dtype=np.float32)
+    return _compute_heading_turning(
+        persisted_parent,
+        delta_seconds_full,
+        transition_valid=transition_valid,
+        sample_valid=sample_valid,
+    )
+
+
 def _bounded_smoothing_window(requested: int, sample_count: int) -> int:
     """Return the exact smoothing window usable by one array domain."""
 
@@ -3467,7 +3485,7 @@ def build_track_datasets(
             )
         )
         delta_heading_smoothed_degrees, angular_velocity_smoothed_deg_s, angular_speed_smoothed_deg_s = (
-            _compute_heading_turning(
+            _compute_turning_from_persisted_smoothed_heading(
                 smoothed_heading_deg,
                 delta_seconds_full,
                 transition_valid=transition_valid,
@@ -8010,6 +8028,21 @@ def _exact_motion_array(
         )
 
 
+def _float32_resultants_within_unit_interval(values: np.ndarray) -> bool:
+    """Return whether resultants fit the float32 image of mathematical [0, 1]."""
+
+    resultants = np.asarray(values)
+    finite = resultants[np.isfinite(resultants)]
+    storage_upper_bound = np.nextafter(
+        np.float32(1.0),
+        np.float32(np.inf),
+    )
+    return bool(
+        not np.any(finite < np.float32(0.0))
+        and not np.any(finite > storage_upper_bound)
+    )
+
+
 def _float32_angle_pair_matches(
     left: np.ndarray,
     right: np.ndarray,
@@ -8284,8 +8317,8 @@ def _validate_motion_core_numeric_invariants(
         transition_valid=recomputed.transition_valid,
         sample_valid=validity["sample_valid"],
     )
-    smoothed_turning = _compute_heading_turning(
-        expected_smoothed_degrees,
+    smoothed_turning = _compute_turning_from_persisted_smoothed_heading(
+        smoothed_degrees,
         delta_seconds_kernel,
         transition_valid=recomputed.transition_valid,
         sample_valid=validity["sample_valid"],
@@ -8491,9 +8524,11 @@ def _validate_motion_core_numeric_invariants(
             )
 
     resultant = np.array(track_group["heading_per_second_resultant"][:], copy=True)
-    finite_resultant = resultant[np.isfinite(resultant)]
-    if np.any(finite_resultant < 0.0) or np.any(finite_resultant > 1.0):
-        raise ValueError("Track heading resultants must remain within [0, 1].")
+    if not _float32_resultants_within_unit_interval(resultant):
+        raise ValueError(
+            "Track heading resultants exceed the float32 storage envelope of "
+            "mathematical [0, 1]."
+        )
 
 
 def _validate_motion_bout_domains(

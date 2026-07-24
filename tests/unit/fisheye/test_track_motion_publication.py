@@ -1227,6 +1227,47 @@ def test_acceleration_summary_uses_persisted_float32_reduction_domain() -> None:
     assert standard_deviation != float(np.std(values.astype(np.float64)))
 
 
+def test_resultant_domain_allows_only_one_float32_boundary_step() -> None:
+    one = np.float32(1.0)
+    one_step = np.nextafter(one, np.float32(np.inf))
+    two_steps = np.nextafter(one_step, np.float32(np.inf))
+
+    assert mod._float32_resultants_within_unit_interval(
+        np.asarray([0.0, one, one_step, np.nan], dtype=np.float32)
+    )
+    assert not mod._float32_resultants_within_unit_interval(
+        np.asarray([two_steps], dtype=np.float32)
+    )
+    assert not mod._float32_resultants_within_unit_interval(
+        np.asarray([-np.finfo(np.float32).tiny], dtype=np.float32)
+    )
+
+
+def test_smoothed_turning_uses_persisted_float32_heading_parent() -> None:
+    smoothed = np.asarray(
+        [45.034366607666016, 142.99696350097656, 99.2468490600586],
+        dtype=np.float64,
+    )
+    delta_seconds = np.asarray([0.0, 1.0 / 30.0, 1.0 / 30.0])
+    valid = np.ones(smoothed.shape, dtype=bool)
+
+    observed = mod._compute_turning_from_persisted_smoothed_heading(
+        smoothed,
+        delta_seconds,
+        transition_valid=valid,
+        sample_valid=valid,
+    )
+    expected = mod._compute_heading_turning(
+        smoothed.astype(np.float32),
+        delta_seconds,
+        transition_valid=valid,
+        sample_valid=valid,
+    )
+
+    for observed_array, expected_array in zip(observed, expected, strict=True):
+        np.testing.assert_array_equal(observed_array, expected_array)
+
+
 def test_motion_seal_accepts_materializer_storage_and_dynamic_staging_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
