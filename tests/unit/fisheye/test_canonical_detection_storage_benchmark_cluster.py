@@ -14,6 +14,9 @@ from fisheye.shared.zarr.benchmark_environment import (
     STORAGE_BENCHMARK_THREAD_ENVIRONMENT,
 )
 from fisheye.shared.zarr.benchmark_matrix import BenchmarkScale
+from fisheye.shared.zarr.detection_benchmark_matrix import (
+    initial_detection_candidate_requests,
+)
 
 
 def _clean_palette_repo(tmp_path: Path) -> Path:
@@ -71,6 +74,7 @@ def _plan(
     *,
     repetitions: int = 1,
     repetition_start: int = 0,
+    candidate_labels: tuple[str, ...] | None = None,
 ):
     benchmark_root = tmp_path / "benchmarks"
     workflow_root = (
@@ -79,6 +83,10 @@ def _plan(
         / "workflows"
         / "smoke_01"
     )
+    requests_by_label = {
+        request.label: request
+        for request in initial_detection_candidate_requests()
+    }
     return build_plan(
         workflow_id="smoke_01",
         workflow_root=workflow_root,
@@ -95,6 +103,11 @@ def _plan(
         mem_gb_per_slot=8,
         walltime="1:00",
         max_active_blocks=1,
+        candidate_requests=(
+            tuple(requests_by_label[label] for label in candidate_labels)
+            if candidate_labels is not None
+            else None
+        ),
     )
 
 
@@ -152,6 +165,42 @@ def test_cluster_plan_continues_balanced_repetitions_without_index_zero(
         "repetition_000" not in output
         for task in blocks.execution_group.tasks
         for output in task.expected_outputs
+    )
+
+
+def test_cluster_plan_can_retain_reviewed_byte_budget_shortlist(
+    tmp_path: Path,
+) -> None:
+    labels = (
+        "regular__chunk_1048576",
+        "sharded__chunk_131072__shard_8388608",
+    )
+
+    plan = _plan(tmp_path, repetitions=5, candidate_labels=labels)
+
+    assert plan.matrix_manifest["summary"] == {
+        "requested_candidate_labels": 2,
+        "unique_physical_candidates": 2,
+        "removed_duplicate_labels": 0,
+        "planned_trials": 10,
+        "destination_collisions": 0,
+        "payload_io_performed": False,
+    }
+    assert [
+        candidate["request"]["label"]
+        for candidate in plan.matrix_manifest["candidates"]
+    ] == list(labels)
+    blocks, _finalizer = plan.workflow.jobs
+    assert blocks.execution_group is not None
+    assert len(blocks.execution_group.tasks) == 5
+    assert all(
+        task.metadata["candidate_count"] == 2
+        and set(task.metadata["balanced_order"])
+        == {
+            candidate["candidate_id"]
+            for candidate in plan.matrix_manifest["candidates"]
+        }
+        for task in blocks.execution_group.tasks
     )
 
 

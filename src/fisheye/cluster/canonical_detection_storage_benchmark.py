@@ -30,8 +30,12 @@ from fisheye.cluster.lsf.runtime import (
 from fisheye.shared.zarr.benchmark_environment import (
     STORAGE_BENCHMARK_THREAD_ENVIRONMENT,
 )
-from fisheye.shared.zarr.benchmark_matrix import BenchmarkScale
+from fisheye.shared.zarr.benchmark_matrix import (
+    BenchmarkScale,
+    StorageCandidateRequest,
+)
 from fisheye.shared.zarr.detection_benchmark_matrix import (
+    initial_detection_candidate_requests,
     plan_canonical_detection_benchmark_matrix,
 )
 
@@ -136,6 +140,7 @@ def build_plan(
     mem_gb_per_slot: int,
     walltime: str,
     max_active_blocks: int,
+    candidate_requests: Sequence[StorageCandidateRequest] | None = None,
     scratch_base: Path | None = None,
     keep_scratch: bool = False,
 ) -> DetectionStorageBenchmarkLsfPlan:
@@ -166,6 +171,7 @@ def build_plan(
         repetitions=int(repetitions),
         repetition_start=int(repetition_start),
         seed=int(seed),
+        candidate_requests=candidate_requests,
     )
     matrix_manifest = matrix.as_manifest()
     matrix_path = workflow / "matrix.json"
@@ -424,6 +430,20 @@ def _parse_scale(value: str) -> BenchmarkScale:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _parse_candidate_label(value: str) -> StorageCandidateRequest:
+    requests = {
+        request.label: request
+        for request in initial_detection_candidate_requests()
+    }
+    try:
+        return requests[value]
+    except KeyError as exc:
+        choices = ", ".join(sorted(requests))
+        raise argparse.ArgumentTypeError(
+            f"unknown candidate label {value!r}; choose one of: {choices}"
+        ) from exc
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow-id", required=True)
@@ -441,6 +461,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--mem-gb-per-slot", type=int, default=8)
     parser.add_argument("--walltime", default="0:30")
     parser.add_argument("--max-active-blocks", type=int, default=1)
+    parser.add_argument(
+        "--candidate-label",
+        action="append",
+        type=_parse_candidate_label,
+        help=(
+            "Initial byte-budget candidate label to retain; repeat for a "
+            "reviewed shortlist. The default retains the complete sweep."
+        ),
+    )
     parser.add_argument("--scratch-base", type=Path)
     parser.add_argument("--keep-scratch", action="store_true")
     parser.add_argument("--submit-host", default="login1-citrus-poller")
@@ -462,6 +491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         mem_gb_per_slot=args.mem_gb_per_slot,
         walltime=args.walltime,
         max_active_blocks=args.max_active_blocks,
+        candidate_requests=args.candidate_label,
         scratch_base=args.scratch_base,
         keep_scratch=bool(args.keep_scratch),
     )

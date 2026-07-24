@@ -340,6 +340,8 @@ Exit gate:
       physical plan.
 - [x] Reject incorrect, dominated, or operationally unsafe candidates.
 - [x] Record rejected candidates and reasons; do not silently omit them.
+- [x] Add a fail-closed cluster-planner shortlist that accepts only named
+      byte-budget candidates from the original sweep, never row overrides.
 - [ ] Carry only the Pareto frontier and required controls to full duration.
 - [ ] Run full-duration materialization, publication, and read workloads.
 - [ ] Benchmark parallel publication only for finalists.
