@@ -11,6 +11,7 @@ import pytest
 
 from fisheye.analysis import track_kinematics as mod
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.shared.coordinate_record import stamp_and_bind_persisted_coordinate_record
 from tests.unit.fisheye.test_directed_transform_chain import _world
 from tests.unit.fisheye.test_track_kinematics_coordinate_contract import (
     _WritableGroup,
@@ -422,6 +423,9 @@ def _replace_motion_derivation_inputs(run, inputs: dict[str, object]) -> None:
     run.attrs["source_refs"] = mod._track_kinematics_source_refs(
         run_type="offline",
         inputs=copied,
+        publication_schema_version=(
+            mod._track_motion_publication_schema_version(run)
+        ),
     )
     stage_provenance = copy.deepcopy(run.attrs["provenance"])
     stage_provenance["inputs"] = copy.deepcopy(copied)
@@ -625,6 +629,12 @@ def test_fresh_full_motion_writer_seal_round_trips_domains_and_authority(
 
     assert isinstance(sealed, mod.BoundTrackMotionRun)
     assert isinstance(sealed.manifest, MappingProxyType)
+    assert sealed.manifest["schema_version"] == 1
+    assert mod.TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR not in run.attrs
+    assert "position_lineage_mode" not in sealed.manifest
+    assert "position_lineage" not in sealed.manifest["source_authority"]
+    assert "schema_id" not in sealed.manifest["run_derivation"]
+    assert "schema_version" not in sealed.manifest["run_derivation"]
     track = sealed.track(7)
     assert track.surface("time_seconds").axis0_domain == (
         mod.TRACK_MOTION_AXIS_TRACK_SAMPLE
@@ -1458,28 +1468,74 @@ def test_manifest_rejects_coherent_detection_path_outside_crop_lineage(
         )
 
 
-def test_manifest_accepts_verified_merged_rowset_coordinate_successor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+def _configure_v2_successor_run(root, run) -> tuple[str, str]:
     historical_rowset = "crop_runs/historical_collection"
     detection_run_id = "finalized_collection_proxy:collection_1"
-    keypoint = root["keypoints_runs"]["kp_1"]
-    keypoint.attrs.update(
+    root["keypoints_runs"]["kp_1"].attrs.update(
         {
             "source_crop_run": "historical_collection",
             "source_detect_run": detection_run_id,
         }
     )
+    mapping_record = {
+        "schema_id": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID,
+        "schema_version": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION,
+        "operation": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION,
+        "historical_source": {"rowset_ref": f"/{historical_rowset}"},
+    }
+    stamp_and_bind_persisted_coordinate_record(
+        root["crop_runs"]["c1"],
+        mapping_record,
+        attr_name=mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    )
+    run.attrs[mod.TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR] = (
+        mod.TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    )
     inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs.pop("detection_path")
     inputs.update(
         {
-            "detection_path": f"source_detect_run:{detection_run_id}",
+            "position_lineage_mode": (
+                mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+            ),
             "keypoint_source_crop_run": "historical_collection",
             "tracking_source_rowset_path": historical_rowset,
+            "source_detection_run_id": detection_run_id,
         }
     )
     _replace_motion_derivation_inputs(run, inputs)
+    return historical_rowset, detection_run_id
+
+
+def _configure_v2_direct_run(root, run, positions) -> None:
+    selection_records = [
+        record
+        for record in positions.source_positions.lineage_records
+        if record.record.get("schema_id")
+        == mod.CROP_GEOMETRY_SELECTION_SCHEMA_ID
+    ]
+    assert len(selection_records) == 1
+    stamp_and_bind_persisted_coordinate_record(
+        root["crop_runs"]["c1"],
+        selection_records[0].record,
+        attr_name=mod.CROP_GEOMETRY_SELECTION_ATTR,
+    )
+    run.attrs[mod.TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR] = (
+        mod.TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    )
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs["position_lineage_mode"] = mod.TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
+    _replace_motion_derivation_inputs(run, inputs)
+
+
+def test_manifest_accepts_verified_merged_rowset_coordinate_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, detection_run_id = _configure_v2_successor_run(
+        root,
+        run,
+    )
     monkeypatch.setattr(
         mod,
         "load_collection_proxy_successor_source_rowset",
@@ -1495,38 +1551,82 @@ def test_manifest_accepts_verified_merged_rowset_coordinate_successor(
     )
 
     refs = manifest["run_derivation"]["record"]["source_refs"]
+    assert manifest["schema_version"] == 2
+    assert manifest["run_derivation"]["schema_version"] == 2
+    assert manifest["position_lineage_mode"] == (
+        mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+    )
     assert refs["source_detection_run_id"] == detection_run_id
     assert "source_detection_path" not in refs
     assert refs["source_tracking_rowset_path"] == historical_rowset
+    lineage = manifest["source_authority"]["position_lineage"]
+    assert lineage["historical_source_rowset_ref"] == f"/{historical_rowset}"
+    assert lineage["successor_mapping"]["record_ref"] == (
+        "/crop_runs/c1@collection_proxy_coordinate_successor_mapping"
+    )
+    assert len(lineage["successor_mapping"]["record_sha256"]) == 64
+
+
+def test_v2_direct_crop_seal_round_trips_through_versioned_reader_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, original, _physical = _clone_full_motion_run(monkeypatch)
+    _configure_v2_direct_run(root, run, original.position_bindings)
+
+    sealed = mod._seal_and_load_track_motion_run_before_selection(root, run)
+
+    assert sealed.manifest["schema_version"] == 2
+    assert sealed.manifest["position_lineage_mode"] == (
+        mod.TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
+    )
+    lineage = sealed.manifest["source_authority"]["position_lineage"]
+    assert lineage["crop_selection"]["record_ref"] == (
+        "/crop_runs/c1@crop_geometry_selection"
+    )
+    assert run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR]["schema_version"] == 2
+    sealed.assert_verified()
+
+
+def test_v2_successor_seal_round_trips_through_versioned_reader_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, _detection_run_id = _configure_v2_successor_run(root, run)
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    sealed = mod._seal_and_load_track_motion_run_before_selection(root, run)
+
+    assert sealed.manifest["schema_version"] == 2
+    assert sealed.manifest["position_lineage_mode"] == (
+        mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+    )
+    assert run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR] == (
+        mod._track_motion_publication_commit(
+            mod._thaw_motion_manifest(sealed.manifest)
+        )
+    )
+    assert run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR]["schema_version"] == 2
+    sealed.assert_verified()
 
 
 def test_manifest_rejects_successor_that_maps_to_another_historical_rowset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
-    detection_run_id = "finalized_collection_proxy:collection_1"
-    root["keypoints_runs"]["kp_1"].attrs.update(
-        {
-            "source_crop_run": "historical_collection",
-            "source_detect_run": detection_run_id,
-        }
-    )
-    inputs = copy.deepcopy(run.attrs["inputs"])
-    inputs.update(
-        {
-            "detection_path": f"source_detect_run:{detection_run_id}",
-            "keypoint_source_crop_run": "historical_collection",
-            "tracking_source_rowset_path": "crop_runs/historical_collection",
-        }
-    )
-    _replace_motion_derivation_inputs(run, inputs)
+    _configure_v2_successor_run(root, run)
     monkeypatch.setattr(
         mod,
         "load_collection_proxy_successor_source_rowset",
         lambda _root, _rowset_path: "crop_runs/another_collection",
     )
 
-    with pytest.raises(ValueError, match="does not identify the exact"):
+    with pytest.raises(ValueError, match="mapping contract is invalid"):
         mod._build_track_motion_publication_manifest(
             root,
             run,
@@ -1910,48 +2010,36 @@ def test_run_derivation_rejects_all_conflicting_duplicate_metadata(
         mod._motion_run_derivation_record(run, positions)
 
 
-def test_offline_derivation_accepts_paired_coordinate_successor_lineage(
+def test_v2_rejects_duplicate_top_level_git_outside_stage_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    _configure_v2_successor_run(root, run)
+    run.attrs["git_commit"] = "b" * 40
+    run.attrs["git_branch"] = "agent/decoy"
+
+    with pytest.raises(ValueError, match="unsupported run-root attrs"):
+        mod._motion_run_root_attrs_record(run, sealed.position_bindings)
+
+
+def test_frozen_v1_derivation_rejects_successor_only_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
     inputs = copy.deepcopy(run.attrs["inputs"])
     inputs.update(
         {
+            "position_lineage_mode": (
+                mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+            ),
             "keypoint_source_crop_run": "c1",
             "tracking_source_rowset_path": "crop_runs/c1",
+            "source_detection_run_id": "collection_1",
         }
     )
     _replace_motion_derivation_inputs(run, inputs)
 
-    record = mod._motion_run_derivation_record(
-        run,
-        sealed.position_bindings,
-    )["record"]
-
-    assert record["source_refs"]["source_keypoint_crop_path"] == "crop_runs/c1"
-    assert record["source_refs"]["source_tracking_rowset_path"] == "crop_runs/c1"
-
-
-@pytest.mark.parametrize(
-    "updates",
-    (
-        {"keypoint_source_crop_run": "c1"},
-        {"tracking_source_rowset_path": "crop_runs/c1"},
-        {
-            "keypoint_source_crop_run": "c1",
-            "tracking_source_rowset_path": "crop_runs/decoy",
-        },
-    ),
-)
-def test_offline_derivation_rejects_unpaired_or_conflicting_successor_lineage(
-    monkeypatch: pytest.MonkeyPatch,
-    updates: dict[str, str],
-) -> None:
-    _root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
-    inputs = copy.deepcopy(run.attrs["inputs"])
-    inputs.update(updates)
-    with pytest.raises(ValueError, match="persisted together|same exact source rowset"):
-        _replace_motion_derivation_inputs(run, inputs)
+    with pytest.raises(ValueError, match="input inventory is not closed"):
         mod._motion_run_derivation_record(run, sealed.position_bindings)
 
 

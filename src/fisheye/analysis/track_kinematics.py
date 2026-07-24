@@ -82,6 +82,11 @@ from fisheye.shared.pixel_frame_authority import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.observation_coordinate_publication import (
     BoundSourceCameraPositionSurface,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION,
+    CROP_GEOMETRY_SELECTION_ATTR,
     CROP_GEOMETRY_SELECTION_OPERATION,
     CROP_GEOMETRY_SELECTION_SCHEMA_ID,
     CROP_GEOMETRY_SELECTION_SCHEMA_VERSION,
@@ -208,9 +213,30 @@ _REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
 _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
     {
         "chaser_metrics",
-        "keypoint_source_crop_run",
         "swim_bout_run",
+    }
+)
+_REQUIRED_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS = frozenset(
+    {
+        "position_lineage_mode",
+        "position_source_path",
+        "position_source_rowset_path",
+        "position_source_kind",
+        "crop_run",
+        "keypoint_path",
+        "keypoint_source_crop_run",
+        "tracking_path",
         "tracking_source_rowset_path",
+        "source_detection_run_id",
+    }
+)
+_REQUIRED_CANONICAL_OFFLINE_DIRECT_V2_INPUT_KEYS = (
+    _REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS | {"position_lineage_mode"}
+)
+_OPTIONAL_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS = frozenset(
+    {
+        "chaser_metrics",
+        "swim_bout_run",
     }
 )
 _CANONICAL_ONLINE_RAW_INPUT_KEYS = frozenset(
@@ -328,11 +354,24 @@ TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID = (
     "palette.track_motion_publication_manifest"
 )
 TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION = 1
+TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2 = 2
+TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR = (
+    "track_motion_publication_manifest_schema_version"
+)
+TRACK_POSITION_LINEAGE_SCHEMA_ID = "palette.track_position_lineage"
+TRACK_POSITION_LINEAGE_SCHEMA_VERSION = 1
+TRACK_POSITION_LINEAGE_DIRECT_CROP_V1 = "direct_crop_selection_v1"
+TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1 = (
+    "verified_collection_proxy_successor_v1"
+)
+TRACK_MOTION_RUN_DERIVATION_SCHEMA_ID = "palette.track_motion_run_derivation"
+TRACK_MOTION_RUN_DERIVATION_SCHEMA_VERSION_V2 = 2
 TRACK_MOTION_PUBLICATION_COMMIT_ATTR = "track_motion_publication_commit"
 TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_ID = (
     "palette.track_motion_publication_commit"
 )
 TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION = 1
+TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION_V2 = 2
 TRACK_MOTION_INPUT_AUTHORITY_ATTR = "track_motion_input_authority"
 TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_ID = "palette.track_motion_input_authority"
 TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_VERSION = 1
@@ -682,12 +721,15 @@ def _track_kinematics_source_refs(
     *,
     run_type: str,
     inputs: Mapping[str, Any],
+    publication_schema_version: int = TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
 ) -> Dict[str, Any]:
     """Normalize exact archive-relative dependencies for one run."""
 
     refs: Dict[str, Any] = {}
 
     if run_type == "online":
+        if publication_schema_version != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("Online track publication supports only manifest v1.")
         refined_run = inputs.get("refined_online_run")
         if refined_run is not None:
             refs["source_refined_online_path"] = (
@@ -738,24 +780,32 @@ def _track_kinematics_source_refs(
             refs["source_chaser_index"] = int(chaser_index)
         return refs
 
-    detection_value = inputs.get("detection_path")
-    if detection_value not in (None, ""):
-        detection_value = str(detection_value)
-        detection_prefix = "source_detect_run:"
-        if detection_value.startswith(detection_prefix):
-            detection_run_id = detection_value[len(detection_prefix) :]
-            if (
-                not detection_run_id
-                or detection_run_id != detection_run_id.strip()
-                or "/" in detection_run_id
-            ):
-                raise ValueError(
-                    "source_detect_run detection lineage must identify one "
-                    "controlled run ID."
+    if publication_schema_version == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION:
+        detection_value = inputs.get("detection_path")
+        if detection_value not in (None, ""):
+            refs["source_detection_path"] = str(detection_value)
+    elif (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        lineage_mode = inputs.get("position_lineage_mode")
+        if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+            detection_value = inputs.get("detection_path")
+            if detection_value not in (None, ""):
+                refs["source_detection_path"] = str(detection_value)
+        elif lineage_mode == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1:
+            detection_run_id = inputs.get("source_detection_run_id")
+            if detection_run_id not in (None, ""):
+                refs["source_detection_run_id"] = _controlled_run_leaf(
+                    detection_run_id,
+                    label="source_detection_run_id",
                 )
-            refs["source_detection_run_id"] = detection_run_id
         else:
-            refs["source_detection_path"] = detection_value
+            raise ValueError("Manifest v2 position_lineage_mode is unsupported.")
+    else:
+        raise ValueError(
+            f"Unsupported track motion manifest version {publication_schema_version!r}."
+        )
     for source_key in (
         "position_source_path",
         "position_source_rowset_path",
@@ -779,16 +829,14 @@ def _track_kinematics_source_refs(
         refs["source_crop_path"] = (
             "crop_runs/" + _controlled_run_leaf(crop_run, label="crop_run")
         )
-    keypoint_source_crop_run = inputs.get("keypoint_source_crop_run")
-    tracking_source_rowset_path = inputs.get("tracking_source_rowset_path")
-    if (keypoint_source_crop_run is None) != (
-        tracking_source_rowset_path is None
+    if (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+        and inputs.get("position_lineage_mode")
+        == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
     ):
-        raise ValueError(
-            "keypoint_source_crop_run and tracking_source_rowset_path must be "
-            "persisted together."
-        )
-    if keypoint_source_crop_run is not None:
+        keypoint_source_crop_run = inputs.get("keypoint_source_crop_run")
+        tracking_source_rowset_path = inputs.get("tracking_source_rowset_path")
         keypoint_source_path = "crop_runs/" + _controlled_run_leaf(
             keypoint_source_crop_run,
             label="keypoint_source_crop_run",
@@ -827,10 +875,11 @@ def _track_kinematics_contract_attrs(
     method: str,
     parameters: Mapping[str, Any],
     inputs: Mapping[str, Any],
+    publication_schema_version: int = TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
 ) -> Dict[str, Any]:
     """Return the shared derived-run contract attrs for track kinematics."""
 
-    return {
+    attrs = {
         "schema_id": TRACK_KINEMATICS_RUN_SCHEMA_ID,
         "schema_version": TRACK_KINEMATICS_RUN_SCHEMA_VERSION,
         "method": method,
@@ -840,8 +889,17 @@ def _track_kinematics_contract_attrs(
         "source_refs": _track_kinematics_source_refs(
             run_type=run_type,
             inputs=inputs,
+            publication_schema_version=publication_schema_version,
         ),
     }
+    if (
+        publication_schema_version
+        != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+    ):
+        attrs[TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR] = (
+            publication_schema_version
+        )
+    return attrs
 
 
 @dataclass
@@ -5373,12 +5431,29 @@ def _validate_online_input_inventory(
     _track_kinematics_source_refs(run_type="online", inputs=inputs)
 
 
+def _track_motion_publication_schema_version(run_group: Any) -> int:
+    """Select one immutable manifest contract without widening v1 semantics."""
+
+    value = run_group.attrs.get(TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR)
+    if value is None:
+        return TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+    if (
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, np.integer))
+        or int(value) != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        raise ValueError(
+            f"{TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR} must be omitted for "
+            "frozen v1 runs or equal the supported v2 version."
+        )
+    return int(value)
+
+
 def _motion_run_derivation_record(
     run_group: Any,
     positions: BoundTrackPositionBindings,
-    *,
-    authoritative_root: Any | None = None,
 ) -> dict[str, Any]:
+    publication_schema_version = _track_motion_publication_schema_version(run_group)
     record = {
         name: copy.deepcopy(run_group.attrs[name])
         for name in _MOTION_RUN_DERIVATION_ATTR_NAMES
@@ -5483,10 +5558,35 @@ def _motion_run_derivation_record(
     if run_type == "offline":
         if record["method"] != "track_kinematics_offline":
             raise ValueError("Canonical offline track method is unsupported.")
-        required_inputs = set(_REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS)
-        allowed_inputs = required_inputs | set(
-            _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS
-        )
+        if (
+            publication_schema_version
+            == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        ):
+            required_inputs = set(_REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS)
+            allowed_inputs = required_inputs | set(
+                _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS
+            )
+        else:
+            lineage_mode = inputs.get("position_lineage_mode")
+            if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+                required_inputs = set(
+                    _REQUIRED_CANONICAL_OFFLINE_DIRECT_V2_INPUT_KEYS
+                )
+                allowed_inputs = required_inputs | set(
+                    _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS
+                )
+            elif (
+                lineage_mode
+                == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+            ):
+                required_inputs = set(
+                    _REQUIRED_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS
+                )
+                allowed_inputs = required_inputs | set(
+                    _OPTIONAL_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS
+                )
+            else:
+                raise ValueError("Manifest v2 position_lineage_mode is unsupported.")
         missing_inputs = sorted(required_inputs - set(inputs))
         unsupported_inputs = sorted(set(inputs) - allowed_inputs)
         if missing_inputs or unsupported_inputs:
@@ -5498,6 +5598,7 @@ def _motion_run_derivation_record(
     expected_refs = _track_kinematics_source_refs(
         run_type=run_type,
         inputs=inputs,
+        publication_schema_version=publication_schema_version,
     )
     if not _track_attr_values_equal(record["source_refs"], expected_refs):
         raise ValueError(
@@ -5538,74 +5639,53 @@ def _motion_run_derivation_record(
                 "Offline crop_run does not identify the exact sealed position "
                 "rowset."
             )
-        source_keypoint_crop_path = record["source_refs"].get(
-            "source_keypoint_crop_path"
-        )
-        source_tracking_rowset_path = record["source_refs"].get(
-            "source_tracking_rowset_path"
-        )
-        uses_successor_lineage = (
-            source_keypoint_crop_path is not None
-            and source_tracking_rowset_path is not None
-            and source_tracking_rowset_path != expected_rowset
-        )
-        if uses_successor_lineage:
-            if authoritative_root is None:
-                raise ValueError(
-                    "Verified coordinate-successor track finalization requires the "
-                    "authoritative archive root."
-                )
-            mapped_rowset = load_collection_proxy_successor_source_rowset(
-                authoritative_root,
-                expected_rowset,
-            )
-            if (
-                mapped_rowset != source_tracking_rowset_path
-                or source_keypoint_crop_path != source_tracking_rowset_path
-            ):
-                raise ValueError(
-                    "Coordinate-successor mapping does not identify the exact "
-                    "keypoint/tracking source rowset."
-                )
-            detection_run_id = record["source_refs"].get(
-                "source_detection_run_id"
-            )
-            if (
-                not isinstance(detection_run_id, str)
-                or not detection_run_id
-                or record["source_refs"].get("source_detection_path") is not None
-            ):
-                raise ValueError(
-                    "Coordinate-successor lineage requires one logical source "
-                    "detection run ID, not a single detection rowset path."
-                )
-            keypoint_path = record["source_refs"].get("source_keypoint_path")
-            keypoint_group = _resolve_motion_input_node(
-                authoritative_root,
-                f"/{keypoint_path}",
-            )
-            if (
-                archive_identity(keypoint_group)
-                != archive_identity(authoritative_root)
-                or keypoint_group.attrs.get("source_crop_run")
-                != source_keypoint_crop_path.split("/", 1)[1]
-                or keypoint_group.attrs.get("source_detect_run")
-                != detection_run_id
-            ):
-                raise ValueError(
-                    "Selected keypoint run does not bind the exact historical "
-                    "rowset and detection-run lineage declared by the successor."
-                )
-        else:
+        if (
+            publication_schema_version
+            == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        ):
             exact_detection_path = _canonical_crop_detection_rowset_path(source)
             if (
                 record["source_refs"].get("source_detection_path")
                 != exact_detection_path
-                or record["source_refs"].get("source_detection_run_id") is not None
             ):
                 raise ValueError(
                     "Offline detection_path does not identify the exact detection "
                     "rowset bound by the canonical crop selection."
+                )
+        elif (
+            inputs.get("position_lineage_mode")
+            == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+        ):
+            source_keypoint_crop_path = record["source_refs"].get(
+                "source_keypoint_crop_path"
+            )
+            source_tracking_rowset_path = record["source_refs"].get(
+                "source_tracking_rowset_path"
+            )
+            if (
+                inputs.get("position_lineage_mode")
+                != TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+                or source_keypoint_crop_path != source_tracking_rowset_path
+                or source_tracking_rowset_path == expected_rowset
+                or not isinstance(
+                    record["source_refs"].get("source_detection_run_id"),
+                    str,
+                )
+            ):
+                raise ValueError(
+                    "Track motion manifest v2 requires one explicit verified "
+                    "collection-proxy successor lineage."
+                )
+        else:
+            exact_detection_path = _canonical_crop_detection_rowset_path(source)
+            if (
+                inputs.get("position_lineage_mode")
+                != TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
+                or record["source_refs"].get("source_detection_path")
+                != exact_detection_path
+            ):
+                raise ValueError(
+                    "Track motion manifest v2 direct-crop lineage is invalid."
                 )
     else:
         _validate_online_input_inventory(
@@ -5628,19 +5708,184 @@ def _motion_run_derivation_record(
         record,
         label=f"/{run_group.path} motion derivation",
     )
-    return {
+    result = {
         "record": normalized,
         "record_sha256": _canonical_json_sha256(normalized),
+    }
+    if (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        result.update(
+            {
+                "schema_id": TRACK_MOTION_RUN_DERIVATION_SCHEMA_ID,
+                "schema_version": TRACK_MOTION_RUN_DERIVATION_SCHEMA_VERSION_V2,
+            }
+        )
+    return result
+
+
+def _motion_v2_position_lineage_record(
+    authoritative_root: Any,
+    run_group: Any,
+    positions: BoundTrackPositionBindings,
+) -> dict[str, Any]:
+    """Bind v2 to one explicit, digest-sealed position-lineage mode."""
+
+    if (
+        _track_motion_publication_schema_version(run_group)
+        != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        raise ValueError("Explicit position lineage is valid only for manifest v2.")
+    inputs = run_group.attrs.get("inputs")
+    source_refs = run_group.attrs.get("source_refs")
+    if not isinstance(inputs, Mapping) or not isinstance(source_refs, Mapping):
+        raise ValueError("Manifest v2 successor lineage lacks exact persisted inputs.")
+    source = positions.source_positions
+    position_rowset_path = str(source.row_identity.rowset_path).strip("/")
+    position_rowset = _resolve_motion_input_node(
+        authoritative_root,
+        f"/{position_rowset_path}",
+    )
+    lineage_mode = inputs.get("position_lineage_mode")
+    if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+        selection = bind_persisted_coordinate_record(
+            position_rowset,
+            attr_name=CROP_GEOMETRY_SELECTION_ATTR,
+        )
+        selection.assert_verified()
+        selection_record = selection.record
+        lineage_selections = [
+            record
+            for record in source.lineage_records
+            if record.record.get("schema_id")
+            == CROP_GEOMETRY_SELECTION_SCHEMA_ID
+        ]
+        detection_rowset_path = _canonical_crop_detection_rowset_path(source)
+        if (
+            len(lineage_selections) != 1
+            or lineage_selections[0].record_ref != selection.record_ref
+            or lineage_selections[0].record_sha256 != selection.record_sha256
+            or lineage_selections[0].record != selection_record
+            or
+            selection_record.get("schema_id")
+            != CROP_GEOMETRY_SELECTION_SCHEMA_ID
+            or selection_record.get("schema_version")
+            != CROP_GEOMETRY_SELECTION_SCHEMA_VERSION
+            or selection_record.get("operation")
+            != CROP_GEOMETRY_SELECTION_OPERATION
+            or source_refs.get("source_detection_path")
+            != detection_rowset_path
+        ):
+            raise ValueError("Manifest v2 direct-crop selection contract is invalid.")
+        return {
+            "schema_id": TRACK_POSITION_LINEAGE_SCHEMA_ID,
+            "schema_version": TRACK_POSITION_LINEAGE_SCHEMA_VERSION,
+            "mode": TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+            "position_rowset_ref": f"/{position_rowset_path}",
+            "crop_selection": {
+                "record_ref": selection.record_ref,
+                "record_sha256": selection.record_sha256,
+            },
+            "detection_rowset_ref": f"/{detection_rowset_path}",
+        }
+    if lineage_mode != TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1:
+        raise ValueError("Manifest v2 position_lineage_mode is unsupported.")
+
+    historical_rowset_path = load_collection_proxy_successor_source_rowset(
+        authoritative_root,
+        position_rowset_path,
+    )
+    mapping = bind_persisted_coordinate_record(
+        position_rowset,
+        attr_name=COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    )
+    mapping.assert_verified()
+    mapping_record = mapping.record
+    historical_record = mapping_record.get("historical_source")
+    historical_ref = (
+        historical_record.get("rowset_ref")
+        if isinstance(historical_record, Mapping)
+        else None
+    )
+    if (
+        mapping_record.get("schema_id")
+        != COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID
+        or mapping_record.get("schema_version")
+        != COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION
+        or mapping_record.get("operation")
+        != COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION
+        or historical_ref != f"/{historical_rowset_path}"
+    ):
+        raise ValueError("Coordinate-successor mapping contract is invalid.")
+
+    keypoint_rowset_path = source_refs.get("source_keypoint_crop_path")
+    tracking_rowset_path = source_refs.get("source_tracking_rowset_path")
+    detection_run_id = source_refs.get("source_detection_run_id")
+    keypoint_path = source_refs.get("source_keypoint_path")
+    tracking_path = source_refs.get("source_tracking_path")
+    if (
+        keypoint_rowset_path != historical_rowset_path
+        or tracking_rowset_path != historical_rowset_path
+        or not isinstance(detection_run_id, str)
+        or not detection_run_id
+        or not isinstance(keypoint_path, str)
+        or not isinstance(tracking_path, str)
+    ):
+        raise ValueError(
+            "Manifest v2 successor mapping does not identify the exact "
+            "keypoint/tracking lineage."
+        )
+    keypoint_group = _resolve_motion_input_node(
+        authoritative_root,
+        f"/{keypoint_path}",
+    )
+    tracking_group = _resolve_motion_input_node(
+        authoritative_root,
+        f"/{tracking_path}",
+    )
+    if (
+        archive_identity(keypoint_group) != archive_identity(authoritative_root)
+        or archive_identity(tracking_group) != archive_identity(authoritative_root)
+        or keypoint_group.attrs.get("source_crop_run")
+        != historical_rowset_path.split("/", 1)[1]
+        or keypoint_group.attrs.get("source_detect_run") != detection_run_id
+    ):
+        raise ValueError(
+            "Selected keypoint/tracking authority conflicts with the verified "
+            "successor lineage."
+        )
+    return {
+        "schema_id": TRACK_POSITION_LINEAGE_SCHEMA_ID,
+        "schema_version": TRACK_POSITION_LINEAGE_SCHEMA_VERSION,
+        "mode": TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1,
+        "position_rowset_ref": f"/{position_rowset_path}",
+        "successor_mapping": {
+            "record_ref": mapping.record_ref,
+            "record_sha256": mapping.record_sha256,
+        },
+        "historical_source_rowset_ref": f"/{historical_rowset_path}",
+        "source_detection_run_id": detection_run_id,
+        "keypoint_source": {
+            "run_ref": f"/{keypoint_path}",
+            "rowset_ref": f"/{keypoint_rowset_path}",
+        },
+        "tracking_source": {
+            "run_ref": f"/{tracking_path}",
+            "rowset_ref": f"/{tracking_rowset_path}",
+        },
     }
 
 
 def _motion_source_authority_record(
     positions: BoundTrackPositionBindings,
+    *,
+    position_lineage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = positions.source_positions
     temporal = positions.source_temporal_authority
     node = source.coordinate_node
-    return {
+    record = {
         "position": {
             "array_ref": f"/{node.path}",
             "dtype": np.dtype(node.dtype).str,
@@ -5655,6 +5900,9 @@ def _motion_source_authority_record(
             "record_sha256": temporal.record_sha256,
         },
     }
+    if position_lineage is not None:
+        record["position_lineage"] = copy.deepcopy(dict(position_lineage))
+    return record
 
 
 def _motion_input_array_record(node: Any) -> dict[str, Any]:
@@ -6872,9 +7120,20 @@ def _motion_run_root_attrs_record(
     """Return one closed, conflict-checked run-root attribute partition."""
 
     live_names = set(str(name) for name in run_group.attrs)
+    publication_schema_version = _track_motion_publication_schema_version(run_group)
+    allowed_names = set(_MOTION_RUN_ALLOWED_ATTR_NAMES)
+    if (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        allowed_names.update(
+            {
+                TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR,
+            }
+        )
     unknown = sorted(
         live_names
-        - set(_MOTION_RUN_ALLOWED_ATTR_NAMES)
+        - allowed_names
         - set(_MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES)
     )
     if unknown:
@@ -8284,6 +8543,7 @@ def _build_track_motion_publication_manifest(
 
     if positions.run_group.path != run_group.path:
         raise ValueError("Position bindings and motion run paths disagree.")
+    publication_schema_version = _track_motion_publication_schema_version(run_group)
     root_group_names = sorted(str(value) for value in run_group.group_keys())
     if root_group_names != ["tracks"]:
         raise ValueError(
@@ -8310,12 +8570,21 @@ def _build_track_motion_publication_manifest(
         else None
     )
     include_physical = physical_record is not None
-    source_authority = _motion_source_authority_record(positions)
-    run_derivation = _motion_run_derivation_record(
-        run_group,
-        positions,
-        authoritative_root=authoritative_root,
+    position_lineage = (
+        _motion_v2_position_lineage_record(
+            authoritative_root,
+            run_group,
+            positions,
+        )
+        if publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+        else None
     )
+    source_authority = _motion_source_authority_record(
+        positions,
+        position_lineage=position_lineage,
+    )
+    run_derivation = _motion_run_derivation_record(run_group, positions)
     run_root_attrs = _motion_run_root_attrs_record(run_group, positions)
     manifest_context: dict[str, Any] = {
         "source_authority": source_authority,
@@ -8552,7 +8821,7 @@ def _build_track_motion_publication_manifest(
 
     manifest = {
         "schema_id": TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
-        "schema_version": TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
+        "schema_version": publication_schema_version,
         "run_ref": f"/{run_group.path}",
         "run_type": positions.run_type,
         "run_name": positions.run_name,
@@ -8581,6 +8850,8 @@ def _build_track_motion_publication_manifest(
         "track_count": track_count,
         "tracks": track_records,
     }
+    if position_lineage is not None:
+        manifest["position_lineage_mode"] = position_lineage["mode"]
     return _motion_json_object(
         manifest,
         label=f"/{run_group.path} full-motion publication manifest",
@@ -8608,9 +8879,21 @@ def _track_motion_publication_commit(
         for name, record in tracks.items()
         if isinstance(record, Mapping)
     }
+    manifest_schema_version = manifest.get("schema_version")
+    if manifest_schema_version not in {
+        TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
+        TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2,
+    }:
+        raise ValueError("Full-motion manifest version cannot mint a commit.")
+    commit_schema_version = (
+        TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION
+        if manifest_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        else TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION_V2
+    )
     commit = {
         "schema_id": TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_ID,
-        "schema_version": TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION,
+        "schema_version": commit_schema_version,
         "run_ref": manifest.get("run_ref"),
         "manifest_sha256": _canonical_json_sha256(manifest),
         "source_authority_sha256": _canonical_json_sha256(source),
@@ -8618,6 +8901,8 @@ def _track_motion_publication_commit(
         "run_derivation_sha256": derivation.get("record_sha256"),
         "position_derivations": position_derivations,
     }
+    if commit_schema_version == TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION_V2:
+        commit["manifest_schema_version"] = manifest_schema_version
     return _motion_json_object(commit, label="track motion publication commit")
 
 
@@ -10588,10 +10873,16 @@ def _load_bound_track_motion_run_impl(
         label=f"/{run_group.path} persisted full-motion manifest",
     )
     expected_digest = _canonical_json_sha256(manifest)
+    manifest_schema_version = manifest.get("schema_version")
     if (
         manifest.get("schema_id") != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID
-        or manifest.get("schema_version")
-        != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        or manifest_schema_version
+        not in {
+            TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
+            TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2,
+        }
+        or manifest_schema_version
+        != _track_motion_publication_schema_version(run_group)
         or manifest.get("run_ref") != f"/{run_group.path}"
         or manifest.get("run_type") != positions.run_type
         or manifest.get("run_name") != positions.run_name
@@ -10599,6 +10890,38 @@ def _load_bound_track_motion_run_impl(
     ):
         raise ValueError(
             "Track full-motion manifest schema, run identity, or digest is invalid."
+        )
+    source_authority = manifest.get("source_authority")
+    run_derivation = manifest.get("run_derivation")
+    if not isinstance(source_authority, Mapping) or not isinstance(
+        run_derivation,
+        Mapping,
+    ):
+        raise ValueError(
+            "Track full-motion manifest source or derivation authority is invalid."
+        )
+    if manifest_schema_version == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION:
+        if (
+            "position_lineage" in source_authority
+            or "position_lineage_mode" in manifest
+            or "schema_id" in run_derivation
+            or "schema_version" in run_derivation
+        ):
+            raise ValueError("Frozen manifest v1 cannot carry v2 contract fields.")
+    elif (
+        manifest.get("position_lineage_mode")
+        not in {
+            TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+            TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1,
+        }
+        or not isinstance(source_authority.get("position_lineage"), Mapping)
+        or run_derivation.get("schema_id")
+        != TRACK_MOTION_RUN_DERIVATION_SCHEMA_ID
+        or run_derivation.get("schema_version")
+        != TRACK_MOTION_RUN_DERIVATION_SCHEMA_VERSION_V2
+    ):
+        raise ValueError(
+            "Manifest v2 lacks its explicit position or derivation contract."
         )
     commit = _motion_json_object(
         raw_commit,
@@ -12395,7 +12718,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         git=git_info,
                         environment=env_info.get("platform"),
                     )
-                    write_stage_provenance(run_group, provenance)
+                    write_stage_provenance(
+                        run_group,
+                        provenance,
+                        include_top_level_git=False,
+                    )
 
                     # Backward-compatible top-level attrs.
                     run_group.attrs.update(
@@ -12493,8 +12820,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 keypoints=keypoints_offline,
                 position_crop_run=position_crop_run,
             )
-            detection_path_offline = (
-                "source_detect_run:" + successor_tracking.expected_detect_run
+            detection_path_offline = None
+            source_detection_run_id = successor_tracking.expected_detect_run
+            offline_publication_schema_version = (
+                TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
             )
             expected_detect_run = successor_tracking.expected_detect_run
             expected_refined_run = None
@@ -12519,6 +12848,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
             expected_detect_run = (
                 detection_offline.source_detect_run or detection_offline.run_name
+            )
+            source_detection_run_id = None
+            offline_publication_schema_version = (
+                TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
             )
             expected_refined_run = (
                 detection_offline.run_name if detection_offline.is_refined else None
@@ -12816,7 +13149,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         env_info = get_environment_info()
 
                         offline_inputs = {
-                            "detection_path": detection_path_offline,
                             **_offline_position_source_inputs(
                                 position_source_offline
                             ),
@@ -12827,12 +13159,27 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             )
                             + keypoints_offline.run_name,
                             "crop_run": position_crop_run,
-                            "keypoint_source_crop_run": keypoints_offline.crop_run,
-                            "tracking_source_rowset_path": (
-                                tracking_source_rowset_path
-                            ),
                             "tracking_path": f"tracking_runs/{tracking_run_name}",
                         }
+                        if args.position_source_run:
+                            offline_inputs.update(
+                                {
+                                    "position_lineage_mode": (
+                                        TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+                                    ),
+                                    "keypoint_source_crop_run": (
+                                        keypoints_offline.crop_run
+                                    ),
+                                    "tracking_source_rowset_path": (
+                                        tracking_source_rowset_path
+                                    ),
+                                    "source_detection_run_id": (
+                                        source_detection_run_id
+                                    ),
+                                }
+                            )
+                        else:
+                            offline_inputs["detection_path"] = detection_path_offline
                         if metrics_metadata:
                             offline_inputs["chaser_metrics"] = metrics_metadata
                         if swim_bout_mirror:
@@ -12862,7 +13209,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             git=git_info,
                             environment=env_info.get("platform"),
                         )
-                        write_stage_provenance(offline_group, offline_provenance)
+                        write_stage_provenance(
+                            offline_group,
+                            offline_provenance,
+                            include_top_level_git=False,
+                        )
 
                         # Backward-compatible top-level attrs.
                         offline_group.attrs.update(
@@ -12872,6 +13223,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                     method="track_kinematics_offline",
                                     parameters=offline_params,
                                     inputs=offline_inputs,
+                                    publication_schema_version=(
+                                        offline_publication_schema_version
+                                    ),
                                 ),
                                 "created_at_utc": created_at,
                                 "fps": fps,
