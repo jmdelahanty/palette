@@ -342,8 +342,12 @@ Exit gate:
 - [x] Record rejected candidates and reasons; do not silently omit them.
 - [x] Add a fail-closed cluster-planner shortlist that accepts only named
       byte-budget candidates from the original sweep, never row overrides.
-- [ ] Carry only the Pareto frontier and required controls to full duration.
-- [ ] Run full-duration materialization, publication, and read workloads.
+- [x] Carry only the 200k finalist and required control to full duration.
+- [x] Run five full-duration materialization, publication, and read
+      repetitions.
+- [ ] Add and benchmark an access-aware hybrid that uses a 1 MiB target for
+      `EAGER` offsets and 128 KiB targets for `WINDOWED` instance columns,
+      inside 8 MiB target shards.
 - [ ] Benchmark parallel publication only for finalists.
 - [x] Report median, p95 where meaningful, dispersion, trial order, and host
       identity rather than only the fastest observation.

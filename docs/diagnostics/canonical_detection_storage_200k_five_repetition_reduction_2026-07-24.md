@@ -4,6 +4,9 @@ Date: 2026-07-24
 
 Status: next-stage candidate selected; no production profile promoted
 
+Follow-up: full-duration evidence is documented in
+[`canonical_detection_storage_full_duration_reduction_2026-07-24.md`](canonical_detection_storage_full_duration_reduction_2026-07-24.md).
+
 ## Evidence Identity
 
 - Benchmark Palette commit:

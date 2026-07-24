@@ -337,5 +337,7 @@ reusing shared logical contracts where the semantics are genuinely identical.
       four balanced 200k-frame repetitions.
 - [x] Run the frozen cross-workflow reduction preview, collect repetition 5
       without changing the workload, and apply the predeclared gates.
-- [ ] Carry the selected 128 KiB-inner / 8 MiB-target-shard plan and the regular
+- [x] Carry the selected 128 KiB-inner / 8 MiB-target-shard plan and the regular
       1 MiB control to full-duration validation without promoting either.
+- [ ] Implement and benchmark the access-aware hybrid identified by the
+      full-duration result before beginning HTTP/Crimson promotion testing.
