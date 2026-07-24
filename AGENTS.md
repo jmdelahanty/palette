@@ -12,8 +12,19 @@
 ## Git Push Rule
 
 - Pushes from this repository require the Palette workstation SSH key and should run outside the Codex sandbox because sandbox DNS/network access can fail.
-- Preferred push path: use the tracked helper, which pushes the current branch and then fast-forwards the shared `/groups` checkout:
+- When a workflow intentionally uses the single shared `/groups` checkout,
+  prefer the tracked helper, which pushes the current branch and then
+  fast-forwards that checkout:
   `scripts/push_and_update_groups_checkout.sh`
+- When concurrent agents or cluster jobs need different Palette commits, do
+  not switch or fast-forward the shared checkout. Use
+  `scripts/deploy_palette_cluster_worktree.sh` from the clean source worktree.
+  It pushes only that branch, creates a detached commit-pinned worktree below
+  the shared deployment root, leaves the shared checkout unchanged, and prints
+  the exact `PALETTE_GROUPS_REPO` value for submission.
+- Cluster submissions from a dedicated deployment must record and pass its
+  absolute `--palette-repo` path and full commit. Never point an already-planned
+  job at a mutable shared checkout or move a deployment path to a newer commit.
 - If you intentionally need to push without updating `/groups`, use:
   `GIT_SSH_COMMAND='ssh -i /home/delahantyj@hhmi.org/.ssh/delahantyj-ws1-git-id_ed25519 -o IdentitiesOnly=yes' git -C /home/delahantyj@hhmi.org/gitrepos/palette push`
 - Do not rely on plain `git push` for Palette; it may fail with `Permission denied (publickey)` or sandbox DNS errors.

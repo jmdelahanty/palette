@@ -270,6 +270,9 @@ Exit gate:
 
 ## Phase 7 — LSF Workflow
 
+- [x] Add a concurrency-safe helper that deploys a clean agent branch as a
+      detached, commit-pinned `/groups` worktree without switching the shared
+      checkout.
 - [ ] Implement a benchmark-family planner on `fisheye.cluster.lsf` models,
       bundle persistence, submission, task groups, and runtime status.
 - [ ] Keep the operator shell surface thin and free of new `bsub` parsing.

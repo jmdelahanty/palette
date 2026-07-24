@@ -103,3 +103,46 @@ git worktree add ../palette-docs     -b docs-stream
 No interleaving on a single branch; each agent is isolated to its own directory and branch.
 (This repo's agent harness can also do this automatically via the Agent tool's
 `isolation: "worktree"` option, which spins up a temp worktree and cleans it up afterward.)
+
+## Commit-pinned cluster worktrees
+
+The workstation's `/tmp` worktrees are not a stable cluster runtime surface.
+When several agents need to submit LSF jobs concurrently, leave the primary
+`/groups/.../gitrepos/palette` checkout on its existing branch and deploy each
+clean committed agent worktree separately:
+
+```bash
+scripts/deploy_palette_cluster_worktree.sh \
+  --source-repo /tmp/palette-my-feature
+```
+
+The helper:
+
+1. requires a clean source branch;
+2. pushes the exact source commit without updating the shared checkout;
+3. fetches that branch into the shared Palette object store;
+4. creates a detached worktree below the shared `palette-worktrees` root;
+5. includes the short commit in the destination name;
+6. locks the worktree against accidental Git pruning;
+7. verifies that the shared checkout's branch and HEAD did not move;
+8. verifies the deployed commit from `login1-citrus-poller` by default.
+
+The final output includes an exact value such as:
+
+```text
+palette_groups_repo_env=PALETTE_GROUPS_REPO=/groups/.../palette-worktrees/my-feature-0123abcd
+```
+
+Pass that absolute path to cluster submitters through `--palette-repo` or
+`PALETTE_GROUPS_REPO`. Submitted jobs must also record the full commit and
+refuse a dirty or mismatched checkout.
+
+A new source commit gets a new deployment path. Do not fast-forward or repoint
+an existing cluster worktree while jobs may still be using it. After their jobs
+and retained evidence no longer need the checkout, unlock and remove old
+deployments through Git rather than deleting their directories directly:
+
+```bash
+git -C /groups/.../gitrepos/palette worktree unlock /groups/.../<deployment>
+git -C /groups/.../gitrepos/palette worktree remove /groups/.../<deployment>
+```
