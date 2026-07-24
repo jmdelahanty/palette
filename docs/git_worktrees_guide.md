@@ -125,7 +125,9 @@ The helper:
 5. includes the short commit in the destination name;
 6. locks the worktree against accidental Git pruning;
 7. verifies that the shared checkout's branch and HEAD did not move;
-8. verifies the deployed commit from `login1-citrus-poller` by default.
+8. verifies the deployed commit from `login1-citrus-poller` by default;
+9. invokes that worktree's `scripts/py` and verifies that `fisheye` imports from
+   the deployed `src` tree rather than another checkout's editable install.
 
 The final output includes an exact value such as:
 

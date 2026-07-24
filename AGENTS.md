@@ -22,6 +22,9 @@
   It pushes only that branch, creates a detached commit-pinned worktree below
   the shared deployment root, leaves the shared checkout unchanged, and prints
   the exact `PALETTE_GROUPS_REPO` value for submission.
+- `scripts/py` prepends the `src` tree beside that exact script. The deployment
+  helper verifies the imported `fisheye` path through Citrus before reporting
+  success, so another checkout's editable install cannot supply job code.
 - Cluster submissions from a dedicated deployment must record and pass its
   absolute `--palette-repo` path and full commit. Never point an already-planned
   job at a mutable shared checkout or move a deployment path to a newer commit.

@@ -349,7 +349,10 @@ if [[ "$SKIP_HOST_VERIFY" -eq 0 ]]; then
   REMOTE_COMMAND+='test -x "$repo/scripts/py" && '
   REMOTE_COMMAND+='actual=$(git -C "$repo" rev-parse HEAD) && '
   REMOTE_COMMAND+='test "$actual" = "$expected" && '
-  REMOTE_COMMAND+='test -z "$(git -C "$repo" status --porcelain --untracked-files=all)"'
+  REMOTE_COMMAND+='test -z "$(git -C "$repo" status --porcelain --untracked-files=all)" && '
+  REMOTE_COMMAND+='expected_import=$(readlink -f "$repo/src/fisheye/__init__.py") && '
+  REMOTE_COMMAND+='actual_import=$(cd "$repo" && "$repo/scripts/py" -c '\''import pathlib, fisheye; print(pathlib.Path(fisheye.__file__).resolve())'\'') && '
+  REMOTE_COMMAND+='test "$actual_import" = "$expected_import"'
   run ssh -o BatchMode=yes "$VERIFY_HOST" "$REMOTE_COMMAND"
 fi
 
@@ -358,4 +361,5 @@ printf 'palette_repo=%s\n' "$DESTINATION"
 printf 'palette_commit=%s\n' "$COMMIT"
 printf 'groups_checkout_unchanged=true\n'
 printf 'worktree_locked=true\n'
+printf 'python_import_root_verified=%s\n' "$([[ "$SKIP_HOST_VERIFY" -eq 1 ]] && printf skipped || printf true)"
 printf 'palette_groups_repo_env=PALETTE_GROUPS_REPO=%q\n' "$DESTINATION"
