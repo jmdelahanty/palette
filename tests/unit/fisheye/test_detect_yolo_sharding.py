@@ -49,6 +49,30 @@ from fisheye.shared.instance_keys import (
 )
 
 
+def test_detection_metadata_uses_decoded_observation_and_ffprobe(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "camera.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setattr(
+        mod,
+        "probe_ffprobe_video_metadata",
+        lambda _path: {"codec": "hevc", "pix_fmt": "yuv420p"},
+    )
+
+    metadata = mod.get_video_metadata(
+        source,
+        cap=None,
+        width=4512,
+        height=4512,
+        n_frames=139295,
+        fps=100.0,
+    )
+
+    assert metadata["total_frames"] == 139295
+    assert metadata["codec"] == "hevc"
+    assert metadata["pix_fmt"] == "yuv420p"
+    assert "imageio_metadata" not in metadata
+
+
 def test_yolo_detection_sharding_is_default_with_cli_opt_out() -> None:
     signature = inspect.signature(mod.detect_yolo)
     assert signature.parameters["detect_row_shard_rows"].default == 131_072

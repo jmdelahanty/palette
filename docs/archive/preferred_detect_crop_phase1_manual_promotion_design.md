@@ -32,8 +32,8 @@ Related notes:
 - [preferred_detect_crop_runs_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_runs_design.md)
 - [track_identity_target_architecture.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/track_identity_target_architecture.md)
 - [crimson_detect_bbox_read_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crimson_detect_bbox_read_contract.md)
-- [crimson_refined_detect_manual_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crimson_refined_detect_manual_contract.md)
-- [crop_live_view_vs_materialized_stream_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crop_live_view_vs_materialized_stream_design.md)
+- [crimson_refined_detect_manual_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/crimson_refined_detect_manual_contract.md)
+- [crop_live_view_vs_materialized_stream_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/crop_live_view_vs_materialized_stream_design.md)
 
 ## Short Answer
 

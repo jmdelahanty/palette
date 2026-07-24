@@ -288,7 +288,7 @@ When reviewing new pipeline work, ask:
 - [subject_mask_stage_unification_todo.md](archive/subject_mask_stage_unification_todo.md)
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [body_frame_contract.md](body_frame_contract.md)
-- [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [body_spline_tail_anchor_design.md](archive/body_spline_tail_anchor_design.md)
 - [tail_kinematics_run_design.md](tail_kinematics_run_design.md)
 - [tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md)
 - [repo_wide_staleness_checklist.md](repo_wide_staleness_checklist.md)

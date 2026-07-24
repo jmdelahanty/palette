@@ -511,7 +511,7 @@ This belongs downstream of current `bout_kinematics_runs`,
 
 ## Relationship To Existing Palette Docs
 
-- [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [body_spline_tail_anchor_design.md](archive/body_spline_tail_anchor_design.md)
   defines the mask/spline-derived tail geometry and tail landmark conventions.
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md) defines
   where interpreted mask-derived shape geometry lives.

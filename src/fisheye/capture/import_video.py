@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import argparse
 import shutil
-import subprocess
 from os import fork, waitpid, WIFEXITED, WEXITSTATUS, _exit
 os.environ.setdefault("BLOSC_NTHREADS", "4")
 # Force kvikIO to use GDS mode, not compatibility mode
@@ -20,7 +19,6 @@ import copy
 import re
 import zarr
 import torch
-import imageio.v3 as iio
 import time
 import numpy as np
 from datetime import datetime, timezone
@@ -52,6 +50,7 @@ from ..shared.acquisition_publication_status import (
     stamp_acquisition_authority_publication_status,
 )
 from ..shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from ..shared.import_video_metadata import probe_ffprobe_video_metadata
 from ..shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     build_verified_acquisition_materialization,
@@ -1158,10 +1157,6 @@ def _decode_contract_metadata(device: str) -> Dict[str, Any]:
 
 
 def _get_video_metadata(video_path: Path, vr: decord.VideoReader, width: int, height: int, n_frames: int) -> Dict[str, Any]:
-    try:
-        iio_meta = iio.immeta(str(video_path))
-    except Exception:
-        iio_meta = {}
     meta = {
         "source_video": str(video_path.name),
         "source_path": str(video_path),
@@ -1171,50 +1166,15 @@ def _get_video_metadata(video_path: Path, vr: decord.VideoReader, width: int, he
         "fps": vr.get_avg_fps(),
         "duration_seconds": n_frames / vr.get_avg_fps() if vr.get_avg_fps() > 0 else 0,
     }
-    if iio_meta:
-        meta["codec"] = iio_meta.get("codec", "unknown")
-        meta["pix_fmt"] = iio_meta.get("pix_fmt", "unknown")
-        meta["imageio_metadata"] = iio_meta
-    stream_codec = None
-    stream_pix_fmt = None
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "format_tags=title,comment,encoder:stream=codec_name,codec_tag_string,pix_fmt",
-                "-of",
-                "json",
-                str(video_path),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout:
-            payload = json.loads(result.stdout)
-            tags = payload.get("format", {}).get("tags", {})
-            if isinstance(tags, dict) and tags:
-                meta["format_tags"] = tags
-                encoder_fields = parse_encoder_comment(tags.get("comment"))
-                if encoder_fields:
-                    meta["encoder_fields"] = encoder_fields
-            streams = payload.get("streams", [])
-            if isinstance(streams, list) and streams:
-                stream = streams[0]
-                if isinstance(stream, dict):
-                    stream_codec = stream.get("codec_name") or stream.get("codec_tag_string")
-                    stream_pix_fmt = stream.get("pix_fmt")
-    except Exception:
-        pass
-    if meta.get("codec") in (None, "", "unknown") and stream_codec:
-        meta["codec"] = stream_codec
-    if meta.get("pix_fmt") in (None, "", "unknown") and stream_pix_fmt:
-        meta["pix_fmt"] = stream_pix_fmt
+    stream = probe_ffprobe_video_metadata(video_path)
+    meta["codec"] = stream.get("codec", "unknown")
+    meta["pix_fmt"] = stream.get("pix_fmt", "unknown")
+    tags = stream.get("format_tags")
+    if isinstance(tags, dict) and tags:
+        meta["format_tags"] = tags
+        encoder_fields = parse_encoder_comment(tags.get("comment"))
+        if encoder_fields:
+            meta["encoder_fields"] = encoder_fields
     return meta
 
 

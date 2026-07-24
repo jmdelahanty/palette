@@ -6,7 +6,7 @@ created: 2026-07-05
 owner: jeremy
 related: docs/identity_lineage_staleness_review.md, docs/palette_cli_narrow_waist_design.md,
          docs/run_resolution_semantics.md,
-         docs/diagnostics/redscare_keypoint_frame_axis_diagnosis_2026-07-02.md
+         docs/archive/redscare_keypoint_frame_axis_diagnosis_2026-07-02.md
 -->
 
 ## Executive Summary
@@ -126,9 +126,9 @@ fallback that derives total frames from `frame_indices.max()+1` when no better s
 available (`src/fisheye/detection/detect_keypoints_yolo.py:827`). The RedScare diagnosis
 shows why that pattern is risky: the affected runs were safe only because the malformed
 array was a summary array and the row-level keypoint arrays stayed aligned
-(`docs/diagnostics/redscare_keypoint_frame_axis_diagnosis_2026-07-02.md:13`). That doc
+(`docs/archive/redscare_keypoint_frame_axis_diagnosis_2026-07-02.md:13`). That doc
 explicitly points to `FrameDomains` as the general fix
-(`docs/diagnostics/redscare_keypoint_frame_axis_diagnosis_2026-07-02.md:123`).
+(`docs/archive/redscare_keypoint_frame_axis_diagnosis_2026-07-02.md:123`).
 
 ## Census Results
 

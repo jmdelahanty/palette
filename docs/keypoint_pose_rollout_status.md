@@ -163,7 +163,7 @@ Contract:
 
 Design note:
 
-- `docs/pose_schema_heuristics_split_proposal.md`
+- `docs/archive/pose_schema_heuristics_split_proposal.md`
 
 Packaged defaults:
 
@@ -474,7 +474,7 @@ are true:
 
 - `docs/keypoint_heading_computation_contract.md`
 - `docs/pose_heuristic_profile_contract.md`
-- `docs/pose_schema_heuristics_split_proposal.md`
+- `docs/archive/pose_schema_heuristics_split_proposal.md`
 - `docs/keypoint_multi_skeleton_todo.md`
 - `docs/keypoint_heading_validity_todo.md`
 - `docs/keypoint_temporal_heading_heuristic_todo.md`

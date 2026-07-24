@@ -36,7 +36,6 @@ import zarr
 import numpy as np
 import torch
 import cv2
-import imageio.v3 as iio
 from datetime import datetime, timezone
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
@@ -127,7 +126,10 @@ from fisheye.shared.zarr_run_completion import (
     note_pending_latest,
     require_runs_parent,
 )
-from fisheye.shared.import_video_metadata import write_video_metadata
+from fisheye.shared.import_video_metadata import (
+    probe_ffprobe_video_metadata,
+    write_video_metadata,
+)
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
@@ -1140,8 +1142,7 @@ def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) ->
 
 def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width: int, height: int, n_frames: int, fps: float) -> Dict[str, Any]:
     """
-    Get comprehensive video metadata similar to import_video.py.
-    Uses both cv2 and imageio for maximum compatibility.
+    Get finite source metadata from decoded observations plus ffprobe.
     """
     cap_owner = False
     if cap is None:
@@ -1151,12 +1152,6 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
             cap.release()
             cap = None
     try:
-        # Try to get codec info from imageio.
-        try:
-            iio_meta = iio.immeta(str(video_path))
-        except Exception:
-            iio_meta = {}
-
         meta = {
             "source_video": str(video_path.name),
             "source_path": str(video_path.absolute()),
@@ -1166,12 +1161,10 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
             "fps": fps,
             "duration_seconds": n_frames / fps if fps > 0 else 0,
         }
-
-        if iio_meta:
-            meta["codec"] = iio_meta.get("codec", "unknown")
-            meta["pix_fmt"] = iio_meta.get("pix_fmt", "unknown")
-            meta["imageio_metadata"] = iio_meta
-        else:
+        stream = probe_ffprobe_video_metadata(video_path)
+        meta["codec"] = stream.get("codec", "unknown")
+        meta["pix_fmt"] = stream.get("pix_fmt", "unknown")
+        if meta["codec"] == "unknown":
             if cap is not None:
                 fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
                 if fourcc > 0:
@@ -1181,9 +1174,9 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
                     meta["codec"] = codec_str
                 else:
                     meta["codec"] = "unknown"
-            else:
-                meta["codec"] = "unknown"
-            meta["pix_fmt"] = "unknown"
+        tags = stream.get("format_tags")
+        if isinstance(tags, dict) and tags:
+            meta["format_tags"] = tags
         return meta
     finally:
         if cap_owner and cap is not None:
@@ -2493,9 +2486,6 @@ def detect_yolo(
             'system_username': env_info['platform']['username'],
             'system_cpu_cores': env_info['platform']['cpu_cores'],
         })
-
-        if 'imageio_metadata' in vid_meta:
-            root.attrs['imageio_metadata'] = vid_meta['imageio_metadata']
 
         if 'cpu_details' in env_info['platform']:
             cpu = env_info['platform']['cpu_details']

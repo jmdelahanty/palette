@@ -456,7 +456,7 @@ mask_labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
 The docs and code treat this as a refined component tensor, not a scalar class
 map:
 
-- `docs/eye_subject_mask_unification_design.md` states that refined
+- `docs/archive/eye_subject_mask_unification_design.md` states that refined
   eye-capable work should target `refined_subject_masks_runs` with explicit
   `eye_left` and `eye_right` components.
 - `src/fisheye/shared/refined_subject_masks_io.py` exposes run-level

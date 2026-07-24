@@ -7,8 +7,8 @@ implementation and policy use `crop_storage_mode = materialized | geometry_only`
 plus optional workflow-local flat ROI caches. Current docs:
 
 - `docs/geometry_only_crop_workflow_cache_design.md`
-- `docs/crop_live_view_vs_materialized_stream_design.md`
-- `docs/crop_reader_geometry_only_inventory_2026-05-16.md`
+- `docs/archive/crop_live_view_vs_materialized_stream_design.md`
+- `docs/archive/crop_reader_geometry_only_inventory_2026-05-16.md`
 
 ## Why crops are persisted today
 - High-resolution frames (e.g., 4512x4512) make on-the-fly cropping expensive.

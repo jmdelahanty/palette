@@ -536,4 +536,4 @@ This can live in stage provenance or direct attrs, but it should be present.
 > production parallel backend is `process_shards`; `serial_driver` remains only
 > as a correctness/debug fallback. Dask scheduler material below is retained as
 > historical planning context. See
-> `docs/diagnostics/subject_mask_finalizer_publication_status_2026-07-09.md`.
+> `docs/archive/subject_mask_finalizer_publication_status_2026-07-09.md`.

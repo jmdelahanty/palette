@@ -2,7 +2,7 @@
 
 Investigation of missing fish detections in the GoodCopBadCop chaser cohort,
 triggered by the freeze-curve avoidance readout (see
-`docs/goodcopbadcop_avoidance_readout_survey.md`), whose immobility estimate is
+`docs/archive/goodcopbadcop_avoidance_readout_survey.md`), whose immobility estimate is
 censored by dropout. What began as "the detector loses frozen fish" turned out
 to be **three distinct mechanisms, two of which are cheap refinement-stage
 bugs, not detection failures.**

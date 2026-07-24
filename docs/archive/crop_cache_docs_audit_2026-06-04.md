@@ -16,9 +16,9 @@ operator guide now includes `--roi-cache-manifest` handoff examples.
 Primary files checked:
 
 - `docs/geometry_only_crop_workflow_cache_design.md`
-- `docs/crop_live_view_vs_materialized_stream_design.md`
+- `docs/archive/crop_live_view_vs_materialized_stream_design.md`
 - `docs/crop_storage_mode_migration_todo.md`
-- `docs/crop_reader_geometry_only_inventory_2026-05-16.md`
+- `docs/archive/crop_reader_geometry_only_inventory_2026-05-16.md`
 - `docs/crop_persistence_tradeoff.md`
 - `docs/geometry_live_gpu_design_note.md`
 - `docs/inference_pipeline_divergence_analysis.md`
@@ -107,7 +107,7 @@ Recommended action:
 - Keep the open questions about `roi_cache_policy=auto`, review/tuning latency,
   and training/export migration.
 
-### `docs/crop_reader_geometry_only_inventory_2026-05-16.md`
+### `docs/archive/crop_reader_geometry_only_inventory_2026-05-16.md`
 
 Status: keep, update last-verified.
 
@@ -128,7 +128,7 @@ Recommended action:
 
 ## Duplicated But Useful Historical Docs
 
-### `docs/crop_live_view_vs_materialized_stream_design.md`
+### `docs/archive/crop_live_view_vs_materialized_stream_design.md`
 
 Status: keep as historical design note, not active source of truth.
 
@@ -205,7 +205,7 @@ Recommended archive now:
 
 Possible archive later, after stronger redirects:
 
-- `docs/crop_live_view_vs_materialized_stream_design.md`
+- `docs/archive/crop_live_view_vs_materialized_stream_design.md`
   - Only if the benchmark/history content is folded into
     `geometry_only_crop_workflow_cache_design.md`.
 - `docs/geometry_live_gpu_design_note.md`
@@ -214,7 +214,7 @@ Possible archive later, after stronger redirects:
 Do not archive:
 
 - `docs/geometry_only_crop_workflow_cache_design.md`
-- `docs/crop_reader_geometry_only_inventory_2026-05-16.md`
+- `docs/archive/crop_reader_geometry_only_inventory_2026-05-16.md`
 - `docs/crop_storage_mode_migration_todo.md`
 
 ## Suggested Next Cleanup Slice

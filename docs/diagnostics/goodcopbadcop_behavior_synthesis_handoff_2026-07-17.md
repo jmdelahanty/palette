@@ -3,7 +3,7 @@
 What was tested this session on the GoodCopBadCop chaser cohort, what survived
 scrutiny, what was retracted, the methodological lessons, and where to pick up.
 Companion to `docs/diagnostics/goodcopbadcop_detection_dropout_2026-07-16.md`
-(the detection-quality half) and `docs/goodcopbadcop_avoidance_readout_survey.md`.
+(the detection-quality half) and `docs/archive/goodcopbadcop_avoidance_readout_survey.md`.
 
 > **Cohort + radial update (2026-07-18):** the 11–12-recording limit was a
 > STALE-REGISTRY bug — the scripts queried `/nvme1/palette_registry.sqlite`, which

@@ -217,4 +217,4 @@ used by nothing) — it is not the framework; retire it.
 ---
 
 *Companion reports: `docs/diagnostics/codebase_review_2026-06-20.md` (whole-repo; this expands its
-P2-7), `docs/diagnostics/code_review_goodcopbadcop_dashboard_2026-06-20.md` (sun-branch diff).*
+P2-7), `docs/archive/code_review_goodcopbadcop_dashboard_2026-06-20.md` (sun-branch diff).*

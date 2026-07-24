@@ -204,7 +204,7 @@ filesystem traversal over the whole recordings tree.
   --reconcile-registry`, `utils/registry_rescan.py`, or the import wrapper's inline
   `scan_zarr`. `reconcile_dataset_from_root` (`db.py:6747`) is idempotent (tests in
   `2a74f2e`); moved stores are marked `status='missing'` (path not rewritten).
-- **Designed intent vs reality:** `docs/diagnostics/registry_design_assessment_2026-06-18.md`
+- **Designed intent vs reality:** `docs/archive/registry_design_assessment_2026-06-18.md`
   §Weaknesses#1 names it — "capture is scattered and not idempotent-by-design." The completed
   `brief_registry_reconcile.md` built `reconcile_dataset_from_root` as the unifying engine,
   but nothing auto-invokes it and import-time `scan_zarr` is still a separate path.

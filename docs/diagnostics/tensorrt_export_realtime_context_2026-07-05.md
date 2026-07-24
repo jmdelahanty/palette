@@ -64,7 +64,7 @@ These inherit the repo's silent-wrong-data and provenance discipline; none are d
    precision flags).
 2. **Numeric parity.** FP16/INT8 engines shift outputs relative to the `.pt`. Realtime
    detections that feed closed-loop behavior AND later analysis must be comparable to
-   the offline path — `docs/diagnostics/realtime_offline_detection_comparison_design_2026-06-17.md`
+   the offline path — `docs/archive/realtime_offline_detection_comparison_design_2026-06-17.md`
    is the relevant design. A parity census (same recording, `.pt` vs `.engine`,
    detections within stated tolerance) should gate any engine promoted for closed-loop
    use.
@@ -74,6 +74,6 @@ These inherit the repo's silent-wrong-data and provenance discipline; none are d
 
 ## Pointers
 
-- Realtime/offline comparison design: `docs/diagnostics/realtime_offline_detection_comparison_design_2026-06-17.md`
+- Realtime/offline comparison design: `docs/archive/realtime_offline_detection_comparison_design_2026-06-17.md`
 - Provenance enforcement (epoch gate, artifact-hash follow-up): `docs/archive/provenance_finalization_enforcement_design.md`, `docs/archive/provenance_enforcement_roadmap.md`
 - Regex fix + hygiene assignment: `agents_todo/brief_review_remediation_wave_2026-07-05.md` (Slice D)

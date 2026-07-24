@@ -66,4 +66,4 @@ default behavior (exclude `fish_present_no_keypoints`).
 
 ## Related Incident
 - Refined-keypoint coordinate-space mismatch investigation and recovery:
-  `docs/keypoint_refined_coordinate_space_incident_2026-03-04.md`
+  `docs/archive/keypoint_refined_coordinate_space_incident_2026-03-04.md`

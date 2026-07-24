@@ -216,8 +216,8 @@ surface needs a careful skeleton-aware policy before we denormalize them.
 - `docs/keypoint_pose_rollout_status.md`
 - `docs/keypoint_training_data_card_contract.md`
 - `docs/pose_heuristic_profile_contract.md`
-- `docs/pose_schema_heuristics_split_proposal.md`
-- `docs/traditional_v2_keypoint_migration_design.md`
+- `docs/archive/pose_schema_heuristics_split_proposal.md`
+- `docs/archive/traditional_v2_keypoint_migration_design.md`
 - `docs/keypoint_derived_metric_schema_contract.md`
 - `docs/keypoint_data_profile_schema_contract.md`
 - `docs/training_quality_gate_contract.md`

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping
 import json
+import math
 import subprocess
 
 import cv2
-import imageio.v3 as iio
 import zarr
 
 from fisheye.shared.acquisition_publication_status import (
@@ -46,6 +46,8 @@ SOURCE_VIDEO_COLORIMETRY_FIELDS = (
     "color_primaries",
 )
 SOURCE_VIDEO_COLORIMETRY_ATTRS = tuple(f"video_{field}" for field in SOURCE_VIDEO_COLORIMETRY_FIELDS)
+VIDEO_METADATA_AUTHORITY_SCHEMA_ID = "palette.video_metadata_authority.v1"
+VIDEO_METADATA_AUTHORITY_SCHEMA_VERSION = 1
 
 
 def _stream_colorimetry_attrs(stream: Dict[str, Any]) -> Dict[str, str]:
@@ -110,27 +112,40 @@ def probe_video_colorimetry_attrs(video_path: Path, *, ffprobe_bin: str = "ffpro
         return {}
 
 
-def _probe_video(video_path: Path) -> Dict[str, Any]:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video: {video_path}")
-
-    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = float(cap.get(cv2.CAP_PROP_FPS))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-    cap.release()
-
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
     try:
-        iio_meta = iio.immeta(str(video_path))
-    except Exception:
-        iio_meta = {}
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
-    format_tags: Dict[str, Any] = {}
-    stream_codec: Optional[str] = None
-    stream_pix_fmt: Optional[str] = None
-    stream_colorimetry: Dict[str, str] = {}
+
+def _positive_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _parse_frame_rate(value: Any) -> float | None:
+    if isinstance(value, str) and "/" in value:
+        numerator, denominator = value.split("/", 1)
+        num = _positive_float(numerator)
+        den = _positive_float(denominator)
+        if num is None or den is None:
+            return None
+        return num / den
+    return _positive_float(value)
+
+
+def _probe_ffprobe(video_path: Path) -> Dict[str, Any]:
+    """Read container/stream metadata without decoding the video surface."""
+
     try:
         result = subprocess.run(
             [
@@ -140,7 +155,12 @@ def _probe_video(video_path: Path) -> Dict[str, Any]:
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "format_tags=title,comment,encoder:stream=codec_name,codec_tag_string,pix_fmt,color_range,color_space,color_transfer,color_primaries",
+                (
+                    "format=duration:format_tags=title,comment,encoder:"
+                    "stream=codec_name,codec_tag_string,pix_fmt,width,height,"
+                    "avg_frame_rate,r_frame_rate,nb_frames,duration,"
+                    "color_range,color_space,color_transfer,color_primaries"
+                ),
                 "-of",
                 "json",
                 str(video_path),
@@ -149,58 +169,175 @@ def _probe_video(video_path: Path) -> Dict[str, Any]:
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0 and result.stdout:
-            payload = json.loads(result.stdout)
-            tags = payload.get("format", {}).get("tags", {})
-            if isinstance(tags, dict):
-                format_tags = tags
-            streams = payload.get("streams", [])
-            if isinstance(streams, list) and streams:
-                stream = streams[0]
-                if isinstance(stream, dict):
-                    stream_codec = stream.get("codec_name") or stream.get("codec_tag_string")
-                    stream_pix_fmt = stream.get("pix_fmt")
-                    stream_colorimetry = _stream_colorimetry_attrs(stream)
-    except Exception:
-        format_tags = {}
-        stream_colorimetry = {}
+    except (FileNotFoundError, PermissionError, OSError):
+        return {}
+    if result.returncode != 0 or not result.stdout:
+        return {}
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    streams = payload.get("streams", [])
+    if not isinstance(streams, list) or not streams or not isinstance(streams[0], dict):
+        return {}
+    stream = streams[0]
+    format_payload = payload.get("format", {})
+    if not isinstance(format_payload, dict):
+        format_payload = {}
+    tags = format_payload.get("tags", {})
+    if not isinstance(tags, dict):
+        tags = {}
+    fps = _parse_frame_rate(stream.get("avg_frame_rate"))
+    if fps is None:
+        fps = _parse_frame_rate(stream.get("r_frame_rate"))
+    duration = _positive_float(stream.get("duration"))
+    if duration is None:
+        duration = _positive_float(format_payload.get("duration"))
+    metadata: Dict[str, Any] = {
+        "width": _positive_int(stream.get("width")),
+        "height": _positive_int(stream.get("height")),
+        "total_frames": _positive_int(stream.get("nb_frames")),
+        "fps": fps,
+        "duration_seconds": duration,
+        "codec": stream.get("codec_name") or stream.get("codec_tag_string"),
+        "pix_fmt": stream.get("pix_fmt"),
+        "format_tags": tags or None,
+    }
+    metadata.update(_stream_colorimetry_attrs(stream))
+    return {key: value for key, value in metadata.items() if value is not None}
 
-    encoder_fields = parse_encoder_comment(format_tags.get("comment") if format_tags else None)
 
-    codec = None
-    pix_fmt = None
-    if iio_meta:
-        codec = iio_meta.get("codec")
-        pix_fmt = iio_meta.get("pix_fmt")
-    if not codec and stream_codec:
-        codec = stream_codec
-    if not codec:
-        if fourcc > 0:
-            codec = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
-        else:
-            codec = "unknown"
-    if not pix_fmt and stream_pix_fmt:
-        pix_fmt = stream_pix_fmt
-    if not pix_fmt:
-        pix_fmt = "unknown"
+def _probe_opencv(video_path: Path) -> Dict[str, Any]:
+    """Read the weak fallback/cross-check metadata exposed by OpenCV."""
 
-    duration_seconds = n_frames / fps if fps and fps > 0 else 0.0
-
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        cap.release()
+        raise ValueError(f"Could not open video: {video_path}")
+    try:
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+    finally:
+        cap.release()
     return {
-        "source_video": str(video_path.name),
-        "source_path": str(video_path.absolute()),
         "width": width,
         "height": height,
         "total_frames": n_frames,
         "fps": fps,
-        "duration_seconds": duration_seconds,
-        "codec": codec,
-        "pix_fmt": pix_fmt,
-        "imageio_metadata": iio_meta if iio_meta else None,
-        "format_tags": format_tags if format_tags else None,
-        "encoder_fields": encoder_fields if encoder_fields else None,
-        **stream_colorimetry,
+        "fourcc": (
+            "".join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4))
+            if fourcc > 0
+            else None
+        ),
     }
+
+
+def _same_numeric(left: int | float, right: int | float) -> bool:
+    if type(left) is int and type(right) is int:
+        return left == right
+    return math.isclose(float(left), float(right), rel_tol=1e-5, abs_tol=1e-6)
+
+
+def _resolve_critical_field(
+    name: str,
+    *,
+    producer: Mapping[str, Any],
+    ffprobe: Mapping[str, Any],
+    opencv: Mapping[str, Any],
+    parse: Any,
+) -> tuple[int | float, str, list[str]]:
+    candidates: list[tuple[str, int | float]] = []
+    for source_name, source in (
+        ("producer", producer),
+        ("ffprobe", ffprobe),
+        ("opencv", opencv),
+    ):
+        value = parse(source.get(name))
+        if value is not None:
+            candidates.append((source_name, value))
+    if not candidates:
+        raise ValueError(f"Could not resolve positive video metadata field {name!r}.")
+    authoritative_source, authoritative_value = candidates[0]
+    disagreements = [
+        source_name
+        for source_name, value in candidates[1:]
+        if not _same_numeric(authoritative_value, value)
+    ]
+    if authoritative_source == "producer" and "ffprobe" in disagreements:
+        raise ValueError(
+            f"Producer and ffprobe disagree on {name}: "
+            f"producer={authoritative_value!r}, ffprobe={parse(ffprobe.get(name))!r}."
+        )
+    return authoritative_value, authoritative_source, disagreements
+
+
+def _probe_video(
+    video_path: Path,
+    *,
+    producer_metadata: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Resolve producer, container, then OpenCV metadata with explicit evidence."""
+
+    producer = dict(producer_metadata or {})
+    ffprobe = _probe_ffprobe(video_path)
+    try:
+        opencv = _probe_opencv(video_path)
+    except (OSError, RuntimeError, ValueError):
+        opencv = {}
+    resolved: Dict[str, Any] = {
+        "source_video": str(video_path.name),
+        "source_path": str(video_path.absolute()),
+    }
+    field_sources: dict[str, str] = {}
+    crosscheck_disagreements: dict[str, list[str]] = {}
+    for name, parse in (
+        ("width", _positive_int),
+        ("height", _positive_int),
+        ("total_frames", _positive_int),
+        ("fps", _positive_float),
+    ):
+        value, source_name, disagreements = _resolve_critical_field(
+            name,
+            producer=producer,
+            ffprobe=ffprobe,
+            opencv=opencv,
+            parse=parse,
+        )
+        resolved[name] = value
+        field_sources[name] = source_name
+        if disagreements:
+            crosscheck_disagreements[name] = disagreements
+    resolved["duration_seconds"] = float(resolved["total_frames"]) / float(resolved["fps"])
+    resolved["codec"] = str(
+        producer.get("codec") or ffprobe.get("codec") or opencv.get("fourcc") or "unknown"
+    )
+    resolved["pix_fmt"] = str(ffprobe.get("pix_fmt") or "unknown")
+    format_tags = ffprobe.get("format_tags")
+    if isinstance(format_tags, Mapping) and format_tags:
+        resolved["format_tags"] = dict(format_tags)
+        encoder_fields = parse_encoder_comment(format_tags.get("comment"))
+        if encoder_fields:
+            resolved["encoder_fields"] = encoder_fields
+    for attr in SOURCE_VIDEO_COLORIMETRY_ATTRS:
+        if ffprobe.get(attr) is not None:
+            resolved[attr] = ffprobe[attr]
+    if ffprobe.get("source_video_colorimetry_source") is not None:
+        resolved["source_video_colorimetry_source"] = ffprobe[
+            "source_video_colorimetry_source"
+        ]
+    resolved["metadata_authority"] = {
+        "schema_id": VIDEO_METADATA_AUTHORITY_SCHEMA_ID,
+        "schema_version": VIDEO_METADATA_AUTHORITY_SCHEMA_VERSION,
+        "resolution_precedence": ["producer", "ffprobe", "opencv_fallback"],
+        "downstream_crosscheck": "decoded_observation",
+        "producer_source": producer.get("_source"),
+        "field_sources": field_sources,
+        "opencv_crosscheck_disagreements": crosscheck_disagreements,
+    }
+    return resolved
 
 
 def _set_attr(attrs: Any, key: str, value: Any, *, overwrite: bool) -> bool:
@@ -344,10 +481,6 @@ def _write_metadata(
     for key, value in root_payload.items():
         if _set_attr(root.attrs, key, value, overwrite=overwrite):
             root_updates[key] = value
-
-    if meta.get("imageio_metadata") is not None:
-        _set_attr(root.attrs, "imageio_metadata", meta["imageio_metadata"], overwrite=overwrite)
-        root_updates.setdefault("imageio_metadata", meta["imageio_metadata"])
 
     return {"raw_video": raw_updates, "root": root_updates}
 
@@ -499,9 +632,20 @@ def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, 
     }
 
 
-def probe_video_metadata(video_path: Path) -> Dict[str, Any]:
-    """Public wrapper for probing source-video metadata."""
-    return _probe_video(video_path)
+def probe_video_metadata(
+    video_path: Path,
+    *,
+    producer_metadata: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Resolve source metadata using producer, ffprobe, then OpenCV evidence."""
+
+    return _probe_video(video_path, producer_metadata=producer_metadata)
+
+
+def probe_ffprobe_video_metadata(video_path: Path) -> Dict[str, Any]:
+    """Return finite container/stream metadata from the shared ffprobe path."""
+
+    return _probe_ffprobe(video_path)
 
 
 def write_video_metadata(

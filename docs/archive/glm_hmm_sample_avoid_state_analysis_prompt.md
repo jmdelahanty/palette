@@ -30,7 +30,7 @@ be settled before a GLM-HMM is worth fitting.
    this doc already flags), and it is confounded with colour and position:
    aggressive = red `#ff0000` at fixed positions in 32/32 recordings, inert =
    blue at different fixed positions in 32/32
-   (`docs/diagnostics/goodcopbadcop_cohort_results_2026-07-14.md:135-142`). A
+   (`docs/archive/goodcopbadcop_cohort_results_2026-07-14.md:135-142`). A
    split derived from the behavior inherits the design confound. Counter-
    balancing colour/position, or deriving the label from something independent
    of the emissions, is a hard prerequisite.
@@ -136,7 +136,7 @@ and the persistence claim fails — that is a real, reportable outcome.
 This matters here specifically because the project's own history warns
 against elaborate latent-state machinery: on the chase data, k-means missed
 the escape effect and a plain speed threshold found it (see
-`docs/diagnostics/goodcopbadcop_escape_pursuit_2026-07-14.md`). But k-means
+`docs/archive/goodcopbadcop_escape_pursuit_2026-07-14.md`). But k-means
 is a *weak* comparator for two independent reasons — it is memoryless (no
 transitions) and unconditioned (no inputs). The threshold beat it via
 input-conditioning, which is the **GLM** contribution, not the history
@@ -403,14 +403,14 @@ Flag every assumption rather than deciding it silently.
 
 - Ashwood et al. 2022, *Nature Neuroscience* — GLM-HMM behavioral states;
   the canonical method and the endpoint-figure template.
-- `docs/diagnostics/goodcopbadcop_escape_pursuit_2026-07-14.md` — the
+- `docs/archive/goodcopbadcop_escape_pursuit_2026-07-14.md` — the
   escape-rate result a threshold found and k-means missed; the reason the
   ladder makes the GLM-HMM earn its complexity.
-- `docs/diagnostics/goodcopbadcop_cohort_results_2026-07-14.md` — cohort
+- `docs/archive/goodcopbadcop_cohort_results_2026-07-14.md` — cohort
   n and the learner/non-learner framing.
 - `docs/keypoint_heading_validity_todo.md` — heading reliability, the
   load-bearing fragile input.
-- `docs/goodcopbadcop_avoidance_readout_survey.md` — companion doc: which
+- `docs/archive/goodcopbadcop_avoidance_readout_survey.md` — companion doc: which
   avoidance *measurement axes* to use before modeling; argues the freeze-curve
   and tail-kinematics readouts are the higher-value immediate move, and the
   GLM-HMM is downstream of a non-circular split.

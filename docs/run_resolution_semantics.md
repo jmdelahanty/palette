@@ -76,7 +76,7 @@ downstream artifact was built against.
 ## Migration note (not this slice)
 
 The existing ~40 `resolve_latest_complete_run_name` call sites (inventoried in
-`docs/diagnostics/authoritative_run_resolution_callsite_inventory_2026-07-02.md`) already
+`docs/archive/authoritative_run_resolution_callsite_inventory_2026-07-02.md`) already
 split along the consumption-vs-inventory line. Reclassifying them onto explicit
 `RunResolution` modes is incremental and can follow the accessor — the point of naming the
 modes now is that the accessor is *built* against them from the start, rather than baking

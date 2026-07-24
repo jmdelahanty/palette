@@ -18,9 +18,9 @@ done — but to verify it against current code and execute Phase 1 correctly.
 
 1. `docs/diagnostics/eye_mask_severance_plan_2026-05-28.md` — the plan you are executing.
    Focus: §1 blocker verdict, §2 Phase 1, §3 the classification correction, §4 risks.
-2. `docs/diagnostics/contract_drift_audit_2026-05-28.md` — why eye-mask contracts are
+2. `docs/archive/contract_drift_audit_2026-05-28.md` — why eye-mask contracts are
    "delete-don't-fix."
-3. `docs/diagnostics/repo_eval_2026-05-28.md` — repo context (utils/ sprawl, the
+3. `docs/archive/repo_eval_2026-05-28.md` — repo context (utils/ sprawl, the
    silent-acceptance theme). Skim.
 
 These docs were written by READ-ONLY analysis agents on 2026-05-28. Treat every file:line

@@ -82,7 +82,7 @@
 ## Related docs
 - `src/fisheye/docs/provenance_workflow.md`
 - `docs/keypoint_review_policy.md`
-- `docs/keypoint_review_status_notes.md`
+- `docs/archive/keypoint_review_status_notes.md`
 - `docs/provenance_contract_draft.md`
 - `docs/pipeline_metadata_boundaries.md`
 - `docs/provenance_multi_agent_handoff.md`

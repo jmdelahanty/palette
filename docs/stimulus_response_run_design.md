@@ -991,7 +991,7 @@ The base framework, bout integration, and grating metrics are implemented in:
 - `src/fisheye/analysis/stimulus_response.py`
 - `src/fisheye/shared/zarr/analysis_stage_arrays.py`
 
-See `docs/stimulus_response_implementation_plan.md` for design decisions,
+See `docs/archive/stimulus_response_implementation_plan.md` for design decisions,
 sequencing, and deferred work. See
 `docs/stimulus_response_compact_v2_design.md` for the compact-layout migration
 plan. See `src/fisheye/docs/zarr_structure.md` for the authoritative zarr

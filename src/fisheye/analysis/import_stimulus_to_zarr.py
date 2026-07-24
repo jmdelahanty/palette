@@ -115,6 +115,16 @@ from fisheye.shared.citrus_enums import (
     STIMULUS_MODE_NAME_TO_ID,
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
+from fisheye.shared.experiment_setup import (
+    MissingExperimentSetupError,
+    build_experiment_setup_record,
+    publish_experiment_setup,
+    resolve_experiment_setup,
+)
+from fisheye.shared.subject_metadata import (
+    normalize_subject_metadata,
+    publish_subject_metadata,
+)
 from fisheye.shared.proof_verification import (
     proof_verification_operation,
     proof_verification_scope,
@@ -1886,6 +1896,24 @@ def _import_stimulus_from_open_h5(
         root,
         preflight=coordinate_preflight,
     )
+    subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
+    if subject_meta:
+        subject_meta = normalize_subject_metadata(subject_meta)
+        subject_authority = publish_subject_metadata(
+            root,
+            subject_meta,
+            source_h5_path=resolved_h5,
+        )
+        publish_experiment_setup(
+            root,
+            build_experiment_setup_record(
+                subject_meta,
+                source_h5_path=resolved_h5,
+                subject_metadata_ref=subject_authority.group_path,
+                subject_metadata_sha256=subject_authority.record_sha256,
+            ),
+            source_h5_path=resolved_h5,
+        )
     analysis = root.require_group("analysis")
     runs_parent = require_runs_parent(analysis, "stimulus_runs")
 
@@ -1938,19 +1966,40 @@ def _import_stimulus_from_open_h5(
             raise RuntimeError(
                 "Stimulus run did not persist fail-closed selector eligibility at "
                 "creation."
-            )
+        )
         analysis_meta = run_group.require_group("source_metadata")
-        subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
         if subject_meta:
-            analysis_meta.attrs["subject_metadata"] = json.dumps(subject_meta, sort_keys=True)
-            experiment_setup = _derive_experiment_setup(subject_meta)
-            if experiment_setup:
-                analysis_meta.attrs["experiment_setup"] = experiment_setup
+            try:
+                canonical_setup = resolve_experiment_setup(root, allow_legacy=False)
+            except MissingExperimentSetupError:
+                # Direct historical CLI use can predate the recording-import
+                # authority publication. Retain the old run-local snapshot only
+                # for that compatibility path.
+                analysis_meta.attrs["subject_metadata"] = json.dumps(subject_meta, sort_keys=True)
+                experiment_setup = _derive_experiment_setup(subject_meta)
+                if experiment_setup:
+                    analysis_meta.attrs["experiment_setup"] = experiment_setup
+                else:
+                    _log(
+                        console,
+                        "[yellow]No valid subject_count in subject_metadata; "
+                        "run-local experiment_setup not set.[/yellow]",
+                    )
             else:
-                _log(
-                    console,
-                    "[yellow]No valid subject_count in subject_metadata; "
-                    "run-local experiment_setup not set.[/yellow]",
+                analysis_meta.attrs["subject_metadata_ref"] = (
+                    canonical_setup.subject_metadata_ref or "analysis/subject_metadata"
+                )
+                subject_group = root.get(
+                    canonical_setup.subject_metadata_ref or "analysis/subject_metadata"
+                )
+                if subject_group is not None:
+                    subject_digest = subject_group.attrs.get("subject_metadata_sha256")
+                    if subject_digest:
+                        analysis_meta.attrs["subject_metadata_sha256"] = str(subject_digest)
+                analysis_meta.attrs["experiment_setup_ref"] = canonical_setup.group_path
+                analysis_meta.attrs["experiment_setup_sha256"] = canonical_setup.record_sha256
+                analysis_meta.attrs["expected_subject_count"] = (
+                    canonical_setup.expected_subject_count
                 )
         camera_meta = _read_h5_camera_metadata(h5)
         if camera_meta:

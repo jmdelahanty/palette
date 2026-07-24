@@ -184,7 +184,7 @@ and rotates so the chaser's travel heading points along `+y`.
 
 Evidence:
 
-- `docs/goodcopbadcop_escape_freeze_canary_checklist.md:208` describes the
+- `docs/archive/goodcopbadcop_escape_freeze_canary_checklist.md:208` describes the
   chaser-centric transform.
 - `src/fisheye/analysis/chaser_escape_freeze.py:418` computes chaser motion in
   math-y-up coordinates by negating image `dy`.
@@ -229,7 +229,7 @@ Interpretation:
 
 Evidence:
 
-- `docs/goodcopbadcop_escape_freeze_canary_checklist.md:212`
+- `docs/archive/goodcopbadcop_escape_freeze_canary_checklist.md:212`
 - `src/fisheye/analysis/chaser_escape_freeze.py:910`
 - `src/fisheye/analysis/chaser_escape_freeze.py:911`
 - `src/fisheye/analysis/chaser_escape_freeze.py:1208`

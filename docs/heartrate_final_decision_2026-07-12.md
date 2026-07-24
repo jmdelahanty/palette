@@ -170,10 +170,10 @@ playgrounds/heartrate_stabilization/outputs/
 
 Detailed history:
 
-- [`heartrate_analysis_status_2026-07-11.md`](heartrate_analysis_status_2026-07-11.md)
-- [`heartrate_top_view_mask_decision_2026-07-11.md`](heartrate_top_view_mask_decision_2026-07-11.md)
-- [`heartrate_frozen_mask_validation_status_2026-07-10.md`](heartrate_frozen_mask_validation_status_2026-07-10.md)
-- [`heartrate_local_rostral_roi_status_2026-07-09.md`](heartrate_local_rostral_roi_status_2026-07-09.md)
+- [`heartrate_analysis_status_2026-07-11.md`](archive/heartrate_analysis_status_2026-07-11.md)
+- [`heartrate_top_view_mask_decision_2026-07-11.md`](archive/heartrate_top_view_mask_decision_2026-07-11.md)
+- [`heartrate_frozen_mask_validation_status_2026-07-10.md`](archive/heartrate_frozen_mask_validation_status_2026-07-10.md)
+- [`heartrate_local_rostral_roi_status_2026-07-09.md`](archive/heartrate_local_rostral_roi_status_2026-07-09.md)
 
 Cross-trial intern handoff:
 

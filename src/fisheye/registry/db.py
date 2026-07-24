@@ -15,6 +15,10 @@ import numpy as np
 import yaml
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.subject_metadata import (
+    MissingSubjectMetadataError,
+    resolve_subject_metadata,
+)
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .extractors.acquisition_video_streams import _extract_acquisition_video_stream_rows
@@ -668,9 +672,15 @@ def _extract_protocol(root: zarr.Group) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _extract_snapshot(root: zarr.Group) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    try:
+        canonical = resolve_subject_metadata(root, allow_legacy=True)
+    except MissingSubjectMetadataError:
+        canonical = None
+    if canonical is not None:
+        return dict(canonical.metadata), canonical.group_path
     analysis = root.get("analysis_metadata")
     if analysis is not None:
-        for key in ("zebrobot_snapshot", "subject_metadata"):
+        for key in ("zebrobot_snapshot",):
             raw = analysis.attrs.get(key)
             payload = _json_loads(raw)
             if payload:
@@ -3160,6 +3170,154 @@ class Registry(RegistryMigrationMixin):
             """,
             payload,
         )
+        self._commit_if_standalone()
+
+    def upsert_subject_snapshot_entities(
+        self,
+        dataset_id: str,
+        *,
+        recording_id: Optional[str],
+        snapshot: Optional[Mapping[str, Any]],
+        snapshot_source: Optional[str],
+    ) -> None:
+        """Project explicit acquisition subject identity into normalized tables.
+
+        A count without explicit subject IDs remains a provenance/count snapshot;
+        it does not cause synthetic biological identities to be invented.
+        """
+
+        if not recording_id or not snapshot:
+            return
+        raw_ids = snapshot.get("subject_ids") or snapshot.get("fish_ids")
+        if isinstance(raw_ids, (list, tuple)):
+            subject_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
+        else:
+            single = _as_text(snapshot.get("fish_id") or snapshot.get("subject_id"))
+            subject_ids = [single] if single else []
+        subject_ids = list(dict.fromkeys(subject_ids))
+        if not subject_ids:
+            return
+        subject_count = _as_int(snapshot.get("subject_count"))
+        if subject_count is not None and len(subject_ids) > subject_count:
+            raise ValueError(
+                "Subject snapshot contains more explicit IDs than subject_count: "
+                f"ids={len(subject_ids)}, subject_count={subject_count}"
+            )
+
+        provenance = _extract_provenance(dict(snapshot))
+        dish_id = _as_text(provenance.get("dish_id"))
+        cross_id = _as_text(provenance.get("cross_id"))
+        species = _as_text(provenance.get("species"))
+        sex = _as_text(provenance.get("sex"))
+        genotype = _as_text(provenance.get("genotype"))
+        line_strain = _as_text(provenance.get("line_strain"))
+        dpf = _as_int(
+            provenance.get("dpf_at_acquisition")
+            or snapshot.get("dpf_at_acquisition")
+            or snapshot.get("dpf")
+        )
+        parents = provenance.get("parents")
+        now = _utc_now()
+        source_payload = _json_dumps(
+            {
+                "source": snapshot_source or "subject_metadata_snapshot",
+                "dataset_id": dataset_id,
+                "subject_count": subject_count,
+            }
+        )
+
+        if cross_id:
+            self.conn.execute(
+                """
+                INSERT INTO crosses (
+                    cross_id, line_strain, genotype, parents_json, metadata_json,
+                    created_utc, updated_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cross_id) DO UPDATE SET
+                    line_strain=COALESCE(excluded.line_strain, crosses.line_strain),
+                    genotype=COALESCE(excluded.genotype, crosses.genotype),
+                    parents_json=COALESCE(excluded.parents_json, crosses.parents_json),
+                    metadata_json=excluded.metadata_json,
+                    updated_utc=excluded.updated_utc;
+                """,
+                (
+                    cross_id,
+                    line_strain,
+                    genotype,
+                    _json_dumps(parents),
+                    source_payload,
+                    now,
+                    now,
+                ),
+            )
+        if dish_id:
+            self.conn.execute(
+                """
+                INSERT INTO dishes (
+                    dish_id, cross_id, species, metadata_json, created_utc, updated_utc
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dish_id) DO UPDATE SET
+                    cross_id=COALESCE(excluded.cross_id, dishes.cross_id),
+                    species=COALESCE(excluded.species, dishes.species),
+                    metadata_json=excluded.metadata_json,
+                    updated_utc=excluded.updated_utc;
+                """,
+                (dish_id, cross_id, species, source_payload, now, now),
+            )
+
+        for subject_id in subject_ids:
+            self.conn.execute(
+                """
+                INSERT INTO subjects (
+                    subject_id, dish_id, species, sex, metadata_json, created_utc, updated_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(subject_id) DO UPDATE SET
+                    dish_id=COALESCE(excluded.dish_id, subjects.dish_id),
+                    species=COALESCE(excluded.species, subjects.species),
+                    sex=COALESCE(excluded.sex, subjects.sex),
+                    metadata_json=excluded.metadata_json,
+                    updated_utc=excluded.updated_utc;
+                """,
+                (subject_id, dish_id, species, sex, source_payload, now, now),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO recording_subjects (
+                    recording_id, subject_id, dataset_id, dish_id, cross_id,
+                    dpf_at_acquisition, species, sex, genotype, line_strain,
+                    metadata_json, created_utc, updated_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(recording_id, subject_id) DO UPDATE SET
+                    dataset_id=excluded.dataset_id,
+                    dish_id=COALESCE(excluded.dish_id, recording_subjects.dish_id),
+                    cross_id=COALESCE(excluded.cross_id, recording_subjects.cross_id),
+                    dpf_at_acquisition=COALESCE(
+                        excluded.dpf_at_acquisition,
+                        recording_subjects.dpf_at_acquisition
+                    ),
+                    species=COALESCE(excluded.species, recording_subjects.species),
+                    sex=COALESCE(excluded.sex, recording_subjects.sex),
+                    genotype=COALESCE(excluded.genotype, recording_subjects.genotype),
+                    line_strain=COALESCE(excluded.line_strain, recording_subjects.line_strain),
+                    metadata_json=excluded.metadata_json,
+                    updated_utc=excluded.updated_utc;
+                """,
+                (
+                    recording_id,
+                    subject_id,
+                    dataset_id,
+                    dish_id,
+                    cross_id,
+                    dpf,
+                    species,
+                    sex,
+                    genotype,
+                    line_strain,
+                    source_payload,
+                    now,
+                    now,
+                ),
+            )
         self._commit_if_standalone()
 
     def replace_detection_sources(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
@@ -6932,7 +7090,7 @@ class Registry(RegistryMigrationMixin):
         zarr_use = _decode_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
 
         protocol_name, protocol_hash = _extract_protocol(root)
-        snapshot, _ = _extract_snapshot(root)
+        snapshot, snapshot_source = _extract_snapshot(root)
         provenance = _extract_provenance(snapshot)
         context = _extract_session_context(root)
         acquisition = _extract_acquisition(root)
@@ -6954,6 +7112,12 @@ class Registry(RegistryMigrationMixin):
             protocol_hash=protocol_hash,
             acquisition=acquisition,
             zarr_purpose=zarr_purpose,
+        )
+        self.upsert_subject_snapshot_entities(
+            dataset_id,
+            recording_id=recording_id,
+            snapshot=snapshot,
+            snapshot_source=snapshot_source,
         )
         detection_records = _build_detection_source_records(root)
         self.replace_detection_sources(dataset_id, detection_records)

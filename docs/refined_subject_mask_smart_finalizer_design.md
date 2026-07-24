@@ -326,7 +326,7 @@ thread canary was about 2.5 times slower on 4,096 rows; the process canary was
 stopped after 536 seconds with low CPU utilization and high memory use. The
 full staged delayed-task Dask process run was also slower than
 `process_shards` (451.72 versus 279.18 seconds). Detailed evidence is preserved
-in `docs/diagnostics/subject_mask_finalizer_publication_status_2026-07-09.md`.
+in `docs/archive/subject_mask_finalizer_publication_status_2026-07-09.md`.
 
 The supported decision is therefore:
 

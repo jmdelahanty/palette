@@ -15,7 +15,7 @@ This document defines the intended workflow shape before implementation.
 
 It complements:
 
-- `docs/crop_live_view_vs_materialized_stream_design.md`
+- `docs/archive/crop_live_view_vs_materialized_stream_design.md`
 - `docs/crop_storage_mode_migration_todo.md`
 - `docs/cluster_workflow_orchestration.md`
 - `docs/cluster_run_group_artifact_workflow.md`
@@ -1130,6 +1130,6 @@ all readers that touch crop pixels. The inventory should classify each reader:
 - review/tooling path where geometry-only support can be deferred;
 - Crimson consumer needing a contract update.
 
-Current Palette inventory: `docs/crop_reader_geometry_only_inventory_2026-05-16.md`.
+Current Palette inventory: `docs/archive/crop_reader_geometry_only_inventory_2026-05-16.md`.
 Future updates should keep a checklist with owner, migration requirement, and
 blocking status for the `latest` cutover.

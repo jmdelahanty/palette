@@ -10,6 +10,10 @@ import zarr
 
 from fisheye.analysis import import_stimulus_to_zarr as mod
 from fisheye.analysis import chaser_metrics_loader
+from fisheye.shared.experiment_setup import (
+    resolve_experiment_setup,
+)
+from fisheye.shared.subject_metadata import resolve_subject_metadata
 from fisheye.analysis.stimulus_response_coordinate_authority import (
     STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_ID,
     STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_VERSION,
@@ -668,6 +672,45 @@ def test_import_sets_source_stimulus_video_path_when_rendered_mp4_exists(tmp_pat
     ) is None
     camera = run_group["calibration/2010093"]
     assert "coordinate_frames" not in camera
+
+
+def test_stimulus_run_binds_versioned_subject_and_setup_authorities(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session_subject.h5"
+    zarr_path = tmp_path / "sample_subject_analysis.zarr"
+    _write_minimal_stimulus_h5(h5_path)
+    subject_metadata = {
+        "subject_count": "1",
+        "subject_type": "individual",
+        "fish_id": "40d99fea-846b-4890-bad2-b4e152dfdde0",
+        "fish_count": "35",
+    }
+    with h5py.File(h5_path, "a") as h5:
+        subject = h5.create_group("subject_metadata")
+        subject.attrs.update(subject_metadata)
+
+    zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_subject_authority",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    subject_authority = resolve_subject_metadata(root, allow_legacy=False)
+    setup_authority = resolve_experiment_setup(root, allow_legacy=False)
+    source = root[f"analysis/stimulus_runs/{run_name}/source_metadata"]
+    assert source.attrs["subject_metadata_ref"] == subject_authority.group_path
+    assert source.attrs["subject_metadata_sha256"] == subject_authority.record_sha256
+    assert source.attrs["experiment_setup_ref"] == setup_authority.group_path
+    assert source.attrs["experiment_setup_sha256"] == setup_authority.record_sha256
+    assert "subject_metadata" not in source.attrs
+    assert "experiment_setup" not in source.attrs
 
 
 def test_import_omits_source_stimulus_video_path_when_rendered_mp4_missing(tmp_path: Path) -> None:

@@ -3,7 +3,7 @@
 **From:** commander session, 2026-07-05
 **Status: READY.**
 **Read first (these are the specification; this brief only scopes the slice):**
-`docs/diagnostics/registry_reconcile_collapse_audit_2026-06-18.md` (the collapse map,
+`docs/archive/registry_reconcile_collapse_audit_2026-06-18.md` (the collapse map,
 boundaries, and "smallest first step" you are executing),
 `docs/diagnostics/subject_mask_profile_design_2026-06-18.md` (the profile-path design),
 `docs/archive/provenance_enforcement_roadmap.md` Slice 4, `docs/registry_schema_reference.md`

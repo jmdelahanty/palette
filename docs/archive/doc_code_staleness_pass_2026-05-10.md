@@ -60,7 +60,7 @@ slice. The focus was stale claims caused by:
 
 ## Docs Updated In This Pass
 
-- `docs/stimulus_response_implementation_plan.md`
+- `docs/archive/stimulus_response_implementation_plan.md`
   - Replaced stale wording that implied derived-analysis registry stages still
     needed to be added from scratch.
   - Clarified remaining work: formal runner integration, writer-side status
