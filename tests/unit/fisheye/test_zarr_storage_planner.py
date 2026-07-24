@@ -16,6 +16,7 @@ from fisheye.shared.zarr.storage_profiles import (
     EDITABLE_LOCAL_V1,
     PUBLISHED_HTTP_V1,
     TRAINING_IMMUTABLE_V1,
+    make_benchmark_storage_profile,
 )
 from fisheye.shared.zarr.storage_report import (
     compare_array_storage,
@@ -24,6 +25,21 @@ from fisheye.shared.zarr.storage_report import (
 
 
 MIB = 1024 * 1024
+
+
+def test_benchmark_profile_sweeps_bytes_not_rows() -> None:
+    profile = make_benchmark_storage_profile(
+        target_chunk_bytes=512 * 1024,
+        target_shard_bytes=8 * MIB,
+        shard_immutable=False,
+    )
+
+    assert profile.target_chunk_bytes == 512 * 1024
+    assert profile.min_chunk_bytes == profile.max_chunk_bytes == 512 * 1024
+    assert profile.target_shard_bytes == profile.max_shard_bytes == 8 * MIB
+    assert profile.per_row_target_shard_bytes == 8 * MIB
+    assert profile.shard_immutable is False
+    assert "benchmark_regular" in profile.profile_id
 
 
 def test_narrow_timelines_derive_different_row_counts_from_bytes() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fisheye.shared.zarr.storage_intent import AccessPattern
 
@@ -159,3 +159,36 @@ def get_storage_profile(profile_id: str) -> StorageProfile:
         raise ValueError(
             f"Unknown storage profile {profile_id!r}; expected one of: {choices}."
         ) from exc
+
+
+def make_benchmark_storage_profile(
+    *,
+    base: StorageProfile = PUBLISHED_HTTP_V1,
+    target_chunk_bytes: int,
+    target_shard_bytes: int,
+    shard_immutable: bool,
+) -> StorageProfile:
+    """Derive one exact byte-sweep candidate without row-count constants."""
+
+    chunk_bytes = int(target_chunk_bytes)
+    shard_bytes = int(target_shard_bytes)
+    if chunk_bytes <= 0 or shard_bytes <= 0:
+        raise ValueError("Benchmark chunk and shard byte targets must be positive.")
+    if shard_bytes < chunk_bytes:
+        raise ValueError("Benchmark shard target cannot be smaller than chunk target.")
+    layout = "sharded" if shard_immutable else "regular"
+    profile_id = (
+        f"{base.profile_id}__benchmark_{layout}"
+        f"__chunk_{chunk_bytes}__shard_{shard_bytes}"
+    )
+    return replace(
+        base,
+        profile_id=profile_id,
+        target_chunk_bytes=chunk_bytes,
+        min_chunk_bytes=chunk_bytes,
+        max_chunk_bytes=chunk_bytes,
+        target_shard_bytes=shard_bytes,
+        per_row_target_shard_bytes=shard_bytes,
+        max_shard_bytes=shard_bytes,
+        shard_immutable=bool(shard_immutable),
+    )

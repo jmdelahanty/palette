@@ -156,7 +156,7 @@ def _materialize(array: Any) -> np.ndarray:
         return np.asarray(array)
 
 
-def _derive_source_camera_geometry(
+def derive_canonical_detection_geometry(
     bbox_norm_coords: np.ndarray,
     *,
     source_width: int,
@@ -390,7 +390,7 @@ class CanonicalDetectionSchema:
                 )
             )
         if valid_bbox_norm and bbox_img is not None and centers is not None:
-            expected_bbox, expected_centers = _derive_source_camera_geometry(
+            expected_bbox, expected_centers = derive_canonical_detection_geometry(
                 bbox_norm,
                 source_width=dimensions.source_width,
                 source_height=dimensions.source_height,
@@ -568,4 +568,5 @@ __all__ = [
     "CanonicalDetectionSchema",
     "CanonicalDetectionSchemaError",
     "DetectionSchemaIssue",
+    "derive_canonical_detection_geometry",
 ]

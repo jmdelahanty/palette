@@ -182,27 +182,29 @@ Phase 3 evidence is recorded in
 Benchmark only disposable stores derived from the noncanonical safe copy. Never
 write benchmark candidates into a canonical recording or training Zarr.
 
-- [ ] Record source-store identity and checksums.
-- [ ] Materialize a controlled `float32` benchmark input from current `float64`
+- [x] Record source-store identity and checksums.
+- [x] Materialize a controlled `float32` benchmark input from current `float64`
       geometry and record the conversion provenance.
-- [ ] Validate source and destination values before timing.
+- [x] Validate the canonical source before timed writes and require exact
+      destination digests before accepting a result.
 - [ ] Sweep `128 KiB`, `512 KiB`, `1 MiB`, and `2 MiB` inner-chunk targets.
 - [ ] Sweep appropriate `8 MiB`, `32 MiB`, `128 MiB`, and `512 MiB` shard targets.
-- [ ] Measure regular chunks and indexed sharding where applicable.
+- [x] Complete an initial same-input regular-versus-indexed-sharding smoke.
 - [ ] Measure sequential write throughput and peak memory.
 - [ ] Measure sharded publication/copy throughput and peak memory.
 - [ ] Measure cold and warm full-array reads.
 - [ ] Measure frame-window reads.
 - [ ] Measure individual-frame indexed reads.
 - [ ] Measure observation-row reads used by downstream joins.
-- [ ] Measure consolidated and direct metadata open separately.
-- [ ] Measure final object count and on-disk bytes.
+- [x] Measure consolidated and direct metadata open separately in the smoke
+      harness.
+- [x] Measure final object count and on-disk bytes in the smoke harness.
 - [ ] Run representative Crimson/Mac/VPN reads or record that validation as an
       explicit cross-repository gate.
 
 Acceptance requirements:
 
-- [ ] No decoded-value or dtype mismatch.
+- [x] No decoded-value or dtype mismatch in the initial 200k-frame A/B smoke.
 - [ ] No unsafe overlapping parallel writes.
 - [ ] No unacceptable per-frame read amplification.
 - [ ] Object count is materially lower than the regular small-chunk layout.
@@ -214,6 +216,9 @@ Exit gate:
 
 - [ ] One storage profile is selected for canonical detections with evidence;
       alternatives and rejected candidates remain recorded.
+
+Initial smoke evidence and its limitations are recorded in
+[`diagnostics/canonical_detection_storage_benchmark_smoke_2026-07-24.md`](diagnostics/canonical_detection_storage_benchmark_smoke_2026-07-24.md).
 
 ## Phase 5 — `detect_yolo` Production Integration
 

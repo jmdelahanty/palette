@@ -17,10 +17,11 @@ For the representative Sleepyfish scale, all nine arrays use approximately
 outer shard. The conservative estimate is nine payload objects and 20 total
 stage objects after adding array and group metadata.
 
-This is a planning result, not a promoted storage profile. Phase 4 must still
-benchmark the chunk/shard byte sweep, resolve `zstd_fast_v1` to an exact codec
-chain and compression level, measure consolidated metadata, and validate reads
-on the real Mac/VPN path.
+This is a planning result, not a promoted storage profile. Phase 4 has now
+resolved `zstd_fast_v1` to an exact codec chain, added the shared array-creation
+boundary, and completed an initial local regular-versus-sharded smoke. The full
+chunk/shard byte sweep, controlled repetitions, request instrumentation, and
+real Mac/VPN validation are still required.
 
 ## Representative Input
 
@@ -133,15 +134,25 @@ Implemented now:
 - conservative inner-chunk, shard, payload, metadata, and total-object counts;
 - fail-closed checks that shards contain whole chunks and preserve complete
   trailing observation axes;
-- JSON-safe planning manifests and deterministic representative tests.
+- JSON-safe planning manifests and deterministic representative tests;
+- exact Zarr v3 `bytes(little) + zstd(level=0, checksum=false)` codec
+  construction for regular chunks;
+- exact Zarr v3 indexed-sharding construction with the same inner data codecs,
+  `bytes + crc32c` index codecs, and the shard index at the end;
+- a policy-owned array-creation boundary that accepts logical contracts and
+  `StoragePlan` values rather than raw writer-specific chunk/shard literals;
+- a safe disposable detection benchmark writer with exact digest validation,
+  consolidated/direct opens, common benchmark envelopes, and physical file
+  inventory.
 
 Not implemented in this phase:
 
-- production Zarr array creation;
-- codec construction or codec promotion;
-- data copy, publication, or metadata consolidation;
-- legacy count/float64 adapters;
-- selector updates;
-- performance claims.
+- production-writer adoption of the shared array factory;
+- promotion of any benchmark codec/storage candidate to a production profile;
+- publication or selector updates;
+- production performance claims.
 
 The production writer remains unchanged until the Phase 4 evidence gate passes.
+
+Initial Phase 4 smoke evidence is recorded in
+[`canonical_detection_storage_benchmark_smoke_2026-07-24.md`](canonical_detection_storage_benchmark_smoke_2026-07-24.md).
