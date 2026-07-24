@@ -85,6 +85,7 @@ from fisheye.shared.observation_coordinate_publication import (
     CROP_GEOMETRY_SELECTION_OPERATION,
     CROP_GEOMETRY_SELECTION_SCHEMA_ID,
     CROP_GEOMETRY_SELECTION_SCHEMA_VERSION,
+    load_collection_proxy_successor_source_rowset,
     load_persisted_source_camera_position_surface,
     require_bound_source_camera_position_surface,
 )
@@ -809,6 +810,16 @@ class KeypointResolution:
     crop_run: str
 
 
+@dataclass(frozen=True)
+class CollectionProxySuccessorTrackingResolution:
+    """Original tracking authority for an exact current-coordinate successor."""
+
+    position_crop_run: str
+    historical_source_rowset_path: str
+    expected_detect_run: str
+    expected_source_rowset_fingerprint: RowsetFingerprint
+
+
 @dataclass
 class DetectionResolution:
     """Resolved detection group metadata."""
@@ -902,6 +913,66 @@ def resolve_keypoint_group(
             return resolve_raw(latest_raw)
 
     raise ValueError("Unable to resolve a keypoint run; no runs detected.")
+
+
+def resolve_collection_proxy_successor_tracking(
+    root: zarr.Group,
+    *,
+    keypoints: KeypointResolution,
+    position_crop_run: str,
+) -> CollectionProxySuccessorTrackingResolution:
+    """Bind successor positions to their exact historical tracking authority.
+
+    Keypoints and tracking remain immutable on the historical merged-proxy
+    rowset. A successor may reuse those arrays only when its sealed mapping
+    proves an exact all-row copy of that same rowset. Tracking IDs are still
+    aligned by the persisted unique ``instance_key`` set downstream.
+    """
+
+    successor_name = _controlled_run_leaf(
+        position_crop_run,
+        label="position_source_run",
+    )
+    successor_path = f"crop_runs/{successor_name}"
+    historical_path = load_collection_proxy_successor_source_rowset(
+        root,
+        successor_path,
+    )
+    expected_historical_path = f"crop_runs/{keypoints.crop_run}"
+    if historical_path != expected_historical_path:
+        raise ValueError(
+            "Selected coordinate successor does not prove exact identity with "
+            "the keypoint source rowset: "
+            f"successor_source={historical_path!r}, "
+            f"keypoint_source={expected_historical_path!r}."
+        )
+    historical_group = root[historical_path]
+    revision = resolve_rowset_edit_revision(historical_group.attrs)
+    fingerprint = build_group_rowset_fingerprint(
+        historical_group,
+        source_rowset_path=historical_path,
+        source_edit_revision=revision,
+    )
+    base_group = root[f"keypoints_runs/{keypoints.base_run_name}"]
+    candidates = {
+        str(value).strip()
+        for value in (
+            keypoints.group.attrs.get("source_detect_run"),
+            base_group.attrs.get("source_detect_run"),
+        )
+        if isinstance(value, str) and str(value).strip()
+    }
+    if len(candidates) != 1:
+        raise ValueError(
+            "Keypoint lineage does not identify one exact source_detect_run for "
+            "successor tracking resolution."
+        )
+    return CollectionProxySuccessorTrackingResolution(
+        position_crop_run=successor_name,
+        historical_source_rowset_path=historical_path,
+        expected_detect_run=next(iter(candidates)),
+        expected_source_rowset_fingerprint=fingerprint,
+    )
 
 
 def load_keypoint_usability_array(
@@ -11726,6 +11797,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Keypoint run to use. Prefix with 'refined/' to target a refined run. Default: latest refined if available.",
     )
     parser.add_argument(
+        "--position-source-run",
+        help=(
+            "Optional current-v2 crop_runs successor that proves exact row identity "
+            "with the selected keypoint run's immutable historical crop source."
+        ),
+    )
+    parser.add_argument(
         "--run-name", help="Optional name for the output track kinematics run."
     )
     parser.add_argument(
@@ -12275,11 +12353,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         console.print("[blue]Building offline track kinematics run from all keypoint frames...[/blue]")
 
         keypoints_offline = resolve_keypoint_group(root, args.keypoint_run, console)
-        crop_group_offline = root[f"crop_runs/{keypoints_offline.crop_run}"]
+        position_crop_run = (
+            _controlled_run_leaf(
+                args.position_source_run,
+                label="position_source_run",
+            )
+            if args.position_source_run
+            else keypoints_offline.crop_run
+        )
+        crop_group_offline = root[f"crop_runs/{position_crop_run}"]
         position_source_offline = load_canonical_offline_position_source(
             root,
             crop_group_offline,
-            crop_run_name=keypoints_offline.crop_run,
+            crop_run_name=position_crop_run,
         )
         positions_offline = position_source_offline.positions_px
         frame_indices_offline = position_source_offline.frame_indices
@@ -12290,18 +12376,49 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 "Canonical offline track publication requires a sealed source-camera "
                 "position surface."
             )
-        detection_path_offline = _canonical_crop_detection_rowset_path(
-            canonical_position_surface.coordinates
-        )
-        detection_offline = resolve_detection_from_path(
-            root,
-            detection_path_offline,
-        )
-        console.print(
-            "[cyan]Using canonical crop-bound offline geometry:[/cyan] "
-            f"crop_runs/{keypoints_offline.crop_run} "
-            f"(detection_rowset={detection_path_offline})"
-        )
+        if args.position_source_run:
+            successor_tracking = resolve_collection_proxy_successor_tracking(
+                root,
+                keypoints=keypoints_offline,
+                position_crop_run=position_crop_run,
+            )
+            detection_path_offline = (
+                "source_detect_run:" + successor_tracking.expected_detect_run
+            )
+            expected_detect_run = successor_tracking.expected_detect_run
+            expected_refined_run = None
+            tracking_source_rowset_path = (
+                successor_tracking.historical_source_rowset_path
+            )
+            tracking_source_fingerprint = (
+                successor_tracking.expected_source_rowset_fingerprint
+            )
+            console.print(
+                "[cyan]Using verified coordinate-successor geometry:[/cyan] "
+                f"crop_runs/{position_crop_run} "
+                f"(historical_tracking_rowset={tracking_source_rowset_path})"
+            )
+        else:
+            detection_path_offline = _canonical_crop_detection_rowset_path(
+                canonical_position_surface.coordinates
+            )
+            detection_offline = resolve_detection_from_path(
+                root,
+                detection_path_offline,
+            )
+            expected_detect_run = (
+                detection_offline.source_detect_run or detection_offline.run_name
+            )
+            expected_refined_run = (
+                detection_offline.run_name if detection_offline.is_refined else None
+            )
+            tracking_source_rowset_path = position_source_offline.path
+            tracking_source_fingerprint = position_source_offline.rowset_fingerprint
+            console.print(
+                "[cyan]Using canonical crop-bound offline geometry:[/cyan] "
+                f"crop_runs/{position_crop_run} "
+                f"(detection_rowset={detection_path_offline})"
+            )
         (
             offline_physical_authority,
             offline_physical_calibration_info,
@@ -12353,9 +12470,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
         )
 
-        expected_detect_run = (
-            detection_offline.source_detect_run or detection_offline.run_name
-        )
         if not expected_detect_run:
             raise ValueError(
                 "Offline: unable to determine source_detect_run for tracking lookup."
@@ -12364,12 +12478,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             root,
             frame_indices_offline.shape[0],
             expected_detect_run=expected_detect_run,
-            expected_refined_run=(
-                detection_offline.run_name if detection_offline.is_refined else None
-            ),
-            expected_source_rowset_path=position_source_offline.path,
+            expected_refined_run=expected_refined_run,
+            expected_source_rowset_path=tracking_source_rowset_path,
             expected_instance_key=position_source_offline.instance_key,
-            expected_source_rowset_fingerprint=position_source_offline.rowset_fingerprint,
+            expected_source_rowset_fingerprint=tracking_source_fingerprint,
             return_metadata=True,
         )
         track_ids_offline = track_ids_offline.astype(np.int64, copy=False)
@@ -12603,7 +12715,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 else "keypoints_runs/"
                             )
                             + keypoints_offline.run_name,
-                            "crop_run": keypoints_offline.crop_run,
+                            "crop_run": position_crop_run,
+                            "keypoint_source_crop_run": keypoints_offline.crop_run,
+                            "tracking_source_rowset_path": (
+                                tracking_source_rowset_path
+                            ),
                             "tracking_path": f"tracking_runs/{tracking_run_name}",
                         }
                         if metrics_metadata:

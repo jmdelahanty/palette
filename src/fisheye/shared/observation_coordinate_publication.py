@@ -3968,6 +3968,43 @@ def load_persisted_collection_proxy_successor_geometry(
     )
 
 
+@proof_verification_operation
+def load_collection_proxy_successor_source_rowset(
+    root_node: Any,
+    rowset_path: str,
+) -> str:
+    """Return the exact historical rowset proven identical by one successor."""
+
+    geometry = load_persisted_collection_proxy_successor_geometry(
+        root_node,
+        rowset_path,
+    )
+    matches = [
+        record
+        for record in geometry.source_lineage_records
+        if record.record.get("schema_id")
+        == COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID
+    ]
+    if len(matches) != 1:
+        _fail(
+            "Collection-proxy successor geometry must carry exactly one verified "
+            "historical-row mapping."
+        )
+    historical = matches[0].record.get("historical_source")
+    rowset_ref = (
+        historical.get("rowset_ref")
+        if isinstance(historical, Mapping)
+        else None
+    )
+    if (
+        not isinstance(rowset_ref, str)
+        or not rowset_ref.startswith("/crop_runs/")
+        or len(rowset_ref.split("/")) != 3
+    ):
+        _fail("Collection-proxy successor historical rowset reference is invalid.")
+    return rowset_ref[1:]
+
+
 def _load_persisted_crop_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -4277,6 +4314,7 @@ __all__ = [
     "derive_detection_source_camera_geometry",
     "detection_observation_geometry_values",
     "load_crop_observation_geometry",
+    "load_collection_proxy_successor_source_rowset",
     "load_crop_roi_geometry",
     "load_detection_observation_geometry",
     "load_persisted_crop_observation_geometry",

@@ -1092,3 +1092,76 @@ def test_refined_source_path_and_digest_are_normalized_in_provenance() -> None:
     assert attrs["source_refs"][
         "source_positions_px_coordinate_descriptor_sha256"
     ] == descriptor.digest()
+
+
+def test_successor_tracking_resolution_requires_exact_keypoint_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Node:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    historical = Node({"edit_revision": 3})
+    base = Node({"source_detect_run": "detect-authority"})
+    refined = Node({"source_detect_run": "detect-authority"})
+    root = {
+        "crop_runs/historical": historical,
+        "keypoints_runs/base": base,
+    }
+    fingerprint = mod.RowsetFingerprint(
+        source_rowset_path="crop_runs/historical",
+        row_count=2,
+        source_edit_revision=3,
+        instance_key_digest="a" * 64,
+        fingerprint="b" * 64,
+        status="complete",
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, path: (
+            "crop_runs/historical"
+            if path == "crop_runs/successor"
+            else "unexpected"
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_group_rowset_fingerprint",
+        lambda group, **_kwargs: fingerprint if group is historical else None,
+    )
+
+    resolved = mod.resolve_collection_proxy_successor_tracking(
+        root,
+        keypoints=mod.KeypointResolution(
+            group=refined,
+            run_name="refined",
+            is_refined=True,
+            base_run_name="base",
+            crop_run="historical",
+        ),
+        position_crop_run="successor",
+    )
+
+    assert resolved.position_crop_run == "successor"
+    assert resolved.historical_source_rowset_path == "crop_runs/historical"
+    assert resolved.expected_detect_run == "detect-authority"
+    assert resolved.expected_source_rowset_fingerprint is fingerprint
+
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _path: "crop_runs/other",
+    )
+    with pytest.raises(ValueError, match="does not prove exact identity"):
+        mod.resolve_collection_proxy_successor_tracking(
+            root,
+            keypoints=mod.KeypointResolution(
+                group=refined,
+                run_name="refined",
+                is_refined=True,
+                base_run_name="base",
+                crop_run="historical",
+            ),
+            position_crop_run="successor",
+        )
