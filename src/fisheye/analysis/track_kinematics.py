@@ -208,7 +208,9 @@ _REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
 _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
     {
         "chaser_metrics",
+        "keypoint_source_crop_run",
         "swim_bout_run",
+        "tracking_source_rowset_path",
     }
 )
 _CANONICAL_ONLINE_RAW_INPUT_KEYS = frozenset(
@@ -760,6 +762,32 @@ def _track_kinematics_source_refs(
         refs["source_crop_path"] = (
             "crop_runs/" + _controlled_run_leaf(crop_run, label="crop_run")
         )
+    keypoint_source_crop_run = inputs.get("keypoint_source_crop_run")
+    tracking_source_rowset_path = inputs.get("tracking_source_rowset_path")
+    if (keypoint_source_crop_run is None) != (
+        tracking_source_rowset_path is None
+    ):
+        raise ValueError(
+            "keypoint_source_crop_run and tracking_source_rowset_path must be "
+            "persisted together."
+        )
+    if keypoint_source_crop_run is not None:
+        keypoint_source_path = "crop_runs/" + _controlled_run_leaf(
+            keypoint_source_crop_run,
+            label="keypoint_source_crop_run",
+        )
+        tracking_source_path = _controlled_two_component_run_path(
+            tracking_source_rowset_path,
+            families=frozenset({"crop_runs"}),
+            label="tracking_source_rowset_path",
+        )
+        if tracking_source_path != keypoint_source_path:
+            raise ValueError(
+                "Keypoint and tracking lineage must identify the same exact source "
+                "rowset."
+            )
+        refs["source_keypoint_crop_path"] = keypoint_source_path
+        refs["source_tracking_rowset_path"] = tracking_source_path
     tracking_path = inputs.get("tracking_path")
     if tracking_path not in (None, ""):
         refs["source_tracking_path"] = _controlled_two_component_run_path(

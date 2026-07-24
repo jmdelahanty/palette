@@ -1834,6 +1834,51 @@ def test_run_derivation_rejects_all_conflicting_duplicate_metadata(
         mod._motion_run_derivation_record(run, positions)
 
 
+def test_offline_derivation_accepts_paired_coordinate_successor_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs.update(
+        {
+            "keypoint_source_crop_run": "c1",
+            "tracking_source_rowset_path": "crop_runs/c1",
+        }
+    )
+    _replace_motion_derivation_inputs(run, inputs)
+
+    record = mod._motion_run_derivation_record(
+        run,
+        sealed.position_bindings,
+    )["record"]
+
+    assert record["source_refs"]["source_keypoint_crop_path"] == "crop_runs/c1"
+    assert record["source_refs"]["source_tracking_rowset_path"] == "crop_runs/c1"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"keypoint_source_crop_run": "c1"},
+        {"tracking_source_rowset_path": "crop_runs/c1"},
+        {
+            "keypoint_source_crop_run": "c1",
+            "tracking_source_rowset_path": "crop_runs/decoy",
+        },
+    ),
+)
+def test_offline_derivation_rejects_unpaired_or_conflicting_successor_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+    updates: dict[str, str],
+) -> None:
+    _root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs.update(updates)
+    with pytest.raises(ValueError, match="persisted together|same exact source rowset"):
+        _replace_motion_derivation_inputs(run, inputs)
+        mod._motion_run_derivation_record(run, sealed.position_bindings)
+
+
 @pytest.mark.parametrize(
     ("path", "replacement"),
     (
