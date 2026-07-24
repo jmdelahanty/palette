@@ -195,6 +195,12 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
     ):
         value = _manifest_text(manifest, key)
         if value:
+            if key == "camera_id":
+                existing = attrs.get(key)
+                if existing not in (None, "", value):
+                    raise ValueError(
+                        "Existing archive camera_id conflicts with recording_manifest.json."
+                    )
             attrs.setdefault(key, value)
     manifest_recording_id = _manifest_text(manifest, "recording_id")
     if manifest_recording_id and manifest_recording_id != recording_id:

@@ -182,6 +182,41 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
     assert fake_root.attrs.get("session_start_iso8601_utc") == "2026-02-23T21:23:35Z"
 
 
+def test_ensure_analysis_archive_rejects_conflicting_camera_identity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    class _FakeGroup:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs(camera_id="2010094")
+
+    recording_dir = tmp_path / "rec"
+    recording_dir.mkdir()
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps({"camera_id": "2010093"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: _FakeGroup())
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "cam.mp4",
+        zarr_path=recording_dir / "zarr" / "rec_analysis.zarr",
+    )
+
+    try:
+        mod.ensure_analysis_archive(plan)
+    except ValueError as exc:
+        assert "camera_id conflicts" in str(exc)
+    else:
+        raise AssertionError("expected conflicting archive and manifest camera IDs to fail")
+
+
 def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path: Path) -> None:
     rec = tmp_path / "rec"
     video = rec / "cams" / "cam.mp4"

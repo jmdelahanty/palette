@@ -63,9 +63,8 @@ before a unified downstream analysis stage.
 
 The analysis-archive split is implemented and documented:
 
-- [analysis_zarr_creation_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/analysis_zarr_creation_contract.md)
-- [analysis_zarr_creation_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/analysis_zarr_creation_todo.md)
-- [create_analysis_zarr.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/create_analysis_zarr.py)
+- [recording_analysis_pipeline_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/recording_analysis_pipeline_contract.md)
+- [import_recording_analysis.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/utils/import_recording_analysis.py)
 - [import_stimulus_to_zarr.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/import_stimulus_to_zarr.py)
 
 This gives the repo a real `analysis/stimulus_runs/<run>/` substrate, including:
@@ -189,8 +188,6 @@ not as a pre-implementation design note.
 These reflect real architecture or active contracts:
 
 - [recording_analysis_pipeline_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/recording_analysis_pipeline_contract.md)
-- [analysis_zarr_creation_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/analysis_zarr_creation_contract.md)
-- [analysis_zarr_creation_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/analysis_zarr_creation_todo.md)
 - [stimulus_response_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/stimulus_response_run_design.md)
 - [grating_analysis_acquisition_questions.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/grating_analysis_acquisition_questions.md)
 - [protocol_parameter_registry_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/protocol_parameter_registry_todo.md)

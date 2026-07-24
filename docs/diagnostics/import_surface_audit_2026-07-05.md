@@ -124,8 +124,8 @@ analysis profile and a sampled/materialized training profile.
 The first audit under-counted import-like writers. A production cleanup should include or
 explicitly classify these surfaces:
 
-- `analysis/create_analysis_zarr.py` — standalone metadata-only analysis shell, optional
-  registry update.
+- `utils/import_recording_analysis.py` — canonical metadata-only analysis bootstrap and
+  stimulus-import surface.
 - `utils/run_recording_analysis_pipeline.py` and `utils/import_recordings_analysis.py` —
   wrapper/pipeline import paths with optional registry scan.
 - `utils/import_recordings_training.py` / `utils/import_sampled_training_pynvvc.py` —

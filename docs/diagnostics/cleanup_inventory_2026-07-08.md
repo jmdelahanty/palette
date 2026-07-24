@@ -223,9 +223,8 @@ session's census confirmed the reframe the hard way.
   used; `patch_legacy_h5.py` was then deleted after operator confirmation that
   enum patching now happens at acquisition. **Gate deletion on code+test+script
   greps of the bare module name plus operator sign-off, not import-graph class.**
-- **H5 is not fully legacy.** `analysis/create_analysis_zarr.py`,
-  `analysis/import_stimulus_to_zarr.py`, `analysis/calibration_manager.py` still
-  ingest H5.
+- **H5 is not fully legacy.** `analysis/import_stimulus_to_zarr.py` and
+  `analysis/calibration_manager.py` still ingest H5.
 
 ### What this session actually executed for utils — and why
 

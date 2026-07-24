@@ -30,12 +30,12 @@ Goal: give another agent a precise implementation map to update `crimson` withou
 Palette repo:
 - `src/fisheye/docs/zarr_structure.md`
 - `docs/zarr_split_policy.md`
-- `docs/analysis_zarr_creation_contract.md`
+- `docs/recording_analysis_pipeline_contract.md`
 - `docs/crimson_detect_bbox_read_contract.md`
 - `docs/archive/crimson_refined_detect_manual_contract.md`
 - `docs/crimson_detect_review_acceptance_contract.md`
 - `docs/zarr_string_encoding_todo.md`
-- `src/fisheye/analysis/create_analysis_zarr.py`
+- `src/fisheye/utils/import_recording_analysis.py`
 - `src/fisheye/utils/import_video_metadata.py`
 - `src/fisheye/detection/detect_yolo.py`
 
@@ -52,15 +52,15 @@ Crimson repo:
 - Analysis archives can be metadata-only for `raw_video` and carry inference/refinement runs.
 - Source: `docs/zarr_split_policy.md`.
 
-2. `create_analysis_zarr` creates a minimal archive first, then enriches.
+2. `import_recording_analysis` creates a minimal archive first, then enriches.
 - Initial attrs include `zarr_purpose=analysis` and archive timestamps.
 - Source-video attrs are added via metadata import.
 - Stimulus import and registry scan are optional steps.
-- Source: `src/fisheye/analysis/create_analysis_zarr.py`.
+- Source: `src/fisheye/utils/import_recording_analysis.py`.
 
 3. Analysis archive naming convention is `<recording>_analysis.zarr`.
 - Detect then appends `detect_runs/<run>` into that archive.
-- Source: `src/fisheye/analysis/create_analysis_zarr.py`, `src/fisheye/utils/run_detect_with_registry_model.py`.
+- Source: `src/fisheye/utils/import_recording_analysis.py`, `src/fisheye/utils/run_detect_with_registry_model.py`.
 
 4. Palette detect data uses normalized center-width-height boxes.
 - `bbox_norm_coords` are `[cx, cy, w, h]` normalized to inference frame size.

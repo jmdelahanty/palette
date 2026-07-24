@@ -139,7 +139,6 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
   - `utils/run_keypoints_batch.py`
   - `utils/run_eye_masks_batch.py`
 - C4 cleanup batch-1 migrated additional batch logging/timestamp helpers in:
-  - `analysis/create_analysis_zarr.py`
   - `utils/detect_quality_batch.py`
   - `utils/prune_zarr_runs.py`
   - `utils/refine_detect_batch.py`
