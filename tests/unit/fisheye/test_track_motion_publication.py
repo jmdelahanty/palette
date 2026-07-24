@@ -1529,6 +1529,12 @@ def _configure_v2_successor_run(root, run) -> tuple[str, str]:
             "source_detect_run": detection_run_id,
         }
     )
+    root["tracking_runs"]["trk_1"].attrs.update(
+        {
+            "source_rowset_path": historical_rowset,
+            "source_detect_run": detection_run_id,
+        }
+    )
     mapping_record = {
         "schema_id": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID,
         "schema_version": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION,
@@ -1617,6 +1623,56 @@ def test_manifest_accepts_verified_merged_rowset_coordinate_successor(
         "/crop_runs/c1@collection_proxy_coordinate_successor_mapping"
     )
     assert len(lineage["successor_mapping"]["record_sha256"]) == 64
+
+
+def test_manifest_accepts_unknown_keypoint_detection_with_exact_tracking_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, detection_run_id = _configure_v2_successor_run(root, run)
+    root["keypoints_runs"]["kp_1"].attrs["source_detect_run"] = "unknown"
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    manifest = mod._build_track_motion_publication_manifest(
+        root,
+        run,
+        sealed.position_bindings,
+    )
+
+    assert (
+        manifest["source_authority"]["position_lineage"][
+            "source_detection_run_id"
+        ]
+        == detection_run_id
+    )
+
+
+def test_manifest_rejects_successor_tracking_detection_identity_disagreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, _detection_run_id = _configure_v2_successor_run(root, run)
+    root["tracking_runs"]["trk_1"].attrs["source_detect_run"] = "decoy"
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    with pytest.raises(ValueError, match="conflicts with the verified successor"):
+        mod._build_track_motion_publication_manifest(
+            root,
+            run,
+            sealed.position_bindings,
+        )
 
 
 def test_v2_direct_crop_seal_round_trips_through_versioned_reader_dispatch(

@@ -5878,12 +5878,26 @@ def _motion_v2_position_lineage_record(
         authoritative_root,
         f"/{tracking_path}",
     )
+    lineage_detection_ids = {
+        str(value).strip()
+        for value in (
+            keypoint_group.attrs.get("source_detect_run"),
+            tracking_group.attrs.get("source_detect_run"),
+        )
+        if (
+            isinstance(value, str)
+            and str(value).strip()
+            and str(value).strip().lower() != "unknown"
+        )
+    }
     if (
         archive_identity(keypoint_group) != archive_identity(authoritative_root)
         or archive_identity(tracking_group) != archive_identity(authoritative_root)
         or keypoint_group.attrs.get("source_crop_run")
         != historical_rowset_path.split("/", 1)[1]
-        or keypoint_group.attrs.get("source_detect_run") != detection_run_id
+        or tracking_group.attrs.get("source_rowset_path")
+        != historical_rowset_path
+        or lineage_detection_ids != {detection_run_id}
     ):
         raise ValueError(
             "Selected keypoint/tracking authority conflicts with the verified "
