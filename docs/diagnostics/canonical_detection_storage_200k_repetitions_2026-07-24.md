@@ -4,6 +4,9 @@ Date: 2026-07-24
 
 Status: complete benchmark evidence; no storage profile promoted
 
+Follow-up: the fifth repetition and frozen reduction are documented in
+[`canonical_detection_storage_200k_five_repetition_reduction_2026-07-24.md`](canonical_detection_storage_200k_five_repetition_reduction_2026-07-24.md).
+
 ## Execution identity
 
 - Palette commit:

@@ -336,10 +336,10 @@ Exit gate:
       [`canonical_detection_storage_reduction_contract.md`](canonical_detection_storage_reduction_contract.md).
 - [x] Validate the cross-workflow reducer against the existing four-repetition
       evidence and confirm that it refuses selection.
-- [ ] Complete at least five balanced repetitions for every unique 200,000-frame
+- [x] Complete at least five balanced repetitions for every unique 200,000-frame
       physical plan.
-- [ ] Reject incorrect, dominated, or operationally unsafe candidates.
-- [ ] Record rejected candidates and reasons; do not silently omit them.
+- [x] Reject incorrect, dominated, or operationally unsafe candidates.
+- [x] Record rejected candidates and reasons; do not silently omit them.
 - [ ] Carry only the Pareto frontier and required controls to full duration.
 - [ ] Run full-duration materialization, publication, and read workloads.
 - [ ] Benchmark parallel publication only for finalists.
@@ -347,7 +347,7 @@ Exit gate:
       identity rather than only the fastest observation.
 - [x] Compare object count, local write, PRFS publication, PRFS reads, and peak
       memory as separate dimensions.
-- [ ] Select the fewest-object candidate that satisfies all predeclared
+- [x] Select the fewest-object candidate that satisfies all predeclared
       correctness, latency, throughput, and resource gates.
 
 Exit gate:

@@ -335,5 +335,7 @@ reusing shared logical contracts where the semantics are genuinely identical.
       smoke without promoting a profile.
 - [x] Add the missing random/sequential/indexed read workloads and complete
       four balanced 200k-frame repetitions.
-- [ ] Run the frozen cross-workflow reduction preview, collect repetition 5
+- [x] Run the frozen cross-workflow reduction preview, collect repetition 5
       without changing the workload, and apply the predeclared gates.
+- [ ] Carry the selected 128 KiB-inner / 8 MiB-target-shard plan and the regular
+      1 MiB control to full-duration validation without promoting either.
