@@ -337,6 +337,112 @@ FRAME_OFFSETS_V1 = ArrayContract(
     units="rows",
 )
 
+FRAME_ROW_OFFSETS_V1 = ArrayContract(
+    schema_id="palette.array.frame_row_offsets",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_frame_boundaries",),
+    axis_names=("camera_frame_boundary",),
+    description=(
+        "Exclusive offsets into a frame-contiguous sparse instance table; "
+        "length is n_frames + 1."
+    ),
+    units="instance_rows",
+)
+
+DETECTION_FRAME_INDICES_V1 = ArrayContract(
+    schema_id="palette.array.detection.frame_indices",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Run-local camera frame index for each detection instance.",
+    units="camera_frame_index",
+)
+
+DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1 = ArrayContract(
+    schema_id="palette.array.detection.source_acquisition_frame_index",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Sealed acquisition-camera frame index for each detection instance."
+    ),
+    units="acquisition_frame_index",
+)
+
+DETECTION_INSTANCE_KEY_V1 = ArrayContract(
+    schema_id="palette.array.detection.instance_key",
+    schema_version=1,
+    dtype=UINT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Stable content-derived identity for each detection instance.",
+    units="identity_key",
+)
+
+DETECTION_BBOX_NORM_COORDS_V1 = ArrayContract(
+    schema_id="palette.array.detection.bbox_norm_coords",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 4),
+    axis_names=("instance", "cxcywh"),
+    description=(
+        "Authoritative source-camera-normalized detection boxes in cx,cy,w,h "
+        "component order."
+    ),
+    units="normalized",
+    coordinate_space="source_camera_normalized",
+)
+
+DETECTION_BBOX_IMG_XYXY_V1 = ArrayContract(
+    schema_id="palette.array.detection.bbox_img_xyxy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 4),
+    axis_names=("instance", "xyxy"),
+    description=(
+        "Exact source-camera half-open pixel-edge projection of the normalized "
+        "detection box."
+    ),
+    units="pixels",
+    coordinate_space="source_camera_pixel_edges",
+)
+
+DETECTION_CENTERS_IMG_XY_V1 = ArrayContract(
+    schema_id="palette.array.detection.centers_img_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 2),
+    axis_names=("instance", "xy"),
+    description=(
+        "Exact source-camera continuous-pixel midpoint of bbox_img_xyxy."
+    ),
+    units="pixels",
+    coordinate_space="source_camera_continuous_pixel",
+)
+
+DETECTION_SCORES_V1 = ArrayContract(
+    schema_id="palette.array.detection.scores",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Finite model confidence for each detection instance.",
+    units="probability",
+)
+
+DETECTION_CLASS_IDS_V1 = ArrayContract(
+    schema_id="palette.array.detection.class_ids",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Nonnegative model taxonomy index for each detection instance.",
+    units="class_index",
+)
+
 KEYPOINTS_ROI_V1 = ArrayContract(
     schema_id="palette.array.keypoints_roi",
     schema_version=1,
@@ -393,10 +499,34 @@ CONTOUR_POINTS_XY_V1 = ArrayContract(
 )
 
 
+DETECTION_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        DETECTION_FRAME_INDICES_V1,
+        DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        DETECTION_INSTANCE_KEY_V1,
+        DETECTION_BBOX_NORM_COORDS_V1,
+        DETECTION_BBOX_IMG_XYXY_V1,
+        DETECTION_CENTERS_IMG_XY_V1,
+        DETECTION_SCORES_V1,
+        DETECTION_CLASS_IDS_V1,
+        FRAME_ROW_OFFSETS_V1,
+    )
+)
+
+
 CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
         FRAME_COUNTS_V1,
         FRAME_OFFSETS_V1,
+        FRAME_ROW_OFFSETS_V1,
+        DETECTION_FRAME_INDICES_V1,
+        DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        DETECTION_INSTANCE_KEY_V1,
+        DETECTION_BBOX_NORM_COORDS_V1,
+        DETECTION_BBOX_IMG_XYXY_V1,
+        DETECTION_CENTERS_IMG_XY_V1,
+        DETECTION_SCORES_V1,
+        DETECTION_CLASS_IDS_V1,
         KEYPOINTS_ROI_V1,
         KEYPOINTS_IMG_V1,
         KEYPOINTS_NORM_V1,

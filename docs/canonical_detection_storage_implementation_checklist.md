@@ -52,6 +52,9 @@ Deferred:
       dense authorities remain chunked unless their editing model changes.
 - [x] Published immutable profiles use validated consolidated metadata as their
       external read surface; mutable/in-progress stores use direct metadata.
+- [x] Defer Pydantic manifest models until at least one additional stage reveals
+      the genuinely shared envelope; keep exact array validation independent of
+      serialization-framework coercion.
 
 ## Phase 0 — Foundation And Checkpoint
 
@@ -115,38 +118,40 @@ Phase 1 evidence and decisions are recorded in
 
 ## Phase 2 — Versioned Canonical Detection Stage Schema
 
-- [ ] Add a versioned stage/run schema type that binds concrete paths to logical
+- [x] Add a versioned stage/run schema type that binds concrete paths to logical
       `ArrayContract` versions.
-- [ ] Define the canonical run schema ID and version.
-- [ ] Define symbolic dimensions such as `n_frames` and `n_instances`.
-- [ ] Define exact contracts for all accepted canonical arrays.
-- [ ] Use exact `float32` for bounding boxes and centers.
-- [ ] Define axis names, coordinate spaces, units, fill/null semantics, and
+- [x] Define the canonical run schema ID and version.
+- [x] Define symbolic dimensions such as `n_frames` and `n_instances`.
+- [x] Define exact contracts for all accepted canonical arrays.
+- [x] Use exact `float32` for bounding boxes and centers.
+- [x] Define axis names, coordinate spaces, units, fill/null semantics, and
       requiredness.
-- [ ] Define row identity through `instance_key` and acquisition-frame lineage.
-- [ ] Define frame-index bounds and the accepted row-ordering invariant.
-- [ ] Define instance/offset cardinality invariants.
-- [ ] Exclude `frame_counts` and `n_detections` from canonical bindings; define
-      their derivation only in explicit compatibility adapters.
-- [ ] Define the valid zero-observation representation.
-- [ ] Serialize the schema and concrete bindings into JSON-safe manifest records.
+- [x] Define row identity through unique `instance_key` and full-acquisition
+      frame lineage; retain recording-bound key derivation validation in the
+      publication contract.
+- [x] Define frame-index bounds and the accepted row-ordering invariant.
+- [x] Define instance/offset cardinality invariants.
+- [x] Exclude `frame_counts` and `n_detections` from canonical bindings.
+- [ ] Define count derivation only in explicit compatibility adapters.
+- [x] Define the valid zero-observation representation.
+- [x] Serialize the schema and concrete bindings into JSON-safe manifest records.
 - [ ] Represent existing `float64` archives through an explicit compatibility
       adapter/profile rather than a union in the canonical contract.
 
 Tests:
 
-- [ ] Exact dtype acceptance and rejection.
-- [ ] Shape and symbolic-dimension validation.
-- [ ] Frame-bound and row-order validation.
-- [ ] Instance/offset consistency.
+- [x] Exact dtype acceptance and rejection.
+- [x] Shape and symbolic-dimension validation.
+- [x] Frame-bound and row-order validation.
+- [x] Instance/offset consistency.
 - [ ] Compatibility count derivation from offsets.
-- [ ] Derived-array consistency where required.
-- [ ] Empty-run validation.
-- [ ] Manifest round-trip and stable schema identity.
+- [x] Derived-array consistency where required.
+- [x] Empty-run validation.
+- [x] Manifest round-trip and stable schema identity.
 
 Exit gate:
 
-- [ ] The complete stage schema can validate an in-memory canonical run without
+- [x] The canonical v1 schema can validate an in-memory canonical run without
       importing or invoking a production writer.
 
 ## Phase 3 — Storage Intents And Planning Report
