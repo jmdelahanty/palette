@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis import detect_bouts_multi_level as bout_writer
@@ -66,6 +67,7 @@ def _fake_writer(argv) -> int:
             "source_track_kinematics_run": "track_1",
             "source_track_motion_manifest_sha256": "a" * 64,
             "track_id": 0,
+            "default_signal_id": 4,
             "frame_axis_contract": build_frame_axis_contract(
                 frames,
                 authoritative_path=(
@@ -93,7 +95,21 @@ def _fake_writer(argv) -> int:
         data=np.zeros((1, frames.size), dtype=np.float32),
         chunks=(1, frames.size),
     )
+    signals.create_array(
+        "detector_signal_signal_ids",
+        data=np.asarray([4], dtype=np.int16),
+        chunks=(1,),
+    )
     return 0
+
+
+def _fake_all_nan_writer(argv) -> int:
+    result = _fake_writer(argv)
+    output = Path(argv[argv.index("--output-zarr-path") + 1])
+    run_name = argv[argv.index("--run-name") + 1]
+    root = zarr.open_group(str(output), mode="a", use_consolidated=False)
+    root[f"analysis/swim_bout_runs/{run_name}/signals/detector_signal_mm_s"][:] = np.nan
+    return result
 
 
 def test_plan_is_read_only(tmp_path: Path) -> None:
@@ -113,12 +129,35 @@ def test_plan_is_read_only(tmp_path: Path) -> None:
     assert not scratch.exists()
 
 
+def test_writer_requires_finite_default_detector_but_permits_zero_activity() -> None:
+    assert (
+        bout_writer._require_finite_default_detector_signal(
+            np.asarray([0.0, np.nan, 0.0], dtype=np.float32),
+            default_level="speed_exponential",
+            track_kinematics_run="track_1",
+            track_id=0,
+        )
+        == 2
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Default swim-bout detector signal has no finite physical samples",
+    ):
+        bout_writer._require_finite_default_detector_signal(
+            np.asarray([np.nan, np.nan], dtype=np.float32),
+            default_level="speed_exponential",
+            track_kinematics_run="track_uncalibrated",
+            track_id=0,
+        )
+
+
 def test_materializer_computes_locally_and_publishes_atomically(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.zarr"
-    _build_source(source)
+    frames = _build_source(source)
     monkeypatch.setattr(mod.bout_writer, "main", _fake_writer)
 
     result = mod.materialize_swim_bouts(
@@ -144,3 +183,33 @@ def test_materializer_computes_locally_and_publishes_atomically(
         "schema_id": "palette.atomic_run_group_publisher",
         "schema_version": 1,
     }
+    validation = result["local_materialization"]["local_validation"]
+    assert validation["default_signal_id"] == 4
+    assert validation["default_detector_row"] == 0
+    assert validation["default_detector_finite_count"] == frames.size
+
+
+def test_materializer_rejects_all_nan_default_detector_before_publish(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    _build_source(source)
+    monkeypatch.setattr(mod.bout_writer, "main", _fake_all_nan_writer)
+
+    with np.testing.assert_raises_regex(
+        RuntimeError,
+        "default detector signal has no finite physical samples",
+    ):
+        mod.materialize_swim_bouts(
+            source,
+            scratch_root=tmp_path / "scratch",
+            run_name="bouts_all_nan",
+            writer_arguments=("--layout", "compact_v2"),
+            copy_backend="python",
+            apply=True,
+            keep_scratch=True,
+        )
+
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    assert root.get("analysis/swim_bout_runs/bouts_all_nan") is None
