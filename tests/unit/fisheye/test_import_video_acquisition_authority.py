@@ -54,6 +54,42 @@ def _organized_source(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     return source, context
 
 
+def test_materialized_import_metadata_uses_decoded_observation_and_ffprobe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "camera.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setattr(
+        import_video_module,
+        "probe_ffprobe_video_metadata",
+        lambda _path: {
+            "codec": "hevc",
+            "pix_fmt": "yuv420p",
+            "format_tags": {"encoder": "orange"},
+        },
+    )
+
+    class _Reader:
+        @staticmethod
+        def get_avg_fps() -> float:
+            return 100.0
+
+    metadata = import_video_module._get_video_metadata(  # noqa: SLF001
+        source,
+        _Reader(),
+        4512,
+        4512,
+        139295,
+    )
+
+    assert metadata["total_frames"] == 139295
+    assert metadata["fps"] == 100.0
+    assert metadata["codec"] == "hevc"
+    assert metadata["pix_fmt"] == "yuv420p"
+    assert "imageio_metadata" not in metadata
+
+
 def _build_complete_archive(
     tmp_path: Path,
     *,

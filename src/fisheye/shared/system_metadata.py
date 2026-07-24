@@ -614,7 +614,7 @@ def get_relevant_packages(
             # Core scientific
             'numpy', 'scipy', 'pandas', 'xarray',
             # Image processing
-            'scikit-image', 'opencv', 'pillow', 'imageio',
+            'scikit-image', 'opencv', 'pillow',
             # Deep learning
             'torch', 'torchvision', 'tensorflow', 'keras',
             # Video

@@ -64,7 +64,7 @@ def test_discover_recording_dirs_can_read_organize_log(tmp_path: Path) -> None:
     assert discovered == [rec.resolve()]
 
 
-def test_build_plans_skips_existing_analysis_zarr(tmp_path: Path) -> None:
+def test_build_plans_resumes_incomplete_existing_analysis_zarr(tmp_path: Path) -> None:
     rec = _recording(tmp_path)
     zarr_path = rec / "zarr" / f"{rec.name}_analysis.zarr"
     zarr_path.mkdir(parents=True)
@@ -78,8 +78,34 @@ def test_build_plans_skips_existing_analysis_zarr(tmp_path: Path) -> None:
     )
 
     assert len(plans) == 1
+    assert plans[0].status == "ok"
+    assert plans[0].reason is not None
+    assert plans[0].reason.startswith("resuming incomplete analysis zarr:")
+
+
+def test_build_plans_skips_existing_analysis_only_after_completion_contract(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    rec = _recording(tmp_path)
+    zarr_path = rec / "zarr" / f"{rec.name}_analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    monkeypatch.setattr(
+        mod,
+        "_existing_analysis_complete",
+        lambda *_args, **_kwargs: (True, "analysis import completion contract is satisfied"),
+    )
+
+    plans = mod.build_plans(
+        [rec],
+        import_stimulus=True,
+        skip_existing=True,
+        allow_preflight_failures=False,
+        check_stimulus=False,
+    )
+
     assert plans[0].status == "skipped"
-    assert plans[0].reason == "analysis zarr already exists"
+    assert plans[0].reason == "analysis import completion contract is satisfied"
 
 
 def test_main_apply_uses_import_only_process(monkeypatch, tmp_path: Path) -> None:
@@ -173,6 +199,11 @@ def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch,
 
     monkeypatch.setattr(mod, "process_recording_import", _unexpected_process)
     monkeypatch.setattr(mod, "Registry", _Registry)
+    monkeypatch.setattr(
+        mod,
+        "_existing_analysis_complete",
+        lambda *_args, **_kwargs: (True, "analysis import completion contract is satisfied"),
+    )
 
     rc = mod.main(
         [

@@ -13,11 +13,15 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Mapping, Optional
 
 import zarr
 
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    load_acquisition_authority_publication_status,
+)
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.import_video_metadata import (
     probe_video_metadata,
@@ -90,6 +94,48 @@ def _manifest_text(manifest: dict[str, object], *keys: str) -> Optional[str]:
         if text:
             return text
     return None
+
+
+def _producer_video_metadata(plan: RecordingAnalysisPlan) -> dict[str, Any]:
+    """Return the organizer's producer-declared full-video fields, when present."""
+
+    manifest = _load_recording_manifest(plan.recording_dir)
+    video_streams = manifest.get("video_streams")
+    if not isinstance(video_streams, Mapping):
+        return {}
+    streams = video_streams.get("streams")
+    if not isinstance(streams, Mapping):
+        return {}
+    selected_key: str | None = None
+    selected: Mapping[str, Any] | None = None
+    wanted = plan.cam_video.expanduser().resolve()
+    for key, candidate in streams.items():
+        if not isinstance(key, str) or not isinstance(candidate, Mapping):
+            continue
+        raw_video = candidate.get("video")
+        if isinstance(raw_video, str) and raw_video.strip():
+            path = Path(raw_video)
+            if not path.is_absolute():
+                path = plan.recording_dir / path
+            if path.expanduser().resolve() == wanted:
+                selected_key, selected = key, candidate
+                break
+    if selected is None:
+        fallback = streams.get("full")
+        if isinstance(fallback, Mapping):
+            selected_key, selected = "full", fallback
+    if selected is None or selected_key is None:
+        return {}
+    source_prefix = f"recording_manifest.video_streams.streams.{selected_key}"
+    producer: dict[str, Any] = {
+        "_source": source_prefix,
+        "total_frames": selected.get("frame_count"),
+        "fps": selected.get("frame_rate"),
+        "width": selected.get("width"),
+        "height": selected.get("height"),
+        "codec": selected.get("codec"),
+    }
+    return {key: value for key, value in producer.items() if value is not None}
 
 
 def stimulus_runs_present(zarr_path: Path) -> bool:
@@ -169,11 +215,19 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
 
 def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dict[str, int]:
     root = zarr.open_group(str(plan.zarr_path), mode="r+")
-    meta = probe_video_metadata(plan.cam_video)
+    try:
+        publication = load_acquisition_authority_publication_status(root)
+        authority_published = publication.status == ACQUISITION_AUTHORITY_PUBLISHED
+    except Exception:
+        authority_published = False
+    meta = probe_video_metadata(
+        plan.cam_video,
+        producer_metadata=_producer_video_metadata(plan),
+    )
     updates = write_video_metadata(
         root,
         meta,
-        overwrite=overwrite,
+        overwrite=bool(overwrite or not authority_published),
         import_purpose="analysis",
         recording_path=plan.recording_dir,
     )
