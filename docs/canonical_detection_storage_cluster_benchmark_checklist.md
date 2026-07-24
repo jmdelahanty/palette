@@ -75,20 +75,21 @@ The LSF workflow must produce one durable submission bundle:
 ```text
 <run-dir>/
 ├── plan.json
-├── submission.json
+├── lsf_plan.json
+├── lsf_submission.json
 ├── matrix.json
-├── cases.jsonl
+├── aggregate.json
+├── candidates/
 ├── reports/
 ├── status/
-├── logs/
-└── summary.json
+└── logs/
 ```
 
 Published benchmark candidates must use a separate shared namespace:
 
 ```text
-<benchmark-root>/canonical_detection_storage/<workflow-id>/
-└── <case-id>.zarr
+<benchmark-root>/canonical_detection_storage/workflows/<workflow-id>/candidates/
+└── <matrix-id>/<scale-id>/repetition_<index>/<case-id>.zarr
 ```
 
 Node-local scratch contains staged sources, canonical local inputs, and
@@ -163,73 +164,77 @@ Exit gate:
 
 ## Phase 3 — Stage And Local Canonical Preparation
 
-- [ ] Allocate a unique scratch root from `/scratch/$USER/$LSB_JOBID` or the
+- [x] Allocate a unique scratch root from `/scratch/$USER/$LSB_JOBID` or the
       LSF-provided local temporary directory.
-- [ ] Refuse shared-storage paths as scratch roots.
-- [ ] Copy the safe fixture to scratch once per scale/repetition allocation.
-- [ ] Record stage-in elapsed time, bytes, file count, tool, and return code.
-- [ ] Validate the staged tree against the fixture manifest before computation.
-- [ ] Open the staged source with direct metadata in read-only mode.
-- [ ] Convert once to the exact canonical schema and dtype set.
-- [ ] Materialize one fixed local canonical staging store.
-- [ ] Record all legacy-to-canonical conversions in provenance.
-- [ ] Validate canonical schema, row ordering, offsets, geometry, dtypes, and
+- [x] Refuse shared-storage paths as scratch roots.
+- [x] Copy the safe fixture to scratch once per scale/repetition allocation.
+- [x] Record stage-in elapsed time, bytes, file count, copy method, and return
+      code.
+- [x] Validate the staged tree against the fixture manifest before computation.
+- [x] Open the staged source with direct metadata in read-only mode.
+- [x] Convert once to the exact canonical schema and dtype set.
+- [x] Materialize one fixed local canonical staging store.
+- [x] Record all legacy-to-canonical conversions in provenance.
+- [x] Validate canonical schema, row ordering, offsets, geometry, dtypes, and
       array digests before starting candidate timers.
-- [ ] Ensure every candidate reads this same local canonical staging store.
-- [ ] Exclude stage-in and canonical preparation from candidate write and
+- [x] Ensure every candidate reads this same local canonical staging store.
+- [x] Exclude stage-in and canonical preparation from candidate write and
       publication summaries while reporting them separately.
 
 Exit gate:
 
-- [ ] Candidate execution cannot reach the shared source fixture after local
-      preparation succeeds.
+- [x] Candidate subprocesses receive only the fixed local canonical staging
+      path; the parent touches the shared fixture again only for the final
+      read-only integrity check.
 
 ## Phase 4 — Local Materialization Matrix
 
-- [ ] Create every local candidate at a new scratch path.
-- [ ] Execute each candidate in a separate subprocess.
-- [ ] Fix native thread counts and record their effective values.
-- [ ] Write regular arrays by complete physical chunks.
-- [ ] Write sharded arrays by complete, non-overlapping outer shards.
-- [ ] Record requested and effective write ownership.
+- [x] Create every local candidate at a new scratch path.
+- [x] Execute each candidate in a separate subprocess.
+- [x] Fix native thread counts and record their effective values.
+- [x] Write regular arrays by complete physical chunks.
+- [x] Write sharded arrays by complete, non-overlapping outer shards.
+- [x] Record requested and effective write ownership.
 - [ ] Measure array creation, payload write, total materialization, logical
       throughput, physical throughput, peak RSS, object count, and compression.
 - [ ] Record actual metadata codecs and chunk grids from the written Zarr.
-- [ ] Validate exact schema, dtype, shape, and value digests.
+- [x] Validate exact schema, dtype, shape, and value digests.
 - [ ] Fail the case if any required payload is missing or any codec differs from
       its versioned profile.
-- [ ] Retain local candidates until their local-read workloads and publication
+- [x] Retain local candidates until their local-read workloads and publication
       inputs are complete.
 
 Exit gate:
 
-- [ ] Every successful local result is exact and comparable through the common
+- [x] Every successful local result is exact and comparable through the common
       benchmark envelope.
 
 ## Phase 5 — Publish Back To Shared Storage
 
-- [ ] Give every candidate a fresh destination below the approved shared
+- [x] Give every candidate a fresh destination below the approved shared
       benchmark workflow root.
-- [ ] Refuse destinations inside recording analysis Zarrs, training roots,
+- [x] Refuse destinations outside the workflow's dedicated `candidates`
+      namespace, including recording analysis Zarrs, training roots,
       selector targets, or the source fixture.
-- [ ] Write initially to a case-specific incomplete destination.
-- [ ] Benchmark publication from the fixed local canonical staging store into
-      the candidate's final immutable plan.
-- [ ] Measure source inventory, decode/re-encode, transfer, validation,
-      consolidation, completion, and total publication time separately.
+- [x] Write initially to a case-specific incomplete destination.
+- [x] Build the candidate's final immutable plan on scratch, then benchmark an
+      exact copy-back to shared storage separately from materialization.
+- [x] Measure source inventory, copy-back, exact-tree validation, consolidated
+      open, and total publication time separately.
 - [ ] Record logical bytes, transferred bytes where observable, created files,
       allocated bytes, and peak RSS.
-- [ ] Use one publisher initially.
+- [x] Use one publisher initially.
 - [ ] For shortlisted candidates, benchmark one, two, and four workers with
       whole-chunk or whole-shard ownership only.
 - [ ] Validate the published destination directly before metadata
       consolidation.
-- [ ] Consolidate metadata from one authoritative process.
+- [x] Consolidate metadata from one authoritative process before exact
+      copy-back.
 - [ ] Reopen through consolidated metadata and compare expected schema, dtype,
       shapes, chunk grids, shards, and codecs with actual metadata.
-- [ ] Validate exact array digests from the published store.
-- [ ] Write a completion record only after all validations pass.
-- [ ] Finalize the benchmark destination without updating registry or selector
+- [x] Validate exact array digests from the published store.
+- [x] Write a completion record only after all validations pass.
+- [x] Finalize the benchmark destination without updating registry or selector
       state.
 - [ ] Preserve failed destinations as visibly incomplete evidence or remove
       them only through an explicit cleanup command.
@@ -246,26 +251,26 @@ separate in reports.
 
 - [ ] Run each read workload in a fresh subprocess for process-cold timing.
 - [ ] Repeat within the process for warm timing.
-- [ ] Do not label OS or shared-filesystem cache state cold unless cache control
+- [x] Do not label OS or shared-filesystem cache state cold unless cache control
       is both real and recorded.
-- [ ] Measure direct and consolidated metadata opening separately.
-- [ ] Read the complete eager `frame_row_offsets` index.
+- [x] Measure direct and consolidated metadata opening separately.
+- [x] Read the complete eager `frame_row_offsets` index.
 - [ ] Read two adjacent offsets followed by the selected per-frame instance
       slice.
 - [ ] Run deterministic random-frame reads.
 - [ ] Run sequential frame windows and 700-FPS traversal.
 - [ ] Run contiguous and random observation-row reads used by joins.
-- [ ] Run complete-array scans.
-- [ ] Use identical frame, row, window, order, and seed inputs for every
+- [x] Run complete-array scans.
+- [x] Use identical frame, row, window, order, and seed inputs for every
       candidate.
 - [ ] Record latency distributions, logical bytes returned, decoded bytes where
       observable, request/range count where observable, and throughput.
-- [ ] Run local-scratch workloads before cleanup.
-- [ ] Run PRFS workloads only against successfully published benchmark outputs.
+- [x] Run local-scratch workloads before cleanup.
+- [x] Run PRFS workloads only against successfully published benchmark outputs.
 
 Exit gate:
 
-- [ ] Every read result identifies its storage tier and cache condition without
+- [x] Every read result identifies its storage tier and cache condition without
       using local evidence as a remote-performance claim.
 
 ## Phase 7 — LSF Workflow
@@ -273,52 +278,54 @@ Exit gate:
 - [x] Add a concurrency-safe helper that deploys a clean agent branch as a
       detached, commit-pinned `/groups` worktree without switching the shared
       checkout.
-- [ ] Implement a benchmark-family planner on `fisheye.cluster.lsf` models,
+- [x] Implement a benchmark-family planner on `fisheye.cluster.lsf` models,
       bundle persistence, submission, task groups, and runtime status.
-- [ ] Keep the operator shell surface thin and free of new `bsub` parsing.
-- [ ] Make plan-only mode the default and require explicit `--submit`.
-- [ ] Record the cluster-visible Palette repository, exact commit, branch, and
-      clean-state check.
-- [ ] Refuse execution when the job commit differs from the planned commit.
-- [ ] Use a CPU allocation; request no GPU.
-- [ ] Represent one `(scale, repetition)` block as one LSF array element.
-- [ ] Run all unique candidates for that block on the same execution host.
-- [ ] Execute candidates sequentially in the planned balanced order while
+- [x] Keep the operator shell surface thin and free of new `bsub` parsing.
+- [x] Make plan-only mode the default and require explicit `--submit`.
+- [x] Record the cluster-visible Palette repository, exact commit, and
+      clean-state check; preserve the source branch in deployment evidence.
+- [x] Refuse execution when the job commit differs from the planned commit.
+- [x] Use a CPU allocation; request no GPU.
+- [x] Represent one `(scale, repetition)` block as one LSF array element.
+- [x] Run all unique candidates for that block on the same execution host.
+- [x] Execute candidates sequentially in the planned balanced order while
       retaining subprocess isolation.
-- [ ] Bound active LSF array elements explicitly.
-- [ ] Record job ID, array index, job name, queue, host, slots, memory request,
+- [x] Bound active LSF array elements explicitly.
+- [x] Record job ID, array index, job name, queue, host, slots, memory request,
       walltime, scratch root, command, timestamps, and return code.
-- [ ] Write atomic running, succeeded, or failed status for every array element.
-- [ ] Install signal and failure traps that retain status and logs.
-- [ ] Clean node-local scratch on exit by default without deleting published
+- [x] Write atomic running, succeeded, or failed status for every array element.
+- [x] Install signal and failure traps that retain status and logs.
+- [x] Clean node-local scratch on exit by default without deleting published
       benchmark evidence.
-- [ ] Submit one success-gated serial finalizer using structured `done`
+- [x] Submit one success-gated serial finalizer using structured `done`
       dependencies.
-- [ ] Have the finalizer validate expected reports and aggregate results only;
+- [x] Have the finalizer validate expected reports and aggregate results only;
       it must not update registry or selectors.
 
 Exit gate:
 
-- [ ] Fake-runner tests prove plan, submission, array selection, failure status,
+- [x] Fake-runner and real-Zarr lifecycle tests prove plan, submission, array
+      selection, failure status,
       dependency, and finalizer behavior before a real `bsub` smoke.
 
 ## Phase 8 — Cluster Smoke And Bounded Rollout
 
 - [x] Render and review one complete plan with no submission.
 - [x] Run one small local end-to-end fixture outside the sandbox.
-- [ ] Submit one `200,000`-frame scale/repetition block.
-- [ ] Verify stage-in, scratch use, candidate order, reports, publish paths,
+- [x] Submit one `200,000`-frame scale/repetition block.
+- [x] Verify stage-in, scratch use, candidate order, reports, publish paths,
       validation, cleanup, and finalizer evidence.
-- [ ] Confirm the source fixture remains unchanged.
-- [ ] Confirm no analysis archive, registry row, selector, or training artifact
+- [x] Confirm the source fixture remains unchanged.
+- [x] Confirm no analysis archive, registry row, selector, or training artifact
       changed.
-- [ ] Measure actual resource use and revise LSF memory/walltime requests.
+- [x] Measure actual resource use and revise future block defaults to one CPU
+      slot and a 30-minute limit; the site enforces about 15 GB per slot.
 - [ ] Submit the remaining bounded `200,000`-frame repetitions.
 - [ ] Summarize variability before expanding to full duration.
 
 Exit gate:
 
-- [ ] The limited cluster run is exact, operationally diagnosable, and safely
+- [x] The limited cluster run is exact, operationally diagnosable, and safely
       isolated from canonical data.
 
 ## Phase 9 — Full Matrix And Candidate Reduction

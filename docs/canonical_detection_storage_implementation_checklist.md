@@ -187,15 +187,18 @@ write benchmark candidates into a canonical recording or training Zarr.
       geometry and record the conversion provenance.
 - [x] Validate the canonical source before timed writes and require exact
       destination digests before accepting a result.
-- [ ] Sweep `128 KiB`, `512 KiB`, `1 MiB`, and `2 MiB` inner-chunk targets.
-- [ ] Sweep appropriate `8 MiB`, `32 MiB`, `128 MiB`, and `512 MiB` shard targets.
+- [x] Sweep `128 KiB`, `512 KiB`, `1 MiB`, and `2 MiB` inner-chunk targets in
+      the first bounded cluster repetition.
+- [x] Resolve `8 MiB`, `32 MiB`, `128 MiB`, and `512 MiB` shard targets and
+      deduplicate the targets that produce identical physical plans at 200k.
 - [x] Complete an initial same-input regular-versus-indexed-sharding smoke.
-- [ ] Measure sequential write throughput and peak memory.
+- [x] Measure sequential write time, logical bytes, and peak memory.
 - [ ] Measure sharded publication/copy throughput and peak memory.
 - [ ] Measure cold and warm full-array reads.
-- [ ] Measure frame-window reads.
+- [ ] Measure frame windows through `frame_row_offsets` plus the corresponding
+      instance slices.
 - [ ] Measure individual-frame indexed reads.
-- [ ] Measure observation-row reads used by downstream joins.
+- [x] Measure contiguous observation-row windows used by downstream joins.
 - [x] Measure consolidated and direct metadata open separately in the smoke
       harness.
 - [x] Measure final object count and on-disk bytes in the smoke harness.
@@ -205,9 +208,11 @@ write benchmark candidates into a canonical recording or training Zarr.
 Acceptance requirements:
 
 - [x] No decoded-value or dtype mismatch in the initial 200k-frame A/B smoke.
-- [ ] No unsafe overlapping parallel writes.
+- [x] No unsafe overlapping parallel writes; the first matrix uses one writer
+      owning complete chunks or shards.
 - [ ] No unacceptable per-frame read amplification.
-- [ ] Object count is materially lower than the regular small-chunk layout.
+- [x] Object count is materially lower than the regular small-chunk layout at
+      the 200k scale.
 - [ ] Peak memory is bounded for the intended writer and publisher hosts.
 - [ ] The chosen result is reproducible and recorded in the common benchmark
       envelope.
@@ -219,6 +224,9 @@ Exit gate:
 
 Initial smoke evidence and its limitations are recorded in
 [`diagnostics/canonical_detection_storage_benchmark_smoke_2026-07-24.md`](diagnostics/canonical_detection_storage_benchmark_smoke_2026-07-24.md).
+
+The first commit-pinned cluster lifecycle smoke is recorded in
+[`diagnostics/canonical_detection_storage_cluster_smoke_2026-07-24.md`](diagnostics/canonical_detection_storage_cluster_smoke_2026-07-24.md).
 
 Cluster matrix implementation and the required stage-to-scratch,
 local-compute, publish-back lifecycle are tracked in
@@ -310,18 +318,20 @@ reusing shared logical contracts where the semantics are genuinely identical.
 
 ## Working Agreement
 
-- [ ] Keep each phase or independently reviewable subphase in its own commit.
+- [x] Keep each phase or independently reviewable subphase in its own commit.
 - [ ] Regenerate deterministic inventories in the same commit as generator
       changes.
-- [ ] Do not mix dtype experiments into chunk/shard profile benchmarks.
-- [ ] Do not change a production writer before its logical and benchmark exit
+- [x] Do not mix dtype experiments into chunk/shard profile benchmarks.
+- [x] Do not change a production writer before its logical and benchmark exit
       gates pass.
-- [ ] Run Zarr pytest/integration validation outside the sandbox according to
+- [x] Run Zarr pytest/integration validation outside the sandbox according to
       `AGENTS.md`.
-- [ ] Update this checklist at every checkpoint so completed and deferred work
+- [x] Update this checklist at every checkpoint so completed and deferred work
       remains visible.
 
 ## Immediate Next Action
 
-- [ ] Commit the accepted dtype decision and this checklist.
-- [ ] Begin Phase 1 with the canonical detection consumer/producer census.
+- [x] Complete and document the first bounded 200k-frame cluster lifecycle
+      smoke without promoting a profile.
+- [ ] Add the missing random/sequential/indexed read workloads, then run four
+      more balanced 200k-frame repetitions.

@@ -15,6 +15,9 @@ import time
 from typing import Any, Mapping, Sequence
 
 from fisheye.cluster.lsf.bundle import write_json_snapshot
+from fisheye.shared.zarr.benchmark_environment import (
+    STORAGE_BENCHMARK_THREAD_ENVIRONMENT,
+)
 from fisheye.shared.zarr.benchmark_fixture import (
     inventory_tree,
     thaw_tree_for_cleanup,
@@ -240,6 +243,16 @@ def run_benchmark_block(
     ):
         raise ValueError("Fixture is not an immutable noncanonical benchmark source.")
     repo_evidence = _verify_repo(palette_repo, expected_commit)
+    effective_thread_environment = {
+        key: os.environ.get(key) for key in STORAGE_BENCHMARK_THREAD_ENVIRONMENT
+    }
+    if (
+        not allow_local
+        and effective_thread_environment != STORAGE_BENCHMARK_THREAD_ENVIRONMENT
+    ):
+        raise RuntimeError(
+            "LSF benchmark native-thread environment does not match the plan."
+        )
     scratch_root = _resolve_scratch_root(
         workflow_id=str(matrix["matrix_id"]),
         scale_id=scale_id,
@@ -260,6 +273,7 @@ def run_benchmark_block(
         "scale_id": scale_id,
         "repetition_index": repetition_index,
         "palette": repo_evidence,
+        "native_thread_environment": effective_thread_environment,
         "scheduler": {
             "job_id": os.environ.get("LSB_JOBID"),
             "job_index": os.environ.get("LSB_JOBINDEX"),
@@ -287,6 +301,8 @@ def run_benchmark_block(
             raise RuntimeError("Node-local staged fixture does not match publication.")
         partial["stage_in"] = {
             "seconds": stage_seconds,
+            "copy_method": "shutil.copytree",
+            "returncode": 0,
             "source": str(fixture / str(fixture_manifest["copied_zarr_relative_path"])),
             "destination": str(local_source),
             "inventory": local_inventory.as_manifest(),

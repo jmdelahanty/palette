@@ -10,6 +10,9 @@ from fisheye.cluster.canonical_detection_storage_benchmark import (
     build_plan,
     materialize_plan,
 )
+from fisheye.shared.zarr.benchmark_environment import (
+    STORAGE_BENCHMARK_THREAD_ENVIRONMENT,
+)
 from fisheye.shared.zarr.benchmark_matrix import BenchmarkScale
 
 
@@ -111,6 +114,18 @@ def test_cluster_plan_is_one_cpu_array_block_plus_success_finalizer(
     task = blocks.execution_group.tasks[0]
     assert task.metadata["candidate_count"] == 8
     assert len(set(task.metadata["balanced_order"])) == 8
+    assert task.command[:1] == ("/usr/bin/env",)
+    assert set(
+        task.command[1 : 1 + len(STORAGE_BENCHMARK_THREAD_ENVIRONMENT)]
+    ) == {
+        f"{key}={value}"
+        for key, value in STORAGE_BENCHMARK_THREAD_ENVIRONMENT.items()
+    }
+    assert task.metadata["native_thread_environment"] == (
+        STORAGE_BENCHMARK_THREAD_ENVIRONMENT
+    )
+    assert "__PALETTE_LSF_JOBID__" in str(task.status_path)
+    assert "__PALETTE_LSF_JOBINDEX__" in str(task.status_path)
     assert finalizer.dependency is not None
     assert finalizer.dependency.upstream_job_keys == ("benchmark_blocks",)
     assert finalizer.metadata["profile_promotion"] is False

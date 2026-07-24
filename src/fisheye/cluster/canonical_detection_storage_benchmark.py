@@ -22,7 +22,14 @@ from fisheye.cluster.lsf import (
     submit_lsf_workflow,
     write_json_snapshot,
 )
-from fisheye.cluster.lsf.runtime import build_runtime_command
+from fisheye.cluster.lsf.runtime import (
+    RUNTIME_JOB_ID_TOKEN,
+    RUNTIME_JOB_INDEX_TOKEN,
+    build_runtime_command,
+)
+from fisheye.shared.zarr.benchmark_environment import (
+    STORAGE_BENCHMARK_THREAD_ENVIRONMENT,
+)
 from fisheye.shared.zarr.benchmark_matrix import BenchmarkScale
 from fisheye.shared.zarr.detection_benchmark_matrix import (
     plan_canonical_detection_benchmark_matrix,
@@ -172,6 +179,11 @@ def build_plan(
             / f"{scale_id}_repetition_{repetition_index:03d}.json"
         )
         command = [
+            "/usr/bin/env",
+            *(
+                f"{key}={value}"
+                for key, value in STORAGE_BENCHMARK_THREAD_ENVIRONMENT.items()
+            ),
             str(repo / "scripts" / "py"),
             "-m",
             "fisheye.diagnostics.run_canonical_detection_storage_benchmark_block",
@@ -207,7 +219,10 @@ def build_plan(
                     workflow
                     / "status"
                     / "blocks"
-                    / f"{scale_id}_{repetition_index:03d}.%J.%I.json"
+                    / (
+                        f"{scale_id}_{repetition_index:03d}."
+                        f"{RUNTIME_JOB_ID_TOKEN}.{RUNTIME_JOB_INDEX_TOKEN}.json"
+                    )
                 ),
                 expected_outputs=(str(block_report),),
                 metadata={
@@ -217,6 +232,9 @@ def build_plan(
                     "balanced_order": [
                         trial.candidate_id for trial in repetition.trials
                     ],
+                    "native_thread_environment": dict(
+                        STORAGE_BENCHMARK_THREAD_ENVIRONMENT
+                    ),
                 },
             )
         )
@@ -276,7 +294,9 @@ def build_plan(
         job_name=f"det_storage_{workflow_id}_finalize",
         command=build_runtime_command(
             finalizer_payload,
-            status_path_template=workflow / "status" / "finalize.%J.json",
+            status_path_template=(
+                workflow / "status" / f"finalize.{RUNTIME_JOB_ID_TOKEN}.json"
+            ),
             workflow_id=workflow_id,
             family=FAMILY,
             job_key="finalize",
@@ -414,9 +434,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20_260_724)
     parser.add_argument("--queue", default="short")
-    parser.add_argument("--ncores", type=int, default=2)
+    parser.add_argument("--ncores", type=int, default=1)
     parser.add_argument("--mem-gb-per-slot", type=int, default=8)
-    parser.add_argument("--walltime", default="1:00")
+    parser.add_argument("--walltime", default="0:30")
     parser.add_argument("--max-active-blocks", type=int, default=1)
     parser.add_argument("--scratch-base", type=Path)
     parser.add_argument("--keep-scratch", action="store_true")

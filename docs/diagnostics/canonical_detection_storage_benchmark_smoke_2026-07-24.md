@@ -4,6 +4,9 @@ Status: exploratory Phase 4 smoke; no production profile selected
 
 Date: 2026-07-24
 
+The later commit-pinned LSF lifecycle smoke is recorded separately in
+[`canonical_detection_storage_cluster_smoke_2026-07-24.md`](canonical_detection_storage_cluster_smoke_2026-07-24.md).
+
 ## Result
 
 The shared planner and array factory can materialize the complete nine-array
