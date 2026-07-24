@@ -1165,3 +1165,107 @@ def test_successor_tracking_resolution_requires_exact_keypoint_source(
             ),
             position_crop_run="successor",
         )
+
+
+def test_successor_tracking_resolution_uses_historical_identity_for_unknown_keypoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Node:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    historical = Node(
+        {
+            "edit_revision": 3,
+            "source_detect_run": "detect-authority",
+        }
+    )
+    base = Node({"source_detect_run": "unknown"})
+    refined = Node({"source_detect_run": "unknown"})
+    root = {
+        "crop_runs/historical": historical,
+        "keypoints_runs/base": base,
+    }
+    fingerprint = mod.RowsetFingerprint(
+        source_rowset_path="crop_runs/historical",
+        row_count=2,
+        source_edit_revision=3,
+        instance_key_digest="a" * 64,
+        fingerprint="b" * 64,
+        status="complete",
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _path: "crop_runs/historical",
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_group_rowset_fingerprint",
+        lambda group, **_kwargs: fingerprint if group is historical else None,
+    )
+
+    resolved = mod.resolve_collection_proxy_successor_tracking(
+        root,
+        keypoints=mod.KeypointResolution(
+            group=refined,
+            run_name="refined",
+            is_refined=True,
+            base_run_name="base",
+            crop_run="historical",
+        ),
+        position_crop_run="successor",
+    )
+
+    assert resolved.expected_detect_run == "detect-authority"
+
+
+def test_successor_tracking_resolution_rejects_detection_identity_disagreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Node:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    historical = Node(
+        {
+            "edit_revision": 3,
+            "source_detect_run": "historical-detect",
+        }
+    )
+    base = Node({"source_detect_run": "keypoint-detect"})
+    refined = Node({"source_detect_run": "keypoint-detect"})
+    root = {
+        "crop_runs/historical": historical,
+        "keypoints_runs/base": base,
+    }
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _path: "crop_runs/historical",
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_group_rowset_fingerprint",
+        lambda _group, **_kwargs: mod.RowsetFingerprint(
+            source_rowset_path="crop_runs/historical",
+            row_count=2,
+            source_edit_revision=3,
+            instance_key_digest="a" * 64,
+            fingerprint="b" * 64,
+            status="complete",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="do not identify one exact"):
+        mod.resolve_collection_proxy_successor_tracking(
+            root,
+            keypoints=mod.KeypointResolution(
+                group=refined,
+                run_name="refined",
+                is_refined=True,
+                base_run_name="base",
+                crop_run="historical",
+            ),
+            position_crop_run="successor",
+        )

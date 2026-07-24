@@ -1062,13 +1062,18 @@ def resolve_collection_proxy_successor_tracking(
         for value in (
             keypoints.group.attrs.get("source_detect_run"),
             base_group.attrs.get("source_detect_run"),
+            historical_group.attrs.get("source_detect_run"),
         )
-        if isinstance(value, str) and str(value).strip()
+        if (
+            isinstance(value, str)
+            and str(value).strip()
+            and str(value).strip().lower() != "unknown"
+        )
     }
     if len(candidates) != 1:
         raise ValueError(
-            "Keypoint lineage does not identify one exact source_detect_run for "
-            "successor tracking resolution."
+            "Keypoint and historical-rowset lineage do not identify one exact "
+            "source_detect_run for successor tracking resolution."
         )
     return CollectionProxySuccessorTrackingResolution(
         position_crop_run=successor_name,
