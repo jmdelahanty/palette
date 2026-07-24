@@ -116,22 +116,22 @@ Exit gate:
 
 ## Phase 1 — Cluster-Visible Safe Fixture
 
-- [ ] Create a cluster-visible safe fixture below the approved shared benchmark
+- [x] Create a cluster-visible safe fixture below the approved shared benchmark
       namespace.
-- [ ] Copy from the selected historical source in read-only mode.
-- [ ] Mark the copy noncanonical, unregistered, selector-ineligible, and
+- [x] Copy from the selected historical source in read-only mode.
+- [x] Mark the copy noncanonical, unregistered, selector-ineligible, and
       benchmark-only.
-- [ ] Record source and copied paths, Zarr version, schema observations, file
+- [x] Record source and copied paths, Zarr version, schema observations, file
       count, apparent bytes, and tree digest.
-- [ ] Verify exact relative-path and content equality after copying.
-- [ ] Make the fixture immutable to benchmark jobs.
-- [ ] Confirm no benchmark command can resolve a canonical recording path as a
+- [x] Verify exact relative-path and content equality after copying.
+- [x] Make the fixture immutable to benchmark jobs.
+- [x] Confirm no benchmark command can resolve a canonical recording path as a
       writable destination.
-- [ ] Record a stable fixture ID used by every case manifest.
+- [x] Record a stable fixture ID used by every case manifest.
 
 Exit gate:
 
-- [ ] The fixture can be staged by an LSF job without reading any mutable or
+- [x] The fixture can be staged by an LSF job without reading any mutable or
       actively produced dataset.
 
 ## Phase 2 — Matrix Planning And Deduplication
