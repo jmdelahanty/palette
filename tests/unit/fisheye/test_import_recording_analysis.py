@@ -46,6 +46,38 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
     assert result.returncode == 5
 
 
+def test_run_stimulus_import_forwards_metadata_and_calibration_only(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=tmp_path / "rec" / "raw" / "session.h5",
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+    opts = _opts()
+    opts.stimulus_metadata_and_calibration_only = True
+    captured: dict[str, object] = {}
+
+    class _Result:
+        returncode = 0
+
+    def _fake_run(cmd, *, check):
+        captured["cmd"] = list(cmd)
+        captured["check"] = check
+        return _Result()
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+
+    ok, returncode, cmd = mod.run_stimulus_import(plan, opts)
+
+    assert ok is True
+    assert returncode == 0
+    assert "--metadata-and-calibration-only" in cmd
+    assert captured == {"cmd": cmd, "check": False}
+
+
 def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path) -> None:
     class _FakeGroup:
         def __init__(self, groups: dict[str, object] | None = None, keys: list[str] | None = None) -> None:

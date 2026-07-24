@@ -107,6 +107,10 @@ from fisheye.shared.zarr_run_completion import (
 
 COORDINATE_CONTRACT_EPOCH = 1
 STIMULUS_IMPORT_VERSION = "2.0.0"
+SOURCE_COORDINATE_POLICY_CANONICAL = "canonical_required_v1"
+SOURCE_COORDINATE_POLICY_METADATA_ONLY = (
+    "omit_uncontracted_surfaces_metadata_and_calibration_only_v1"
+)
 COORDINATE_SURFACE_MANIFEST_ATTR = "coordinate_surface_manifest"
 COORDINATE_SURFACE_MANIFEST_DIGEST_ATTR = (
     f"{COORDINATE_SURFACE_MANIFEST_ATTR}_sha256"
@@ -255,6 +259,24 @@ class StimulusCoordinatePreflight:
     )
     source_acquisition_mapping_record: Mapping[str, Any] | None = None
     source_acquisition_mapping_record_sha256: str | None = None
+    source_coordinate_policy: str = SOURCE_COORDINATE_POLICY_CANONICAL
+    omitted_coordinate_source_paths: tuple[str, ...] = ()
+
+
+def _present_coordinate_source_paths(h5: h5py.File) -> tuple[str, ...]:
+    paths: list[str] = []
+    if "/stimulus_coordinates" in h5:
+        paths.append("/stimulus_coordinates")
+    for path in (
+        "/tracking_data/bounding_boxes",
+        "/tracking_data/chaser_states",
+        f"/tracking_data/{STIMULUS_STATE_KEY_ARRAY}",
+        f"/tracking_data/{LEGACY_SOURCE_ROW_IDENTITY_ARRAY}",
+        f"/tracking_data/{SOURCE_ACQUISITION_FRAME_INDEX_ARRAY}",
+    ):
+        if path in h5:
+            paths.append(path)
+    return tuple(paths)
 
 
 @dataclass(frozen=True)
@@ -1238,6 +1260,7 @@ def preflight_stimulus_coordinate_contract(
     h5: h5py.File,
     *,
     source_h5: Path,
+    metadata_and_calibration_only: bool = False,
 ) -> StimulusCoordinatePreflight:
     """Validate one already-open H5 handle before any destination mutation."""
 
@@ -1255,9 +1278,25 @@ def preflight_stimulus_coordinate_contract(
             f"Selected calibration evidence is invalid: {exc}"
         ) from exc
 
-    if "/protocol_snapshot" in h5:
-        raise StimulusCoordinateContractError(
-            "protocol_snapshot geometry lacks canonical array-specific support."
+    omitted_paths = _present_coordinate_source_paths(h5)
+    if metadata_and_calibration_only:
+        evidence = {
+            "source_file_identity": file_identity,
+            "selected_calibration_sha256": (
+                selected_calibration.source_evidence_sha256
+            ),
+            "source_coordinate_policy": SOURCE_COORDINATE_POLICY_METADATA_ONLY,
+            "omitted_coordinate_source_paths": list(omitted_paths),
+            "has_chaser_states": False,
+        }
+        return StimulusCoordinatePreflight(
+            source_h5=source,
+            source_file_identity=file_identity,
+            selected_calibration=selected_calibration,
+            source_contract_sha256=canonical_mapping_digest(evidence),
+            has_chaser_states=False,
+            source_coordinate_policy=SOURCE_COORDINATE_POLICY_METADATA_ONLY,
+            omitted_coordinate_source_paths=omitted_paths,
         )
     if "/stimulus_coordinates" in h5:
         raise StimulusCoordinateContractError(
@@ -1402,6 +1441,10 @@ def reverify_stimulus_coordinate_contract(
     current = preflight_stimulus_coordinate_contract(
         h5,
         source_h5=preflight.source_h5,
+        metadata_and_calibration_only=(
+            preflight.source_coordinate_policy
+            == SOURCE_COORDINATE_POLICY_METADATA_ONLY
+        ),
     )
     if current.source_file_identity != preflight.source_file_identity:
         raise StimulusCoordinateContractError(
@@ -2861,6 +2904,8 @@ __all__ = [
     "SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR",
     "SOURCE_ROW_INDICES_ARRAY",
     "SOURCE_ARENA_FRAME_ID",
+    "SOURCE_COORDINATE_POLICY_CANONICAL",
+    "SOURCE_COORDINATE_POLICY_METADATA_ONLY",
     "LEGACY_SOURCE_ROW_IDENTITY_ARRAY",
     "SourceSelectedCalibration",
     "StimulusCoordinateContractError",

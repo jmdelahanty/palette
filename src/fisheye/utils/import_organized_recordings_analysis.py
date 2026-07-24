@@ -255,6 +255,9 @@ def _make_import_options(args: argparse.Namespace) -> RecordingImportOptions:
         stimulus_overwrite=bool(args.stimulus_overwrite),
         stimulus_quiet=bool(args.stimulus_quiet),
         allow_preflight_failures=bool(args.allow_preflight_failures),
+        stimulus_metadata_and_calibration_only=bool(
+            args.stimulus_metadata_and_calibration_only
+        ),
     )
 
 
@@ -434,6 +437,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
     parser.add_argument(
+        "--stimulus-metadata-and-calibration-only",
+        action="store_true",
+        help=(
+            "Import stimulus events, protocol metadata, and selected calibration "
+            "while omitting H5 coordinate surfaces without canonical array-level "
+            "identity."
+        ),
+    )
+    parser.add_argument(
         "--allow-preflight-failures",
         action="store_true",
         help="Proceed even if recording_manifest.json marks preflight.status=fail.",
@@ -485,6 +497,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             skip_existing=not bool(args.overwrite),
             import_video_metadata=bool(args.import_video_metadata),
             import_stimulus=bool(args.import_stimulus),
+            stimulus_metadata_and_calibration_only=bool(
+                args.stimulus_metadata_and_calibration_only
+            ),
             allow_preflight_failures=bool(args.allow_preflight_failures),
             registry=str(args.registry.expanduser()) if args.registry is not None else None,
             created_at_utc=utc_now(),

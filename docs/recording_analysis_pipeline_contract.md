@@ -184,6 +184,12 @@ Supported entry points:
   - `scripts/py -m fisheye.utils.import_recordings_analysis --recording-only ...`
   - Equivalent explicit form: `--no-import-stimulus`
 
+For recordings whose H5 coordinate surfaces predate the canonical array-level
+identity contract, the import-only entry points also accept
+`--stimulus-metadata-and-calibration-only`. This preserves events, protocol step
+timing, and selected calibration while explicitly omitting uncontracted tracking
+coordinates; it is not a positional compatibility mode.
+
 Behavior:
 
 - `raw/*.h5` is required by default and whenever stimulus import is enabled.

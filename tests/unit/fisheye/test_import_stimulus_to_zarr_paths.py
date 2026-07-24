@@ -90,6 +90,7 @@ from fisheye.shared.stimulus_coordinate_contract import (
     SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR,
     SOURCE_ACQUISITION_MAPPING_SCHEMA_ID,
     SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION,
+    SOURCE_COORDINATE_POLICY_METADATA_ONLY,
     STIMULUS_IMPORT_VERSION,
     StimulusCoordinateContractError,
     arena_geometry_record,
@@ -3087,7 +3088,7 @@ def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) ->
     _write_stimulus_h5_with_protocol_steps(h5_path)
     with pytest.raises(
         StimulusCoordinateContractError,
-        match="protocol_snapshot geometry lacks canonical array-specific support",
+        match="stimulus_coordinates lacks canonical array-specific geometry support",
     ):
         mod.import_stimulus_to_zarr(
             stimulus_h5=h5_path,
@@ -3099,3 +3100,57 @@ def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) ->
         )
 
     assert not zarr_path.exists()
+
+
+def test_metadata_and_calibration_only_import_omits_uncontracted_coordinate_surfaces(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _write_stimulus_h5_with_protocol_steps(h5_path)
+    with h5py.File(h5_path, "a") as h5:
+        tracking = h5.create_group("tracking_data")
+        tracking.create_dataset(
+            "chaser_states",
+            data=np.asarray([(1000, 1.0, 2.0)], dtype=[
+                ("stimulus_frame_num", "<u8"),
+                ("chaser_pos_x", "<f4"),
+                ("chaser_pos_y", "<f4"),
+            ]),
+        )
+        tracking.create_dataset(
+            "bounding_boxes",
+            data=np.asarray([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32),
+        )
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_metadata_only",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+        metadata_and_calibration_only=True,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["analysis/stimulus_runs"][run_name]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["source_coordinate_policy"] == (
+        SOURCE_COORDINATE_POLICY_METADATA_ONLY
+    )
+    assert run.attrs["source_coordinate_surface_status"] == (
+        "omitted_uncontracted_source_surfaces"
+    )
+    assert run.attrs["omitted_coordinate_source_paths"] == [
+        "/stimulus_coordinates",
+        "/tracking_data/bounding_boxes",
+        "/tracking_data/chaser_states",
+    ]
+    assert run.attrs["chaser_states_coordinate_descriptor_status"] == "not_present"
+    assert "tracking_data" not in run
+    assert "stimulus_coordinates" not in run
+    assert "protocol_json" in run.attrs
+    assert "events" in run
+    assert "steps" in run
+    assert "calibration" in run

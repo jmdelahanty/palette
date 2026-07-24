@@ -57,6 +57,7 @@ class RecordingImportOptions:
     stimulus_overwrite: bool
     stimulus_quiet: bool
     allow_preflight_failures: bool = False
+    stimulus_metadata_and_calibration_only: bool = False
 
 
 @dataclass
@@ -348,6 +349,8 @@ def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOption
         cmd.append("--overwrite")
     if opts.stimulus_quiet:
         cmd.append("--quiet")
+    if opts.stimulus_metadata_and_calibration_only:
+        cmd.append("--metadata-and-calibration-only")
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, check=False)
     return result.returncode == 0, result.returncode, cmd
@@ -529,6 +532,9 @@ def _build_options(args: argparse.Namespace) -> RecordingImportOptions:
         stimulus_overwrite=bool(args.stimulus_overwrite),
         stimulus_quiet=bool(args.stimulus_quiet),
         allow_preflight_failures=bool(args.allow_preflight_failures),
+        stimulus_metadata_and_calibration_only=bool(
+            args.stimulus_metadata_and_calibration_only
+        ),
     )
 
 
@@ -584,6 +590,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
+    parser.add_argument(
+        "--stimulus-metadata-and-calibration-only",
+        action="store_true",
+        help=(
+            "Import stimulus events, protocol metadata, and selected calibration "
+            "while omitting H5 coordinate surfaces without canonical array-level "
+            "identity."
+        ),
+    )
     parser.add_argument(
         "--allow-preflight-failures",
         action="store_true",
