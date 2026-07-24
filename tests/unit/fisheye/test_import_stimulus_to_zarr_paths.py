@@ -3154,3 +3154,40 @@ def test_metadata_and_calibration_only_import_omits_uncontracted_coordinate_surf
     assert "events" in run
     assert "steps" in run
     assert "calibration" in run
+
+
+def test_metadata_only_import_initializes_empty_source_camera_frame_placeholder(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _write_stimulus_h5_with_protocol_steps(h5_path)
+    _prepare_acquisition_authority(zarr_path, total_frames=138_000)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    placeholder = root.require_group(
+        "analysis/coordinate_frames/source_camera/2010093/continuous"
+    )
+    assert dict(placeholder.attrs) == {}
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_metadata_empty_source_frame",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+        metadata_and_calibration_only=True,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    source_frame = root[
+        "analysis/coordinate_frames/source_camera/2010093/continuous"
+    ]
+    assert PIXEL_FRAME_AUTHORITY_ATTR in source_frame.attrs
+    assert PIXEL_FRAME_AUTHORITY_DIGEST_ATTR in source_frame.attrs
+    physical = load_stimulus_physical_coordinate_authority(
+        root,
+        stimulus_run=run_name,
+    )
+    assert physical is not None
+    assert physical.camera_id == "2010093"

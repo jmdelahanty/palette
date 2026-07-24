@@ -80,9 +80,15 @@ def test_run_stimulus_import_forwards_metadata_and_calibration_only(
 
 def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path) -> None:
     class _FakeGroup:
-        def __init__(self, groups: dict[str, object] | None = None, keys: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            groups: dict[str, object] | None = None,
+            keys: list[str] | None = None,
+            attrs: dict[str, object] | None = None,
+        ) -> None:
             self._groups = groups or {}
             self._keys = keys or []
+            self.attrs = attrs or {}
 
         def get(self, name: str):
             return self._groups.get(name)
@@ -102,6 +108,51 @@ def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
 
     assert mod.stimulus_runs_present(tmp_path / "sample_analysis.zarr")
+
+
+def test_stimulus_runs_present_rejects_failed_strict_run(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeGroup:
+        def __init__(
+            self,
+            groups: dict[str, object] | None = None,
+            keys: list[str] | None = None,
+            attrs: dict[str, object] | None = None,
+        ) -> None:
+            self._groups = groups or {}
+            self._keys = keys or []
+            self.attrs = attrs or {}
+
+        def get(self, name: str):
+            return self._groups.get(name)
+
+        def group_keys(self):
+            return list(self._keys)
+
+    failed = _FakeGroup(
+        attrs={
+            "palette_run_completion_status": "failed",
+            "stage_selector_eligible": False,
+        }
+    )
+    parent = _FakeGroup(
+        groups={"stimulus_failed": failed},
+        keys=["stimulus_failed"],
+        attrs={
+            "palette_completion_epoch": 2,
+            "latest": "stimulus_failed",
+        },
+    )
+    fake_root = _FakeGroup(
+        groups={
+            "analysis": _FakeGroup(groups={"stimulus_runs": parent}),
+        }
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
+
+    assert not mod.stimulus_runs_present(tmp_path / "sample_analysis.zarr")
 
 
 def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> None:
@@ -509,6 +560,35 @@ def test_resolve_single_recording_plan_still_requires_h5_by_default(tmp_path: Pa
         assert "no .h5 files" in str(exc)
     else:
         raise AssertionError("expected ValueError for missing raw/*.h5")
+
+
+def test_resolve_single_recording_plan_uses_manifest_full_video_to_disambiguate(
+    tmp_path: Path,
+) -> None:
+    rec = tmp_path / "rec"
+    (rec / "cams").mkdir(parents=True, exist_ok=True)
+    (rec / "raw").mkdir(parents=True, exist_ok=True)
+    full = rec / "cams" / "Cam2010096_full.mp4"
+    derived = rec / "cams" / "Cam2010096_preview.mp4"
+    full.touch()
+    derived.touch()
+    (rec / "raw" / "session.h5").touch()
+    (rec / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "video_streams": {
+                    "streams": {
+                        "full": {"video": "cams/Cam2010096_full.mp4"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = mod.resolve_single_recording_plan(recording_dir=rec)
+
+    assert plan.cam_video == full.resolve()
 
 
 def test_resolve_single_recording_plan_fails_on_ambiguous_video(tmp_path: Path) -> None:

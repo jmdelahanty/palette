@@ -37,6 +37,7 @@ from fisheye.shared.subject_metadata import (
     publish_subject_metadata,
     read_h5_subject_metadata,
 )
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 
 
 @dataclass
@@ -105,6 +106,27 @@ def _manifest_text(manifest: dict[str, object], *keys: str) -> Optional[str]:
     return None
 
 
+def _manifest_full_video(recording_dir: Path) -> Optional[Path]:
+    manifest = _load_recording_manifest(recording_dir)
+    video_streams = manifest.get("video_streams")
+    if not isinstance(video_streams, Mapping):
+        return None
+    streams = video_streams.get("streams")
+    if not isinstance(streams, Mapping):
+        return None
+    full = streams.get("full")
+    if not isinstance(full, Mapping):
+        return None
+    raw_path = full.get("video")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    candidate = Path(raw_path.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = recording_dir / candidate
+    candidate = candidate.resolve()
+    return candidate if candidate.is_file() else None
+
+
 def _producer_video_metadata(plan: RecordingAnalysisPlan) -> dict[str, Any]:
     """Return the organizer's producer-declared full-video fields, when present."""
 
@@ -158,6 +180,9 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
     stim = analysis.get("stimulus_runs")
     if stim is None:
         return False
+    attrs = getattr(stim, "attrs", {})
+    if "palette_completion_epoch" in attrs or "latest_complete" in attrs:
+        return resolve_latest_complete_run_name(stim) is not None
     try:
         return len(list(stim.group_keys())) > 0
     except Exception:
@@ -480,10 +505,18 @@ def resolve_single_recording_plan(
         if not mp4s:
             raise ValueError(f"no .mp4 files found under {cams_dir}")
         if len(mp4s) > 1:
-            raise ValueError(
-                f"multiple .mp4 files found under {cams_dir}; pass --video explicitly for single-recording mode"
-            )
-        cam_video = mp4s[0].resolve()
+            manifest_video = _manifest_full_video(rec_dir)
+            if manifest_video is None or manifest_video not in {
+                candidate.resolve() for candidate in mp4s
+            }:
+                raise ValueError(
+                    f"multiple .mp4 files found under {cams_dir} and no live "
+                    "recording_manifest.video_streams.streams.full.video disambiguates "
+                    "them; pass --video explicitly for single-recording mode"
+                )
+            cam_video = manifest_video
+        else:
+            cam_video = mp4s[0].resolve()
     else:
         cam_video = video.expanduser().resolve()
         if not cam_video.exists() or not cam_video.is_file():

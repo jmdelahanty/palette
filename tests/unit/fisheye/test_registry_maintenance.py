@@ -60,6 +60,7 @@ from fisheye.registry.maintenance import (
     _delete_paths,
     _is_safe_artifact_path,
     _normalize_run_ids,
+    _recording_calibration_status,
     _resolve_detect_quality_group,
     _extract_eye_mask_profile_rows_for_maintenance,
     _resolve_existing_run_ids,
@@ -720,6 +721,96 @@ class _FakeZarrModule:
     def open_group(self, path: str, mode: str = "r", consolidated: Optional[bool] = None) -> _FakeGroup:
         _ = mode, consolidated
         return self._roots_by_path[str(path)]
+
+
+def test_recording_calibration_status_discovers_selected_stimulus_camera() -> None:
+    root = _FakeGroup()
+    analysis = root.add_group("analysis")
+    stimulus_parent = analysis.add_group(
+        "stimulus_runs",
+        attrs={
+            "palette_completion_epoch": 2,
+            "latest": "stimulus_001",
+            "latest_complete": "stimulus_001",
+        },
+    )
+    stimulus = stimulus_parent.add_group(
+        "stimulus_001",
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
+    )
+    calibration = stimulus.add_group(
+        "calibration",
+        attrs={
+            "schema_id": "palette.selected_calibration_snapshot",
+            "schema_version": 2,
+            "active_camera_id": "2010093",
+            "active_camera_calibration_ref": (
+                "analysis/stimulus_runs/stimulus_001/calibration/2010093"
+            ),
+            "selected_calibration_manifest_sha256": "a" * 64,
+        },
+    )
+    camera = calibration.add_group(
+        "2010093",
+        attrs={
+            "pixels_per_mm_camera": 52.731327056884766,
+            "pixel_to_mm": 0.01896405904826241,
+        },
+    )
+
+    selected, status, reason, details = _recording_calibration_status(
+        root=root,
+        analysis_group=analysis,
+    )
+
+    assert selected is camera
+    assert status == "ok"
+    assert reason == "present_usable_camera_scale"
+    assert details["calibration_group_path"] == (
+        "analysis/stimulus_runs/stimulus_001/calibration/2010093"
+    )
+    assert details["source_stimulus_run"] == "stimulus_001"
+    assert details["stimulus_run_selection"] == "latest_complete"
+    assert details["active_camera_id"] == "2010093"
+    assert details["pixels_per_mm_camera"] == pytest.approx(52.731327056884766)
+    assert details["camera_scale_source_attr"] == "pixels_per_mm_camera"
+
+
+def test_recording_calibration_status_ignores_incomplete_stimulus_run() -> None:
+    root = _FakeGroup()
+    analysis = root.add_group("analysis")
+    stimulus_parent = analysis.add_group(
+        "stimulus_runs",
+        attrs={
+            "palette_completion_epoch": 2,
+            "latest": "stimulus_running",
+        },
+    )
+    stimulus = stimulus_parent.add_group(
+        "stimulus_running",
+        attrs={"palette_run_completion_status": "running"},
+    )
+    calibration = stimulus.add_group(
+        "calibration",
+        attrs={"active_camera_id": "2010093"},
+    )
+    calibration.add_group(
+        "2010093",
+        attrs={"pixels_per_mm_camera": 52.731327056884766},
+    )
+
+    selected, status, reason, details = _recording_calibration_status(
+        root=root,
+        analysis_group=analysis,
+    )
+
+    assert selected is None
+    assert status == "missing"
+    assert reason == "missing"
+    assert details == {"usable_camera_scale": False}
 
 
 def _add_fake_group_path(
