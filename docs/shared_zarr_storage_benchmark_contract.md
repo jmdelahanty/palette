@@ -86,6 +86,8 @@ The detection-specific benchmark and publication gates are tracked in
 [`canonical_detection_storage_implementation_checklist.md`](canonical_detection_storage_implementation_checklist.md).
 The cluster execution workflow is tracked separately in
 [`canonical_detection_storage_cluster_benchmark_checklist.md`](canonical_detection_storage_cluster_benchmark_checklist.md).
+The predeclared five-repetition reduction gates are frozen in
+[`canonical_detection_storage_reduction_contract.md`](canonical_detection_storage_reduction_contract.md).
 
 ## Parameter Matrix
 

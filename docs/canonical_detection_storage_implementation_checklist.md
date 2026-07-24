@@ -333,5 +333,7 @@ reusing shared logical contracts where the semantics are genuinely identical.
 
 - [x] Complete and document the first bounded 200k-frame cluster lifecycle
       smoke without promoting a profile.
-- [ ] Add the missing random/sequential/indexed read workloads, then run four
-      more balanced 200k-frame repetitions.
+- [x] Add the missing random/sequential/indexed read workloads and complete
+      four balanced 200k-frame repetitions.
+- [ ] Run the frozen cross-workflow reduction preview, collect repetition 5
+      without changing the workload, and apply the predeclared gates.

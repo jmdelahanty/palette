@@ -331,6 +331,11 @@ Exit gate:
 
 ## Phase 9 — Full Matrix And Candidate Reduction
 
+- [x] Freeze the five-repetition reduction control, metrics, ratios, and
+      selection objective before collecting repetition 5; see
+      [`canonical_detection_storage_reduction_contract.md`](canonical_detection_storage_reduction_contract.md).
+- [x] Validate the cross-workflow reducer against the existing four-repetition
+      evidence and confirm that it refuses selection.
 - [ ] Complete at least five balanced repetitions for every unique 200,000-frame
       physical plan.
 - [ ] Reject incorrect, dominated, or operationally unsafe candidates.

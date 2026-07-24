@@ -132,3 +132,16 @@ Before promotion:
 Evidence is stored in `matrix.json`, the four reports under
 `reports/blocks/`, per-candidate local/write/publication/PRFS reports beside
 the published candidates, and `aggregate.json` in the workflow root above.
+
+The frozen cross-workflow reducer was also run against this evidence before
+repetition 5. Its preview aggregate is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/
+canonical_detection_storage/reductions/
+sleepyfish_det_storage_200k_v2_four_rep_preview_20260724_01/aggregate.json
+```
+
+It combined four blocks and eight candidates, extracted peak RSS, and refused
+selection with `reason = insufficient_balanced_repetitions`. Reducer, matrix,
+and lifecycle validation passed 12 focused tests outside the sandbox.
