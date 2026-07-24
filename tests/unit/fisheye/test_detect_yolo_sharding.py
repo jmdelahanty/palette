@@ -468,6 +468,56 @@ def _assert_failed_producer_attempt_rolled_back(
         assert parent.attrs[name] == value
 
 
+def test_sanitize_backend_boxes_clips_to_exact_result_extent() -> None:
+    boxes, keep, report = mod._sanitize_backend_boxes_xyxy(  # noqa: SLF001
+        np.asarray(
+            [
+                [-1.0e-5, 10.0, 640.0001, 630.0],
+                [10.0, 20.0, 30.0, 40.0],
+            ],
+            dtype=np.float32,
+        ),
+        result_width=640,
+        result_height=640,
+    )
+
+    np.testing.assert_array_equal(keep, np.asarray([True, True]))
+    np.testing.assert_allclose(
+        boxes,
+        np.asarray([[0.0, 10.0, 640.0, 630.0], [10.0, 20.0, 30.0, 40.0]]),
+    )
+    assert report == {
+        "input_count": 2,
+        "clipped_count": 1,
+        "dropped_nonfinite_count": 0,
+        "dropped_nonpositive_count": 0,
+        "output_count": 2,
+    }
+
+
+def test_sanitize_backend_boxes_drops_nonfinite_and_collapsed_rows() -> None:
+    boxes, keep, report = mod._sanitize_backend_boxes_xyxy(  # noqa: SLF001
+        np.asarray(
+            [
+                [np.nan, 0.0, 2.0, 2.0],
+                [-5.0, 1.0, -1.0, 3.0],
+                [1.0, 1.0, 2.0, 2.0],
+            ],
+            dtype=np.float64,
+        ),
+        result_width=640,
+        result_height=640,
+    )
+
+    np.testing.assert_array_equal(keep, np.asarray([False, False, True]))
+    np.testing.assert_array_equal(boxes, np.asarray([[1.0, 1.0, 2.0, 2.0]]))
+    assert report == {
+        "input_count": 3,
+        "clipped_count": 1,
+        "dropped_nonfinite_count": 1,
+        "dropped_nonpositive_count": 1,
+        "output_count": 1,
+    }
 def test_write_detection_output_arrays_uses_complete_indexed_shards(tmp_path) -> None:
     group = zarr.open_group(tmp_path / "detect_sharded.zarr", mode="w")
     values = _detection_values()
