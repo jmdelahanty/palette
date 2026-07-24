@@ -21,6 +21,11 @@ from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
 from ..registry.stage_complete import emit_stage_completion
+from ..shared.experiment_setup import (
+    MissingExperimentSetupError,
+    ResolvedExperimentSetup,
+    resolve_expected_subject_count as resolve_setup_expected_subject_count,
+)
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.type_conversions import normalize_attr
@@ -148,30 +153,26 @@ def _read_sampled_import_meta(root: zarr.Group) -> Tuple[bool, Dict[str, Any]]:
     return sampled, meta
 
 
-def _get_expected_subject_count(root: zarr.Group) -> Optional[int]:
-    setup = root.attrs.get("experiment_setup", {})
-    if setup:
-        total_expected = setup.get("total_expected_fish")
-        if total_expected is None:
-            total_expected = setup.get("subject_count")
-        try:
-            if total_expected is not None:
-                return int(total_expected)
-        except Exception:
-            pass
-    return None
-
-
 def _resolve_expected_subject_count(
     root: zarr.Group,
     explicit_count: Optional[int],
-) -> Optional[int]:
-    if explicit_count is not None:
+    *,
+    require_experiment_setup: bool,
+) -> tuple[Optional[int], Optional[ResolvedExperimentSetup]]:
+    try:
+        expected, setup = resolve_setup_expected_subject_count(
+            root,
+            explicit_count,
+            allow_legacy=True,
+        )
+        return expected, setup
+    except MissingExperimentSetupError:
+        if require_experiment_setup:
+            raise
         expected = _as_positive_int(explicit_count)
-        if expected is None:
+        if explicit_count is not None and expected is None:
             raise ValueError("--expected-subject-count must be a positive integer")
-        return expected
-    return _get_expected_subject_count(root)
+        return expected, None
 
 
 def _as_positive_int(value: object) -> Optional[int]:
@@ -592,6 +593,7 @@ def save_quality_report(
     if "sampling" in quality_report:
         quality_group.attrs["sampling"] = quality_report["sampling"]
     expected_subject_count = _as_positive_int(quality_report["coverage"].get("expected_count"))
+    experiment_setup = quality_report.get("experiment_setup")
     count_policy = {
         "expected_subject_count": expected_subject_count,
         "over_expected_label": 4,
@@ -604,6 +606,10 @@ def save_quality_report(
     quality_group.attrs["count_policy"] = count_policy
     if expected_subject_count is not None:
         quality_group.attrs["expected_subject_count"] = expected_subject_count
+    if isinstance(experiment_setup, dict):
+        quality_group.attrs["experiment_setup_path"] = experiment_setup["group_path"]
+        quality_group.attrs["experiment_setup_sha256"] = experiment_setup["record_sha256"]
+        quality_group.attrs["experiment_setup_legacy"] = bool(experiment_setup.get("legacy"))
 
     # Load detection data
     frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
@@ -706,6 +712,7 @@ def save_quality_report(
         'jump_threshold_pixels_effective': quality_report['artifacts'].get('jump_threshold_pixels_effective'),
         'jump_threshold_reference_width': quality_report['artifacts'].get('jump_threshold_reference_width'),
         'expected_subject_count': expected_subject_count,
+        'experiment_setup': experiment_setup,
         'count_policy': count_policy,
         'temporal_artifact_policy': quality_report['artifacts'].get('temporal_artifact_policy'),
     }
@@ -772,6 +779,16 @@ def save_quality_report(
                 "source_detect_run": source_run,
                 "source_detect_family_path": detect_family_path,
                 "source_detect_path": _join_group_path(detect_family_path, source_run),
+                "experiment_setup_path": (
+                    experiment_setup.get("group_path")
+                    if isinstance(experiment_setup, dict)
+                    else None
+                ),
+                "experiment_setup_sha256": (
+                    experiment_setup.get("record_sha256")
+                    if isinstance(experiment_setup, dict)
+                    else None
+                ),
             },
         ),
     )
@@ -820,6 +837,7 @@ def analyze_detect_quality(
     threshold_mode: str = "pixels",
     threshold_reference_width: float = 640.0,
     expected_subject_count: Optional[int] = None,
+    require_experiment_setup: bool = True,
 ) -> Dict:
     """
     Comprehensive detection quality analysis.
@@ -837,7 +855,11 @@ def analyze_detect_quality(
     root = open_zarr_group_direct(zarr_path, mode="r")
     detect_family_path = _normalize_group_path(detect_family_path)
     sampled, sampled_meta = _read_sampled_import_meta(root)
-    expected_count = _resolve_expected_subject_count(root, expected_subject_count)
+    expected_count, experiment_setup = _resolve_expected_subject_count(
+        root,
+        expected_subject_count,
+        require_experiment_setup=require_experiment_setup,
+    )
 
     # Get detect run
     if run_name is None:
@@ -976,6 +998,17 @@ def analyze_detect_quality(
             "sampled": bool(sampled),
             **sampled_meta,
         },
+        "experiment_setup": (
+            {
+                "group_path": experiment_setup.group_path,
+                "run_name": experiment_setup.run_name,
+                "record_sha256": experiment_setup.record_sha256,
+                "expected_subject_count": experiment_setup.expected_subject_count,
+                "legacy": experiment_setup.legacy,
+            }
+            if experiment_setup is not None
+            else None
+        ),
     }
 
 
@@ -1011,6 +1044,14 @@ Examples:
         help=(
             "Group path containing detect runs (default: detect_runs). "
             "Use clips/<clip>/cameras/<serial>/detect_runs for clip-local runs."
+        ),
+    )
+    parser.add_argument(
+        "--allow-missing-experiment-setup",
+        action="store_true",
+        help=(
+            "Compatibility-only: allow quality analysis without a canonical or "
+            "legacy experiment setup. Production runs should not use this flag."
         ),
     )
     parser.add_argument(
@@ -1092,6 +1133,7 @@ Examples:
             threshold_mode=args.threshold_mode,
             threshold_reference_width=args.threshold_reference_width,
             expected_subject_count=args.expected_subject_count,
+            require_experiment_setup=not args.allow_missing_experiment_setup,
         )
 
         # Print detailed summary

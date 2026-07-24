@@ -36,6 +36,7 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
         return False, 5, ["stimulus"]
 
     monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "import_experiment_setup", lambda _plan: None)
     monkeypatch.setattr(mod, "stimulus_runs_present", lambda _path: False)
     monkeypatch.setattr(mod, "run_stimulus_import", _fake_stim)
     result = mod.process_recording_import(plan, opts, logger=None)
@@ -192,9 +193,17 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
     video.write_bytes(b"video")
     h5_path.write_bytes(b"h5")
     root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
-    root.attrs.update({"recording_id": "rec", "camera_id": "2010093"})
+    root.attrs.update(
+        {
+            "recording_id": "rec",
+            "camera_id": "2010093",
+            "source_video_metadata": {
+                "imageio_metadata": {"nframes": 1.7976931348623157e308}
+            },
+        }
+    )
 
-    def _fake_probe(_path: Path) -> dict[str, object]:
+    def _fake_probe(_path: Path, **_kwargs: object) -> dict[str, object]:
         return {
             "source_video": video.name,
             "source_path": str(video),
@@ -235,12 +244,50 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
         "relative_path": f"cams/{video.name}",
     }
     assert root.attrs["source_video_metadata"]["camera_id"] == "2010093"
+    assert "imageio_metadata" not in root.attrs["source_video_metadata"]
     authority = root["analysis/acquisition_camera_frames/2010093"]
     assert authority.attrs["acquisition_import_ownership"]["mode"] == (
         "external_video_v1"
     )
     assert authority.attrs["acquisition_camera_frame"]["width_px"] == 4512
     assert authority.attrs["acquisition_camera_frame"]["height_px"] == 4512
+
+
+def test_producer_video_metadata_selects_manifest_stream_for_source_video(tmp_path: Path) -> None:
+    rec = tmp_path / "rec"
+    video = rec / "cams" / "cam.mp4"
+    video.parent.mkdir(parents=True)
+    video.touch()
+    (rec / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "video_streams": {
+                    "streams": {
+                        "full": {
+                            "video": "cams/cam.mp4",
+                            "frame_count": 139295,
+                            "frame_rate": 100,
+                            "codec": "hevc",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=rec,
+        h5_path=None,
+        cam_video=video,
+        zarr_path=rec / "zarr" / "rec_analysis.zarr",
+    )
+
+    assert mod._producer_video_metadata(plan) == {  # noqa: SLF001
+        "_source": "recording_manifest.video_streams.streams.full",
+        "total_frames": 139295,
+        "fps": 100,
+        "codec": "hevc",
+    }
 
 
 def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(
@@ -488,6 +535,7 @@ def test_process_recording_import_allows_failed_preflight_when_overridden(monkey
         seen["ensure"] = True
 
     monkeypatch.setattr(mod, "ensure_analysis_archive", _fake_ensure)
+    monkeypatch.setattr(mod, "import_experiment_setup", lambda _plan: None)
 
     result = mod.process_recording_import(plan, opts, logger=None)
 

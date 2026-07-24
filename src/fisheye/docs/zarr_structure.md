@@ -84,6 +84,19 @@ validation details are recorded in `recording_step_status.details_json`, but a
 stage only blocks on array-contract failures after it is explicitly added to
 `_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`.
 
+### `analysis/subject_metadata_runs/` and `analysis/experiment_setup_runs/`
+
+New H5-backed imports store immutable acquisition subject snapshots as
+versioned `palette.subject_metadata.v1` runs under
+`analysis/subject_metadata_runs/<run>` and publish the declared acquisition plan as a
+versioned `palette.experiment_setup.v2` run under
+`analysis/experiment_setup_runs/<run>`. The setup distinguishes expected and
+assigned subjects from the upstream source-dish population. Detection quality
+and refinement bind the selected setup path and digest. Root
+`experiment_setup`/`subject_count` attrs and stimulus-run subject snapshots are
+historical compatibility projections, not the modern authority. See
+`docs/experiment_setup_contract.md`.
+
 Shadow-mode registry telemetry can be inspected with:
 
 ```bash

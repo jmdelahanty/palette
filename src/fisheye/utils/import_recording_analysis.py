@@ -22,6 +22,10 @@ from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PUBLISHED,
     load_acquisition_authority_publication_status,
 )
+from fisheye.shared.experiment_setup import (
+    build_experiment_setup_record,
+    publish_experiment_setup,
+)
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.import_video_metadata import (
     probe_video_metadata,
@@ -29,6 +33,10 @@ from fisheye.shared.import_video_metadata import (
     write_video_metadata,
 )
 from fisheye.shared.recording_preflight import preflight_gate_reason
+from fisheye.shared.subject_metadata import (
+    publish_subject_metadata,
+    read_h5_subject_metadata,
+)
 
 
 @dataclass
@@ -276,6 +284,43 @@ def _write_source_h5_fingerprint(
     return {"root_attrs_updated": root_updated, "raw_video_attrs_updated": raw_updated}
 
 
+def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, Any]]:
+    """Publish canonical subject metadata and experiment setup from the H5."""
+
+    if plan.h5_path is None:
+        return None
+    subject_metadata = read_h5_subject_metadata(plan.h5_path)
+    if not subject_metadata:
+        return None
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    subject_authority = publish_subject_metadata(
+        root,
+        subject_metadata,
+        source_h5_path=plan.h5_path,
+    )
+    record = build_experiment_setup_record(
+        subject_metadata,
+        source_h5_path=plan.h5_path,
+        subject_metadata_sha256=subject_authority.record_sha256,
+        subject_metadata_ref=subject_authority.group_path,
+    )
+    resolved = publish_experiment_setup(
+        root,
+        record,
+        source_h5_path=plan.h5_path,
+    )
+    return {
+        "run_name": resolved.run_name,
+        "group_path": resolved.group_path,
+        "record_sha256": resolved.record_sha256,
+        "expected_subject_count": resolved.expected_subject_count,
+        "assigned_subject_count": resolved.assigned_subject_count,
+        "subject_metadata_run": subject_authority.run_name,
+        "subject_metadata_path": subject_authority.group_path,
+        "subject_metadata_sha256": subject_authority.record_sha256,
+    }
+
+
 def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) -> None:
     if logger is not None:
         logger(event, **fields)
@@ -351,6 +396,20 @@ def process_recording_import(
             raw_video_attrs_updated=updates["raw_video_attrs_updated"],
             overwrite=bool(opts.video_metadata_overwrite),
         )
+
+    if plan.h5_path is not None:
+        try:
+            setup = import_experiment_setup(plan)
+        except Exception as exc:
+            return RecordingImportResult(ok=False, failed_step="import_experiment_setup", error=str(exc))
+        if setup is not None:
+            _log(
+                logger,
+                "experiment_setup_imported",
+                recording_dir=str(plan.recording_dir),
+                zarr_path=str(plan.zarr_path),
+                **setup,
+            )
 
     if opts.import_stimulus:
         if plan.h5_path is None:
