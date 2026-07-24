@@ -220,6 +220,10 @@ Exit gate:
 Initial smoke evidence and its limitations are recorded in
 [`diagnostics/canonical_detection_storage_benchmark_smoke_2026-07-24.md`](diagnostics/canonical_detection_storage_benchmark_smoke_2026-07-24.md).
 
+Cluster matrix implementation and the required stage-to-scratch,
+local-compute, publish-back lifecycle are tracked in
+[`canonical_detection_storage_cluster_benchmark_checklist.md`](canonical_detection_storage_cluster_benchmark_checklist.md).
+
 ## Phase 5 — `detect_yolo` Production Integration
 
 - [ ] Route canonical array creation through the shared schema/storage owner.
