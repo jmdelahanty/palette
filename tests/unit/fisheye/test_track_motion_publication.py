@@ -2297,6 +2297,65 @@ def test_validator_rejects_omitted_tracking_arena_authorities(
             [(7, track)],
         )
 
+
+def test_validator_accepts_negative_unassigned_tracking_rows_outside_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, track, sealed, _physical = _clone_full_motion_run(
+        monkeypatch,
+        source_rows=np.asarray([0], dtype=np.int64),
+    )
+    tracking = root["tracking_runs"]["trk_1"]
+    tracking["track_ids"].data[1] = np.int32(-1)
+    authority = mod.build_track_motion_input_authority(
+        root,
+        source_positions=sealed.position_bindings.source_positions,
+        mode="offline_exact_sources_v1",
+        heading_node=root["keypoints_runs"]["kp_1"]["heading"],
+        keypoint_usability_node=root["keypoints_runs"]["kp_1"]["heading_usable"],
+        keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
+        tracking_group=tracking,
+    )
+    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority.record
+
+    _manifest, values = mod._validate_track_motion_input_authority(
+        root,
+        run,
+        sealed.position_bindings,
+        [(7, track)],
+    )
+
+    assert values["track_id"].tolist() == [7, -1]
+
+
+def test_validator_rejects_nonnegative_tracking_row_missing_from_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, track, sealed, _physical = _clone_full_motion_run(
+        monkeypatch,
+        source_rows=np.asarray([0], dtype=np.int64),
+    )
+    tracking = root["tracking_runs"]["trk_1"]
+    tracking["track_ids"].data[1] = np.int32(8)
+    authority = mod.build_track_motion_input_authority(
+        root,
+        source_positions=sealed.position_bindings.source_positions,
+        mode="offline_exact_sources_v1",
+        heading_node=root["keypoints_runs"]["kp_1"]["heading"],
+        keypoint_usability_node=root["keypoints_runs"]["kp_1"]["heading_usable"],
+        keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
+        tracking_group=tracking,
+    )
+    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority.record
+
+    with pytest.raises(ValueError, match="assigned track IDs disagree"):
+        mod._validate_track_motion_input_authority(
+            root,
+            run,
+            sealed.position_bindings,
+            [(7, track)],
+        )
+
     missing_inventory = copy.deepcopy(original)
     missing_inventory["arena_inventory"] = None
     run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = missing_inventory

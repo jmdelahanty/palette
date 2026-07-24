@@ -7039,7 +7039,17 @@ def _validate_track_motion_input_authority(
     arena_values = values["arena_id"]
     track_values = values["track_id"]
     if arena_values is not None and inventory_map is not None:
-        for track_id in np.unique(track_values):
+        observed_assigned_track_ids = {
+            int(track_id)
+            for track_id in np.unique(track_values).tolist()
+            if int(track_id) >= 0
+        }
+        if observed_assigned_track_ids != set(inventory_map):
+            raise ValueError(
+                "Tracking row-level assigned track IDs disagree with its exact "
+                "track inventory."
+            )
+        for track_id in sorted(observed_assigned_track_ids):
             selected = arena_values[track_values == track_id]
             unique_arenas = np.unique(selected)
             if unique_arenas.shape != (1,) or inventory_map.get(int(track_id)) != int(
