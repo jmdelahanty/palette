@@ -1,6 +1,6 @@
 # Zarr payload integrity and validation receipts
 
-Status: active pilot contract
+Status: production-scale canary validated; guarded track publisher pilot
 Schema versions: `palette.zarr_payload_integrity_receipt` v1 and
 `palette.zarr_payload_validation_receipt` v1
 Initial adopter: guarded track-kinematics materialization
@@ -155,3 +155,10 @@ Before production rollout, rerun the same long Sleepyfish recording and verify:
 - selector and rollback tests remain green; and
 - completion and activation time decrease without moving cost into an
   unmeasured phase.
+
+This acceptance was satisfied by LSF job `153171881` at Palette commit
+`6d976a57`. The canary's decoded root exactly matched the preceding equivalent
+publication, the standard exhaustive public loader accepted all `104` motion
+surfaces, and authoritative publication fell from `1,521.7` to `448.4`
+seconds. Detailed phase evidence is recorded in
+[`analysis_materializer_runtime_telemetry.md`](analysis_materializer_runtime_telemetry.md).

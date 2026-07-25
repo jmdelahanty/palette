@@ -104,3 +104,43 @@ construction, canonical coordinate binding, and post-binding physical
 verification. Completion still performs one exhaustive full-motion scientific
 validation. Final validation uses the bound receipt, and activation freshly
 rehashes the immutable physical payload before selector eligibility is exposed.
+
+## Receipt-mode Sleepyfish canary
+
+The first production-scale receipt canary completed successfully on 2026-07-24:
+
+- Palette commit: `6d976a57`
+- LSF job: `153171881`
+- host: `h07u31`
+- source: cam2010095, `1,169,010` track rows
+- output: `track_kinematics_sleepyfish_cam2010095_receipt_canary_20260724_v001`
+- requested slots / shard workers: `8` / `8`
+- application wall time: `576.0` seconds
+- LSF execution time: `592` seconds
+- maximum RSS: `1.7` GiB
+
+The like-for-like authoritative publication phase fell from `1,521.7` to
+`448.4` seconds: a `70.5%` reduction and approximately `3.4x` speedup.
+
+| Publication phase | Before (s) | Receipt canary (s) |
+|---|---:|---:|
+| Post-rename binding | 247.3 | 240.5 |
+| Completion / full-motion sealing | 646.6 | 192.1 |
+| Two authoritative validations | 125.2 | 1.3 combined |
+| Final selector activation / resealing | 490.6 | 1.2 |
+| Receipt construction | n/a | 0.4 |
+| Post-binding physical verification | n/a | 0.6 |
+
+The baseline and canary decoded-payload roots were exactly equal:
+`0d246d1df9424314bd7c9c2cd9246fb64206fb3f38961522e64447bd87bab6e3`.
+This binds equal persisted logical values across all `106` arrays despite the
+different immutable run names, code commits, hosts, and provenance records.
+The normal exhaustive public full-motion loader also accepted the completed
+canary and rebound one track with `104` derived-motion surfaces.
+
+The canary confirms that receipt hashing did not move the bottleneck. The two
+remaining dominant phases are canonical binding (`240.5` seconds) and the one
+required scientific completion seal (`192.1` seconds). Eight workers were
+useful for only the `3.7`-second sharded-copy phase; average LSF CPU efficiency
+was `13.78%`. Future tuning should profile those two serial scientific phases
+and separately reconsider the default slot count.
