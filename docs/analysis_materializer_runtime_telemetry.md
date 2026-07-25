@@ -105,6 +105,14 @@ verification. Completion still performs one exhaustive full-motion scientific
 validation. Final validation uses the bound receipt, and activation freshly
 rehashes the immutable physical payload before selector eligibility is exposed.
 
+Canonical binding additionally records nested durations for receipt preflight,
+initial exhaustive payload validation, attribute snapshotting, per-track
+coordinate publication, post-binding physical/metadata reverification, binding
+status commit, and the closing array-proof recheck. Receipt-backed binding
+omits the immediate exhaustive publication reload and duplicate final staging
+validator. The materializer then checks the persisted receipt identities rather
+than repeating the binder's just-completed physical rehash.
+
 ## Receipt-mode Sleepyfish canary
 
 The first production-scale receipt canary completed successfully on 2026-07-24:

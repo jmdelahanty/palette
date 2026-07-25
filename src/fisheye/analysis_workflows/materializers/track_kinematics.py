@@ -530,6 +530,21 @@ def _writer_result_summary(value: Any, *, label: str) -> dict[str, Any]:
             summary[name] = raw_value
         elif name == "errors" and isinstance(raw_value, (list, tuple)):
             summary[name] = [str(item) for item in raw_value]
+        elif name == "binding_phase_seconds" and isinstance(raw_value, Mapping):
+            phases: dict[str, float] = {}
+            for raw_phase_name, raw_seconds in raw_value.items():
+                phase_name = str(raw_phase_name)
+                if (
+                    not phase_name
+                    or type(raw_seconds) not in {int, float}
+                    or not np.isfinite(raw_seconds)
+                    or float(raw_seconds) < 0.0
+                ):
+                    raise ValueError(
+                        f"{label} returned an invalid binding phase duration."
+                    )
+                phases[phase_name] = float(raw_seconds)
+            summary[name] = phases
     return summary
 
 
@@ -734,6 +749,9 @@ def publish_track_kinematics_run(
             run,
             expected_keypoint_run=plan.keypoint_run,
             expected_run_name=plan.run_name,
+            payload_integrity_receipt=integrity_receipt,
+            payload_run_path=plan.target_run_path,
+            payload_hash_workers=max(1, int(plan.shard_workers)),
         )
         canonical_binding_seconds = float(time.perf_counter() - binding_started)
         summary = _require_valid_writer_result(
@@ -748,20 +766,28 @@ def publish_track_kinematics_run(
             raise RuntimeError(
                 "Canonical binder must not mark the run complete or update pointers."
             )
-        post_binding_verification_started = time.perf_counter()
-        verify_payload_integrity_receipt(
-            plan.target_run_path,
-            integrity_receipt,
-            expected_run_ref=f"/{run.path}",
-            hash_workers=max(1, int(plan.shard_workers)),
-            verify_physical_payload=True,
-        )
-        post_binding_physical_verification_seconds = float(
-            time.perf_counter() - post_binding_verification_started
-        )
-        run.attrs[
+        post_binding_receipt_check_started = time.perf_counter()
+        bound_integrity = run.attrs.get(
             track_writer.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR
-        ] = json_attr_safe(integrity_receipt)
+        )
+        if bound_integrity != json_attr_safe(integrity_receipt):
+            raise RuntimeError(
+                "Canonical binder did not retain the exact verified payload receipt."
+            )
+        binding_validation = run.attrs.get(
+            track_writer.TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR
+        )
+        if (
+            not isinstance(binding_validation, Mapping)
+            or binding_validation.get("record_sha256")
+            != summary.get("binding_validation_receipt_sha256")
+        ):
+            raise RuntimeError(
+                "Canonical binder did not retain its exact validation receipt."
+            )
+        post_binding_receipt_check_seconds = float(
+            time.perf_counter() - post_binding_receipt_check_started
+        )
         transaction["payload_integrity_receipt"] = integrity_receipt
         transaction["binding_complete"] = True
         return {
@@ -781,8 +807,8 @@ def publish_track_kinematics_run(
                 ]["root_sha256"],
                 "receipt_build_seconds": receipt_build_seconds,
                 "canonical_binding_seconds": canonical_binding_seconds,
-                "post_binding_physical_verification_seconds": (
-                    post_binding_physical_verification_seconds
+                "post_binding_receipt_check_seconds": (
+                    post_binding_receipt_check_seconds
                 ),
             },
         }

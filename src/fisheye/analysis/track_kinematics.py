@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -78,6 +79,10 @@ from fisheye.shared.coordinate_identity import (
 from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     load_persisted_acquisition_camera_authority,
+)
+from fisheye.shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
 )
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.observation_coordinate_publication import (
@@ -384,6 +389,24 @@ TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR = (
 TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR = (
     "track_motion_payload_validation_receipt"
 )
+TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR = (
+    "track_kinematics_binding_validation_receipt"
+)
+TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_ID = (
+    "palette.track_kinematics_canonical_binding_input_validator"
+)
+TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
+TRACK_KINEMATICS_BINDING_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_kinematics_binding_numerical_policy",
+    "schema_version": 1,
+    "scientific_validation": (
+        "exact_staging_manifest_identity_time_position_subset_and_physical_scaling"
+    ),
+    "payload_transition": "metadata_only_final_path_coordinate_binding",
+    "post_binding_integrity": (
+        "exact_physical_payload_and_immutable_zarr_metadata_reverification"
+    ),
+}
 TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID = "palette.track_motion_full_validator"
 TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
 TRACK_MOTION_NUMERICAL_POLICY = {
@@ -4360,6 +4383,7 @@ _MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES = frozenset(
         TRACK_MOTION_PUBLICATION_COMMIT_ATTR,
         TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
         TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR,
+        TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR,
         # The atomic materializer updates this operational receipt after the
         # scientific publication has been sealed and validated.  It is not a
         # scientific or coordinate authority and therefore must remain outside
@@ -11595,21 +11619,50 @@ def stage_offline_track_kinematics_run(
     }
 
 
+@proof_verification_operation
 def bind_staged_offline_track_kinematics_run(
     authoritative_root: zarr.Group,
     final_run_group: zarr.Group,
     *,
     expected_keypoint_run: str,
     expected_run_name: str,
+    payload_integrity_receipt: Mapping[str, Any] | None = None,
+    payload_run_path: str | Path | None = None,
+    payload_hash_workers: int = 4,
 ) -> Mapping[str, Any]:
     """Bind a validated stage only at its authoritative final archive path."""
 
+    receipt_mode = payload_integrity_receipt is not None or payload_run_path is not None
+    if receipt_mode and (
+        payload_integrity_receipt is None or payload_run_path is None
+    ):
+        raise ValueError(
+            "Receipt-backed track binding requires both integrity receipt and run path."
+        )
+    if type(payload_hash_workers) is not int or payload_hash_workers <= 0:
+        raise ValueError("Track binding payload hash workers must be positive.")
     if archive_identity(authoritative_root) != archive_identity(final_run_group):
         raise ValueError(
             "Final track run is not inside the supplied authoritative archive."
         )
+    phase_seconds: dict[str, float] = {}
+    canonical_integrity: dict[str, Any] | None = None
+    if receipt_mode:
+        assert payload_integrity_receipt is not None
+        started = time.perf_counter()
+        canonical_integrity = canonical_payload_integrity_receipt(
+            payload_integrity_receipt
+        )
+        if canonical_integrity["run_ref"] != f"/{final_run_group.path}":
+            raise ValueError(
+                "Track binding integrity receipt names a different canonical run."
+            )
+        phase_seconds["integrity_receipt_preflight"] = float(
+            time.perf_counter() - started
+        )
+    started = time.perf_counter()
     (
-        _,
+        staging_manifest,
         digest,
         surface,
         physical_authority,
@@ -11624,6 +11677,29 @@ def bind_staged_offline_track_kinematics_run(
         require_complete=False,
         expected_selector_eligible=False,
     )
+    phase_seconds["initial_exhaustive_payload_validation"] = float(
+        time.perf_counter() - started
+    )
+    binding_validation_receipt: dict[str, Any] | None = None
+    if canonical_integrity is not None:
+        binding_validation_receipt = build_payload_validation_receipt(
+            canonical_integrity,
+            scientific_manifest_schema_id=(
+                TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_ID
+            ),
+            scientific_manifest_schema_version=int(
+                staging_manifest["schema_version"]
+            ),
+            scientific_manifest_sha256=digest,
+            validator_schema_id=(
+                TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_ID
+            ),
+            validator_schema_version=(
+                TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+            ),
+            numerical_policy=TRACK_KINEMATICS_BINDING_NUMERICAL_POLICY,
+        )
+    started = time.perf_counter()
     attrs_targets: list[Any] = [final_run_group.attrs]
     for _, subgroup in groups:
         attrs_targets.extend(
@@ -11636,7 +11712,10 @@ def bind_staged_offline_track_kinematics_run(
         if physical_authority is not None:
             attrs_targets.append(subgroup["positions_mm"].attrs)
     snapshots = [copy.deepcopy(dict(attrs)) for attrs in attrs_targets]
+    phase_seconds["attribute_snapshot"] = float(time.perf_counter() - started)
     try:
+        started = time.perf_counter()
+        bound_publications: list[TrackPositionPublicationResult] = []
         for track_id, subgroup in groups:
             track_sample_key_node = subgroup["track_sample_key"]
             source_row_index_node = subgroup["source_row_index"]
@@ -11674,40 +11753,114 @@ def bind_staged_offline_track_kinematics_run(
             )
             if np.any(key_values[:, 0] != track_id):
                 raise ValueError("Track identity changed during final-path binding.")
-            publish_track_position_coordinates(
-                subgroup,
-                subgroup["positions_px"],
-                subgroup["source_row_index"],
-                track_row_identity=identity,
-                source_positions=surface.coordinates,
-                source_temporal_authority=surface.temporal_authority,
-                positions_mm_node=(
-                    subgroup["positions_mm"]
-                    if physical_authority is not None
-                    else None
-                ),
-                physical_frame=(
-                    physical_authority.physical_frame
-                    if physical_authority is not None
-                    else None
-                ),
+            bound_publications.append(
+                publish_track_position_coordinates(
+                    subgroup,
+                    subgroup["positions_px"],
+                    subgroup["source_row_index"],
+                    track_row_identity=identity,
+                    source_positions=surface.coordinates,
+                    source_temporal_authority=surface.temporal_authority,
+                    positions_mm_node=(
+                        subgroup["positions_mm"]
+                        if physical_authority is not None
+                        else None
+                    ),
+                    physical_frame=(
+                        physical_authority.physical_frame
+                        if physical_authority is not None
+                        else None
+                    ),
+                )
             )
-        for _, subgroup in groups:
-            _load_bound_track_publication(
-                subgroup,
-                surface=surface,
-                physical_authority=physical_authority,
+        phase_seconds["per_track_coordinate_publication"] = float(
+            time.perf_counter() - started
+        )
+        if not receipt_mode:
+            started = time.perf_counter()
+            for _, subgroup in groups:
+                _load_bound_track_publication(
+                    subgroup,
+                    surface=surface,
+                    physical_authority=physical_authority,
+                )
+            phase_seconds["post_stamp_exhaustive_reload"] = float(
+                time.perf_counter() - started
             )
+        elif len(bound_publications) != len(groups) or any(
+            not isinstance(publication, TrackPositionPublicationResult)
+            for publication in bound_publications
+        ):
+            raise RuntimeError(
+                "Receipt-backed track binding lost a freshly sealed track publication."
+            )
+        started = time.perf_counter()
         final_run_group.attrs[TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
             TRACK_KINEMATICS_BOUND_CANONICAL_STATUS
         )
-        validated = _validate_bound_offline_track_kinematics_run_or_raise(
-            authoritative_root,
-            final_run_group,
-            expected_keypoint_run=expected_keypoint_run,
-            expected_run_name=expected_run_name,
-            require_complete=False,
-            expected_selector_eligible=False,
+        phase_seconds["binding_status_commit"] = float(
+            time.perf_counter() - started
+        )
+        if receipt_mode:
+            assert payload_run_path is not None
+            assert canonical_integrity is not None
+            assert binding_validation_receipt is not None
+            started = time.perf_counter()
+            verified_integrity = verify_payload_integrity_receipt(
+                payload_run_path,
+                canonical_integrity,
+                expected_run_ref=f"/{final_run_group.path}",
+                hash_workers=payload_hash_workers,
+                verify_physical_payload=True,
+            )
+            verified_validation = verify_payload_validation_receipt(
+                binding_validation_receipt,
+                integrity_receipt=verified_integrity,
+                expected_scientific_manifest_sha256=digest,
+                expected_validator_schema_id=(
+                    TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_ID
+                ),
+                expected_validator_schema_version=(
+                    TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+                ),
+            )
+            final_run_group.attrs[TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = (
+                json_attr_safe(verified_integrity)
+            )
+            final_run_group.attrs[
+                TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR
+            ] = json_attr_safe(verified_validation)
+            phase_seconds["post_binding_payload_reverification"] = float(
+                time.perf_counter() - started
+            )
+            validated: Mapping[str, Any] = {
+                "valid": True,
+                "status": TRACK_KINEMATICS_BOUND_CANONICAL_STATUS,
+                "run_name": expected_run_name,
+                "track_count": len(groups),
+                "row_count": total_rows,
+                "binding_manifest_sha256": digest,
+            }
+        else:
+            started = time.perf_counter()
+            validated = _validate_bound_offline_track_kinematics_run_or_raise(
+                authoritative_root,
+                final_run_group,
+                expected_keypoint_run=expected_keypoint_run,
+                expected_run_name=expected_run_name,
+                require_complete=False,
+                expected_selector_eligible=False,
+            )
+            phase_seconds["final_exhaustive_bound_validation"] = float(
+                time.perf_counter() - started
+            )
+        started = time.perf_counter()
+        # Close every operation-scoped array proof while attribute rollback is
+        # still available.  The decorator would otherwise close the proof only
+        # after this function returned, outside the rollback boundary.
+        finish_proof_verification()
+        phase_seconds["closing_array_proof_reverification"] = float(
+            time.perf_counter() - started
         )
         return {
             **validated,
@@ -11715,6 +11868,12 @@ def bind_staged_offline_track_kinematics_run(
             "track_count": len(groups),
             "row_count": total_rows,
             "binding_manifest_sha256": digest,
+            "binding_phase_seconds": phase_seconds,
+            "binding_validation_receipt_sha256": (
+                None
+                if binding_validation_receipt is None
+                else binding_validation_receipt["record_sha256"]
+            ),
         }
     except BaseException as exc:
         rollback_errors: list[str] = []

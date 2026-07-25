@@ -209,6 +209,9 @@ def _install_writer_api(
         *,
         expected_keypoint_run,
         expected_run_name,
+        payload_integrity_receipt,
+        payload_run_path,
+        payload_hash_workers,
     ):
         assert expected_keypoint_run == "refined/kp_1"
         assert expected_run_name == "track_1"
@@ -222,6 +225,9 @@ def _install_writer_api(
         assert str(final_run_group.attrs["palette_run_completion_status"]) == "running"
         assert final_run_group.attrs["stage_selector_eligible"] is False
         assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
+        assert payload_integrity_receipt["run_ref"] == f"/{final_run_group.path}"
+        assert Path(payload_run_path).name == "track_1"
+        assert payload_hash_workers >= 1
         events.append(
             (
                 "bind",
@@ -248,11 +254,22 @@ def _install_writer_api(
         final_run_group.attrs[mod.COORDINATE_BINDING_STATUS_ATTR] = (
             mod.BOUND_CANONICAL_STATUS
         )
+        final_run_group.attrs[
+            mod.track_writer.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR
+        ] = dict(payload_integrity_receipt)
+        final_run_group.attrs[
+            mod.track_writer.TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR
+        ] = {"record_sha256": "f" * 64}
         return {
             "valid": True,
             "status": mod.BOUND_CANONICAL_STATUS,
             "track_count": 2,
             "binding_manifest_sha256": "d" * 64,
+            "binding_validation_receipt_sha256": "f" * 64,
+            "binding_phase_seconds": {
+                "initial_exhaustive_payload_validation": 1.25,
+                "post_binding_payload_reverification": 0.5,
+            },
         }
 
     def validate_before_selection(
@@ -556,6 +573,11 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         "status": mod.BOUND_CANONICAL_STATUS,
         "track_count": 2,
         "binding_manifest_sha256": "d" * 64,
+        "binding_validation_receipt_sha256": "f" * 64,
+        "binding_phase_seconds": {
+            "initial_exhaustive_payload_validation": 1.25,
+            "post_binding_payload_reverification": 0.5,
+        },
     }
     assert staging["payload_integrity_receipt"]["record_sha256"] == run.attrs[
         mod.track_writer.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR

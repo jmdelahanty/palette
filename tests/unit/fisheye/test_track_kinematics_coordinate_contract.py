@@ -768,6 +768,168 @@ def test_deferred_track_stage_binds_only_at_authoritative_final_path(
     assert track_position.positions_mm is None
 
 
+def test_receipt_backed_binding_reuses_fresh_publications_and_skips_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+    )
+    run_name = "tk_receipt_bound"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, path: surface if path == "crop_runs/c1" else None,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    root = _WritableGroup(path="", archive_token=world["archive_token"])
+    analysis = root.create_group("analysis")
+    runs = analysis.create_group("track_kinematics_runs")
+    offline = runs.create_group("offline")
+    offline.children[run_name] = run
+    run_ref = f"/{run.path}"
+    integrity = {"run_ref": run_ref, "record_sha256": "e" * 64}
+    validation = {"record_sha256": "f" * 64}
+
+    monkeypatch.setattr(
+        mod,
+        "canonical_payload_integrity_receipt",
+        lambda value: dict(integrity) if value is integrity else dict(value),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_payload_validation_receipt",
+        lambda *_args, **_kwargs: dict(validation),
+    )
+
+    def verify_integrity(
+        path,
+        value,
+        *,
+        expected_run_ref,
+        hash_workers,
+        verify_physical_payload,
+    ):
+        assert str(path).endswith(run_name)
+        assert value == integrity
+        assert expected_run_ref == run_ref
+        assert hash_workers == 3
+        assert verify_physical_payload is True
+        return dict(integrity)
+
+    monkeypatch.setattr(mod, "verify_payload_integrity_receipt", verify_integrity)
+    monkeypatch.setattr(
+        mod,
+        "verify_payload_validation_receipt",
+        lambda value, **_kwargs: dict(value),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_bound_track_publication",
+        lambda *_args, **_kwargs: pytest.fail(
+            "receipt-backed binding must reuse the freshly sealed publication"
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_validate_bound_offline_track_kinematics_run_or_raise",
+        lambda *_args, **_kwargs: pytest.fail(
+            "receipt-backed binding must not repeat the exhaustive validator"
+        ),
+    )
+
+    bound = mod.bind_staged_offline_track_kinematics_run(
+        root,
+        run,
+        expected_keypoint_run="kp_1",
+        expected_run_name=run_name,
+        payload_integrity_receipt=integrity,
+        payload_run_path=f"/tmp/{run_name}",
+        payload_hash_workers=3,
+    )
+
+    assert bound["valid"] is True
+    assert bound["binding_validation_receipt_sha256"] == "f" * 64
+    assert "post_stamp_exhaustive_reload" not in bound["binding_phase_seconds"]
+    assert "final_exhaustive_bound_validation" not in bound[
+        "binding_phase_seconds"
+    ]
+    assert run.attrs[mod.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] == integrity
+    assert run.attrs[mod.TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR] == (
+        validation
+    )
+
+
+def test_binding_closes_array_proofs_before_rollback_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+    )
+    run_name = "tk_proof_close_failure"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, path: surface if path == "crop_runs/c1" else None,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    before = copy.deepcopy(dict(run.attrs))
+    monkeypatch.setattr(
+        mod,
+        "finish_proof_verification",
+        lambda: (_ for _ in ()).throw(RuntimeError("closing proof drift")),
+    )
+
+    with pytest.raises(RuntimeError, match="closing proof drift"):
+        mod.bind_staged_offline_track_kinematics_run(
+            world["root"],
+            run,
+            expected_keypoint_run="kp_1",
+            expected_run_name=run_name,
+        )
+
+    assert dict(run.attrs) == before
+
+
 def test_deferred_physical_payload_is_unbound_until_final_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

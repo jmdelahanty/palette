@@ -116,6 +116,29 @@ The public `load_bound_track_motion_run` reader remains exhaustive and rebuilds
 the live scientific manifest. Receipt-mode verification is private to the
 guarded publisher and cannot mint normal reader authority.
 
+### Canonical binding proof reuse
+
+Canonical coordinate binding has its own validation receipt. Before changing
+metadata, the binder still runs the complete staging-manifest validator over
+identity, temporal lineage, position subsets, and physical scaling. During that
+single guarded operation, repeated payload-hash requests for the same exact
+archive/path/dtype/shape reuse one verified value. The proof scope performs a
+fresh closing read before returning, while attribute rollback is still
+available.
+
+In receipt mode, each coordinate publisher returns an already sealed binding.
+The binder therefore does not immediately reload those bindings or rerun the
+same complete staging validator. Instead, it rehashes the immutable physical
+payload in parallel, rechecks immutable Zarr metadata, and persists
+`track_kinematics_binding_validation_receipt`. A caller that supplies no
+integrity receipt retains the exhaustive reload and final-validator path.
+
+The guarded materializer requires the exact integrity and binding-validation
+receipts returned by the binder. It does not perform a third immediately
+adjacent physical rehash. Later completion, activation, and ordinary public
+reader proofs remain separate operation boundaries and reverify according to
+their existing contracts.
+
 ## Mutation behavior
 
 Publication fails closed when any of these occurs:
