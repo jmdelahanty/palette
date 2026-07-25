@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from fisheye.shared.zarr.storage_intent import AccessPattern
 
@@ -15,6 +15,41 @@ from fisheye.shared.zarr.storage_profiles import (
     PUBLISHED_HTTP_V1,
     make_benchmark_storage_profile,
 )
+
+
+def parse_access_chunk_bytes_option(value: str) -> tuple[str, int]:
+    """Parse one ``ACCESS:BYTES`` benchmark CLI option."""
+
+    raw_access, separator, raw_bytes = str(value).partition(":")
+    if not separator:
+        raise ValueError("Access chunk target must use ACCESS:BYTES syntax.")
+    access = AccessPattern(raw_access.strip()).value
+    try:
+        target = int(raw_bytes)
+    except ValueError as exc:
+        raise ValueError("Access chunk target bytes must be an integer.") from exc
+    if target <= 0:
+        raise ValueError("Access chunk target bytes must be positive.")
+    return access, target
+
+
+def collect_access_chunk_bytes_options(
+    values: Iterable[tuple[str, int]],
+) -> dict[str, int]:
+    """Collect parsed access targets while rejecting duplicate classes."""
+
+    targets: dict[str, int] = {}
+    for raw_access, raw_target in values:
+        access = AccessPattern(raw_access).value
+        if access in targets:
+            raise ValueError(
+                f"Duplicate access chunk target for {access!r}."
+            )
+        target = int(raw_target)
+        if target <= 0:
+            raise ValueError("Access chunk target bytes must be positive.")
+        targets[access] = target
+    return targets
 
 
 def plan_detection_benchmark_candidate(
@@ -49,4 +84,8 @@ def plan_detection_benchmark_candidate(
     return plan_canonical_detection_storage(dimensions, profile=profile)
 
 
-__all__ = ["plan_detection_benchmark_candidate"]
+__all__ = [
+    "collect_access_chunk_bytes_options",
+    "parse_access_chunk_bytes_option",
+    "plan_detection_benchmark_candidate",
+]

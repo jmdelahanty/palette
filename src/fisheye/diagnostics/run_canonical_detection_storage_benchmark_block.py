@@ -35,6 +35,7 @@ from fisheye.shared.zarr.detection_benchmark_access import (
 from fisheye.shared.zarr.detection_benchmark_staging import (
     prepare_canonical_detection_benchmark_staging,
 )
+from fisheye.shared.zarr.storage_intent import AccessPattern
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -48,6 +49,33 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Expected a JSON object: {path}")
     return value
+
+
+def _extend_candidate_storage_arguments(
+    command: list[str],
+    request: Mapping[str, object],
+) -> None:
+    """Append the complete serialized storage request to a child CLI."""
+
+    shard_bytes = request.get("target_shard_bytes")
+    if shard_bytes is not None:
+        command.extend(["--shard-bytes", str(int(shard_bytes))])
+    raw_targets = request.get("target_chunk_bytes_by_access", {})
+    if not isinstance(raw_targets, Mapping):
+        raise ValueError("Candidate access chunk targets must be an object.")
+    unknown = set(raw_targets).difference(access.value for access in AccessPattern)
+    if unknown:
+        raise ValueError(
+            f"Candidate has unknown access chunk targets: {sorted(unknown)!r}."
+        )
+    for access in AccessPattern:
+        if access.value in raw_targets:
+            command.extend(
+                [
+                    "--access-chunk-bytes",
+                    f"{access.value}:{int(raw_targets[access.value])}",
+                ]
+            )
 
 
 def _sha256_file(path: Path) -> str:
@@ -320,8 +348,7 @@ def run_benchmark_block(
                 str(request["layout"]),
                 "--apply",
             ]
-            if request.get("target_shard_bytes") is not None:
-                command.extend(["--shard-bytes", str(request["target_shard_bytes"])])
+            _extend_candidate_storage_arguments(command, request)
             subprocess_started = time.perf_counter()
             completed = subprocess.run(
                 command,
@@ -360,10 +387,7 @@ def run_benchmark_block(
                 "--read-seed",
                 str(matrix["seed"]),
             ]
-            if request.get("target_shard_bytes") is not None:
-                local_read_command.extend(
-                    ["--shard-bytes", str(request["target_shard_bytes"])]
-                )
+            _extend_candidate_storage_arguments(local_read_command, request)
             local_read_started = time.perf_counter()
             local_read_completed = subprocess.run(
                 local_read_command,
@@ -408,10 +432,7 @@ def run_benchmark_block(
                 "--read-seed",
                 str(matrix["seed"]),
             ]
-            if request.get("target_shard_bytes") is not None:
-                read_command.extend(
-                    ["--shard-bytes", str(request["target_shard_bytes"])]
-                )
+            _extend_candidate_storage_arguments(read_command, request)
             read_started = time.perf_counter()
             read_completed = subprocess.run(
                 read_command,

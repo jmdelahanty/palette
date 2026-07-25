@@ -17,6 +17,8 @@ from fisheye.shared.zarr.detection_benchmark_access import (
     require_detection_consumer_workloads,
 )
 from fisheye.shared.zarr.detection_benchmark_planning import (
+    collect_access_chunk_bytes_options,
+    parse_access_chunk_bytes_option,
     plan_detection_benchmark_candidate,
 )
 from fisheye.shared.zarr.detection_benchmark_reads import (
@@ -32,6 +34,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--storage-tier", required=True)
     parser.add_argument("--chunk-bytes", required=True, type=int)
     parser.add_argument("--shard-bytes", type=int)
+    parser.add_argument(
+        "--access-chunk-bytes",
+        action="append",
+        default=[],
+        type=parse_access_chunk_bytes_option,
+        metavar="ACCESS:BYTES",
+    )
     parser.add_argument("--layout", choices=("regular", "sharded"), required=True)
     parser.add_argument("--read-seed", type=int, default=20_260_724)
     args = parser.parse_args(argv)
@@ -42,11 +51,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     benchmark_input = load_canonical_detection_benchmark_input(
         args.canonical_staging
     )
+    try:
+        access_chunk_bytes = collect_access_chunk_bytes_options(
+            args.access_chunk_bytes
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     plans = plan_detection_benchmark_candidate(
         benchmark_input.dimensions,
         target_chunk_bytes=int(args.chunk_bytes),
         target_shard_bytes=args.shard_bytes,
         layout=args.layout,
+        target_chunk_bytes_by_access=access_chunk_bytes,
     )
     report = benchmark_detection_candidate_reads(
         benchmark_input,

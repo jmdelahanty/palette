@@ -25,6 +25,7 @@ from fisheye.shared.zarr.canonical_detection_benchmark import (
     write_detection_benchmark_candidate,
 )
 from fisheye.shared.zarr.detection_benchmark_matrix import (
+    ACCESS_AWARE_HYBRID_REQUEST,
     plan_canonical_detection_benchmark_matrix,
 )
 from fisheye.shared.zarr.detection_benchmark_access import (
@@ -395,12 +396,7 @@ def test_tiny_block_runs_one_fixed_staging_candidate_and_copy_back(
         ),
         destination_root=workflow / "candidates",
         repetitions=1,
-        candidate_requests=(
-            StorageCandidateRequest(
-                layout=BenchmarkLayout.REGULAR,
-                target_chunk_bytes=MIB,
-            ),
-        ),
+        candidate_requests=(ACCESS_AWARE_HYBRID_REQUEST,),
     ).as_manifest()
     matrix_path = workflow / "matrix.json"
     matrix_path.parent.mkdir(parents=True)
