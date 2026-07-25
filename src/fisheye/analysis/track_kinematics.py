@@ -147,6 +147,12 @@ from fisheye.shared.source_camera_physical_authority import (
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr.columnar import load_structured_dataset
+from fisheye.shared.zarr_payload_receipt import (
+    build_payload_validation_receipt,
+    canonical_payload_integrity_receipt,
+    verify_payload_integrity_receipt,
+    verify_payload_validation_receipt,
+)
 from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
 
 
@@ -372,6 +378,25 @@ TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_ID = (
 )
 TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION = 1
 TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION_V2 = 2
+TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR = (
+    "track_motion_payload_integrity_receipt"
+)
+TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR = (
+    "track_motion_payload_validation_receipt"
+)
+TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID = "palette.track_motion_full_validator"
+TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
+TRACK_MOTION_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_motion_numerical_policy",
+    "schema_version": 1,
+    "scientific_validation": (
+        "full_live_manifest_numeric_invariants_physical_scaling_domains_and_aliases"
+    ),
+    "floating_comparison": (
+        "persisted_dtype_exact_for_declared_aliases_and_versioned_tolerance_for_derivations"
+    ),
+    "integrity_after_validation": "exact_decoded_shards_plus_physical_payload_sha256",
+}
 TRACK_MOTION_INPUT_AUTHORITY_ATTR = "track_motion_input_authority"
 TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_ID = "palette.track_motion_input_authority"
 TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_VERSION = 1
@@ -2447,12 +2472,25 @@ def mark_track_kinematics_run_complete(
     run_type: str,
     publication_owner_uuid: str,
     validate_complete_run: Callable[[zarr.Group], Mapping[str, Any]],
+    payload_integrity_receipt: Mapping[str, Any] | None = None,
+    payload_run_path: str | Path | None = None,
+    payload_hash_workers: int = 4,
     defer_selector_eligibility: bool = False,
     deferred_activation_sink: (
         Callable[[DeferredTrackKinematicsSelectorActivation], None] | None
     ) = None,
 ) -> Optional[DeferredTrackKinematicsSelectorActivation]:
     """Validate a complete ineligible run, prepare pointers, and expose it last."""
+
+    receipt_mode = payload_integrity_receipt is not None or payload_run_path is not None
+    if receipt_mode and (
+        payload_integrity_receipt is None or payload_run_path is None
+    ):
+        raise ValueError(
+            "Track receipt publication requires both integrity receipt and run path."
+        )
+    if type(payload_hash_workers) is not int or payload_hash_workers <= 0:
+        raise ValueError("Track payload hash workers must be positive.")
 
     if deferred_activation_sink is not None and not defer_selector_eligibility:
         raise ValueError(
@@ -2593,6 +2631,13 @@ def mark_track_kinematics_run_complete(
             raise RuntimeError(
                 "Complete track run produced no sealed full-motion tracks."
             )
+        if receipt_mode:
+            assert payload_integrity_receipt is not None
+            _persist_track_motion_payload_validation_receipt(
+                sealed_motion.run_group,
+                sealed_motion,
+                payload_integrity_receipt=payload_integrity_receipt,
+            )
         resolved_run = _resolve_owned_track_run_child(
             root,
             run_name=run_name,
@@ -2613,7 +2658,24 @@ def mark_track_kinematics_run_complete(
             owner_uuid=owner_uuid,
         )
         assert resolved_run is not None
-        sealed_motion.assert_verified()
+        if receipt_mode:
+            assert payload_run_path is not None
+            receipt_validation = verify_track_motion_payload_validation_receipt(
+                root,
+                resolved_run,
+                expected_publication_owner_uuid=owner_uuid,
+                run_path=payload_run_path,
+                require_complete=True,
+                verify_physical_payload=False,
+                hash_workers=payload_hash_workers,
+            )
+            if receipt_validation.get("valid") is not True:
+                raise RuntimeError(
+                    "Track completion payload receipt validation failed: "
+                    f"{receipt_validation!r}."
+                )
+        else:
+            sealed_motion.assert_verified()
 
         write_selector(
             "analysis/track_kinematics_runs",
@@ -2676,7 +2738,8 @@ def mark_track_kinematics_run_complete(
             owner_uuid=owner_uuid,
         )
         assert resolved_run is not None
-        sealed_motion.assert_verified()
+        if not receipt_mode:
+            sealed_motion.assert_verified()
         baseline_motion_manifest_sha256 = getattr(
             sealed_motion,
             "manifest_sha256",
@@ -2760,21 +2823,45 @@ def mark_track_kinematics_run_complete(
                     "Track eligibility commit fresh validation did not report "
                     f"valid=true: {validation!r}."
                 )
-            fresh_motion = _seal_and_load_track_motion_run_before_selection(
-                commit_root,
-                fresh_run,
-                expected_publication_owner_uuid=owner_uuid,
-            )
-            if not fresh_motion.tracks or (
-                baseline_motion_manifest_sha256 is not None
-                and getattr(fresh_motion, "manifest_sha256", None)
-                != baseline_motion_manifest_sha256
-            ):
-                raise RuntimeError(
-                    "Track eligibility commit observed different sealed motion "
-                    "payload."
+            if receipt_mode:
+                assert payload_run_path is not None
+                receipt_validation = verify_track_motion_payload_validation_receipt(
+                    commit_root,
+                    fresh_run,
+                    expected_publication_owner_uuid=owner_uuid,
+                    run_path=payload_run_path,
+                    require_complete=True,
+                    verify_physical_payload=True,
+                    hash_workers=payload_hash_workers,
                 )
-            fresh_motion.assert_verified()
+                if (
+                    receipt_validation.get("valid") is not True
+                    or (
+                        baseline_motion_manifest_sha256 is not None
+                        and receipt_validation.get("manifest_sha256")
+                        != baseline_motion_manifest_sha256
+                    )
+                ):
+                    raise RuntimeError(
+                        "Track eligibility commit observed a different receipt-bound "
+                        f"motion payload: {receipt_validation!r}."
+                    )
+            else:
+                fresh_motion = _seal_and_load_track_motion_run_before_selection(
+                    commit_root,
+                    fresh_run,
+                    expected_publication_owner_uuid=owner_uuid,
+                )
+                if not fresh_motion.tracks or (
+                    baseline_motion_manifest_sha256 is not None
+                    and getattr(fresh_motion, "manifest_sha256", None)
+                    != baseline_motion_manifest_sha256
+                ):
+                    raise RuntimeError(
+                        "Track eligibility commit observed different sealed motion "
+                        "payload."
+                    )
+                fresh_motion.assert_verified()
             fresh_run = _resolve_owned_track_run_child(
                 commit_root,
                 run_name=run_name,
@@ -4271,6 +4358,8 @@ _MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES = frozenset(
         TRACK_MOTION_PUBLICATION_MANIFEST_ATTR,
         TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR,
         TRACK_MOTION_PUBLICATION_COMMIT_ATTR,
+        TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+        TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR,
         # The atomic materializer updates this operational receipt after the
         # scientific publication has been sealed and validated.  It is not a
         # scientific or coordinate authority and therefore must remain outside
@@ -10902,6 +10991,7 @@ def _load_bound_track_motion_run_impl(
     run_group: zarr.Group,
     *,
     expected_selector_eligible: bool,
+    prevalidated_live_manifest: Mapping[str, Any] | None = None,
 ) -> BoundTrackMotionRun:
     """Freshly bind the exact sealed motion payload from live arrays."""
 
@@ -10997,10 +11087,17 @@ def _load_bound_track_motion_run_impl(
         raise ValueError(
             "Track full-motion publication commit does not bind the exact manifest."
         )
-    live_manifest = _build_track_motion_publication_manifest(
-        authoritative_root,
-        run_group,
-        positions,
+    live_manifest = (
+        _motion_json_object(
+            prevalidated_live_manifest,
+            label=f"/{run_group.path} prevalidated live full-motion manifest",
+        )
+        if prevalidated_live_manifest is not None
+        else _build_track_motion_publication_manifest(
+            authoritative_root,
+            run_group,
+            positions,
+        )
     )
     if not _track_attr_values_equal(manifest, live_manifest):
         raise ValueError(
@@ -11168,7 +11265,144 @@ def _seal_and_load_track_motion_run_before_selection(
         authoritative_root,
         run_group,
         expected_selector_eligible=False,
+        prevalidated_live_manifest=manifest,
     )
+
+
+def _persist_track_motion_payload_validation_receipt(
+    run_group: zarr.Group,
+    sealed_motion: BoundTrackMotionRun,
+    *,
+    payload_integrity_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the one exhaustive motion validation to its immutable payload."""
+
+    integrity = canonical_payload_integrity_receipt(payload_integrity_receipt)
+    if integrity["run_ref"] != f"/{run_group.path}":
+        raise ValueError(
+            "Track payload integrity receipt names a different canonical run."
+        )
+    validation = build_payload_validation_receipt(
+        integrity,
+        scientific_manifest_schema_id=TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
+        scientific_manifest_schema_version=int(
+            sealed_motion.manifest["schema_version"]
+        ),
+        scientific_manifest_sha256=sealed_motion.manifest_sha256,
+        validator_schema_id=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
+        validator_schema_version=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
+        numerical_policy=TRACK_MOTION_NUMERICAL_POLICY,
+    )
+    run_group.attrs[TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = json_attr_safe(
+        integrity
+    )
+    run_group.attrs[TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR] = json_attr_safe(
+        validation
+    )
+    return validation
+
+
+def verify_track_motion_payload_validation_receipt(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_publication_owner_uuid: str,
+    run_path: str | Path,
+    require_complete: bool,
+    verify_physical_payload: bool,
+    hash_workers: int = 4,
+) -> Mapping[str, Any]:
+    """Verify a guarded publication receipt without minting reader authority."""
+
+    try:
+        run_group = _fresh_track_run_group(authoritative_root, run_group)
+        owner_uuid = _track_publication_owner_uuid(run_group)
+        if owner_uuid != str(expected_publication_owner_uuid):
+            raise ValueError("Track payload receipt observed a different owner.")
+        expected_completion = "complete" if require_complete else "running"
+        if (
+            run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+            != expected_completion
+            or run_group.attrs.get("stage_selector_eligible") is not False
+            or run_group.attrs.get(
+                TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR
+            )
+            != TRACK_KINEMATICS_BOUND_CANONICAL_STATUS
+        ):
+            raise ValueError(
+                "Track payload receipt observed a different binding, completion, "
+                "or selector state."
+            )
+        raw_manifest = run_group.attrs.get(TRACK_MOTION_PUBLICATION_MANIFEST_ATTR)
+        raw_digest = run_group.attrs.get(
+            TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR
+        )
+        raw_commit = run_group.attrs.get(TRACK_MOTION_PUBLICATION_COMMIT_ATTR)
+        if (
+            not isinstance(raw_manifest, Mapping)
+            or not isinstance(raw_digest, str)
+            or not isinstance(raw_commit, Mapping)
+        ):
+            raise ValueError("Track payload receipt lacks its full-motion manifest.")
+        manifest = _motion_json_object(
+            raw_manifest,
+            label=f"/{run_group.path} receipt-bound full-motion manifest",
+        )
+        if (
+            raw_digest != _canonical_json_sha256(manifest)
+            or manifest.get("run_ref") != f"/{run_group.path}"
+            or _motion_json_object(
+                raw_commit,
+                label=f"/{run_group.path} receipt-bound publication commit",
+            )
+            != _track_motion_publication_commit(manifest)
+        ):
+            raise ValueError(
+                "Track payload receipt observed a stale manifest or publication commit."
+            )
+        raw_integrity = run_group.attrs.get(
+            TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR
+        )
+        raw_validation = run_group.attrs.get(
+            TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR
+        )
+        if not isinstance(raw_integrity, Mapping) or not isinstance(
+            raw_validation, Mapping
+        ):
+            raise ValueError("Track run lacks its payload integrity or validation receipt.")
+        integrity = verify_payload_integrity_receipt(
+            run_path,
+            raw_integrity,
+            expected_run_ref=f"/{run_group.path}",
+            hash_workers=int(hash_workers),
+            verify_physical_payload=bool(verify_physical_payload),
+        )
+        validation = verify_payload_validation_receipt(
+            raw_validation,
+            integrity_receipt=integrity,
+            expected_scientific_manifest_sha256=raw_digest,
+            expected_validator_schema_id=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
+            expected_validator_schema_version=(
+                TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+            ),
+        )
+        return {
+            "valid": True,
+            "status": "receipt_bound_track_motion_valid",
+            "run_name": str(run_group.path).rsplit("/", 1)[-1],
+            "manifest_sha256": raw_digest,
+            "integrity_receipt_sha256": integrity["record_sha256"],
+            "validation_receipt_sha256": validation["record_sha256"],
+            "physical_payload_verified": bool(verify_physical_payload),
+        }
+    except Exception as exc:
+        return {
+            "valid": False,
+            "status": "invalid",
+            "run_name": str(getattr(run_group, "path", "")).rsplit("/", 1)[-1],
+            "errors": [str(exc)],
+            "physical_payload_verified": bool(verify_physical_payload),
+        }
 
 
 def load_bound_track_motion_run(

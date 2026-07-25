@@ -93,3 +93,14 @@ changes in order:
 
 Any reduction in validation must be implemented as a new, reviewed publication
 contract. Telemetry alone does not authorize skipping an existing proof step.
+
+## Receipt-mode track publication
+
+The guarded track-kinematics v3 publisher implements the first versioned
+receipt optimization described above. See
+[`zarr_payload_validation_receipt_contract.md`](zarr_payload_validation_receipt_contract.md).
+Its post-rename metadata records separate durations for physical receipt
+construction, canonical coordinate binding, and post-binding physical
+verification. Completion still performs one exhaustive full-motion scientific
+validation. Final validation uses the bound receipt, and activation freshly
+rehashes the immutable physical payload before selector eligibility is exposed.

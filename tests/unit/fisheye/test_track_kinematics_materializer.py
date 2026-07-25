@@ -320,8 +320,37 @@ def _install_writer_api(
         events.append(("seal_motion", False, "complete"))
         return SimpleNamespace(
             tracks=(object(), object()),
+            run_group=final_run_group,
+            manifest={"schema_version": 2},
+            manifest_sha256="e" * 64,
             assert_verified=lambda: None,
         )
+
+    def verify_receipt(
+        authoritative_root,
+        final_run_group,
+        *,
+        expected_publication_owner_uuid,
+        run_path,
+        require_complete,
+        verify_physical_payload,
+        hash_workers,
+    ):
+        assert str(authoritative_root.attrs["source_revision"]) == "source-revision-1"
+        assert final_run_group.attrs["palette_run_completion_status"] == (
+            "complete" if require_complete else "running"
+        )
+        assert expected_publication_owner_uuid == final_run_group.attrs[
+            mod.track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR
+        ]
+        assert Path(run_path).name == "track_1"
+        assert hash_workers >= 1
+        return {
+            "valid": True,
+            "status": "receipt_bound_track_motion_valid",
+            "manifest_sha256": "e" * 64,
+            "physical_payload_verified": bool(verify_physical_payload),
+        }
 
     monkeypatch.setattr(
         mod.track_writer,
@@ -351,6 +380,12 @@ def _install_writer_api(
         mod.track_writer,
         "_seal_and_load_track_motion_run_before_selection",
         seal_motion,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mod.track_writer,
+        "verify_track_motion_payload_validation_receipt",
+        verify_receipt,
         raising=False,
     )
 
@@ -460,14 +495,9 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         "analysis/track_kinematics_runs/offline/track_1",
         "running",
     )
-    assert events[2:] == [
-        ("validate_before", False, "running"),
-        ("seal_motion", False, "complete"),
-        ("validate_before", True, "complete"),
-        ("validate_before", True, "complete"),
-        ("validate_before", True, "complete"),
-        ("seal_motion", False, "complete"),
-    ]
+    # Exhaustive full-motion sealing occurs once. Subsequent completion and
+    # activation checks use the bound payload receipt.
+    assert events[2:] == [("seal_motion", False, "complete")]
 
     local_run = zarr.open_group(
         str(scratch / "track-staging.zarr/analysis/track_kinematics_runs/offline/track_1"),
@@ -527,6 +557,9 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         "track_count": 2,
         "binding_manifest_sha256": "d" * 64,
     }
+    assert staging["payload_integrity_receipt"]["record_sha256"] == run.attrs[
+        mod.track_writer.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR
+    ]["record_sha256"]
     assert staging["materialization"]["stage_result"] == {
         "valid": True,
         "status": mod.UNBOUND_STAGE_STATUS,
@@ -614,15 +647,19 @@ def test_post_bind_canonical_validation_failure_rolls_back(
     events: list[tuple[Any, ...]] = []
     _install_writer_api(monkeypatch, events)
 
-    def invalid_binding(*_args, require_complete, **_kwargs):
-        assert require_complete is False
-        return {"valid": False, "errors": ["wrong source row selection"]}
+    real_validate = mod._validate_track_run
 
-    monkeypatch.setattr(
-        mod.track_writer,
-        "_validate_bound_offline_track_kinematics_run_before_selection",
-        invalid_binding,
-    )
+    def invalid_binding(path, **kwargs):
+        result = real_validate(path, **kwargs)
+        if (
+            kwargs.get("expected_binding_status") == mod.BOUND_CANONICAL_STATUS
+            and kwargs.get("require_complete") is False
+        ):
+            result["valid"] = False
+            result["errors"].append("wrong source row selection")
+        return result
+
+    monkeypatch.setattr(mod, "_validate_track_run", invalid_binding)
 
     with pytest.raises(RuntimeError, match="Published pre-pointer validation failed"):
         mod.materialize_track_kinematics(
@@ -700,7 +737,7 @@ def test_final_validation_after_completion_precedes_eligibility_commit(
 
     with pytest.raises(
         RuntimeError,
-        match="Published final run validation failed",
+        match="Complete track pre-selection validation did not report valid=true",
     ):
         mod.materialize_track_kinematics(
             source,
@@ -769,7 +806,7 @@ def test_outer_rollback_preserves_publication_committed_before_track_lease(
 
     with pytest.raises(
         RuntimeError,
-        match="Published final run validation failed",
+        match="Complete track pre-selection validation did not report valid=true",
     ):
         mod.materialize_track_kinematics(
             source,
@@ -812,6 +849,7 @@ def test_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
     intervening = "intervening_winner"
     intervening_owner = str(uuid.uuid4())
     rollback_attempted = False
+    completed_validation_count = 0
 
     def intervene_before_track_lease(*args, **kwargs):
         root = args[0]
@@ -834,13 +872,16 @@ def test_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
         return mark_complete(*args, **kwargs)
 
     def fail_completed_validation(path, **kwargs):
+        nonlocal completed_validation_count
         result = real_validate(path, **kwargs)
         if (
             kwargs.get("expected_binding_status") == mod.BOUND_CANONICAL_STATUS
             and kwargs.get("require_complete") is True
         ):
-            result["valid"] = False
-            result["errors"].append("injected failure after deferred receipt")
+            completed_validation_count += 1
+            if completed_validation_count == 2:
+                result["valid"] = False
+                result["errors"].append("injected failure after deferred receipt")
         return result
 
     def fail_exact_receipt_rollback(activation, *, root=None):
@@ -974,6 +1015,54 @@ def test_outer_rollback_preserves_replacement_target_and_winner_selectors(
     assert track_parent.attrs["latest_complete"] == "offline/track_1"
     assert track_parent.attrs["latest_offline"] == "track_1"
     assert offline.attrs["latest"] == "track_1"
+
+
+def test_activation_payload_receipt_failure_prevents_eligibility_and_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_previous_pointers(source)
+    events: list[tuple[Any, ...]] = []
+    _install_writer_api(monkeypatch, events)
+    verify_receipt = mod.track_writer.verify_track_motion_payload_validation_receipt
+
+    def fail_fresh_physical_receipt(*args, verify_physical_payload, **kwargs):
+        result = dict(
+            verify_receipt(
+                *args,
+                verify_physical_payload=verify_physical_payload,
+                **kwargs,
+            )
+        )
+        if verify_physical_payload:
+            result["valid"] = False
+            result["errors"] = ["injected physical payload mutation"]
+        return result
+
+    monkeypatch.setattr(
+        mod.track_writer,
+        "verify_track_motion_payload_validation_receipt",
+        fail_fresh_physical_receipt,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="eligibility commit observed a different receipt-bound motion payload",
+    ):
+        mod.materialize_track_kinematics(
+            source,
+            scratch_root=scratch,
+            keypoint_run="refined/kp_1",
+            run_name="track_1",
+            output_shard_rows=5,
+            copy_backend="python",
+            apply=True,
+        )
+
+    _assert_previous_pointers_restored(source)
 
 
 @pytest.mark.parametrize(
