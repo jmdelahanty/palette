@@ -277,6 +277,19 @@ def _decoded_payload_record(copy_report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def decoded_payload_receipt_from_copy_report(
+    copy_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the canonical decoded-payload receipt for an exact copy report.
+
+    This intentionally excludes physical files and mutable Zarr attributes.  It
+    lets a local scientific validator bind its result to the same decoded array
+    identity that the final authoritative payload-integrity receipt will carry.
+    """
+
+    return _decoded_payload_record(copy_report)
+
+
 def _validate_decoded_payload_record(value: Any) -> dict[str, Any]:
     decoded = _canonical_copy(value, label="decoded payload receipt")
     if not isinstance(decoded, dict) or set(decoded) != {
@@ -758,6 +771,7 @@ __all__ = [
     "PAYLOAD_INTEGRITY_RECEIPT_SCHEMA_VERSION",
     "PAYLOAD_VALIDATION_RECEIPT_SCHEMA_ID",
     "PAYLOAD_VALIDATION_RECEIPT_SCHEMA_VERSION",
+    "decoded_payload_receipt_from_copy_report",
     "PHYSICAL_PAYLOAD_CANONICALIZATION",
     "build_payload_integrity_receipt",
     "build_payload_validation_receipt",

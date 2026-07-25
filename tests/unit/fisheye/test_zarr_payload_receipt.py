@@ -10,6 +10,7 @@ from fisheye.shared.zarr_payload_receipt import (
     build_payload_validation_receipt,
     canonical_json_sha256,
     canonical_payload_integrity_receipt,
+    decoded_payload_receipt_from_copy_report,
     verify_payload_integrity_receipt,
     verify_payload_validation_receipt,
 )
@@ -120,7 +121,6 @@ def test_receipt_survives_metadata_changes_and_rejects_payload_changes(
         expected_run_ref=RUN_REF,
         hash_workers=2,
     )
-
     # Array interpretation metadata is immutable even though attributes are
     # allowed to advance during publication.
     (run / "tracks" / "id_0" / "speed_raw_px" / "zarr.json").write_text(
@@ -149,6 +149,19 @@ def test_receipt_survives_metadata_changes_and_rejects_payload_changes(
             expected_run_ref=RUN_REF,
             hash_workers=2,
         )
+
+
+def test_decoded_receipt_can_bind_local_science_before_physical_publication(
+    tmp_path: Path,
+) -> None:
+    decoded = decoded_payload_receipt_from_copy_report(_copy_report())
+    integrity = build_payload_integrity_receipt(
+        _run_tree(tmp_path),
+        run_ref=RUN_REF,
+        decoded_copy_report=_copy_report(),
+    )
+
+    assert decoded == integrity["decoded_payload"]
 
 
 def test_receipt_rejects_decoded_gaps_and_tampered_records(tmp_path: Path) -> None:

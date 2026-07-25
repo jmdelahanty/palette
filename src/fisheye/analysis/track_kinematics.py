@@ -389,6 +389,26 @@ TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR = (
 TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR = (
     "track_motion_payload_validation_receipt"
 )
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR = (
+    "track_motion_staged_scientific_validation"
+)
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID = (
+    "palette.track_motion_staged_scientific_validation"
+)
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION = 1
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID = (
+    "palette.track_motion_core_numeric_validator"
+)
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION = 1
+TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_motion_staged_scientific_numerical_policy",
+    "schema_version": 1,
+    "scope": "all_tracks_full_core_numeric_derivation_and_summary_invariants",
+    "payload_binding": "exact_decoded_copy_merkle_root",
+    "publication_checks_retained": (
+        "closed_inventory_semantic_attrs_payload_hashes_physical_scaling_aliases_domains"
+    ),
+}
 TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR = (
     "track_kinematics_binding_validation_receipt"
 )
@@ -409,11 +429,26 @@ TRACK_KINEMATICS_BINDING_NUMERICAL_POLICY = {
 }
 TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID = "palette.track_motion_full_validator"
 TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
+TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION = 2
 TRACK_MOTION_NUMERICAL_POLICY = {
     "schema_id": "palette.track_motion_numerical_policy",
     "schema_version": 1,
     "scientific_validation": (
         "full_live_manifest_numeric_invariants_physical_scaling_domains_and_aliases"
+    ),
+    "floating_comparison": (
+        "persisted_dtype_exact_for_declared_aliases_and_versioned_tolerance_for_derivations"
+    ),
+    "integrity_after_validation": "exact_decoded_shards_plus_physical_payload_sha256",
+}
+TRACK_MOTION_RECEIPT_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_motion_numerical_policy",
+    "schema_version": 2,
+    "scientific_validation": (
+        "staged_full_core_numeric_invariants_bound_to_exact_decoded_payload"
+    ),
+    "authoritative_publication_validation": (
+        "closed_live_manifest_physical_scaling_domains_aliases_and_semantic_attrs"
     ),
     "floating_comparison": (
         "persisted_dtype_exact_for_declared_aliases_and_versioned_tolerance_for_derivations"
@@ -2498,6 +2533,7 @@ def mark_track_kinematics_run_complete(
     payload_integrity_receipt: Mapping[str, Any] | None = None,
     payload_run_path: str | Path | None = None,
     payload_hash_workers: int = 4,
+    staged_scientific_validation: Mapping[str, Any] | None = None,
     defer_selector_eligibility: bool = False,
     deferred_activation_sink: (
         Callable[[DeferredTrackKinematicsSelectorActivation], None] | None
@@ -2511,6 +2547,10 @@ def mark_track_kinematics_run_complete(
     ):
         raise ValueError(
             "Track receipt publication requires both integrity receipt and run path."
+        )
+    if staged_scientific_validation is not None and not receipt_mode:
+        raise ValueError(
+            "Track staged scientific validation requires payload-integrity receipt mode."
         )
     if type(payload_hash_workers) is not int or payload_hash_workers <= 0:
         raise ValueError("Track payload hash workers must be positive.")
@@ -2645,10 +2685,27 @@ def mark_track_kinematics_run_complete(
                 "Track run did not remain complete and selector-ineligible for final "
                 "validation."
             )
+        verified_staged_scientific_validation = None
+        if staged_scientific_validation is not None:
+            assert payload_integrity_receipt is not None
+            verified_staged_scientific_validation = (
+                verify_track_motion_staged_scientific_validation(
+                    run_group,
+                    staged_scientific_validation,
+                    payload_integrity_receipt=payload_integrity_receipt,
+                )
+            )
+        seal_kwargs: dict[str, Any] = {
+            "expected_publication_owner_uuid": owner_uuid,
+        }
+        if verified_staged_scientific_validation is not None:
+            seal_kwargs["prevalidated_staged_scientific_validation"] = (
+                verified_staged_scientific_validation
+            )
         sealed_motion = _seal_and_load_track_motion_run_before_selection(
             root,
             run_group,
-            expected_publication_owner_uuid=owner_uuid,
+            **seal_kwargs,
         )
         if not sealed_motion.tracks:
             raise RuntimeError(
@@ -2660,6 +2717,9 @@ def mark_track_kinematics_run_complete(
                 sealed_motion.run_group,
                 sealed_motion,
                 payload_integrity_receipt=payload_integrity_receipt,
+                staged_scientific_validation=(
+                    verified_staged_scientific_validation
+                ),
             )
         resolved_run = _resolve_owned_track_run_child(
             root,
@@ -8673,6 +8733,273 @@ def _validate_motion_core_numeric_invariants(
         )
 
 
+def _validate_track_motion_decoded_payload_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "canonicalization",
+        "array_count",
+        "decoded_bytes",
+        "root_sha256",
+    }:
+        raise ValueError("Track decoded-payload summary inventory is not closed.")
+    array_count = value.get("array_count")
+    decoded_bytes = value.get("decoded_bytes")
+    root_sha256 = value.get("root_sha256")
+    if (
+        type(value.get("canonicalization")) is not str
+        or not value["canonicalization"]
+        or type(array_count) is not int
+        or array_count < 0
+        or type(decoded_bytes) is not int
+        or decoded_bytes < 0
+        or type(root_sha256) is not str
+    ):
+        raise ValueError("Track decoded-payload receipt summary is malformed.")
+    _sha256_text(root_sha256, label="track decoded-payload root_sha256")
+    return {
+        "canonicalization": str(value["canonicalization"]),
+        "array_count": int(array_count),
+        "decoded_bytes": int(decoded_bytes),
+        "root_sha256": str(root_sha256),
+    }
+
+
+def _track_motion_decoded_payload_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Track scientific validation requires a decoded receipt.")
+    expected = {
+        "canonicalization",
+        "array_count",
+        "decoded_bytes",
+        "root_sha256",
+        "arrays",
+    }
+    if set(value) != expected:
+        raise ValueError("Track decoded-payload receipt inventory is not closed.")
+    arrays = value.get("arrays")
+    array_count = value.get("array_count")
+    if (
+        not isinstance(arrays, list)
+        or type(array_count) is not int
+        or len(arrays) != array_count
+    ):
+        raise ValueError("Track decoded-payload array inventory is malformed.")
+    return _validate_track_motion_decoded_payload_summary(
+        {
+            "canonicalization": value.get("canonicalization"),
+            "array_count": array_count,
+            "decoded_bytes": value.get("decoded_bytes"),
+            "root_sha256": value.get("root_sha256"),
+        }
+    )
+
+
+def _canonical_track_motion_staged_scientific_validation(
+    value: Any,
+) -> dict[str, Any]:
+    record = _motion_json_object(
+        value,
+        label="track staged scientific-validation receipt",
+    )
+    digest = record.pop("record_sha256", None)
+    expected = {
+        "schema_id",
+        "schema_version",
+        "receipt_role",
+        "run_name",
+        "staging_manifest_sha256",
+        "decoded_payload",
+        "validator",
+        "numerical_policy",
+        "validated_tracks",
+        "result",
+    }
+    if set(record) != expected:
+        raise ValueError(
+            "Track staged scientific-validation receipt inventory is not closed."
+        )
+    validator = record.get("validator")
+    tracks = record.get("validated_tracks")
+    staging_digest = record.get("staging_manifest_sha256")
+    if (
+        record.get("schema_id")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID
+        or record.get("schema_version")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
+        or record.get("receipt_role")
+        != "scientific_derivation_validation_bound_to_exact_decoded_payload"
+        or record.get("result") != "valid"
+        or type(record.get("run_name")) is not str
+        or not record["run_name"]
+        or type(staging_digest) is not str
+        or validator
+        != {
+            "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID,
+            "schema_version": (
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
+            ),
+        }
+        or record.get("numerical_policy")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
+        or not isinstance(tracks, list)
+        or not tracks
+        or type(digest) is not str
+    ):
+        raise ValueError(
+            "Track staged scientific-validation receipt is unsupported."
+        )
+    _sha256_text(staging_digest, label="track staging manifest sha256")
+    _sha256_text(digest, label="track scientific-validation receipt sha256")
+    decoded = record.get("decoded_payload")
+    if not isinstance(decoded, Mapping):
+        raise ValueError("Track scientific receipt lacks decoded-payload identity.")
+    decoded_summary = dict(decoded)
+    if set(decoded_summary) != {
+        "canonicalization",
+        "array_count",
+        "decoded_bytes",
+        "root_sha256",
+    }:
+        raise ValueError("Track scientific decoded-payload summary is not closed.")
+    _validate_track_motion_decoded_payload_summary(decoded_summary)
+    seen: set[int] = set()
+    for track_record in tracks:
+        if not isinstance(track_record, Mapping) or set(track_record) != {
+            "track_id",
+            "sample_count",
+        }:
+            raise ValueError("Track scientific validated-track record is malformed.")
+        track_id = track_record.get("track_id")
+        sample_count = track_record.get("sample_count")
+        if (
+            type(track_id) is not int
+            or track_id in seen
+            or type(sample_count) is not int
+            or sample_count < 0
+        ):
+            raise ValueError("Track scientific validated-track identity is invalid.")
+        seen.add(track_id)
+    if tracks != sorted(tracks, key=lambda item: int(item["track_id"])):
+        raise ValueError("Track scientific validated-track records are not ordered.")
+    if digest != _canonical_json_sha256(record):
+        raise ValueError("Track staged scientific-validation receipt digest is stale.")
+    return {**record, "record_sha256": digest}
+
+
+def build_track_motion_staged_scientific_validation(
+    run_group: Any,
+    *,
+    decoded_payload_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate local numerical derivations once and bind them to copied values."""
+
+    if (
+        run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or run_group.attrs.get("stage_selector_eligible") is not False
+        or run_group.attrs.get(TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR)
+        != TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    ):
+        raise ValueError(
+            "Staged scientific validation requires one complete, unbound, "
+            "selector-ineligible numerical run."
+        )
+    staging_digest = run_group.attrs.get(
+        TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR
+    )
+    if type(staging_digest) is not str:
+        raise ValueError("Staged scientific validation lacks a staging manifest.")
+    _sha256_text(staging_digest, label="track staging manifest sha256")
+    tracks: list[dict[str, int]] = []
+    for track_id, track_group in _live_track_groups(run_group):
+        _validate_motion_core_numeric_invariants(
+            run_group,
+            track_group,
+            track_id=track_id,
+        )
+        tracks.append(
+            {
+                "track_id": int(track_id),
+                "sample_count": int(track_group["track_sample_key"].shape[0]),
+            }
+        )
+    decoded_summary = _track_motion_decoded_payload_summary(
+        decoded_payload_receipt
+    )
+    run_name = str(run_group.path).rsplit("/", 1)[-1]
+    body = {
+        "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID,
+        "schema_version": (
+            TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
+        ),
+        "receipt_role": (
+            "scientific_derivation_validation_bound_to_exact_decoded_payload"
+        ),
+        "run_name": run_name,
+        "staging_manifest_sha256": staging_digest,
+        "decoded_payload": decoded_summary,
+        "validator": {
+            "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID,
+            "schema_version": (
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
+            ),
+        },
+        "numerical_policy": copy.deepcopy(
+            TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
+        ),
+        "validated_tracks": tracks,
+        "result": "valid",
+    }
+    return _canonical_track_motion_staged_scientific_validation(
+        {**body, "record_sha256": _canonical_json_sha256(body)}
+    )
+
+
+def verify_track_motion_staged_scientific_validation(
+    run_group: Any,
+    value: Mapping[str, Any],
+    *,
+    payload_integrity_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify a staged scientific result against the exact installed payload."""
+
+    receipt = _canonical_track_motion_staged_scientific_validation(value)
+    integrity = canonical_payload_integrity_receipt(payload_integrity_receipt)
+    persisted = run_group.attrs.get(
+        TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+    )
+    if not isinstance(persisted, Mapping) or not _track_attr_values_equal(
+        persisted,
+        receipt,
+    ):
+        raise ValueError("Track run lacks its exact staged scientific receipt.")
+    if (
+        receipt["run_name"] != str(run_group.path).rsplit("/", 1)[-1]
+        or receipt["staging_manifest_sha256"]
+        != run_group.attrs.get(TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR)
+    ):
+        raise ValueError("Track scientific receipt names another run or stage.")
+    decoded = integrity["decoded_payload"]
+    expected_decoded = {
+        "canonicalization": decoded["canonicalization"],
+        "array_count": decoded["array_count"],
+        "decoded_bytes": decoded["decoded_bytes"],
+        "root_sha256": decoded["root_sha256"],
+    }
+    if receipt["decoded_payload"] != expected_decoded:
+        raise ValueError(
+            "Track scientific validation is bound to another decoded payload."
+        )
+    live_tracks = [
+        {
+            "track_id": int(track_id),
+            "sample_count": int(track_group["track_sample_key"].shape[0]),
+        }
+        for track_id, track_group in _live_track_groups(run_group)
+    ]
+    if receipt["validated_tracks"] != live_tracks:
+        raise ValueError("Track scientific validated-track inventory changed.")
+    return receipt
+
+
 def _validate_motion_bout_domains(
     track_group: Any,
     records: Mapping[str, Mapping[str, Any]],
@@ -8717,9 +9044,26 @@ def _build_track_motion_publication_manifest(
     authoritative_root: Any,
     run_group: Any,
     positions: BoundTrackPositionBindings,
+    *,
+    prevalidated_staged_scientific_validation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build and validate the exact live full-motion inventory."""
 
+    if prevalidated_staged_scientific_validation is not None:
+        prevalidated_staged_scientific_validation = (
+            _canonical_track_motion_staged_scientific_validation(
+                prevalidated_staged_scientific_validation
+            )
+        )
+        if not _track_attr_values_equal(
+            run_group.attrs.get(
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+            ),
+            prevalidated_staged_scientific_validation,
+        ):
+            raise ValueError(
+                "Full-motion manifest received an unpersisted scientific receipt."
+            )
     if positions.run_group.path != run_group.path:
         raise ValueError("Position bindings and motion run paths disagree.")
     publication_schema_version = _track_motion_publication_schema_version(run_group)
@@ -8893,11 +9237,12 @@ def _build_track_motion_publication_manifest(
             run_group=run_group,
             manifest_context=manifest_context,
         )
-        _validate_motion_core_numeric_invariants(
-            run_group,
-            track_group,
-            track_id=track_id,
-        )
+        if prevalidated_staged_scientific_validation is None:
+            _validate_motion_core_numeric_invariants(
+                run_group,
+                track_group,
+                track_id=track_id,
+            )
         _validate_motion_physical_values(
             track_group,
             surfaces,
@@ -11016,10 +11361,49 @@ def _load_bound_track_motion_run_impl(
     *,
     expected_selector_eligible: bool,
     prevalidated_live_manifest: Mapping[str, Any] | None = None,
+    prevalidated_position_bindings: BoundTrackPositionBindings | None = None,
 ) -> BoundTrackMotionRun:
     """Freshly bind the exact sealed motion payload from live arrays."""
 
-    if expected_selector_eligible:
+    if prevalidated_position_bindings is not None:
+        if type(prevalidated_position_bindings) is not BoundTrackPositionBindings:
+            raise ValueError("Prevalidated track positions use an unsupported type.")
+        fresh_run = _fresh_track_run_group(authoritative_root, run_group)
+        if (
+            prevalidated_position_bindings.archive_identity
+            != archive_identity(authoritative_root)
+            or prevalidated_position_bindings.run_group.path != fresh_run.path
+            or prevalidated_position_bindings.run_type
+            != str(fresh_run.path).split("/")[2]
+            or prevalidated_position_bindings.run_name
+            != str(fresh_run.path).split("/")[3]
+            or fresh_run.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+            != RUN_STATUS_COMPLETE
+            or fresh_run.attrs.get("stage_selector_eligible")
+            is not expected_selector_eligible
+        ):
+            raise ValueError(
+                "Prevalidated track positions no longer name the exact completed run."
+            )
+        live_track_ids = [track_id for track_id, _ in _live_track_groups(fresh_run)]
+        if live_track_ids != [
+            track_id
+            for track_id, _ in prevalidated_position_bindings.track_positions
+        ]:
+            raise ValueError("Prevalidated track position inventory changed.")
+        positions = BoundTrackPositionBindings(
+            archive_identity=prevalidated_position_bindings.archive_identity,
+            run_type=prevalidated_position_bindings.run_type,
+            run_name=prevalidated_position_bindings.run_name,
+            source_positions=prevalidated_position_bindings.source_positions,
+            source_temporal_authority=(
+                prevalidated_position_bindings.source_temporal_authority
+            ),
+            physical_authority=prevalidated_position_bindings.physical_authority,
+            track_positions=prevalidated_position_bindings.track_positions,
+            run_group=fresh_run,
+        )
+    elif expected_selector_eligible:
         positions = load_bound_track_position_bindings(
             authoritative_root,
             run_group,
@@ -11234,6 +11618,7 @@ def _seal_and_load_track_motion_run_before_selection(
     run_group: zarr.Group,
     *,
     expected_publication_owner_uuid: str | None = None,
+    prevalidated_staged_scientific_validation: Mapping[str, Any] | None = None,
 ) -> BoundTrackMotionRun:
     """Persist then freshly reload a complete, selector-ineligible motion seal."""
 
@@ -11263,6 +11648,9 @@ def _seal_and_load_track_motion_run_before_selection(
         authoritative_root,
         run_group,
         positions,
+        prevalidated_staged_scientific_validation=(
+            prevalidated_staged_scientific_validation
+        ),
     )
     run_group.attrs[TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = manifest
     run_group = _resolve_owned_track_run_child(
@@ -11290,6 +11678,7 @@ def _seal_and_load_track_motion_run_before_selection(
         run_group,
         expected_selector_eligible=False,
         prevalidated_live_manifest=manifest,
+        prevalidated_position_bindings=positions,
     )
 
 
@@ -11298,6 +11687,7 @@ def _persist_track_motion_payload_validation_receipt(
     sealed_motion: BoundTrackMotionRun,
     *,
     payload_integrity_receipt: Mapping[str, Any],
+    staged_scientific_validation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind the one exhaustive motion validation to its immutable payload."""
 
@@ -11306,6 +11696,7 @@ def _persist_track_motion_payload_validation_receipt(
         raise ValueError(
             "Track payload integrity receipt names a different canonical run."
         )
+    receipt_backed = staged_scientific_validation is not None
     validation = build_payload_validation_receipt(
         integrity,
         scientific_manifest_schema_id=TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
@@ -11314,8 +11705,16 @@ def _persist_track_motion_payload_validation_receipt(
         ),
         scientific_manifest_sha256=sealed_motion.manifest_sha256,
         validator_schema_id=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
-        validator_schema_version=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
-        numerical_policy=TRACK_MOTION_NUMERICAL_POLICY,
+        validator_schema_version=(
+            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+            if receipt_backed
+            else TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+        ),
+        numerical_policy=(
+            TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
+            if receipt_backed
+            else TRACK_MOTION_NUMERICAL_POLICY
+        ),
     )
     run_group.attrs[TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = json_attr_safe(
         integrity
@@ -11401,15 +11800,52 @@ def verify_track_motion_payload_validation_receipt(
             hash_workers=int(hash_workers),
             verify_physical_payload=bool(verify_physical_payload),
         )
+        raw_validator = raw_validation.get("validator")
+        validator_version = (
+            raw_validator.get("schema_version")
+            if isinstance(raw_validator, Mapping)
+            else None
+        )
+        if validator_version not in {
+            TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
+            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION,
+        }:
+            raise ValueError(
+                "Track payload validation receipt uses an unsupported validator."
+            )
+        expected_numerical_policy = (
+            TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
+            if validator_version
+            == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+            else TRACK_MOTION_NUMERICAL_POLICY
+        )
+        if (
+            validator_version
+            == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+        ):
+            staged_scientific = run_group.attrs.get(
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+            )
+            if not isinstance(staged_scientific, Mapping):
+                raise ValueError(
+                    "Receipt-backed track validation lacks staged scientific proof."
+                )
+            verify_track_motion_staged_scientific_validation(
+                run_group,
+                staged_scientific,
+                payload_integrity_receipt=integrity,
+            )
         validation = verify_payload_validation_receipt(
             raw_validation,
             integrity_receipt=integrity,
             expected_scientific_manifest_sha256=raw_digest,
             expected_validator_schema_id=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
-            expected_validator_schema_version=(
-                TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
-            ),
+            expected_validator_schema_version=int(validator_version),
         )
+        if validation.get("numerical_policy") != expected_numerical_policy:
+            raise ValueError(
+                "Track payload validation receipt numerical policy changed."
+            )
         return {
             "valid": True,
             "status": "receipt_bound_track_motion_valid",
@@ -13803,8 +14239,10 @@ __all__ = [
     "DeferredTrackKinematicsSelectorActivation",
     "TrackPhysicalAuthority",
     "TrackSpeeds",
+    "TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR",
     "_ordered_track_arena_ids",
     "bind_staged_offline_track_kinematics_run",
+    "build_track_motion_staged_scientific_validation",
     "compute_track_speed",
     "find_fps",
     "_filter_public_track_rows",
@@ -13817,6 +14255,7 @@ __all__ = [
     "stage_offline_track_kinematics_run",
     "validate_bound_track_motion_run",
     "validate_bound_track_position_bindings",
+    "verify_track_motion_staged_scientific_validation",
     "main",
 ]
 

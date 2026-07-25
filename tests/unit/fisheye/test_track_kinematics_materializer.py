@@ -167,6 +167,34 @@ def _install_writer_api(
     *,
     detached_descriptor: bool = False,
 ) -> None:
+    def build_scientific_validation(
+        run_group,
+        *,
+        decoded_payload_receipt,
+    ):
+        assert run_group.attrs[mod.COORDINATE_BINDING_STATUS_ATTR] == (
+            mod.UNBOUND_STAGE_STATUS
+        )
+        return {
+            "schema_id": "test.track_motion_staged_scientific_validation",
+            "decoded_payload_root_sha256": decoded_payload_receipt["root_sha256"],
+            "record_sha256": "9" * 64,
+        }
+
+    def verify_scientific_validation(
+        run_group,
+        value,
+        *,
+        payload_integrity_receipt,
+    ):
+        assert run_group.attrs[
+            mod.track_writer.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+        ] == value
+        assert value["decoded_payload_root_sha256"] == (
+            payload_integrity_receipt["decoded_payload"]["root_sha256"]
+        )
+        return dict(value)
+
     def stage(
         source_zarr,
         staging_zarr,
@@ -327,6 +355,7 @@ def _install_writer_api(
         final_run_group,
         *,
         expected_publication_owner_uuid,
+        prevalidated_staged_scientific_validation=None,
     ):
         assert final_run_group.attrs["palette_run_completion_status"] == "complete"
         assert final_run_group.attrs["stage_selector_eligible"] is False
@@ -334,6 +363,7 @@ def _install_writer_api(
         assert expected_publication_owner_uuid == final_run_group.attrs[
             mod.track_writer.TRACK_KINEMATICS_PUBLICATION_OWNER_ATTR
         ]
+        assert prevalidated_staged_scientific_validation is not None
         events.append(("seal_motion", False, "complete"))
         return SimpleNamespace(
             tracks=(object(), object()),
@@ -369,6 +399,18 @@ def _install_writer_api(
             "physical_payload_verified": bool(verify_physical_payload),
         }
 
+    monkeypatch.setattr(
+        mod.track_writer,
+        "build_track_motion_staged_scientific_validation",
+        build_scientific_validation,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mod.track_writer,
+        "verify_track_motion_staged_scientific_validation",
+        verify_scientific_validation,
+        raising=False,
+    )
     monkeypatch.setattr(
         mod.track_writer,
         "stage_offline_track_kinematics_run",

@@ -415,6 +415,108 @@ def _restore_publication_attrs(run, manifest, digest, commit) -> None:
     run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR] = copy.deepcopy(commit)
 
 
+def _decoded_payload_receipt_fixture(*, root_sha256: str = "8" * 64):
+    return {
+        "canonicalization": "test.decoded_payload.v1",
+        "array_count": 1,
+        "decoded_bytes": 16,
+        "root_sha256": root_sha256,
+        "arrays": [{}],
+    }
+
+
+def test_staged_scientific_validation_binds_full_numeric_check_to_decoded_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    )
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR] = "7" * 64
+
+    receipt = mod.build_track_motion_staged_scientific_validation(
+        run,
+        decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+    )
+
+    assert receipt["result"] == "valid"
+    assert receipt["decoded_payload"]["root_sha256"] == "8" * 64
+    assert receipt["validated_tracks"] == [{"track_id": 7, "sample_count": 2}]
+    assert len(receipt["record_sha256"]) == 64
+
+
+def test_staged_scientific_validation_rejects_wrong_numeric_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    )
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR] = "7" * 64
+    track["speed_raw_px"].data[1] += np.float32(5.0)
+
+    with pytest.raises(ValueError, match="numeric derivation invariant"):
+        mod.build_track_motion_staged_scientific_validation(
+            run,
+            decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+        )
+
+
+def test_staged_scientific_validation_rejects_another_installed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    )
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR] = "7" * 64
+    receipt = mod.build_track_motion_staged_scientific_validation(
+        run,
+        decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+    )
+    run.attrs[mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR] = receipt
+    monkeypatch.setattr(
+        mod,
+        "canonical_payload_integrity_receipt",
+        lambda _value: {
+            "decoded_payload": _decoded_payload_receipt_fixture(
+                root_sha256="6" * 64
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="another decoded payload"):
+        mod.verify_track_motion_staged_scientific_validation(
+            run,
+            receipt,
+            payload_integrity_receipt={},
+        )
+
+
+def test_seal_reuses_one_position_binding_within_same_publication_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    original = mod._load_bound_track_position_bindings_before_selection
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "_load_bound_track_position_bindings_before_selection",
+        counted,
+    )
+
+    rebound = mod._seal_and_load_track_motion_run_before_selection(root, run)
+
+    assert calls == 1
+    assert rebound.position_bindings.run_group.path == run.path
+
+
 def _replace_motion_derivation_inputs(run, inputs: dict[str, object]) -> None:
     """Replace every duplicated derivation input copy coherently."""
 

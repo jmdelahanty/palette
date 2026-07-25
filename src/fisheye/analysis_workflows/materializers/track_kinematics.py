@@ -31,6 +31,7 @@ from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import require_runs_parent
 from ...shared.zarr_payload_receipt import (
     build_payload_integrity_receipt,
+    decoded_payload_receipt_from_copy_report,
     verify_payload_integrity_receipt,
 )
 from ...shared.zarr_sharded_copy import (
@@ -568,6 +569,7 @@ def publish_track_kinematics_run(
         "completion_published": False,
         "publication_owner_uuid": None,
         "payload_integrity_receipt": None,
+        "scientific_validation_receipt": None,
     }
     deferred_activation: list[Any] = []
 
@@ -743,6 +745,20 @@ def publish_track_kinematics_run(
         transaction["publication_owner_uuid"] = (
             track_writer._track_publication_owner_uuid(run)
         )
+        scientific_validation = materialization_payload.get(
+            "scientific_validation"
+        )
+        if not isinstance(scientific_validation, Mapping):
+            raise RuntimeError(
+                "Track publication lacks staged scientific validation."
+            )
+        verified_scientific_validation = (
+            track_writer.verify_track_motion_staged_scientific_validation(
+                run,
+                scientific_validation,
+                payload_integrity_receipt=integrity_receipt,
+            )
+        )
         binding_started = time.perf_counter()
         result = track_writer.bind_staged_offline_track_kinematics_run(
             root,
@@ -789,6 +805,9 @@ def publish_track_kinematics_run(
             time.perf_counter() - post_binding_receipt_check_started
         )
         transaction["payload_integrity_receipt"] = integrity_receipt
+        transaction["scientific_validation_receipt"] = (
+            verified_scientific_validation
+        )
         transaction["binding_complete"] = True
         return {
             "canonical_binding": summary,
@@ -837,6 +856,9 @@ def publish_track_kinematics_run(
             payload_integrity_receipt=transaction["payload_integrity_receipt"],
             payload_run_path=plan.target_run_path,
             payload_hash_workers=max(1, int(plan.shard_workers)),
+            staged_scientific_validation=(
+                transaction["scientific_validation_receipt"]
+            ),
             defer_selector_eligibility=True,
             deferred_activation_sink=retain_deferred_activation,
         )
@@ -1035,6 +1057,20 @@ def materialize_track_kinematics(
                 raise RuntimeError(
                     "Sharded track copy did not report exact decoded validation."
                 )
+        with telemetry.phase("staged_scientific_validation"):
+            decoded_payload = decoded_payload_receipt_from_copy_report(
+                sharded_copy
+            )
+            sharded_scientific = open_zarr_root(plan.sharded_run, mode="a")
+            scientific_validation = (
+                track_writer.build_track_motion_staged_scientific_validation(
+                    sharded_scientific,
+                    decoded_payload_receipt=decoded_payload,
+                )
+            )
+            sharded_scientific.attrs[
+                track_writer.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+            ] = json_attr_safe(scientific_validation)
         local_payload = {
             "source_access": "authoritative_zarr_read_only",
             "compute_output": "node_local_unbound_numeric_stage",
@@ -1043,6 +1079,7 @@ def materialize_track_kinematics(
             "stage_result": stage_summary,
             "regular_validation": regular_validation,
             "sharded_copy": sharded_copy,
+            "scientific_validation": scientific_validation,
         }
         with telemetry.phase("publishing_state_transition"):
             sharded = open_zarr_root(plan.sharded_run, mode="a")
