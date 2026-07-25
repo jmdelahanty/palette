@@ -11715,6 +11715,10 @@ def bind_staged_offline_track_kinematics_run(
     phase_seconds["attribute_snapshot"] = float(time.perf_counter() - started)
     try:
         started = time.perf_counter()
+        track_time_lineage_seconds = 0.0
+        track_identity_preparation_seconds = 0.0
+        track_identity_publication_seconds = 0.0
+        track_position_publication_seconds = 0.0
         bound_publications: list[TrackPositionPublicationResult] = []
         for track_id, subgroup in groups:
             track_sample_key_node = subgroup["track_sample_key"]
@@ -11726,6 +11730,7 @@ def bind_staged_offline_track_kinematics_run(
                 "source_frame_interpolation"
             ]
             source_instance_key_node = subgroup["source_instance_key"]
+            subphase_started = time.perf_counter()
             time_lineage = stamp_track_sample_time_lineage(
                 subgroup,
                 track_sample_key_node,
@@ -11735,6 +11740,8 @@ def bind_staged_offline_track_kinematics_run(
                 source_instance_key_node,
                 source_temporal_authority=surface.temporal_authority,
             )
+            track_time_lineage_seconds += time.perf_counter() - subphase_started
+            subphase_started = time.perf_counter()
             key_values = np.array(
                 track_sample_key_node[:],
                 copy=True,
@@ -11745,14 +11752,22 @@ def bind_staged_offline_track_kinematics_run(
                 values=key_values,
                 track_time_lineage=time_lineage,
             )
+            track_identity_preparation_seconds += (
+                time.perf_counter() - subphase_started
+            )
+            subphase_started = time.perf_counter()
             identity = stamp_and_bind_row_identity_contract(
                 subgroup,
                 track_sample_key_node,
                 contract=identity_contract,
                 track_time_lineage=time_lineage,
             )
+            track_identity_publication_seconds += (
+                time.perf_counter() - subphase_started
+            )
             if np.any(key_values[:, 0] != track_id):
                 raise ValueError("Track identity changed during final-path binding.")
+            subphase_started = time.perf_counter()
             bound_publications.append(
                 publish_track_position_coordinates(
                     subgroup,
@@ -11773,8 +11788,23 @@ def bind_staged_offline_track_kinematics_run(
                     ),
                 )
             )
+            track_position_publication_seconds += (
+                time.perf_counter() - subphase_started
+            )
         phase_seconds["per_track_coordinate_publication"] = float(
             time.perf_counter() - started
+        )
+        phase_seconds["track_time_lineage_publication"] = float(
+            track_time_lineage_seconds
+        )
+        phase_seconds["track_identity_preparation"] = float(
+            track_identity_preparation_seconds
+        )
+        phase_seconds["track_identity_publication"] = float(
+            track_identity_publication_seconds
+        )
+        phase_seconds["track_position_publication"] = float(
+            track_position_publication_seconds
         )
         if not receipt_mode:
             started = time.perf_counter()

@@ -48,6 +48,7 @@ from fisheye.shared.archive_identity import (
     archive_identity,
     require_same_archive,
 )
+from fisheye.shared.proof_verification import verify_persisted_proof
 
 
 ROW_IDENTITY_CONTRACT_ATTR = "row_identity_contract"
@@ -569,7 +570,21 @@ def require_bound_row_identity_contract(
                 ),
             )
         )
-    value.assert_verified()
+    lineage = value.track_time_lineage
+    verify_persisted_proof(
+        (
+            "palette.bound_row_identity_contract.v1",
+            value.archive_identity.kind,
+            value.archive_identity.key,
+            value.record_ref,
+            value.record_sha256,
+            value.rowset_path,
+            value.key_array_path,
+            None if lineage is None else lineage.record_ref,
+            None if lineage is None else lineage.record_sha256,
+        ),
+        value.assert_verified,
+    )
     return value
 
 
@@ -1782,27 +1797,43 @@ def require_bound_source_row_temporal_authority(
                 ),
             )
         )
-    current = load_bound_source_row_temporal_authority(
-        value._source_rowset_node,
-        value._source_frame_index_node,
-        source_row_identity=value.source_row_identity,
-        acquisition_frame=value.acquisition_frame,
-    )
-    if (
-        current.record != value.record
-        or current.record_ref != value.record_ref
-        or current.record_sha256 != value.record_sha256
-        or current.archive_identity != value.archive_identity
-    ):
-        raise RowIdentityContractError(
-            (
-                _issue(
-                    "source_temporal_authority_stale",
-                    value.record_ref,
-                    "Immediate-source temporal authority changed after binding.",
-                ),
-            )
+    def verify() -> None:
+        current = load_bound_source_row_temporal_authority(
+            value._source_rowset_node,
+            value._source_frame_index_node,
+            source_row_identity=value.source_row_identity,
+            acquisition_frame=value.acquisition_frame,
         )
+        if (
+            current.record != value.record
+            or current.record_ref != value.record_ref
+            or current.record_sha256 != value.record_sha256
+            or current.archive_identity != value.archive_identity
+        ):
+            raise RowIdentityContractError(
+                (
+                    _issue(
+                        "source_temporal_authority_stale",
+                        value.record_ref,
+                        "Immediate-source temporal authority changed after binding.",
+                    ),
+                )
+            )
+
+    verify_persisted_proof(
+        (
+            "palette.bound_source_row_temporal_authority.v1",
+            value.archive_identity.kind,
+            value.archive_identity.key,
+            value.record_ref,
+            value.record_sha256,
+            value.source_row_identity.record_ref,
+            value.source_row_identity.record_sha256,
+            value.acquisition_frame.record_ref,
+            value.acquisition_frame.record_sha256,
+        ),
+        verify,
+    )
     return value
 
 
@@ -2257,30 +2288,44 @@ def require_bound_track_sample_time_lineage(
                 ),
             )
         )
-    current = load_bound_track_sample_time_lineage(
-        value._rowset_node,
-        value._key_array_node,
-        value._source_row_index_node,
-        value._source_frame_index_node,
-        value._interpolation_node,
-        value._source_instance_key_node,
-        source_temporal_authority=value._source_temporal_authority,
-    )
-    if (
-        current.record != value.record
-        or current.record_ref != value.record_ref
-        or current.record_sha256 != value.record_sha256
-        or current.archive_identity != value.archive_identity
-    ):
-        raise RowIdentityContractError(
-            (
-                _issue(
-                    "track_time_lineage_stale",
-                    value.record_ref,
-                    "Track-sample immediate-source lineage changed after binding.",
-                ),
-            )
+    def verify() -> None:
+        current = load_bound_track_sample_time_lineage(
+            value._rowset_node,
+            value._key_array_node,
+            value._source_row_index_node,
+            value._source_frame_index_node,
+            value._interpolation_node,
+            value._source_instance_key_node,
+            source_temporal_authority=value._source_temporal_authority,
         )
+        if (
+            current.record != value.record
+            or current.record_ref != value.record_ref
+            or current.record_sha256 != value.record_sha256
+            or current.archive_identity != value.archive_identity
+        ):
+            raise RowIdentityContractError(
+                (
+                    _issue(
+                        "track_time_lineage_stale",
+                        value.record_ref,
+                        "Track-sample immediate-source lineage changed after binding.",
+                    ),
+                )
+            )
+
+    verify_persisted_proof(
+        (
+            "palette.bound_track_sample_time_lineage.v1",
+            value.archive_identity.kind,
+            value.archive_identity.key,
+            value.record_ref,
+            value.record_sha256,
+            value._source_temporal_authority.record_ref,
+            value._source_temporal_authority.record_sha256,
+        ),
+        verify,
+    )
     return value
 
 
