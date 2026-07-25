@@ -18,6 +18,7 @@ from fisheye.shared.import_video_metadata import (
 from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
 )
+from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
 from fisheye.utils import run_detection_local_publish as mod
 
@@ -139,3 +140,72 @@ def test_verify_model_requires_matching_registered_digest(tmp_path: Path) -> Non
     assert verified["sha256"] == digest
     with pytest.raises(RuntimeError, match="digest mismatch"):
         mod._verify_model(model, "0" * 64)  # noqa: SLF001
+
+
+def test_default_local_publish_provenance_passes_completion_gate(
+    tmp_path: Path,
+) -> None:
+    provenance = mod._resolve_detection_run_provenance(  # noqa: SLF001
+        supplied=None,
+        source_zarr=tmp_path / "recording_analysis.zarr",
+        video_path=tmp_path / "camera.mp4",
+        model_path=tmp_path / "model.pt",
+        model_sha256="a" * 64,
+        model_run_id="model-run",
+        model_set_id="model-set",
+        model_created_utc="2026-07-25T00:00:00Z",
+        run_name="detect_test",
+        config_path="detect.yaml",
+        conf_threshold=0.25,
+        iou_threshold=0.7,
+        max_det=10,
+        batch_size=16,
+        resize_dims=[640, 640],
+        imgsz=[640, 640],
+        decode_backend="pynvvc_nv12_rgb",
+        detect_row_shard_rows=131_072,
+        detect_frame_shard_rows=131_072,
+        use_gpu=True,
+        copy_backend="python",
+    )
+
+    validation = validate_run_provenance(provenance)
+    assert validation.valid, validation.errors
+    assert provenance["command"] == "fisheye.utils.run_detection_local_publish"
+    assert provenance["input_run_ids"] == {
+        "model_run": "model-run",
+        "model_set": "model-set",
+    }
+    assert provenance["params"]["output_policy"] == mod.PUBLISH_POLICY
+
+
+def test_local_publish_rejects_incomplete_supplied_provenance_before_inference(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="requires valid run provenance before inference",
+    ):
+        mod._resolve_detection_run_provenance(  # noqa: SLF001
+            supplied={"schema_id": "transport-policy-only"},
+            source_zarr=tmp_path / "recording_analysis.zarr",
+            video_path=tmp_path / "camera.mp4",
+            model_path=tmp_path / "model.pt",
+            model_sha256="a" * 64,
+            model_run_id="model-run",
+            model_set_id="model-set",
+            model_created_utc=None,
+            run_name="detect_test",
+            config_path=None,
+            conf_threshold=None,
+            iou_threshold=None,
+            max_det=None,
+            batch_size=None,
+            resize_dims=None,
+            imgsz=None,
+            decode_backend=None,
+            detect_row_shard_rows=131_072,
+            detect_frame_shard_rows=131_072,
+            use_gpu=None,
+            copy_backend="python",
+        )

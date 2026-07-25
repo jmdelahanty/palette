@@ -56,6 +56,10 @@ from fisheye.shared.pixel_frame_authority import (
     load_persisted_acquisition_camera_authority,
     stamp_source_camera_pixel_frame_authority,
 )
+from fisheye.shared.run_provenance import (
+    build_run_provenance,
+    validate_run_provenance,
+)
 from fisheye.shared.source_video_metadata import resolve_source_video
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -92,6 +96,77 @@ def default_detection_run_name() -> str:
 
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     return f"detect_{stamp}_{uuid.uuid4().hex[:8]}"
+
+
+def _resolve_detection_run_provenance(
+    *,
+    supplied: Mapping[str, Any] | None,
+    source_zarr: Path,
+    video_path: Path,
+    model_path: Path,
+    model_sha256: str,
+    model_run_id: str,
+    model_set_id: str,
+    model_created_utc: str | None,
+    run_name: str,
+    config_path: str | None,
+    conf_threshold: float | None,
+    iou_threshold: float | None,
+    max_det: int | None,
+    batch_size: int | None,
+    resize_dims: list[int] | None,
+    imgsz: list[int] | None,
+    decode_backend: str | None,
+    detect_row_shard_rows: int | None,
+    detect_frame_shard_rows: int,
+    use_gpu: bool | None,
+    copy_backend: str,
+) -> dict[str, Any]:
+    """Return completion-grade provenance before expensive inference starts."""
+
+    candidate = (
+        dict(supplied)
+        if supplied is not None
+        else build_run_provenance(
+            command="fisheye.utils.run_detection_local_publish",
+            params={
+                "source_zarr": str(source_zarr),
+                "video_path": str(video_path),
+                "model_path": str(model_path),
+                "model_sha256": model_sha256.lower(),
+                "model_run_id": model_run_id,
+                "model_set_id": model_set_id,
+                "model_created_utc": model_created_utc,
+                "run_name": run_name,
+                "config_path": config_path,
+                "conf_threshold": conf_threshold,
+                "iou_threshold": iou_threshold,
+                "max_det": max_det,
+                "batch_size": batch_size,
+                "resize_dims": resize_dims,
+                "imgsz": imgsz,
+                "decode_backend": decode_backend,
+                "detect_row_shard_rows": detect_row_shard_rows,
+                "detect_frame_shard_rows": int(detect_frame_shard_rows),
+                "use_gpu": use_gpu,
+                "copy_backend": copy_backend,
+                "source_video_policy": "stream_canonical_prfs_video_in_place_v1",
+                "output_policy": PUBLISH_POLICY,
+            },
+            input_run_ids={
+                "model_run": model_run_id,
+                "model_set": model_set_id,
+            },
+            cwd=Path.cwd(),
+        )
+    )
+    validation = validate_run_provenance(candidate)
+    if not validation.valid:
+        raise ValueError(
+            "Detection publication requires valid run provenance before "
+            f"inference: {'; '.join(validation.errors)}"
+        )
+    return validation.normalized or candidate
 
 
 def _copy_attrs(source: zarr.Group, target: zarr.Group) -> None:
@@ -443,6 +518,29 @@ def run_detection_local_publish(
     recording_id = str(canonical_root.attrs.get("recording_id") or "").strip()
     if not recording_id:
         raise RuntimeError("Canonical archive has no recording_id.")
+    effective_run_provenance = _resolve_detection_run_provenance(
+        supplied=run_provenance,
+        source_zarr=source,
+        video_path=resolved_video,
+        model_path=model,
+        model_sha256=model_sha256,
+        model_run_id=model_run_id,
+        model_set_id=model_set_id,
+        model_created_utc=model_created_utc,
+        run_name=name,
+        config_path=config_path,
+        conf_threshold=conf_threshold,
+        iou_threshold=iou_threshold,
+        max_det=max_det,
+        batch_size=batch_size,
+        resize_dims=resize_dims,
+        imgsz=imgsz,
+        decode_backend=decode_backend,
+        detect_row_shard_rows=detect_row_shard_rows,
+        detect_frame_shard_rows=int(detect_frame_shard_rows),
+        use_gpu=use_gpu,
+        copy_backend=copy_backend,
+    )
     target_run = source / "detect_runs" / name
     if target_run.exists():
         raise FileExistsError(f"Canonical detect run already exists: {target_run}")
@@ -487,14 +585,7 @@ def run_detection_local_publish(
             model_sha256=model_sha256.lower(),
             detect_row_shard_rows=detect_row_shard_rows,
             detect_frame_shard_rows=int(detect_frame_shard_rows),
-            cli_provenance={
-                "schema_id": SCHEMA_ID,
-                "source_video_policy": "stream_canonical_prfs_video_in_place_v1",
-                "output_policy": PUBLISH_POLICY,
-                "lsb_jobid": os.environ.get("LSB_JOBID"),
-                "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
-            },
-            run_provenance=run_provenance,
+            run_provenance=effective_run_provenance,
         )
         if detected_name != name or not local_run.is_dir():
             raise RuntimeError("Detector returned a different or absent local run.")
