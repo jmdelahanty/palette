@@ -407,6 +407,10 @@ def test_plan_is_read_only_and_refuses_existing_target(tmp_path: Path) -> None:
     assert result["status"] == "planned"
     assert result["mutates_archive"] is False
     assert result["plan"]["staging_zarr"].endswith("track-staging.zarr")
+    assert result["runtime_telemetry"]["materializer"] == "track_kinematics"
+    assert [
+        phase["name"] for phase in result["runtime_telemetry"]["phases"]
+    ] == ["materialization_plan"]
     assert not scratch.exists()
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     assert "analysis" not in root
@@ -440,6 +444,10 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     assert result["publish"]["final_validation"]["valid"] is True
     assert result["publish"]["physical_copy"]["verification"] == (
         "sha256_all_physical_files"
+    )
+    assert result["runtime_telemetry"]["execution"]["requested_shard_workers"] == 2
+    assert result["publish"]["runtime_telemetry"]["materializer"] == (
+        "atomic_run_publisher"
     )
     assert events[0] == (
         "stage",

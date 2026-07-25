@@ -16,7 +16,6 @@ import hashlib
 import json
 import os
 import shutil
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +33,7 @@ from ...shared.zarr_sharded_copy import (
     copy_completed_run_to_sharded,
 )
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from .runtime_telemetry import PhaseTelemetry
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v2"
@@ -827,15 +827,24 @@ def materialize_track_kinematics(
     apply: bool = False,
     keep_scratch: bool = False,
 ) -> dict[str, Any]:
-    plan = build_track_kinematics_materialization_plan(
-        source_zarr,
-        scratch_root=scratch_root,
-        keypoint_run=keypoint_run,
-        run_name=run_name,
-        output_shard_rows=output_shard_rows,
-        shard_workers=shard_workers,
-        writer_arguments=writer_arguments,
+    telemetry = PhaseTelemetry(
+        materializer="track_kinematics",
+        context={
+            "requested_shard_workers": int(shard_workers),
+            "output_shard_rows": int(output_shard_rows),
+            "copy_backend": str(copy_backend),
+        },
     )
+    with telemetry.phase("materialization_plan"):
+        plan = build_track_kinematics_materialization_plan(
+            source_zarr,
+            scratch_root=scratch_root,
+            keypoint_run=keypoint_run,
+            run_name=run_name,
+            output_shard_rows=output_shard_rows,
+            shard_workers=shard_workers,
+            writer_arguments=writer_arguments,
+        )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
@@ -843,51 +852,56 @@ def materialize_track_kinematics(
         "plan": plan.to_json(),
     }
     if not apply:
+        result["runtime_telemetry"] = telemetry.to_json()
         return result
     if plan.scratch_root.exists():
         raise FileExistsError(f"Refusing existing scratch root: {plan.scratch_root}")
-    plan.scratch_root.mkdir(parents=True)
+    with telemetry.phase("scratch_prepare"):
+        plan.scratch_root.mkdir(parents=True)
     succeeded = False
     try:
-        compute_started = time.perf_counter()
-        stage_result = track_writer.stage_offline_track_kinematics_run(
-            plan.source_zarr,
-            plan.staging_zarr,
-            keypoint_run=plan.keypoint_run,
-            run_name=plan.run_name,
-            writer_arguments=plan.writer_arguments,
-        )
-        compute_seconds = float(time.perf_counter() - compute_started)
-        stage_summary = _writer_result_summary(
-            stage_result,
-            label="Offline track numerical staging",
-        )
+        with telemetry.phase("offline_numeric_staging"):
+            stage_result = track_writer.stage_offline_track_kinematics_run(
+                plan.source_zarr,
+                plan.staging_zarr,
+                keypoint_run=plan.keypoint_run,
+                run_name=plan.run_name,
+                writer_arguments=plan.writer_arguments,
+            )
+        compute_seconds = telemetry.duration_seconds("offline_numeric_staging") or 0.0
+        with telemetry.phase("staging_result_summary"):
+            stage_summary = _writer_result_summary(
+                stage_result,
+                label="Offline track numerical staging",
+            )
         if stage_summary.get("valid") is False:
             raise RuntimeError(
                 f"Offline track numerical staging reported invalid: {stage_summary}"
             )
-        regular_validation = _validate_track_run(
-            plan.local_run_path,
-            require_sharded=False,
-            expected_binding_status=UNBOUND_STAGE_STATUS,
-            require_complete=True,
-            expected_selector_eligible=False,
-        )
+        with telemetry.phase("local_unbound_validation"):
+            regular_validation = _validate_track_run(
+                plan.local_run_path,
+                require_sharded=False,
+                expected_binding_status=UNBOUND_STAGE_STATUS,
+                require_complete=True,
+                expected_selector_eligible=False,
+            )
         if not regular_validation["valid"]:
             raise RuntimeError(
                 f"Local unbound numerical track stage is invalid: {regular_validation}"
             )
-        sharded_copy = copy_completed_run_to_sharded(
-            plan.local_run_path,
-            plan.sharded_run,
-            row_count_array=None,
-            shard_rows=plan.output_shard_rows,
-            workers=plan.shard_workers,
-        )
-        if sharded_copy.get("exact_decoded_validation") is not True:
-            raise RuntimeError(
-                "Sharded track copy did not report exact decoded validation."
+        with telemetry.phase("shard_materialization_and_decoded_validation"):
+            sharded_copy = copy_completed_run_to_sharded(
+                plan.local_run_path,
+                plan.sharded_run,
+                row_count_array=None,
+                shard_rows=plan.output_shard_rows,
+                workers=plan.shard_workers,
             )
+            if sharded_copy.get("exact_decoded_validation") is not True:
+                raise RuntimeError(
+                    "Sharded track copy did not report exact decoded validation."
+                )
         local_payload = {
             "source_access": "authoritative_zarr_read_only",
             "compute_output": "node_local_unbound_numeric_stage",
@@ -897,39 +911,46 @@ def materialize_track_kinematics(
             "regular_validation": regular_validation,
             "sharded_copy": sharded_copy,
         }
-        sharded = open_zarr_root(plan.sharded_run, mode="a")
-        if str(sharded.attrs.get(COORDINATE_BINDING_STATUS_ATTR)) != UNBOUND_STAGE_STATUS:
-            raise RuntimeError(
-                "Sharded copy did not preserve exact unbound coordinate status."
+        with telemetry.phase("publishing_state_transition"):
+            sharded = open_zarr_root(plan.sharded_run, mode="a")
+            if (
+                str(sharded.attrs.get(COORDINATE_BINDING_STATUS_ATTR))
+                != UNBOUND_STAGE_STATUS
+            ):
+                raise RuntimeError(
+                    "Sharded copy did not preserve exact unbound coordinate status."
+                )
+            if str(sharded.attrs.get("palette_run_completion_status")) != "complete":
+                raise RuntimeError(
+                    "Sharded copy did not preserve generic stage completion."
+                )
+            sharded.attrs[COORDINATE_BINDING_STATUS_ATTR] = PUBLISHING_BINDING_STATUS
+            sharded.attrs["palette_run_completion_status"] = "running"
+            if "palette_run_completed_at_utc" in sharded.attrs:
+                del sharded.attrs["palette_run_completed_at_utc"]
+            sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
+        with telemetry.phase("sharded_publishing_validation"):
+            publishing_validation = _validate_track_run(
+                plan.sharded_run,
+                require_sharded=True,
+                expected_binding_status=PUBLISHING_BINDING_STATUS,
+                require_complete=False,
+                expected_selector_eligible=False,
             )
-        if str(sharded.attrs.get("palette_run_completion_status")) != "complete":
-            raise RuntimeError(
-                "Sharded copy did not preserve generic stage completion."
-            )
-        sharded.attrs[COORDINATE_BINDING_STATUS_ATTR] = PUBLISHING_BINDING_STATUS
-        sharded.attrs["palette_run_completion_status"] = "running"
-        if "palette_run_completed_at_utc" in sharded.attrs:
-            del sharded.attrs["palette_run_completed_at_utc"]
-        sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
-        publishing_validation = _validate_track_run(
-            plan.sharded_run,
-            require_sharded=True,
-            expected_binding_status=PUBLISHING_BINDING_STATUS,
-            require_complete=False,
-            expected_selector_eligible=False,
-        )
         if not publishing_validation["valid"]:
             raise RuntimeError(
                 "Sharded publishing-stage track run is invalid: "
                 f"{publishing_validation}"
             )
         local_payload["publishing_validation"] = publishing_validation
-        sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
-        publish = publish_track_kinematics_run(
-            plan,
-            materialization_payload=local_payload,
-            copy_backend=copy_backend,
-        )
+        with telemetry.phase("local_materialization_metadata_write"):
+            sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
+        with telemetry.phase("authoritative_publish"):
+            publish = publish_track_kinematics_run(
+                plan,
+                materialization_payload=local_payload,
+                copy_backend=copy_backend,
+            )
         result.update(
             {
                 "status": "complete",
@@ -941,7 +962,9 @@ def materialize_track_kinematics(
         return result
     finally:
         if succeeded and not keep_scratch and plan.scratch_root.exists():
-            shutil.rmtree(plan.scratch_root)
+            with telemetry.phase("scratch_cleanup"):
+                shutil.rmtree(plan.scratch_root)
+        result["runtime_telemetry"] = telemetry.to_json()
 
 
 def _default_scratch_root(run_name: str) -> Path:
