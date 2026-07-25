@@ -152,3 +152,46 @@ required scientific completion seal (`192.1` seconds). Eight workers were
 useful for only the `3.7`-second sharded-copy phase; average LSF CPU efficiency
 was `13.78%`. Future tuning should profile those two serial scientific phases
 and separately reconsider the default slot count.
+
+## Canonical-binding proof-reuse canary
+
+A second like-for-like Sleepyfish canary validated operation-scoped payload
+proof reuse and the receipt-backed binding path on 2026-07-24:
+
+- Palette commit: `d8495219`
+- materialization LSF job: `153172030` on `h07u29`
+- exhaustive public-reader LSF job: `153172069` on `h07u18`
+- output: `track_kinematics_sleepyfish_cam2010095_binding_canary_20260724_v001`
+- source rows: `1,169,010`; requested slots / shard workers: `8` / `8`
+- application wall time: `445.9` seconds
+- authoritative publication: `325.1` seconds
+- maximum LSF RSS: `1.9` GiB
+
+The decoded-payload root again exactly matched the preceding canary:
+`0d246d1df9424314bd7c9c2cd9246fb64206fb3f38961522e64447bd87bab6e3`.
+The independent normal public loader completed successfully in `157` seconds
+and accepted one track with `104` full-motion surfaces.
+
+| Phase | Receipt canary (s) | Binding canary (s) | Reduction |
+|---|---:|---:|---:|
+| Total application | 576.0 | 445.9 | 22.6% |
+| Authoritative publication | 448.4 | 325.1 | 27.5% |
+| Post-rename canonical binding | 240.5 | 133.7 | 44.4% |
+| Completion / full-motion sealing | 192.1 | 176.1 | 8.4% |
+
+The new nested binding telemetry attributes the `133.2`-second binder body to:
+
+| Binding subphase | Seconds |
+|---|---:|
+| Initial exhaustive staging-payload validation | 13.0 |
+| Per-track coordinate publication | 117.0 |
+| Closing array-proof reverification | 2.3 |
+| Post-binding physical/metadata reverification | 0.8 |
+| Receipt preflight, snapshots, and binding-status commit | 0.1 combined |
+
+This confirms that duplicate full-array hashing and repeated final validation
+were real costs, while preserving the scientific and publication proofs. It
+also localizes the next optimization target: the sealed per-track coordinate
+publisher itself, not receipt hashing, array-proof closure, transfer, or worker
+count. Any change there should retain the freshly minted typed authorities and
+the same rollback boundary rather than weakening coordinate lineage checks.

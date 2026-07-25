@@ -185,3 +185,11 @@ publication, the standard exhaustive public loader accepted all `104` motion
 surfaces, and authoritative publication fell from `1,521.7` to `448.4`
 seconds. Detailed phase evidence is recorded in
 [`analysis_materializer_runtime_telemetry.md`](analysis_materializer_runtime_telemetry.md).
+
+The operation-scoped canonical-binding extension was subsequently accepted by
+LSF jobs `153172030` and `153172069` at commit `d8495219`. The decoded root
+remained identical, the independent exhaustive public loader again accepted
+all `104` surfaces, and canonical binding fell from `240.5` to `133.7` seconds.
+The persisted binding-validation receipt and nested phase telemetry identified
+the per-track coordinate publisher—not the receipt or closing array proof—as
+the dominant remaining binding cost.
