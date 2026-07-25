@@ -176,7 +176,11 @@ def _sanitize_backend_boxes_xyxy(
     if type(result_height) is not int or result_height <= 0:
         raise ValueError("result_height must be one positive integer.")
     finite = np.isfinite(raw).all(axis=1)
-    clipped = raw.copy()
+    # Normalize from float64 coordinates below.  Performing the midpoint and
+    # width arithmetic in a float32 backend dtype can make a box whose upper
+    # edge is exactly ``result_width`` recompose a few ULPs beyond 1.0 in
+    # canonical cxcywh form.
+    clipped = raw.astype(np.float64, copy=True)
     clipped[:, (0, 2)] = np.clip(clipped[:, (0, 2)], 0.0, float(result_width))
     clipped[:, (1, 3)] = np.clip(clipped[:, (1, 3)], 0.0, float(result_height))
     positive = (clipped[:, 2] > clipped[:, 0]) & (clipped[:, 3] > clipped[:, 1])

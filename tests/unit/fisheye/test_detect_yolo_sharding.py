@@ -486,6 +486,7 @@ def test_sanitize_backend_boxes_clips_to_exact_result_extent() -> None:
         boxes,
         np.asarray([[0.0, 10.0, 640.0, 630.0], [10.0, 20.0, 30.0, 40.0]]),
     )
+    assert boxes.dtype == np.float64
     assert report == {
         "input_count": 2,
         "clipped_count": 1,
@@ -493,6 +494,23 @@ def test_sanitize_backend_boxes_clips_to_exact_result_extent() -> None:
         "dropped_nonpositive_count": 0,
         "output_count": 2,
     }
+
+
+def test_sanitize_backend_boxes_preserves_exact_normalized_boundary() -> None:
+    boxes, keep, _ = mod._sanitize_backend_boxes_xyxy(  # noqa: SLF001
+        np.asarray([[123.456, 231.125, 640.0, 640.0]], dtype=np.float32),
+        result_width=640,
+        result_height=640,
+    )
+
+    np.testing.assert_array_equal(keep, np.asarray([True]))
+    cx = (boxes[:, 0] + boxes[:, 2]) * 0.5 / 640
+    cy = (boxes[:, 1] + boxes[:, 3]) * 0.5 / 640
+    width = (boxes[:, 2] - boxes[:, 0]) / 640
+    height = (boxes[:, 3] - boxes[:, 1]) / 640
+
+    assert np.all(cx + width * 0.5 <= 1.0)
+    assert np.all(cy + height * 0.5 <= 1.0)
 
 
 def test_sanitize_backend_boxes_drops_nonfinite_and_collapsed_rows() -> None:
