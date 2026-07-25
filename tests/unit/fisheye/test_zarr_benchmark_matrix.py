@@ -186,6 +186,48 @@ def test_detection_matrix_is_deterministic_and_balances_layout_positions(
         )
 
 
+def test_shortlist_rotates_every_candidate_across_trial_positions(
+    tmp_path: Path,
+) -> None:
+    requests = (
+        StorageCandidateRequest(
+            layout=BenchmarkLayout.REGULAR,
+            target_chunk_bytes=1024 * 1024,
+        ),
+        StorageCandidateRequest(
+            layout=BenchmarkLayout.SHARDED,
+            target_chunk_bytes=128 * 1024,
+            target_shard_bytes=8 * 1024 * 1024,
+        ),
+        ACCESS_AWARE_HYBRID_REQUEST,
+    )
+    matrix = plan_canonical_detection_benchmark_matrix(
+        matrix_id="sleepyfish_detection_balanced_shortlist_v1",
+        scales=(_scales()[1],),
+        destination_root=tmp_path,
+        candidate_requests=requests,
+        repetitions=5,
+        seed=20_260_724,
+    )
+
+    positions = {
+        candidate.candidate_id: [
+            trial.position
+            for repetition in matrix.repetitions
+            for trial in repetition.trials
+            if trial.candidate_id == candidate.candidate_id
+        ]
+        for candidate in matrix.candidates
+    }
+    assert all(set(values) == {0, 1, 2} for values in positions.values())
+    assert all(
+        max(values.count(position) for position in range(3))
+        - min(values.count(position) for position in range(3))
+        <= 1
+        for values in positions.values()
+    )
+
+
 def test_detection_matrix_records_exact_destination_collisions(tmp_path: Path) -> None:
     initial = _matrix(tmp_path, repetitions=1)
     occupied = Path(initial.repetitions[0].trials[0].destination)

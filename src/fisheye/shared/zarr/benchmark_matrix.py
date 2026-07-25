@@ -485,21 +485,17 @@ def _balanced_order(
 
     for layout, bucket in buckets.items():
         random.Random(f"{seed}:{layout.value}").shuffle(bucket)
-        if bucket:
-            offset = repetition_index % len(bucket)
-            buckets[layout] = bucket[offset:] + bucket[:offset]
 
-    merged: list[ResolvedStorageCandidate] = []
+    base_order: list[ResolvedStorageCandidate] = []
     active_layouts = [layout for layout in BenchmarkLayout if buckets[layout]]
     index = 0
     while any(buckets.values()):
         layout = active_layouts[index % len(active_layouts)]
         if buckets[layout]:
-            merged.append(buckets[layout].pop(0))
+            base_order.append(buckets[layout].pop(0))
         index += 1
-    if repetition_index % 2:
-        merged.reverse()
-    return tuple(merged)
+    offset = repetition_index % len(base_order)
+    return tuple(base_order[offset:] + base_order[:offset])
 
 
 def plan_storage_benchmark_matrix(
