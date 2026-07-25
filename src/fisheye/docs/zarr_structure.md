@@ -333,6 +333,10 @@ YOLO detection storage note:
 - runs record `detect_storage_layout`, `detect_storage_policy`,
   `detect_row_shard_rows`, `detect_frame_shard_rows`, and
   `detect_shard_write` in attrs/provenance
+- CUDA runs record the PyTorch allocator high-water mark under
+  `timing_summary.pytorch_cuda_peak_memory` and in query-friendly
+  `pytorch_cuda_peak_*` attrs. This measures PyTorch allocated/reserved memory,
+  not CUDA-context, NVDEC, driver, or other non-PyTorch device allocations
 - use `--no-detect-sharding` for an explicit ordinary-chunk compatibility or
   benchmark run; blob/traditional detection writers remain unchanged
 

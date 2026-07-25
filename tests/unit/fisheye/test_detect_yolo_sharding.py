@@ -237,6 +237,77 @@ def test_detection_execution_parameters_reject_fp16_cpu_path() -> None:
         )
 
 
+def test_pytorch_cuda_peak_memory_tracking_records_allocator_high_water(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+    gib = 1024**3
+    monkeypatch.setattr(mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(mod.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(mod.torch.cuda, "memory_allocated", lambda device: gib // 4)
+    monkeypatch.setattr(mod.torch.cuda, "memory_reserved", lambda device: gib // 2)
+    monkeypatch.setattr(
+        mod.torch.cuda,
+        "get_device_properties",
+        lambda device: SimpleNamespace(total_memory=24 * gib),
+    )
+    monkeypatch.setattr(
+        mod.torch.cuda,
+        "reset_peak_memory_stats",
+        lambda device: calls.append(("reset", int(device))),
+    )
+    monkeypatch.setattr(
+        mod.torch.cuda,
+        "synchronize",
+        lambda device: calls.append(("synchronize", int(device))),
+    )
+    monkeypatch.setattr(
+        mod.torch.cuda,
+        "max_memory_allocated",
+        lambda device: 2 * gib,
+    )
+    monkeypatch.setattr(
+        mod.torch.cuda,
+        "max_memory_reserved",
+        lambda device: 3 * gib,
+    )
+
+    tracker = mod._start_pytorch_cuda_peak_memory_tracking(  # noqa: SLF001
+        use_gpu=True
+    )
+    result = mod._finish_pytorch_cuda_peak_memory_tracking(tracker)  # noqa: SLF001
+
+    assert calls == [("reset", 0), ("synchronize", 0)]
+    assert result["status"] == "ok"
+    assert result["measurement_scope"] == "pytorch_cuda_caching_allocator_only"
+    assert result["baseline_allocated_bytes"] == gib // 4
+    assert result["baseline_reserved_bytes"] == gib // 2
+    assert result["peak_allocated_bytes"] == 2 * gib
+    assert result["peak_reserved_bytes"] == 3 * gib
+    assert result["peak_allocated_gib"] == 2.0
+    assert result["peak_reserved_gib"] == 3.0
+    assert result["peak_reserved_fraction_of_device"] == 0.125
+
+
+def test_pytorch_cuda_peak_memory_tracking_is_explicitly_not_applicable_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mod.torch.cuda,
+        "is_available",
+        lambda: pytest.fail("CPU tracking must not query CUDA availability"),
+    )
+
+    tracker = mod._start_pytorch_cuda_peak_memory_tracking(  # noqa: SLF001
+        use_gpu=False
+    )
+    result = mod._finish_pytorch_cuda_peak_memory_tracking(tracker)  # noqa: SLF001
+
+    assert result["status"] == "not_applicable"
+    assert result["reason"] == "cpu_inference"
+    assert "peak_allocated_bytes" not in result
+
+
 def test_detection_model_identity_projection_is_exact_and_fail_closed() -> None:
     artifact = {
         "role": "detect_model",
@@ -1523,6 +1594,15 @@ def test_real_detect_yolo_attempt_normalizes_boxes_in_validated_result_shape(
     assert type(parameters["torch_cudnn_benchmark"]) is bool
     assert parameters["model_fused"] is True
     assert parameters["half"] is False
+    cuda_memory = run.attrs["timing_summary"]["pytorch_cuda_peak_memory"]
+    assert cuda_memory["status"] == "not_applicable"
+    assert cuda_memory["reason"] == "cpu_inference"
+    assert run.attrs["pytorch_cuda_peak_memory_status"] == "not_applicable"
+    assert (
+        run.attrs["pytorch_cuda_peak_memory_scope"]
+        == "pytorch_cuda_caching_allocator_only"
+    )
+    assert "pytorch_cuda_peak_allocated_bytes" not in run.attrs
     model_artifact = next(
         artifact
         for artifact in run.attrs["run_provenance"]["input_artifacts"]

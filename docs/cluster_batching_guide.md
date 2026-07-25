@@ -164,6 +164,10 @@ Persisted production `detect_yolo` runs include a `timing_summary` attr and
 flat timing attrs for read/decode, preprocess/resize, predict, postprocess,
 array assembly, and Zarr write. Use those persisted timings to confirm that a
 cluster production run has the same bottleneck profile as the compute smoke.
+CUDA runs also include `timing_summary.pytorch_cuda_peak_memory` plus flat peak
+allocated/reserved attrs. These are exact PyTorch allocator high-water marks;
+use LSF/NVML telemetry when total device usage including NVDEC, the CUDA
+context, and non-PyTorch allocations is required.
 
 For the benchmark protocol and current measurements, see
 `docs/detect_decode_backend_benchmark_todo.md`.

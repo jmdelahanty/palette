@@ -159,6 +159,10 @@ DETECTION_BACKEND_BBOX_SANITIZATION_SCHEMA_ID = (
 DETECTION_BACKEND_BBOX_SANITIZATION_POLICY = (
     "clip_xyxy_to_validated_result_extent_drop_nonfinite_or_nonpositive_v1"
 )
+PYTORCH_CUDA_PEAK_MEMORY_SCHEMA_ID = "palette.pytorch_cuda_peak_memory.v1"
+PYTORCH_CUDA_PEAK_MEMORY_POLICY = (
+    "reset_after_model_and_decoder_setup_terminal_sync_v1"
+)
 
 # First explicitly persisted version of the complete detection algorithm.
 # Bump this value whenever geometry, filtering, or box post-processing changes
@@ -273,6 +277,100 @@ def _detection_execution_parameters(
         "model_fused": model_fused,
         "half": model_fp16,
     }
+
+
+def _start_pytorch_cuda_peak_memory_tracking(*, use_gpu: bool) -> dict[str, Any]:
+    """Reset and describe one run-scoped PyTorch CUDA allocator high-water mark."""
+
+    if type(use_gpu) is not bool:
+        raise TypeError("use_gpu must be one bool.")
+    base: dict[str, Any] = {
+        "schema_id": PYTORCH_CUDA_PEAK_MEMORY_SCHEMA_ID,
+        "measurement_policy": PYTORCH_CUDA_PEAK_MEMORY_POLICY,
+        "measurement_scope": "pytorch_cuda_caching_allocator_only",
+        "excluded_memory": "cuda_context_nvdec_driver_and_non_pytorch_allocations",
+    }
+    if not use_gpu:
+        return {
+            **base,
+            "status": "not_applicable",
+            "reason": "cpu_inference",
+        }
+    if not torch.cuda.is_available():
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "cuda_not_available",
+        }
+    try:
+        device_index = int(torch.cuda.current_device())
+        baseline_allocated = int(torch.cuda.memory_allocated(device_index))
+        baseline_reserved = int(torch.cuda.memory_reserved(device_index))
+        device_total = int(torch.cuda.get_device_properties(device_index).total_memory)
+        torch.cuda.reset_peak_memory_stats(device_index)
+    except Exception as exc:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        **base,
+        "status": "tracking",
+        "device_index": device_index,
+        "device_total_bytes": device_total,
+        "baseline_allocated_bytes": baseline_allocated,
+        "baseline_reserved_bytes": baseline_reserved,
+        "reset_timing": "immediately_before_inference_loop",
+    }
+
+
+def _finish_pytorch_cuda_peak_memory_tracking(
+    tracker: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Synchronize once and finalize a PyTorch CUDA allocator measurement."""
+
+    record = dict(tracker)
+    if record.get("status") != "tracking":
+        return record
+    try:
+        device_index = int(record["device_index"])
+        torch.cuda.synchronize(device_index)
+        peak_allocated = int(torch.cuda.max_memory_allocated(device_index))
+        peak_reserved = int(torch.cuda.max_memory_reserved(device_index))
+        device_total = int(record["device_total_bytes"])
+        if peak_allocated < 0 or peak_reserved < peak_allocated or device_total <= 0:
+            raise RuntimeError("CUDA allocator counters are internally inconsistent.")
+    except Exception as exc:
+        record.update(
+            {
+                "status": "unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        return record
+    gib = float(1024**3)
+    record.update(
+        {
+            "status": "ok",
+            "terminal_cuda_synchronize": True,
+            "peak_allocated_bytes": peak_allocated,
+            "peak_reserved_bytes": peak_reserved,
+            "peak_allocated_gib": float(peak_allocated / gib),
+            "peak_reserved_gib": float(peak_reserved / gib),
+            "baseline_allocated_gib": float(
+                int(record["baseline_allocated_bytes"]) / gib
+            ),
+            "baseline_reserved_gib": float(
+                int(record["baseline_reserved_bytes"]) / gib
+            ),
+            "peak_allocated_fraction_of_device": float(
+                peak_allocated / device_total
+            ),
+            "peak_reserved_fraction_of_device": float(peak_reserved / device_total),
+        }
+    )
+    return record
 
 
 def _sanitize_backend_boxes_xyxy(
@@ -2998,6 +3096,9 @@ def detect_yolo(
         'array_assembly_seconds_total': 0.0,
         'zarr_write_seconds_total': 0.0,
     }
+    pytorch_cuda_peak_memory = _start_pytorch_cuda_peak_memory_tracking(
+        use_gpu=bool(use_gpu)
+    )
     processing_start = time.time()
     pynvvc_frame_iter = None
     opencv_stream_exhausted = False
@@ -3352,6 +3453,10 @@ def detect_yolo(
             f"expected_shape={expected_backend_result_shape!r}."
         )
 
+    pytorch_cuda_peak_memory = _finish_pytorch_cuda_peak_memory_tracking(
+        pytorch_cuda_peak_memory
+    )
+
     # Decoder resources remain owned by the encompassing publication attempt
     # and are closed exactly once by its finalization boundary.
     
@@ -3576,6 +3681,7 @@ def detect_yolo(
         'zarr_write_seconds_total': float(stage_timings['zarr_write_seconds_total']),
         'predict_avg_batch_ms': float(avg_inference * 1000.0) if inference_times else 0.0,
         'read_decode_avg_batch_ms': float(np.mean(read_times) * 1000.0) if read_times else 0.0,
+        'pytorch_cuda_peak_memory': pytorch_cuda_peak_memory,
     }
     
     # Store metadata
@@ -3715,6 +3821,25 @@ def detect_yolo(
     detect_group.attrs['decode_backend_effective'] = decode_backend_effective
     detect_group.attrs['decode_domain_proof'] = decode_domain_proof
     detect_group.attrs['video_reader_type'] = video_reader_type
+    detect_group.attrs['pytorch_cuda_peak_memory_status'] = str(
+        pytorch_cuda_peak_memory.get('status') or 'unavailable'
+    )
+    detect_group.attrs['pytorch_cuda_peak_memory_scope'] = str(
+        pytorch_cuda_peak_memory.get('measurement_scope') or ''
+    )
+    if pytorch_cuda_peak_memory.get('status') == 'ok':
+        detect_group.attrs['pytorch_cuda_peak_allocated_bytes'] = int(
+            pytorch_cuda_peak_memory['peak_allocated_bytes']
+        )
+        detect_group.attrs['pytorch_cuda_peak_reserved_bytes'] = int(
+            pytorch_cuda_peak_memory['peak_reserved_bytes']
+        )
+        detect_group.attrs['pytorch_cuda_peak_allocated_gib'] = float(
+            pytorch_cuda_peak_memory['peak_allocated_gib']
+        )
+        detect_group.attrs['pytorch_cuda_peak_reserved_gib'] = float(
+            pytorch_cuda_peak_memory['peak_reserved_gib']
+        )
 
     platform_info = env_info.get("platform") or {}
     scheduler_info = platform_info.get("lsf") or platform_info.get("slurm")
