@@ -193,11 +193,13 @@ write benchmark candidates into a canonical recording or training Zarr.
       deduplicate the targets that produce identical physical plans at 200k.
 - [x] Complete an initial same-input regular-versus-indexed-sharding smoke.
 - [x] Measure sequential write time, logical bytes, and peak memory.
-- [ ] Measure sharded publication/copy throughput and peak memory.
-- [ ] Measure cold and warm full-array reads.
-- [ ] Measure frame windows through `frame_row_offsets` plus the corresponding
+- [x] Measure sharded publication/copy throughput; publisher-specific peak RSS
+      remains a separate profiling refinement.
+- [x] Measure process-first and same-process warm complete-offset reads without
+      incorrectly labeling uncontrolled OS/filesystem cache state as cold.
+- [x] Measure frame windows through `frame_row_offsets` plus the corresponding
       instance slices.
-- [ ] Measure individual-frame indexed reads.
+- [x] Measure individual-frame indexed reads.
 - [x] Measure contiguous observation-row windows used by downstream joins.
 - [x] Measure consolidated and direct metadata open separately in the smoke
       harness.
@@ -213,8 +215,9 @@ Acceptance requirements:
 - [ ] No unacceptable per-frame read amplification.
 - [x] Object count is materially lower than the regular small-chunk layout at
       the 200k scale.
-- [ ] Peak memory is bounded for the intended writer and publisher hosts.
-- [ ] The chosen result is reproducible and recorded in the common benchmark
+- [x] Peak writer memory is bounded and unchanged across the full-duration
+      candidates; publisher-specific peak RSS remains to be captured.
+- [x] The candidate result is reproducible and recorded in the common benchmark
       envelope.
 
 Exit gate:
@@ -231,6 +234,10 @@ The first commit-pinned cluster lifecycle smoke is recorded in
 Cluster matrix implementation and the required stage-to-scratch,
 local-compute, publish-back lifecycle are tracked in
 [`canonical_detection_storage_cluster_benchmark_checklist.md`](canonical_detection_storage_cluster_benchmark_checklist.md).
+
+The corrected five-repetition access-aware result and exact Crimson handoff are
+recorded in
+[`diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md`](diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md).
 
 ## Phase 5 — `detect_yolo` Production Integration
 
@@ -339,5 +346,8 @@ reusing shared logical contracts where the semantics are genuinely identical.
       without changing the workload, and apply the predeclared gates.
 - [x] Carry the selected 128 KiB-inner / 8 MiB-target-shard plan and the regular
       1 MiB control to full-duration validation without promoting either.
-- [ ] Implement and benchmark the access-aware hybrid identified by the
+- [x] Implement and benchmark the access-aware hybrid identified by the
       full-duration result before beginning HTTP/Crimson promotion testing.
+- [ ] Run the documented exact-dtype, persisted-offset, cache, file-range, and
+      UI workload through Crimson on the actual Mac/VPN mount; do not promote a
+      production profile before this consumer gate passes.

@@ -345,9 +345,16 @@ Exit gate:
 - [x] Carry only the 200k finalist and required control to full duration.
 - [x] Run five full-duration materialization, publication, and read
       repetitions.
-- [ ] Add and benchmark an access-aware hybrid that uses a 1 MiB target for
+- [x] Add and benchmark an access-aware hybrid that uses a 1 MiB target for
       `EAGER` offsets and 128 KiB targets for `WINDOWED` instance columns,
       inside 8 MiB target shards.
+- [x] Complete one corrected lifecycle smoke and five balanced full-duration
+      repetitions of the regular, uniform-sharded, and access-aware layouts.
+- [x] Apply the unchanged frozen reduction gates and preserve the regular
+      control as their formal result rather than weakening a relative threshold
+      after observing a small absolute eager-offset regression.
+- [x] Carry the access-aware hybrid forward only as the Crimson consumer-test
+      finalist; do not promote it from cluster evidence.
 - [ ] Benchmark parallel publication only for finalists.
 - [x] Report median, p95 where meaningful, dispersion, trial order, and host
       identity rather than only the fastest observation.
@@ -363,6 +370,9 @@ Exit gate:
 
 ## Phase 10 — HTTP And Crimson Validation
 
+The exact stores, workload, telemetry, and promotion gates are recorded in
+[`diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md`](diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md).
+
 - [ ] Serve finalist stores through a request-logging HTTP Range path.
 - [ ] Record metadata requests, range requests, transferred bytes, decoded
       bytes, latency, and read amplification.
@@ -370,6 +380,15 @@ Exit gate:
 - [ ] Verify direct and consolidated metadata behavior explicitly.
 - [ ] Measure Crimson initialization, random scrub, forward playback, frame
       windows, and full-array operations.
+- [ ] Make Crimson load the selected run's complete persisted
+      `frame_row_offsets` once, retain it, and prove later frame resolution does
+      not reread offsets or scan `frame_indices`.
+- [ ] Compare the current zero-byte TensorStore cache with one fixed nonzero
+      cache while keeping those results separate.
+- [ ] Run five balanced process-first repetitions against the matching regular
+      and hybrid benchmark stores and preserve OS/filesystem-cache uncertainty.
+- [ ] Capture TensorStore/file read counts, batched reads, transferred bytes,
+      shard-index reuse, adapter latency, and application cache behavior.
 - [ ] Run the actual Mac/VPN path used in practice.
 - [ ] Record unsupported consolidated-metadata behavior as a compatibility gate,
       not as a Python-only success.
