@@ -437,6 +437,7 @@ def test_staged_scientific_validation_binds_full_numeric_check_to_decoded_root(
     receipt = mod.build_track_motion_staged_scientific_validation(
         run,
         decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+        run_name=str(run.path).rsplit("/", 1)[-1],
     )
 
     assert receipt["result"] == "valid"
@@ -459,6 +460,7 @@ def test_staged_scientific_validation_rejects_wrong_numeric_payload(
         mod.build_track_motion_staged_scientific_validation(
             run,
             decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+            run_name=str(run.path).rsplit("/", 1)[-1],
         )
 
 
@@ -473,6 +475,7 @@ def test_staged_scientific_validation_rejects_another_installed_payload(
     receipt = mod.build_track_motion_staged_scientific_validation(
         run,
         decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+        run_name=str(run.path).rsplit("/", 1)[-1],
     )
     run.attrs[mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR] = receipt
     monkeypatch.setattr(

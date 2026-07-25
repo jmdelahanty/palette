@@ -1066,6 +1066,7 @@ def materialize_track_kinematics(
                 track_writer.build_track_motion_staged_scientific_validation(
                     sharded_scientific,
                     decoded_payload_receipt=decoded_payload,
+                    run_name=plan.run_name,
                 )
             )
             sharded_scientific.attrs[

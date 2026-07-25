@@ -171,10 +171,12 @@ def _install_writer_api(
         run_group,
         *,
         decoded_payload_receipt,
+        run_name,
     ):
         assert run_group.attrs[mod.COORDINATE_BINDING_STATUS_ATTR] == (
             mod.UNBOUND_STAGE_STATUS
         )
+        assert run_name == "track_1"
         return {
             "schema_id": "test.track_motion_staged_scientific_validation",
             "decoded_payload_root_sha256": decoded_payload_receipt["root_sha256"],

@@ -8889,6 +8889,7 @@ def build_track_motion_staged_scientific_validation(
     run_group: Any,
     *,
     decoded_payload_receipt: Mapping[str, Any],
+    run_name: str,
 ) -> dict[str, Any]:
     """Validate local numerical derivations once and bind them to copied values."""
 
@@ -8924,7 +8925,14 @@ def build_track_motion_staged_scientific_validation(
     decoded_summary = _track_motion_decoded_payload_summary(
         decoded_payload_receipt
     )
-    run_name = str(run_group.path).rsplit("/", 1)[-1]
+    run_name = str(run_name).strip()
+    if (
+        not run_name
+        or run_name in {".", ".."}
+        or "/" in run_name
+        or "\\" in run_name
+    ):
+        raise ValueError("Staged scientific validation requires one safe run name.")
     body = {
         "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID,
         "schema_version": (
