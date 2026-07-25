@@ -813,7 +813,7 @@ lineage, and DuckDB queries Parquet.
 - Protocol-specific table extensions should stay in this export family when
   they are derived from existing per-recording analysis runs. The first
   GoodCopBadCop chaser tables are specified in
-  [`goodcopbadcop_group_export_design.md`](goodcopbadcop_group_export_design.md).
+  [`goodcopbadcop_group_export_design.md`](archive/goodcopbadcop_group_export_design.md).
 
 ### Phase 3. Polars/DuckDB Smoke Queries
 

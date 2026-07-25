@@ -4906,6 +4906,74 @@ def _positive_float_value(value: object) -> Optional[float]:
     return float(parsed)
 
 
+def _selected_stimulus_calibration_candidate(
+    analysis_group: Optional[object],
+) -> Optional[tuple[str, object, Dict[str, object]]]:
+    """Return the selected complete stimulus run's active camera calibration.
+
+    Modern stimulus imports bind calibration below the immutable selected run,
+    rather than copying it into ``analysis/calibration``.  Only the active
+    camera child of a complete selected run is authoritative for registry
+    status; arbitrary camera children and incomplete runs are ignored.
+    """
+
+    if analysis_group is None:
+        return None
+    stimulus_parent = _get_group_path(analysis_group, "stimulus_runs")
+    if stimulus_parent is None:
+        return None
+    run_name = resolve_latest_complete_run_name(stimulus_parent)
+    if run_name is None:
+        return None
+    run_group = _get_group_path(stimulus_parent, run_name)
+    if run_group is None:
+        return None
+    parent_attrs = getattr(stimulus_parent, "attrs", {})
+    selection = (
+        "latest_complete"
+        if _decode_text(parent_attrs.get("latest_complete")) == run_name
+        else "legacy_complete"
+    )
+    calibration = _get_group_path(run_group, "calibration")
+    if calibration is None:
+        return None
+
+    calibration_attrs = getattr(calibration, "attrs", {})
+    active_camera_id = _decode_text(calibration_attrs.get("active_camera_id"))
+    manifest = _coerce_mapping_value(
+        calibration_attrs.get("selected_calibration_manifest")
+    )
+    if active_camera_id is None and manifest is not None:
+        active_camera_id = _decode_text(manifest.get("camera_id"))
+    if active_camera_id is None:
+        return None
+    camera_group = _get_group_path(calibration, active_camera_id)
+    if camera_group is None:
+        return None
+
+    details: Dict[str, object] = {
+        "source_stimulus_run": run_name,
+        "stimulus_run_selection": selection,
+        "active_camera_id": active_camera_id,
+    }
+    for attr_name in (
+        "schema_id",
+        "schema_version",
+        "active_camera_calibration_ref",
+        "active_camera_transform_ref",
+        "active_camera_transform_sha256",
+        "selected_calibration_manifest_sha256",
+    ):
+        value = calibration_attrs.get(attr_name)
+        if value is not None:
+            details[attr_name] = value
+    return (
+        f"analysis/stimulus_runs/{run_name}/calibration/{active_camera_id}",
+        camera_group,
+        details,
+    )
+
+
 def _recording_calibration_status(
     *,
     root: object,
@@ -4913,31 +4981,37 @@ def _recording_calibration_status(
 ) -> tuple[Optional[object], str, str, Dict[str, object]]:
     """Summarize canonical camera-scale calibration for the status ledger.
 
-    ``analysis/calibration`` is preferred over the legacy root ``calibration``
-    group when it has a usable scale. An empty group remains a present legacy
-    surface for compatibility, but is explicitly distinguished from a usable
-    camera calibration in ``details_json``.
+    ``analysis/calibration`` is preferred, followed by the selected complete
+    stimulus run's active camera calibration and then the legacy root
+    ``calibration`` group. An empty group remains a present legacy surface for
+    compatibility, but is explicitly distinguished from a usable camera
+    calibration in ``details_json``.
     """
 
-    candidates: List[tuple[str, object]] = []
+    candidates: List[tuple[str, object, Dict[str, object]]] = []
     if analysis_group is not None and hasattr(analysis_group, "get"):
         try:
             analysis_calibration = analysis_group.get("calibration")  # type: ignore[attr-defined]
         except Exception:
             analysis_calibration = None
         if analysis_calibration is not None:
-            candidates.append(("analysis/calibration", analysis_calibration))
+            candidates.append(("analysis/calibration", analysis_calibration, {}))
+
+    stimulus_candidate = _selected_stimulus_calibration_candidate(analysis_group)
+    if stimulus_candidate is not None:
+        candidates.append(stimulus_candidate)
+
     try:
         legacy_calibration = root.get("calibration")  # type: ignore[attr-defined]
     except Exception:
         legacy_calibration = None
     if legacy_calibration is not None and all(
-        legacy_calibration is not group for _, group in candidates
+        legacy_calibration is not group for _, group, _ in candidates
     ):
-        candidates.append(("calibration", legacy_calibration))
+        candidates.append(("calibration", legacy_calibration, {}))
 
     summaries: List[tuple[object, Dict[str, object]]] = []
-    for group_path, group in candidates:
+    for group_path, group, candidate_details in candidates:
         attrs = getattr(group, "attrs", {})
         ppm = _positive_float_value(attrs.get("pixels_per_mm_camera"))
         ppm_source = "pixels_per_mm_camera" if ppm is not None else None
@@ -4952,6 +5026,7 @@ def _recording_calibration_status(
         details: Dict[str, object] = {
             "calibration_group_path": group_path,
             "usable_camera_scale": ppm is not None,
+            **candidate_details,
         }
         if ppm is not None:
             details["pixels_per_mm_camera"] = float(ppm)

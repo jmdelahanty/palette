@@ -74,7 +74,17 @@ def _write_source(
     duplicate_key: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     root = zarr.open_group(path, mode="w", zarr_format=3)
-    root.attrs.update({"width": 100, "height": 100, "total_frames": 8})
+    root.attrs.update(
+        {
+            "width": 100,
+            "height": 100,
+            "total_frames": 8,
+            "experiment_setup": {
+                "setup_type": "single_dish",
+                "total_expected_fish": 1,
+            },
+        }
+    )
     parent = root.create_group("detect_runs")
     parent.attrs["latest"] = "detect_source"
     source = parent.create_group("detect_source")
@@ -280,7 +290,17 @@ def test_collection_quality_supports_empty_modern_detection_surface(
 ) -> None:
     path = tmp_path / "analysis.zarr"
     root = zarr.open_group(path, mode="w", zarr_format=3)
-    root.attrs.update({"width": 100, "height": 100, "total_frames": 4})
+    root.attrs.update(
+        {
+            "width": 100,
+            "height": 100,
+            "total_frames": 4,
+            "experiment_setup": {
+                "setup_type": "single_dish",
+                "total_expected_fish": 1,
+            },
+        }
+    )
     source = root.create_group("detect_runs").create_group("empty")
     source.create_array(
         "frame_indices", data=np.empty((0,), dtype=np.int64), chunks=(2,), shards=(4,)
@@ -325,7 +345,17 @@ def test_collection_quality_multi_subject_skips_global_temporal_labels(
 ) -> None:
     path = tmp_path / "analysis.zarr"
     root = zarr.open_group(path, mode="w", zarr_format=3)
-    root.attrs.update({"width": 100, "height": 100, "total_frames": 4})
+    root.attrs.update(
+        {
+            "width": 100,
+            "height": 100,
+            "total_frames": 4,
+            "experiment_setup": {
+                "setup_type": "single_dish",
+                "total_expected_fish": 2,
+            },
+        }
+    )
     source = root.create_group("detect_runs").create_group("multi")
     frames = np.asarray([0, 0, 1, 1, 2, 2, 2], dtype=np.int64)
     boxes = np.asarray(

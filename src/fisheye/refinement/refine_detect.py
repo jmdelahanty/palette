@@ -21,6 +21,11 @@ from typing import Dict, List, Mapping, Optional, Tuple, Any
 from rich.console import Console
 
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
+from ..shared.experiment_setup import (
+    MissingExperimentSetupError,
+    ResolvedExperimentSetup,
+    resolve_experiment_setup,
+)
 from ..shared.dish_mask_boundary import (
     DEFAULT_DISH_MASK_BOUNDARY_TOLERANCE_MM,
     apply_dish_mask_boundary_tolerance,
@@ -51,6 +56,31 @@ _DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE = (
     "Interpolation overrides are deprecated and unsupported for refine_detect. "
     "The current sparse-first refine_detect workflow always runs with interpolation disabled."
 )
+
+
+def _validate_quality_experiment_setup_binding(
+    setup: ResolvedExperimentSetup,
+    quality_attrs: Mapping[str, Any],
+) -> None:
+    """Reject quality output computed under a different acquisition plan."""
+
+    quality_expected = quality_attrs.get("expected_subject_count")
+    if quality_expected is not None and int(quality_expected) != setup.expected_subject_count:
+        raise ValueError(
+            "Detection quality expected-subject count contradicts current experiment setup: "
+            f"quality={quality_expected}, setup={setup.expected_subject_count}"
+        )
+    quality_setup_sha = normalize_attr(quality_attrs.get("experiment_setup_sha256"))
+    if quality_setup_sha is None:
+        if not setup.legacy:
+            raise ValueError(
+                "Detection quality run is not bound to the canonical experiment setup"
+            )
+    elif quality_setup_sha != setup.record_sha256:
+        raise ValueError(
+            "Detection quality experiment-setup binding is stale or contradictory: "
+            f"quality={quality_setup_sha}, current={setup.record_sha256}"
+        )
 
 
 def _normalize_group_path(path: str) -> str:
@@ -1326,6 +1356,19 @@ def create_refined_run(
         if quality_group is not None
         else None
     )
+    experiment_setup = None
+    try:
+        experiment_setup = resolve_experiment_setup(root, allow_legacy=True)
+    except MissingExperimentSetupError:
+        if require_quality_for_run:
+            raise ValueError(
+                "Production detection refinement requires experiment setup metadata"
+            )
+    if experiment_setup is not None and quality_group is not None:
+        _validate_quality_experiment_setup_binding(
+            experiment_setup,
+            quality_group.attrs,
+        )
     if sampled_import:
         console.print("[yellow]⚠ Sampled training import detected; disabling refine filters.[/yellow]")
         detection_quality_labels = np.zeros_like(detection_quality_labels)
@@ -1555,6 +1598,16 @@ def create_refined_run(
         'detect_quality_guardrail_enforced': bool(require_quality_for_run),
         'dish_mask_gate': dish_mask_gate,
         'top_k_selection': top_k_selection,
+        'experiment_setup': (
+            {
+                'path': experiment_setup.group_path,
+                'sha256': experiment_setup.record_sha256,
+                'expected_subject_count': experiment_setup.expected_subject_count,
+                'legacy': experiment_setup.legacy,
+            }
+            if experiment_setup is not None
+            else None
+        ),
     }
 
     refined_group.attrs['source_detect_run'] = detect_run
@@ -1564,6 +1617,10 @@ def create_refined_run(
     refined_group.attrs['source_quality_group_path'] = (
         resolved_quality_group_path or "N/A"
     )
+    if experiment_setup is not None:
+        refined_group.attrs['experiment_setup_path'] = experiment_setup.group_path
+        refined_group.attrs['experiment_setup_sha256'] = experiment_setup.record_sha256
+        refined_group.attrs['expected_subject_count'] = experiment_setup.expected_subject_count
     refined_group.attrs['refined_family_path'] = refined_family_path
     refined_group.attrs['refinement_timestamp'] = created_timestamp
     refined_group.attrs['processing_time_seconds'] = float(duration)
@@ -1580,6 +1637,12 @@ def create_refined_run(
         'detect_path': source_detect_path,
         'quality_run': resolved_quality_run or 'N/A',
         'quality_group_path': resolved_quality_group_path or 'N/A',
+        'experiment_setup_path': (
+            experiment_setup.group_path if experiment_setup is not None else 'N/A'
+        ),
+        'experiment_setup_sha256': (
+            experiment_setup.record_sha256 if experiment_setup is not None else 'N/A'
+        ),
         'refined_family_path': refined_family_path,
     }
 
@@ -1676,6 +1739,12 @@ def create_refined_run(
             "source_detect_family_path": detect_family_path,
             "source_detect_path": source_detect_path,
             "quality_run": resolved_quality_run or "N/A",
+            "experiment_setup_path": (
+                experiment_setup.group_path if experiment_setup is not None else "N/A"
+            ),
+            "experiment_setup_sha256": (
+                experiment_setup.record_sha256 if experiment_setup is not None else "N/A"
+            ),
             "selection_policy": (
                 "quality_filtered_per_frame_top_k_sparse_instances_no_interpolation"
                 if top_k_selection.get("enabled")

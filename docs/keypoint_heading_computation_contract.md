@@ -247,7 +247,7 @@ If heading metadata is absent or disabled:
 ## Related Docs
 
 - `docs/pose_heuristic_profile_contract.md`
-- `docs/pose_schema_heuristics_split_proposal.md`
+- `docs/archive/pose_schema_heuristics_split_proposal.md`
 
 ### Editing / dashed candidate preview
 

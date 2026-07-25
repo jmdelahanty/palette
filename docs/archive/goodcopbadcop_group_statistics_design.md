@@ -58,7 +58,7 @@ For GoodCopBadCop, common paired contrasts include:
 ## Input Tables
 
 The first implementation should read the existing GoodCopBadCop group export
-tables documented in `docs/goodcopbadcop_group_export_design.md`:
+tables documented in `docs/archive/goodcopbadcop_group_export_design.md`:
 
 ```text
 goodcopbadcop_spatial_occupancy_zones

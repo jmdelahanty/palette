@@ -894,7 +894,7 @@ new stage combination does not require a new scheduler backend or a copied DAG
 implementation. Semantic requirements still fail closed: for example, mask
 finalization must name both its mask-inference and refined-keypoint producers.
 The completed GoodCopBadCop baseline and validation gates are recorded in
-`docs/diagnostics/goodcopbadcop_subject_mask_concurrent_dag_2026-07-12.md`.
+`docs/archive/goodcopbadcop_subject_mask_concurrent_dag_2026-07-12.md`.
 
 For GPU keypoint jobs, pass `--queue gpu_l4 --gpus 1`. The submitter will request
 `-gpu num=1` from LSF and, unless `--device` is already supplied, will pass

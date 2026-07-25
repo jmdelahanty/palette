@@ -13,7 +13,7 @@ slice:
 
 ## Corrections Applied
 
-- `docs/diagnostics/stage_array_validation_audit_2026-05-21.md`
+- `docs/archive/stage_array_validation_audit_2026-05-21.md`
   - Recorded that rootless `ok` completion sync has been remediated for
     keypoint/pose and eye-mask batch wrappers.
   - Added the shadow report command.

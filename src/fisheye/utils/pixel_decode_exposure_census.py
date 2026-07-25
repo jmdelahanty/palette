@@ -21,7 +21,7 @@ import zarr
 
 
 DEFAULT_REGISTRY = Path("/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite")
-DEFAULT_OUTPUT = Path("docs/diagnostics/pixel_decode_exposure_census_2026-07-02.md")
+DEFAULT_OUTPUT = Path("docs/archive/pixel_decode_exposure_census_2026-07-02.md")
 
 RAW_VIDEO_SURFACES = (
     "raw_video/images_ds",

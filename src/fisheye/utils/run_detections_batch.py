@@ -17,6 +17,13 @@ from fisheye.cli.shared_args import add_registry_discovery_args
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    ACQUISITION_AUTHORITY_STATUS_ATTR,
+    EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+    parse_acquisition_authority_publication_status,
+)
 from fisheye.shared.environment import resolve_log_dir
 from fisheye.shared.environment import resolve_recording_roots
 from fisheye.shared.zarr_discovery import discover_registry_zarrs
@@ -57,6 +64,7 @@ DECODE_BACKEND_CHOICES = (
 REASON_ANALYSIS_ZARR_MISSING = "analysis_zarr_missing"
 REASON_ANALYSIS_ZARR_OPEN_FAILED = "analysis_zarr_open_failed"
 REASON_NOT_ANALYSIS_ZARR = "not_analysis_zarr"
+REASON_ACQUISITION_AUTHORITY_MISSING = "acquisition_authority_missing"
 REASON_CAMERA_VIDEO_MISSING = "camera_video_missing"
 REASON_CAMERA_VIDEO_AMBIGUOUS = "camera_video_ambiguous"
 REASON_CAMS_DIR_MISSING = "cams_directory_missing"
@@ -77,6 +85,7 @@ class DetectPlan:
     detect_present: bool = False
     background_present: bool = False
     tuning_present: bool = False
+    acquisition_authority_present: bool = False
 
 
 class JsonLogger(SharedJsonLogger):
@@ -248,6 +257,60 @@ def _analysis_metadata_readable(zarr_path: Path) -> bool:
     return False
 
 
+def _read_node_attrs(node_path: Path) -> Optional[dict[str, object]]:
+    zarr_json = node_path / "zarr.json"
+    if not zarr_json.exists():
+        return None
+    try:
+        payload = json.loads(zarr_json.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    attrs = payload.get("attributes")
+    return attrs if isinstance(attrs, dict) else None
+
+
+def _has_published_acquisition_authority(zarr_path: Path) -> bool:
+    """Cheap fail-closed metadata preflight for canonical detection inputs.
+
+    Detection itself reopens and fully validates the sealed authority.  This
+    planner check deliberately avoids synchronous Zarr traversal while still
+    rejecting absent, partial, or structurally invalid publication metadata.
+    """
+
+    root_attrs = _read_node_attrs(zarr_path)
+    raw_attrs = _read_node_attrs(zarr_path / "raw_video")
+    if root_attrs is None or raw_attrs is None:
+        return False
+    root_value = root_attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR)
+    raw_value = raw_attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR)
+    if root_value != raw_value or root_value is None:
+        return False
+    try:
+        status = parse_acquisition_authority_publication_status(root_value)
+    except Exception:
+        return False
+    if (
+        status.status != ACQUISITION_AUTHORITY_PUBLISHED
+        or status.authority_mode
+        not in {
+            EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+        }
+        or status.authority_path is None
+    ):
+        return False
+    authority_attrs = _read_node_attrs(zarr_path.joinpath(*status.authority_path.split("/")))
+    if authority_attrs is None:
+        return False
+    required = {
+        "acquisition_import_ownership": dict,
+        "acquisition_import_ownership_sha256": str,
+        "acquisition_camera_frame": dict,
+        "acquisition_camera_frame_sha256": str,
+    }
+    return all(type(authority_attrs.get(name)) is expected for name, expected in required.items())
+
+
 def _has_group_latest(zarr_path: Path, group_name: str) -> bool:
     attrs = _read_group_attrs(zarr_path, group_name)
     if not attrs:
@@ -302,6 +365,20 @@ def _build_plan_for_zarr(
     detect_present = _has_group_latest(zarr_path, "detect_runs")
     background_present = _has_group_latest(zarr_path, "background_runs")
     tuning_present = _has_detection_tuning(zarr_path)
+    acquisition_authority_present = _has_published_acquisition_authority(zarr_path)
+
+    if not acquisition_authority_present:
+        return DetectPlan(
+            zarr_path=zarr_path,
+            recording_dir=recording_dir,
+            video_path=None,
+            status=STATUS_MISSING,
+            reason=REASON_ACQUISITION_AUTHORITY_MISSING,
+            detect_present=detect_present,
+            background_present=background_present,
+            tuning_present=tuning_present,
+            acquisition_authority_present=False,
+        )
 
     if require_background and not background_present:
         return DetectPlan(
@@ -313,6 +390,7 @@ def _build_plan_for_zarr(
             detect_present=detect_present,
             background_present=background_present,
             tuning_present=tuning_present,
+            acquisition_authority_present=acquisition_authority_present,
         )
 
     if require_tuning and not tuning_present:
@@ -325,6 +403,7 @@ def _build_plan_for_zarr(
             detect_present=detect_present,
             background_present=background_present,
             tuning_present=tuning_present,
+            acquisition_authority_present=acquisition_authority_present,
         )
 
     video_path, video_reason = _resolve_video_path(local_recording_dir)
@@ -348,6 +427,7 @@ def _build_plan_for_zarr(
             detect_present=detect_present,
             background_present=background_present,
             tuning_present=tuning_present,
+            acquisition_authority_present=acquisition_authority_present,
         )
 
     if skip_existing and detect_present:
@@ -360,6 +440,7 @@ def _build_plan_for_zarr(
             detect_present=detect_present,
             background_present=background_present,
             tuning_present=tuning_present,
+            acquisition_authority_present=acquisition_authority_present,
         )
 
     return DetectPlan(
@@ -370,6 +451,7 @@ def _build_plan_for_zarr(
         detect_present=detect_present,
         background_present=background_present,
         tuning_present=tuning_present,
+        acquisition_authority_present=acquisition_authority_present,
     )
 
 
@@ -420,6 +502,7 @@ def _apply_registry_prereq(
                 detect_present=plan.detect_present,
                 background_present=plan.background_present,
                 tuning_present=plan.tuning_present,
+                acquisition_authority_present=plan.acquisition_authority_present,
             )
         )
     return updated
@@ -442,6 +525,7 @@ def _plan_payload(plan: DetectPlan) -> dict[str, object]:
         "detect_present": plan.detect_present,
         "background_present": plan.background_present,
         "tuning_present": plan.tuning_present,
+        "acquisition_authority_present": plan.acquisition_authority_present,
     }
 
 
@@ -922,7 +1006,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    inputs = _resolve_input_paths(args.paths, args.file_list or [])
+    if args.source == "registry" and not args.paths and not args.file_list:
+        inputs: list[Path] = []
+    else:
+        inputs = _resolve_input_paths(args.paths, args.file_list or [])
     registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     explicit_model_path: Optional[Path] = None
     if args.model is not None:

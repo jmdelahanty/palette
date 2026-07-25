@@ -400,6 +400,6 @@ Selects the heuristic family used for left/right eye flip correction.
 ## Related Docs
 
 - [keypoint_pose_rollout_status.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_pose_rollout_status.md)
-- [pose_schema_heuristics_split_proposal.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_schema_heuristics_split_proposal.md)
+- [pose_schema_heuristics_split_proposal.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/pose_schema_heuristics_split_proposal.md)
 - [keypoint_heading_computation_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_heading_computation_contract.md)
 - [keypoint_multi_skeleton_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_multi_skeleton_todo.md)

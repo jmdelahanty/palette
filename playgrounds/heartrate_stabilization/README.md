@@ -4,9 +4,9 @@ Purpose: prototype fish-attached ROI measurements for the heartrate example
 recording without turning the first experiments into production Palette
 analysis surfaces.
 
-Top-level case note: [`docs/heartrate_stabilized_roi_case.md`](../../docs/heartrate_stabilized_roi_case.md).
+Top-level case note: [`docs/archive/heartrate_stabilized_roi_case.md`](../../docs/archive/heartrate_stabilized_roi_case.md).
 Current moving-fish and embedded positive-control status:
-[`docs/heartrate_analysis_status_2026-07-11.md`](../../docs/heartrate_analysis_status_2026-07-11.md).
+[`docs/archive/heartrate_analysis_status_2026-07-11.md`](../../docs/archive/heartrate_analysis_status_2026-07-11.md).
 Final interpretation and the frozen cross-trial intern handoff:
 [`docs/heartrate_final_decision_2026-07-12.md`](../../docs/heartrate_final_decision_2026-07-12.md) and
 [`docs/embedded_fish_heartrate_intern_handoff_2026-07-13.md`](../../docs/embedded_fish_heartrate_intern_handoff_2026-07-13.md).
@@ -1090,7 +1090,7 @@ The command is expected to emit no estimate when either held-out fold, matched
 controls, cross-fit frequency agreement, or cluster reproducibility fails. It
 never emits events from an unconfirmed source or a held-out block that fails
 the maximum-statistic correction across confirmation blocks. See
-`docs/heartrate_local_rostral_roi_status_2026-07-09.md` for the checked result
+`docs/archive/heartrate_local_rostral_roi_status_2026-07-09.md` for the checked result
 and injection-recovery command.
 
 ### Five-Minute Consensus-Mask Discovery

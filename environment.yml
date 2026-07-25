@@ -34,8 +34,6 @@ dependencies:
   - distributed
   - matplotlib
   - pillow
-  - imageio
-  - imageio-ffmpeg
   # The local Decord wheel is linked against FFmpeg 4.x shared libraries
   # (`libavformat.so.58`). Do not let the solver silently choose FFmpeg 5+ here.
   - "ffmpeg=4.4.*"

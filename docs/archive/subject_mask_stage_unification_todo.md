@@ -448,7 +448,7 @@ Exact naming can change, but the structure should be component-scoped.
 
 - [x] Decide which eye-specific arrays move into
       `refined_subject_masks_runs/components/eye_left|eye_right`.
-      See [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md).
+      See [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/eye_subject_mask_unification_design.md).
 - [x] Decide whether contour storage remains per-eye component-local or also has
       a shared run-level index.
       Decision: keep contours per-eye component-local under

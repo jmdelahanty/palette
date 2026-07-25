@@ -36,9 +36,9 @@ analysis/chaser_distance_runs/goodcopbadcop_chaser_distance_v1_20260617
 Planned protocol-specific components under the chaser-distance run include
 CRA primary endpoint metrics, egocentric bearing metrics, near-field
 avoidance metrics, and epoch behavior summaries. See
-[`goodcopbadcop_cra_near_field_design.md`](goodcopbadcop_cra_near_field_design.md)
+[`goodcopbadcop_cra_near_field_design.md`](archive/goodcopbadcop_cra_near_field_design.md)
 for the near-field implementation plan and
-[`goodcopbadcop_viewer_dataset_cleanup_checklist.md`](goodcopbadcop_viewer_dataset_cleanup_checklist.md)
+[`goodcopbadcop_viewer_dataset_cleanup_checklist.md`](archive/goodcopbadcop_viewer_dataset_cleanup_checklist.md)
 for the viewer/dataset cleanup plan.
 
 The key design rule is that event-window semantics live once in
@@ -248,5 +248,5 @@ coordinate attrs are present.
 - `docs/detection_analysis_run_surfaces.md`
 - `docs/spatial_occupancy_zone_summary_design.md`
 - `docs/chaser_distance_run_contract.md`
-- `docs/goodcopbadcop_cra_near_field_design.md`
+- `docs/archive/goodcopbadcop_cra_near_field_design.md`
 - `docs/artifact_storage_map.md`

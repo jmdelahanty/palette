@@ -273,7 +273,7 @@ No stitching required — the annotation spans the whole recording.
 ## Related documents
 
 - `docs/stimulus_response_run_design.md` — storage layout and metric definitions
-- `docs/stimulus_response_implementation_plan.md` — design decisions and sequencing
+- `docs/archive/stimulus_response_implementation_plan.md` — design decisions and sequencing
 - `docs/grating_analysis_acquisition_questions.md` — calibration blockers for angular accuracy
 - `docs/analytics_storage_schema_matrix.md` — authoritative sparse axes and logical-reader boundary
 - `src/fisheye/docs/zarr_structure.md` — authoritative zarr layout reference

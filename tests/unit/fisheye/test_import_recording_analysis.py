@@ -36,6 +36,7 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
         return False, 5, ["stimulus"]
 
     monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "import_experiment_setup", lambda _plan: None)
     monkeypatch.setattr(mod, "stimulus_runs_present", lambda _path: False)
     monkeypatch.setattr(mod, "run_stimulus_import", _fake_stim)
     result = mod.process_recording_import(plan, opts, logger=None)
@@ -45,11 +46,49 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
     assert result.returncode == 5
 
 
+def test_run_stimulus_import_forwards_metadata_and_calibration_only(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=tmp_path / "rec" / "raw" / "session.h5",
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+    opts = _opts()
+    opts.stimulus_metadata_and_calibration_only = True
+    captured: dict[str, object] = {}
+
+    class _Result:
+        returncode = 0
+
+    def _fake_run(cmd, *, check):
+        captured["cmd"] = list(cmd)
+        captured["check"] = check
+        return _Result()
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+
+    ok, returncode, cmd = mod.run_stimulus_import(plan, opts)
+
+    assert ok is True
+    assert returncode == 0
+    assert "--metadata-and-calibration-only" in cmd
+    assert captured == {"cmd": cmd, "check": False}
+
+
 def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path) -> None:
     class _FakeGroup:
-        def __init__(self, groups: dict[str, object] | None = None, keys: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            groups: dict[str, object] | None = None,
+            keys: list[str] | None = None,
+            attrs: dict[str, object] | None = None,
+        ) -> None:
             self._groups = groups or {}
             self._keys = keys or []
+            self.attrs = attrs or {}
 
         def get(self, name: str):
             return self._groups.get(name)
@@ -69,6 +108,51 @@ def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
 
     assert mod.stimulus_runs_present(tmp_path / "sample_analysis.zarr")
+
+
+def test_stimulus_runs_present_rejects_failed_strict_run(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeGroup:
+        def __init__(
+            self,
+            groups: dict[str, object] | None = None,
+            keys: list[str] | None = None,
+            attrs: dict[str, object] | None = None,
+        ) -> None:
+            self._groups = groups or {}
+            self._keys = keys or []
+            self.attrs = attrs or {}
+
+        def get(self, name: str):
+            return self._groups.get(name)
+
+        def group_keys(self):
+            return list(self._keys)
+
+    failed = _FakeGroup(
+        attrs={
+            "palette_run_completion_status": "failed",
+            "stage_selector_eligible": False,
+        }
+    )
+    parent = _FakeGroup(
+        groups={"stimulus_failed": failed},
+        keys=["stimulus_failed"],
+        attrs={
+            "palette_completion_epoch": 2,
+            "latest": "stimulus_failed",
+        },
+    )
+    fake_root = _FakeGroup(
+        groups={
+            "analysis": _FakeGroup(groups={"stimulus_runs": parent}),
+        }
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
+
+    assert not mod.stimulus_runs_present(tmp_path / "sample_analysis.zarr")
 
 
 def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> None:
@@ -181,6 +265,41 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
     assert fake_root.attrs.get("session_start_iso8601_utc") == "2026-02-23T21:23:35Z"
 
 
+def test_ensure_analysis_archive_rejects_conflicting_camera_identity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    class _FakeGroup:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs(camera_id="2010094")
+
+    recording_dir = tmp_path / "rec"
+    recording_dir.mkdir()
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps({"camera_id": "2010093"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: _FakeGroup())
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "cam.mp4",
+        zarr_path=recording_dir / "zarr" / "rec_analysis.zarr",
+    )
+
+    try:
+        mod.ensure_analysis_archive(plan)
+    except ValueError as exc:
+        assert "camera_id conflicts" in str(exc)
+    else:
+        raise AssertionError("expected conflicting archive and manifest camera IDs to fail")
+
+
 def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path: Path) -> None:
     rec = tmp_path / "rec"
     video = rec / "cams" / "cam.mp4"
@@ -192,9 +311,17 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
     video.write_bytes(b"video")
     h5_path.write_bytes(b"h5")
     root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
-    root.attrs.update({"recording_id": "rec", "camera_id": "2010093"})
+    root.attrs.update(
+        {
+            "recording_id": "rec",
+            "camera_id": "2010093",
+            "source_video_metadata": {
+                "imageio_metadata": {"nframes": 1.7976931348623157e308}
+            },
+        }
+    )
 
-    def _fake_probe(_path: Path) -> dict[str, object]:
+    def _fake_probe(_path: Path, **_kwargs: object) -> dict[str, object]:
         return {
             "source_video": video.name,
             "source_path": str(video),
@@ -235,12 +362,50 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
         "relative_path": f"cams/{video.name}",
     }
     assert root.attrs["source_video_metadata"]["camera_id"] == "2010093"
+    assert "imageio_metadata" not in root.attrs["source_video_metadata"]
     authority = root["analysis/acquisition_camera_frames/2010093"]
     assert authority.attrs["acquisition_import_ownership"]["mode"] == (
         "external_video_v1"
     )
     assert authority.attrs["acquisition_camera_frame"]["width_px"] == 4512
     assert authority.attrs["acquisition_camera_frame"]["height_px"] == 4512
+
+
+def test_producer_video_metadata_selects_manifest_stream_for_source_video(tmp_path: Path) -> None:
+    rec = tmp_path / "rec"
+    video = rec / "cams" / "cam.mp4"
+    video.parent.mkdir(parents=True)
+    video.touch()
+    (rec / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "video_streams": {
+                    "streams": {
+                        "full": {
+                            "video": "cams/cam.mp4",
+                            "frame_count": 139295,
+                            "frame_rate": 100,
+                            "codec": "hevc",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=rec,
+        h5_path=None,
+        cam_video=video,
+        zarr_path=rec / "zarr" / "rec_analysis.zarr",
+    )
+
+    assert mod._producer_video_metadata(plan) == {  # noqa: SLF001
+        "_source": "recording_manifest.video_streams.streams.full",
+        "total_frames": 139295,
+        "fps": 100,
+        "codec": "hevc",
+    }
 
 
 def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(
@@ -397,6 +562,35 @@ def test_resolve_single_recording_plan_still_requires_h5_by_default(tmp_path: Pa
         raise AssertionError("expected ValueError for missing raw/*.h5")
 
 
+def test_resolve_single_recording_plan_uses_manifest_full_video_to_disambiguate(
+    tmp_path: Path,
+) -> None:
+    rec = tmp_path / "rec"
+    (rec / "cams").mkdir(parents=True, exist_ok=True)
+    (rec / "raw").mkdir(parents=True, exist_ok=True)
+    full = rec / "cams" / "Cam2010096_full.mp4"
+    derived = rec / "cams" / "Cam2010096_preview.mp4"
+    full.touch()
+    derived.touch()
+    (rec / "raw" / "session.h5").touch()
+    (rec / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "video_streams": {
+                    "streams": {
+                        "full": {"video": "cams/Cam2010096_full.mp4"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = mod.resolve_single_recording_plan(recording_dir=rec)
+
+    assert plan.cam_video == full.resolve()
+
+
 def test_resolve_single_recording_plan_fails_on_ambiguous_video(tmp_path: Path) -> None:
     rec = tmp_path / "rec"
     (rec / "cams").mkdir(parents=True, exist_ok=True)
@@ -488,6 +682,7 @@ def test_process_recording_import_allows_failed_preflight_when_overridden(monkey
         seen["ensure"] = True
 
     monkeypatch.setattr(mod, "ensure_analysis_archive", _fake_ensure)
+    monkeypatch.setattr(mod, "import_experiment_setup", lambda _plan: None)
 
     result = mod.process_recording_import(plan, opts, logger=None)
 

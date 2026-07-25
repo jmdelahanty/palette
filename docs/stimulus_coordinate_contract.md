@@ -5,6 +5,25 @@ do not infer coordinate or time semantics from array names, dimensions,
 numeric ranges, camera-frame identifiers, or resolution ratios. Historical
 archives must be handled by explicit offline inventory/migration tooling.
 
+## Metadata-and-calibration-only import
+
+An H5 may contain scientifically useful events, protocol metadata, and selected
+calibration while its coordinate arrays predate the canonical row/time identity
+contract. Operators may explicitly request
+`--metadata-and-calibration-only` from `import_stimulus_to_zarr`, or
+`--stimulus-metadata-and-calibration-only` from the recording import wrappers.
+
+This mode does not infer or bless missing coordinate semantics. It publishes the
+event timeline, authored protocol definition and step timing, selected camera and
+display calibration, and physical scale authority. It omits
+`stimulus_coordinates`, H5 tracking bounding boxes, `chaser_states`, and their
+row/time identity arrays. The completed run records the exact omitted H5 paths,
+the explicit policy, and the omission reason in both attrs and run provenance.
+Consumers requiring chaser positions must continue to fail closed until those
+surfaces are handled by an exact offline migration.
+
+The default remains strict canonical import.
+
 ## Row and time identity
 
 `stimulus_state_key` is the primary identity of a `chaser_states` row. It is

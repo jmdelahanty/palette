@@ -16,6 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+import zarr
+
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    load_acquisition_authority_publication_status,
+)
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import JsonLogger, make_run_id, utc_now
 from fisheye.utils.import_recording_analysis import (
@@ -135,6 +141,23 @@ def discover_recording_dirs(
     return sorted(_find_video_recording_dirs(root, recursive=recursive))
 
 
+def _existing_analysis_complete(
+    zarr_path: Path,
+    *,
+    require_stimulus: bool,
+) -> tuple[bool, str]:
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r")
+        publication = load_acquisition_authority_publication_status(root)
+    except Exception as exc:
+        return False, f"acquisition authority is incomplete: {exc}"
+    if publication.status != ACQUISITION_AUTHORITY_PUBLISHED:
+        return False, f"acquisition authority status is {publication.status!r}"
+    if require_stimulus and not stimulus_runs_present(zarr_path):
+        return False, "stimulus runs are missing"
+    return True, "analysis import completion contract is satisfied"
+
+
 def build_plans(
     recording_dirs: Iterable[Path],
     *,
@@ -172,8 +195,15 @@ def build_plans(
         if reason is not None:
             status = "missing"
         elif skip_existing and plan.zarr_path.exists():
-            status = "skipped"
-            reason = "analysis zarr already exists"
+            complete, completion_reason = _existing_analysis_complete(
+                plan.zarr_path,
+                require_stimulus=bool(import_stimulus),
+            )
+            if complete:
+                status = "skipped"
+                reason = completion_reason
+            else:
+                reason = f"resuming incomplete analysis zarr: {completion_reason}"
 
         stimulus_present: Optional[bool] = None
         if check_stimulus and plan.zarr_path.exists():
@@ -225,6 +255,9 @@ def _make_import_options(args: argparse.Namespace) -> RecordingImportOptions:
         stimulus_overwrite=bool(args.stimulus_overwrite),
         stimulus_quiet=bool(args.stimulus_quiet),
         allow_preflight_failures=bool(args.allow_preflight_failures),
+        stimulus_metadata_and_calibration_only=bool(
+            args.stimulus_metadata_and_calibration_only
+        ),
     )
 
 
@@ -404,6 +437,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
     parser.add_argument(
+        "--stimulus-metadata-and-calibration-only",
+        action="store_true",
+        help=(
+            "Import stimulus events, protocol metadata, and selected calibration "
+            "while omitting H5 coordinate surfaces without canonical array-level "
+            "identity."
+        ),
+    )
+    parser.add_argument(
         "--allow-preflight-failures",
         action="store_true",
         help="Proceed even if recording_manifest.json marks preflight.status=fail.",
@@ -455,6 +497,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             skip_existing=not bool(args.overwrite),
             import_video_metadata=bool(args.import_video_metadata),
             import_stimulus=bool(args.import_stimulus),
+            stimulus_metadata_and_calibration_only=bool(
+                args.stimulus_metadata_and_calibration_only
+            ),
             allow_preflight_failures=bool(args.allow_preflight_failures),
             registry=str(args.registry.expanduser()) if args.registry is not None else None,
             created_at_utc=utc_now(),

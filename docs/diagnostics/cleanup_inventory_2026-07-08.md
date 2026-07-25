@@ -108,12 +108,12 @@ paths.
 ```
 docs/archive/analysis_dense_array_migration_todo.md
 docs/body_frame_contract.md
-docs/crimson_refined_detect_manual_contract.md
+docs/archive/crimson_refined_detect_manual_contract.md
 docs/derived_metrics_schema_contract.md
 docs/detect_batch_analysis_zarr_parallel_agents_contract.md
 docs/detection_chunking_findings.md
-docs/eye_mask_row_mapping_contract.md
-docs/eye_subject_mask_unification_design.md
+docs/archive/eye_mask_row_mapping_contract.md
+docs/archive/eye_subject_mask_unification_design.md
 docs/geometry_live_gpu_design_note.md
 docs/grating_analysis_acquisition_questions.md
 docs/keypoint_heading_computation_contract.md
@@ -121,9 +121,9 @@ docs/keypoint_heading_validity_todo.md
 docs/keypoint_late_correction_contract.md
 docs/keypoint_merged_row_gate_contract.md
 docs/keypoint_quality_registry_workflow.md
-docs/keypoint_refined_coordinate_space_incident_2026-03-04.md
+docs/archive/keypoint_refined_coordinate_space_incident_2026-03-04.md
 docs/keypoint_review_policy.md
-docs/keypoint_review_status_notes.md
+docs/archive/keypoint_review_status_notes.md
 docs/keypoint_training_data_card_contract.md
 docs/kvikio_gds_subject_mask_experiment.md
 docs/legacy_archive_migration_policy.md
@@ -132,7 +132,7 @@ docs/paintera_palette_subject_mask_workflow.md
 docs/pipeline_metadata_boundaries.md
 docs/pose_heuristic_profile_contract.md
 docs/pose_kinematics_run_design.md
-docs/pose_schema_heuristics_split_proposal.md
+docs/archive/pose_schema_heuristics_split_proposal.md
 docs/protocol_parameter_registry_todo.md
 docs/raw_vs_smoothed_metrics_behavioral_geometry.md
 docs/realtime_sparse_row_index_contract.md
@@ -223,9 +223,8 @@ session's census confirmed the reframe the hard way.
   used; `patch_legacy_h5.py` was then deleted after operator confirmation that
   enum patching now happens at acquisition. **Gate deletion on code+test+script
   greps of the bare module name plus operator sign-off, not import-graph class.**
-- **H5 is not fully legacy.** `analysis/create_analysis_zarr.py`,
-  `analysis/import_stimulus_to_zarr.py`, `analysis/calibration_manager.py` still
-  ingest H5.
+- **H5 is not fully legacy.** `analysis/import_stimulus_to_zarr.py` and
+  `analysis/calibration_manager.py` still ingest H5.
 
 ### What this session actually executed for utils — and why
 

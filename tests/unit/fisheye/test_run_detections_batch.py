@@ -4,6 +4,14 @@ import json
 from pathlib import Path
 import sys
 import types
+
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    ACQUISITION_AUTHORITY_STATUS_ATTR,
+    EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+    build_acquisition_authority_publication_status,
+)
 from fisheye.utils import run_detections_batch as mod
 
 
@@ -13,12 +21,27 @@ def _patch_detect_yolo(monkeypatch, func) -> None:
     monkeypatch.setitem(sys.modules, "fisheye.detection.detect_yolo", fake_module)
 
 
-def _write_root_metadata(zarr_path: Path, attrs: dict[str, object] | None = None) -> None:
+def _write_root_metadata(
+    zarr_path: Path,
+    attrs: dict[str, object] | None = None,
+    *,
+    published_acquisition_authority: bool = True,
+) -> None:
     zarr_path.mkdir(parents=True, exist_ok=True)
+    root_attrs = dict(attrs or {})
+    if published_acquisition_authority:
+        authority_path = "analysis/acquisition_camera_frames/cam_1"
+        status = build_acquisition_authority_publication_status(
+            status=ACQUISITION_AUTHORITY_PUBLISHED,
+            reason_code=EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+            authority_mode=EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            authority_path=authority_path,
+        ).to_dict()
+        root_attrs[ACQUISITION_AUTHORITY_STATUS_ATTR] = status
     (zarr_path / "zarr.json").write_text(
         json.dumps(
             {
-                "attributes": attrs or {},
+                "attributes": root_attrs,
                 "zarr_format": 3,
                 "consolidated_metadata": None,
                 "node_type": "group",
@@ -26,6 +49,22 @@ def _write_root_metadata(zarr_path: Path, attrs: dict[str, object] | None = None
         ),
         encoding="utf-8",
     )
+    if published_acquisition_authority:
+        _write_group_attrs(
+            zarr_path,
+            "raw_video",
+            {ACQUISITION_AUTHORITY_STATUS_ATTR: status},
+        )
+        _write_group_attrs(
+            zarr_path,
+            authority_path,
+            {
+                "acquisition_import_ownership": {"test": True},
+                "acquisition_import_ownership_sha256": "0" * 64,
+                "acquisition_camera_frame": {"test": True},
+                "acquisition_camera_frame_sha256": "1" * 64,
+            },
+        )
 
 
 def _write_group_attrs(zarr_path: Path, group_name: str, attrs: dict[str, object]) -> None:
@@ -113,6 +152,26 @@ def test_build_plans_applies_status_reason_taxonomy(tmp_path: Path) -> None:
     missing_plan = by_path[str(zarr_no_video.resolve())]
     assert missing_plan.status == mod.STATUS_MISSING
     assert missing_plan.reason == mod.REASON_CAMS_DIR_MISSING
+
+
+def test_build_plan_requires_published_acquisition_authority(tmp_path: Path) -> None:
+    recording = tmp_path / "recording"
+    zarr_path = recording / "zarr" / "recording_analysis.zarr"
+    _write_root_metadata(zarr_path, published_acquisition_authority=False)
+    video_path = recording / "cams" / "cam_1.mp4"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"")
+
+    plan = mod._build_plan_for_zarr(  # noqa: SLF001
+        zarr_path=zarr_path,
+        skip_existing=False,
+        require_background=False,
+        require_tuning=False,
+    )
+
+    assert plan.status == mod.STATUS_MISSING
+    assert plan.reason == mod.REASON_ACQUISITION_AUTHORITY_MISSING
+    assert plan.acquisition_authority_present is False
 
 
 def test_main_apply_uses_pre_resolved_model_and_returns_failure(monkeypatch, tmp_path: Path) -> None:
@@ -331,6 +390,7 @@ def test_main_dry_run_resolve_models_emits_selected_model(monkeypatch, tmp_path:
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
     assert rows == [
         {
+            "acquisition_authority_present": False,
             "background_present": False,
             "detect_present": False,
             "model_resolution_status": "ok",
@@ -543,11 +603,6 @@ def test_discover_from_registry_returns_sorted_paths(monkeypatch, tmp_path: Path
             pass
 
     monkeypatch.setattr("fisheye.utils.run_detections_batch.Registry", _FakeRegistry, raising=False)
-    # Also patch the import inside the function
-    import fisheye.utils.run_detections_batch as _mod
-
-    original = _mod._discover_analysis_zarrs_from_registry.__code__
-    # Use monkeypatch on the module-level lazy import
     monkeypatch.setattr("fisheye.registry.db.Registry", _FakeRegistry)
 
     result = mod._discover_analysis_zarrs_from_registry(
@@ -662,6 +717,35 @@ def test_main_source_registry_dry_run(monkeypatch, tmp_path: Path, capsys) -> No
     assert rc == 0
     out = capsys.readouterr().out
     assert "rec_a_analysis.zarr" in out
+
+
+def test_main_source_registry_without_paths_is_unscoped(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+    captured: list[list[Path]] = []
+
+    def _discover(**kwargs):  # noqa: ANN003
+        captured.append(list(kwargs["scope_paths"]))
+        return []
+
+    monkeypatch.setattr(mod, "_discover_analysis_zarrs_from_registry", _discover)
+
+    rc = mod.main(
+        [
+            "--source",
+            "registry",
+            "--dry-run",
+            "--no-log",
+            "--registry",
+            str(registry_path),
+        ]
+    )
+
+    assert rc == 0
+    assert captured == [[]]
 
 
 def test_main_source_registry_missing_registry_fails(tmp_path: Path, capsys) -> None:

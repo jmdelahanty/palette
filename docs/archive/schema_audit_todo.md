@@ -30,7 +30,7 @@ means the asset exists and covers this stage; a dash means it does not.
 | 9 | Eye masks | `segmentation/eye_segmentation_yolo.py` | `eye_masks_runs/` | YES | group only | -- | `eye_mask_parity_parallel_agents_contract.md` | -- |
 | 10 | Eye mask refinement | `refinement/refine_eye_masks.py` | `refined_eye_masks_runs/` | YES | group only | -- | `eye_mask_training_artifact_contract.md` | -- |
 | 11 | ID assignment | `tracking/assign_ids.py` | `id_assignment_runs/` | YES | group only | -- | -- | -- |
-| 12 | Stimulus import | `analysis/import_stimulus_to_zarr.py` | `analysis/stimulus_runs/` | YES | -- | -- | `analysis_zarr_creation_contract.md` | -- |
+| 12 | Stimulus import | `analysis/import_stimulus_to_zarr.py` | `analysis/stimulus_runs/` | YES | -- | -- | `recording_analysis_pipeline_contract.md` | -- |
 
 **Key observations:**
 

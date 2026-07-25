@@ -11,7 +11,7 @@ eye masks pipelines, documents the existing infrastructure, and recommends
 specific changes.
 
 Related incident note for refined-keypoint coordinate-space mismatch:
-- `docs/keypoint_refined_coordinate_space_incident_2026-03-04.md`
+- `docs/archive/keypoint_refined_coordinate_space_incident_2026-03-04.md`
 
 ---
 

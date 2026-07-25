@@ -30,12 +30,12 @@ Goal: give another agent a precise implementation map to update `crimson` withou
 Palette repo:
 - `src/fisheye/docs/zarr_structure.md`
 - `docs/zarr_split_policy.md`
-- `docs/analysis_zarr_creation_contract.md`
+- `docs/recording_analysis_pipeline_contract.md`
 - `docs/crimson_detect_bbox_read_contract.md`
-- `docs/crimson_refined_detect_manual_contract.md`
+- `docs/archive/crimson_refined_detect_manual_contract.md`
 - `docs/crimson_detect_review_acceptance_contract.md`
 - `docs/zarr_string_encoding_todo.md`
-- `src/fisheye/analysis/create_analysis_zarr.py`
+- `src/fisheye/utils/import_recording_analysis.py`
 - `src/fisheye/utils/import_video_metadata.py`
 - `src/fisheye/detection/detect_yolo.py`
 
@@ -52,15 +52,15 @@ Crimson repo:
 - Analysis archives can be metadata-only for `raw_video` and carry inference/refinement runs.
 - Source: `docs/zarr_split_policy.md`.
 
-2. `create_analysis_zarr` creates a minimal archive first, then enriches.
+2. `import_recording_analysis` creates a minimal archive first, then enriches.
 - Initial attrs include `zarr_purpose=analysis` and archive timestamps.
 - Source-video attrs are added via metadata import.
 - Stimulus import and registry scan are optional steps.
-- Source: `src/fisheye/analysis/create_analysis_zarr.py`.
+- Source: `src/fisheye/utils/import_recording_analysis.py`.
 
 3. Analysis archive naming convention is `<recording>_analysis.zarr`.
 - Detect then appends `detect_runs/<run>` into that archive.
-- Source: `src/fisheye/analysis/create_analysis_zarr.py`, `src/fisheye/utils/run_detect_with_registry_model.py`.
+- Source: `src/fisheye/utils/import_recording_analysis.py`, `src/fisheye/utils/run_detect_with_registry_model.py`.
 
 4. Palette detect data uses normalized center-width-height boxes.
 - `bbox_norm_coords` are `[cx, cy, w, h]` normalized to inference frame size.
@@ -91,7 +91,7 @@ Crimson repo:
 - Preferred array: `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8).
 - Fallbacks: `reason` (string) then `detection_source` (0=clean, 1=interpolated).
 - Read contract: `docs/crimson_detect_bbox_read_contract.md`.
-- Write contract: `docs/crimson_refined_detect_manual_contract.md`.
+- Write contract: `docs/archive/crimson_refined_detect_manual_contract.md`.
 
 6. Refined keypoint reason labels follow the same compatibility pattern.
 - Preferred array: `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8).
@@ -116,7 +116,7 @@ Crimson repo:
 | Pre-detect analysis archives | Valid archive may exist before `detect_runs` exists | Load path expects `detect_runs` | Early archive cannot open in Crimson loader mode | Graceful "video/stimulus-only" mode when `detect_runs` missing |
 | Doc/spec drift | Palette spec evolved | Crimson spec copy is stale | Implementers can code against wrong schema | Sync `crimson/zarr_structure.md` from Palette authoritative doc |
 | Registry-aware selection | Dataset intent stored as `zarr_use` etc. | No registry integration | Cannot choose best archive per recording intent | Optional phase: registry-backed archive choice |
-| Manual refined detect edits | Palette expects `manual_review_latest` + `detect_review_status` + manual subgroup arrays | No explicit Crimson write contract yet | Manual edits may not become active source for crop/registry | Implement manual-write contract in `docs/crimson_refined_detect_manual_contract.md` |
+| Manual refined detect edits | Palette expects `manual_review_latest` + `detect_review_status` + manual subgroup arrays | No explicit Crimson write contract yet | Manual edits may not become active source for crop/registry | Implement manual-write contract in `docs/archive/crimson_refined_detect_manual_contract.md` |
 | Review acceptance after inspection | Palette status consumers expect structured `detect_review_status` + latest pointer | Acceptance can be ad hoc/manual | Inconsistent review state, poor auditability | Implement acceptance flow per `docs/crimson_detect_review_acceptance_contract.md` |
 | Stimulus rendered-video provenance | Analysis stimulus runs can expose `source_stimulus_video_path` | Loader/spec may only read `source_h5` or ignore stimulus attrs | Missed provenance link to rendered stimulus MP4 | Treat `source_stimulus_video_path` as optional analysis-only hint; do not expect it on training archives |
 
@@ -164,7 +164,7 @@ Crimson repo:
 ### Phase 5: Manual Refined-Detect Writes
 
 1. Implement Crimson-side writer for manual refined detections.
-- Use contract in `docs/crimson_refined_detect_manual_contract.md`.
+- Use contract in `docs/archive/crimson_refined_detect_manual_contract.md`.
 - Write/overwrite `refined_detect_runs/<latest>/<manual_group>` arrays + attrs.
 
 2. Update run-level pointers/status after manual writes.

@@ -194,7 +194,7 @@ split the same way.
 - [detect_review.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/tune/detect_review.py)
 - [refined_detect_review.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/shared/refined_detect_review.py)
 - [set_detect_review_status.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/utils/set_detect_review_status.py)
-- [crimson_refined_detect_manual_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crimson_refined_detect_manual_contract.md)
+- [crimson_refined_detect_manual_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/crimson_refined_detect_manual_contract.md)
 
 These already define how manual detections are written and selected today.
 

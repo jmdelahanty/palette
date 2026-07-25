@@ -22,8 +22,6 @@ Headline:
 - `analysis_dense_array_migration_todo.md` describes a deferred proposal whose
   trigger ("a second consumer needs dense data") has occurred but no migration
   has happened — still accurate as a deferred TODO.
-- Two checklists are effectively complete: `analysis_zarr_creation_todo.md`
-  has all Phase B steps done; Phase C/D items remain valid follow-ups.
 - `stimulus_response_analysis_flow.md`, `stimulus_response_compact_v2_design.md`,
   `compact_v2_readiness_audit_2026-05-11.md` are all current.
 - Several low-volatility primers (math primer, ellipse notes, raw_vs_smoothed,
@@ -72,22 +70,6 @@ mark archived in favor of `current_pipeline_contract.md` +
 `stimulus_response.py:1556` (STIMULUS_RESPONSE_LAYOUT_DEFAULT = compact_v2),
 `bout_kinematics.py:79` (BOUT_KINEMATICS_LAYOUT_DEFAULT = compact_tabular_v2).
 **Action:** None.
-
-### analysis_zarr_creation_contract.md
-**Classification:** CURRENT
-**Evidence:** `src/fisheye/analysis/create_analysis_zarr.py` exists and the
-contract `last_verified: 2026-02-27` describes a still-implemented surface.
-**Action:** Bump `last_verified` after next operator review.
-
-### analysis_zarr_creation_todo.md
-**Classification:** CHECKLIST-COMPLETE (mostly)
-**Evidence:** Phase A and B fully marked done; Phase C task "Update
-import_recordings_analysis to call create_analysis_zarr first" remains open
-in doc and is corroborated by separate
-`import_recordings_analysis.py` orchestrator. Phase D detect_yolo boundary
-items still open.
-**Action:** Close Phases A-B explicitly; carry C/D into a leaner follow-up
-or merge into `recording_analysis_pipeline_contract.md`.
 
 ### analysis_zarr_object_count_schema_direction.md
 **Classification:** CURRENT
@@ -340,7 +322,7 @@ cross-recording Parquet export under `src/fisheye/utils/`.
 ### zarr_spec_runtime_drift_todo.md
 **Classification:** CURRENT
 **Evidence:** Drift items 1-2 still verifiable in
-`create_analysis_zarr.py` and `import_video_metadata.py`.
+`import_recording_analysis.py` and `import_video_metadata.py`.
 **Action:** None.
 
 ### zarr_split_policy.md
@@ -370,12 +352,11 @@ naming used throughout codebase.
   and per-line citation `provenance_backfill_todo.md`); a single corrective
   pass on the importer wording should patch all three (importer code at
   `import_stimulus_to_zarr.py:756-759` already handles both keys).
-- `analysis_zarr_creation_contract.md` (Feb 2026) and
-  `recording_analysis_pipeline_contract.md` (May 2026) both describe
-  archive-creation orchestration. They are mostly complementary, but the
-  creation contract has an open "Open decisions" section that
-  `recording_analysis_pipeline_contract.md` has effectively decided. Worth a
-  short close-out pass.
+- Earlier analysis-archive creation notes and
+  `recording_analysis_pipeline_contract.md` both described archive-creation
+  orchestration. Those earlier notes were retired after the canonical importer
+  absorbed the remaining safeguards; the pipeline contract is now the retained
+  authority.
 - No analysis-shard doc currently calls out the
   `track_kinematics_runs` compact-tabular migration as actively deferred —
   the inventory captures this at line 96/355, but other docs (math primer,

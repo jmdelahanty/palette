@@ -15,7 +15,7 @@ exists for the recordings that matter. Your job is to prove that — or find whe
 
 1. `docs/diagnostics/eye_mask_severance_plan_2026-05-28.md` — focus on §1 (the quality
    caveats), §2 Phase 0, and §4 risks. This phase exists to close those risks.
-2. Skim `docs/diagnostics/contract_drift_audit_2026-05-28.md` for context on lineage attrs.
+2. Skim `docs/archive/contract_drift_audit_2026-05-28.md` for context on lineage attrs.
 
 These docs are point-in-time analyses; verify claims against current code and current data.
 

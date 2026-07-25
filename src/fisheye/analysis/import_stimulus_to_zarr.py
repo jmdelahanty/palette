@@ -115,6 +115,16 @@ from fisheye.shared.citrus_enums import (
     STIMULUS_MODE_NAME_TO_ID,
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
+from fisheye.shared.experiment_setup import (
+    MissingExperimentSetupError,
+    build_experiment_setup_record,
+    publish_experiment_setup,
+    resolve_experiment_setup,
+)
+from fisheye.shared.subject_metadata import (
+    normalize_subject_metadata,
+    publish_subject_metadata,
+)
 from fisheye.shared.proof_verification import (
     proof_verification_operation,
     proof_verification_scope,
@@ -131,6 +141,7 @@ from fisheye.shared.selected_calibration import (
 )
 from fisheye.shared.stimulus_coordinate_contract import (
     COORDINATE_CONTRACT_EPOCH,
+    SOURCE_COORDINATE_POLICY_METADATA_ONLY,
     STIMULUS_IMPORT_VERSION,
     StimulusCoordinatePreflight,
     _load_bound_stimulus_coordinate_evidence_before_selection,
@@ -1832,6 +1843,7 @@ def import_stimulus_to_zarr(
     overwrite: bool,
     verbose: bool,
     repair_chaser_gaps: bool = True,
+    metadata_and_calibration_only: bool = False,
 ) -> str:
     """Main import routine."""
     console = Console() if verbose else None
@@ -1854,6 +1866,7 @@ def import_stimulus_to_zarr(
         coordinate_preflight = preflight_stimulus_coordinate_contract(
             h5,
             source_h5=resolved_h5,
+            metadata_and_calibration_only=metadata_and_calibration_only,
         )
         return _import_stimulus_from_open_h5(
             h5,
@@ -1886,6 +1899,24 @@ def _import_stimulus_from_open_h5(
         root,
         preflight=coordinate_preflight,
     )
+    subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
+    if subject_meta:
+        subject_meta = normalize_subject_metadata(subject_meta)
+        subject_authority = publish_subject_metadata(
+            root,
+            subject_meta,
+            source_h5_path=resolved_h5,
+        )
+        publish_experiment_setup(
+            root,
+            build_experiment_setup_record(
+                subject_meta,
+                source_h5_path=resolved_h5,
+                subject_metadata_ref=subject_authority.group_path,
+                subject_metadata_sha256=subject_authority.record_sha256,
+            ),
+            source_h5_path=resolved_h5,
+        )
     analysis = root.require_group("analysis")
     runs_parent = require_runs_parent(analysis, "stimulus_runs")
 
@@ -1938,19 +1969,61 @@ def _import_stimulus_from_open_h5(
             raise RuntimeError(
                 "Stimulus run did not persist fail-closed selector eligibility at "
                 "creation."
+        )
+        metadata_only_coordinates = (
+            coordinate_preflight.source_coordinate_policy
+            == SOURCE_COORDINATE_POLICY_METADATA_ONLY
+        )
+        run_group.attrs["source_coordinate_policy"] = (
+            coordinate_preflight.source_coordinate_policy
+        )
+        if metadata_only_coordinates:
+            run_group.attrs["source_coordinate_surface_status"] = (
+                "omitted_uncontracted_source_surfaces"
+            )
+            run_group.attrs["omitted_coordinate_source_paths"] = list(
+                coordinate_preflight.omitted_coordinate_source_paths
+            )
+            run_group.attrs["coordinate_surface_omission_reason_code"] = (
+                "metadata_and_calibration_only_requested"
+            )
+        else:
+            run_group.attrs["source_coordinate_surface_status"] = (
+                "canonical" if coordinate_preflight.has_chaser_states else "not_present"
             )
         analysis_meta = run_group.require_group("source_metadata")
-        subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
         if subject_meta:
-            analysis_meta.attrs["subject_metadata"] = json.dumps(subject_meta, sort_keys=True)
-            experiment_setup = _derive_experiment_setup(subject_meta)
-            if experiment_setup:
-                analysis_meta.attrs["experiment_setup"] = experiment_setup
+            try:
+                canonical_setup = resolve_experiment_setup(root, allow_legacy=False)
+            except MissingExperimentSetupError:
+                # Direct historical CLI use can predate the recording-import
+                # authority publication. Retain the old run-local snapshot only
+                # for that compatibility path.
+                analysis_meta.attrs["subject_metadata"] = json.dumps(subject_meta, sort_keys=True)
+                experiment_setup = _derive_experiment_setup(subject_meta)
+                if experiment_setup:
+                    analysis_meta.attrs["experiment_setup"] = experiment_setup
+                else:
+                    _log(
+                        console,
+                        "[yellow]No valid subject_count in subject_metadata; "
+                        "run-local experiment_setup not set.[/yellow]",
+                    )
             else:
-                _log(
-                    console,
-                    "[yellow]No valid subject_count in subject_metadata; "
-                    "run-local experiment_setup not set.[/yellow]",
+                analysis_meta.attrs["subject_metadata_ref"] = (
+                    canonical_setup.subject_metadata_ref or "analysis/subject_metadata"
+                )
+                subject_group = root.get(
+                    canonical_setup.subject_metadata_ref or "analysis/subject_metadata"
+                )
+                if subject_group is not None:
+                    subject_digest = subject_group.attrs.get("subject_metadata_sha256")
+                    if subject_digest:
+                        analysis_meta.attrs["subject_metadata_sha256"] = str(subject_digest)
+                analysis_meta.attrs["experiment_setup_ref"] = canonical_setup.group_path
+                analysis_meta.attrs["experiment_setup_sha256"] = canonical_setup.record_sha256
+                analysis_meta.attrs["expected_subject_count"] = (
+                    canonical_setup.expected_subject_count
                 )
         camera_meta = _read_h5_camera_metadata(h5)
         if camera_meta:
@@ -2052,7 +2125,7 @@ def _import_stimulus_from_open_h5(
             )
 
         # Copy tracking data
-        if "/tracking_data" in h5:
+        if "/tracking_data" in h5 and not metadata_only_coordinates:
             track_group = run_group.create_group("tracking_data")
             _copy_h5_dataset(h5["/tracking_data"], track_group, "chaser_states")
             _copy_h5_dataset(h5["/tracking_data"], track_group, "bounding_boxes")
@@ -2084,6 +2157,20 @@ def _import_stimulus_from_open_h5(
                     values = np.asarray(_ensure_utf8_column(values))
                 store_array(events_group, "values", values, {})
 
+        protocol_text, protocol_payload = _read_protocol_snapshot(h5)
+        if protocol_text is not None:
+            run_group.attrs["protocol_json"] = protocol_text
+        if events_data is not None and protocol_payload is not None:
+            _materialize_stimulus_steps(
+                run_group,
+                h5=h5,
+                events_data=events_data,
+                protocol=protocol_payload,
+                arena_config=arena_config or {},
+                metadata=frame_metadata,
+                console=console,
+            )
+
         # Keep the exact arena-config payload run-local for inspection. The
         # selected calibration helper below is the interpretation authority.
         if "/calibration_snapshot/arena_config_json" in h5:
@@ -2105,7 +2192,12 @@ def _import_stimulus_from_open_h5(
         if stats:
             run_group.attrs.update(asdict(stats))
 
-        if repair_chaser_gaps and stats and stats.missing_frames:
+        if metadata_only_coordinates:
+            run_group.attrs["chaser_interpolation_skipped"] = True
+            run_group.attrs["chaser_interpolation_skipped_reason"] = (
+                "coordinate_surfaces_omitted_by_import_policy"
+            )
+        elif repair_chaser_gaps and stats and stats.missing_frames:
             if coordinate_preflight.has_chaser_states:
                 run_group.attrs["chaser_interpolation_skipped"] = True
                 run_group.attrs[
@@ -2175,6 +2267,12 @@ def _import_stimulus_from_open_h5(
                     "import_version": run_attrs["import_version"],
                     "repair_chaser_gaps": bool(repair_chaser_gaps),
                     "coordinate_contract_epoch": COORDINATE_CONTRACT_EPOCH,
+                    "source_coordinate_policy": (
+                        coordinate_preflight.source_coordinate_policy
+                    ),
+                    "omitted_coordinate_source_paths": list(
+                        coordinate_preflight.omitted_coordinate_source_paths
+                    ),
                     "active_camera_id": (
                         coordinate_preflight.selected_calibration.active_camera_id
                     ),
@@ -2273,6 +2371,15 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip the post-import chaser state interpolation step.",
     )
+    parser.add_argument(
+        "--metadata-and-calibration-only",
+        action="store_true",
+        help=(
+            "Import events, protocol metadata, and selected calibration while "
+            "omitting source coordinate surfaces that lack the canonical "
+            "array-level identity contract."
+        ),
+    )
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress verbose output.")
     return parser.parse_args(argv)
 
@@ -2286,6 +2393,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         overwrite=args.overwrite,
         verbose=not args.quiet,
         repair_chaser_gaps=not args.skip_chaser_repair,
+        metadata_and_calibration_only=bool(args.metadata_and_calibration_only),
     )
 
 

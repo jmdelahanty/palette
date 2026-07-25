@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import zarr
 
 from fisheye.shared import import_video_metadata as video_meta_mod
@@ -117,7 +118,6 @@ def test_probe_video_metadata_parses_ffprobe_stream_colorimetry(tmp_path, monkey
         )
 
     monkeypatch.setattr(video_meta_mod.cv2, "VideoCapture", lambda path: FakeCapture())
-    monkeypatch.setattr(video_meta_mod.iio, "immeta", lambda path: {})
     monkeypatch.setattr(video_meta_mod.subprocess, "run", lambda *args, **kwargs: FakeResult())
 
     meta = probe_video_metadata(source)
@@ -127,6 +127,112 @@ def test_probe_video_metadata_parses_ffprobe_stream_colorimetry(tmp_path, monkey
     assert meta["video_color_transfer"] == "bt709"
     assert meta["video_color_primaries"] == "bt709"
     assert meta["source_video_colorimetry_source"] == "ffprobe_stream"
+    assert "imageio_metadata" not in meta
+
+
+def test_probe_video_metadata_prefers_matching_producer_then_ffprobe(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+
+    monkeypatch.setattr(
+        video_meta_mod,
+        "_probe_opencv",
+        lambda _path: {
+            "width": 640,
+            "height": 480,
+            "total_frames": 100,
+            "fps": 50.0,
+            "fourcc": "hvc1",
+        },
+    )
+    monkeypatch.setattr(
+        video_meta_mod,
+        "_probe_ffprobe",
+        lambda _path: {
+            "width": 640,
+            "height": 480,
+            "total_frames": 100,
+            "fps": 50.0,
+            "codec": "hevc",
+            "pix_fmt": "yuv420p",
+        },
+    )
+
+    meta = probe_video_metadata(
+        source,
+        producer_metadata={
+            "_source": "recording_manifest.video_streams.streams.full",
+            "total_frames": 100,
+            "fps": 50.0,
+            "codec": "hevc",
+        },
+    )
+
+    assert meta["total_frames"] == 100
+    assert meta["fps"] == 50.0
+    assert meta["width"] == 640
+    assert meta["height"] == 480
+    assert meta["codec"] == "hevc"
+    assert meta["metadata_authority"]["field_sources"] == {
+        "width": "ffprobe",
+        "height": "ffprobe",
+        "total_frames": "producer",
+        "fps": "producer",
+    }
+
+
+def test_probe_video_metadata_rejects_producer_ffprobe_frame_conflict(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setattr(
+        video_meta_mod,
+        "_probe_opencv",
+        lambda _path: {"width": 640, "height": 480, "total_frames": 100, "fps": 50.0},
+    )
+    monkeypatch.setattr(
+        video_meta_mod,
+        "_probe_ffprobe",
+        lambda _path: {"width": 640, "height": 480, "total_frames": 100, "fps": 50.0},
+    )
+
+    with pytest.raises(ValueError, match="Producer and ffprobe disagree on total_frames"):
+        probe_video_metadata(
+            source,
+            producer_metadata={"total_frames": 101, "fps": 50.0},
+        )
+
+
+def test_probe_video_metadata_does_not_require_opencv_when_ffprobe_is_complete(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+
+    def _fail_opencv(_path):
+        raise ValueError("opencv unavailable")
+
+    monkeypatch.setattr(
+        video_meta_mod,
+        "_probe_opencv",
+        _fail_opencv,
+    )
+    monkeypatch.setattr(
+        video_meta_mod,
+        "_probe_ffprobe",
+        lambda _path: {
+            "width": 640,
+            "height": 480,
+            "total_frames": 100,
+            "fps": 50.0,
+            "codec": "hevc",
+            "pix_fmt": "yuv420p",
+        },
+    )
+
+    meta = probe_video_metadata(source)
+
+    assert set(meta["metadata_authority"]["field_sources"].values()) == {"ffprobe"}
 
 
 def test_write_video_metadata_does_not_partially_upgrade_existing_legacy_object(tmp_path):

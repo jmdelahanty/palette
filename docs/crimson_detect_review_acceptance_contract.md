@@ -22,7 +22,7 @@ Date anchored: 2026-04-11.
   - Registry schema changes
 
 Related docs:
-- `docs/crimson_refined_detect_manual_contract.md`
+- `docs/archive/crimson_refined_detect_manual_contract.md`
 - `docs/crimson_detect_bbox_read_contract.md`
 - `docs/detection_refinement_workflow.md`
 

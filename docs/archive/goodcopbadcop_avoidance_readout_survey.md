@@ -1,6 +1,6 @@
 # Avoidance readout survey — new measurement axes for GoodCopBadCop
 
-Companion to `docs/glm_hmm_sample_avoid_state_analysis_prompt.md`. That doc
+Companion to `docs/archive/glm_hmm_sample_avoid_state_analysis_prompt.md`. That doc
 asks how to *model* a sample-vs-avoid state; this one asks the prior question —
 **what should we measure at all?** It maps the avoidance-behavior literature
 onto the components that already exist in this repo, and ranks the untapped
@@ -28,7 +28,7 @@ nothing else:
 That axis is precisely the one poisoned by the two dominant problems in the
 2026-07-14 diagnostics: the **colour/position confound** (aggressive = red at
 fixed positions in 32/32 recordings; see
-`docs/diagnostics/goodcopbadcop_cohort_results_2026-07-14.md:135-142`) and
+`docs/archive/goodcopbadcop_cohort_results_2026-07-14.md:135-142`) and
 **tracking dropout** (the detector loses the fish exactly when it freezes
 hardest, flipping escape-rate p-values and invalidating near-zone occupancy;
 see `..._escape_pursuit_2026-07-14.md` and `..._chase_epoch_findings...`).
@@ -207,7 +207,7 @@ an approaching robotic fish" (*Sci Rep* 2026); "Zebrafish Adjust Their
 Behavior in Response to an Interactive Robotic Predator" (*Front Robot AI*
 2019, PMC7806020).
 
-Internal: `docs/glm_hmm_sample_avoid_state_analysis_prompt.md`;
-`docs/diagnostics/goodcopbadcop_cohort_results_2026-07-14.md`;
-`docs/diagnostics/goodcopbadcop_escape_pursuit_2026-07-14.md`;
+Internal: `docs/archive/glm_hmm_sample_avoid_state_analysis_prompt.md`;
+`docs/archive/goodcopbadcop_cohort_results_2026-07-14.md`;
+`docs/archive/goodcopbadcop_escape_pursuit_2026-07-14.md`;
 `docs/heartrate_final_decision_2026-07-12.md`.

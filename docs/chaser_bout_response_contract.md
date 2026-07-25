@@ -22,7 +22,7 @@ This module **filters to `default_signal_id`**. Reading the whole table counts e
 bout up to five times and mixes jittery raw peaks with smoothed ones; an early version did
 exactly that and inflated every bout and escape count ~5× (all findings survived because the
 inflation was near-uniform, but the magnitudes were wrong — see
-`docs/diagnostics/goodcopbadcop_escape_pursuit_2026-07-14.md`). A single-level table with no
+`docs/archive/goodcopbadcop_escape_pursuit_2026-07-14.md`). A single-level table with no
 `signal_id` column is read whole. The chosen level is recorded in the component's diagnostics as
 `source_swim_bout_signal_id` / `source_swim_bout_level` / `bout_level_selection`, and pinned by
 `test_multi_level_bout_table_is_filtered_to_the_default_level`.
@@ -103,7 +103,7 @@ which is precisely why **`circling_excess_vs_virtual` is the quantity to read, a
 curve is a diagnostic only.** The same trap sinks two other tempting statistics: bearing at
 CPA is always ~90° (same identity), and the angular sweep of a *straight* chord about the
 object is already 100–140° for typical entry/exit radii. See
-`docs/diagnostics/goodcopbadcop_static_object_approach_findings_2026-07-14.md` §2.
+`docs/archive/goodcopbadcop_static_object_approach_findings_2026-07-14.md` §2.
 
 ## The confound this module exists to control
 

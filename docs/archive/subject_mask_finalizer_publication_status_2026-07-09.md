@@ -22,8 +22,8 @@ stands:
 Related docs:
 
 - `docs/refined_subject_masks_runs_contract.md`
-- `docs/diagnostics/subject_mask_finalization_parallelism_2026-06-20.md`
-- `docs/diagnostics/subject_mask_contour_sampling_2026-07-08.md`
+- `docs/archive/subject_mask_finalization_parallelism_2026-06-20.md`
+- `docs/archive/subject_mask_contour_sampling_2026-07-08.md`
 - `docs/clipped_collection_roi_cache_model_workflow.md`
 
 Related Crimson docs, in the `crimson-ui-monolith` repository:

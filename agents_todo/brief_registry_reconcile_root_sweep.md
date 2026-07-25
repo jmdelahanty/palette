@@ -8,7 +8,7 @@ the maintainer runs `--apply` from their own session.
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 **Read first:** `docs/archive/HANDOFF_2026-07-05.md` operating notes;
-`docs/diagnostics/registry_reconcile_collapse_audit_2026-06-18.md` (the design
+`docs/archive/registry_reconcile_collapse_audit_2026-06-18.md` (the design
 audit — NOTE it is partially stale, see "Landed since the audit" below);
 `docs/diagnostics/detect_review_pointer_recensus_2026-07-07.md` (the motivating
 drift evidence). Ground rules: local `sun` is ground truth; fresh worktree on
@@ -85,7 +85,7 @@ hand-running `--reconcile-dataset` 13 times, and nothing sweeps for the next one
    13 known filesystem-only stores to classify `new`; material disagreement with
    the re-census is a FINDING, not something to reconcile silently.
 5. **Audit-doc addendum**: append a short dated "Landed state" section to
-   `docs/diagnostics/registry_reconcile_collapse_audit_2026-06-18.md` recording
+   `docs/archive/registry_reconcile_collapse_audit_2026-06-18.md` recording
    what exists now (orchestrator, profile extractors incl. subject_mask, deleted
    sync scripts, this sweep) so the audit stops going stale silently.
 

@@ -237,4 +237,4 @@ difference is the definition (path length over a trial vs peak speed of a bout),
 
 ## Results
 
-`docs/diagnostics/goodcopbadcop_escape_pursuit_2026-07-14.md`.
+`docs/archive/goodcopbadcop_escape_pursuit_2026-07-14.md`.

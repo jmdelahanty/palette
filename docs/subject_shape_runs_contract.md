@@ -1019,13 +1019,13 @@ body QC, centerline, tail-anchor, and spline work.
   frame supersedes a keypoint-only fallback?
 - How should the first tail-anchor/spline implementation choose between raw
   centerline samples and B-spline samples for canonical body and tail length?
-  See [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md).
+  See [body_spline_tail_anchor_design.md](archive/body_spline_tail_anchor_design.md).
 - What tail sampling density and width-probe policy should become the default
   for tail curvature and mask-width profiles?
 
 ## Related Documents
 
-- [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [body_spline_tail_anchor_design.md](archive/body_spline_tail_anchor_design.md)
 - [body_frame_contract.md](body_frame_contract.md)
 - [current_pipeline_contract.md](current_pipeline_contract.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)

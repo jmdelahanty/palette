@@ -50,10 +50,13 @@ For tabular keypoint/detection review, the canonical refined surface is now an
 immutable sharded snapshot and hot edits belong in sparse delta partitions.
 Dense subject-mask editing remains a distinct chunked-authority workflow. See
 [`tabular_delta_compaction_contract.md`](tabular_delta_compaction_contract.md).
+The shared byte-based chunk/shard planner and its implementation checklist are
+specified in
+[`shared_zarr_storage_policy_design.md`](shared_zarr_storage_policy_design.md).
 
 The measured clipped-collection probability-mask case and proposed Zarr v3
 indexed-sharding benchmark are documented in
-[`diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md`](diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md).
+[`diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md`](archive/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md).
 That case reinforces the distinction: `856.21 GiB` of logical `uint8`
 probabilities compresses to roughly hundreds of MiB per clip, while the regular
 layout still creates about `110k` tiny probability chunk objects across the

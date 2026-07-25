@@ -53,7 +53,7 @@ automation) — the main difference is where `palette-crimson` edits originate.
     `docs/palette-crimson/detect_bbox_read.md`
   - `docs/crimson_detect_review_acceptance_contract.md` →
     `docs/palette-crimson/detect_review_acceptance.md`
-  - `docs/crimson_refined_detect_manual_contract.md` →
+  - `docs/archive/crimson_refined_detect_manual_contract.md` →
     `docs/palette-crimson/refined_detect_manual.md`
 - [ ] Decide whether the archived zarr alignment note should be replaced by a
       current Palette-owned `docs/palette-crimson/zarr_alignment.md` contract:

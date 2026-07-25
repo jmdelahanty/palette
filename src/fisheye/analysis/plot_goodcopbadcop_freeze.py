@@ -15,7 +15,7 @@ classifies immobility on speed_smoothed_mm, so this script draws the NULL (aggre
 Δ~+0.004, p~0.85; inert and far also ~0). The definitive figure is the raw-vs-smoothed contrast
 in scratch/freeze_corrected_plots (curve/summary PNGs). Keep this script only for the null; do
 NOT present its output as an avoidance result. What survived the clean-signal check: the escape
-response (12x during chase, 12/12, p=0.0005). See docs/goodcopbadcop_avoidance_readout_survey.md
+response (12x during chase, 12/12, p=0.0005). See docs/archive/goodcopbadcop_avoidance_readout_survey.md
 item 1 and the chaser_response_regimes contract.
 
 Run (palette env):
@@ -29,7 +29,7 @@ Options:
     --tag      filename suffix (default: 2026-07-17, reproduces the meeting artifacts).
 
 Provenance: /nvme1/recordings/figures/goodcopbadcop_freeze_figures_2026-07-17_PROVENANCE.txt
-Method doc: docs/goodcopbadcop_avoidance_readout_survey.md
+Method doc: docs/archive/goodcopbadcop_avoidance_readout_survey.md
 """
 from __future__ import annotations
 import argparse

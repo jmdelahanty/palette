@@ -13,11 +13,19 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Mapping, Optional
 
 import zarr
 
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    load_acquisition_authority_publication_status,
+)
+from fisheye.shared.experiment_setup import (
+    build_experiment_setup_record,
+    publish_experiment_setup,
+)
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.import_video_metadata import (
     probe_video_metadata,
@@ -25,6 +33,11 @@ from fisheye.shared.import_video_metadata import (
     write_video_metadata,
 )
 from fisheye.shared.recording_preflight import preflight_gate_reason
+from fisheye.shared.subject_metadata import (
+    publish_subject_metadata,
+    read_h5_subject_metadata,
+)
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 
 
 @dataclass
@@ -45,6 +58,7 @@ class RecordingImportOptions:
     stimulus_overwrite: bool
     stimulus_quiet: bool
     allow_preflight_failures: bool = False
+    stimulus_metadata_and_calibration_only: bool = False
 
 
 @dataclass
@@ -92,6 +106,69 @@ def _manifest_text(manifest: dict[str, object], *keys: str) -> Optional[str]:
     return None
 
 
+def _manifest_full_video(recording_dir: Path) -> Optional[Path]:
+    manifest = _load_recording_manifest(recording_dir)
+    video_streams = manifest.get("video_streams")
+    if not isinstance(video_streams, Mapping):
+        return None
+    streams = video_streams.get("streams")
+    if not isinstance(streams, Mapping):
+        return None
+    full = streams.get("full")
+    if not isinstance(full, Mapping):
+        return None
+    raw_path = full.get("video")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    candidate = Path(raw_path.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = recording_dir / candidate
+    candidate = candidate.resolve()
+    return candidate if candidate.is_file() else None
+
+
+def _producer_video_metadata(plan: RecordingAnalysisPlan) -> dict[str, Any]:
+    """Return the organizer's producer-declared full-video fields, when present."""
+
+    manifest = _load_recording_manifest(plan.recording_dir)
+    video_streams = manifest.get("video_streams")
+    if not isinstance(video_streams, Mapping):
+        return {}
+    streams = video_streams.get("streams")
+    if not isinstance(streams, Mapping):
+        return {}
+    selected_key: str | None = None
+    selected: Mapping[str, Any] | None = None
+    wanted = plan.cam_video.expanduser().resolve()
+    for key, candidate in streams.items():
+        if not isinstance(key, str) or not isinstance(candidate, Mapping):
+            continue
+        raw_video = candidate.get("video")
+        if isinstance(raw_video, str) and raw_video.strip():
+            path = Path(raw_video)
+            if not path.is_absolute():
+                path = plan.recording_dir / path
+            if path.expanduser().resolve() == wanted:
+                selected_key, selected = key, candidate
+                break
+    if selected is None:
+        fallback = streams.get("full")
+        if isinstance(fallback, Mapping):
+            selected_key, selected = "full", fallback
+    if selected is None or selected_key is None:
+        return {}
+    source_prefix = f"recording_manifest.video_streams.streams.{selected_key}"
+    producer: dict[str, Any] = {
+        "_source": source_prefix,
+        "total_frames": selected.get("frame_count"),
+        "fps": selected.get("frame_rate"),
+        "width": selected.get("width"),
+        "height": selected.get("height"),
+        "codec": selected.get("codec"),
+    }
+    return {key: value for key, value in producer.items() if value is not None}
+
+
 def stimulus_runs_present(zarr_path: Path) -> bool:
     try:
         root = zarr.open(str(zarr_path), mode="r")
@@ -103,6 +180,9 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
     stim = analysis.get("stimulus_runs")
     if stim is None:
         return False
+    attrs = getattr(stim, "attrs", {})
+    if "palette_completion_epoch" in attrs or "latest_complete" in attrs:
+        return resolve_latest_complete_run_name(stim) is not None
     try:
         return len(list(stim.group_keys())) > 0
     except Exception:
@@ -141,6 +221,12 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
     ):
         value = _manifest_text(manifest, key)
         if value:
+            if key == "camera_id":
+                existing = attrs.get(key)
+                if existing not in (None, "", value):
+                    raise ValueError(
+                        "Existing archive camera_id conflicts with recording_manifest.json."
+                    )
             attrs.setdefault(key, value)
     manifest_recording_id = _manifest_text(manifest, "recording_id")
     if manifest_recording_id and manifest_recording_id != recording_id:
@@ -169,11 +255,19 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
 
 def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dict[str, int]:
     root = zarr.open_group(str(plan.zarr_path), mode="r+")
-    meta = probe_video_metadata(plan.cam_video)
+    try:
+        publication = load_acquisition_authority_publication_status(root)
+        authority_published = publication.status == ACQUISITION_AUTHORITY_PUBLISHED
+    except Exception:
+        authority_published = False
+    meta = probe_video_metadata(
+        plan.cam_video,
+        producer_metadata=_producer_video_metadata(plan),
+    )
     updates = write_video_metadata(
         root,
         meta,
-        overwrite=overwrite,
+        overwrite=bool(overwrite or not authority_published),
         import_purpose="analysis",
         recording_path=plan.recording_dir,
     )
@@ -222,6 +316,43 @@ def _write_source_h5_fingerprint(
     return {"root_attrs_updated": root_updated, "raw_video_attrs_updated": raw_updated}
 
 
+def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, Any]]:
+    """Publish canonical subject metadata and experiment setup from the H5."""
+
+    if plan.h5_path is None:
+        return None
+    subject_metadata = read_h5_subject_metadata(plan.h5_path)
+    if not subject_metadata:
+        return None
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    subject_authority = publish_subject_metadata(
+        root,
+        subject_metadata,
+        source_h5_path=plan.h5_path,
+    )
+    record = build_experiment_setup_record(
+        subject_metadata,
+        source_h5_path=plan.h5_path,
+        subject_metadata_sha256=subject_authority.record_sha256,
+        subject_metadata_ref=subject_authority.group_path,
+    )
+    resolved = publish_experiment_setup(
+        root,
+        record,
+        source_h5_path=plan.h5_path,
+    )
+    return {
+        "run_name": resolved.run_name,
+        "group_path": resolved.group_path,
+        "record_sha256": resolved.record_sha256,
+        "expected_subject_count": resolved.expected_subject_count,
+        "assigned_subject_count": resolved.assigned_subject_count,
+        "subject_metadata_run": subject_authority.run_name,
+        "subject_metadata_path": subject_authority.group_path,
+        "subject_metadata_sha256": subject_authority.record_sha256,
+    }
+
+
 def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) -> None:
     if logger is not None:
         logger(event, **fields)
@@ -243,6 +374,8 @@ def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOption
         cmd.append("--overwrite")
     if opts.stimulus_quiet:
         cmd.append("--quiet")
+    if opts.stimulus_metadata_and_calibration_only:
+        cmd.append("--metadata-and-calibration-only")
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, check=False)
     return result.returncode == 0, result.returncode, cmd
@@ -297,6 +430,20 @@ def process_recording_import(
             raw_video_attrs_updated=updates["raw_video_attrs_updated"],
             overwrite=bool(opts.video_metadata_overwrite),
         )
+
+    if plan.h5_path is not None:
+        try:
+            setup = import_experiment_setup(plan)
+        except Exception as exc:
+            return RecordingImportResult(ok=False, failed_step="import_experiment_setup", error=str(exc))
+        if setup is not None:
+            _log(
+                logger,
+                "experiment_setup_imported",
+                recording_dir=str(plan.recording_dir),
+                zarr_path=str(plan.zarr_path),
+                **setup,
+            )
 
     if opts.import_stimulus:
         if plan.h5_path is None:
@@ -358,10 +505,18 @@ def resolve_single_recording_plan(
         if not mp4s:
             raise ValueError(f"no .mp4 files found under {cams_dir}")
         if len(mp4s) > 1:
-            raise ValueError(
-                f"multiple .mp4 files found under {cams_dir}; pass --video explicitly for single-recording mode"
-            )
-        cam_video = mp4s[0].resolve()
+            manifest_video = _manifest_full_video(rec_dir)
+            if manifest_video is None or manifest_video not in {
+                candidate.resolve() for candidate in mp4s
+            }:
+                raise ValueError(
+                    f"multiple .mp4 files found under {cams_dir} and no live "
+                    "recording_manifest.video_streams.streams.full.video disambiguates "
+                    "them; pass --video explicitly for single-recording mode"
+                )
+            cam_video = manifest_video
+        else:
+            cam_video = mp4s[0].resolve()
     else:
         cam_video = video.expanduser().resolve()
         if not cam_video.exists() or not cam_video.is_file():
@@ -410,6 +565,9 @@ def _build_options(args: argparse.Namespace) -> RecordingImportOptions:
         stimulus_overwrite=bool(args.stimulus_overwrite),
         stimulus_quiet=bool(args.stimulus_quiet),
         allow_preflight_failures=bool(args.allow_preflight_failures),
+        stimulus_metadata_and_calibration_only=bool(
+            args.stimulus_metadata_and_calibration_only
+        ),
     )
 
 
@@ -465,6 +623,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
+    parser.add_argument(
+        "--stimulus-metadata-and-calibration-only",
+        action="store_true",
+        help=(
+            "Import stimulus events, protocol metadata, and selected calibration "
+            "while omitting H5 coordinate surfaces without canonical array-level "
+            "identity."
+        ),
+    )
     parser.add_argument(
         "--allow-preflight-failures",
         action="store_true",

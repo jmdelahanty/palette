@@ -49,6 +49,30 @@ from fisheye.shared.instance_keys import (
 )
 
 
+def test_detection_metadata_uses_decoded_observation_and_ffprobe(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "camera.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setattr(
+        mod,
+        "probe_ffprobe_video_metadata",
+        lambda _path: {"codec": "hevc", "pix_fmt": "yuv420p"},
+    )
+
+    metadata = mod.get_video_metadata(
+        source,
+        cap=None,
+        width=4512,
+        height=4512,
+        n_frames=139295,
+        fps=100.0,
+    )
+
+    assert metadata["total_frames"] == 139295
+    assert metadata["codec"] == "hevc"
+    assert metadata["pix_fmt"] == "yuv420p"
+    assert "imageio_metadata" not in metadata
+
+
 def test_yolo_detection_sharding_is_default_with_cli_opt_out() -> None:
     signature = inspect.signature(mod.detect_yolo)
     assert signature.parameters["detect_row_shard_rows"].default == 131_072
@@ -444,6 +468,74 @@ def _assert_failed_producer_attempt_rolled_back(
         assert parent.attrs[name] == value
 
 
+def test_sanitize_backend_boxes_clips_to_exact_result_extent() -> None:
+    boxes, keep, report = mod._sanitize_backend_boxes_xyxy(  # noqa: SLF001
+        np.asarray(
+            [
+                [-1.0e-5, 10.0, 640.0001, 630.0],
+                [10.0, 20.0, 30.0, 40.0],
+            ],
+            dtype=np.float32,
+        ),
+        result_width=640,
+        result_height=640,
+    )
+
+    np.testing.assert_array_equal(keep, np.asarray([True, True]))
+    np.testing.assert_allclose(
+        boxes,
+        np.asarray([[0.0, 10.0, 640.0, 630.0], [10.0, 20.0, 30.0, 40.0]]),
+    )
+    assert boxes.dtype == np.float64
+    assert report == {
+        "input_count": 2,
+        "clipped_count": 1,
+        "dropped_nonfinite_count": 0,
+        "dropped_nonpositive_count": 0,
+        "output_count": 2,
+    }
+
+
+def test_sanitize_backend_boxes_preserves_exact_normalized_boundary() -> None:
+    boxes, keep, _ = mod._sanitize_backend_boxes_xyxy(  # noqa: SLF001
+        np.asarray([[123.456, 231.125, 640.0, 640.0]], dtype=np.float32),
+        result_width=640,
+        result_height=640,
+    )
+
+    np.testing.assert_array_equal(keep, np.asarray([True]))
+    cx = (boxes[:, 0] + boxes[:, 2]) * 0.5 / 640
+    cy = (boxes[:, 1] + boxes[:, 3]) * 0.5 / 640
+    width = (boxes[:, 2] - boxes[:, 0]) / 640
+    height = (boxes[:, 3] - boxes[:, 1]) / 640
+
+    assert np.all(cx + width * 0.5 <= 1.0)
+    assert np.all(cy + height * 0.5 <= 1.0)
+
+
+def test_sanitize_backend_boxes_drops_nonfinite_and_collapsed_rows() -> None:
+    boxes, keep, report = mod._sanitize_backend_boxes_xyxy(  # noqa: SLF001
+        np.asarray(
+            [
+                [np.nan, 0.0, 2.0, 2.0],
+                [-5.0, 1.0, -1.0, 3.0],
+                [1.0, 1.0, 2.0, 2.0],
+            ],
+            dtype=np.float64,
+        ),
+        result_width=640,
+        result_height=640,
+    )
+
+    np.testing.assert_array_equal(keep, np.asarray([False, False, True]))
+    np.testing.assert_array_equal(boxes, np.asarray([[1.0, 1.0, 2.0, 2.0]]))
+    assert report == {
+        "input_count": 3,
+        "clipped_count": 1,
+        "dropped_nonfinite_count": 1,
+        "dropped_nonpositive_count": 1,
+        "output_count": 1,
+    }
 def test_write_detection_output_arrays_uses_complete_indexed_shards(tmp_path) -> None:
     group = zarr.open_group(tmp_path / "detect_sharded.zarr", mode="w")
     values = _detection_values()

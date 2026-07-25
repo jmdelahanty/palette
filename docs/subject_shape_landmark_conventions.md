@@ -410,6 +410,6 @@ landmark from a nearby contour point.
 ## Related Documents
 
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
-- [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [body_spline_tail_anchor_design.md](archive/body_spline_tail_anchor_design.md)
 - [body_frame_contract.md](body_frame_contract.md)
 - [refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md)

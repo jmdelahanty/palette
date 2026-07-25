@@ -422,7 +422,7 @@ Implementation steps:
       `goodcopbadcop_epoch_behavior_summary` and fall back to
       `goodcopbadcop_epoch_speed_summary` only when the persisted behavior table
       is absent.
-- [x] Update `docs/goodcopbadcop_group_export_design.md` after implementation.
+- [x] Update `docs/archive/goodcopbadcop_group_export_design.md` after implementation.
 - [x] Add tests proving exported values equal stored zarr component arrays.
 
 ## Group Statistics Cleanup

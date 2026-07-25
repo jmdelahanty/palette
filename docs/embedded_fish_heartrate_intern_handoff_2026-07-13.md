@@ -19,7 +19,7 @@ table.
 Read the final interpretation before starting:
 
 - [`heartrate_final_decision_2026-07-12.md`](heartrate_final_decision_2026-07-12.md)
-- [`heartrate_top_view_mask_decision_2026-07-11.md`](heartrate_top_view_mask_decision_2026-07-11.md)
+- [`heartrate_top_view_mask_decision_2026-07-11.md`](archive/heartrate_top_view_mask_decision_2026-07-11.md)
 - [`playgrounds/heartrate_stabilization/README.md`](../playgrounds/heartrate_stabilization/README.md)
 
 ## Data And Frozen Inputs
@@ -352,7 +352,7 @@ docs/embedded_fish_heartrate_intern_handoff_2026-07-13.md
 
 Scientific context and reporting boundary:
 docs/heartrate_final_decision_2026-07-12.md
-docs/heartrate_top_view_mask_decision_2026-07-11.md
+docs/archive/heartrate_top_view_mask_decision_2026-07-11.md
 playgrounds/heartrate_stabilization/README.md
 
 Objective:

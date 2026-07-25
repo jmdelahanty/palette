@@ -482,7 +482,6 @@ If the hooks do not run, the manifest keeps the default
 `preflight.status="not_run"` with `checked_at_utc=null`; that is an unchecked
 state, not a media/H5 failure.
 
-- `scripts/py -m fisheye.analysis.create_analysis_zarr ...`
 - `scripts/py -m fisheye.utils.import_recording_analysis ...`
 - `scripts/py -m fisheye.utils.import_organized_recordings_analysis ...`
 - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline ...`

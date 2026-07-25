@@ -95,5 +95,5 @@ track_kinematics, the duplication justifies fixing the source.
 
 ## Related
 
-- `docs/stimulus_response_implementation_plan.md` — current consumer approach
+- `docs/archive/stimulus_response_implementation_plan.md` — current consumer approach
 - `docs/track_kinematics_bout_status.md` — known issues with track_kinematics

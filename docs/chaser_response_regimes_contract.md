@@ -137,4 +137,4 @@ a far stronger claim than a change in mean speed. `chaser_egocentric_bearing.py`
 the angular half.
 
 And it is descriptive. One fish is not an experiment — see
-`docs/diagnostics/goodcopbadcop_chase_epoch_findings_2026-07-14.md`.
+`docs/archive/goodcopbadcop_chase_epoch_findings_2026-07-14.md`.

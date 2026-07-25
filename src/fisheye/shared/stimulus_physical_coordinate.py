@@ -745,7 +745,18 @@ def publish_stimulus_physical_coordinate_authority(
         )
         if was_created:
             created.append((camera_container, _PIXEL_CONVENTION))
-        if was_created:
+        source_attrs = _attrs(
+            source_node,
+            label=f"/{canonical_node_path(source_node)}",
+        )
+        empty_existing_placeholder = not was_created and not dict(source_attrs)
+        if empty_existing_placeholder:
+            # Earlier interrupted publishers could leave an empty group after
+            # rolling back its attrs.  An empty node carries no authority and
+            # is safe to initialize; any partial/non-empty attrs still fail
+            # closed through the normal loader below.
+            attrs_snapshots.append((source_attrs, {}))
+        if was_created or empty_existing_placeholder:
             source_camera = stamp_source_camera_pixel_frame_authority(
                 source_node,
                 frame_id=f"{selected.camera_id}_source_camera",

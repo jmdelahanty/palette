@@ -124,8 +124,8 @@ analysis profile and a sampled/materialized training profile.
 The first audit under-counted import-like writers. A production cleanup should include or
 explicitly classify these surfaces:
 
-- `analysis/create_analysis_zarr.py` — standalone metadata-only analysis shell, optional
-  registry update.
+- `utils/import_recording_analysis.py` — canonical metadata-only analysis bootstrap and
+  stimulus-import surface.
 - `utils/run_recording_analysis_pipeline.py` and `utils/import_recordings_analysis.py` —
   wrapper/pipeline import paths with optional registry scan.
 - `utils/import_recordings_training.py` / `utils/import_sampled_training_pynvvc.py` —
@@ -204,7 +204,7 @@ filesystem traversal over the whole recordings tree.
   --reconcile-registry`, `utils/registry_rescan.py`, or the import wrapper's inline
   `scan_zarr`. `reconcile_dataset_from_root` (`db.py:6747`) is idempotent (tests in
   `2a74f2e`); moved stores are marked `status='missing'` (path not rewritten).
-- **Designed intent vs reality:** `docs/diagnostics/registry_design_assessment_2026-06-18.md`
+- **Designed intent vs reality:** `docs/archive/registry_design_assessment_2026-06-18.md`
   §Weaknesses#1 names it — "capture is scattered and not idempotent-by-design." The completed
   `brief_registry_reconcile.md` built `reconcile_dataset_from_root` as the unifying engine,
   but nothing auto-invokes it and import-time `scan_zarr` is still a separate path.

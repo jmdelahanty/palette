@@ -18,7 +18,7 @@ Related notes:
 - [repo_wide_staleness_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_checklist.md)
 - [repo_wide_staleness_gap_matrix.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_gap_matrix.md)
 - [repo_wide_staleness_workflow_edge_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_workflow_edge_checklist.md)
-- [crop_live_view_vs_materialized_stream_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crop_live_view_vs_materialized_stream_design.md)
+- [crop_live_view_vs_materialized_stream_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/crop_live_view_vs_materialized_stream_design.md)
 - [refined_detect_collapse_v2.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_detect_collapse_v2.md)
 - [refined_detect_multisubject_goal.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_detect_multisubject_goal.md)
 - [refined_detect_sparse_instances_schema.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_detect_sparse_instances_schema.md)

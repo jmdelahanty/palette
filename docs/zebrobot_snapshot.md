@@ -145,16 +145,20 @@ Keep only the explicit fields listed in the snapshot schema above.
 
 ## Zarr mirror (post-import)
 
-When H5 data is imported into Zarr, mirror the snapshot JSON into:
+Historical imports mirrored the snapshot JSON into:
 
 - analysis_metadata.zebrobot_snapshot
 
-If /subject_metadata exists in H5, store it separately as:
+and stored `/subject_metadata` as:
 
 - analysis_metadata.subject_metadata
 
-This keeps downstream tooling independent of the H5 file while preserving the
-H5 as the source of truth.
+For new imports, the canonical acquisition snapshot is a versioned
+`analysis/subject_metadata_runs/<run>` authority, and the declared recording
+population is a versioned `analysis/experiment_setup_runs/<run>` authority. See
+`docs/experiment_setup_contract.md`. The historical attrs above remain read
+compatibility surfaces only. This keeps downstream tooling independent of the
+H5 file while preserving the H5 as the source of truth.
 
 ## Implementation notes
 

@@ -10,6 +10,10 @@ import zarr
 
 from fisheye.analysis import import_stimulus_to_zarr as mod
 from fisheye.analysis import chaser_metrics_loader
+from fisheye.shared.experiment_setup import (
+    resolve_experiment_setup,
+)
+from fisheye.shared.subject_metadata import resolve_subject_metadata
 from fisheye.analysis.stimulus_response_coordinate_authority import (
     STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_ID,
     STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_VERSION,
@@ -86,6 +90,7 @@ from fisheye.shared.stimulus_coordinate_contract import (
     SOURCE_ACQUISITION_MAPPING_RECORD_DIGEST_ATTR,
     SOURCE_ACQUISITION_MAPPING_SCHEMA_ID,
     SOURCE_ACQUISITION_MAPPING_SCHEMA_VERSION,
+    SOURCE_COORDINATE_POLICY_METADATA_ONLY,
     STIMULUS_IMPORT_VERSION,
     StimulusCoordinateContractError,
     arena_geometry_record,
@@ -668,6 +673,45 @@ def test_import_sets_source_stimulus_video_path_when_rendered_mp4_exists(tmp_pat
     ) is None
     camera = run_group["calibration/2010093"]
     assert "coordinate_frames" not in camera
+
+
+def test_stimulus_run_binds_versioned_subject_and_setup_authorities(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session_subject.h5"
+    zarr_path = tmp_path / "sample_subject_analysis.zarr"
+    _write_minimal_stimulus_h5(h5_path)
+    subject_metadata = {
+        "subject_count": "1",
+        "subject_type": "individual",
+        "fish_id": "40d99fea-846b-4890-bad2-b4e152dfdde0",
+        "fish_count": "35",
+    }
+    with h5py.File(h5_path, "a") as h5:
+        subject = h5.create_group("subject_metadata")
+        subject.attrs.update(subject_metadata)
+
+    zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_subject_authority",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    subject_authority = resolve_subject_metadata(root, allow_legacy=False)
+    setup_authority = resolve_experiment_setup(root, allow_legacy=False)
+    source = root[f"analysis/stimulus_runs/{run_name}/source_metadata"]
+    assert source.attrs["subject_metadata_ref"] == subject_authority.group_path
+    assert source.attrs["subject_metadata_sha256"] == subject_authority.record_sha256
+    assert source.attrs["experiment_setup_ref"] == setup_authority.group_path
+    assert source.attrs["experiment_setup_sha256"] == setup_authority.record_sha256
+    assert "subject_metadata" not in source.attrs
+    assert "experiment_setup" not in source.attrs
 
 
 def test_import_omits_source_stimulus_video_path_when_rendered_mp4_missing(tmp_path: Path) -> None:
@@ -3044,7 +3088,7 @@ def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) ->
     _write_stimulus_h5_with_protocol_steps(h5_path)
     with pytest.raises(
         StimulusCoordinateContractError,
-        match="protocol_snapshot geometry lacks canonical array-specific support",
+        match="stimulus_coordinates lacks canonical array-specific geometry support",
     ):
         mod.import_stimulus_to_zarr(
             stimulus_h5=h5_path,
@@ -3056,3 +3100,94 @@ def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) ->
         )
 
     assert not zarr_path.exists()
+
+
+def test_metadata_and_calibration_only_import_omits_uncontracted_coordinate_surfaces(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _write_stimulus_h5_with_protocol_steps(h5_path)
+    with h5py.File(h5_path, "a") as h5:
+        tracking = h5.create_group("tracking_data")
+        tracking.create_dataset(
+            "chaser_states",
+            data=np.asarray([(1000, 1.0, 2.0)], dtype=[
+                ("stimulus_frame_num", "<u8"),
+                ("chaser_pos_x", "<f4"),
+                ("chaser_pos_y", "<f4"),
+            ]),
+        )
+        tracking.create_dataset(
+            "bounding_boxes",
+            data=np.asarray([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32),
+        )
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_metadata_only",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+        metadata_and_calibration_only=True,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["analysis/stimulus_runs"][run_name]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["source_coordinate_policy"] == (
+        SOURCE_COORDINATE_POLICY_METADATA_ONLY
+    )
+    assert run.attrs["source_coordinate_surface_status"] == (
+        "omitted_uncontracted_source_surfaces"
+    )
+    assert run.attrs["omitted_coordinate_source_paths"] == [
+        "/stimulus_coordinates",
+        "/tracking_data/bounding_boxes",
+        "/tracking_data/chaser_states",
+    ]
+    assert run.attrs["chaser_states_coordinate_descriptor_status"] == "not_present"
+    assert "tracking_data" not in run
+    assert "stimulus_coordinates" not in run
+    assert "protocol_json" in run.attrs
+    assert "events" in run
+    assert "steps" in run
+    assert "calibration" in run
+
+
+def test_metadata_only_import_initializes_empty_source_camera_frame_placeholder(
+    tmp_path: Path,
+) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _write_stimulus_h5_with_protocol_steps(h5_path)
+    _prepare_acquisition_authority(zarr_path, total_frames=138_000)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    placeholder = root.require_group(
+        "analysis/coordinate_frames/source_camera/2010093/continuous"
+    )
+    assert dict(placeholder.attrs) == {}
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_metadata_empty_source_frame",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+        metadata_and_calibration_only=True,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    source_frame = root[
+        "analysis/coordinate_frames/source_camera/2010093/continuous"
+    ]
+    assert PIXEL_FRAME_AUTHORITY_ATTR in source_frame.attrs
+    assert PIXEL_FRAME_AUTHORITY_DIGEST_ATTR in source_frame.attrs
+    physical = load_stimulus_physical_coordinate_authority(
+        root,
+        stimulus_run=run_name,
+    )
+    assert physical is not None
+    assert physical.camera_id == "2010093"

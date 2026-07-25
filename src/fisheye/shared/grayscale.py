@@ -7,7 +7,7 @@ channels without luma weights. Existing callsites choose among these as part of
 their pixel contract; changing values or switching a callsite between
 conventions changes produced pixels.
 
-See ``docs/diagnostics/pixel_decode_exposure_census_2026-07-02.md`` and
+See ``docs/archive/pixel_decode_exposure_census_2026-07-02.md`` and
 ``docs/video_pixel_model_input_contract.md`` before changing a convention or
 retargeting a callsite.
 """

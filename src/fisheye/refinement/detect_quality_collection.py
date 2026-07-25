@@ -34,6 +34,7 @@ from ..shared.detect_quality_contract import (
     CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA,
     FULL_FRAME_GEOMETRY_SCHEMA,
 )
+from ..shared.experiment_setup import resolve_expected_subject_count
 from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.zarr_io import open_zarr_root
 from ..shared.zarr_run_completion import (
@@ -759,8 +760,6 @@ def run_collection_detect_quality(
         raise ValueError("output_run must be a safe single group name.")
     if workers <= 0:
         raise ValueError("workers must be positive.")
-    if expected_subject_count is not None and expected_subject_count <= 0:
-        raise ValueError("expected_subject_count must be positive when provided.")
     if relocation_confirm_count < 2:
         raise ValueError("relocation_confirm_count must be at least 2.")
     if blip_gap_threshold <= 0:
@@ -768,6 +767,11 @@ def run_collection_detect_quality(
     if relocation_cluster_radius_fraction <= 0:
         raise ValueError("relocation_cluster_radius_fraction must be positive.")
     root = open_zarr_root(archive, mode="r")
+    expected_subject_count, experiment_setup = resolve_expected_subject_count(
+        root,
+        expected_subject_count,
+        allow_legacy=True,
+    )
     source = _group_at(root, source_group_path)
     row_count = _validate_source(source)
     resolved_frame_count = _resolve_frame_count(
@@ -810,6 +814,9 @@ def run_collection_detect_quality(
         "full_frame_geometry_schema": FULL_FRAME_GEOMETRY_SCHEMA,
         "full_frame_geometry_source": geometry_source,
         "expected_subject_count": expected_subject_count,
+        "experiment_setup_path": experiment_setup.group_path,
+        "experiment_setup_sha256": experiment_setup.record_sha256,
+        "experiment_setup_legacy": experiment_setup.legacy,
         "jump_threshold": float(jump_threshold),
         "threshold_mode": threshold_mode,
         "threshold_reference_width": float(threshold_reference_width),
@@ -916,6 +923,10 @@ def run_collection_detect_quality(
                     "height": int(resolved_height),
                     "full_frame_geometry_schema": FULL_FRAME_GEOMETRY_SCHEMA,
                     "full_frame_geometry_source": geometry_source,
+                    "expected_subject_count": expected_subject_count,
+                    "experiment_setup_path": experiment_setup.group_path,
+                    "experiment_setup_sha256": experiment_setup.record_sha256,
+                    "experiment_setup_legacy": experiment_setup.legacy,
                     "frame_index_semantics": "recording_parent_frame_index_0_based",
                     "row_identity": "instance_key",
                     "storage_layout": "indexed_sharding_v1",
@@ -1017,6 +1028,8 @@ def run_collection_detect_quality(
                 input_run_ids={
                     "source_detect_identity": source_identity,
                     "source_detection_group_path": source_group_path,
+                    "experiment_setup_path": experiment_setup.group_path,
+                    "experiment_setup_sha256": experiment_setup.record_sha256,
                 },
                 cwd=Path.cwd(),
             )

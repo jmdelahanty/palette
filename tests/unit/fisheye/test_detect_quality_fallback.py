@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.refinement import detect_quality as detect_quality_mod
@@ -26,6 +27,7 @@ def _write_frame_count_precedence_archive(zarr_path: Path) -> None:
     root.attrs["width"] = 4512
     root.attrs["height"] = 4512
     root.attrs["total_frames"] = 10
+    root.attrs["experiment_setup"] = {"setup_type": "single_dish", "total_expected_fish": 1}
 
     raw = root.create_group("raw_video")
     raw.attrs["source_video"] = "Cam2010093.mp4"
@@ -143,6 +145,7 @@ def test_analyze_detect_quality_scaled_threshold_is_resolution_invariant(tmp_pat
     root.attrs["width"] = 4512
     root.attrs["height"] = 4512
     root.attrs["total_frames"] = 2
+    root.attrs["experiment_setup"] = {"setup_type": "single_dish", "total_expected_fish": 1}
 
     raw = root.create_group("raw_video")
     raw.attrs["source_video"] = "Cam2010093.mp4"
@@ -194,6 +197,7 @@ def test_detect_quality_expected_subject_count_marks_only_over_expected_frames(
     root.attrs["width"] = 4512
     root.attrs["height"] = 4512
     root.attrs["total_frames"] = 4
+    root.attrs["experiment_setup"] = {"setup_type": "single_dish", "total_expected_fish": 4}
 
     detect_parent = root.create_group("detect_runs")
     detect = detect_parent.create_group("detect_multi")
@@ -251,7 +255,7 @@ def test_detect_quality_expected_subject_count_marks_only_over_expected_frames(
     assert quality.attrs["count_policy"]["over_expected_rule"] == "frame_counts > 4"
 
 
-def test_detect_quality_without_expected_count_preserves_legacy_single_subject_multi_labels(
+def test_detect_quality_legacy_setup_preserves_single_subject_multi_labels(
     tmp_path: Path,
 ) -> None:
     zarr_path = tmp_path / "analysis_single_subject.zarr"
@@ -259,6 +263,7 @@ def test_detect_quality_without_expected_count_preserves_legacy_single_subject_m
     root.attrs["width"] = 640
     root.attrs["height"] = 640
     root.attrs["total_frames"] = 2
+    root.attrs["experiment_setup"] = {"setup_type": "single_dish", "total_expected_fish": 1}
 
     detect_parent = root.create_group("detect_runs")
     detect = detect_parent.create_group("detect_single")
@@ -305,3 +310,36 @@ def test_detect_quality_without_expected_count_preserves_legacy_single_subject_m
         quality["detection_quality_labels"][:],
         np.array([0, 4, 4], dtype=np.int8),
     )
+
+
+def test_detect_quality_requires_setup_and_rejects_explicit_contradiction(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis_setup_gate.zarr"
+    _write_frame_count_precedence_archive(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    del root.attrs["experiment_setup"]
+
+    with pytest.raises(ValueError, match="Missing experiment setup metadata"):
+        analyze_detect_quality(
+            str(zarr_path),
+            run_name="detect_2026-02-09_12-00-00",
+        )
+
+    compatibility = analyze_detect_quality(
+        str(zarr_path),
+        run_name="detect_2026-02-09_12-00-00",
+        require_experiment_setup=False,
+    )
+    assert compatibility["experiment_setup"] is None
+
+    root.attrs["experiment_setup"] = {
+        "setup_type": "single_dish",
+        "total_expected_fish": 1,
+    }
+    with pytest.raises(ValueError, match="contradicts experiment setup"):
+        analyze_detect_quality(
+            str(zarr_path),
+            run_name="detect_2026-02-09_12-00-00",
+            expected_subject_count=2,
+        )

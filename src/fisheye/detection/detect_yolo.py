@@ -36,7 +36,6 @@ import zarr
 import numpy as np
 import torch
 import cv2
-import imageio.v3 as iio
 from datetime import datetime, timezone
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
@@ -127,7 +126,10 @@ from fisheye.shared.zarr_run_completion import (
     note_pending_latest,
     require_runs_parent,
 )
-from fisheye.shared.import_video_metadata import write_video_metadata
+from fisheye.shared.import_video_metadata import (
+    probe_ffprobe_video_metadata,
+    write_video_metadata,
+)
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
@@ -142,6 +144,56 @@ DECODE_BACKEND_CHOICES = (
     DECODE_BACKEND_DECORD_CPU,
     DECODE_BACKEND_OPENCV,
 )
+
+DETECTION_BACKEND_BBOX_SANITIZATION_SCHEMA_ID = (
+    "palette.detection_backend_bbox_sanitization.v1"
+)
+DETECTION_BACKEND_BBOX_SANITIZATION_POLICY = (
+    "clip_xyxy_to_validated_result_extent_drop_nonfinite_or_nonpositive_v1"
+)
+
+
+def _sanitize_backend_boxes_xyxy(
+    boxes_xyxy: np.ndarray,
+    *,
+    result_width: int,
+    result_height: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    """Clip detector boxes to the validated image and reject empty payloads.
+
+    Ultralytics normally clips result boxes, but GPU kernels can still return a
+    boundary edge a few floating-point units outside the exact result extent.
+    Canonical source-camera geometry must be closed over ``[0, width]`` and
+    ``[0, height]``.  Clipping is therefore part of result ingestion; boxes
+    that remain non-finite or collapse to zero area are not observations.
+    """
+
+    raw = np.asarray(boxes_xyxy)
+    if raw.ndim != 2 or raw.shape[1:] != (4,) or raw.dtype.kind != "f":
+        raise ValueError("Detector boxes must be one floating (N,4) xyxy array.")
+    if type(result_width) is not int or result_width <= 0:
+        raise ValueError("result_width must be one positive integer.")
+    if type(result_height) is not int or result_height <= 0:
+        raise ValueError("result_height must be one positive integer.")
+    finite = np.isfinite(raw).all(axis=1)
+    # Normalize from float64 coordinates below.  Performing the midpoint and
+    # width arithmetic in a float32 backend dtype can make a box whose upper
+    # edge is exactly ``result_width`` recompose a few ULPs beyond 1.0 in
+    # canonical cxcywh form.
+    clipped = raw.astype(np.float64, copy=True)
+    clipped[:, (0, 2)] = np.clip(clipped[:, (0, 2)], 0.0, float(result_width))
+    clipped[:, (1, 3)] = np.clip(clipped[:, (1, 3)], 0.0, float(result_height))
+    positive = (clipped[:, 2] > clipped[:, 0]) & (clipped[:, 3] > clipped[:, 1])
+    keep = finite & positive
+    adjusted = finite & np.any(clipped != raw, axis=1)
+    report = {
+        "input_count": int(raw.shape[0]),
+        "clipped_count": int(np.count_nonzero(adjusted)),
+        "dropped_nonfinite_count": int(np.count_nonzero(~finite)),
+        "dropped_nonpositive_count": int(np.count_nonzero(finite & ~positive)),
+        "output_count": int(np.count_nonzero(keep)),
+    }
+    return clipped[keep], keep, report
 PYNVVC_SURFACE_MATERIALIZATION = "stream_event_owned_batch_v2"
 DETECT_SHARD_WRITE_SCHEMA = "palette.detect_materialized_shards.v1"
 DEFAULT_DETECT_ROW_SHARD_ROWS = 131_072
@@ -1140,8 +1192,7 @@ def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) ->
 
 def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width: int, height: int, n_frames: int, fps: float) -> Dict[str, Any]:
     """
-    Get comprehensive video metadata similar to import_video.py.
-    Uses both cv2 and imageio for maximum compatibility.
+    Get finite source metadata from decoded observations plus ffprobe.
     """
     cap_owner = False
     if cap is None:
@@ -1151,12 +1202,6 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
             cap.release()
             cap = None
     try:
-        # Try to get codec info from imageio.
-        try:
-            iio_meta = iio.immeta(str(video_path))
-        except Exception:
-            iio_meta = {}
-
         meta = {
             "source_video": str(video_path.name),
             "source_path": str(video_path.absolute()),
@@ -1166,12 +1211,10 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
             "fps": fps,
             "duration_seconds": n_frames / fps if fps > 0 else 0,
         }
-
-        if iio_meta:
-            meta["codec"] = iio_meta.get("codec", "unknown")
-            meta["pix_fmt"] = iio_meta.get("pix_fmt", "unknown")
-            meta["imageio_metadata"] = iio_meta
-        else:
+        stream = probe_ffprobe_video_metadata(video_path)
+        meta["codec"] = stream.get("codec", "unknown")
+        meta["pix_fmt"] = stream.get("pix_fmt", "unknown")
+        if meta["codec"] == "unknown":
             if cap is not None:
                 fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
                 if fourcc > 0:
@@ -1181,9 +1224,9 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
                     meta["codec"] = codec_str
                 else:
                     meta["codec"] = "unknown"
-            else:
-                meta["codec"] = "unknown"
-            meta["pix_fmt"] = "unknown"
+        tags = stream.get("format_tags")
+        if isinstance(tags, dict) and tags:
+            meta["format_tags"] = tags
         return meta
     finally:
         if cap_owner and cap is not None:
@@ -2494,9 +2537,6 @@ def detect_yolo(
             'system_cpu_cores': env_info['platform']['cpu_cores'],
         })
 
-        if 'imageio_metadata' in vid_meta:
-            root.attrs['imageio_metadata'] = vid_meta['imageio_metadata']
-
         if 'cpu_details' in env_info['platform']:
             cpu = env_info['platform']['cpu_details']
             root.attrs.update({
@@ -2742,6 +2782,10 @@ def detect_yolo(
     batch_results = []
     validated_backend_result_count = 0
     validated_backend_result_orig_shapes: set[tuple[int, int]] = set()
+    backend_bbox_input_count = 0
+    backend_bbox_clipped_count = 0
+    backend_bbox_dropped_nonfinite_count = 0
+    backend_bbox_dropped_nonpositive_count = 0
 
     def accumulate_results(
         result: Any,
@@ -2751,6 +2795,10 @@ def detect_yolo(
     ) -> None:
         """Vectorize detection accumulation for a single frame."""
         nonlocal validated_backend_result_count
+        nonlocal backend_bbox_input_count
+        nonlocal backend_bbox_clipped_count
+        nonlocal backend_bbox_dropped_nonfinite_count
+        nonlocal backend_bbox_dropped_nonpositive_count
         validated_backend_result_count += 1
         validated_backend_result_orig_shapes.add(
             (int(orig_shape[0]), int(orig_shape[1]))
@@ -2758,13 +2806,23 @@ def detect_yolo(
         if result.boxes is None or len(result.boxes) == 0:
             return
 
-        boxes_xyxy = result.boxes.xyxy.detach().cpu().numpy()
-        scores_np = result.boxes.conf.detach().cpu().numpy()
-        num_detections = boxes_xyxy.shape[0]
+        raw_boxes_xyxy = result.boxes.xyxy.detach().cpu().numpy()
+        raw_scores_np = result.boxes.conf.detach().cpu().numpy()
+        result_height, result_width = orig_shape
+        boxes_xyxy, keep, sanitation = _sanitize_backend_boxes_xyxy(
+            raw_boxes_xyxy,
+            result_width=int(result_width),
+            result_height=int(result_height),
+        )
+        backend_bbox_input_count += sanitation["input_count"]
+        backend_bbox_clipped_count += sanitation["clipped_count"]
+        backend_bbox_dropped_nonfinite_count += sanitation["dropped_nonfinite_count"]
+        backend_bbox_dropped_nonpositive_count += sanitation["dropped_nonpositive_count"]
+        num_detections = int(boxes_xyxy.shape[0])
         if num_detections == 0:
             return
 
-        result_height, result_width = orig_shape
+        scores_np = raw_scores_np[keep]
         cx = (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) * 0.5 / result_width
         cy = (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) * 0.5 / result_height
         w = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / result_width
@@ -2778,7 +2836,9 @@ def detect_yolo(
         if cls_tensor is None:
             class_ids = np.zeros(num_detections, dtype=np.int32)
         else:
-            class_ids = cls_tensor.detach().cpu().numpy().astype(np.int32, copy=False)
+            class_ids = (
+                cls_tensor.detach().cpu().numpy()[keep].astype(np.int32, copy=False)
+            )
 
         batch_results.append((indices, bbox_norm, scores, class_ids))
         frame_counts[global_frame_idx] += num_detections
@@ -3406,6 +3466,15 @@ def detect_yolo(
             int(inference_height),
             int(inference_width),
         ],
+        'backend_bbox_sanitization': {
+            'schema_id': DETECTION_BACKEND_BBOX_SANITIZATION_SCHEMA_ID,
+            'policy': DETECTION_BACKEND_BBOX_SANITIZATION_POLICY,
+            'input_count': int(backend_bbox_input_count),
+            'clipped_count': int(backend_bbox_clipped_count),
+            'dropped_nonfinite_count': int(backend_bbox_dropped_nonfinite_count),
+            'dropped_nonpositive_count': int(backend_bbox_dropped_nonpositive_count),
+            'output_count': int(total_detections),
+        },
         'parameters': {
             'conf_threshold': conf_threshold,
             'iou_threshold': iou_threshold,
