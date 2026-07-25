@@ -245,3 +245,56 @@ The stable physical-copy and completion timings localize the improvement to
 the intended canonical identity/binding path. Completion and full-motion
 sealing is now the dominant authoritative-publication cost and should be the
 next separately investigated optimization target.
+
+## Staged scientific-validation receipt canary
+
+The next canary separated scientific derivation validation from authoritative
+publication.  Track speed, smoothing, heading, turning, acceleration, and
+summary invariants are now validated once against the node-local sharded run.
+That result is stored as a versioned receipt bound to the exact decoded-copy
+Merkle root.  Final publication accepts the receipt only when the installed
+payload-integrity receipt names the same decoded root, run, staging manifest,
+track inventory, validator version, and numerical policy.
+
+The authoritative publisher still validates the closed array and attribute
+inventories, payload hashes, semantic contracts, physical pixel/mm scaling,
+aliases, bout domains, coordinate authorities, and selector state.  Runs that
+lack the new receipt retain the exhaustive numerical fallback.  The seal also
+reuses its freshly validated position binding within the same synchronous
+publication operation instead of immediately loading the same authority a
+second time; fresh archive, path, completion, selector, and track-inventory
+checks remain mandatory.
+
+- Palette commit: `33b9f588`
+- successful materialization LSF job: `153172604` on `h07u31`
+- independent exhaustive public-reader LSF job: `153172608` on `h07u31`
+- output: `track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003`
+- source rows: `1,169,010`; requested slots / shard workers: `8` / `8`
+- exact decoded-payload root:
+  `0d246d1df9424314bd7c9c2cd9246fb64206fb3f38961522e64447bd87bab6e3`
+- public reader: valid, one track, `104` surfaces, manifest SHA-256
+  `b5b5561c9dd2cc559ae91425c382c79cbdfcc1020f0c5e2a4c872921e1d8fe13`
+
+| Phase | Identity-proof canary (s) | Scientific-receipt canary (s) | Change |
+|---|---:|---:|---:|
+| Total application | 340.4 | 320.3 | -5.9% |
+| Offline numerical staging | 114.6 | 123.8 | host/run variation |
+| Local staged scientific validation | absent | 66.8 | moved out of publication |
+| Authoritative publication | 220.1 | 123.7 | -43.8% |
+| Post-rename canonical binding | 31.0 | 33.8 | effectively stable |
+| Completion / full-motion sealing | 173.9 | 74.0 | -57.5% |
+| Physical tree copy | 6.2 | 6.1 | unchanged |
+
+The total-job reduction is intentionally smaller than the publication
+reduction: the full numerical validator still runs once per production output,
+but now runs on the local staged payload and carries its result through an
+exact-copy proof.  The removed work is the redundant authoritative
+recomputation and the second same-operation position binding.  Exhaustive
+public-reader canaries remain the independent integration check rather than a
+mandatory part of every publication transaction.
+
+Two earlier attempts failed closed before eligibility.  The first exposed that
+a standalone run root has Zarr path `/` and therefore requires an explicit
+logical run name.  The second exposed that the new receipt had not yet been
+added to the closed immutable run-root attribute inventory.  Both conditions
+are now explicit contract checks covered by focused tests.
