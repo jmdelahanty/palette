@@ -1,8 +1,8 @@
 # Recording Analysis Pipeline Contract
 <!-- contract-meta
-version: 3
+version: 4
 status: active
-last_verified: 2026-07-16
+last_verified: 2026-07-24
 -->
 
 Purpose: define the canonical, operator-first contract for analysis processing per recording.
@@ -14,8 +14,8 @@ the narrower import/detect/refine analysis pipeline contract.
 
 Date anchored: 2026-02-09.
 
-Related detect batch contract:
-- `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
+Related detection publication contract:
+- `docs/detection_publication_contract.md`
 
 ## Goals
 
@@ -44,10 +44,12 @@ Related detect batch contract:
       after the read-only post-hoc equivalence audit described below proves
       that the gate would remove zero selected instances.
 - Stage 3 detect tool:
-  - Modules:
-    - `fisheye.detection.detect_yolo` (explicit model path/config)
-    - `fisheye.utils.run_detect_with_registry_model` (registry model resolution + detect run provenance)
-  - Responsibility: append one detect run to analysis Zarr.
+  - Canonical module: `fisheye.utils.run_detect_with_registry_model`.
+  - Responsibility: resolve a registered model and its digest, construct and
+    validate a disposable candidate on node-local scratch, then atomically
+    publish and activate one detect run in the analysis Zarr.
+  - Internal numerical writer: `fisheye.detection.detect_yolo`; this is not an
+    operator-facing canonical publication path.
 - Stage 4 detect-quality tool (required before refine for production):
   - Module: `fisheye.refinement.detect_quality`
   - Responsibility: append one raw-detect quality report under the selected
@@ -130,7 +132,8 @@ collection manifest.
   - Required execution order:
     1. import (`process_recording_import`)
     2. dish-mask tune/import/verify before production detect/refine
-    3. detect (`run_detect_yolo` or `run_detect_registry_model`)
+    3. registry-resolved detect (`run_detect_registry_model`) using node-local
+       candidate construction and atomic canonical publication
     4. detect quality (`fisheye.refinement.detect_quality`)
     5. refine (`run_refine_detect`, optional)
     6. register (optional)
@@ -293,6 +296,9 @@ provenance.
   - stimulus import defaults to skip when runs already exist unless `--stimulus-always`
 - Detect stage:
   - append-only detect runs; existing runs remain immutable
+  - candidate construction and validation occur on node-local scratch
+  - canonical installation is atomic; selectors change only after the
+    published run passes validation
 - Detect-quality stage:
   - append-only quality reports under detect runs; existing quality reports
     remain immutable
@@ -305,12 +311,12 @@ provenance.
 
 ## Model Resolution Contract
 
-- `--model-source explicit`:
-  - detect uses explicit `--model` and/or detect config behavior.
-- `--model-source registry`:
-  - detect uses `run_detect_with_registry_model`
-  - resolver currently targets `task=detect`
-  - run provenance for selected model is written on the detect run attrs
+- Canonical recording pipelines always use `run_detect_with_registry_model`.
+  The resolver targets `task=detect`, and the registered model SHA-256 and
+  resolution provenance are written on the detect run before atomic
+  publication.
+- Explicit models may be used for detached artifacts or standalone outputs,
+  but cannot publish into a canonical recording archive.
 
 ## Logging Contract
 
@@ -327,7 +333,7 @@ provenance.
 - Single recording dry-run:
   - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --dry-run`
 - Dish-mask tune/verify after import and before production detect/refine:
-  - `scripts/py -m fisheye.tune.mask_tuner "$ANALYSIS_ZARR" --registry /nvme1/palette_registry.sqlite`
+  - `scripts/py -m fisheye.tune.mask_tuner "$ANALYSIS_ZARR" --registry "$PALETTE_REGISTRY_PATH"`
   - The save always writes `analysis_metadata.attrs["dish_mask"]`; `--registry`
     additionally upserts `recording_step_status.dish_mask=ok` for the matching
     dataset. Without `--registry`, the next registry maintenance/backfill pass
@@ -339,17 +345,17 @@ provenance.
     of the continued line; a standalone `\` line does not continue the previous
     command.
 - Batch import-only apply for newly organized recordings:
-  - `scripts/py -m fisheye.utils.import_organized_recordings_analysis --organize-log "$ORGANIZE_LOG" --registry /nvme1/palette_registry.sqlite --apply`
+  - `scripts/py -m fisheye.utils.import_organized_recordings_analysis --organize-log "$ORGANIZE_LOG" --registry "$PALETTE_REGISTRY_PATH" --apply`
   - This creates/updates analysis zarrs and keeps registry-backed review lists
     current without running inference.
 - Single recording apply with registry model + register:
-  - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --model-source registry --registry /nvme1/palette_registry.sqlite --register --apply`
-  - If detect path is YOLO and pipeline wrapper does not auto-run quality:
-    - `scripts/py -m fisheye.refinement.detect_quality "$ANALYSIS_ZARR" --save`
+  - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --registry "$PALETTE_REGISTRY_PATH" --register --apply`
+  - The wrapper runs detect quality immediately after successful detection;
+    use the standalone quality command only for an intentional stage-only rerun.
 - Batch apply:
-  - `scripts/py -m fisheye.utils.import_recordings_analysis /nvme1/recordings --recursive --model-source registry --registry /nvme1/palette_registry.sqlite --apply`
+  - `scripts/py -m fisheye.utils.import_recordings_analysis "$PALETTE_RECORDINGS_ROOT" --recursive --registry "$PALETTE_REGISTRY_PATH" --apply`
 - Batch detect-quality stage (when needed separately):
-  - `scripts/py -m fisheye.utils.detect_quality_batch /nvme1/recordings --recursive --apply`
+  - `scripts/py -m fisheye.utils.detect_quality_batch "$PALETTE_RECORDINGS_ROOT" --recursive --apply`
 
 ## Out of Scope (Current Contract)
 

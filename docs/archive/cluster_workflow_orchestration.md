@@ -1,6 +1,8 @@
+<!-- ARCHIVED 2026-07-08: its implementation-era orchestration plan is superseded by docs/lsf_submission_framework_design.md and the family operator guides. -->
+
 # Cluster Workflow Orchestration
 <!-- contract-meta
-status: design
+status: archived
 last_verified: 2026-05-16
 purpose: Define how Palette should chain cluster jobs across GPU, CPU, storage-import, validation, and registry-projection stages without wasting scheduler resources or corrupting shared Zarr stores.
 -->

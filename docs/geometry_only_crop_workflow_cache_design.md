@@ -17,7 +17,7 @@ It complements:
 
 - `docs/archive/crop_live_view_vs_materialized_stream_design.md`
 - `docs/crop_storage_mode_migration_todo.md`
-- `docs/cluster_workflow_orchestration.md`
+- `docs/lsf_submission_framework_design.md`
 - `docs/cluster_run_group_artifact_workflow.md`
 
 ## Core Policy

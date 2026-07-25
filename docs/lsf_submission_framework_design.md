@@ -1,8 +1,9 @@
 # LSF Submission Architecture: Shared Kernel and Job-Family Planners
 
-- Status: Phase 1 and the Phase 2 dry-run implementation are complete; no
-  GoodCopBadCop jobs have been submitted
-- Last reviewed: 2026-07-10
+- Status: Phase 1 and Phase 2 are implemented; shared-kernel adoption remains
+  partial across job families. Use `docs/cluster_batching_guide.md` for current
+  operator commands.
+- Last reviewed: 2026-07-24
 - Scope: Palette commands that plan or submit LSF jobs with `bsub`
 
 ## Purpose
@@ -128,13 +129,14 @@ implemented on 2026-07-10:
 - ordinary-batch, clipped-collection, and whole-recording keypoint submitters
   expose the same default/custom/opt-out storage controls. Plans record both
   `keypoint_storage.requested` and `keypoint_storage.effective`; immutable YOLO
-  outputs default to 262,144-row ROI shards and 262,144-row frame shards, while
+  outputs default to 131,072-row ROI shards and 131,072-row frame shards, while
   `--no-keypoint-sharding` remains an explicit compatibility override.
 
-Recovery behavior, a cross-family conformance scanner, and broad migration of
-detect/mask/cache submitters remain later slices. The new whole-recording
-planner has been validated locally with fake LSF submissions, but it has not
-been run against the GoodCopBadCop target set or submitted on Citrus Poller.
+At the 2026-07-10 checkpoint, recovery behavior, a cross-family conformance
+scanner, and broad migration of detect/mask/cache submitters remained later
+slices. The whole-recording planner had then been validated only with fake LSF
+submissions. Later campaign evidence belongs in the family operator guides and
+run manifests rather than being reconstructed in this design history.
 
 ## Current Repository Inventory
 
@@ -192,9 +194,9 @@ Several shell submitters implement useful dependency patterns directly:
   serial registry finalizer.
 - `submit_refine_keypoints_batches_bsub.sh` supports an upstream dependency and
   a dependent registry finalizer.
-- `submit_detect_quality_refine_bsub.sh` demonstrates a simple linear
-  detect-to-quality-to-refine chain, while documenting why selecting `latest`
-  makes it inappropriate for concurrent production use.
+- `submit_detect_artifact_quality_refine_bsub.sh` demonstrates a deterministic
+  detect-artifact/import-to-quality-to-refine chain without direct canonical
+  GPU writes.
 
 These scripts prove the execution patterns, but independently reimplement job
 ID parsing, command rendering, dependency construction, dry-run behavior, and
@@ -494,16 +496,19 @@ The shared implementation should not:
 
 The detect family should own:
 
-- model resolution or explicit model pinning;
+- registered model resolution and exact model-artifact pinning;
 - deterministic detect, quality, and refined run names;
-- direct-write versus artifact/import topology;
+- ordinary node-local atomic publication versus detached artifact/import
+  topology;
 - decode backend and resize contract;
 - detect-quality parameters;
 - output collision preflight;
 - detect and refined-detect validators.
 
-The production default should follow the deterministic artifact path rather
-than a downstream `latest` selector.
+Full-recording production should use deterministic node-local candidate
+construction and atomic publication. Detached artifacts remain appropriate
+when clip fan-out or an explicit transport boundary requires them; downstream
+stages should consume exact run names rather than a mutable `latest` selector.
 
 ### Keypoints
 
@@ -882,8 +887,8 @@ For each migrated family:
 
 - Move the deterministic artifact/import/quality/refine path onto the shared
   kernel.
-- Retain direct-write detect submission for constrained smokes, clearly labeled
-  as such.
+- Retain node-local candidate plus atomic publication for ordinary
+  full-recording detection arrays.
 - Reuse the existing clipped detect/refine completion checker concepts.
 
 ### Phase 4: converge subject-mask and crop/cache planners

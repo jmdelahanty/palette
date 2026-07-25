@@ -92,22 +92,21 @@ run as separate commands.
 
 ## Running the full pipeline (batch)
 
-The most common way to process recordings is the batch pipeline, which handles
-steps 1 through 7 for every recording under your recordings root. You just
-need a YOLO model file (`.pt`) — ask Jeremy for the current best model if you
-don't have one.
+The most common way to process recordings is the batch pipeline. Canonical
+detection always resolves the model and its digest from the registry; operators
+do not pass an arbitrary weights path into a live recording archive.
 
 ### Dry-run first
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_analysis \
+  "$PALETTE_RECORDINGS_ROOT" \
   --recursive \
-  --model /path/to/best.pt \
+  --registry "$PALETTE_REGISTRY_PATH" \
   --conf 0.25 \
   --iou 0.7 \
   --refine-detect \
-  --keypoints \
-  --refine-keypoints
+  --keypoints
 ```
 
 With no `--apply` flag, this prints a plan showing each recording it found,
@@ -118,13 +117,13 @@ whether a recorded manifest preflight would block the run.
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_analysis \
+  "$PALETTE_RECORDINGS_ROOT" \
   --recursive \
-  --model /path/to/best.pt \
+  --registry "$PALETTE_REGISTRY_PATH" \
   --conf 0.25 \
   --iou 0.7 \
   --refine-detect \
   --keypoints \
-  --refine-keypoints \
   --apply
 ```
 
@@ -136,30 +135,34 @@ To reprocess existing recordings, add `--overwrite`.
 ```bash
 scripts/py -m fisheye.utils.run_recording_analysis_pipeline \
   --recording-dir "$PALETTE_RECORDINGS_ROOT/2026-01-28T19-36-18Z_arena_1_Feeding" \
-  --model /path/to/best.pt \
+  --registry "$PALETTE_REGISTRY_PATH" \
   --conf 0.25 \
   --iou 0.7 \
   --refine-detect \
   --keypoints \
-  --refine-keypoints \
   --apply
 ```
 
-### Advanced: using the model registry
+The legacy `--refine-keypoints` option currently fails closed before archive
+mutation while the future-normal refined-keypoint publication path is being
+finished. Run the dedicated, lineage-aware keypoint refinement workflow when
+that stage is required.
 
-If you have access to the Palette model registry, you can let the pipeline
-automatically select the best model for each recording instead of specifying
-one explicitly. This is optional — most users should use an explicit model
-path as shown above.
+### Registry model selection controls
+
+Registry resolution is mandatory for canonical detection. Use `--set-id` to
+constrain the model set, `--require-unique` to fail on a top-score tie, and
+`--top-k` to control how many candidates are retained in resolution
+provenance.
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_analysis \
+  "$PALETTE_RECORDINGS_ROOT" \
   --recursive \
-  --model-source registry \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$PALETTE_REGISTRY_PATH" \
+  --require-unique \
   --refine-detect \
   --keypoints \
-  --refine-keypoints \
   --register \
   --apply
 ```
@@ -181,7 +184,7 @@ review tools can see the new analysis zarrs immediately:
 ```bash
 scripts/py -m fisheye.utils.import_organized_recordings_analysis \
   --organize-log "$ORGANIZE_LOG" \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$PALETTE_REGISTRY_PATH" \
   --apply
 ```
 
@@ -203,7 +206,7 @@ Interactive tuning:
 ```bash
 scripts/py -m fisheye.tune.mask_tuner \
   path/to/zarr/..._analysis.zarr \
-  --registry /nvme1/palette_registry.sqlite
+  --registry "$PALETTE_REGISTRY_PATH"
 ```
 
 For full-resolution tuning, add `--full`. If Orange/Citrus wrote a runtime dish
@@ -219,10 +222,10 @@ attribute later.
 To iterate masks missing according to the registry:
 
 ```bash
-scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
+scripts/py -m fisheye.utils.review_dish_masks "$PALETTE_RECORDINGS_ROOT" \
   --source registry \
   --only-missing \
-  --registry /nvme1/palette_registry.sqlite
+  --registry "$PALETTE_REGISTRY_PATH"
 ```
 
 ### 3. Detect
@@ -234,7 +237,7 @@ created run.
 
 ```bash
 palette detect path/to/zarr/2026-01-28T19-36-18Z_arena_1_Feeding_analysis.zarr \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$PALETTE_REGISTRY_PATH" \
   --json
 ```
 

@@ -6,8 +6,8 @@ cluster with LSF. The current primary stages — **detect**, **crop**,
 pre-filtering.
 
 Related contract:
-- `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
-- `docs/cluster_workflow_orchestration.md`
+- `docs/detection_publication_contract.md`
+- `docs/lsf_submission_framework_design.md`
 - `docs/cluster_run_group_artifact_workflow.md`
 - `docs/cluster_pipeline_migration_checklist.md`
 - `docs/clipped_training_zarr_implementation_checklist.md`
@@ -75,8 +75,8 @@ into one CPU job can be reasonable when filesystem pressure is controlled.
 At Janelia, checked 2026-05-16, `short` is the default queue for CPU jobs under
 one hour, and `gpu_l4` is the normal single-node L4 GPU queue. `gpu_l4_parallel`
 is for multinode/MPI jobs and should not be used for ordinary Palette
-single-recording stages. See `docs/cluster_workflow_orchestration.md` for the
-queue table.
+single-recording stages. Verify current site policy against the Janelia HPC
+source linked above before changing queue defaults.
 
 Do not treat `--jobs`, `--batch-size`, or a loop over many archives as the
 final cluster abstraction. Those controls are useful locally, but the cluster
@@ -339,11 +339,6 @@ scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jere
   --recursive --apply \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
 
-# Apply — run detections with an explicit model path, bypassing model registry
-scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/palette_smoke \
-  --recursive --apply \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/best.pt
-
 # Registry mode — only process recordings not yet detected
 scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
@@ -383,28 +378,17 @@ already have `detect_runs/latest` unless `--overwrite` is set.
 | `--mem-gb`         | `16`    | Memory per job in GB                             |
 | `--registry`       | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path       |
 | `--config`         | `configs/fisheye/default.yaml` | Detection config     |
-| `--model`          | *(none)* | Explicit detect model path; bypasses registry model resolution |
 | `--set-id`         | *(none)* | Detect model set filter                         |
 | `--require-tuning` | off     | Skip zarrs without detection_tuning              |
 | `--overwrite`      | off     | Rerun even if detect_runs/latest exists          |
 | `--dry-run`        | off     | Print manifests + commands; do not submit        |
 
 **Execution model:** Each batch job calls `run_detections_batch --apply` with
-a batch of zarr paths. By default, model resolution happens inside the batch
-runner through the registry. Passing `--model PATH` uses that explicit model
-for every batch target and does not require registry-backed model resolution;
-registry discovery still requires `--source registry` and a readable registry.
-
-**Current pilot write policy:** `run_detections_batch` currently writes detect
-run groups directly into the target analysis Zarr. This is acceptable only for
-low-concurrency smoke runs where one job owns one target archive at a time and
-the output is validated immediately.
-
-Do not use the direct-write path for the storage-behavior smoke. If the goal is
-to verify cluster throughput without NFS chunk-write pressure, run a compute-only
-smoke first: open the PRFS video, load the model, decode a small frame batch,
-and execute inference without writing predictions to the canonical analysis
-Zarr.
+a batch of Zarr paths. The runner resolves a registered model and its SHA-256,
+streams the canonical PRFS video, builds and validates the complete run under
+node-local scratch, then atomically publishes and activates the run. Direct
+writes into an existing canonical analysis Zarr are rejected before mutation.
+See `docs/detection_publication_contract.md`.
 
 Compute-only detection smoke:
 
@@ -548,15 +532,15 @@ scripts/submit_detect_artifact_bsub.sh \
   --batch-size 16
 ```
 
-For registry-scoped full-recording runs, prefer the artifact-chain submitter
-over the direct-write detect array. It discovers targets with
+For registry-scoped runs that also need quality and refinement, prefer the
+artifact-chain submitter. It discovers targets with
 `run_detections_batch --source registry --json`, submits one GPU artifact job
 per recording, then submits one dependent CPU postprocess job per recording.
 The CPU job imports the artifact, validates the imported run, runs
 `detect_quality_batch`, and runs `refine_detect_batch` against the explicit
 detect run name. It also uses a deterministic quality run name and passes that
 name into refinement. This preserves per-recording parallelism while avoiding
-GPU jobs writing `detect_runs` chunks directly to PRFS/NRS:
+GPU jobs writing incomplete `detect_runs` children to PRFS/NRS:
 
 ```bash
 scripts/submit_detect_artifact_quality_refine_bsub.sh \
@@ -578,8 +562,7 @@ artifact tarballs live under
 By default, the submitter asks `run_detections_batch --dry-run --json
 --resolve-models` to resolve the registry-selected detect model for each
 recording, then writes that selected path into `targets.jsonl` and
-`submissions.tsv`. Pass `--model /path/to/best.pt` only when you want to bypass
-registry model resolution deliberately. `--detect-set-id`,
+`submissions.tsv`. `--detect-set-id`,
 `--detect-require-unique`, `--detect-top-k`, and
 `--detect-include-non-success` are forwarded to the registry resolver.
 Both the registry file and the selected model path must be readable from the
@@ -587,12 +570,11 @@ LSF submit host. On Janelia login/compute nodes, use the canonical PRFS
 registry at `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`.
 Do not pass a workstation-local registry such as `/nvme1/palette_registry.sqlite`
 unless you are deliberately debugging a local-only snapshot. If registry model
-rows still point at workstation-local paths such as `/nvme1/models/...`,
-pass an explicit PRFS/NRS-visible model path under `/groups/...` or refresh the
-registry model artifact paths before submitting cluster jobs.
+rows point at paths unavailable to compute nodes, refresh the registry model
+artifact paths before submitting cluster jobs.
 The submitter records `latest_policy=set_latest_explicit` by default so a
 successfully imported artifact leaves the normal `detect_runs/latest` surface
-consistent with direct-write detection. Downstream CPU steps still pass the
+consistent with atomic full-recording detection. Downstream CPU steps still pass the
 explicit detect and quality run names and do not rely on `latest`.
 
 The cluster submitter defaults to `--detect-decode-backend pynvvc_nv12_rgb` and
@@ -1222,26 +1204,15 @@ Use `--run-id` for deterministic reruns:
 
 ### Chained Detect, Quality, And Refine Submission
 
-For registry-discovered recordings that are missing detections completely, use
-the chained submitter for conservative pilot runs, or use
-`scripts/submit_detect_artifact_quality_refine_bsub.sh` when you want the safer
-scratch-artifact/import path. The direct-write chained submitter discovers the
-zarr target set once, submits detect as an LSF array, then submits
-`detect_quality_batch` and `refine_detect_batch` as dependent CPU jobs using
-`done(<jobid>)`.
-
-The direct-write chained submitter below is a convenience path, not the
-preferred broad production path. It writes detection output directly into the
-canonical Zarr from GPU jobs, then schedules CPU quality/refine jobs that use
-the archive's latest run selection at postprocess time. Use it only for
-low-concurrency pilots or one-off local/cluster runs where no other writer is
-mutating the same archives. For broad registry batches, use
-`submit_detect_artifact_quality_refine_bsub.sh`.
+For registry-discovered recordings that need the complete detect, quality, and
+refine sequence, use the artifact/import chain. It builds detached candidates
+on node-local scratch, imports a deterministic run, validates it, and only then
+runs the dependent CPU stages.
 
 Dry-run first:
 
 ```bash
-./scripts/submit_detect_quality_refine_bsub.sh \
+./scripts/submit_detect_artifact_quality_refine_bsub.sh \
   --root /groups/johnson/johnsonlab/jeremy/recordings \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --path-contains GoodCopBadCop \
@@ -1253,31 +1224,30 @@ Dry-run first:
 Submit on an LSF login node:
 
 ```bash
-./scripts/submit_detect_quality_refine_bsub.sh \
+./scripts/submit_detect_artifact_quality_refine_bsub.sh \
   --root /groups/johnson/johnsonlab/jeremy/recordings \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --path-contains GoodCopBadCop \
   --detect-queue gpu_l4 \
-  --detect-gpu 'num=1' \
+  --detect-gpus 1 \
   --detect-decode-backend pynvvc_nv12_rgb \
   --detect-resize-dims 640 640 \
   --detect-batch-size 4 \
-  --detect-max-active 2 \
-  --quality-queue short \
-  --quality-walltime 1:00 \
-  --refine-queue short \
-  --refine-walltime 1:00 \
+  --post-queue short \
+  --post-walltime 1:00 \
   --run-id goodcopbadcop_detect_quality_refine_$(date -u +%Y%m%dT%H%M%SZ) \
   --submit
 ```
 
-The dependency chain is fail-closed: if the detect array does not finish with
-`DONE`, the quality job remains pending; if quality fails, refine remains
-pending. Logs and the exact discovered `recordings.txt` live under
-`<root>/logs/detect_quality_refine_bsub/detect_quality_refine_<run_id>/`.
-On the Janelia `short` queue, keep CPU postprocess walltimes at or below
-`1:00`; longer requests can be rejected by LSF before the dependency chain is
-fully submitted.
+The dependency chain is fail-closed: if the detect-artifact job does not finish
+with `DONE`, its postprocess job remains pending. Import, validation, quality,
+and refinement then run serially inside that CPU postprocess job and stop at
+the first failed stage. Logs plus the exact `targets.jsonl`, `targets.tsv`, and
+`submissions.tsv` plan live under
+`<root>/logs/detect_artifact_quality_refine_bsub/detect_artifact_quality_refine_<run_id>/`.
+On the Janelia `short` queue, keep CPU postprocess walltimes at or below `1:00`;
+longer requests can be rejected by LSF before the dependency chain is fully
+submitted.
 
 ---
 

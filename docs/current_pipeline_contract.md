@@ -282,6 +282,7 @@ When reviewing new pipeline work, ask:
 ## Related Documents
 
 - [recording_analysis_pipeline_contract.md](recording_analysis_pipeline_contract.md)
+- [detection_publication_contract.md](detection_publication_contract.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
 - [segmentation_pipeline_step_todo.md](segmentation_pipeline_step_todo.md)
 - [subject_mask_refinement_todo.md](subject_mask_refinement_todo.md)

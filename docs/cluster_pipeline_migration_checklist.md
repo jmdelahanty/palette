@@ -1,7 +1,7 @@
 # Cluster Pipeline Migration Checklist
 <!-- contract-meta
 status: working_checklist
-last_verified: 2026-06-20
+last_verified: 2026-07-24
 purpose: Track what remains to migrate Palette detect, pose, segmentation, and refinement workflows to Janelia cluster execution.
 -->
 
@@ -14,7 +14,7 @@ It is based on a read-through of:
 
 - `docs/operator_guide/pipeline_workflow.md`
 - `docs/cluster_batching_guide.md`
-- `docs/cluster_workflow_orchestration.md`
+- `docs/lsf_submission_framework_design.md`
 - `docs/cluster_run_group_artifact_workflow.md`
 - `scripts/submit_detect_batches_bsub.sh`
 - `scripts/submit_crop_batches_bsub.sh`
@@ -30,7 +30,7 @@ gaps needed for larger production runs.
 
 For scheduler-level decisions about splitting GPU inference, CPU refinement,
 artifact import, validation, and registry projection into separate LSF jobs,
-see `docs/cluster_workflow_orchestration.md`.
+see `docs/lsf_submission_framework_design.md`.
 
 ## Current State
 
@@ -40,7 +40,6 @@ Palette already has the first layer of cluster support:
 |------|--------|-------|
 | Environment validation | present | `scripts/validate_cluster_palette_env.sh` checks Python, CUDA, PyTorch, Decord, FFmpeg linkage, reports PyNvVideoCodec/NVIDIA video-library availability, and can require PyNv with `--require-pynvvc`. |
 | Detect submitter | present | `scripts/submit_detect_batches_bsub.sh` wraps `fisheye.utils.run_detections_batch`. |
-| Detect-quality-refine submitter | present | `scripts/submit_detect_quality_refine_bsub.sh` chains detect, detect_quality, and refined_detect through LSF `done(<jobid>)` dependencies. |
 | Detect artifact-quality-refine submitter | present | `scripts/submit_detect_artifact_quality_refine_bsub.sh` submits per-recording scratch artifact detect jobs plus dependent import/validate/quality/refine CPU jobs. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
 | Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs; `scripts/submit_crop_flat_roi_cache_batches_bsub.sh` now defers per-job registry writes and submits one serial registry finalizer after cache jobs complete. |
@@ -213,8 +212,9 @@ Ready for pilot:
   `scripts/py -m fisheye.utils.validate_imported_run_group`.
 - [x] Full-recording artifact-chain submitter exists:
   `scripts/submit_detect_artifact_quality_refine_bsub.sh`.
-- [x] Artifact-chain submitter can use registry model resolution during dry-run
-  planning (`run_detections_batch --resolve-models`) or an explicit `--model`.
+- [x] Artifact-chain submitter requires registry model resolution during
+  dry-run planning (`run_detections_batch --resolve-models`) and pins the
+  resolved model path and identity into each target package.
 - [x] Artifact-chain postprocess pins deterministic detect and detect-quality
   run names before invoking refined detect, avoiding mutable `latest`
   selection in the safe broad-run path.
@@ -287,8 +287,8 @@ Execution model note:
 
 Remaining:
 
-- [x] Add a chained detect-quality/refine submitter for registry-discovered
-  targets: `scripts/submit_detect_quality_refine_bsub.sh`.
+- [x] Retire the direct-write detect-quality/refine submitter after the
+  artifact/import and node-local atomic publication paths became authoritative.
 - [x] Add clip-aware validation/reporting utilities for imported detect and
   refined-detect paths so operators do not need to inspect nested `zarr.json`
   metadata manually.

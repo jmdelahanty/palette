@@ -1,9 +1,11 @@
+<!-- ARCHIVED 2026-07-24: historical migration record. Its 262,144-row values describe that campaign; current raw detection and keypoint defaults are 131,072 rows. -->
+
 # Immutable YOLO sharding migration (2026-07-13)
 
 ## Scope and decision
 
-Palette's serial YOLO writers now default to Zarr v3 indexed sharding for raw,
-immutable inference outputs:
+At the time of this migration, Palette's serial YOLO writers used Zarr v3
+indexed sharding for raw, immutable inference outputs:
 
 - detections: `262144` outer rows for detection- and frame-domain arrays;
 - keypoints: `262144` outer ROI rows and `262144` outer frame rows.

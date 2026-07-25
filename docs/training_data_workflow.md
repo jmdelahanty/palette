@@ -5,7 +5,8 @@ This document describes a practical, repeatable workflow for building YOLO train
 ## Overview
 - **Raw MP4s remain the source of truth** for full-resolution data.
 - **Sampled Zarr imports** provide a compact, repeatable training dataset with metadata.
-- **Detection-only Zarrs** (via `detect_yolo`) avoid full imports and still retain provenance (`source_video_path`).
+- **Analysis Zarr detection runs** stream the source video without importing
+  full-frame pixels and retain acquisition and model provenance.
 - **Refinement + QC** is a first-class step before training updates.
 - **Iteration**: train → run detect on more videos → refine → curate → retrain.
 
@@ -15,30 +16,32 @@ For recording analysis archives, the canonical stage order is:
 
 1. import/create analysis archive + metadata/stimulus
 2. detect
-3. refine (optional)
-4. registry rescan (optional)
+3. detect quality
+4. refine (optional)
+5. registry rescan (optional)
 
 Single recording wrapper:
 
 ```bash
 scripts/py -m fisheye.utils.run_recording_analysis_pipeline \
   --recording-dir "$REC" \
-  --model-source registry \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$PALETTE_REGISTRY_PATH" \
   --apply
 ```
 
 Batch wrapper:
 
 ```bash
-scripts/py -m fisheye.utils.import_recordings_analysis /nvme1/recordings \
+scripts/py -m fisheye.utils.import_recordings_analysis "$PALETTE_RECORDINGS_ROOT" \
   --recursive \
-  --model-source registry \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$PALETTE_REGISTRY_PATH" \
   --apply
 ```
 
-Contract reference: `docs/recording_analysis_pipeline_contract.md`.
+Canonical detection resolves a registered model and publishes through the
+node-local atomic adapter; direct `detect_yolo` calls are not canonical
+recording publication. See `docs/recording_analysis_pipeline_contract.md` and
+`docs/detection_publication_contract.md`.
 
 ## Recommended Workflow
 

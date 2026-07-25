@@ -1,7 +1,9 @@
+<!-- ARCHIVED 2026-07-24: the implementation wave is complete. Current behavior is defined by docs/detection_publication_contract.md and docs/cluster_batching_guide.md. -->
+
 # Detect Batch Analysis-Zarr Parallel Agent Contract
 <!-- contract-meta
 version: 1
-status: active
+status: archived
 last_verified: 2026-02-27
 stage_arrays_spec: DETECT_SPEC
 -->

@@ -95,6 +95,7 @@ Useful starting points:
 
 - `AGENTS.md` - repository rules for coding agents and local validation.
 - `docs/operator_guide/pipeline_workflow.md` - current processing workflow.
+- `docs/detection_publication_contract.md` - safe detection construction and atomic publication.
 - `docs/palette_cli_narrow_waist_design.md` - CLI/API contract.
 - `docs/run_resolution_semantics.md` - run-selection semantics.
 - `docs/zarr_run_completion_contract.md` - completion, provenance, and atomic publication gate.

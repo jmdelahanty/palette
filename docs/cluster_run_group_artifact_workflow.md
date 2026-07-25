@@ -27,7 +27,7 @@ For the broader detect, pose, segmentation, and refinement migration checklist,
 see `docs/cluster_pipeline_migration_checklist.md`.
 
 For scheduler-level orchestration across GPU, CPU, import, validation, and
-registry-projection jobs, see `docs/cluster_workflow_orchestration.md`.
+registry-projection jobs, see `docs/lsf_submission_framework_design.md`.
 
 For geometry-only crop runs and temporary ROI cache placement across cluster
 pose/segmentation workflows, see
@@ -250,8 +250,9 @@ PRFS video + canonical analysis metadata
   -> serialized importer promotes into detect_runs/
 ```
 
-The current direct-write detection runner is a pilot path, not the final
-production path for broad cluster arrays.
+Ordinary full-recording detection arrays now build a complete node-local
+candidate and atomically publish it. Clipped fan-out and workflows with an
+explicit transport boundary continue to use the artifact/import flow above.
 
 If the immediate question is "can the cluster decode and run the model?", use a
 compute-only smoke before writing any predicted chunks to PRFS/NRS. That smoke
@@ -1045,19 +1046,17 @@ and detection should not accidentally run YOLO on full source frames. The
 detector also rejects GPU tensor decoder paths when no explicit resize dims are
 resolved, including Decord GPU fallback.
 
-If `--model` is omitted, the wrapper resolves a registry detect model for each
-recording during planning by calling `run_detections_batch --dry-run --json
+The wrapper resolves a registry detect model for each recording during
+planning by calling `run_detections_batch --dry-run --json
 --resolve-models`. The per-target selected model path is recorded in
 `targets.jsonl`, `targets.tsv`, and `submissions.tsv`, then passed to the
-scratch artifact job. Pass `--model` only to intentionally bypass registry
-model resolution. The wrapper requires the selected model path to be readable
+scratch artifact job. The wrapper requires the selected model path to be readable
 on the submit host. The registry file itself must also be readable from the LSF
 login node. Use the canonical PRFS registry
 `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`, not
 `/nvme1/palette_registry.sqlite`, when submitting from login/compute nodes that
-cannot see workstation NVMe. If registry rows still point at workstation-local
-`/nvme1/models/...` paths, use a `/groups/...` model path or update the registry
-artifact path before submitting to LSF.
+cannot see workstation NVMe. If registry rows point at paths unavailable to
+compute nodes, update the registry artifact path before submitting to LSF.
 
 The wrapper intentionally remains detect-specific. The reusable workflow
 surface should be extracted only after this path has been exercised on real
