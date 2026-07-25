@@ -36,6 +36,9 @@ worker count, shard rows, and copy backend when those values are known.
 not attributed by that counter. Whole-process sampling with
 `fisheye.diagnostics.run_with_resource_telemetry` remains useful when a
 benchmark needs process-tree RSS, thread count, and time-series CPU samples.
+Guarded jobs rendered by `scripts/submit_analysis_workflow_bsub.sh` run through
+that sampler and publish its summary, JSONL samples, and captured workflow log
+beside the execution report.
 
 ## Track-kinematics phases
 
@@ -90,4 +93,3 @@ changes in order:
 
 Any reduction in validation must be implemented as a new, reviewed publication
 contract. Telemetry alone does not authorize skipping an existing proof step.
-

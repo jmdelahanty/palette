@@ -30,6 +30,42 @@ def _build_clean_palette_checkout(path: Path) -> None:
     module = path / "src" / "fisheye" / "utils" / "execute_analysis_workflow.py"
     module.parent.mkdir(parents=True)
     module.write_text("# fixture\n", encoding="utf-8")
+    telemetry_module = (
+        path
+        / "src"
+        / "fisheye"
+        / "diagnostics"
+        / "run_with_resource_telemetry.py"
+    )
+    telemetry_module.parent.mkdir(parents=True)
+    telemetry_module.write_text(
+        """from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+import subprocess
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--summary-json', type=Path, required=True)
+parser.add_argument('--samples-jsonl', type=Path, required=True)
+parser.add_argument('--stdout-log', type=Path, required=True)
+parser.add_argument('--requested-workers', type=int, required=True)
+parser.add_argument('--allocated-slots', type=int, required=True)
+parser.add_argument('--sample-interval-seconds')
+parser.add_argument('command', nargs=argparse.REMAINDER)
+args = parser.parse_args()
+command = args.command[1:] if args.command[:1] == ['--'] else args.command
+completed = subprocess.run(command, check=False, text=True, capture_output=True)
+args.stdout_log.write_text(completed.stdout + completed.stderr, encoding='utf-8')
+args.samples_jsonl.write_text('{}\\n', encoding='utf-8')
+args.summary_json.write_text(
+    json.dumps({'exit_code': completed.returncode}) + '\\n',
+    encoding='utf-8',
+)
+raise SystemExit(completed.returncode)
+""",
+        encoding="utf-8",
+    )
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     subprocess.run(["git", "-C", str(path), "add", "."], check=True)
     subprocess.run(
@@ -108,6 +144,10 @@ def test_submit_analysis_workflow_records_requested_and_runtime_resources(
     assert "requested_mem_gb_per_slot=7" in submission
     assert "requested_walltime=00:30" in submission
     assert f"runtime_environment={run_dir / 'runtime_environment.txt'}" in submission
+    assert (
+        f"resource_telemetry_summary={run_dir / 'resource_telemetry_summary.json'}"
+        in submission
+    )
 
     job_script = run_dir / "run_analysis_workflow.sh"
     subprocess.run(["bash", "-n", str(job_script)], check=True)
@@ -146,6 +186,13 @@ def test_submit_analysis_workflow_records_requested_and_runtime_resources(
     assert "effective_queue=short" in status
     assert "cpu_model=" in status
     assert "allocated_slots=5" in status
+    assert (
+        f"resource_telemetry_summary={run_dir / 'resource_telemetry_summary.json'}"
+        in status
+    )
+    assert (run_dir / "resource_telemetry_summary.json").is_file()
+    assert (run_dir / "resource_telemetry_samples.jsonl").is_file()
+    assert (run_dir / "workflow_stdout.log").is_file()
 
 
 def test_submit_analysis_workflow_labels_unspecified_queue_as_cluster_default(
