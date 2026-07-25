@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import hashlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -24,6 +26,10 @@ from fisheye.shared.acquisition_publication_status import (
     build_acquisition_authority_publication_status,
 )
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from fisheye.shared.detection_candidate import (
+    DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR,
+    node_local_detection_candidate_authority,
+)
 from fisheye.shared.import_video_metadata import (
     publish_external_video_acquisition_authority,
 )
@@ -126,6 +132,65 @@ def test_detection_writer_rejects_legacy_and_cross_namespace_modes() -> None:
             output_run_family="detection_artifact_runs",
             instance_key_recording_identity="not-authoritative-here",
         )
+
+
+def test_detection_writer_refuses_canonical_archive_before_mutation(tmp_path) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    archive.mkdir()
+    metadata = archive / "zarr.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {
+                    "acquisition_authority_publication_status": {
+                        "status": "published"
+                    }
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    before = metadata.read_bytes()
+
+    with pytest.raises(RuntimeError, match="Direct detection writes"):
+        mod.detect_yolo(
+            "missing.mp4",
+            model_path="missing.pt",
+            output_zarr=str(archive),
+        )
+
+    assert metadata.read_bytes() == before
+    assert [path.relative_to(archive) for path in archive.rglob("*")] == [
+        Path("zarr.json")
+    ]
+
+
+def test_detection_writer_allows_marked_node_local_candidate(tmp_path) -> None:
+    archive = tmp_path / "candidate.zarr"
+    archive.mkdir()
+    (archive / "zarr.json").write_text(
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {
+                    "acquisition_authority_publication_status": {
+                        "status": "published"
+                    },
+                    DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR: (
+                        node_local_detection_candidate_authority()
+                    ),
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    mod._assert_detection_output_target_is_not_canonical(archive)  # noqa: SLF001
 
 
 @pytest.mark.parametrize(

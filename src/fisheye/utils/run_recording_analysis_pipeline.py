@@ -3,7 +3,7 @@
 
 Pipeline order:
 1) import_recording_analysis (archive + metadata + stimulus)
-2) detect inference (explicit model or registry-resolved)
+2) registry-resolved detect inference with node-local atomic publication
 3) detect_quality (required before refine_detect)
 4) refine_detect (optional)
 5) keypoints (optional)
@@ -34,8 +34,6 @@ from fisheye.utils.import_recording_analysis import (
 
 @dataclass
 class RecordingPipelineOptions:
-    model_source: str
-    model: Optional[Path]
     detect_config: Optional[Path]
     conf: Optional[float]
     iou: Optional[float]
@@ -74,36 +72,6 @@ def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) ->
         logger(event, **fields)
 
 
-def run_detect_yolo(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
-    plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable,
-        "-m",
-        "fisheye.detection.detect_yolo",
-        str(plan.cam_video),
-        "--output",
-        str(plan.zarr_path),
-        "--write-raw-video-metadata",
-    ]
-    if opts.model is not None:
-        cmd.extend(["--model", str(opts.model)])
-    if opts.detect_config is not None:
-        cmd.extend(["--config", str(opts.detect_config)])
-    if opts.conf is not None:
-        cmd.extend(["--conf", str(opts.conf)])
-    if opts.iou is not None:
-        cmd.extend(["--iou", str(opts.iou)])
-    if opts.max_det is not None:
-        cmd.extend(["--max-det", str(opts.max_det)])
-    if opts.batch_size is not None:
-        cmd.extend(["--batch-size", str(opts.batch_size)])
-    if opts.cpu:
-        cmd.append("--cpu")
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=False)
-    return result.returncode == 0, result.returncode, cmd
-
-
 def run_detect_registry_model(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
     cmd = [
         sys.executable,
@@ -115,7 +83,6 @@ def run_detect_registry_model(plan: RecordingAnalysisPlan, opts: RecordingPipeli
         str(plan.zarr_path),
         "--registry",
         str(opts.registry_path),
-        "--write-raw-video-metadata",
     ]
     if opts.detect_config is not None:
         cmd.extend(["--config", str(opts.detect_config)])
@@ -218,10 +185,7 @@ def process_recording_analysis_pipeline(
             returncode=import_result.returncode,
         )
 
-    if opts.model_source == "registry":
-        detect_ok, detect_rc, detect_cmd = run_detect_registry_model(plan, opts)
-    else:
-        detect_ok, detect_rc, detect_cmd = run_detect_yolo(plan, opts)
+    detect_ok, detect_rc, detect_cmd = run_detect_registry_model(plan, opts)
     _log(
         logger,
         "detect_result",
@@ -229,7 +193,7 @@ def process_recording_analysis_pipeline(
         zarr_path=str(plan.zarr_path),
         returncode=int(detect_rc),
         cmd=detect_cmd,
-        model_source=str(opts.model_source),
+        model_source="registry",
     )
     if not detect_ok:
         return RecordingPipelineResult(
@@ -339,8 +303,6 @@ def _build_import_options(args: argparse.Namespace) -> RecordingImportOptions:
 
 def _build_pipeline_options(args: argparse.Namespace, registry_path: Path) -> RecordingPipelineOptions:
     return RecordingPipelineOptions(
-        model_source=str(args.model_source),
-        model=args.model,
         detect_config=args.detect_config,
         conf=args.conf,
         iou=args.iou,
@@ -375,20 +337,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--apply", action="store_true", help="Execute pipeline steps.")
     parser.add_argument("--dry-run", action="store_true", help="Print resolved plan only.")
 
-    parser.add_argument(
-        "--model-source",
-        choices=("explicit", "registry"),
-        default="explicit",
-        help="Model resolution source: explicit path/config or registry resolver.",
-    )
-    parser.add_argument("--model", type=Path, help="YOLO model path (.pt).")
     parser.add_argument("--detect-config", type=Path, help="YOLO detect config YAML.")
     parser.add_argument("--conf", type=float, help="YOLO confidence threshold override.")
     parser.add_argument("--iou", type=float, help="YOLO IoU threshold override.")
     parser.add_argument("--max-det", type=int, help="YOLO max detections per frame override.")
     parser.add_argument("--batch-size", type=int, help="YOLO batch size override.")
     parser.add_argument("--cpu", action="store_true", help="Force CPU for YOLO detect.")
-    parser.add_argument("--set-id", type=str, help="Optional detect set filter when --model-source=registry.")
+    parser.add_argument("--set-id", type=str, help="Optional registered detect model-set filter.")
     parser.add_argument("--require-unique", action="store_true", help="Fail detect step when top scores tie.")
     parser.add_argument(
         "--include-non-success",
@@ -515,8 +470,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
-    if args.model_source == "registry" and not registry_path.exists():
-        print(f"Registry not found for --model-source=registry: {registry_path}")
+    if not registry_path.exists():
+        print(f"Registry not found for detection publication: {registry_path}")
         return 1
 
     print("Single recording analysis pipeline plan")
@@ -524,7 +479,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  video: {plan.cam_video}")
     print(f"  h5: {plan.h5_path if plan.h5_path is not None else 'none (recording-only)'}")
     print(f"  output: {plan.zarr_path}")
-    print(f"  model_source: {args.model_source}")
+    print("  model_source: registry")
     print(f"  import_stimulus: {bool(args.import_stimulus)}")
     print(f"  allow_preflight_failures: {bool(args.allow_preflight_failures)}")
     print(f"  refine_detect: {bool(args.refine_detect)}")

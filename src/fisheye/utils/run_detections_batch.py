@@ -33,13 +33,13 @@ from fisheye.utils.batch_registry_model_resolution import (
 )
 from fisheye.registry.model_resolution import load_candidates, load_target_profile, resolve_recording_id
 from fisheye.utils.run_detect_with_registry_model import DetectRegistryResult
-from fisheye.utils.run_detect_with_registry_model import DEFAULT_DETECT_FRAME_SHARD_ROWS
-from fisheye.utils.run_detect_with_registry_model import DEFAULT_DETECT_ROW_SHARD_ROWS
+from fisheye.shared.detection_candidate import (
+    DEFAULT_DETECT_FRAME_SHARD_ROWS,
+    DEFAULT_DETECT_ROW_SHARD_ROWS,
+)
 from fisheye.utils.run_detect_with_registry_model import build_detect_payload_args
 from fisheye.utils.run_detect_with_registry_model import build_detect_resolution_payload
-from fisheye.utils.run_detect_with_registry_model import emit_detect_step_status
 from fisheye.utils.run_detect_with_registry_model import pick_best_detect_candidate
-from fisheye.utils.run_detect_with_registry_model import write_detect_model_resolution_provenance
 from fisheye.shared.zarr_recording_context import infer_recording_context
 
 try:
@@ -800,13 +800,78 @@ def _run_detect_plan(
 
     selected = resolved_model.payload.get("selected", {})
     selected_payload = selected if isinstance(selected, dict) else {}
-    try:
-        from fisheye.detection.detect_yolo import detect_yolo
-
-        run_name = detect_yolo(
-            video_path=str(plan.video_path),
-            model_path=resolved_model.model_path,
+    selected_model_sha256 = selected_payload.get("model_sha256")
+    selected_run_id = selected_payload.get("run_id")
+    selected_set_id = selected_payload.get("set_id")
+    if write_raw_video_metadata or overwrite_raw_video_metadata:
+        return DetectRegistryResult(
+            ok=False,
+            status="failed",
+            reason="canonical_acquisition_metadata_is_immutable",
+            error="Detection cannot create or overwrite acquisition metadata.",
+            remediation="Import the recording before canonical detection publication.",
+            recording_dir=str(plan.recording_dir),
             output_zarr=str(plan.zarr_path),
+            registry_path=str(registry_path),
+            video_path=str(plan.video_path),
+            selected_model_path=resolved_model.model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolution_payload=resolved_model.payload,
+        )
+    if resolved_model.payload.get("mode") != "registry":
+        return DetectRegistryResult(
+            ok=False,
+            status="failed",
+            reason="canonical_detection_requires_registered_model",
+            error="Explicit unregistered models cannot publish canonical detection runs.",
+            remediation="Register the model, then select it with --set-id.",
+            recording_dir=str(plan.recording_dir),
+            output_zarr=str(plan.zarr_path),
+            registry_path=str(registry_path),
+            video_path=str(plan.video_path),
+            selected_model_path=resolved_model.model_path,
+            resolution_payload=resolved_model.payload,
+        )
+    missing_identity = [
+        label
+        for label, value in (
+            ("model_sha256", selected_model_sha256),
+            ("model_run_id", selected_run_id),
+            ("model_set_id", selected_set_id),
+        )
+        if not isinstance(value, str) or not value
+    ]
+    if missing_identity:
+        return DetectRegistryResult(
+            ok=False,
+            status="failed",
+            reason="registered_model_identity_incomplete",
+            error=f"Selected detect model is missing: {', '.join(missing_identity)}",
+            remediation="Repair the registry model identity before canonical publication.",
+            recording_dir=str(plan.recording_dir),
+            output_zarr=str(plan.zarr_path),
+            registry_path=str(registry_path),
+            video_path=str(plan.video_path),
+            selected_model_path=resolved_model.model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolution_payload=resolved_model.payload,
+        )
+    try:
+        from fisheye.utils.run_detection_local_publish import (
+            run_detection_local_publish,
+        )
+
+        publication = run_detection_local_publish(
+            source_zarr=plan.zarr_path,
+            video_path=plan.video_path,
+            model_path=resolved_model.model_path,
+            model_sha256=selected_model_sha256,
+            model_run_id=selected_run_id,
+            model_set_id=selected_set_id,
+            model_created_utc=selected_payload.get("created_utc"),
+            registry_path=registry_path,
             config_path=config,
             conf_threshold=conf,
             iou_threshold=iou,
@@ -815,56 +880,30 @@ def _run_detect_plan(
             resize_dims=resize_dims,
             imgsz=imgsz,
             decode_backend=decode_backend,
-            use_gpu=(False if cpu else None),
-            write_raw_video_metadata=bool(write_raw_video_metadata),
-            overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
+            use_gpu=False if cpu else None,
             detect_row_shard_rows=detect_row_shard_rows,
             detect_frame_shard_rows=int(detect_frame_shard_rows),
+            model_resolution_payload=resolved_model.payload,
         )
-        if resolved_model.payload.get("mode") == "registry":
-            write_detect_model_resolution_provenance(
-                zarr_path=plan.zarr_path,
-                run_name=run_name,
-                payload=resolved_model.payload,
-            )
+        run_name = str(publication["run_name"])
     except Exception as exc:
-        emit_detect_step_status(
-            zarr_path=plan.zarr_path,
-            registry_path=registry_path,
-            status="error",
-            run_name=None,
-            reason="detect_inference_failed",
-            selected_model_path=resolved_model.model_path,
-            selected_run_id=selected_payload.get("run_id"),
-            selected_set_id=selected_payload.get("set_id"),
-        )
         return DetectRegistryResult(
             ok=False,
             status="failed",
-            reason="detect_inference_failed",
+            reason="detect_atomic_publication_failed",
             error=str(exc),
-            remediation="Inspect model/config inputs and rerun with --dry-run --json to verify resolved model selection.",
+            remediation="Inspect the node-local candidate/publication report; the canonical archive was not activated.",
             recording_dir=str(plan.recording_dir),
             output_zarr=str(plan.zarr_path),
             registry_path=str(registry_path),
             video_path=str(plan.video_path),
             selected_model_path=resolved_model.model_path,
-            selected_run_id=selected_payload.get("run_id"),
-            selected_set_id=selected_payload.get("set_id"),
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
             resolved_at_utc=resolved_model.payload.get("resolved_at_utc"),
             resolution_payload=resolved_model.payload,
         )
 
-    emit_detect_step_status(
-        zarr_path=plan.zarr_path,
-        registry_path=registry_path,
-        status="ok",
-        run_name=run_name,
-        reason="detect_inference_ok",
-        selected_model_path=resolved_model.model_path,
-        selected_run_id=selected_payload.get("run_id"),
-        selected_set_id=selected_payload.get("set_id"),
-    )
     return DetectRegistryResult(
         ok=True,
         status="ok",
@@ -873,8 +912,8 @@ def _run_detect_plan(
         registry_path=str(registry_path),
         video_path=str(plan.video_path),
         selected_model_path=resolved_model.model_path,
-        selected_run_id=selected_payload.get("run_id"),
-        selected_set_id=selected_payload.get("set_id"),
+        selected_run_id=selected_run_id,
+        selected_set_id=selected_set_id,
         detect_run=run_name,
         resolved_at_utc=resolved_model.payload.get("resolved_at_utc"),
         resolution_payload=resolved_model.payload,
@@ -933,7 +972,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--model",
         type=Path,
-        help="Explicit YOLO detect model path. Bypasses registry model resolution.",
+        help=(
+            "Explicit model for dry-run/artifact planning only; canonical "
+            "--apply requires a registered model."
+        ),
     )
     parser.add_argument(
         "--resolve-models",
@@ -990,16 +1032,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Video decode backend passed to detect_yolo.",
     )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
-    parser.add_argument(
-        "--write-raw-video-metadata",
-        action="store_true",
-        help="Write metadata-only raw_video attrs during detect.",
-    )
-    parser.add_argument(
-        "--overwrite-raw-video-metadata",
-        action="store_true",
-        help="Overwrite existing metadata-only raw_video attrs during detect.",
-    )
 
     parser.add_argument(
         "--scheduler",
@@ -1039,6 +1071,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Explicit model does not exist: {explicit_model_path}", file=sys.stderr)
             return 1
         explicit_model_path = explicit_model_path.resolve()
+    if args.apply and explicit_model_path is not None:
+        print(
+            "Canonical detection publication requires a registered model; "
+            "register the model and select it with --set-id.",
+            file=sys.stderr,
+        )
+        return 1
 
     skip_existing = not args.overwrite
     require_background = bool(args.require_background) and not bool(args.no_require_background)
@@ -1297,43 +1336,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         runnable_plans.append(plan)
 
     resolved_models_by_plan: dict[str, ResolvedModel] = {}
-    if runnable_plans:
-        if explicit_model_path is not None:
-            if not args.json:
-                print(
-                    "Using explicit detect model for "
-                    f"{len(runnable_plans)} recording plan(s): {explicit_model_path}"
-                )
-            resolved_models_by_plan = _resolve_explicit_models_for_plans(
-                plans=runnable_plans,
-                model_path=explicit_model_path,
-                config=args.config,
-                conf=args.conf,
-                iou=args.iou,
-                max_det=args.max_det,
-                batch_size=args.batch_size,
-                resize_dims=args.resize_dims,
-                imgsz=args.imgsz,
-                decode_backend=args.decode_backend,
-                detect_row_shard_rows=args.detect_row_shard_rows,
-                detect_frame_shard_rows=int(args.detect_frame_shard_rows),
-                cpu=bool(args.cpu),
-            )
-            if logger is not None:
-                logger.log(
-                    "model_resolution_summary",
-                    zarr="-",
-                    status=STATUS_OK,
-                    mode="explicit",
-                    selected_model_path=str(explicit_model_path),
-                    total=len(runnable_plans),
-                    resolved=len(resolved_models_by_plan),
-                    failed=0,
-                )
-        elif not args.json:
-            print(f"Pre-resolving registry models for {len(runnable_plans)} recording plan(s)...")
+    if runnable_plans and not args.json:
+        print(f"Pre-resolving registry models for {len(runnable_plans)} recording plan(s)...")
 
-    if runnable_plans and explicit_model_path is None:
+    if runnable_plans:
         def _emit_model_resolution_event(event_payload: dict[str, object]) -> None:
             event_name = str(event_payload.get("event", "model_resolution_event"))
             if logger is not None:
@@ -1441,8 +1447,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = _run_detect_plan(
             plan=plan,
             resolved_model=resolved_models_by_plan[str(plan.zarr_path.resolve())],
-            write_raw_video_metadata=bool(args.write_raw_video_metadata),
-            overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),
+            write_raw_video_metadata=False,
+            overwrite_raw_video_metadata=False,
             config=args.config,
             conf=args.conf,
             iou=args.iou,

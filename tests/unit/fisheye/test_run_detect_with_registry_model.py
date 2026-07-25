@@ -8,6 +8,7 @@ import types
 import pytest
 
 from fisheye.shared.run_provenance import validate_run_provenance
+from fisheye.shared import detection_model_provenance as model_provenance
 from fisheye.utils import run_detect_with_registry_model as mod
 
 
@@ -17,43 +18,14 @@ def test_registry_detect_defaults_to_indexed_sharding() -> None:
     assert signature.parameters["detect_frame_shard_rows"].default == 131_072
 
 
-def _patch_detect_yolo(monkeypatch: pytest.MonkeyPatch, func) -> None:
-    fake_module = types.ModuleType("fisheye.detection.detect_yolo")
-    fake_module.detect_yolo = func
-    monkeypatch.setitem(sys.modules, "fisheye.detection.detect_yolo", fake_module)
-
-
-def test_emit_detect_step_status_uses_explicit_registry_path(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    root: dict[str, object] = {}
-    calls: list[dict[str, object]] = []
-    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
-    monkeypatch.setattr(
-        mod,
-        "emit_stage_completion",
-        lambda *_args, **kwargs: calls.append(kwargs),
+def _patch_local_publisher(monkeypatch: pytest.MonkeyPatch, func) -> None:
+    fake_module = types.ModuleType("fisheye.utils.run_detection_local_publish")
+    fake_module.run_detection_local_publish = func
+    monkeypatch.setitem(
+        sys.modules,
+        "fisheye.utils.run_detection_local_publish",
+        fake_module,
     )
-
-    registry_path = tmp_path / "registry.sqlite"
-    registry_path.touch()
-    zarr_path = tmp_path / "recording_analysis.zarr"
-    mod.emit_detect_step_status(
-        zarr_path=zarr_path,
-        registry_path=registry_path,
-        status="ok",
-        run_name="detect_001",
-        reason="detect_inference_ok",
-        selected_model_path="/models/best.pt",
-        selected_run_id="model_run_1",
-        selected_set_id="model_set_1",
-    )
-
-    assert len(calls) == 1
-    assert calls[0]["registry"] == registry_path
-    assert calls[0]["auto_registry_from_env"] is False
-    assert calls[0]["run_name"] == "detect_001"
 
 
 def test_pick_best_candidate_enforces_unique_when_tied() -> None:
@@ -108,7 +80,11 @@ def test_write_model_resolution_provenance_updates_detect_run_attrs(
     detect_run.attrs["provenance"] = {"stage": "detect"}
     detect_parent["detect_20260209_000000"] = detect_run
     root["detect_runs"] = detect_parent
-    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(
+        model_provenance.zarr,
+        "open_group",
+        lambda *_args, **_kwargs: root,
+    )
 
     payload = {
         "mode": "registry",
@@ -126,7 +102,7 @@ def test_write_model_resolution_provenance_updates_detect_run_attrs(
         "candidates": [{"run_id": "detect_run_001", "score": 0.88}],
     }
 
-    mod.write_detect_model_resolution_provenance(
+    model_provenance.write_detect_model_resolution_provenance(
         zarr_path=tmp_path / "sample_analysis.zarr",
         run_name="detect_20260209_000000",
         payload=payload,
@@ -197,9 +173,11 @@ def test_run_detect_with_registry_model_returns_dry_run_payload(
     registry_path = tmp_path / "registry.sqlite"
 
     best = _setup_resolution_mocks(monkeypatch)
-    _patch_detect_yolo(
+    _patch_local_publisher(
         monkeypatch,
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("detect_yolo should not run during dry-run")),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("publisher should not run during dry-run")
+        ),
     )
 
     result = mod.run_detect_with_registry_model(
@@ -232,7 +210,10 @@ def test_run_detect_with_registry_model_returns_failure_payload_when_detect_fail
     (cams_dir / "cam_2010093.mp4").write_bytes(b"")
 
     best = _setup_resolution_mocks(monkeypatch)
-    _patch_detect_yolo(monkeypatch, lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu oom")))
+    _patch_local_publisher(
+        monkeypatch,
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu oom")),
+    )
 
     result = mod.run_detect_with_registry_model(
         recording_dir=recording_dir,
@@ -242,8 +223,8 @@ def test_run_detect_with_registry_model_returns_failure_payload_when_detect_fail
 
     assert result.ok is False
     assert result.status == "failed"
-    assert result.reason == "detect_inference_failed"
-    assert "dry-run" in (result.remediation or "")
+    assert result.reason == "detect_atomic_publication_failed"
+    assert "not activated" in (result.remediation or "")
     assert result.selected_model_path == best.model_path
     assert result.detect_run is None
 
@@ -317,18 +298,11 @@ def test_main_runs_detect_resolution_and_writes_provenance(
 
     monkeypatch.setattr(mod, "load_candidates", _fake_load_candidates)
 
-    def _fake_detect_yolo(**kwargs: object) -> str:
-        calls["detect_kwargs"] = kwargs
-        return "detect_001"
+    def _fake_local_publisher(**kwargs: object) -> dict[str, object]:
+        calls["publish_kwargs"] = kwargs
+        return {"run_name": "detect_001", "status": "complete"}
 
-    _patch_detect_yolo(monkeypatch, _fake_detect_yolo)
-
-    def _fake_write_model_resolution_provenance(*, zarr_path: Path, run_name: str, payload: dict[str, object]) -> None:
-        calls["write_zarr_path"] = zarr_path
-        calls["write_run_name"] = run_name
-        calls["write_payload"] = payload
-
-    monkeypatch.setattr(mod, "write_detect_model_resolution_provenance", _fake_write_model_resolution_provenance)
+    _patch_local_publisher(monkeypatch, _fake_local_publisher)
 
     rc = mod.main(
         [
@@ -360,19 +334,18 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     assert calls.get("resolver_set_id") == "detect_set_123"
     assert calls.get("resolver_include_non_success") is True
 
-    detect_kwargs = calls.get("detect_kwargs")
-    assert isinstance(detect_kwargs, dict)
-    assert detect_kwargs.get("video_path") == str(video_path.resolve())
-    assert detect_kwargs.get("model_path") == "/tmp/detect_model.pt"
-    assert detect_kwargs.get("model_sha256") == "d" * 64
-    assert detect_kwargs.get("output_zarr") == str(output_path.resolve())
-    assert detect_kwargs.get("resize_dims") == [768, 1280]
-    assert detect_kwargs.get("imgsz") is None
-    assert detect_kwargs.get("decode_backend") == "pynvvc_luma_rgb"
-    assert detect_kwargs.get("detect_row_shard_rows") == 262_144
-    assert detect_kwargs.get("detect_frame_shard_rows") == 524_288
-    assert detect_kwargs.get("run_provenance") == detect_kwargs.get("cli_provenance")
-    run_provenance = detect_kwargs.get("run_provenance")
+    publish_kwargs = calls.get("publish_kwargs")
+    assert isinstance(publish_kwargs, dict)
+    assert publish_kwargs.get("video_path") == video_path.resolve()
+    assert publish_kwargs.get("model_path") == "/tmp/detect_model.pt"
+    assert publish_kwargs.get("model_sha256") == "d" * 64
+    assert publish_kwargs.get("source_zarr") == output_path.resolve()
+    assert publish_kwargs.get("resize_dims") == [768, 1280]
+    assert publish_kwargs.get("imgsz") is None
+    assert publish_kwargs.get("decode_backend") == "pynvvc_luma_rgb"
+    assert publish_kwargs.get("detect_row_shard_rows") == 262_144
+    assert publish_kwargs.get("detect_frame_shard_rows") == 524_288
+    run_provenance = publish_kwargs.get("run_provenance")
     assert isinstance(run_provenance, dict)
     assert validate_run_provenance(run_provenance).valid is True
     assert run_provenance["command"] == "fisheye.utils.run_detect_with_registry_model"
@@ -381,9 +354,7 @@ def test_main_runs_detect_resolution_and_writes_provenance(
         "model_set": "detect_set_123",
     }
 
-    assert calls.get("write_zarr_path") == output_path.resolve()
-    assert calls.get("write_run_name") == "detect_001"
-    payload = calls.get("write_payload")
+    payload = publish_kwargs.get("model_resolution_payload")
     assert isinstance(payload, dict)
     assert payload.get("task") == "detect"
     selected = payload.get("selected")

@@ -9,6 +9,7 @@ module still provides the core implementation and legacy CLI.
 
 import copy
 import hashlib
+import json
 import os
 from contextvars import ContextVar
 from functools import wraps
@@ -54,8 +55,15 @@ from fisheye.shared.instance_keys import (
     mint_detection_instance_keys,
 )
 from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_STATUS_ATTR,
     ACQUISITION_AUTHORITY_PUBLISHED,
     load_acquisition_authority_publication_status,
+)
+from fisheye.shared.detection_candidate import (
+    DEFAULT_DETECT_FRAME_SHARD_ROWS,
+    DEFAULT_DETECT_ROW_SHARD_ROWS,
+    DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR,
+    node_local_detection_candidate_authority,
 )
 from fisheye.shared.observation_coordinate_publication import (
     BoundDetectionFrameEvidence,
@@ -156,6 +164,47 @@ DETECTION_BACKEND_BBOX_SANITIZATION_POLICY = (
 # Bump this value whenever geometry, filtering, or box post-processing changes
 # in a way that is not fully described by the recorded parameters.
 DETECT_ALGORITHM_VERSION = 1
+
+
+def _assert_detection_output_target_is_not_canonical(
+    output_zarr: Path,
+) -> None:
+    """Refuse direct mutation of an existing canonical analysis archive.
+
+    Canonical detection is built in a disposable overlay carrying an explicit
+    candidate marker and is published by the atomic publisher.  A brand-new
+    standalone output and the deliberately unbound artifact writer remain
+    supported, but an ordinary caller cannot append to a live analysis Zarr.
+    """
+
+    if not output_zarr.exists():
+        return
+    metadata_path = output_zarr / "zarr.json"
+    if not metadata_path.is_file():
+        return
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot verify detection output authority for {output_zarr}: {exc}"
+        ) from exc
+    attrs = payload.get("attributes") if isinstance(payload, dict) else None
+    attrs = attrs if isinstance(attrs, dict) else {}
+    if attrs.get(DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR) == (
+        node_local_detection_candidate_authority()
+    ):
+        return
+    looks_canonical = (
+        ACQUISITION_AUTHORITY_STATUS_ATTR in attrs
+        or (output_zarr / "analysis_metadata" / "zarr.json").is_file()
+        or (output_zarr / "analysis" / "acquisition_camera_frames").is_dir()
+    )
+    if looks_canonical:
+        raise RuntimeError(
+            "Direct detection writes to a canonical analysis Zarr are forbidden. "
+            "Build a node-local candidate and publish it through "
+            "fisheye.utils.run_detection_local_publish."
+        )
 
 
 def _validated_model_identity_attrs(
@@ -269,8 +318,6 @@ def _sanitize_backend_boxes_xyxy(
     return clipped[keep], keep, report
 PYNVVC_SURFACE_MATERIALIZATION = "stream_event_owned_batch_v2"
 DETECT_SHARD_WRITE_SCHEMA = "palette.detect_materialized_shards.v1"
-DEFAULT_DETECT_ROW_SHARD_ROWS = 131_072
-DEFAULT_DETECT_FRAME_SHARD_ROWS = 131_072
 DETECTION_RUN_FAMILY = "detect_runs"
 DETECTION_ARTIFACT_RUN_FAMILY = "detection_artifact_runs"
 DETECTION_COORDINATE_CONTRACT_MODES = ("canonical", "artifact_unbound")
@@ -2273,6 +2320,7 @@ def detect_yolo(
     # Validate inputs
     model_path = Path(model_path).expanduser()
     output_zarr = Path(output_zarr)
+    _assert_detection_output_target_is_not_canonical(output_zarr)
     
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")

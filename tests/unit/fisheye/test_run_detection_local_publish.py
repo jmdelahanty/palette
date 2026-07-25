@@ -8,6 +8,10 @@ import pytest
 import zarr
 
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from fisheye.shared.detection_candidate import (
+    DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR,
+    node_local_detection_candidate_authority,
+)
 from fisheye.shared.import_video_metadata import (
     publish_external_video_acquisition_authority,
 )
@@ -86,6 +90,9 @@ def test_prepare_local_overlay_copies_only_verified_acquisition_metadata(
         "staged_raw_video_arrays": 0,
     }
     staged = zarr.open_group(local, mode="r", use_consolidated=False)
+    assert staged.attrs[DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR] == (
+        node_local_detection_candidate_authority()
+    )
     assert tuple(staged["raw_video"].array_keys()) == ()
     ownership, acquisition = load_persisted_acquisition_camera_authority(staged)
     ownership.assert_verified()

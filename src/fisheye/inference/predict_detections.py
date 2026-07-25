@@ -16,10 +16,10 @@ import numpy as np
 import zarr
 from rich.console import Console
 
-from ..detection.detect_yolo import (
+from ..shared.detection_candidate import (
     DEFAULT_DETECT_FRAME_SHARD_ROWS,
     DEFAULT_DETECT_ROW_SHARD_ROWS,
-    detect_yolo as run_detect_yolo,
+    build_detection_candidate,
 )
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
@@ -301,7 +301,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
 
     try:
-        run_name_raw = run_detect_yolo(
+        run_name_raw = build_detection_candidate(
             video_path=str(video_path),
             model_path=args.model_path,
             output_zarr=args.output_zarr,

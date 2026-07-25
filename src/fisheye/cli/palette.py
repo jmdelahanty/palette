@@ -99,8 +99,6 @@ class DetectRequest:
     imgsz: Sequence[int] | None = None
     decode_backend: str | None = None
     cpu: bool = False
-    write_raw_video_metadata: bool = False
-    overwrite_raw_video_metadata: bool = False
     cwd: Path | None = None
 
 
@@ -806,13 +804,13 @@ def _action_for_stage(stage_id: str, dataset: DatasetRef) -> dict[str, Any]:
     if stage_id == "detect_quality":
         return _action_payload(
             verb="detect-quality",
-            parts=["scripts/submit_detect_quality_refine_bsub.sh", "--registry", registry, "--path-contains", recording],
+            parts=["scripts/submit_detect_artifact_quality_refine_bsub.sh", "--registry", registry, "--path-contains", recording],
             missing_inputs=[] if registry is not None else ["registry"],
         )
     if stage_id == "refined_detect":
         return _action_payload(
             verb="refine-detect",
-            parts=["scripts/submit_detect_quality_refine_bsub.sh", "--registry", registry, "--path-contains", recording],
+            parts=["scripts/submit_detect_artifact_quality_refine_bsub.sh", "--registry", registry, "--path-contains", recording],
             missing_inputs=[] if registry is not None else ["registry"],
         )
     if stage_id == "crop":
@@ -1220,8 +1218,6 @@ def _resolved_palette_command(verb: str, dataset: DatasetRef, args: Any, *, appl
             ("--imgsz", "imgsz", True),
             ("--decode-backend", "decode_backend", False),
             ("--cpu", "cpu", False),
-            ("--write-raw-video-metadata", "write_raw_video_metadata", False),
-            ("--overwrite-raw-video-metadata", "overwrite_raw_video_metadata", False),
         ),
         "crop": (
             ("--config", "config", False),
@@ -1696,8 +1692,6 @@ def detect(request: DetectRequest) -> dict[str, Any]:
         imgsz=request.imgsz,
         decode_backend=request.decode_backend,
         cpu=bool(request.cpu),
-        write_raw_video_metadata=bool(request.write_raw_video_metadata),
-        overwrite_raw_video_metadata=bool(request.overwrite_raw_video_metadata),
         argv=[],
         cli_provenance=provenance if apply else None,
     )
@@ -2039,8 +2033,6 @@ def _detect_request_from_args(args: argparse.Namespace) -> DetectRequest:
         imgsz=args.imgsz,
         decode_backend=args.decode_backend,
         cpu=bool(args.cpu),
-        write_raw_video_metadata=bool(args.write_raw_video_metadata),
-        overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),
     )
 
 
@@ -2163,8 +2155,6 @@ def _add_detect_args(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--imgsz", nargs="+", type=int, default=None, help="YOLO inference size alias.")
     sub.add_argument("--decode-backend", type=str, default=None, help="Video decode backend passed through to detect.")
     sub.add_argument("--cpu", action="store_true", help="Force CPU inference.")
-    sub.add_argument("--write-raw-video-metadata", action="store_true", help="Write metadata-only raw_video attrs.")
-    sub.add_argument("--overwrite-raw-video-metadata", action="store_true", help="Overwrite existing raw_video metadata attrs.")
 
 
 def _add_crop_args(sub: argparse.ArgumentParser) -> None:

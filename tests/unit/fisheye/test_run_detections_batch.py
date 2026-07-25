@@ -15,10 +15,14 @@ from fisheye.shared.acquisition_publication_status import (
 from fisheye.utils import run_detections_batch as mod
 
 
-def _patch_detect_yolo(monkeypatch, func) -> None:
-    fake_module = types.ModuleType("fisheye.detection.detect_yolo")
-    fake_module.detect_yolo = func
-    monkeypatch.setitem(sys.modules, "fisheye.detection.detect_yolo", fake_module)
+def _patch_local_publisher(monkeypatch, func) -> None:
+    fake_module = types.ModuleType("fisheye.utils.run_detection_local_publish")
+    fake_module.run_detection_local_publish = func
+    monkeypatch.setitem(
+        sys.modules,
+        "fisheye.utils.run_detection_local_publish",
+        fake_module,
+    )
 
 
 def _write_root_metadata(
@@ -449,51 +453,12 @@ def test_main_dry_run_with_explicit_model_does_not_require_registry(
     assert '"status": "ok"' in out
 
 
-def test_main_apply_with_explicit_model_skips_registry_resolution(monkeypatch, tmp_path: Path) -> None:
-    zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
-    zarr_path.mkdir(parents=True, exist_ok=True)
-    recording_dir = zarr_path.parent.parent
-    video_path = recording_dir / "cams" / "cam_1.mp4"
-    video_path.parent.mkdir(parents=True, exist_ok=True)
-    video_path.write_bytes(b"")
+def test_main_apply_rejects_explicit_unregistered_model(
+    tmp_path: Path,
+    capsys,
+) -> None:
     model_path = tmp_path / "best.pt"
     model_path.write_bytes(b"model")
-
-    plan = mod.DetectPlan(
-        zarr_path=zarr_path.resolve(),
-        recording_dir=recording_dir.resolve(),
-        video_path=video_path.resolve(),
-        status=mod.STATUS_OK,
-    )
-
-    monkeypatch.setattr(mod, "_resolve_input_paths", lambda *_args, **_kwargs: [tmp_path])
-    monkeypatch.setattr(mod, "_discover_analysis_zarrs", lambda *_args, **_kwargs: [zarr_path.resolve()])
-    monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: [plan])
-
-    def _unexpected_resolve(**_kwargs):
-        raise AssertionError("_resolve_registry_models_for_plans should not be called with --model")
-
-    monkeypatch.setattr(mod, "_resolve_registry_models_for_plans", _unexpected_resolve)
-
-    calls: list[dict[str, object]] = []
-
-    def _fake_run_detect_plan(**kwargs):  # noqa: ANN003
-        calls.append(kwargs)
-        resolved_model = kwargs["resolved_model"]
-        return mod.DetectRegistryResult(
-            ok=True,
-            status="ok",
-            recording_dir=str(recording_dir.resolve()),
-            output_zarr=str(zarr_path.resolve()),
-            registry_path=str((tmp_path / "missing_registry.sqlite").resolve()),
-            video_path=str(video_path.resolve()),
-            selected_model_path=resolved_model.model_path,
-            detect_run="detect_explicit",
-            resolved_at_utc=None,
-            resolution_payload=resolved_model.payload,
-        )
-
-    monkeypatch.setattr(mod, "_run_detect_plan", _fake_run_detect_plan)
 
     rc = mod.main([
         "--apply", "--json", "--no-log",
@@ -503,17 +468,11 @@ def test_main_apply_with_explicit_model_skips_registry_resolution(monkeypatch, t
         str(tmp_path),
     ])
 
-    assert rc == 0
-    assert len(calls) == 1
-    resolved_model = calls[0]["resolved_model"]
-    assert resolved_model.model_path == str(model_path.resolve())
-    assert resolved_model.payload["mode"] == "explicit"
-    assert resolved_model.payload["selected"]["model_path"] == str(model_path.resolve())
-    assert calls[0]["decode_backend"] == "pynvvc_luma_rgb"
-    assert resolved_model.payload["parameters"]["decode_backend"] == "pynvvc_luma_rgb"
+    assert rc == 1
+    assert "requires a registered model" in capsys.readouterr().err
 
 
-def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatch, tmp_path: Path) -> None:
+def test_run_detect_plan_rejects_explicit_model(tmp_path: Path) -> None:
     zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     recording_dir = zarr_path.parent.parent
     video_path = recording_dir / "cams" / "cam_1.mp4"
@@ -527,19 +486,6 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
         recording_dir=recording_dir.resolve(),
         video_path=video_path.resolve(),
         status=mod.STATUS_OK,
-    )
-
-    _patch_detect_yolo(monkeypatch, lambda **_kwargs: "detect_explicit")
-
-    def _unexpected_provenance(**_kwargs):
-        raise AssertionError("registry model-resolution provenance should be skipped for explicit models")
-
-    monkeypatch.setattr(mod, "write_detect_model_resolution_provenance", _unexpected_provenance)
-    status_calls: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        mod,
-        "emit_detect_step_status",
-        lambda **kwargs: status_calls.append(kwargs),
     )
 
     result = mod._run_detect_plan(  # noqa: SLF001
@@ -567,23 +513,11 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
         registry_path=tmp_path / "missing_registry.sqlite",
     )
 
-    assert result.ok is True
-    assert result.detect_run == "detect_explicit"
-    assert status_calls == [
-        {
-            "zarr_path": zarr_path.resolve(),
-            "registry_path": tmp_path / "missing_registry.sqlite",
-            "status": "ok",
-            "run_name": "detect_explicit",
-            "reason": "detect_inference_ok",
-            "selected_model_path": str(model_path.resolve()),
-            "selected_run_id": None,
-            "selected_set_id": None,
-        }
-    ]
+    assert result.ok is False
+    assert result.reason == "canonical_detection_requires_registered_model"
 
 
-def test_run_detect_plan_records_inference_failure_in_explicit_registry(
+def test_run_detect_plan_reports_atomic_publication_failure_without_registry_write(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -601,15 +535,9 @@ def test_run_detect_plan_records_inference_failure_in_explicit_registry(
         video_path=video_path.resolve(),
         status=mod.STATUS_OK,
     )
-    _patch_detect_yolo(
+    _patch_local_publisher(
         monkeypatch,
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu oom")),
-    )
-    status_calls: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        mod,
-        "emit_detect_step_status",
-        lambda **kwargs: status_calls.append(kwargs),
     )
 
     result = mod._run_detect_plan(  # noqa: SLF001
@@ -620,6 +548,7 @@ def test_run_detect_plan_records_inference_failure_in_explicit_registry(
                 "mode": "registry",
                 "selected": {
                     "model_path": str(model_path.resolve()),
+                    "model_sha256": "d" * 64,
                     "run_id": "model_run_1",
                     "set_id": "model_set_1",
                 },
@@ -642,10 +571,70 @@ def test_run_detect_plan_records_inference_failure_in_explicit_registry(
     )
 
     assert result.ok is False
-    assert result.reason == "detect_inference_failed"
-    assert status_calls[0]["registry_path"] == registry_path
-    assert status_calls[0]["status"] == "error"
-    assert status_calls[0]["reason"] == "detect_inference_failed"
+    assert result.reason == "detect_atomic_publication_failed"
+
+
+def test_run_detect_plan_passes_registered_digest_to_atomic_publisher(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    recording_dir = zarr_path.parent.parent
+    video_path = recording_dir / "cams" / "cam_1.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"")
+    model_path = tmp_path / "best.pt"
+    model_path.write_bytes(b"model")
+    registry_path = tmp_path / "registry.sqlite"
+    calls: list[dict[str, object]] = []
+
+    def _publish(**kwargs):  # noqa: ANN003
+        calls.append(kwargs)
+        return {"run_name": "detect_atomic_1"}
+
+    _patch_local_publisher(monkeypatch, _publish)
+    result = mod._run_detect_plan(  # noqa: SLF001
+        plan=mod.DetectPlan(
+            zarr_path=zarr_path.resolve(),
+            recording_dir=recording_dir.resolve(),
+            video_path=video_path.resolve(),
+            status=mod.STATUS_OK,
+        ),
+        resolved_model=mod.ResolvedModel(
+            model_path=str(model_path.resolve()),
+            payload={
+                "mode": "registry",
+                "selected": {
+                    "model_path": str(model_path.resolve()),
+                    "model_sha256": "a" * 64,
+                    "run_id": "model_run_1",
+                    "set_id": "model_set_1",
+                },
+            },
+        ),
+        write_raw_video_metadata=False,
+        overwrite_raw_video_metadata=False,
+        config=None,
+        conf=None,
+        iou=None,
+        max_det=None,
+        batch_size=None,
+        resize_dims=[768, 1280],
+        imgsz=None,
+        decode_backend="pynvvc_luma_rgb",
+        detect_row_shard_rows=131_072,
+        detect_frame_shard_rows=131_072,
+        cpu=False,
+        registry_path=registry_path,
+    )
+
+    assert result.ok is True
+    assert result.detect_run == "detect_atomic_1"
+    assert len(calls) == 1
+    assert calls[0]["source_zarr"] == zarr_path.resolve()
+    assert calls[0]["model_sha256"] == "a" * 64
+    assert calls[0]["model_run_id"] == "model_run_1"
+    assert calls[0]["model_set_id"] == "model_set_1"
 
 
 # ---------------------------------------------------------------------------

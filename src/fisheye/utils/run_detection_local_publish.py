@@ -34,6 +34,16 @@ from fisheye.shared.acquisition_publication_status import (
     load_acquisition_authority_publication_status,
 )
 from fisheye.shared.artifact_fingerprint import fingerprint_artifact
+from fisheye.shared.detection_candidate import (
+    DEFAULT_DETECT_FRAME_SHARD_ROWS,
+    DEFAULT_DETECT_ROW_SHARD_ROWS,
+    DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR,
+    build_detection_candidate,
+    node_local_detection_candidate_authority,
+)
+from fisheye.shared.detection_model_provenance import (
+    write_detect_model_resolution_provenance,
+)
 from fisheye.shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.observation_coordinate_publication import (
@@ -52,11 +62,6 @@ from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     require_runs_parent,
 )
-from fisheye.utils.run_detect_with_registry_model import (
-    DEFAULT_DETECT_FRAME_SHARD_ROWS,
-    DEFAULT_DETECT_ROW_SHARD_ROWS,
-    write_detect_model_resolution_provenance,
-)
 
 
 SCHEMA_ID = "palette.node_local_detection_publish.v1"
@@ -71,6 +76,22 @@ def _safe_name(value: str) -> str:
     if not name or name in {".", ".."}:
         raise ValueError(f"Invalid detection run name: {value!r}")
     return name
+
+
+def default_node_local_detection_scratch_root() -> Path:
+    """Return a job-scoped local scratch root without touching shared storage."""
+
+    base = Path(os.environ.get("TMPDIR") or "/tmp").expanduser().resolve()
+    job_id = str(os.environ.get("LSB_JOBID") or os.getpid())
+    job_index = str(os.environ.get("LSB_JOBINDEX") or "0")
+    return base / "palette" / "detection_publish" / f"{job_id}_{job_index}"
+
+
+def default_detection_run_name() -> str:
+    """Return a collision-resistant human-readable detection run name."""
+
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return f"detect_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
 def _copy_attrs(source: zarr.Group, target: zarr.Group) -> None:
@@ -116,6 +137,9 @@ def _prepare_local_overlay(source_zarr: Path, local_zarr: Path) -> dict[str, Any
         raise FileExistsError(f"Node-local output already exists: {local_zarr}")
     local = open_zarr_root(local_zarr, mode="w")
     _copy_attrs(source, local)
+    local.attrs[DETECTION_CANDIDATE_BUILD_AUTHORITY_ATTR] = (
+        node_local_detection_candidate_authority()
+    )
     local_raw = local.create_group("raw_video")
     _copy_attrs(raw, local_raw)
     local_analysis = local.create_group("analysis")
@@ -359,8 +383,8 @@ def run_detection_local_publish(
     model_sha256: str,
     model_run_id: str,
     model_set_id: str,
-    run_name: str,
-    scratch_root: str | Path,
+    run_name: str | None = None,
+    scratch_root: str | Path | None = None,
     registry_path: str | Path,
     model_created_utc: str | None = None,
     video_path: str | Path | None = None,
@@ -370,12 +394,15 @@ def run_detection_local_publish(
     max_det: int | None = None,
     batch_size: int | None = None,
     resize_dims: list[int] | None = None,
+    imgsz: list[int] | None = None,
     decode_backend: str | None = None,
     detect_row_shard_rows: int | None = DEFAULT_DETECT_ROW_SHARD_ROWS,
     detect_frame_shard_rows: int = DEFAULT_DETECT_FRAME_SHARD_ROWS,
-    use_gpu: bool = True,
+    use_gpu: bool | None = None,
     copy_backend: str = "python",
     keep_scratch: bool = False,
+    model_resolution_payload: Mapping[str, Any] | None = None,
+    run_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one raw detection run locally and publish it fail-closed."""
 
@@ -383,8 +410,12 @@ def run_detection_local_publish(
     source = Path(source_zarr).expanduser().resolve()
     model = Path(model_path).expanduser().resolve()
     registry = Path(registry_path).expanduser().resolve()
-    scratch = Path(scratch_root).expanduser().resolve()
-    name = _safe_name(run_name)
+    scratch = Path(
+        scratch_root
+        if scratch_root is not None
+        else default_node_local_detection_scratch_root()
+    ).expanduser().resolve()
+    name = _safe_name(run_name or default_detection_run_name())
     if not source.is_dir():
         raise FileNotFoundError(f"Analysis Zarr not found: {source}")
     if not model.is_file():
@@ -423,19 +454,21 @@ def run_detection_local_publish(
     success = False
     try:
         overlay = _prepare_local_overlay(source, local_zarr)
-        resolution = _resolution_payload(
-            registry_path=registry,
-            recording_id=recording_id,
-            model_path=model,
-            model_sha256=model_sha256.lower(),
-            model_run_id=model_run_id,
-            model_set_id=model_set_id,
-            model_created_utc=model_created_utc,
+        resolution = (
+            copy.deepcopy(dict(model_resolution_payload))
+            if model_resolution_payload is not None
+            else _resolution_payload(
+                registry_path=registry,
+                recording_id=recording_id,
+                model_path=model,
+                model_sha256=model_sha256.lower(),
+                model_run_id=model_run_id,
+                model_set_id=model_set_id,
+                model_created_utc=model_created_utc,
+            )
         )
-        from fisheye.detection.detect_yolo import detect_yolo
-
         detector_started = time.perf_counter()
-        detected_name = detect_yolo(
+        detected_name = build_detection_candidate(
             video_path=str(resolved_video),
             model_path=str(model),
             output_zarr=str(local_zarr),
@@ -445,8 +478,9 @@ def run_detection_local_publish(
             max_det=max_det,
             batch_size=batch_size,
             resize_dims=resize_dims,
+            imgsz=imgsz,
             decode_backend=decode_backend,
-            use_gpu=bool(use_gpu),
+            use_gpu=use_gpu,
             write_raw_video_metadata=False,
             overwrite_raw_video_metadata=False,
             run_name=name,
@@ -460,6 +494,7 @@ def run_detection_local_publish(
                 "lsb_jobid": os.environ.get("LSB_JOBID"),
                 "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
             },
+            run_provenance=run_provenance,
         )
         if detected_name != name or not local_run.is_dir():
             raise RuntimeError("Detector returned a different or absent local run.")
@@ -640,8 +675,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-run-id", required=True)
     parser.add_argument("--model-set-id", required=True)
     parser.add_argument("--model-created-utc")
-    parser.add_argument("--run-name", required=True)
-    parser.add_argument("--scratch-root", type=Path, required=True)
+    parser.add_argument("--run-name")
+    parser.add_argument(
+        "--scratch-root",
+        type=Path,
+        help="Node-local scratch root (default: job-scoped path under $TMPDIR).",
+    )
     parser.add_argument(
         "--registry",
         type=Path,
@@ -654,6 +693,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-det", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--resize-dims", nargs="+", type=int)
+    parser.add_argument("--imgsz", nargs="+", type=int)
     parser.add_argument(
         "--decode-backend",
         choices=(
@@ -712,10 +752,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_det=args.max_det,
             batch_size=args.batch_size,
             resize_dims=args.resize_dims,
+            imgsz=args.imgsz,
             decode_backend=args.decode_backend,
             detect_row_shard_rows=args.detect_row_shard_rows,
             detect_frame_shard_rows=args.detect_frame_shard_rows,
-            use_gpu=not args.cpu,
+            use_gpu=False if args.cpu else None,
             copy_backend=args.copy_backend,
             keep_scratch=args.keep_scratch,
         )

@@ -304,20 +304,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Attempt runs even if analysis zarr already exists (unless --overwrite is set).",
     )
 
-    parser.add_argument("--model", type=Path, help="YOLO model path (.pt).")
-    parser.add_argument(
-        "--model-source",
-        choices=("explicit", "registry"),
-        default="explicit",
-        help="Model resolution source: explicit path/config or per-recording registry resolver.",
-    )
     parser.add_argument("--detect-config", type=Path, help="YOLO detect config YAML.")
     parser.add_argument("--conf", type=float, help="YOLO confidence threshold override.")
     parser.add_argument("--iou", type=float, help="YOLO IoU threshold override.")
     parser.add_argument("--max-det", type=int, help="YOLO max detections per frame override.")
     parser.add_argument("--batch-size", type=int, help="YOLO batch size override.")
     parser.add_argument("--cpu", action="store_true", help="Force CPU for YOLO detect.")
-    parser.add_argument("--set-id", type=str, help="Optional detect set filter when --model-source=registry.")
+    parser.add_argument("--set-id", type=str, help="Optional registered detect model-set filter.")
     parser.add_argument(
         "--require-unique",
         action="store_true",
@@ -438,8 +431,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     skip_existing = not args.overwrite and not args.no_skip_existing
 
     registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
-    if args.model_source == "registry" and not registry_path.exists():
-        print(f"Registry not found for --model-source=registry: {registry_path}")
+    if args.apply and not registry_path.exists():
+        print(f"Registry not found for detection publication: {registry_path}")
         return 1
 
     logger: Optional[JsonLogger] = None
@@ -458,9 +451,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             apply=bool(args.apply),
             skip_existing=bool(skip_existing),
             overwrite=bool(args.overwrite),
-            model=str(args.model) if args.model else None,
             detect_config=str(args.detect_config) if args.detect_config else None,
-            model_source=str(args.model_source),
+            model_source="registry",
             import_stimulus=bool(args.import_stimulus),
             allow_preflight_failures=bool(args.allow_preflight_failures),
             expected_subject_count=args.expected_subject_count,
@@ -511,8 +503,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Registry: {registry_path}")
 
     pipeline_opts = RecordingPipelineOptions(
-        model_source=str(args.model_source),
-        model=args.model,
         detect_config=args.detect_config,
         conf=args.conf,
         iou=args.iou,

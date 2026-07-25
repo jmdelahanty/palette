@@ -10,8 +10,6 @@ from fisheye.utils.import_recording_analysis import RecordingAnalysisPlan, Recor
 
 def _opts(tmp_path: Path) -> mod.RecordingPipelineOptions:
     return mod.RecordingPipelineOptions(
-        model_source="explicit",
-        model=None,
         detect_config=None,
         conf=None,
         iou=None,
@@ -50,7 +48,11 @@ def test_process_pipeline_returns_detect_failure(monkeypatch, tmp_path: Path) ->
     opts = _opts(tmp_path)
 
     monkeypatch.setattr(mod, "process_recording_import", lambda *a, **k: RecordingImportResult(ok=True))
-    monkeypatch.setattr(mod, "run_detect_yolo", lambda *a, **k: (False, 4, ["detect"]))
+    monkeypatch.setattr(
+        mod,
+        "run_detect_registry_model",
+        lambda *a, **k: (False, 4, ["detect"]),
+    )
 
     result = mod.process_recording_analysis_pipeline(plan, opts, logger=None)
 
@@ -79,7 +81,6 @@ def test_run_detect_registry_model_builds_expected_command(monkeypatch, tmp_path
         zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
     )
     opts = _opts(tmp_path)
-    opts.model_source = "registry"
     opts.detect_config = Path("configs/fisheye/yolo_detect_config.yaml")
     opts.conf = 0.4
     opts.iou = 0.8
@@ -99,7 +100,7 @@ def test_run_detect_registry_model_builds_expected_command(monkeypatch, tmp_path
     assert "fisheye.utils.run_detect_with_registry_model" in cmd
     assert "--recording-dir" in cmd
     assert "--registry" in cmd
-    assert "--write-raw-video-metadata" in cmd
+    assert "--write-raw-video-metadata" not in cmd
     assert "--set-id" in cmd
     assert "--require-unique" in cmd
     assert "--top-k" in cmd
@@ -276,7 +277,7 @@ def test_process_pipeline_happy_path_runs_stages_in_order(monkeypatch, tmp_path:
             return "rec:zdataset"
 
     monkeypatch.setattr(mod, "process_recording_import", _import)
-    monkeypatch.setattr(mod, "run_detect_yolo", _detect)
+    monkeypatch.setattr(mod, "run_detect_registry_model", _detect)
     monkeypatch.setattr(mod, "run_detect_quality", _quality)
     monkeypatch.setattr(mod, "run_refine_detect", _refine)
 
@@ -298,7 +299,11 @@ def test_process_pipeline_returns_detect_quality_failure(monkeypatch, tmp_path: 
     opts.refine_detect = True
 
     monkeypatch.setattr(mod, "process_recording_import", lambda *a, **k: RecordingImportResult(ok=True))
-    monkeypatch.setattr(mod, "run_detect_yolo", lambda *a, **k: (True, 0, ["detect"]))
+    monkeypatch.setattr(
+        mod,
+        "run_detect_registry_model",
+        lambda *a, **k: (True, 0, ["detect"]),
+    )
     monkeypatch.setattr(mod, "run_detect_quality", lambda *a, **k: (False, 7, ["detect_quality"]))
     monkeypatch.setattr(
         mod,
@@ -362,7 +367,7 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
             return "rec:zdataset"
 
     monkeypatch.setattr(mod, "process_recording_import", _import)
-    monkeypatch.setattr(mod, "run_detect_yolo", _detect)
+    monkeypatch.setattr(mod, "run_detect_registry_model", _detect)
     monkeypatch.setattr(mod, "run_detect_quality", _quality)
     monkeypatch.setattr(mod, "run_refine_detect", _refine)
     monkeypatch.setattr(mod, "run_keypoints_batch", _keypoints)

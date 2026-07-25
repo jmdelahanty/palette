@@ -9,18 +9,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-import zarr
-
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.run_provenance import build_run_provenance
-from fisheye.registry.stage_complete import emit_stage_completion
-from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.detection_candidate import (
+    DEFAULT_DETECT_FRAME_SHARD_ROWS,
+    DEFAULT_DETECT_ROW_SHARD_ROWS,
+)
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.registry.model_resolution import Candidate, TargetProfile, load_candidates, load_target_profile, resolve_recording_id
 
-_DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
-DEFAULT_DETECT_ROW_SHARD_ROWS = 131_072
-DEFAULT_DETECT_FRAME_SHARD_ROWS = 131_072
 
 DECODE_BACKEND_CHOICES = (
     "auto",
@@ -30,71 +27,6 @@ DECODE_BACKEND_CHOICES = (
     "decord_cpu",
     "opencv",
 )
-
-
-def emit_detect_step_status(
-    *,
-    zarr_path: Path,
-    registry_path: Optional[Path],
-    status: str,
-    run_name: Optional[str],
-    reason: Optional[str],
-    selected_model_path: Optional[str],
-    selected_run_id: Optional[str],
-    selected_set_id: Optional[str],
-) -> None:
-    """Write a detect step status row to the registry (non-fatal)."""
-    try:
-        resolved_registry_path = None
-        if registry_path is not None:
-            resolved_registry_path = registry_path.expanduser().resolve()
-            if not resolved_registry_path.exists():
-                return
-        resolved_zarr_path = zarr_path.expanduser().resolve()
-        root = zarr.open(str(resolved_zarr_path), mode="r", use_consolidated=False)
-
-        # Extract method and coverage from the detect run if available
-        method = None
-        coverage_pct = None
-        if run_name and status == "ok":
-            detect_runs = root.get("detect_runs")
-            if detect_runs is not None and run_name in detect_runs:
-                detect_group = detect_runs[run_name]
-                method = normalize_attr(detect_group.attrs.get("detection_method"))
-                summary = detect_group.attrs.get("summary_statistics")
-                if isinstance(summary, dict):
-                    cov = summary.get("coverage_pct") or summary.get("coverage_percent")
-                    if cov is not None:
-                        try:
-                            coverage_pct = float(cov)
-                        except (TypeError, ValueError):
-                            pass
-
-        emit_stage_completion(
-            root,
-            resolved_zarr_path,
-            step_name="detect",
-            status=status,
-            source=_DETECT_STATUS_SOURCE,
-            run_name=run_name,
-            method=method,
-            coverage_pct=coverage_pct,
-            review_status_json=None,
-            details_json={
-                "reason": reason,
-                "selected_model_path": selected_model_path,
-                "run_id": selected_run_id,
-                "set_id": selected_set_id,
-            },
-            console=None,
-            registry=resolved_registry_path,
-            auto_registry_from_env=resolved_registry_path is None,
-            require_env_registry_exists=True,
-            invalidate_on_ok=True,
-            trigger_run_name=run_name,
-        )
-    except Exception:
-        pass  # Non-fatal; batch runners log results via JSONL already
 
 
 @dataclass(frozen=True)
@@ -258,49 +190,6 @@ def _resolution_payload(
     return build_detect_resolution_payload(**kwargs)
 
 
-def write_detect_model_resolution_provenance(
-    *,
-    zarr_path: Path,
-    run_name: str,
-    payload: dict[str, Any],
-) -> None:
-    root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
-    detect_parent = root.get("detect_runs")
-    if detect_parent is None or run_name not in detect_parent:
-        raise RuntimeError(f"detect run not found for provenance annotation: detect_runs/{run_name}")
-
-    detect_group = detect_parent[run_name]
-    selected = payload.get("selected", {}) if isinstance(payload.get("selected"), dict) else {}
-    attrs = dict(detect_group.attrs)
-    attrs["model_resolution_mode"] = "registry"
-    attrs["model_resolution_task"] = "detect"
-    attrs["model_resolution_registry_path"] = payload.get("registry_path")
-    attrs["model_resolution_recording_id"] = payload.get("recording_id")
-    attrs["model_resolution_selected_run_id"] = selected.get("run_id")
-    attrs["model_resolution_selected_set_id"] = selected.get("set_id")
-    attrs["model_resolution_selected_model_path"] = selected.get("model_path")
-    attrs["model_resolution_selected_score"] = selected.get("score")
-    attrs["model_resolution_selected_created_utc"] = selected.get("created_utc")
-    attrs["model_resolution_resolved_at_utc"] = payload.get("resolved_at_utc")
-    attrs["model_resolution_candidates_json"] = json.dumps(payload.get("candidates", []), sort_keys=True)
-
-    provenance = attrs.get("provenance")
-    if not isinstance(provenance, dict):
-        provenance = {}
-    provenance["model_resolution"] = payload
-    attrs["provenance"] = provenance
-    detect_group.attrs.put(attrs)
-
-
-def _write_model_resolution_provenance(
-    *,
-    zarr_path: Path,
-    run_name: str,
-    payload: dict[str, Any],
-) -> None:
-    write_detect_model_resolution_provenance(zarr_path=zarr_path, run_name=run_name, payload=payload)
-
-
 def _failure_result(
     *,
     reason: str,
@@ -403,6 +292,10 @@ def run_detect_with_registry_model(
     cpu: bool = False,
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
+    run_name: Optional[str] = None,
+    scratch_root: Optional[Path] = None,
+    copy_backend: str = "python",
+    keep_scratch: bool = False,
     argv: Optional[list[str]] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
     run_provenance: Optional[Mapping[str, Any]] = None,
@@ -531,8 +424,54 @@ def run_detect_with_registry_model(
             resolution_payload=payload,
         )
 
+    if write_raw_video_metadata or overwrite_raw_video_metadata:
+        return _failure_result(
+            reason="canonical_acquisition_metadata_is_immutable",
+            error=(
+                "Detection publication cannot create or overwrite acquisition metadata. "
+                "Import the recording before running detection."
+            ),
+            remediation="Run the recording importer, then rerun detection without the raw-video metadata flags.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+            video_path=resolved_video_path,
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolved_at_utc=resolved_at_utc,
+            resolution_payload=payload,
+        )
+
+    missing_identity = [
+        label
+        for label, value in (
+            ("model_sha256", selected_model_sha256),
+            ("model_run_id", selected_run_id),
+            ("model_set_id", selected_set_id),
+        )
+        if not value
+    ]
+    if missing_identity:
+        return _failure_result(
+            reason="registered_model_identity_incomplete",
+            error=f"Selected detect model is missing: {', '.join(missing_identity)}",
+            remediation="Repair the registered model identity before canonical detection publication.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+            video_path=resolved_video_path,
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolved_at_utc=resolved_at_utc,
+            resolution_payload=payload,
+        )
+
     try:
-        from fisheye.detection.detect_yolo import detect_yolo
+        from fisheye.utils.run_detection_local_publish import (
+            run_detection_local_publish,
+        )
 
         effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
         if effective_run_provenance is None:
@@ -554,11 +493,17 @@ def run_detect_with_registry_model(
                 },
                 cwd=Path.cwd(),
             )
-        run_name = detect_yolo(
-            video_path=str(resolved_video_path),
+        publication = run_detection_local_publish(
+            source_zarr=resolved_output_path,
+            video_path=resolved_video_path,
             model_path=best.model_path,
             model_sha256=selected_model_sha256,
-            output_zarr=str(resolved_output_path),
+            model_run_id=selected_run_id,
+            model_set_id=selected_set_id,
+            model_created_utc=selected_payload.get("created_utc"),
+            run_name=run_name,
+            scratch_root=scratch_root,
+            registry_path=resolved_registry_path,
             config_path=config,
             conf_threshold=conf,
             iou_threshold=iou,
@@ -567,29 +512,20 @@ def run_detect_with_registry_model(
             resize_dims=resize_dims,
             imgsz=imgsz,
             decode_backend=decode_backend,
-            use_gpu=(False if cpu else None),
-            write_raw_video_metadata=bool(write_raw_video_metadata),
-            overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
+            use_gpu=False if cpu else None,
             detect_row_shard_rows=detect_row_shard_rows,
             detect_frame_shard_rows=int(detect_frame_shard_rows),
-            cli_provenance=effective_run_provenance,
+            copy_backend=copy_backend,
+            keep_scratch=keep_scratch,
+            model_resolution_payload=payload,
             run_provenance=effective_run_provenance,
         )
+        published_run_name = str(publication["run_name"])
     except Exception as exc:
-        emit_detect_step_status(
-            zarr_path=resolved_output_path,
-            registry_path=resolved_registry_path,
-            status="error",
-            run_name=None,
-            reason="detect_inference_failed",
-            selected_model_path=selected_model_path,
-            selected_run_id=selected_run_id,
-            selected_set_id=selected_set_id,
-        )
         return _failure_result(
-            reason="detect_inference_failed",
+            reason="detect_atomic_publication_failed",
             error=str(exc),
-            remediation="Inspect model/config inputs and rerun with --dry-run --json to verify resolved model selection.",
+            remediation="Inspect the node-local candidate/publication report; the canonical archive was not activated.",
             recording_dir=resolved_recording_dir,
             output_path=resolved_output_path,
             registry_path=resolved_registry_path,
@@ -600,40 +536,6 @@ def run_detect_with_registry_model(
             resolved_at_utc=resolved_at_utc,
             resolution_payload=payload,
         )
-
-    try:
-        write_detect_model_resolution_provenance(
-            zarr_path=resolved_output_path,
-            run_name=run_name,
-            payload=payload,
-        )
-    except Exception as exc:
-        return _failure_result(
-            reason="provenance_write_failed",
-            error=str(exc),
-            remediation="Ensure output zarr is writable and detect_runs/<run> exists before retrying.",
-            recording_dir=resolved_recording_dir,
-            output_path=resolved_output_path,
-            registry_path=resolved_registry_path,
-            video_path=resolved_video_path,
-            selected_model_path=selected_model_path,
-            selected_run_id=selected_run_id,
-            selected_set_id=selected_set_id,
-            detect_run=run_name,
-            resolved_at_utc=resolved_at_utc,
-            resolution_payload=payload,
-        )
-
-    emit_detect_step_status(
-        zarr_path=resolved_output_path,
-        registry_path=resolved_registry_path,
-        status="ok",
-        run_name=run_name,
-        reason="detect_inference_ok",
-        selected_model_path=selected_model_path,
-        selected_run_id=selected_run_id,
-        selected_set_id=selected_set_id,
-    )
 
     return DetectRegistryResult(
         ok=True,
@@ -645,7 +547,7 @@ def run_detect_with_registry_model(
         selected_model_path=selected_model_path,
         selected_run_id=selected_run_id,
         selected_set_id=selected_set_id,
-        detect_run=run_name,
+        detect_run=published_run_name,
         resolved_at_utc=resolved_at_utc,
         resolution_payload=payload,
     )
@@ -712,16 +614,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Video decode backend passed to detect_yolo.",
     )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
+    parser.add_argument("--run-name", help="Optional explicit canonical run name.")
     parser.add_argument(
-        "--write-raw-video-metadata",
-        action="store_true",
-        help="Write metadata-only raw_video attrs during detect.",
+        "--scratch-root",
+        type=Path,
+        help="Node-local scratch root (default: job-scoped path under $TMPDIR).",
     )
-    parser.add_argument(
-        "--overwrite-raw-video-metadata",
-        action="store_true",
-        help="Overwrite existing metadata-only raw_video attrs during detect.",
-    )
+    parser.add_argument("--copy-backend", choices=("python", "rsync"), default="python")
+    parser.add_argument("--keep-scratch", action="store_true")
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
     args = parser.parse_args(argv)
 
@@ -746,8 +646,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         detect_row_shard_rows=args.detect_row_shard_rows,
         detect_frame_shard_rows=int(args.detect_frame_shard_rows),
         cpu=bool(args.cpu),
-        write_raw_video_metadata=bool(args.write_raw_video_metadata),
-        overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),
+        run_name=args.run_name,
+        scratch_root=args.scratch_root,
+        copy_backend=args.copy_backend,
+        keep_scratch=bool(args.keep_scratch),
         argv=argv,
     )
 

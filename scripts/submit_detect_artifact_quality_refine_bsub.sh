@@ -7,7 +7,6 @@ CONFIG="configs/fisheye/yolo_detect_config.yaml"
 PATH_CONTAINS=""
 LOG_DIR=""
 RUN_ID=""
-MODEL=""
 DETECT_SET_ID=""
 DETECT_REQUIRE_UNIQUE=0
 DETECT_INCLUDE_NON_SUCCESS=0
@@ -42,7 +41,7 @@ SUBMIT=0
 
 usage() {
   cat <<'USAGE'
-Usage: submit_detect_artifact_quality_refine_bsub.sh [--model PATH] [options]
+Usage: submit_detect_artifact_quality_refine_bsub.sh [options]
 
 Submit a registry-discovered per-recording artifact workflow:
 
@@ -62,10 +61,8 @@ Discovery options:
   --overwrite                    Plan zarrs even if detect is already ok
 
 Detect artifact options:
-  --model PATH                   Explicit detect model path. If omitted, resolve
-                                  a detect model from the registry per recording.
-                                  Resolved/explicit paths must be readable on
-                                  the submit host.
+  A registered detect model is resolved per recording and its digest/provenance
+  is pinned into the artifact/import workflow.
   --detect-set-id ID             Optional detect set filter for registry model resolution
   --detect-require-unique        Fail if top registry model candidates tie
   --detect-include-non-success   Allow non-success training runs as model candidates
@@ -115,7 +112,6 @@ while [[ $# -gt 0 ]]; do
     --run-id) RUN_ID="$2"; shift 2;;
     --require-tuning) REQUIRE_TUNING=1; shift;;
     --overwrite) OVERWRITE=1; shift;;
-    --model) MODEL="$2"; shift 2;;
     --detect-set-id) DETECT_SET_ID="$2"; shift 2;;
     --detect-require-unique) DETECT_REQUIRE_UNIQUE=1; shift;;
     --detect-include-non-success) DETECT_INCLUDE_NON_SUCCESS=1; shift;;
@@ -194,7 +190,6 @@ PLAN_CMD=(
 if [[ -n "$PATH_CONTAINS" ]]; then PLAN_CMD+=(--path-contains "$PATH_CONTAINS"); fi
 if [[ "$REQUIRE_TUNING" == "1" ]]; then PLAN_CMD+=(--require-tuning); fi
 if [[ "$OVERWRITE" == "1" ]]; then PLAN_CMD+=(--overwrite); fi
-if [[ -n "$MODEL" ]]; then PLAN_CMD+=(--model "$MODEL"); fi
 if [[ -n "$DETECT_SET_ID" ]]; then PLAN_CMD+=(--set-id "$DETECT_SET_ID"); fi
 if [[ "$DETECT_REQUIRE_UNIQUE" == "1" ]]; then PLAN_CMD+=(--require-unique); fi
 if [[ "$DETECT_INCLUDE_NON_SUCCESS" == "1" ]]; then PLAN_CMD+=(--include-non-success); fi
@@ -250,12 +245,12 @@ for plan in plans:
     if not isinstance(model, str) or not model:
         raise SystemExit(
             f"Runnable plan is missing selected_model for zarr={zarr!r}; "
-            "pass --model or fix registry model resolution."
+            "fix registry model resolution."
         )
     if not Path(model).is_file():
         raise SystemExit(
             f"Selected model path is not readable for zarr={zarr!r}: {model}. "
-            "Pass --model with a cluster-visible weights path or refresh the registry model path."
+            "Refresh the registry model path to a cluster-visible weights path."
         )
     index = len(targets) + 1
     zarr_stem = Path(zarr).name
@@ -500,7 +495,7 @@ root=$ROOT
 registry=$REGISTRY
 path_contains=${PATH_CONTAINS:-<none>}
 target_count=$target_count
-model=${MODEL:-<registry resolution>}
+model=<registry resolution>
 config=$CONFIG
 artifact_output_dir=$ARTIFACT_OUTPUT_DIR
 postprocess_dir=$POSTPROCESS_DIR

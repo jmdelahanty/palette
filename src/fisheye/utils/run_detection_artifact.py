@@ -24,6 +24,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from fisheye.shared.instance_keys import resolve_recording_identity
+from fisheye.shared.detection_candidate import build_detection_candidate
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
@@ -290,14 +291,6 @@ def _stderr_console() -> Any:
     return Console(stderr=True)
 
 
-def _detect_yolo(**kwargs: Any) -> str:
-    # Keep the Ultralytics import out of argparse/help paths because importing
-    # detect_yolo initializes third-party settings/cache state.
-    from fisheye.detection.detect_yolo import detect_yolo
-
-    return detect_yolo(**kwargs)
-
-
 def _extract_timing(source_run_group: Path) -> dict[str, Any]:
     zarr_json = source_run_group / "zarr.json"
     if not zarr_json.exists():
@@ -532,7 +525,7 @@ def build_detection_artifact(
         cwd=Path.cwd(),
     )
     with contextlib.redirect_stdout(sys.stderr):
-        run_name = _detect_yolo(
+        run_name = build_detection_candidate(
             video_path=str(video_path),
             model_path=str(model_path) if model_path is not None else None,
             output_zarr=str(scratch_zarr),

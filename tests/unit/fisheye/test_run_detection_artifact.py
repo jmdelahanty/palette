@@ -137,7 +137,7 @@ def test_build_detection_artifact_packages_detect_run_group(
         (run_group / "zarr.json").write_text(json.dumps(zarr_payload), encoding="utf-8")
         return "detect_fake"
 
-    monkeypatch.setattr(mod, "_detect_yolo", fake_detect_yolo)
+    monkeypatch.setattr(mod, "build_detection_candidate", fake_detect_yolo)
     monkeypatch.setattr(
         mod,
         "get_git_info",
@@ -273,7 +273,7 @@ def test_build_detection_artifact_can_request_deterministic_run_name(
             _write_array(run_group / name)
         return run_name
 
-    monkeypatch.setattr(mod, "_detect_yolo", fake_detect_yolo)
+    monkeypatch.setattr(mod, "build_detection_candidate", fake_detect_yolo)
 
     summary = mod.build_detection_artifact(
         video_path=video,

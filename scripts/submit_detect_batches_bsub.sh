@@ -10,7 +10,6 @@ NCORES=4
 MEM_GB=16
 CONFIG="configs/fisheye/default.yaml"
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
-MODEL=""
 DECODE_BACKEND=""
 RESIZE_DIMS=()
 DETECT_ROW_SHARD_ROWS=""
@@ -47,7 +46,6 @@ Options:
   --mem-gb N                Memory per job in GB (default: 16)
   --config PATH             Detect config path (default: configs/fisheye/default.yaml)
   --registry PATH           Registry sqlite path (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
-  --model PATH              Explicit detect model path; bypass registry model resolution
   --decode-backend NAME     Decode backend passed to run_detections_batch
   --resize-dims H W         Canonical inference size passed to run_detections_batch
   --detect-row-shard-rows N Override default detection-row outer shard rows
@@ -85,7 +83,6 @@ while [[ $# -gt 0 ]]; do
     --mem-gb) MEM_GB="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
-    --model) MODEL="$2"; shift 2;;
     --decode-backend) DECODE_BACKEND="$2"; shift 2;;
     --resize-dims) RESIZE_DIMS=("$2" "$3"); shift 3;;
     --detect-row-shard-rows) DETECT_ROW_SHARD_ROWS="$2"; shift 2;;
@@ -250,9 +247,6 @@ fi
 analysis_count=$(wc -l < "$RUN_DIR/recordings.txt" | tr -d ' ')
 
 EXTRA_ARGS=(--apply --no-dask-progress --registry "$REGISTRY" --top-k "$TOP_K" --config "$CONFIG")
-if [[ -n "$MODEL" ]]; then
-  EXTRA_ARGS+=(--model "$MODEL")
-fi
 if [[ -n "$DECODE_BACKEND" ]]; then
   EXTRA_ARGS+=(--decode-backend "$DECODE_BACKEND")
 fi
@@ -334,7 +328,7 @@ echo "Run dir: $RUN_DIR"
 echo "Source: $SOURCE"
 echo "Root: $ROOT"
 echo "Registry: $REGISTRY"
-echo "Model: ${MODEL:-<registry resolution>}"
+echo "Model: <registry resolution; canonical publication requires a registered digest>"
 echo "Decode backend: ${DECODE_BACKEND:-<runner default>}"
 if [[ "${#RESIZE_DIMS[@]}" -gt 0 ]]; then
   echo "Resize dims: ${RESIZE_DIMS[0]} ${RESIZE_DIMS[1]}"
