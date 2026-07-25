@@ -160,6 +160,45 @@ def test_validates_explicit_regular_detection_completion_contract(tmp_path) -> N
     assert all(item["shards"] is None for item in report["arrays"])
 
 
+def test_read_only_validation_preserves_persisted_completion_report(tmp_path) -> None:
+    run = _detect_run(tmp_path, sharded=True)
+    validate_immutable_yolo_storage(
+        run,
+        stage="detect",
+        row_shard_rows=8,
+        frame_shard_rows=8,
+    )
+    persisted = dict(run.attrs[IMMUTABLE_YOLO_STORAGE_ATTR])
+
+    report = validate_immutable_yolo_storage(
+        run,
+        stage="detect",
+        row_shard_rows=8,
+        frame_shard_rows=8,
+        persist_report=False,
+    )
+
+    assert report["status"] == "ok"
+    assert dict(run.attrs[IMMUTABLE_YOLO_STORAGE_ATTR]) == persisted
+
+
+def test_read_only_validation_does_not_persist_failure_report(tmp_path) -> None:
+    run = _detect_run(tmp_path)
+    del run["instance_key"]
+    assert IMMUTABLE_YOLO_STORAGE_ATTR not in run.attrs
+
+    with pytest.raises(RuntimeError, match="missing required arrays.*instance_key"):
+        validate_immutable_yolo_storage(
+            run,
+            stage="detect",
+            row_shard_rows=8,
+            frame_shard_rows=8,
+            persist_report=False,
+        )
+
+    assert IMMUTABLE_YOLO_STORAGE_ATTR not in run.attrs
+
+
 def test_rejects_missing_modern_identity(tmp_path) -> None:
     run = _detect_run(tmp_path)
     del run["instance_key"]

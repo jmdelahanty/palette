@@ -311,7 +311,7 @@ def _validate_run_path(
     frame_shard_rows: int,
 ) -> dict[str, Any]:
     try:
-        run = open_zarr_root(run_path, mode="a")
+        run = open_zarr_root(run_path, mode="r")
         errors: list[str] = []
         if run.attrs.get("palette_run_completion_status") != "complete":
             errors.append("run is not complete")
@@ -332,6 +332,7 @@ def _validate_run_path(
             stage="detect",
             row_shard_rows=row_shard_rows,
             frame_shard_rows=(frame_shard_rows if row_shard_rows is not None else None),
+            persist_report=False,
         )
         provenance = run.attrs.get("run_provenance")
         artifacts = provenance.get("input_artifacts") if isinstance(provenance, Mapping) else None

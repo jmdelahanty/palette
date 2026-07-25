@@ -154,6 +154,7 @@ def validate_immutable_yolo_storage(
     stage: Literal["detect", "keypoints"],
     row_shard_rows: int | None,
     frame_shard_rows: int | None,
+    persist_report: bool = True,
 ) -> dict[str, Any]:
     """Validate the physical raw-YOLO storage contract before completion.
 
@@ -164,6 +165,8 @@ def validate_immutable_yolo_storage(
 
     if stage not in _REQUIRED_ARRAYS:
         raise ValueError(f"Unsupported immutable YOLO stage: {stage!r}.")
+    if type(persist_report) is not bool:
+        raise TypeError("persist_report must be one bool.")
     prefix = "detect" if stage == "detect" else "keypoint"
     expected_layout = (
         "indexed_sharding_v1" if row_shard_rows is not None else "regular_chunks_v1"
@@ -322,13 +325,14 @@ def validate_immutable_yolo_storage(
         errors.append(f"{summary_name} must be empty under the explicit regular-chunk contract")
 
     if errors:
-        _record_failure(
-            run_group,
-            stage=stage,
-            layout=layout,
-            policy=policy,
-            errors=errors,
-        )
+        if persist_report:
+            _record_failure(
+                run_group,
+                stage=stage,
+                layout=layout,
+                policy=policy,
+                errors=errors,
+            )
         raise RuntimeError(
             f"Refusing to complete immutable YOLO {stage} run: " + "; ".join(errors)
         )
@@ -350,5 +354,6 @@ def validate_immutable_yolo_storage(
         "validated_at_utc": _utc_now(),
         "errors": [],
     }
-    run_group.attrs[IMMUTABLE_YOLO_STORAGE_ATTR] = report
+    if persist_report:
+        run_group.attrs[IMMUTABLE_YOLO_STORAGE_ATTR] = report
     return report
