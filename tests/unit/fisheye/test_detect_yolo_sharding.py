@@ -128,6 +128,76 @@ def test_detection_writer_rejects_legacy_and_cross_namespace_modes() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("use_gpu", "model_fp16", "memory_format", "precision", "device"),
+    [
+        (False, False, "framework_default", "fp32", "cpu"),
+        (True, True, "channels_last", "fp16", "cuda"),
+    ],
+)
+def test_detection_execution_parameters_record_effective_numerical_contract(
+    use_gpu: bool,
+    model_fp16: bool,
+    memory_format: str,
+    precision: str,
+    device: str,
+) -> None:
+    parameters = mod._detection_execution_parameters(  # noqa: SLF001
+        use_gpu=use_gpu,
+        model_fp16=model_fp16,
+        model_fused=True,
+        torch_memory_format=memory_format,
+        torch_cudnn_benchmark=use_gpu,
+    )
+
+    assert parameters == {
+        "detect_algorithm_version": 1,
+        "inference_precision": precision,
+        "inference_device": device,
+        "torch_cudnn_benchmark": use_gpu,
+        "torch_memory_format": memory_format,
+        "model_fused": True,
+        "half": model_fp16,
+    }
+
+
+def test_detection_execution_parameters_reject_fp16_cpu_path() -> None:
+    with pytest.raises(ValueError, match="requires the effective CUDA path"):
+        mod._detection_execution_parameters(  # noqa: SLF001
+            use_gpu=False,
+            model_fp16=True,
+            model_fused=True,
+            torch_memory_format="framework_default",
+            torch_cudnn_benchmark=False,
+        )
+
+
+def test_detection_model_identity_projection_is_exact_and_fail_closed() -> None:
+    artifact = {
+        "role": "detect_model",
+        "sha256": "a" * 64,
+        "fingerprint_scheme": "content_v1",
+    }
+
+    assert mod._validated_model_identity_attrs(  # noqa: SLF001
+        artifact,
+        expected_sha256="A" * 64,
+    ) == {
+        "model_sha256": "a" * 64,
+        "model_fingerprint_scheme": "content_v1",
+    }
+    with pytest.raises(RuntimeError, match="pinned registry digest"):
+        mod._validated_model_identity_attrs(  # noqa: SLF001
+            artifact,
+            expected_sha256="b" * 64,
+        )
+    with pytest.raises(RuntimeError, match="reports a registry mismatch"):
+        mod._validated_model_identity_attrs(  # noqa: SLF001
+            {**artifact, "mismatch": True},
+            expected_sha256="a" * 64,
+        )
+
+
 def _detection_values() -> dict[str, np.ndarray]:
     frame_indices = np.asarray([0, 1, 1, 3, 5, 8, 13, 21, 34, 35], dtype=np.int32)
     bbox_coords = np.arange(40, dtype=np.float64).reshape(10, 4) / 100.0
@@ -446,6 +516,7 @@ def _install_detect_yolo_producer_harness(
     call_args = {
         "video_path": str(video_path),
         "model_path": str(model_path),
+        "model_sha256": hashlib.sha256(b"fake-model").hexdigest(),
         "output_zarr": str(output_path),
         "decode_backend": "opencv",
         "use_gpu": False,
@@ -1379,6 +1450,27 @@ def test_real_detect_yolo_attempt_normalizes_boxes_in_validated_result_shape(
     )
     assert run.attrs["palette_run_completion_status"] == "complete"
     assert run.attrs["stage_selector_eligible"] is True
+    parameters = run.attrs["parameters"]
+    assert parameters["detect_algorithm_version"] == 1
+    assert parameters["inference_precision"] == "fp32"
+    assert parameters["inference_device"] == "cpu"
+    assert parameters["torch_memory_format"] == "framework_default"
+    assert type(parameters["torch_cudnn_benchmark"]) is bool
+    assert parameters["model_fused"] is True
+    assert parameters["half"] is False
+    model_artifact = next(
+        artifact
+        for artifact in run.attrs["run_provenance"]["input_artifacts"]
+        if artifact["role"] == "detect_model"
+    )
+    assert run.attrs["model_sha256"] == model_artifact["sha256"]
+    assert run.attrs["model_fingerprint_scheme"] == (
+        model_artifact["fingerprint_scheme"]
+    )
+    assert run.attrs["provenance"]["parameters"] == parameters
+    assert run.attrs["provenance"]["artifacts"]["model_sha256"] == (
+        model_artifact["sha256"]
+    )
     assert root["detect_runs"].attrs["latest"] == "candidate"
     assert root["detect_runs"].attrs["latest_complete"] == "candidate"
 

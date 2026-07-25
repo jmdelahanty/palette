@@ -16,6 +16,7 @@ where interpolation behavior is defined.
 import numpy as np
 import zarr
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
@@ -550,8 +551,6 @@ def save_quality_report(
     Returns:
         Path to created quality report group
     """
-    from datetime import datetime
-
     root = open_zarr_group_direct(zarr_path, mode="a")
 
     # Navigate to source detect run
@@ -702,7 +701,7 @@ def save_quality_report(
 
     quality_group.attrs['provenance'] = {
         'command': ' '.join(sys.argv),
-        'created_at_utc': datetime.now().isoformat(),
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'source_detect_run': source_run,
         'source_detect_family_path': detect_family_path,
         'source_detect_path': _join_group_path(detect_family_path, source_run),

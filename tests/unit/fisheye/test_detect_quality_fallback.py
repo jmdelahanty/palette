@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +126,10 @@ def test_detect_quality_frame_domains_matches_legacy_report_and_saved_content(
 
     normal_quality = zarr.open_group(str(normal_path), mode="r")[normal_quality_path]
     legacy_quality = zarr.open_group(str(legacy_path), mode="r")[legacy_quality_path]
+    created_at = datetime.fromisoformat(
+        normal_quality.attrs["provenance"]["created_at_utc"]
+    )
+    assert created_at.utcoffset() == timedelta(0)
     assert normal_quality.attrs["coverage_stats"] == legacy_quality.attrs["coverage_stats"]
     assert normal_quality.attrs["detection_quality_summary"] == (
         legacy_quality.attrs["detection_quality_summary"]

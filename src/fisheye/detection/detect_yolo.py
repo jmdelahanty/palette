@@ -152,6 +152,79 @@ DETECTION_BACKEND_BBOX_SANITIZATION_POLICY = (
     "clip_xyxy_to_validated_result_extent_drop_nonfinite_or_nonpositive_v1"
 )
 
+# First explicitly persisted version of the complete detection algorithm.
+# Bump this value whenever geometry, filtering, or box post-processing changes
+# in a way that is not fully described by the recorded parameters.
+DETECT_ALGORITHM_VERSION = 1
+
+
+def _validated_model_identity_attrs(
+    model_artifact: Mapping[str, Any],
+    *,
+    expected_sha256: str | None,
+) -> dict[str, str]:
+    """Project one verified model fingerprint into query-friendly run attrs."""
+
+    if model_artifact.get("role") != "detect_model":
+        raise RuntimeError("Detection model fingerprint has the wrong artifact role.")
+    error = str(model_artifact.get("error") or "").strip()
+    if error:
+        raise RuntimeError(f"Detection model fingerprint failed: {error}")
+    digest = str(model_artifact.get("sha256") or "").strip().lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise RuntimeError("Detection model fingerprint lacks a canonical SHA-256.")
+    if model_artifact.get("mismatch") is True:
+        raise RuntimeError("Detection model fingerprint reports a registry mismatch.")
+    expected = str(expected_sha256 or "").strip().lower()
+    if expected and digest != expected:
+        raise RuntimeError(
+            "Detection model fingerprint differs from the pinned registry digest: "
+            f"expected={expected}, actual={digest}."
+        )
+    scheme = str(model_artifact.get("fingerprint_scheme") or "").strip()
+    if not scheme:
+        raise RuntimeError("Detection model fingerprint lacks its scheme identifier.")
+    return {
+        "model_sha256": digest,
+        "model_fingerprint_scheme": scheme,
+    }
+
+
+def _detection_execution_parameters(
+    *,
+    use_gpu: bool,
+    model_fp16: bool,
+    model_fused: bool,
+    torch_memory_format: str,
+    torch_cudnn_benchmark: bool,
+) -> dict[str, Any]:
+    """Return the effective numerical execution contract for one detect run."""
+
+    for name, value in (
+        ("use_gpu", use_gpu),
+        ("model_fp16", model_fp16),
+        ("model_fused", model_fused),
+        ("torch_cudnn_benchmark", torch_cudnn_benchmark),
+    ):
+        if type(value) is not bool:
+            raise TypeError(f"{name} must be one bool.")
+    if model_fp16 and not use_gpu:
+        raise ValueError("FP16 detection execution requires the effective CUDA path.")
+    memory_format = str(torch_memory_format).strip()
+    if memory_format not in {"channels_last", "framework_default"}:
+        raise ValueError(f"Unsupported detection memory format {memory_format!r}.")
+    return {
+        "detect_algorithm_version": DETECT_ALGORITHM_VERSION,
+        "inference_precision": "fp16" if model_fp16 else "fp32",
+        "inference_device": "cuda" if use_gpu else "cpu",
+        "torch_cudnn_benchmark": torch_cudnn_benchmark,
+        "torch_memory_format": memory_format,
+        "model_fused": model_fused,
+        "half": model_fp16,
+    }
+
 
 def _sanitize_backend_boxes_xyxy(
     boxes_xyxy: np.ndarray,
@@ -2210,6 +2283,10 @@ def detect_yolo(
         role="detect_model",
         registry_hash=model_sha256,
     )
+    model_identity_attrs = _validated_model_identity_attrs(
+        model_artifact,
+        expected_sha256=model_sha256,
+    )
     console.print(f"Video: [cyan]{video_path}[/cyan]")
     console.print(f"Model: [cyan]{model_path}[/cyan]")
     console.print(f"Output: [cyan]{output_zarr}[/cyan]")
@@ -2244,30 +2321,41 @@ def detect_yolo(
     # Load model
     console.print("\n[bold]Loading model...[/bold]")
     model = YOLO(str(model_path))
+    model_fused = False
     try:
         model.fuse()
+        model_fused = True
     except AttributeError:
         pass  # Older versions may not expose fuse; Ultralytics will handle it.
     
     # Check device and move model
     model_fp16 = False
+    torch_memory_format = "framework_default"
     
     if not use_gpu:
         model.to('cpu')
         console.print("[green]✓[/green] Model loaded on CPU")
     else:
-        import torch
         if torch.cuda.is_available():
             torch.backends.cudnn.benchmark = True
             model.to('cuda')
             model.model = model.model.to(memory_format=torch.channels_last)
             model.half()
             model_fp16 = True
+            torch_memory_format = "channels_last"
             console.print(f"[green]✓[/green] Model loaded on GPU: {torch.cuda.get_device_name(0)}")
             console.print(f"[cyan]  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB[/cyan]")
         else:
             console.print("[yellow]⚠[/yellow]  CUDA not available, using CPU")
             use_gpu = False
+
+    execution_parameters = _detection_execution_parameters(
+        use_gpu=bool(use_gpu),
+        model_fp16=model_fp16,
+        model_fused=model_fused,
+        torch_memory_format=torch_memory_format,
+        torch_cudnn_benchmark=bool(torch.backends.cudnn.benchmark),
+    )
 
     predict_kwargs: Dict[str, Any] = {
         "conf": conf_threshold,
@@ -3455,6 +3543,7 @@ def detect_yolo(
         'model_name': Path(
             str(model_artifact.get('path') or model_path.absolute())
         ).name,
+        **model_identity_attrs,
         'source_video_width': source_video_width,
         'source_video_height': source_video_height,
         'source_full_width': source_full_width,
@@ -3476,6 +3565,7 @@ def detect_yolo(
             'output_count': int(total_detections),
         },
         'parameters': {
+            **execution_parameters,
             'conf_threshold': conf_threshold,
             'iou_threshold': iou_threshold,
             'max_det': max_det,
@@ -3620,6 +3710,7 @@ def detect_yolo(
         artifacts={
             "model_path": str(model_path.absolute()),
             "model_name": model_path.name,
+            **model_identity_attrs,
             "device": "cuda" if use_gpu else "cpu",
             "gpu": env_info.get("gpu"),
         },
@@ -3654,6 +3745,7 @@ def detect_yolo(
                     else "explicit_regular_chunks_override"
                 ),
                 "coordinate_contract_mode": coordinate_contract_mode,
+                **execution_parameters,
                 **(
                     {"coordinate_contract": "canonical_v2"}
                     if coordinate_contract_mode == "canonical"
