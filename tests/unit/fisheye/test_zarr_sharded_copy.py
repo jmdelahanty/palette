@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -44,10 +45,13 @@ def test_copy_completed_run_to_sharded_preserves_values_and_owns_outer_shards(
         row_count_array="row_index/frame_indices",
         shard_rows=5,
         workers=workers,
+        compute_full_decoded_content_hashes=True,
     )
 
     assert report["status"] == "complete"
     assert report["exact_decoded_validation"] is True
+    assert report["exact_full_decoded_content_hashes"] is True
+    assert report["full_decoded_content_hash_seconds"] >= 0.0
     assert report["duration_seconds"] >= 0.0
     assert report["decoded_mib_per_second"] > 0.0
     assert report["worker_ownership"] == (
@@ -55,6 +59,13 @@ def test_copy_completed_run_to_sharded_preserves_values_and_owns_outer_shards(
     )
     destination = zarr.open_group(str(destination_path), mode="r", use_consolidated=False)
     np.testing.assert_array_equal(np.asarray(destination["values"][:]), values)
+    values_plan = next(
+        item for item in report["arrays"] if item["path"] == "values"
+    )
+    assert values_plan["decoded_content_bytes"] == values.nbytes
+    assert values_plan["decoded_content_sha256"] == hashlib.sha256(
+        values.tobytes(order="C")
+    ).hexdigest()
     assert tuple(destination["values"].chunks) == (2, 3)
     assert tuple(destination["values"].shards) == (6, 3)
     assert destination.attrs["custom"] == {"preserved": True}

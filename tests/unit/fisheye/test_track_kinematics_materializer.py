@@ -171,17 +171,78 @@ def _install_writer_api(
         run_group,
         *,
         decoded_payload_receipt,
+        decoded_content_inventory,
         run_name,
     ):
         assert run_group.attrs[mod.COORDINATE_BINDING_STATUS_ATTR] == (
             mod.UNBOUND_STAGE_STATUS
         )
         assert run_name == "track_1"
-        return {
-            "schema_id": "test.track_motion_staged_scientific_validation",
-            "decoded_payload_root_sha256": decoded_payload_receipt["root_sha256"],
-            "record_sha256": "9" * 64,
+        assert decoded_content_inventory["decoded_payload_root_sha256"] == (
+            decoded_payload_receipt["root_sha256"]
+        )
+        value_validation = {
+            "schema_id": (
+                "palette.track_motion_staged_publication_value_validation"
+            ),
+            "schema_version": 1,
+            "result": "valid",
+            "content_inventory_sha256": decoded_content_inventory["record_sha256"],
+            "array_count": decoded_content_inventory["array_count"],
+            "alias_count": 0,
+            "physical_surface_count": 0,
+            "bout_group_count": 0,
+            "validated_contracts": [
+                "whole_array_decoded_content_sha256",
+                "exact_alias_payload_identity",
+                "exact_physical_mm_per_pixel_scaling_or_closed_absence",
+                "bout_axis0_domain_alignment",
+            ],
         }
+        body = {
+            "schema_id": (
+                mod.track_writer.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID
+            ),
+            "schema_version": 2,
+            "receipt_role": (
+                "scientific_derivation_validation_bound_to_exact_decoded_payload"
+            ),
+            "run_name": run_name,
+            "staging_manifest_sha256": run_group.attrs[
+                mod.STAGING_MANIFEST_DIGEST_ATTR
+            ],
+            "decoded_payload": {
+                name: decoded_payload_receipt[name]
+                for name in (
+                    "canonicalization",
+                    "array_count",
+                    "decoded_bytes",
+                    "root_sha256",
+                )
+            },
+            "decoded_content_inventory": decoded_content_inventory,
+            "publication_value_validation": value_validation,
+            "validator": {
+                "schema_id": (
+                    mod.track_writer.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID
+                ),
+                "schema_version": 2,
+            },
+            "numerical_policy": (
+                mod.track_writer.TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
+            ),
+            "validated_tracks": [
+                {
+                    "track_id": int(name.removeprefix("id_")),
+                    "sample_count": int(
+                        run_group[f"tracks/{name}/track_sample_key"].shape[0]
+                    ),
+                }
+                for name in sorted(run_group["tracks"].group_keys())
+            ],
+            "result": "valid",
+        }
+        return {**body, "record_sha256": mod._canonical_mapping_sha256(body)}
 
     def verify_scientific_validation(
         run_group,
@@ -192,7 +253,7 @@ def _install_writer_api(
         assert run_group.attrs[
             mod.track_writer.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
         ] == value
-        assert value["decoded_payload_root_sha256"] == (
+        assert value["decoded_payload"]["root_sha256"] == (
             payload_integrity_receipt["decoded_payload"]["root_sha256"]
         )
         return dict(value)
@@ -626,6 +687,11 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     assert staging["payload_integrity_receipt"]["record_sha256"] == run.attrs[
         mod.track_writer.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR
     ]["record_sha256"]
+    payload_validation = run.attrs[
+        mod.track_writer.TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR
+    ]
+    assert payload_validation["validator"]["schema_version"] == 3
+    assert payload_validation["numerical_policy"]["schema_version"] == 3
     assert staging["materialization"]["stage_result"] == {
         "valid": True,
         "status": mod.UNBOUND_STAGE_STATUS,

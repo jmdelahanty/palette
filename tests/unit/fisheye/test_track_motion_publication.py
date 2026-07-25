@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
 from types import MappingProxyType, SimpleNamespace
 import uuid
 
@@ -12,6 +13,7 @@ import pytest
 from fisheye.analysis import track_kinematics as mod
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.coordinate_record import stamp_and_bind_persisted_coordinate_record
+from fisheye.shared.zarr_payload_receipt import DECODED_PAYLOAD_CANONICALIZATION
 from tests.unit.fisheye.test_directed_transform_chain import _world
 from tests.unit.fisheye.test_track_kinematics_coordinate_contract import (
     _WritableGroup,
@@ -449,6 +451,101 @@ def test_staged_scientific_validation_binds_full_numeric_check_to_decoded_root(
     assert root_attrs["record"]["immutable_attrs"][
         mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
     ] == receipt
+
+
+def test_staged_scientific_validation_v2_binds_manifest_value_proofs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    )
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR] = "7" * 64
+    staging_manifest = copy.deepcopy(
+        run.attrs.get(mod.TRACK_KINEMATICS_STAGING_MANIFEST_ATTR, {})
+    )
+    staging_manifest["physical_authority"] = None
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_ATTR] = staging_manifest
+
+    live_nodes = {
+        str(name): run[str(name)] for name in run.array_keys()
+    }
+    for track_id, track_group in mod._live_track_groups(run):
+        for relative_path, node in mod._iter_track_array_nodes(track_group):
+            live_nodes[f"tracks/id_{track_id}/{relative_path}"] = node
+    arrays = []
+    for path, node in sorted(live_nodes.items()):
+        values = np.ascontiguousarray(np.asarray(node[:]))
+        arrays.append(
+            {
+                "path": path,
+                "dtype": str(node.dtype),
+                "shape": [int(value) for value in node.shape],
+                "decoded_bytes": int(values.nbytes),
+                "content_sha256": hashlib.sha256(
+                    values.tobytes(order="C")
+                ).hexdigest(),
+            }
+        )
+    decoded_bytes = sum(int(record["decoded_bytes"]) for record in arrays)
+    content_body = {
+        "schema_id": "palette.decoded_array_content_inventory",
+        "schema_version": 1,
+        "canonicalization": DECODED_PAYLOAD_CANONICALIZATION,
+        "decoded_payload_root_sha256": "8" * 64,
+        "array_count": len(arrays),
+        "decoded_bytes": decoded_bytes,
+        "arrays": arrays,
+        "inventory_sha256": mod._canonical_json_sha256(arrays),
+    }
+    content_inventory = {
+        **content_body,
+        "record_sha256": mod._canonical_json_sha256(content_body),
+    }
+    decoded_receipt = {
+        "canonicalization": DECODED_PAYLOAD_CANONICALIZATION,
+        "array_count": len(arrays),
+        "decoded_bytes": decoded_bytes,
+        "root_sha256": "8" * 64,
+        "arrays": [{} for _ in arrays],
+    }
+
+    receipt = mod.build_track_motion_staged_scientific_validation(
+        run,
+        decoded_payload_receipt=decoded_receipt,
+        decoded_content_inventory=content_inventory,
+        run_name=str(run.path).rsplit("/", 1)[-1],
+    )
+
+    assert receipt["schema_version"] == 2
+    assert receipt["decoded_content_inventory"] == content_inventory
+    assert receipt["publication_value_validation"]["result"] == "valid"
+    assert receipt["publication_value_validation"]["array_count"] == len(arrays)
+
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_BOUND_CANONICAL_STATUS
+    )
+    run.attrs[mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR] = receipt
+    original_payload_sha256 = mod.array_payload_sha256
+
+    def reject_rehash_of_published_motion(node):
+        path = str(getattr(node, "path", ""))
+        if path == str(run.path) or path.startswith(f"{run.path}/"):
+            raise AssertionError(f"unexpected authoritative payload rehash: {path}")
+        return original_payload_sha256(node)
+
+    monkeypatch.setattr(
+        mod,
+        "array_payload_sha256",
+        reject_rehash_of_published_motion,
+    )
+    rebuilt = mod._build_track_motion_publication_manifest(
+        root,
+        run,
+        sealed.position_bindings,
+        prevalidated_staged_scientific_validation=receipt,
+    )
+    assert rebuilt["track_count"] == 1
 
 
 def test_staged_scientific_validation_rejects_wrong_numeric_payload(

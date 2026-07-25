@@ -9,7 +9,7 @@ PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/
 SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 LOG_DIR=""
 QUEUE=""
-NCORES=8
+NCORES=4
 MEM_GB=32
 WALLTIME="24:00"
 SUBMIT=0
@@ -44,7 +44,7 @@ Options:
   --submit-host HOST           SSH poller used when bsub is unavailable locally
   --log-dir PATH               Submission root; defaults beside the recording
   --queue NAME                 LSF queue; default is the cluster default
-  --ncores N                   CPU slots and Dask workers (default: 8)
+  --ncores N                   CPU slots and Dask workers (default: 4)
   --mem-gb N                   LSF memory request per slot (default: 32)
   --walltime H:MM              LSF walltime (default: 24:00)
   --submit                     Render and submit; default reserves a render-only directory

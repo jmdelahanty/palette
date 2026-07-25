@@ -225,6 +225,7 @@ def test_submit_analysis_workflow_labels_unspecified_queue_as_cluster_default(
     )
 
     assert "requested_queue=<cluster-default>" in result.stdout
+    assert "requested_resources=ncores:4" in result.stdout
     bsub_line = next(
         line for line in result.stdout.splitlines() if line.startswith("bsub_command=")
     )
