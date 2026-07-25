@@ -35,8 +35,8 @@ from fisheye.shared.zarr.benchmark_matrix import (
     StorageCandidateRequest,
 )
 from fisheye.shared.zarr.detection_benchmark_matrix import (
-    initial_detection_candidate_requests,
     plan_canonical_detection_benchmark_matrix,
+    selectable_detection_candidate_requests,
 )
 
 
@@ -433,7 +433,7 @@ def _parse_scale(value: str) -> BenchmarkScale:
 def _parse_candidate_label(value: str) -> StorageCandidateRequest:
     requests = {
         request.label: request
-        for request in initial_detection_candidate_requests()
+        for request in selectable_detection_candidate_requests()
     }
     try:
         return requests[value]

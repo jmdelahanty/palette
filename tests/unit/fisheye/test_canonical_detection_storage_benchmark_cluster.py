@@ -16,6 +16,7 @@ from fisheye.shared.zarr.benchmark_environment import (
 from fisheye.shared.zarr.benchmark_matrix import BenchmarkScale
 from fisheye.shared.zarr.detection_benchmark_matrix import (
     initial_detection_candidate_requests,
+    selectable_detection_candidate_requests,
 )
 
 
@@ -85,7 +86,7 @@ def _plan(
     )
     requests_by_label = {
         request.label: request
-        for request in initial_detection_candidate_requests()
+        for request in selectable_detection_candidate_requests()
     }
     return build_plan(
         workflow_id="smoke_01",
@@ -174,14 +175,15 @@ def test_cluster_plan_can_retain_reviewed_byte_budget_shortlist(
     labels = (
         "regular__chunk_1048576",
         "sharded__chunk_131072__shard_8388608",
+        "sharded__chunk_131072__eager_chunk_1048576__shard_8388608",
     )
 
     plan = _plan(tmp_path, repetitions=5, candidate_labels=labels)
 
     assert plan.matrix_manifest["summary"] == {
-        "requested_candidate_labels": 2,
+        "requested_candidate_labels": 3,
         "unique_physical_candidates": 2,
-        "removed_duplicate_labels": 0,
+        "removed_duplicate_labels": 1,
         "planned_trials": 10,
         "destination_collisions": 0,
         "payload_io_performed": False,
@@ -189,7 +191,11 @@ def test_cluster_plan_can_retain_reviewed_byte_budget_shortlist(
     assert [
         candidate["request"]["label"]
         for candidate in plan.matrix_manifest["candidates"]
-    ] == list(labels)
+    ] == list(labels[:2])
+    assert [
+        duplicate["removed_label"]
+        for duplicate in plan.matrix_manifest["duplicates"]
+    ] == [labels[2]]
     blocks, _finalizer = plan.workflow.jobs
     assert blocks.execution_group is not None
     assert len(blocks.execution_group.tasks) == 5

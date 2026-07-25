@@ -12,8 +12,10 @@ from fisheye.shared.zarr.benchmark_matrix import (
     require_storage_benchmark_matrix_manifest,
 )
 from fisheye.shared.zarr.detection_benchmark_matrix import (
+    ACCESS_AWARE_HYBRID_REQUEST,
     initial_detection_candidate_requests,
     plan_canonical_detection_benchmark_matrix,
+    selectable_detection_candidate_requests,
 )
 
 
@@ -74,6 +76,53 @@ def test_detection_candidate_sweep_uses_only_byte_budgets() -> None:
             target_chunk_bytes=1024,
             target_shard_bytes=8192,
         )
+
+
+def test_access_aware_candidate_is_explicit_and_selectable() -> None:
+    requests = selectable_detection_candidate_requests()
+
+    assert len(requests) == 21
+    assert requests[-1] is ACCESS_AWARE_HYBRID_REQUEST
+    assert ACCESS_AWARE_HYBRID_REQUEST.label == (
+        "sharded__chunk_131072__eager_chunk_1048576__shard_8388608"
+    )
+    assert ACCESS_AWARE_HYBRID_REQUEST.as_manifest()[
+        "target_chunk_bytes_by_access"
+    ] == {"eager": 1024 * 1024}
+    with pytest.raises(ValueError, match="access-specific"):
+        StorageCandidateRequest(
+            layout=BenchmarkLayout.SHARDED,
+            target_chunk_bytes=128 * 1024,
+            target_shard_bytes=512 * 1024,
+            target_chunk_bytes_by_access=(("eager", 1024 * 1024),),
+        )
+
+
+def test_access_aware_candidate_resolves_by_array_access_class(
+    tmp_path: Path,
+) -> None:
+    matrix = plan_canonical_detection_benchmark_matrix(
+        matrix_id="sleepyfish_detection_access_aware_v1",
+        scales=(_scales()[1],),
+        destination_root=tmp_path,
+        candidate_requests=(ACCESS_AWARE_HYBRID_REQUEST,),
+        repetitions=1,
+        seed=20_260_724,
+    )
+
+    assert len(matrix.candidates) == 1
+    arrays = {
+        entry["path"]: entry["plan"]
+        for entry in matrix.candidates[0].stage_plan["arrays"]
+    }
+    assert arrays["instances/frame_row_offsets"]["access_pattern"] == "eager"
+    assert arrays["instances/frame_row_offsets"]["chunk_nbytes"] == 1024 * 1024
+    assert all(
+        plan["chunk_nbytes"] == 128 * 1024
+        for path, plan in arrays.items()
+        if path != "instances/frame_row_offsets"
+    )
+    assert all(plan["shard_nbytes"] <= 8 * 1024 * 1024 for plan in arrays.values())
 
 
 def test_detection_matrix_deduplicates_effective_physical_stage_plans(

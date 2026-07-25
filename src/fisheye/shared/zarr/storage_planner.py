@@ -32,20 +32,22 @@ def _choose_growth_units(
     maximum_units: int,
     unit_nbytes: int,
     profile: StorageProfile,
+    access: AccessPattern,
 ) -> int:
     candidates = _candidate_unit_counts(maximum_units)
+    target_bytes, min_bytes, max_bytes = profile.chunk_byte_budget(access)
     bounded = tuple(
         units
         for units in candidates
-        if profile.min_chunk_bytes
+        if min_bytes
         <= units * unit_nbytes
-        <= profile.max_chunk_bytes
+        <= max_bytes
     )
     choices = bounded or candidates
     return min(
         choices,
         key=lambda units: (
-            abs((units * unit_nbytes) - profile.target_chunk_bytes),
+            abs((units * unit_nbytes) - target_bytes),
             units,
         ),
     )
@@ -85,12 +87,18 @@ def _plan_chunk_shape(
         maximum_units=maximum_units,
         unit_nbytes=intent.access_unit_nbytes,
         profile=profile,
+        access=intent.access,
     )
     chunk_shape = list(access_unit)
     chunk_shape[growth_axis] *= growth_units
     chunk_nbytes = intent.itemsize_bytes * prod(chunk_shape)
+    target_bytes, _min_bytes, _max_bytes = profile.chunk_byte_budget(intent.access)
     return tuple(chunk_shape), (
         "inner chunk derived from uncompressed access-unit bytes",
+        (
+            f"{intent.access.value} access uses a {target_bytes}-byte "
+            "target from the storage profile"
+        ),
         (
             f"selected {growth_units} access units at "
             f"{intent.access_unit_nbytes} bytes each for a "

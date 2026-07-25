@@ -33,6 +33,13 @@ from fisheye.shared.zarr.storage_profiles import (
 INITIAL_CHUNK_TARGETS = (128 * KIB, 512 * KIB, 1 * MIB, 2 * MIB)
 INITIAL_SHARD_TARGETS = (8 * MIB, 32 * MIB, 128 * MIB, 512 * MIB)
 
+ACCESS_AWARE_HYBRID_REQUEST = StorageCandidateRequest(
+    layout=BenchmarkLayout.SHARDED,
+    target_chunk_bytes=128 * KIB,
+    target_shard_bytes=8 * MIB,
+    target_chunk_bytes_by_access=(("eager", 1 * MIB),),
+)
+
 INITIAL_DETECTION_MATRIX_WORKLOADS = tuple(
     MatrixWorkload.from_contract(contract)
     for contract in (
@@ -111,6 +118,12 @@ def initial_detection_candidate_requests() -> tuple[StorageCandidateRequest, ...
     return regular + sharded
 
 
+def selectable_detection_candidate_requests() -> tuple[StorageCandidateRequest, ...]:
+    """Return the original sweep plus reviewed access-aware candidates."""
+
+    return initial_detection_candidate_requests() + (ACCESS_AWARE_HYBRID_REQUEST,)
+
+
 def _canonical_dimensions(scale: BenchmarkScale) -> CanonicalDetectionDimensions:
     dimensions = scale.dimension_map
     expected = ("n_frames", "n_instances", "source_width", "source_height")
@@ -131,6 +144,9 @@ def _resolve_detection_stage_plan(
         target_chunk_bytes=request.target_chunk_bytes,
         target_shard_bytes=request.target_shard_bytes,
         layout=request.layout.value,
+        target_chunk_bytes_by_access=dict(
+            request.target_chunk_bytes_by_access
+        ),
     ).as_manifest()
 
 
@@ -168,6 +184,7 @@ def plan_canonical_detection_benchmark_matrix(
 
 
 __all__ = [
+    "ACCESS_AWARE_HYBRID_REQUEST",
     "INITIAL_CHUNK_TARGETS",
     "INITIAL_DETECTION_CORRECTNESS_GATES",
     "INITIAL_DETECTION_MATRIX_WORKLOADS",
@@ -175,4 +192,5 @@ __all__ = [
     "INITIAL_SHARD_TARGETS",
     "initial_detection_candidate_requests",
     "plan_canonical_detection_benchmark_matrix",
+    "selectable_detection_candidate_requests",
 ]

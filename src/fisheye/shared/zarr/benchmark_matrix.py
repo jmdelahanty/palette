@@ -17,6 +17,7 @@ import random
 from typing import Callable, Iterable, Mapping, Sequence
 
 from fisheye.shared.zarr.benchmark_contracts import BenchmarkWorkloadContract
+from fisheye.shared.zarr.storage_intent import AccessPattern
 
 
 MATRIX_SCHEMA_ID = "palette.storage_benchmark_matrix"
@@ -107,6 +108,7 @@ class StorageCandidateRequest:
     layout: BenchmarkLayout
     target_chunk_bytes: int
     target_shard_bytes: int | None = None
+    target_chunk_bytes_by_access: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         layout = BenchmarkLayout(self.layout)
@@ -115,6 +117,28 @@ class StorageCandidateRequest:
         if chunk_bytes <= 0:
             raise ValueError("target_chunk_bytes must be positive.")
         object.__setattr__(self, "target_chunk_bytes", chunk_bytes)
+        normalized_overrides: dict[str, int] = {}
+        for raw_access, raw_target in self.target_chunk_bytes_by_access:
+            access = AccessPattern(raw_access).value
+            if access in normalized_overrides:
+                raise ValueError(
+                    f"Duplicate access-specific chunk target for {access!r}."
+                )
+            target = int(raw_target)
+            if target <= 0:
+                raise ValueError(
+                    "Access-specific target chunk bytes must be positive."
+                )
+            normalized_overrides[access] = target
+        object.__setattr__(
+            self,
+            "target_chunk_bytes_by_access",
+            tuple(
+                (access.value, normalized_overrides[access.value])
+                for access in AccessPattern
+                if access.value in normalized_overrides
+            ),
+        )
         if layout is BenchmarkLayout.REGULAR:
             if self.target_shard_bytes is not None:
                 raise ValueError(
@@ -128,23 +152,40 @@ class StorageCandidateRequest:
             raise ValueError(
                 "target_shard_bytes cannot be smaller than target_chunk_bytes."
             )
+        if any(
+            target > shard_bytes
+            for _access, target in self.target_chunk_bytes_by_access
+        ):
+            raise ValueError(
+                "target_shard_bytes cannot be smaller than an access-specific "
+                "target chunk size."
+            )
         object.__setattr__(self, "target_shard_bytes", shard_bytes)
 
     @property
     def label(self) -> str:
         chunk = f"chunk_{self.target_chunk_bytes}"
+        access = "".join(
+            f"__{name}_chunk_{value}"
+            for name, value in self.target_chunk_bytes_by_access
+        )
         if self.layout is BenchmarkLayout.REGULAR:
-            return f"regular__{chunk}"
-        return f"sharded__{chunk}__shard_{self.target_shard_bytes}"
+            return f"regular__{chunk}{access}"
+        return (
+            f"sharded__{chunk}{access}__shard_{self.target_shard_bytes}"
+        )
 
     def as_manifest(self) -> dict[str, object]:
         return {
             "schema_id": "palette.storage_benchmark_candidate_request",
-            "schema_version": 1,
+            "schema_version": 2,
             "label": self.label,
             "layout": self.layout.value,
             "target_chunk_bytes": self.target_chunk_bytes,
             "target_shard_bytes": self.target_shard_bytes,
+            "target_chunk_bytes_by_access": dict(
+                self.target_chunk_bytes_by_access
+            ),
             "row_overrides_supported": False,
         }
 

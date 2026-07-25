@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Mapping
+
+from fisheye.shared.zarr.storage_intent import AccessPattern
+
 from fisheye.shared.zarr.detection_schema import CanonicalDetectionDimensions
 from fisheye.shared.zarr.detection_storage import (
     CanonicalDetectionStoragePlanSet,
@@ -19,6 +23,7 @@ def plan_detection_benchmark_candidate(
     target_chunk_bytes: int,
     target_shard_bytes: int | None,
     layout: str,
+    target_chunk_bytes_by_access: Mapping[AccessPattern | str, int] | None = None,
 ) -> CanonicalDetectionStoragePlanSet:
     """Resolve one regular or sharded candidate without row overrides."""
 
@@ -39,6 +44,7 @@ def plan_detection_benchmark_candidate(
         target_chunk_bytes=chunk_bytes,
         target_shard_bytes=shard_bytes,
         shard_immutable=resolved_layout == "sharded",
+        target_chunk_bytes_by_access=target_chunk_bytes_by_access,
     )
     return plan_canonical_detection_storage(dimensions, profile=profile)
 

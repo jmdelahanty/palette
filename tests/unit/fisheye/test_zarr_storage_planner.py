@@ -42,6 +42,61 @@ def test_benchmark_profile_sweeps_bytes_not_rows() -> None:
     assert "benchmark_regular" in profile.profile_id
 
 
+def test_access_specific_chunk_budget_preserves_one_shared_planner() -> None:
+    profile = make_benchmark_storage_profile(
+        target_chunk_bytes=128 * 1024,
+        target_shard_bytes=8 * MIB,
+        shard_immutable=True,
+        target_chunk_bytes_by_access={AccessPattern.EAGER: MIB},
+    )
+    offsets = plan_storage(
+        ArrayIntent(
+            name="frame_row_offsets",
+            shape=(1_188_001,),
+            dtype=np.uint64,
+            access=AccessPattern.EAGER,
+            write_mode=WriteMode.IMMUTABLE,
+        ),
+        profile,
+    )
+    frame_indices = plan_storage(
+        ArrayIntent(
+            name="frame_indices",
+            shape=(1_187_087,),
+            dtype=np.uint32,
+            access=AccessPattern.WINDOWED,
+            write_mode=WriteMode.IMMUTABLE,
+        ),
+        profile,
+    )
+
+    assert profile.chunk_byte_budget(AccessPattern.EAGER) == (MIB, MIB, MIB)
+    assert profile.chunk_byte_budget(AccessPattern.WINDOWED) == (
+        128 * 1024,
+        128 * 1024,
+        128 * 1024,
+    )
+    assert offsets.chunk_shape == (131_072,)
+    assert offsets.chunk_nbytes == MIB
+    assert offsets.shard_shape == (1_048_576,)
+    assert frame_indices.chunk_shape == (32_768,)
+    assert frame_indices.chunk_nbytes == 128 * 1024
+    assert frame_indices.shard_shape == (1_212_416,)
+    assert profile.as_manifest()["target_chunk_bytes_by_access"] == {
+        "eager": MIB
+    }
+
+
+def test_access_specific_chunk_budget_cannot_exceed_benchmark_shard() -> None:
+    with pytest.raises(ValueError, match="smaller than any chunk target"):
+        make_benchmark_storage_profile(
+            target_chunk_bytes=128 * 1024,
+            target_shard_bytes=512 * 1024,
+            shard_immutable=True,
+            target_chunk_bytes_by_access={AccessPattern.EAGER: MIB},
+        )
+
+
 def test_narrow_timelines_derive_different_row_counts_from_bytes() -> None:
     frame_counts = plan_storage(
         ArrayIntent(

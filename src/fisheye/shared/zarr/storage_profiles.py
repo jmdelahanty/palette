@@ -3,12 +3,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Mapping
 
 from fisheye.shared.zarr.storage_intent import AccessPattern
 
 
 KIB = 1024
 MIB = 1024 * KIB
+
+
+def _normalize_chunk_targets_by_access(
+    values: Mapping[AccessPattern | str, int]
+    | tuple[tuple[AccessPattern | str, int], ...],
+) -> tuple[tuple[str, int], ...]:
+    normalized: dict[str, int] = {}
+    items = values.items() if isinstance(values, Mapping) else values
+    for raw_access, raw_target in items:
+        access = AccessPattern(raw_access).value
+        if access in normalized:
+            raise ValueError(
+                f"Duplicate chunk-byte override for access pattern {access!r}."
+            )
+        target = int(raw_target)
+        if target <= 0:
+            raise ValueError(
+                "Access-specific target chunk bytes must be positive; "
+                f"got {raw_target!r} for {access!r}."
+            )
+        normalized[access] = target
+    return tuple(
+        (access.value, normalized[access.value])
+        for access in AccessPattern
+        if access.value in normalized
+    )
 
 
 @dataclass(frozen=True)
@@ -27,6 +54,7 @@ class StorageProfile:
     codec_profile_id: str
     shard_immutable: bool = True
     shard_owned_appends: bool = True
+    target_chunk_bytes_by_access: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         positive_fields = {
@@ -52,6 +80,31 @@ class StorageProfile:
             raise ValueError(
                 "per_row_target_shard_bytes cannot exceed max_shard_bytes."
             )
+        object.__setattr__(
+            self,
+            "target_chunk_bytes_by_access",
+            _normalize_chunk_targets_by_access(
+                self.target_chunk_bytes_by_access
+            ),
+        )
+
+    def chunk_byte_budget(self, access: AccessPattern) -> tuple[int, int, int]:
+        """Return ``(target, minimum, maximum)`` for one access class.
+
+        Access-specific targets are exact benchmark/profile decisions. Arrays
+        without an override retain the profile's ordinary target and bounds.
+        """
+
+        resolved = AccessPattern(access).value
+        overrides = dict(self.target_chunk_bytes_by_access)
+        if resolved in overrides:
+            target = int(overrides[resolved])
+            return target, target, target
+        return (
+            int(self.target_chunk_bytes),
+            int(self.min_chunk_bytes),
+            int(self.max_chunk_bytes),
+        )
 
     def shard_target_bytes(self, access: AccessPattern) -> int:
         """Return the outer-shard target for an access class."""
@@ -65,7 +118,7 @@ class StorageProfile:
 
         return {
             "schema_id": "palette.storage_profile",
-            "schema_version": 1,
+            "schema_version": 2,
             "profile_id": self.profile_id,
             "target_chunk_bytes": self.target_chunk_bytes,
             "min_chunk_bytes": self.min_chunk_bytes,
@@ -78,6 +131,9 @@ class StorageProfile:
             "codec_profile_id": self.codec_profile_id,
             "shard_immutable": self.shard_immutable,
             "shard_owned_appends": self.shard_owned_appends,
+            "target_chunk_bytes_by_access": dict(
+                self.target_chunk_bytes_by_access
+            ),
         }
 
 
@@ -167,6 +223,7 @@ def make_benchmark_storage_profile(
     target_chunk_bytes: int,
     target_shard_bytes: int,
     shard_immutable: bool,
+    target_chunk_bytes_by_access: Mapping[AccessPattern | str, int] | None = None,
 ) -> StorageProfile:
     """Derive one exact byte-sweep candidate without row-count constants."""
 
@@ -177,9 +234,23 @@ def make_benchmark_storage_profile(
     if shard_bytes < chunk_bytes:
         raise ValueError("Benchmark shard target cannot be smaller than chunk target.")
     layout = "sharded" if shard_immutable else "regular"
+    normalized_overrides = _normalize_chunk_targets_by_access(
+        target_chunk_bytes_by_access or {}
+    )
+    largest_chunk_target = max(
+        (chunk_bytes, *(value for _access, value in normalized_overrides))
+    )
+    if shard_immutable and shard_bytes < largest_chunk_target:
+        raise ValueError(
+            "Benchmark shard target cannot be smaller than any chunk target."
+        )
+    access_suffix = "".join(
+        f"__{access}_chunk_{value}"
+        for access, value in normalized_overrides
+    )
     profile_id = (
         f"{base.profile_id}__benchmark_{layout}"
-        f"__chunk_{chunk_bytes}__shard_{shard_bytes}"
+        f"__chunk_{chunk_bytes}{access_suffix}__shard_{shard_bytes}"
     )
     return replace(
         base,
@@ -191,4 +262,5 @@ def make_benchmark_storage_profile(
         per_row_target_shard_bytes=shard_bytes,
         max_shard_bytes=shard_bytes,
         shard_immutable=bool(shard_immutable),
+        target_chunk_bytes_by_access=normalized_overrides,
     )
