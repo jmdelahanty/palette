@@ -195,3 +195,53 @@ also localizes the next optimization target: the sealed per-track coordinate
 publisher itself, not receipt hashing, array-proof closure, transfer, or worker
 count. Any change there should retain the freshly minted typed authorities and
 the same rollback boundary rather than weakening coordinate lineage checks.
+
+## Canonical identity-proof reuse canary
+
+A third like-for-like Sleepyfish canary separated the previously broad
+`per_track_coordinate_publication` phase and reused sealed row-identity and
+temporal-lineage proofs within the existing operation scope on 2026-07-24:
+
+- Palette commit: `bf5b360b`
+- materialization LSF job: `153172180` on `h07u14`
+- exhaustive public-reader LSF job: `153172210` on `h07u26`
+- output: `track_kinematics_sleepyfish_cam2010095_identity_proof_canary_20260724_v001`
+- source rows: `1,169,010`; requested slots / shard workers: `8` / `8`
+- application wall time: `340.4` seconds
+- authoritative publication: `220.1` seconds
+- maximum LSF RSS: `1.7` GiB
+
+The decoded-payload root remained exactly
+`0d246d1df9424314bd7c9c2cd9246fb64206fb3f38961522e64447bd87bab6e3`.
+The independent normal public loader completed successfully in `151` seconds
+and accepted one track with `104` full-motion surfaces.
+
+| Phase | Previous canary (s) | Identity-proof canary (s) | Reduction |
+|---|---:|---:|---:|
+| Total application | 445.9 | 340.4 | 23.7% |
+| Authoritative publication | 325.1 | 220.1 | 32.3% |
+| Post-rename canonical binding | 133.7 | 31.0 | 76.8% |
+| Broad per-track publication | 117.0 | 13.9 | 88.1% |
+| Physical tree copy | 6.2 | 6.2 | unchanged |
+| Completion / full-motion sealing | 176.1 | 173.9 | unchanged |
+
+The new per-track timing resolves the `13.9`-second phase into:
+
+| Per-track subphase | Seconds |
+|---|---:|
+| Track time-lineage publication | 1.73 |
+| Track identity preparation | 3.89 |
+| Track row-identity publication | 7.76 |
+| Track position publication | 0.51 |
+
+The optimization does not introduce a process-global or time-based cache.
+Fresh readers remain exhaustive. Within one explicit publication operation,
+the exact archive, persisted refs, and digests identify a reusable proof; the
+outer publication still re-runs every distinct proof before leaving the attrs
+rollback boundary. Tests also mutate a temporal authority after its initial
+verification and confirm that the closing proof fails the operation.
+
+The stable physical-copy and completion timings localize the improvement to
+the intended canonical identity/binding path. Completion and full-motion
+sealing is now the dominant authoritative-publication cost and should be the
+next separately investigated optimization target.
