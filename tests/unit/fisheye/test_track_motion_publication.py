@@ -444,6 +444,11 @@ def test_staged_scientific_validation_binds_full_numeric_check_to_decoded_root(
     assert receipt["decoded_payload"]["root_sha256"] == "8" * 64
     assert receipt["validated_tracks"] == [{"track_id": 7, "sample_count": 2}]
     assert len(receipt["record_sha256"]) == 64
+    run.attrs[mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR] = receipt
+    root_attrs = mod._motion_run_root_attrs_record(run, _sealed.position_bindings)
+    assert root_attrs["record"]["immutable_attrs"][
+        mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+    ] == receipt
 
 
 def test_staged_scientific_validation_rejects_wrong_numeric_payload(
