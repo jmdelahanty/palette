@@ -535,6 +535,12 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
         raise AssertionError("registry model-resolution provenance should be skipped for explicit models")
 
     monkeypatch.setattr(mod, "write_detect_model_resolution_provenance", _unexpected_provenance)
+    status_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        mod,
+        "emit_detect_step_status",
+        lambda **kwargs: status_calls.append(kwargs),
+    )
 
     result = mod._run_detect_plan(  # noqa: SLF001
         plan=plan,
@@ -563,6 +569,83 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
 
     assert result.ok is True
     assert result.detect_run == "detect_explicit"
+    assert status_calls == [
+        {
+            "zarr_path": zarr_path.resolve(),
+            "registry_path": tmp_path / "missing_registry.sqlite",
+            "status": "ok",
+            "run_name": "detect_explicit",
+            "reason": "detect_inference_ok",
+            "selected_model_path": str(model_path.resolve()),
+            "selected_run_id": None,
+            "selected_set_id": None,
+        }
+    ]
+
+
+def test_run_detect_plan_records_inference_failure_in_explicit_registry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    recording_dir = zarr_path.parent.parent
+    video_path = recording_dir / "cams" / "cam_1.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"")
+    model_path = tmp_path / "best.pt"
+    model_path.write_bytes(b"model")
+    registry_path = tmp_path / "registry.sqlite"
+    plan = mod.DetectPlan(
+        zarr_path=zarr_path.resolve(),
+        recording_dir=recording_dir.resolve(),
+        video_path=video_path.resolve(),
+        status=mod.STATUS_OK,
+    )
+    _patch_detect_yolo(
+        monkeypatch,
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu oom")),
+    )
+    status_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        mod,
+        "emit_detect_step_status",
+        lambda **kwargs: status_calls.append(kwargs),
+    )
+
+    result = mod._run_detect_plan(  # noqa: SLF001
+        plan=plan,
+        resolved_model=mod.ResolvedModel(
+            model_path=str(model_path.resolve()),
+            payload={
+                "mode": "registry",
+                "selected": {
+                    "model_path": str(model_path.resolve()),
+                    "run_id": "model_run_1",
+                    "set_id": "model_set_1",
+                },
+            },
+        ),
+        write_raw_video_metadata=False,
+        overwrite_raw_video_metadata=False,
+        config=None,
+        conf=None,
+        iou=None,
+        max_det=None,
+        batch_size=None,
+        resize_dims=None,
+        imgsz=None,
+        decode_backend=None,
+        detect_row_shard_rows=131_072,
+        detect_frame_shard_rows=131_072,
+        cpu=False,
+        registry_path=registry_path,
+    )
+
+    assert result.ok is False
+    assert result.reason == "detect_inference_failed"
+    assert status_calls[0]["registry_path"] == registry_path
+    assert status_calls[0]["status"] == "error"
+    assert status_calls[0]["reason"] == "detect_inference_failed"
 
 
 # ---------------------------------------------------------------------------

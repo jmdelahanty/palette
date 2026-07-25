@@ -32,9 +32,10 @@ DECODE_BACKEND_CHOICES = (
 )
 
 
-def _emit_detect_step_status(
+def emit_detect_step_status(
     *,
     zarr_path: Path,
+    registry_path: Optional[Path],
     status: str,
     run_name: Optional[str],
     reason: Optional[str],
@@ -44,6 +45,11 @@ def _emit_detect_step_status(
 ) -> None:
     """Write a detect step status row to the registry (non-fatal)."""
     try:
+        resolved_registry_path = None
+        if registry_path is not None:
+            resolved_registry_path = registry_path.expanduser().resolve()
+            if not resolved_registry_path.exists():
+                return
         resolved_zarr_path = zarr_path.expanduser().resolve()
         root = zarr.open(str(resolved_zarr_path), mode="r", use_consolidated=False)
 
@@ -81,8 +87,9 @@ def _emit_detect_step_status(
                 "set_id": selected_set_id,
             },
             console=None,
-            auto_registry_from_env=True,
-            require_env_registry_exists=False,
+            registry=resolved_registry_path,
+            auto_registry_from_env=resolved_registry_path is None,
+            require_env_registry_exists=True,
             invalidate_on_ok=True,
             trigger_run_name=run_name,
         )
@@ -569,8 +576,9 @@ def run_detect_with_registry_model(
             run_provenance=effective_run_provenance,
         )
     except Exception as exc:
-        _emit_detect_step_status(
+        emit_detect_step_status(
             zarr_path=resolved_output_path,
+            registry_path=resolved_registry_path,
             status="error",
             run_name=None,
             reason="detect_inference_failed",
@@ -616,8 +624,9 @@ def run_detect_with_registry_model(
             resolution_payload=payload,
         )
 
-    _emit_detect_step_status(
+    emit_detect_step_status(
         zarr_path=resolved_output_path,
+        registry_path=resolved_registry_path,
         status="ok",
         run_name=run_name,
         reason="detect_inference_ok",

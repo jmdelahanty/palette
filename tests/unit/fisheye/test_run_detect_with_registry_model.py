@@ -23,6 +23,39 @@ def _patch_detect_yolo(monkeypatch: pytest.MonkeyPatch, func) -> None:
     monkeypatch.setitem(sys.modules, "fisheye.detection.detect_yolo", fake_module)
 
 
+def test_emit_detect_step_status_uses_explicit_registry_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(
+        mod,
+        "emit_stage_completion",
+        lambda *_args, **kwargs: calls.append(kwargs),
+    )
+
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.touch()
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    mod.emit_detect_step_status(
+        zarr_path=zarr_path,
+        registry_path=registry_path,
+        status="ok",
+        run_name="detect_001",
+        reason="detect_inference_ok",
+        selected_model_path="/models/best.pt",
+        selected_run_id="model_run_1",
+        selected_set_id="model_set_1",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["registry"] == registry_path
+    assert calls[0]["auto_registry_from_env"] is False
+    assert calls[0]["run_name"] == "detect_001"
+
+
 def test_pick_best_candidate_enforces_unique_when_tied() -> None:
     candidates = [
         mod.Candidate(

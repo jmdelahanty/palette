@@ -37,6 +37,7 @@ from fisheye.utils.run_detect_with_registry_model import DEFAULT_DETECT_FRAME_SH
 from fisheye.utils.run_detect_with_registry_model import DEFAULT_DETECT_ROW_SHARD_ROWS
 from fisheye.utils.run_detect_with_registry_model import build_detect_payload_args
 from fisheye.utils.run_detect_with_registry_model import build_detect_resolution_payload
+from fisheye.utils.run_detect_with_registry_model import emit_detect_step_status
 from fisheye.utils.run_detect_with_registry_model import pick_best_detect_candidate
 from fisheye.utils.run_detect_with_registry_model import write_detect_model_resolution_provenance
 from fisheye.shared.zarr_recording_context import infer_recording_context
@@ -827,6 +828,16 @@ def _run_detect_plan(
                 payload=resolved_model.payload,
             )
     except Exception as exc:
+        emit_detect_step_status(
+            zarr_path=plan.zarr_path,
+            registry_path=registry_path,
+            status="error",
+            run_name=None,
+            reason="detect_inference_failed",
+            selected_model_path=resolved_model.model_path,
+            selected_run_id=selected_payload.get("run_id"),
+            selected_set_id=selected_payload.get("set_id"),
+        )
         return DetectRegistryResult(
             ok=False,
             status="failed",
@@ -844,6 +855,16 @@ def _run_detect_plan(
             resolution_payload=resolved_model.payload,
         )
 
+    emit_detect_step_status(
+        zarr_path=plan.zarr_path,
+        registry_path=registry_path,
+        status="ok",
+        run_name=run_name,
+        reason="detect_inference_ok",
+        selected_model_path=resolved_model.model_path,
+        selected_run_id=selected_payload.get("run_id"),
+        selected_set_id=selected_payload.get("set_id"),
+    )
     return DetectRegistryResult(
         ok=True,
         status="ok",
