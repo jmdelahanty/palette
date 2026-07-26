@@ -4,11 +4,14 @@ import json
 import sys
 from pathlib import Path
 
+from fisheye.utils import run_citrus_session_import as import_mod
 from fisheye.utils.run_citrus_session_import import (
+    CommandRecord,
     build_import_command,
     build_organize_command,
     _read_recording_dirs_from_organize_log,
     _read_zarr_paths_from_import_log,
+    _organize_failure_reason,
 )
 
 
@@ -128,3 +131,77 @@ def test_read_recording_dirs_from_empty_organize_log_returns_empty(tmp_path: Pat
     log_path.write_text(json.dumps({"event": "run_start"}) + "\n", encoding="utf-8")
 
     assert _read_recording_dirs_from_organize_log(log_path) == []
+
+
+def test_applied_organizer_with_zero_recordings_fails_closed(tmp_path: Path) -> None:
+    log_path = tmp_path / "organize.jsonl"
+    log_path.write_text(json.dumps({"event": "batch_start"}) + "\n", encoding="utf-8")
+
+    assert _organize_failure_reason(
+        apply=True,
+        returncode=0,
+        organize_log=log_path,
+        organized_recording_dirs=[],
+    ) == "applied organizer produced zero recording_applied entries"
+
+
+def test_dry_run_may_have_no_applied_recordings(tmp_path: Path) -> None:
+    log_path = tmp_path / "organize.jsonl"
+    log_path.write_text(json.dumps({"event": "batch_start"}) + "\n", encoding="utf-8")
+
+    assert (
+        _organize_failure_reason(
+            apply=False,
+            returncode=0,
+            organize_log=log_path,
+            organized_recording_dirs=[],
+        )
+        is None
+    )
+
+
+def test_applied_main_returns_failure_and_writes_disposition_for_zero_recordings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session = tmp_path / "staging" / "session"
+    session.mkdir(parents=True)
+    run_dir = tmp_path / "run"
+    status_path = run_dir / "status.json"
+
+    def fake_run_command(command, *, name: str, run_dir: Path) -> CommandRecord:
+        assert name == "01_organize_recordings"
+        log = run_dir / "organize_recordings" / "organize_recordings_test.jsonl"
+        log.write_text(json.dumps({"event": "batch_start"}) + "\n", encoding="utf-8")
+        return CommandRecord(
+            name=name,
+            command=list(command),
+            returncode=0,
+            stdout_path=str(run_dir / "stdout.txt"),
+            stderr_path=str(run_dir / "stderr.txt"),
+        )
+
+    monkeypatch.setattr(import_mod, "_run_command", fake_run_command)
+
+    result = import_mod.main(
+        [
+            str(session),
+            "--dest-root",
+            str(tmp_path / "recordings"),
+            "--run-dir",
+            str(run_dir),
+            "--status-json",
+            str(status_path),
+            "--apply",
+        ]
+    )
+
+    assert result == 1
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["organized_recording_dirs"] == []
+    disposition = json.loads(
+        (session / "_palette_batch_disposition.json").read_text(encoding="utf-8")
+    )
+    assert disposition["workflow"]["status"] == "failed"
+    assert disposition["cleanup_assessment"]["safe_to_delete_batch"] is False
