@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,3 +188,93 @@ def test_atomic_candidate_publication_never_sets_latest_or_selection(
     )
     assert repeated["published"] is False
     assert repeated["status"] == "already_complete"
+
+
+def test_candidate_reread_preserves_creation_provenance_across_software_contexts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_zarr = tmp_path / "recording.zarr"
+    zarr.open_group(str(source_zarr), mode="w", zarr_format=3).require_group("analysis")
+    plan = _plan(source_zarr)
+    plan.receipt_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "_record_from_receipt_and_zarr",
+        lambda _source, _receipt: (
+            SimpleNamespace(receipt_sha256=plan.receipt_sha256),
+            plan.candidate_record,
+            plan.candidate_record_sha256,
+        ),
+    )
+    mod.publish_arena_geometry_candidate(
+        plan,
+        scratch_root=tmp_path / "scratch",
+        copy_backend="python",
+    )
+
+    replay_provenance = dict(plan.run_provenance)
+    replay_provenance.update(
+        {
+            "git_sha": "f" * 40,
+            "git_short_sha": "f" * 8,
+            "git_dirty": False,
+            "fisheye_version": "99.0.0",
+            "runtime": {"host": {"hostname": "future-validator"}},
+        }
+    )
+    replay_plan = replace(plan, run_provenance=replay_provenance)
+
+    validation = mod.validate_arena_geometry_candidate_run(
+        plan.target_run_path,
+        expected_plan=replay_plan,
+        require_complete=True,
+        require_eligible=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["errors"] == []
+
+
+def test_candidate_reread_rejects_changed_stable_provenance_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_zarr = tmp_path / "recording.zarr"
+    zarr.open_group(str(source_zarr), mode="w", zarr_format=3).require_group("analysis")
+    plan = _plan(source_zarr)
+    plan.receipt_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "_record_from_receipt_and_zarr",
+        lambda _source, _receipt: (
+            SimpleNamespace(receipt_sha256=plan.receipt_sha256),
+            plan.candidate_record,
+            plan.candidate_record_sha256,
+        ),
+    )
+    mod.publish_arena_geometry_candidate(
+        plan,
+        scratch_root=tmp_path / "scratch",
+        copy_backend="python",
+    )
+
+    replay_provenance = dict(plan.run_provenance)
+    replay_provenance["input_artifacts"] = [
+        {
+            "role": "recording_geometry_recovery_receipt",
+            "path": str(plan.receipt_path),
+            "sha256": "sha256:" + "0" * 64,
+        }
+    ]
+    replay_plan = replace(plan, run_provenance=replay_provenance)
+
+    validation = mod.validate_arena_geometry_candidate_run(
+        plan.target_run_path,
+        expected_plan=replay_plan,
+        require_complete=True,
+        require_eligible=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["errors"] == ["run provenance input_artifacts mismatch"]
