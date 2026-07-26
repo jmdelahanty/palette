@@ -27,6 +27,9 @@ SHARD_POLICIES = (
     SHARD_POLICY_ALL_ROW_ALIGNED,
     SHARD_POLICY_MULTI_CHUNK_CAPPED,
 )
+STRUCTURED_DTYPE_SINGLE_CHUNK_LAYOUT = (
+    "structured_dtype_single_chunk_zarr_v3_sharding_codec_workaround_v1"
+)
 _SOURCE_ROOT: zarr.Group | None = None
 _DESTINATION_ROOT: zarr.Group | None = None
 
@@ -168,10 +171,20 @@ def build_sharded_copy_plan(
             raise ValueError(f"Array {path!r} has no logical chunk contract.")
         source_chunks = tuple(int(value) for value in chunks)
         layout = layouts.get(path)
+        structured_dtype = np.dtype(array.dtype).kind == "V"
+        if structured_dtype and layout is not None and layout.outer_shards is not None:
+            raise ValueError(
+                f"Array {path!r} has a structured dtype that Zarr v3 cannot "
+                "safely write through its sharding codec."
+            )
         requested_inner = (
-            source_chunks
-            if layout is None or layout.inner_chunks is None
-            else tuple(int(value) for value in layout.inner_chunks)
+            tuple(max(1, int(value)) for value in array.shape)
+            if structured_dtype
+            else (
+                source_chunks
+                if layout is None or layout.inner_chunks is None
+                else tuple(int(value) for value in layout.inner_chunks)
+            )
         )
         inner = _normalize_grid(
             requested_inner,
@@ -187,7 +200,7 @@ def build_sharded_copy_plan(
             )
         requested_outer: tuple[int, ...] | None = None
         outer: tuple[int, ...] | None = None
-        if row_aligned:
+        if row_aligned and not structured_dtype:
             if layout is not None and layout.outer_shards is not None:
                 requested_outer = tuple(int(value) for value in layout.outer_shards)
                 outer = _aligned_outer_grid(
@@ -234,7 +247,11 @@ def build_sharded_copy_plan(
                 effective_shard_rows=effective,
                 requested_outer_shards=requested_outer,
                 outer_shards=outer,
-                layout_profile=None if layout is None else layout.layout_profile,
+                layout_profile=(
+                    STRUCTURED_DTYPE_SINGLE_CHUNK_LAYOUT
+                    if structured_dtype
+                    else None if layout is None else layout.layout_profile
+                ),
                 shard_policy=policy,
             )
         )

@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -79,12 +80,22 @@ from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     load_persisted_acquisition_camera_authority,
 )
+from fisheye.shared.proof_verification import (
+    finish_proof_verification,
+    proof_verification_operation,
+)
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.observation_coordinate_publication import (
     BoundSourceCameraPositionSurface,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID,
+    COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION,
+    CROP_GEOMETRY_SELECTION_ATTR,
     CROP_GEOMETRY_SELECTION_OPERATION,
     CROP_GEOMETRY_SELECTION_SCHEMA_ID,
     CROP_GEOMETRY_SELECTION_SCHEMA_VERSION,
+    load_collection_proxy_successor_source_rowset,
     load_persisted_source_camera_position_surface,
     require_bound_source_camera_position_surface,
 )
@@ -134,9 +145,26 @@ from fisheye.shared.stimulus_physical_coordinate import (
     load_stimulus_physical_coordinate_authority,
     require_bound_stimulus_physical_coordinate_authority,
 )
+from fisheye.shared.source_camera_physical_authority import (
+    BoundSourceCameraPhysicalAuthority,
+    load_source_camera_physical_authority,
+    require_bound_source_camera_physical_authority,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr.columnar import load_structured_dataset
+from fisheye.shared.zarr_payload_receipt import (
+    build_payload_validation_receipt,
+    canonical_payload_integrity_receipt,
+    verify_payload_integrity_receipt,
+    verify_payload_validation_receipt,
+)
 from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
+
+
+TrackPhysicalAuthority = (
+    BoundStimulusPhysicalCoordinateAuthority
+    | BoundSourceCameraPhysicalAuthority
+)
 
 
 SAMPLE_REASON_OK = 0
@@ -194,6 +222,29 @@ _REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
     }
 )
 _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS = frozenset(
+    {
+        "chaser_metrics",
+        "swim_bout_run",
+    }
+)
+_REQUIRED_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS = frozenset(
+    {
+        "position_lineage_mode",
+        "position_source_path",
+        "position_source_rowset_path",
+        "position_source_kind",
+        "crop_run",
+        "keypoint_path",
+        "keypoint_source_crop_run",
+        "tracking_path",
+        "tracking_source_rowset_path",
+        "source_detection_run_id",
+    }
+)
+_REQUIRED_CANONICAL_OFFLINE_DIRECT_V2_INPUT_KEYS = (
+    _REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS | {"position_lineage_mode"}
+)
+_OPTIONAL_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS = frozenset(
     {
         "chaser_metrics",
         "swim_bout_run",
@@ -314,11 +365,96 @@ TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID = (
     "palette.track_motion_publication_manifest"
 )
 TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION = 1
+TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2 = 2
+TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR = (
+    "track_motion_publication_manifest_schema_version"
+)
+TRACK_POSITION_LINEAGE_SCHEMA_ID = "palette.track_position_lineage"
+TRACK_POSITION_LINEAGE_SCHEMA_VERSION = 1
+TRACK_POSITION_LINEAGE_DIRECT_CROP_V1 = "direct_crop_selection_v1"
+TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1 = (
+    "verified_collection_proxy_successor_v1"
+)
+TRACK_MOTION_RUN_DERIVATION_SCHEMA_ID = "palette.track_motion_run_derivation"
+TRACK_MOTION_RUN_DERIVATION_SCHEMA_VERSION_V2 = 2
 TRACK_MOTION_PUBLICATION_COMMIT_ATTR = "track_motion_publication_commit"
 TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_ID = (
     "palette.track_motion_publication_commit"
 )
 TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION = 1
+TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION_V2 = 2
+TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR = (
+    "track_motion_payload_integrity_receipt"
+)
+TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR = (
+    "track_motion_payload_validation_receipt"
+)
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR = (
+    "track_motion_staged_scientific_validation"
+)
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID = (
+    "palette.track_motion_staged_scientific_validation"
+)
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION = 1
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID = (
+    "palette.track_motion_core_numeric_validator"
+)
+TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION = 1
+TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_motion_staged_scientific_numerical_policy",
+    "schema_version": 1,
+    "scope": "all_tracks_full_core_numeric_derivation_and_summary_invariants",
+    "payload_binding": "exact_decoded_copy_merkle_root",
+    "publication_checks_retained": (
+        "closed_inventory_semantic_attrs_payload_hashes_physical_scaling_aliases_domains"
+    ),
+}
+TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR = (
+    "track_kinematics_binding_validation_receipt"
+)
+TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_ID = (
+    "palette.track_kinematics_canonical_binding_input_validator"
+)
+TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
+TRACK_KINEMATICS_BINDING_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_kinematics_binding_numerical_policy",
+    "schema_version": 1,
+    "scientific_validation": (
+        "exact_staging_manifest_identity_time_position_subset_and_physical_scaling"
+    ),
+    "payload_transition": "metadata_only_final_path_coordinate_binding",
+    "post_binding_integrity": (
+        "exact_physical_payload_and_immutable_zarr_metadata_reverification"
+    ),
+}
+TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID = "palette.track_motion_full_validator"
+TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
+TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION = 2
+TRACK_MOTION_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_motion_numerical_policy",
+    "schema_version": 1,
+    "scientific_validation": (
+        "full_live_manifest_numeric_invariants_physical_scaling_domains_and_aliases"
+    ),
+    "floating_comparison": (
+        "persisted_dtype_exact_for_declared_aliases_and_versioned_tolerance_for_derivations"
+    ),
+    "integrity_after_validation": "exact_decoded_shards_plus_physical_payload_sha256",
+}
+TRACK_MOTION_RECEIPT_NUMERICAL_POLICY = {
+    "schema_id": "palette.track_motion_numerical_policy",
+    "schema_version": 2,
+    "scientific_validation": (
+        "staged_full_core_numeric_invariants_bound_to_exact_decoded_payload"
+    ),
+    "authoritative_publication_validation": (
+        "closed_live_manifest_physical_scaling_domains_aliases_and_semantic_attrs"
+    ),
+    "floating_comparison": (
+        "persisted_dtype_exact_for_declared_aliases_and_versioned_tolerance_for_derivations"
+    ),
+    "integrity_after_validation": "exact_decoded_shards_plus_physical_payload_sha256",
+}
 TRACK_MOTION_INPUT_AUTHORITY_ATTR = "track_motion_input_authority"
 TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_ID = "palette.track_motion_input_authority"
 TRACK_MOTION_INPUT_AUTHORITY_SCHEMA_VERSION = 1
@@ -357,7 +493,7 @@ class BoundTrackPositionBindings:
     run_name: str
     source_positions: BoundCanonicalCoordinateDescriptor
     source_temporal_authority: BoundSourceRowTemporalAuthority
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None
+    physical_authority: TrackPhysicalAuthority | None
     track_positions: tuple[tuple[int, TrackPositionPublicationResult], ...]
     run_group: zarr.Group
 
@@ -668,12 +804,15 @@ def _track_kinematics_source_refs(
     *,
     run_type: str,
     inputs: Mapping[str, Any],
+    publication_schema_version: int = TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
 ) -> Dict[str, Any]:
     """Normalize exact archive-relative dependencies for one run."""
 
     refs: Dict[str, Any] = {}
 
     if run_type == "online":
+        if publication_schema_version != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("Online track publication supports only manifest v1.")
         refined_run = inputs.get("refined_online_run")
         if refined_run is not None:
             refs["source_refined_online_path"] = (
@@ -724,8 +863,33 @@ def _track_kinematics_source_refs(
             refs["source_chaser_index"] = int(chaser_index)
         return refs
 
+    if publication_schema_version == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION:
+        detection_value = inputs.get("detection_path")
+        if detection_value not in (None, ""):
+            refs["source_detection_path"] = str(detection_value)
+    elif (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        lineage_mode = inputs.get("position_lineage_mode")
+        if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+            detection_value = inputs.get("detection_path")
+            if detection_value not in (None, ""):
+                refs["source_detection_path"] = str(detection_value)
+        elif lineage_mode == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1:
+            detection_run_id = inputs.get("source_detection_run_id")
+            if detection_run_id not in (None, ""):
+                refs["source_detection_run_id"] = _controlled_run_leaf(
+                    detection_run_id,
+                    label="source_detection_run_id",
+                )
+        else:
+            raise ValueError("Manifest v2 position_lineage_mode is unsupported.")
+    else:
+        raise ValueError(
+            f"Unsupported track motion manifest version {publication_schema_version!r}."
+        )
     for source_key in (
-        "detection_path",
         "position_source_path",
         "position_source_rowset_path",
     ):
@@ -748,6 +912,30 @@ def _track_kinematics_source_refs(
         refs["source_crop_path"] = (
             "crop_runs/" + _controlled_run_leaf(crop_run, label="crop_run")
         )
+    if (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+        and inputs.get("position_lineage_mode")
+        == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+    ):
+        keypoint_source_crop_run = inputs.get("keypoint_source_crop_run")
+        tracking_source_rowset_path = inputs.get("tracking_source_rowset_path")
+        keypoint_source_path = "crop_runs/" + _controlled_run_leaf(
+            keypoint_source_crop_run,
+            label="keypoint_source_crop_run",
+        )
+        tracking_source_path = _controlled_two_component_run_path(
+            tracking_source_rowset_path,
+            families=frozenset({"crop_runs"}),
+            label="tracking_source_rowset_path",
+        )
+        if tracking_source_path != keypoint_source_path:
+            raise ValueError(
+                "Keypoint and tracking lineage must identify the same exact source "
+                "rowset."
+            )
+        refs["source_keypoint_crop_path"] = keypoint_source_path
+        refs["source_tracking_rowset_path"] = tracking_source_path
     tracking_path = inputs.get("tracking_path")
     if tracking_path not in (None, ""):
         refs["source_tracking_path"] = _controlled_two_component_run_path(
@@ -770,10 +958,11 @@ def _track_kinematics_contract_attrs(
     method: str,
     parameters: Mapping[str, Any],
     inputs: Mapping[str, Any],
+    publication_schema_version: int = TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
 ) -> Dict[str, Any]:
     """Return the shared derived-run contract attrs for track kinematics."""
 
-    return {
+    attrs = {
         "schema_id": TRACK_KINEMATICS_RUN_SCHEMA_ID,
         "schema_version": TRACK_KINEMATICS_RUN_SCHEMA_VERSION,
         "method": method,
@@ -783,8 +972,17 @@ def _track_kinematics_contract_attrs(
         "source_refs": _track_kinematics_source_refs(
             run_type=run_type,
             inputs=inputs,
+            publication_schema_version=publication_schema_version,
         ),
     }
+    if (
+        publication_schema_version
+        != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+    ):
+        attrs[TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR] = (
+            publication_schema_version
+        )
+    return attrs
 
 
 @dataclass
@@ -796,6 +994,16 @@ class KeypointResolution:
     is_refined: bool
     base_run_name: str
     crop_run: str
+
+
+@dataclass(frozen=True)
+class CollectionProxySuccessorTrackingResolution:
+    """Original tracking authority for an exact current-coordinate successor."""
+
+    position_crop_run: str
+    historical_source_rowset_path: str
+    expected_detect_run: str
+    expected_source_rowset_fingerprint: RowsetFingerprint
 
 
 @dataclass
@@ -891,6 +1099,71 @@ def resolve_keypoint_group(
             return resolve_raw(latest_raw)
 
     raise ValueError("Unable to resolve a keypoint run; no runs detected.")
+
+
+def resolve_collection_proxy_successor_tracking(
+    root: zarr.Group,
+    *,
+    keypoints: KeypointResolution,
+    position_crop_run: str,
+) -> CollectionProxySuccessorTrackingResolution:
+    """Bind successor positions to their exact historical tracking authority.
+
+    Keypoints and tracking remain immutable on the historical merged-proxy
+    rowset. A successor may reuse those arrays only when its sealed mapping
+    proves an exact all-row copy of that same rowset. Tracking IDs are still
+    aligned by the persisted unique ``instance_key`` set downstream.
+    """
+
+    successor_name = _controlled_run_leaf(
+        position_crop_run,
+        label="position_source_run",
+    )
+    successor_path = f"crop_runs/{successor_name}"
+    historical_path = load_collection_proxy_successor_source_rowset(
+        root,
+        successor_path,
+    )
+    expected_historical_path = f"crop_runs/{keypoints.crop_run}"
+    if historical_path != expected_historical_path:
+        raise ValueError(
+            "Selected coordinate successor does not prove exact identity with "
+            "the keypoint source rowset: "
+            f"successor_source={historical_path!r}, "
+            f"keypoint_source={expected_historical_path!r}."
+        )
+    historical_group = root[historical_path]
+    revision = resolve_rowset_edit_revision(historical_group.attrs)
+    fingerprint = build_group_rowset_fingerprint(
+        historical_group,
+        source_rowset_path=historical_path,
+        source_edit_revision=revision,
+    )
+    base_group = root[f"keypoints_runs/{keypoints.base_run_name}"]
+    candidates = {
+        str(value).strip()
+        for value in (
+            keypoints.group.attrs.get("source_detect_run"),
+            base_group.attrs.get("source_detect_run"),
+            historical_group.attrs.get("source_detect_run"),
+        )
+        if (
+            isinstance(value, str)
+            and str(value).strip()
+            and str(value).strip().lower() != "unknown"
+        )
+    }
+    if len(candidates) != 1:
+        raise ValueError(
+            "Keypoint and historical-rowset lineage do not identify one exact "
+            "source_detect_run for successor tracking resolution."
+        )
+    return CollectionProxySuccessorTrackingResolution(
+        position_crop_run=successor_name,
+        historical_source_rowset_path=historical_path,
+        expected_detect_run=next(iter(candidates)),
+        expected_source_rowset_fingerprint=fingerprint,
+    )
 
 
 def load_keypoint_usability_array(
@@ -2057,7 +2330,35 @@ def rollback_deferred_track_kinematics_selector_activation(
         expected_owner=activation.expected_owner,
     )
 
+def resolve_track_physical_authority(
+    root: zarr.Group,
+    *,
+    stimulus_run: str | None,
+) -> tuple[TrackPhysicalAuthority | None, Dict[str, Any]]:
+    """Resolve stimulus or recording calibration to one downstream contract."""
 
+    stimulus, info = resolve_canonical_track_physical_authority(
+        root,
+        stimulus_run=stimulus_run,
+    )
+    if stimulus is not None:
+        return stimulus, info
+    try:
+        recording = load_source_camera_physical_authority(root)
+    except KeyError:
+        return None, info
+    recording = require_bound_source_camera_physical_authority(recording)
+    return recording, {
+        "status": "bound_typed_source_camera_mm_v1",
+        "reason_code": "NONE",
+        "authority_kind": "recording_calibration",
+        "camera_id": recording.camera_id,
+        "mm_per_pixel": recording.mm_per_pixel,
+        "authority_manifest_ref": recording.manifest.record_ref,
+        "authority_manifest_sha256": recording.manifest.record_sha256,
+        "physical_frame_ref": recording.physical_frame.record_ref,
+        "physical_frame_sha256": recording.physical_frame.record_sha256,
+    }
 def ensure_track_kinematics_run_group(
     root: zarr.Group,
     run_name: Optional[str],
@@ -2229,12 +2530,30 @@ def mark_track_kinematics_run_complete(
     run_type: str,
     publication_owner_uuid: str,
     validate_complete_run: Callable[[zarr.Group], Mapping[str, Any]],
+    payload_integrity_receipt: Mapping[str, Any] | None = None,
+    payload_run_path: str | Path | None = None,
+    payload_hash_workers: int = 4,
+    staged_scientific_validation: Mapping[str, Any] | None = None,
     defer_selector_eligibility: bool = False,
     deferred_activation_sink: (
         Callable[[DeferredTrackKinematicsSelectorActivation], None] | None
     ) = None,
 ) -> Optional[DeferredTrackKinematicsSelectorActivation]:
     """Validate a complete ineligible run, prepare pointers, and expose it last."""
+
+    receipt_mode = payload_integrity_receipt is not None or payload_run_path is not None
+    if receipt_mode and (
+        payload_integrity_receipt is None or payload_run_path is None
+    ):
+        raise ValueError(
+            "Track receipt publication requires both integrity receipt and run path."
+        )
+    if staged_scientific_validation is not None and not receipt_mode:
+        raise ValueError(
+            "Track staged scientific validation requires payload-integrity receipt mode."
+        )
+    if type(payload_hash_workers) is not int or payload_hash_workers <= 0:
+        raise ValueError("Track payload hash workers must be positive.")
 
     if deferred_activation_sink is not None and not defer_selector_eligibility:
         raise ValueError(
@@ -2366,14 +2685,41 @@ def mark_track_kinematics_run_complete(
                 "Track run did not remain complete and selector-ineligible for final "
                 "validation."
             )
+        verified_staged_scientific_validation = None
+        if staged_scientific_validation is not None:
+            assert payload_integrity_receipt is not None
+            verified_staged_scientific_validation = (
+                verify_track_motion_staged_scientific_validation(
+                    run_group,
+                    staged_scientific_validation,
+                    payload_integrity_receipt=payload_integrity_receipt,
+                )
+            )
+        seal_kwargs: dict[str, Any] = {
+            "expected_publication_owner_uuid": owner_uuid,
+        }
+        if verified_staged_scientific_validation is not None:
+            seal_kwargs["prevalidated_staged_scientific_validation"] = (
+                verified_staged_scientific_validation
+            )
         sealed_motion = _seal_and_load_track_motion_run_before_selection(
             root,
             run_group,
-            expected_publication_owner_uuid=owner_uuid,
+            **seal_kwargs,
         )
         if not sealed_motion.tracks:
             raise RuntimeError(
                 "Complete track run produced no sealed full-motion tracks."
+            )
+        if receipt_mode:
+            assert payload_integrity_receipt is not None
+            _persist_track_motion_payload_validation_receipt(
+                sealed_motion.run_group,
+                sealed_motion,
+                payload_integrity_receipt=payload_integrity_receipt,
+                staged_scientific_validation=(
+                    verified_staged_scientific_validation
+                ),
             )
         resolved_run = _resolve_owned_track_run_child(
             root,
@@ -2395,7 +2741,24 @@ def mark_track_kinematics_run_complete(
             owner_uuid=owner_uuid,
         )
         assert resolved_run is not None
-        sealed_motion.assert_verified()
+        if receipt_mode:
+            assert payload_run_path is not None
+            receipt_validation = verify_track_motion_payload_validation_receipt(
+                root,
+                resolved_run,
+                expected_publication_owner_uuid=owner_uuid,
+                run_path=payload_run_path,
+                require_complete=True,
+                verify_physical_payload=False,
+                hash_workers=payload_hash_workers,
+            )
+            if receipt_validation.get("valid") is not True:
+                raise RuntimeError(
+                    "Track completion payload receipt validation failed: "
+                    f"{receipt_validation!r}."
+                )
+        else:
+            sealed_motion.assert_verified()
 
         write_selector(
             "analysis/track_kinematics_runs",
@@ -2458,7 +2821,8 @@ def mark_track_kinematics_run_complete(
             owner_uuid=owner_uuid,
         )
         assert resolved_run is not None
-        sealed_motion.assert_verified()
+        if not receipt_mode:
+            sealed_motion.assert_verified()
         baseline_motion_manifest_sha256 = getattr(
             sealed_motion,
             "manifest_sha256",
@@ -2542,21 +2906,45 @@ def mark_track_kinematics_run_complete(
                     "Track eligibility commit fresh validation did not report "
                     f"valid=true: {validation!r}."
                 )
-            fresh_motion = _seal_and_load_track_motion_run_before_selection(
-                commit_root,
-                fresh_run,
-                expected_publication_owner_uuid=owner_uuid,
-            )
-            if not fresh_motion.tracks or (
-                baseline_motion_manifest_sha256 is not None
-                and getattr(fresh_motion, "manifest_sha256", None)
-                != baseline_motion_manifest_sha256
-            ):
-                raise RuntimeError(
-                    "Track eligibility commit observed different sealed motion "
-                    "payload."
+            if receipt_mode:
+                assert payload_run_path is not None
+                receipt_validation = verify_track_motion_payload_validation_receipt(
+                    commit_root,
+                    fresh_run,
+                    expected_publication_owner_uuid=owner_uuid,
+                    run_path=payload_run_path,
+                    require_complete=True,
+                    verify_physical_payload=True,
+                    hash_workers=payload_hash_workers,
                 )
-            fresh_motion.assert_verified()
+                if (
+                    receipt_validation.get("valid") is not True
+                    or (
+                        baseline_motion_manifest_sha256 is not None
+                        and receipt_validation.get("manifest_sha256")
+                        != baseline_motion_manifest_sha256
+                    )
+                ):
+                    raise RuntimeError(
+                        "Track eligibility commit observed a different receipt-bound "
+                        f"motion payload: {receipt_validation!r}."
+                    )
+            else:
+                fresh_motion = _seal_and_load_track_motion_run_before_selection(
+                    commit_root,
+                    fresh_run,
+                    expected_publication_owner_uuid=owner_uuid,
+                )
+                if not fresh_motion.tracks or (
+                    baseline_motion_manifest_sha256 is not None
+                    and getattr(fresh_motion, "manifest_sha256", None)
+                    != baseline_motion_manifest_sha256
+                ):
+                    raise RuntimeError(
+                        "Track eligibility commit observed different sealed motion "
+                        "payload."
+                    )
+                fresh_motion.assert_verified()
             fresh_run = _resolve_owned_track_run_child(
                 commit_root,
                 run_name=run_name,
@@ -2838,6 +3226,24 @@ def _compute_heading_turning(
     return delta_heading, angular_velocity, angular_speed
 
 
+def _compute_turning_from_persisted_smoothed_heading(
+    smoothed_heading_degrees: np.ndarray,
+    delta_seconds_full: np.ndarray,
+    *,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Derive turning from the authoritative public float32 heading parent."""
+
+    persisted_parent = np.asarray(smoothed_heading_degrees, dtype=np.float32)
+    return _compute_heading_turning(
+        persisted_parent,
+        delta_seconds_full,
+        transition_valid=transition_valid,
+        sample_valid=sample_valid,
+    )
+
+
 def _bounded_smoothing_window(requested: int, sample_count: int) -> int:
     """Return the exact smoothing window usable by one array domain."""
 
@@ -2991,6 +3397,17 @@ def _compute_speed_derivatives(
         for level in SPEED_DERIVATIVE_LEVELS
         if level in speed_by_level_px
     }
+
+
+def _acceleration_summary_statistics(values: np.ndarray) -> tuple[float, float]:
+    """Summarize acceleration in its persisted public float32 domain."""
+
+    persisted = np.asarray(values, dtype=np.float32)
+    finite = persisted[np.isfinite(persisted)]
+    if not finite.size:
+        nan = float("nan")
+        return nan, nan
+    return float(np.mean(finite)), float(np.std(finite))
 
 
 def build_track_datasets(
@@ -3243,7 +3660,7 @@ def build_track_datasets(
             )
         )
         delta_heading_smoothed_degrees, angular_velocity_smoothed_deg_s, angular_speed_smoothed_deg_s = (
-            _compute_heading_turning(
+            _compute_turning_from_persisted_smoothed_heading(
                 smoothed_heading_deg,
                 delta_seconds_full,
                 transition_valid=transition_valid,
@@ -3500,9 +3917,9 @@ def build_track_datasets(
             heading_mean_deg = float("nan")
             heading_consistency = float("nan")
 
-        accel_finite = smoothed_accel_px[np.isfinite(smoothed_accel_px)]
-        mean_accel_px = float(np.mean(accel_finite)) if accel_finite.size else float("nan")
-        accel_std_px = float(np.std(accel_finite)) if accel_finite.size else float("nan")
+        mean_accel_px, accel_std_px = _acceleration_summary_statistics(
+            smoothed_accel_px
+        )
         mean_accel_mm = mean_accel_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(mean_accel_px) else float("nan")
         accel_std_mm = accel_std_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(accel_std_px) else float("nan")
 
@@ -3639,7 +4056,7 @@ def _validate_in_memory_track_physical_arrays(
     data: Mapping[str, Any],
     *,
     track_id: int,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority,
+    physical_authority: TrackPhysicalAuthority,
 ) -> None:
     """Validate every prospective mm array before mutating the destination."""
 
@@ -3692,7 +4109,7 @@ def _validate_in_memory_track_physical_arrays(
         if not np.array_equal(physical_values, expected, equal_nan=True):
             raise ValueError(
                 f"Track {track_id} physical array {relative_path!r} does not use "
-                "the exact selected-stimulus mm_per_pixel authority."
+                "the exact source-camera mm_per_pixel authority."
             )
 
 
@@ -3735,14 +4152,14 @@ def _validate_scaled_scalar_pair(
         )
     if physical != pixel * float(mm_per_pixel):
         raise ValueError(
-            f"{label} does not use the exact selected-stimulus mm_per_pixel authority."
+            f"{label} does not use the exact source-camera mm_per_pixel authority."
         )
 
 
 def _validate_track_summary_physical_fields(
     summary: Mapping[str, Any],
     *,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     label: str,
 ) -> None:
     mm_fields = {str(name) for name in summary if _is_mm_summary_field(name)}
@@ -3845,14 +4262,22 @@ def _validate_no_run_root_coordinate_arrays(run_group: Any) -> None:
 
 
 def _physical_authority_manifest_record(
-    value: BoundStimulusPhysicalCoordinateAuthority | None,
+    value: TrackPhysicalAuthority | None,
 ) -> dict[str, Any] | None:
     if value is None:
         return None
-    authority = require_bound_stimulus_physical_coordinate_authority(value)
+    if type(value) is BoundStimulusPhysicalCoordinateAuthority:
+        authority = require_bound_stimulus_physical_coordinate_authority(value)
+        selector = {"stimulus_run": authority.stimulus_run}
+    else:
+        authority = require_bound_source_camera_physical_authority(value)
+        selector = {
+            "authority_kind": "recording_calibration",
+            "recording_calibration": True,
+        }
     physical = authority.physical_frame
     return {
-        "stimulus_run": authority.stimulus_run,
+        **selector,
         "camera_id": authority.camera_id,
         "authority_manifest_ref": authority.manifest.record_ref,
         "authority_manifest_sha256": authority.manifest.record_sha256,
@@ -4016,6 +4441,9 @@ _MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES = frozenset(
         TRACK_MOTION_PUBLICATION_MANIFEST_ATTR,
         TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR,
         TRACK_MOTION_PUBLICATION_COMMIT_ATTR,
+        TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR,
+        TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR,
+        TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR,
         # The atomic materializer updates this operational receipt after the
         # scientific publication has been sealed and validated.  It is not a
         # scientific or coordinate authority and therefore must remain outside
@@ -4032,6 +4460,7 @@ _MOTION_RUN_ALLOWED_ATTR_NAMES = frozenset(_MOTION_RUN_DERIVATION_ATTR_NAMES) | 
             TRACK_KINEMATICS_STAGING_MANIFEST_ATTR,
             TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR,
             TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR,
+            TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR,
         }
     )
 )
@@ -5210,10 +5639,29 @@ def _validate_online_input_inventory(
     _track_kinematics_source_refs(run_type="online", inputs=inputs)
 
 
+def _track_motion_publication_schema_version(run_group: Any) -> int:
+    """Select one immutable manifest contract without widening v1 semantics."""
+
+    value = run_group.attrs.get(TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR)
+    if value is None:
+        return TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+    if (
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, np.integer))
+        or int(value) != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        raise ValueError(
+            f"{TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR} must be omitted for "
+            "frozen v1 runs or equal the supported v2 version."
+        )
+    return int(value)
+
+
 def _motion_run_derivation_record(
     run_group: Any,
     positions: BoundTrackPositionBindings,
 ) -> dict[str, Any]:
+    publication_schema_version = _track_motion_publication_schema_version(run_group)
     record = {
         name: copy.deepcopy(run_group.attrs[name])
         for name in _MOTION_RUN_DERIVATION_ATTR_NAMES
@@ -5318,10 +5766,35 @@ def _motion_run_derivation_record(
     if run_type == "offline":
         if record["method"] != "track_kinematics_offline":
             raise ValueError("Canonical offline track method is unsupported.")
-        required_inputs = set(_REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS)
-        allowed_inputs = required_inputs | set(
-            _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS
-        )
+        if (
+            publication_schema_version
+            == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        ):
+            required_inputs = set(_REQUIRED_CANONICAL_OFFLINE_INPUT_KEYS)
+            allowed_inputs = required_inputs | set(
+                _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS
+            )
+        else:
+            lineage_mode = inputs.get("position_lineage_mode")
+            if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+                required_inputs = set(
+                    _REQUIRED_CANONICAL_OFFLINE_DIRECT_V2_INPUT_KEYS
+                )
+                allowed_inputs = required_inputs | set(
+                    _OPTIONAL_CANONICAL_OFFLINE_INPUT_KEYS
+                )
+            elif (
+                lineage_mode
+                == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+            ):
+                required_inputs = set(
+                    _REQUIRED_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS
+                )
+                allowed_inputs = required_inputs | set(
+                    _OPTIONAL_CANONICAL_OFFLINE_SUCCESSOR_V2_INPUT_KEYS
+                )
+            else:
+                raise ValueError("Manifest v2 position_lineage_mode is unsupported.")
         missing_inputs = sorted(required_inputs - set(inputs))
         unsupported_inputs = sorted(set(inputs) - allowed_inputs)
         if missing_inputs or unsupported_inputs:
@@ -5333,6 +5806,7 @@ def _motion_run_derivation_record(
     expected_refs = _track_kinematics_source_refs(
         run_type=run_type,
         inputs=inputs,
+        publication_schema_version=publication_schema_version,
     )
     if not _track_attr_values_equal(record["source_refs"], expected_refs):
         raise ValueError(
@@ -5373,15 +5847,54 @@ def _motion_run_derivation_record(
                 "Offline crop_run does not identify the exact sealed position "
                 "rowset."
             )
-        exact_detection_path = _canonical_crop_detection_rowset_path(source)
         if (
-            record["source_refs"].get("source_detection_path")
-            != exact_detection_path
+            publication_schema_version
+            == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
         ):
-            raise ValueError(
-                "Offline detection_path does not identify the exact detection "
-                "rowset bound by the canonical crop selection."
+            exact_detection_path = _canonical_crop_detection_rowset_path(source)
+            if (
+                record["source_refs"].get("source_detection_path")
+                != exact_detection_path
+            ):
+                raise ValueError(
+                    "Offline detection_path does not identify the exact detection "
+                    "rowset bound by the canonical crop selection."
+                )
+        elif (
+            inputs.get("position_lineage_mode")
+            == TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+        ):
+            source_keypoint_crop_path = record["source_refs"].get(
+                "source_keypoint_crop_path"
             )
+            source_tracking_rowset_path = record["source_refs"].get(
+                "source_tracking_rowset_path"
+            )
+            if (
+                inputs.get("position_lineage_mode")
+                != TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+                or source_keypoint_crop_path != source_tracking_rowset_path
+                or source_tracking_rowset_path == expected_rowset
+                or not isinstance(
+                    record["source_refs"].get("source_detection_run_id"),
+                    str,
+                )
+            ):
+                raise ValueError(
+                    "Track motion manifest v2 requires one explicit verified "
+                    "collection-proxy successor lineage."
+                )
+        else:
+            exact_detection_path = _canonical_crop_detection_rowset_path(source)
+            if (
+                inputs.get("position_lineage_mode")
+                != TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
+                or record["source_refs"].get("source_detection_path")
+                != exact_detection_path
+            ):
+                raise ValueError(
+                    "Track motion manifest v2 direct-crop lineage is invalid."
+                )
     else:
         _validate_online_input_inventory(
             method=record["method"],
@@ -5403,19 +5916,198 @@ def _motion_run_derivation_record(
         record,
         label=f"/{run_group.path} motion derivation",
     )
-    return {
+    result = {
         "record": normalized,
         "record_sha256": _canonical_json_sha256(normalized),
+    }
+    if (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        result.update(
+            {
+                "schema_id": TRACK_MOTION_RUN_DERIVATION_SCHEMA_ID,
+                "schema_version": TRACK_MOTION_RUN_DERIVATION_SCHEMA_VERSION_V2,
+            }
+        )
+    return result
+
+
+def _motion_v2_position_lineage_record(
+    authoritative_root: Any,
+    run_group: Any,
+    positions: BoundTrackPositionBindings,
+) -> dict[str, Any]:
+    """Bind v2 to one explicit, digest-sealed position-lineage mode."""
+
+    if (
+        _track_motion_publication_schema_version(run_group)
+        != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        raise ValueError("Explicit position lineage is valid only for manifest v2.")
+    inputs = run_group.attrs.get("inputs")
+    source_refs = run_group.attrs.get("source_refs")
+    if not isinstance(inputs, Mapping) or not isinstance(source_refs, Mapping):
+        raise ValueError("Manifest v2 successor lineage lacks exact persisted inputs.")
+    source = positions.source_positions
+    position_rowset_path = str(source.row_identity.rowset_path).strip("/")
+    position_rowset = _resolve_motion_input_node(
+        authoritative_root,
+        f"/{position_rowset_path}",
+    )
+    lineage_mode = inputs.get("position_lineage_mode")
+    if lineage_mode == TRACK_POSITION_LINEAGE_DIRECT_CROP_V1:
+        selection = bind_persisted_coordinate_record(
+            position_rowset,
+            attr_name=CROP_GEOMETRY_SELECTION_ATTR,
+        )
+        selection.assert_verified()
+        selection_record = selection.record
+        lineage_selections = [
+            record
+            for record in source.lineage_records
+            if record.record.get("schema_id")
+            == CROP_GEOMETRY_SELECTION_SCHEMA_ID
+        ]
+        detection_rowset_path = _canonical_crop_detection_rowset_path(source)
+        if (
+            len(lineage_selections) != 1
+            or lineage_selections[0].record_ref != selection.record_ref
+            or lineage_selections[0].record_sha256 != selection.record_sha256
+            or lineage_selections[0].record != selection_record
+            or
+            selection_record.get("schema_id")
+            != CROP_GEOMETRY_SELECTION_SCHEMA_ID
+            or selection_record.get("schema_version")
+            != CROP_GEOMETRY_SELECTION_SCHEMA_VERSION
+            or selection_record.get("operation")
+            != CROP_GEOMETRY_SELECTION_OPERATION
+            or source_refs.get("source_detection_path")
+            != detection_rowset_path
+        ):
+            raise ValueError("Manifest v2 direct-crop selection contract is invalid.")
+        return {
+            "schema_id": TRACK_POSITION_LINEAGE_SCHEMA_ID,
+            "schema_version": TRACK_POSITION_LINEAGE_SCHEMA_VERSION,
+            "mode": TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+            "position_rowset_ref": f"/{position_rowset_path}",
+            "crop_selection": {
+                "record_ref": selection.record_ref,
+                "record_sha256": selection.record_sha256,
+            },
+            "detection_rowset_ref": f"/{detection_rowset_path}",
+        }
+    if lineage_mode != TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1:
+        raise ValueError("Manifest v2 position_lineage_mode is unsupported.")
+
+    historical_rowset_path = load_collection_proxy_successor_source_rowset(
+        authoritative_root,
+        position_rowset_path,
+    )
+    mapping = bind_persisted_coordinate_record(
+        position_rowset,
+        attr_name=COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    )
+    mapping.assert_verified()
+    mapping_record = mapping.record
+    historical_record = mapping_record.get("historical_source")
+    historical_ref = (
+        historical_record.get("rowset_ref")
+        if isinstance(historical_record, Mapping)
+        else None
+    )
+    if (
+        mapping_record.get("schema_id")
+        != COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID
+        or mapping_record.get("schema_version")
+        != COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION
+        or mapping_record.get("operation")
+        != COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION
+        or historical_ref != f"/{historical_rowset_path}"
+    ):
+        raise ValueError("Coordinate-successor mapping contract is invalid.")
+
+    keypoint_rowset_path = source_refs.get("source_keypoint_crop_path")
+    tracking_rowset_path = source_refs.get("source_tracking_rowset_path")
+    detection_run_id = source_refs.get("source_detection_run_id")
+    keypoint_path = source_refs.get("source_keypoint_path")
+    tracking_path = source_refs.get("source_tracking_path")
+    if (
+        keypoint_rowset_path != historical_rowset_path
+        or tracking_rowset_path != historical_rowset_path
+        or not isinstance(detection_run_id, str)
+        or not detection_run_id
+        or not isinstance(keypoint_path, str)
+        or not isinstance(tracking_path, str)
+    ):
+        raise ValueError(
+            "Manifest v2 successor mapping does not identify the exact "
+            "keypoint/tracking lineage."
+        )
+    keypoint_group = _resolve_motion_input_node(
+        authoritative_root,
+        f"/{keypoint_path}",
+    )
+    tracking_group = _resolve_motion_input_node(
+        authoritative_root,
+        f"/{tracking_path}",
+    )
+    lineage_detection_ids = {
+        str(value).strip()
+        for value in (
+            keypoint_group.attrs.get("source_detect_run"),
+            tracking_group.attrs.get("source_detect_run"),
+        )
+        if (
+            isinstance(value, str)
+            and str(value).strip()
+            and str(value).strip().lower() != "unknown"
+        )
+    }
+    if (
+        archive_identity(keypoint_group) != archive_identity(authoritative_root)
+        or archive_identity(tracking_group) != archive_identity(authoritative_root)
+        or keypoint_group.attrs.get("source_crop_run")
+        != historical_rowset_path.split("/", 1)[1]
+        or tracking_group.attrs.get("source_rowset_path")
+        != historical_rowset_path
+        or lineage_detection_ids != {detection_run_id}
+    ):
+        raise ValueError(
+            "Selected keypoint/tracking authority conflicts with the verified "
+            "successor lineage."
+        )
+    return {
+        "schema_id": TRACK_POSITION_LINEAGE_SCHEMA_ID,
+        "schema_version": TRACK_POSITION_LINEAGE_SCHEMA_VERSION,
+        "mode": TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1,
+        "position_rowset_ref": f"/{position_rowset_path}",
+        "successor_mapping": {
+            "record_ref": mapping.record_ref,
+            "record_sha256": mapping.record_sha256,
+        },
+        "historical_source_rowset_ref": f"/{historical_rowset_path}",
+        "source_detection_run_id": detection_run_id,
+        "keypoint_source": {
+            "run_ref": f"/{keypoint_path}",
+            "rowset_ref": f"/{keypoint_rowset_path}",
+        },
+        "tracking_source": {
+            "run_ref": f"/{tracking_path}",
+            "rowset_ref": f"/{tracking_rowset_path}",
+        },
     }
 
 
 def _motion_source_authority_record(
     positions: BoundTrackPositionBindings,
+    *,
+    position_lineage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = positions.source_positions
     temporal = positions.source_temporal_authority
     node = source.coordinate_node
-    return {
+    record = {
         "position": {
             "array_ref": f"/{node.path}",
             "dtype": np.dtype(node.dtype).str,
@@ -5430,6 +6122,9 @@ def _motion_source_authority_record(
             "record_sha256": temporal.record_sha256,
         },
     }
+    if position_lineage is not None:
+        record["position_lineage"] = copy.deepcopy(dict(position_lineage))
+    return record
 
 
 def _motion_input_array_record(node: Any) -> dict[str, Any]:
@@ -6532,7 +7227,17 @@ def _validate_track_motion_input_authority(
     arena_values = values["arena_id"]
     track_values = values["track_id"]
     if arena_values is not None and inventory_map is not None:
-        for track_id in np.unique(track_values):
+        observed_assigned_track_ids = {
+            int(track_id)
+            for track_id in np.unique(track_values).tolist()
+            if int(track_id) >= 0
+        }
+        if observed_assigned_track_ids != set(inventory_map):
+            raise ValueError(
+                "Tracking row-level assigned track IDs disagree with its exact "
+                "track inventory."
+            )
+        for track_id in sorted(observed_assigned_track_ids):
             selected = arena_values[track_values == track_id]
             unique_arenas = np.unique(selected)
             if unique_arenas.shape != (1,) or inventory_map.get(int(track_id)) != int(
@@ -6647,9 +7352,20 @@ def _motion_run_root_attrs_record(
     """Return one closed, conflict-checked run-root attribute partition."""
 
     live_names = set(str(name) for name in run_group.attrs)
+    publication_schema_version = _track_motion_publication_schema_version(run_group)
+    allowed_names = set(_MOTION_RUN_ALLOWED_ATTR_NAMES)
+    if (
+        publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    ):
+        allowed_names.update(
+            {
+                TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR,
+            }
+        )
     unknown = sorted(
         live_names
-        - set(_MOTION_RUN_ALLOWED_ATTR_NAMES)
+        - allowed_names
         - set(_MOTION_RUN_PUBLICATION_DYNAMIC_ATTR_NAMES)
     )
     if unknown:
@@ -7515,6 +8231,21 @@ def _exact_motion_array(
         )
 
 
+def _float32_resultants_within_unit_interval(values: np.ndarray) -> bool:
+    """Return whether resultants fit the float32 image of mathematical [0, 1]."""
+
+    resultants = np.asarray(values)
+    finite = resultants[np.isfinite(resultants)]
+    storage_upper_bound = np.nextafter(
+        np.float32(1.0),
+        np.float32(np.inf),
+    )
+    return bool(
+        not np.any(finite < np.float32(0.0))
+        and not np.any(finite > storage_upper_bound)
+    )
+
+
 def _float32_angle_pair_matches(
     left: np.ndarray,
     right: np.ndarray,
@@ -7789,8 +8520,8 @@ def _validate_motion_core_numeric_invariants(
         transition_valid=recomputed.transition_valid,
         sample_valid=validity["sample_valid"],
     )
-    smoothed_turning = _compute_heading_turning(
-        expected_smoothed_degrees,
+    smoothed_turning = _compute_turning_from_persisted_smoothed_heading(
+        smoothed_degrees,
         delta_seconds_kernel,
         transition_valid=recomputed.transition_valid,
         sample_valid=validity["sample_valid"],
@@ -7954,20 +8685,11 @@ def _validate_motion_core_numeric_invariants(
         expected_summary["heading_resultant"] = float("nan")
 
     default_derivative = derivatives[DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL]
-    summary_acceleration = np.asarray(
-        default_derivative["smoothed_acceleration_px"],
-        dtype=np.float64,
-    )
-    finite_acceleration = summary_acceleration[np.isfinite(summary_acceleration)]
-    expected_summary["mean_acceleration_px"] = (
-        float(np.mean(finite_acceleration))
-        if finite_acceleration.size
-        else float("nan")
-    )
-    expected_summary["acceleration_std_px"] = (
-        float(np.std(finite_acceleration))
-        if finite_acceleration.size
-        else float("nan")
+    (
+        expected_summary["mean_acceleration_px"],
+        expected_summary["acceleration_std_px"],
+    ) = _acceleration_summary_statistics(
+        np.asarray(default_derivative["smoothed_acceleration_px"])
     )
     expected_summary["keypoint_success_rate"] = (
         float(np.mean(keypoint_success))
@@ -8005,9 +8727,286 @@ def _validate_motion_core_numeric_invariants(
             )
 
     resultant = np.array(track_group["heading_per_second_resultant"][:], copy=True)
-    finite_resultant = resultant[np.isfinite(resultant)]
-    if np.any(finite_resultant < 0.0) or np.any(finite_resultant > 1.0):
-        raise ValueError("Track heading resultants must remain within [0, 1].")
+    if not _float32_resultants_within_unit_interval(resultant):
+        raise ValueError(
+            "Track heading resultants exceed the float32 storage envelope of "
+            "mathematical [0, 1]."
+        )
+
+
+def _validate_track_motion_decoded_payload_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "canonicalization",
+        "array_count",
+        "decoded_bytes",
+        "root_sha256",
+    }:
+        raise ValueError("Track decoded-payload summary inventory is not closed.")
+    array_count = value.get("array_count")
+    decoded_bytes = value.get("decoded_bytes")
+    root_sha256 = value.get("root_sha256")
+    if (
+        type(value.get("canonicalization")) is not str
+        or not value["canonicalization"]
+        or type(array_count) is not int
+        or array_count < 0
+        or type(decoded_bytes) is not int
+        or decoded_bytes < 0
+        or type(root_sha256) is not str
+    ):
+        raise ValueError("Track decoded-payload receipt summary is malformed.")
+    _sha256_text(root_sha256, label="track decoded-payload root_sha256")
+    return {
+        "canonicalization": str(value["canonicalization"]),
+        "array_count": int(array_count),
+        "decoded_bytes": int(decoded_bytes),
+        "root_sha256": str(root_sha256),
+    }
+
+
+def _track_motion_decoded_payload_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Track scientific validation requires a decoded receipt.")
+    expected = {
+        "canonicalization",
+        "array_count",
+        "decoded_bytes",
+        "root_sha256",
+        "arrays",
+    }
+    if set(value) != expected:
+        raise ValueError("Track decoded-payload receipt inventory is not closed.")
+    arrays = value.get("arrays")
+    array_count = value.get("array_count")
+    if (
+        not isinstance(arrays, list)
+        or type(array_count) is not int
+        or len(arrays) != array_count
+    ):
+        raise ValueError("Track decoded-payload array inventory is malformed.")
+    return _validate_track_motion_decoded_payload_summary(
+        {
+            "canonicalization": value.get("canonicalization"),
+            "array_count": array_count,
+            "decoded_bytes": value.get("decoded_bytes"),
+            "root_sha256": value.get("root_sha256"),
+        }
+    )
+
+
+def _canonical_track_motion_staged_scientific_validation(
+    value: Any,
+) -> dict[str, Any]:
+    record = _motion_json_object(
+        value,
+        label="track staged scientific-validation receipt",
+    )
+    digest = record.pop("record_sha256", None)
+    expected = {
+        "schema_id",
+        "schema_version",
+        "receipt_role",
+        "run_name",
+        "staging_manifest_sha256",
+        "decoded_payload",
+        "validator",
+        "numerical_policy",
+        "validated_tracks",
+        "result",
+    }
+    if set(record) != expected:
+        raise ValueError(
+            "Track staged scientific-validation receipt inventory is not closed."
+        )
+    validator = record.get("validator")
+    tracks = record.get("validated_tracks")
+    staging_digest = record.get("staging_manifest_sha256")
+    if (
+        record.get("schema_id")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID
+        or record.get("schema_version")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
+        or record.get("receipt_role")
+        != "scientific_derivation_validation_bound_to_exact_decoded_payload"
+        or record.get("result") != "valid"
+        or type(record.get("run_name")) is not str
+        or not record["run_name"]
+        or type(staging_digest) is not str
+        or validator
+        != {
+            "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID,
+            "schema_version": (
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
+            ),
+        }
+        or record.get("numerical_policy")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
+        or not isinstance(tracks, list)
+        or not tracks
+        or type(digest) is not str
+    ):
+        raise ValueError(
+            "Track staged scientific-validation receipt is unsupported."
+        )
+    _sha256_text(staging_digest, label="track staging manifest sha256")
+    _sha256_text(digest, label="track scientific-validation receipt sha256")
+    decoded = record.get("decoded_payload")
+    if not isinstance(decoded, Mapping):
+        raise ValueError("Track scientific receipt lacks decoded-payload identity.")
+    decoded_summary = dict(decoded)
+    if set(decoded_summary) != {
+        "canonicalization",
+        "array_count",
+        "decoded_bytes",
+        "root_sha256",
+    }:
+        raise ValueError("Track scientific decoded-payload summary is not closed.")
+    _validate_track_motion_decoded_payload_summary(decoded_summary)
+    seen: set[int] = set()
+    for track_record in tracks:
+        if not isinstance(track_record, Mapping) or set(track_record) != {
+            "track_id",
+            "sample_count",
+        }:
+            raise ValueError("Track scientific validated-track record is malformed.")
+        track_id = track_record.get("track_id")
+        sample_count = track_record.get("sample_count")
+        if (
+            type(track_id) is not int
+            or track_id in seen
+            or type(sample_count) is not int
+            or sample_count < 0
+        ):
+            raise ValueError("Track scientific validated-track identity is invalid.")
+        seen.add(track_id)
+    if tracks != sorted(tracks, key=lambda item: int(item["track_id"])):
+        raise ValueError("Track scientific validated-track records are not ordered.")
+    if digest != _canonical_json_sha256(record):
+        raise ValueError("Track staged scientific-validation receipt digest is stale.")
+    return {**record, "record_sha256": digest}
+
+
+def build_track_motion_staged_scientific_validation(
+    run_group: Any,
+    *,
+    decoded_payload_receipt: Mapping[str, Any],
+    run_name: str,
+) -> dict[str, Any]:
+    """Validate local numerical derivations once and bind them to copied values."""
+
+    if (
+        run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+        or run_group.attrs.get("stage_selector_eligible") is not False
+        or run_group.attrs.get(TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR)
+        != TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    ):
+        raise ValueError(
+            "Staged scientific validation requires one complete, unbound, "
+            "selector-ineligible numerical run."
+        )
+    staging_digest = run_group.attrs.get(
+        TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR
+    )
+    if type(staging_digest) is not str:
+        raise ValueError("Staged scientific validation lacks a staging manifest.")
+    _sha256_text(staging_digest, label="track staging manifest sha256")
+    tracks: list[dict[str, int]] = []
+    for track_id, track_group in _live_track_groups(run_group):
+        _validate_motion_core_numeric_invariants(
+            run_group,
+            track_group,
+            track_id=track_id,
+        )
+        tracks.append(
+            {
+                "track_id": int(track_id),
+                "sample_count": int(track_group["track_sample_key"].shape[0]),
+            }
+        )
+    decoded_summary = _track_motion_decoded_payload_summary(
+        decoded_payload_receipt
+    )
+    run_name = str(run_name).strip()
+    if (
+        not run_name
+        or run_name in {".", ".."}
+        or "/" in run_name
+        or "\\" in run_name
+    ):
+        raise ValueError("Staged scientific validation requires one safe run name.")
+    body = {
+        "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID,
+        "schema_version": (
+            TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
+        ),
+        "receipt_role": (
+            "scientific_derivation_validation_bound_to_exact_decoded_payload"
+        ),
+        "run_name": run_name,
+        "staging_manifest_sha256": staging_digest,
+        "decoded_payload": decoded_summary,
+        "validator": {
+            "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID,
+            "schema_version": (
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
+            ),
+        },
+        "numerical_policy": copy.deepcopy(
+            TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
+        ),
+        "validated_tracks": tracks,
+        "result": "valid",
+    }
+    return _canonical_track_motion_staged_scientific_validation(
+        {**body, "record_sha256": _canonical_json_sha256(body)}
+    )
+
+
+def verify_track_motion_staged_scientific_validation(
+    run_group: Any,
+    value: Mapping[str, Any],
+    *,
+    payload_integrity_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify a staged scientific result against the exact installed payload."""
+
+    receipt = _canonical_track_motion_staged_scientific_validation(value)
+    integrity = canonical_payload_integrity_receipt(payload_integrity_receipt)
+    persisted = run_group.attrs.get(
+        TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+    )
+    if not isinstance(persisted, Mapping) or not _track_attr_values_equal(
+        persisted,
+        receipt,
+    ):
+        raise ValueError("Track run lacks its exact staged scientific receipt.")
+    if (
+        receipt["run_name"] != str(run_group.path).rsplit("/", 1)[-1]
+        or receipt["staging_manifest_sha256"]
+        != run_group.attrs.get(TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR)
+    ):
+        raise ValueError("Track scientific receipt names another run or stage.")
+    decoded = integrity["decoded_payload"]
+    expected_decoded = {
+        "canonicalization": decoded["canonicalization"],
+        "array_count": decoded["array_count"],
+        "decoded_bytes": decoded["decoded_bytes"],
+        "root_sha256": decoded["root_sha256"],
+    }
+    if receipt["decoded_payload"] != expected_decoded:
+        raise ValueError(
+            "Track scientific validation is bound to another decoded payload."
+        )
+    live_tracks = [
+        {
+            "track_id": int(track_id),
+            "sample_count": int(track_group["track_sample_key"].shape[0]),
+        }
+        for track_id, track_group in _live_track_groups(run_group)
+    ]
+    if receipt["validated_tracks"] != live_tracks:
+        raise ValueError("Track scientific validated-track inventory changed.")
+    return receipt
 
 
 def _validate_motion_bout_domains(
@@ -8054,11 +9053,29 @@ def _build_track_motion_publication_manifest(
     authoritative_root: Any,
     run_group: Any,
     positions: BoundTrackPositionBindings,
+    *,
+    prevalidated_staged_scientific_validation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build and validate the exact live full-motion inventory."""
 
+    if prevalidated_staged_scientific_validation is not None:
+        prevalidated_staged_scientific_validation = (
+            _canonical_track_motion_staged_scientific_validation(
+                prevalidated_staged_scientific_validation
+            )
+        )
+        if not _track_attr_values_equal(
+            run_group.attrs.get(
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+            ),
+            prevalidated_staged_scientific_validation,
+        ):
+            raise ValueError(
+                "Full-motion manifest received an unpersisted scientific receipt."
+            )
     if positions.run_group.path != run_group.path:
         raise ValueError("Position bindings and motion run paths disagree.")
+    publication_schema_version = _track_motion_publication_schema_version(run_group)
     root_group_names = sorted(str(value) for value in run_group.group_keys())
     if root_group_names != ["tracks"]:
         raise ValueError(
@@ -8085,7 +9102,20 @@ def _build_track_motion_publication_manifest(
         else None
     )
     include_physical = physical_record is not None
-    source_authority = _motion_source_authority_record(positions)
+    position_lineage = (
+        _motion_v2_position_lineage_record(
+            authoritative_root,
+            run_group,
+            positions,
+        )
+        if publication_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+        else None
+    )
+    source_authority = _motion_source_authority_record(
+        positions,
+        position_lineage=position_lineage,
+    )
     run_derivation = _motion_run_derivation_record(run_group, positions)
     run_root_attrs = _motion_run_root_attrs_record(run_group, positions)
     manifest_context: dict[str, Any] = {
@@ -8216,11 +9246,12 @@ def _build_track_motion_publication_manifest(
             run_group=run_group,
             manifest_context=manifest_context,
         )
-        _validate_motion_core_numeric_invariants(
-            run_group,
-            track_group,
-            track_id=track_id,
-        )
+        if prevalidated_staged_scientific_validation is None:
+            _validate_motion_core_numeric_invariants(
+                run_group,
+                track_group,
+                track_id=track_id,
+            )
         _validate_motion_physical_values(
             track_group,
             surfaces,
@@ -8323,7 +9354,7 @@ def _build_track_motion_publication_manifest(
 
     manifest = {
         "schema_id": TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
-        "schema_version": TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
+        "schema_version": publication_schema_version,
         "run_ref": f"/{run_group.path}",
         "run_type": positions.run_type,
         "run_name": positions.run_name,
@@ -8352,6 +9383,8 @@ def _build_track_motion_publication_manifest(
         "track_count": track_count,
         "tracks": track_records,
     }
+    if position_lineage is not None:
+        manifest["position_lineage_mode"] = position_lineage["mode"]
     return _motion_json_object(
         manifest,
         label=f"/{run_group.path} full-motion publication manifest",
@@ -8379,9 +9412,21 @@ def _track_motion_publication_commit(
         for name, record in tracks.items()
         if isinstance(record, Mapping)
     }
+    manifest_schema_version = manifest.get("schema_version")
+    if manifest_schema_version not in {
+        TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
+        TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2,
+    }:
+        raise ValueError("Full-motion manifest version cannot mint a commit.")
+    commit_schema_version = (
+        TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION
+        if manifest_schema_version
+        == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        else TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION_V2
+    )
     commit = {
         "schema_id": TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_ID,
-        "schema_version": TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION,
+        "schema_version": commit_schema_version,
         "run_ref": manifest.get("run_ref"),
         "manifest_sha256": _canonical_json_sha256(manifest),
         "source_authority_sha256": _canonical_json_sha256(source),
@@ -8389,6 +9434,8 @@ def _track_motion_publication_commit(
         "run_derivation_sha256": derivation.get("record_sha256"),
         "position_derivations": position_derivations,
     }
+    if commit_schema_version == TRACK_MOTION_PUBLICATION_COMMIT_SCHEMA_VERSION_V2:
+        commit["manifest_schema_version"] = manifest_schema_version
     return _motion_json_object(commit, label="track motion publication commit")
 
 
@@ -8398,7 +9445,7 @@ def _build_track_staging_manifest(
     ordered_ids: List[int],
     source_positions: BoundCanonicalCoordinateDescriptor,
     source_temporal_authority: Any,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     physical_omission_reason_code: str,
     keypoint_run: str,
     run_name: str,
@@ -8504,7 +9551,7 @@ def save_track_kinematics_tracks(
     positions_px_source: BoundCanonicalCoordinateDescriptor,
     input_authority: BoundTrackMotionInputAuthority | None = None,
     physical_frame: BoundPhysicalFrameCalibration | None = None,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None = None,
+    physical_authority: TrackPhysicalAuthority | None = None,
     physical_omission_reason_code: str = "NO_COMPATIBLE_TYPED_PHYSICAL_FRAME",
     track_id_to_arena_id: Optional[Dict[int, int]] = None,
     defer_coordinate_binding: bool = False,
@@ -8524,13 +9571,16 @@ def save_track_kinematics_tracks(
     if physical_frame is not None:
         raise ValueError(
             "Detached physical_frame values cannot authorize canonical track mm "
-            "outputs; supply a sealed selected-stimulus physical_authority."
+            "outputs; supply a sealed source-camera physical authority."
         )
-    if physical_authority is not None:
-        physical_authority = (
-            require_bound_stimulus_physical_coordinate_authority(
-                physical_authority
-            )
+    if type(physical_authority) is BoundStimulusPhysicalCoordinateAuthority:
+        physical_authority = require_bound_stimulus_physical_coordinate_authority(
+            physical_authority
+        )
+        physical_frame = physical_authority.physical_frame
+    elif physical_authority is not None:
+        physical_authority = require_bound_source_camera_physical_authority(
+            physical_authority
         )
         physical_frame = physical_authority.physical_frame
     if defer_coordinate_binding:
@@ -9204,7 +10254,7 @@ def _validate_run_track_physical_surfaces(
     run_group: Any,
     *,
     groups: list[tuple[int, Any]],
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     physical_omission_reason_code: str,
     binding_status: str,
     expected_track_records: Mapping[str, Any] | None = None,
@@ -9486,7 +10536,7 @@ def _require_stage_source_surface(
 def _require_stage_physical_authority(
     authoritative_root: zarr.Group,
     manifest: Mapping[str, Any],
-) -> BoundStimulusPhysicalCoordinateAuthority | None:
+) -> TrackPhysicalAuthority | None:
     record = manifest.get("physical_authority")
     reason = manifest.get("physical_omission_reason_code")
     if record is None:
@@ -9500,8 +10550,7 @@ def _require_stage_physical_authority(
                 "Track staging omission requires one stable physical reason code."
             )
         return None
-    if type(record) is not dict or set(record) != {
-        "stimulus_run",
+    common_fields = {
         "camera_id",
         "authority_manifest_ref",
         "authority_manifest_sha256",
@@ -9512,7 +10561,16 @@ def _require_stage_physical_authority(
         "source_camera_frame_ref",
         "source_camera_frame_sha256",
         "mm_per_pixel",
-    }:
+    }
+    authority_kind = record.get("authority_kind") if type(record) is dict else None
+    selector_fields = (
+        {"stimulus_run"}
+        if authority_kind is None and type(record) is dict and "stimulus_run" in record
+        else {"authority_kind", "recording_calibration"}
+        if authority_kind == "recording_calibration"
+        else set()
+    )
+    if type(record) is not dict or set(record) != common_fields | selector_fields:
         raise ValueError(
             "Track staging physical authority record is absent or not closed."
         )
@@ -9520,21 +10578,28 @@ def _require_stage_physical_authority(
         raise ValueError(
             "A staged physical authority cannot carry an omission reason."
         )
-    stimulus_run = record.get("stimulus_run")
-    if not isinstance(stimulus_run, str) or not stimulus_run:
-        raise ValueError("Track staging physical stimulus run is invalid.")
-    authority = load_stimulus_physical_coordinate_authority(
-        authoritative_root,
-        stimulus_run=stimulus_run,
-    )
-    if authority is None:
-        raise ValueError(
-            "Selected stimulus no longer provides the staged physical authority."
+    if authority_kind is None:
+        stimulus_run = record.get("stimulus_run")
+        if not isinstance(stimulus_run, str) or not stimulus_run:
+            raise ValueError("Track staging physical stimulus run is invalid.")
+        authority = load_stimulus_physical_coordinate_authority(
+            authoritative_root,
+            stimulus_run=stimulus_run,
         )
-    authority = require_bound_stimulus_physical_coordinate_authority(authority)
+        if authority is None:
+            raise ValueError(
+                "Selected stimulus no longer provides the staged physical authority."
+            )
+        authority = require_bound_stimulus_physical_coordinate_authority(authority)
+    else:
+        if record.get("recording_calibration") is not True:
+            raise ValueError("Track staging recording calibration selector is invalid.")
+        authority = require_bound_source_camera_physical_authority(
+            load_source_camera_physical_authority(authoritative_root)
+        )
     if _physical_authority_manifest_record(authority) != record:
         raise ValueError(
-            "Selected stimulus physical authority, frame, calibration, scale, or "
+            "Source-camera physical authority, frame, calibration, scale, or "
             "digest changed after numerical staging."
         )
     return authority
@@ -9566,7 +10631,7 @@ def _validate_track_physical_arrays(
     subgroup: Any,
     *,
     expected_records: Mapping[str, Any] | None,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
     binding_status: str,
 ) -> None:
     live = _track_physical_array_nodes(subgroup)
@@ -9919,7 +10984,7 @@ def _load_bound_track_publication(
     subgroup: zarr.Group,
     *,
     surface: BoundSourceCameraPositionSurface,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
 ) -> TrackPositionPublicationResult:
     return _load_bound_track_publication_from_source(
         subgroup,
@@ -9934,26 +10999,33 @@ def _load_bound_track_publication_from_source(
     *,
     source_positions: BoundCanonicalCoordinateDescriptor,
     source_temporal_authority: BoundSourceRowTemporalAuthority,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
 ) -> TrackPositionPublicationResult:
+    track_sample_key_node = subgroup["track_sample_key"]
+    source_row_index_node = subgroup["source_row_index"]
+    source_acquisition_frame_node = subgroup[
+        "source_acquisition_frame_index"
+    ]
+    source_frame_interpolation_node = subgroup["source_frame_interpolation"]
+    source_instance_key_node = subgroup["source_instance_key"]
     time_lineage = load_bound_track_sample_time_lineage(
         subgroup,
-        subgroup["track_sample_key"],
-        subgroup["source_row_index"],
-        subgroup["source_acquisition_frame_index"],
-        subgroup["source_frame_interpolation"],
-        subgroup["source_instance_key"],
+        track_sample_key_node,
+        source_row_index_node,
+        source_acquisition_frame_node,
+        source_frame_interpolation_node,
+        source_instance_key_node,
         source_temporal_authority=source_temporal_authority,
     )
     identity = load_bound_row_identity_contract(
         subgroup,
-        subgroup["track_sample_key"],
+        track_sample_key_node,
         track_time_lineage=time_lineage,
     )
     return load_track_position_coordinates(
         subgroup,
         subgroup["positions_px"],
-        subgroup["source_row_index"],
+        source_row_index_node,
         track_row_identity=identity,
         source_positions=source_positions,
         source_temporal_authority=source_temporal_authority,
@@ -10158,22 +11230,30 @@ def _resolve_track_source_authority(
 def _resolve_track_physical_authority(
     authoritative_root: zarr.Group,
     run_group: zarr.Group,
-) -> BoundStimulusPhysicalCoordinateAuthority | None:
+) -> TrackPhysicalAuthority | None:
     expected = run_group.attrs.get("physical_coordinate_authority")
     if expected is None:
         return None
     if not isinstance(expected, Mapping):
         raise ValueError("Track run physical authority record is not an object.")
-    stimulus_run = expected.get("stimulus_run")
-    if not isinstance(stimulus_run, str) or not stimulus_run:
-        raise ValueError("Track run physical authority lacks one stimulus run.")
-    authority = load_stimulus_physical_coordinate_authority(
-        authoritative_root,
-        stimulus_run=stimulus_run,
-    )
-    if authority is None:
-        raise ValueError("Track run declares unavailable stimulus physical authority.")
-    authority = require_bound_stimulus_physical_coordinate_authority(authority)
+    authority_kind = expected.get("authority_kind")
+    if authority_kind is None and "stimulus_run" in expected:
+        stimulus_run = expected.get("stimulus_run")
+        if not isinstance(stimulus_run, str) or not stimulus_run:
+            raise ValueError("Track run physical authority lacks one stimulus run.")
+        authority = load_stimulus_physical_coordinate_authority(
+            authoritative_root,
+            stimulus_run=stimulus_run,
+        )
+        if authority is None:
+            raise ValueError("Track run declares unavailable stimulus physical authority.")
+        authority = require_bound_stimulus_physical_coordinate_authority(authority)
+    elif authority_kind == "recording_calibration":
+        authority = require_bound_source_camera_physical_authority(
+            load_source_camera_physical_authority(authoritative_root)
+        )
+    else:
+        raise ValueError("Track run physical authority kind is unsupported.")
     if _physical_authority_manifest_record(authority) != dict(expected):
         raise ValueError("Track run physical authority changed after publication.")
     return authority
@@ -10289,10 +11369,50 @@ def _load_bound_track_motion_run_impl(
     run_group: zarr.Group,
     *,
     expected_selector_eligible: bool,
+    prevalidated_live_manifest: Mapping[str, Any] | None = None,
+    prevalidated_position_bindings: BoundTrackPositionBindings | None = None,
 ) -> BoundTrackMotionRun:
     """Freshly bind the exact sealed motion payload from live arrays."""
 
-    if expected_selector_eligible:
+    if prevalidated_position_bindings is not None:
+        if type(prevalidated_position_bindings) is not BoundTrackPositionBindings:
+            raise ValueError("Prevalidated track positions use an unsupported type.")
+        fresh_run = _fresh_track_run_group(authoritative_root, run_group)
+        if (
+            prevalidated_position_bindings.archive_identity
+            != archive_identity(authoritative_root)
+            or prevalidated_position_bindings.run_group.path != fresh_run.path
+            or prevalidated_position_bindings.run_type
+            != str(fresh_run.path).split("/")[2]
+            or prevalidated_position_bindings.run_name
+            != str(fresh_run.path).split("/")[3]
+            or fresh_run.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+            != RUN_STATUS_COMPLETE
+            or fresh_run.attrs.get("stage_selector_eligible")
+            is not expected_selector_eligible
+        ):
+            raise ValueError(
+                "Prevalidated track positions no longer name the exact completed run."
+            )
+        live_track_ids = [track_id for track_id, _ in _live_track_groups(fresh_run)]
+        if live_track_ids != [
+            track_id
+            for track_id, _ in prevalidated_position_bindings.track_positions
+        ]:
+            raise ValueError("Prevalidated track position inventory changed.")
+        positions = BoundTrackPositionBindings(
+            archive_identity=prevalidated_position_bindings.archive_identity,
+            run_type=prevalidated_position_bindings.run_type,
+            run_name=prevalidated_position_bindings.run_name,
+            source_positions=prevalidated_position_bindings.source_positions,
+            source_temporal_authority=(
+                prevalidated_position_bindings.source_temporal_authority
+            ),
+            physical_authority=prevalidated_position_bindings.physical_authority,
+            track_positions=prevalidated_position_bindings.track_positions,
+            run_group=fresh_run,
+        )
+    elif expected_selector_eligible:
         positions = load_bound_track_position_bindings(
             authoritative_root,
             run_group,
@@ -10326,10 +11446,16 @@ def _load_bound_track_motion_run_impl(
         label=f"/{run_group.path} persisted full-motion manifest",
     )
     expected_digest = _canonical_json_sha256(manifest)
+    manifest_schema_version = manifest.get("schema_version")
     if (
         manifest.get("schema_id") != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID
-        or manifest.get("schema_version")
-        != TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+        or manifest_schema_version
+        not in {
+            TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION,
+            TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2,
+        }
+        or manifest_schema_version
+        != _track_motion_publication_schema_version(run_group)
         or manifest.get("run_ref") != f"/{run_group.path}"
         or manifest.get("run_type") != positions.run_type
         or manifest.get("run_name") != positions.run_name
@@ -10337,6 +11463,38 @@ def _load_bound_track_motion_run_impl(
     ):
         raise ValueError(
             "Track full-motion manifest schema, run identity, or digest is invalid."
+        )
+    source_authority = manifest.get("source_authority")
+    run_derivation = manifest.get("run_derivation")
+    if not isinstance(source_authority, Mapping) or not isinstance(
+        run_derivation,
+        Mapping,
+    ):
+        raise ValueError(
+            "Track full-motion manifest source or derivation authority is invalid."
+        )
+    if manifest_schema_version == TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION:
+        if (
+            "position_lineage" in source_authority
+            or "position_lineage_mode" in manifest
+            or "schema_id" in run_derivation
+            or "schema_version" in run_derivation
+        ):
+            raise ValueError("Frozen manifest v1 cannot carry v2 contract fields.")
+    elif (
+        manifest.get("position_lineage_mode")
+        not in {
+            TRACK_POSITION_LINEAGE_DIRECT_CROP_V1,
+            TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1,
+        }
+        or not isinstance(source_authority.get("position_lineage"), Mapping)
+        or run_derivation.get("schema_id")
+        != TRACK_MOTION_RUN_DERIVATION_SCHEMA_ID
+        or run_derivation.get("schema_version")
+        != TRACK_MOTION_RUN_DERIVATION_SCHEMA_VERSION_V2
+    ):
+        raise ValueError(
+            "Manifest v2 lacks its explicit position or derivation contract."
         )
     commit = _motion_json_object(
         raw_commit,
@@ -10346,10 +11504,17 @@ def _load_bound_track_motion_run_impl(
         raise ValueError(
             "Track full-motion publication commit does not bind the exact manifest."
         )
-    live_manifest = _build_track_motion_publication_manifest(
-        authoritative_root,
-        run_group,
-        positions,
+    live_manifest = (
+        _motion_json_object(
+            prevalidated_live_manifest,
+            label=f"/{run_group.path} prevalidated live full-motion manifest",
+        )
+        if prevalidated_live_manifest is not None
+        else _build_track_motion_publication_manifest(
+            authoritative_root,
+            run_group,
+            positions,
+        )
     )
     if not _track_attr_values_equal(manifest, live_manifest):
         raise ValueError(
@@ -10462,6 +11627,7 @@ def _seal_and_load_track_motion_run_before_selection(
     run_group: zarr.Group,
     *,
     expected_publication_owner_uuid: str | None = None,
+    prevalidated_staged_scientific_validation: Mapping[str, Any] | None = None,
 ) -> BoundTrackMotionRun:
     """Persist then freshly reload a complete, selector-ineligible motion seal."""
 
@@ -10491,6 +11657,9 @@ def _seal_and_load_track_motion_run_before_selection(
         authoritative_root,
         run_group,
         positions,
+        prevalidated_staged_scientific_validation=(
+            prevalidated_staged_scientific_validation
+        ),
     )
     run_group.attrs[TRACK_MOTION_PUBLICATION_MANIFEST_ATTR] = manifest
     run_group = _resolve_owned_track_run_child(
@@ -10517,7 +11686,192 @@ def _seal_and_load_track_motion_run_before_selection(
         authoritative_root,
         run_group,
         expected_selector_eligible=False,
+        prevalidated_live_manifest=manifest,
+        prevalidated_position_bindings=positions,
     )
+
+
+def _persist_track_motion_payload_validation_receipt(
+    run_group: zarr.Group,
+    sealed_motion: BoundTrackMotionRun,
+    *,
+    payload_integrity_receipt: Mapping[str, Any],
+    staged_scientific_validation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind the one exhaustive motion validation to its immutable payload."""
+
+    integrity = canonical_payload_integrity_receipt(payload_integrity_receipt)
+    if integrity["run_ref"] != f"/{run_group.path}":
+        raise ValueError(
+            "Track payload integrity receipt names a different canonical run."
+        )
+    receipt_backed = staged_scientific_validation is not None
+    validation = build_payload_validation_receipt(
+        integrity,
+        scientific_manifest_schema_id=TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
+        scientific_manifest_schema_version=int(
+            sealed_motion.manifest["schema_version"]
+        ),
+        scientific_manifest_sha256=sealed_motion.manifest_sha256,
+        validator_schema_id=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
+        validator_schema_version=(
+            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+            if receipt_backed
+            else TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+        ),
+        numerical_policy=(
+            TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
+            if receipt_backed
+            else TRACK_MOTION_NUMERICAL_POLICY
+        ),
+    )
+    run_group.attrs[TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = json_attr_safe(
+        integrity
+    )
+    run_group.attrs[TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR] = json_attr_safe(
+        validation
+    )
+    return validation
+
+
+def verify_track_motion_payload_validation_receipt(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_publication_owner_uuid: str,
+    run_path: str | Path,
+    require_complete: bool,
+    verify_physical_payload: bool,
+    hash_workers: int = 4,
+) -> Mapping[str, Any]:
+    """Verify a guarded publication receipt without minting reader authority."""
+
+    try:
+        run_group = _fresh_track_run_group(authoritative_root, run_group)
+        owner_uuid = _track_publication_owner_uuid(run_group)
+        if owner_uuid != str(expected_publication_owner_uuid):
+            raise ValueError("Track payload receipt observed a different owner.")
+        expected_completion = "complete" if require_complete else "running"
+        if (
+            run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+            != expected_completion
+            or run_group.attrs.get("stage_selector_eligible") is not False
+            or run_group.attrs.get(
+                TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR
+            )
+            != TRACK_KINEMATICS_BOUND_CANONICAL_STATUS
+        ):
+            raise ValueError(
+                "Track payload receipt observed a different binding, completion, "
+                "or selector state."
+            )
+        raw_manifest = run_group.attrs.get(TRACK_MOTION_PUBLICATION_MANIFEST_ATTR)
+        raw_digest = run_group.attrs.get(
+            TRACK_MOTION_PUBLICATION_MANIFEST_DIGEST_ATTR
+        )
+        raw_commit = run_group.attrs.get(TRACK_MOTION_PUBLICATION_COMMIT_ATTR)
+        if (
+            not isinstance(raw_manifest, Mapping)
+            or not isinstance(raw_digest, str)
+            or not isinstance(raw_commit, Mapping)
+        ):
+            raise ValueError("Track payload receipt lacks its full-motion manifest.")
+        manifest = _motion_json_object(
+            raw_manifest,
+            label=f"/{run_group.path} receipt-bound full-motion manifest",
+        )
+        if (
+            raw_digest != _canonical_json_sha256(manifest)
+            or manifest.get("run_ref") != f"/{run_group.path}"
+            or _motion_json_object(
+                raw_commit,
+                label=f"/{run_group.path} receipt-bound publication commit",
+            )
+            != _track_motion_publication_commit(manifest)
+        ):
+            raise ValueError(
+                "Track payload receipt observed a stale manifest or publication commit."
+            )
+        raw_integrity = run_group.attrs.get(
+            TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR
+        )
+        raw_validation = run_group.attrs.get(
+            TRACK_MOTION_PAYLOAD_VALIDATION_RECEIPT_ATTR
+        )
+        if not isinstance(raw_integrity, Mapping) or not isinstance(
+            raw_validation, Mapping
+        ):
+            raise ValueError("Track run lacks its payload integrity or validation receipt.")
+        integrity = verify_payload_integrity_receipt(
+            run_path,
+            raw_integrity,
+            expected_run_ref=f"/{run_group.path}",
+            hash_workers=int(hash_workers),
+            verify_physical_payload=bool(verify_physical_payload),
+        )
+        raw_validator = raw_validation.get("validator")
+        validator_version = (
+            raw_validator.get("schema_version")
+            if isinstance(raw_validator, Mapping)
+            else None
+        )
+        if validator_version not in {
+            TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
+            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION,
+        }:
+            raise ValueError(
+                "Track payload validation receipt uses an unsupported validator."
+            )
+        expected_numerical_policy = (
+            TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
+            if validator_version
+            == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+            else TRACK_MOTION_NUMERICAL_POLICY
+        )
+        if (
+            validator_version
+            == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+        ):
+            staged_scientific = run_group.attrs.get(
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+            )
+            if not isinstance(staged_scientific, Mapping):
+                raise ValueError(
+                    "Receipt-backed track validation lacks staged scientific proof."
+                )
+            verify_track_motion_staged_scientific_validation(
+                run_group,
+                staged_scientific,
+                payload_integrity_receipt=integrity,
+            )
+        validation = verify_payload_validation_receipt(
+            raw_validation,
+            integrity_receipt=integrity,
+            expected_scientific_manifest_sha256=raw_digest,
+            expected_validator_schema_id=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
+            expected_validator_schema_version=int(validator_version),
+        )
+        if validation.get("numerical_policy") != expected_numerical_policy:
+            raise ValueError(
+                "Track payload validation receipt numerical policy changed."
+            )
+        return {
+            "valid": True,
+            "status": "receipt_bound_track_motion_valid",
+            "run_name": str(run_group.path).rsplit("/", 1)[-1],
+            "manifest_sha256": raw_digest,
+            "integrity_receipt_sha256": integrity["record_sha256"],
+            "validation_receipt_sha256": validation["record_sha256"],
+            "physical_payload_verified": bool(verify_physical_payload),
+        }
+    except Exception as exc:
+        return {
+            "valid": False,
+            "status": "invalid",
+            "run_name": str(getattr(run_group, "path", "")).rsplit("/", 1)[-1],
+            "errors": [str(exc)],
+            "physical_payload_verified": bool(verify_physical_payload),
+        }
 
 
 def load_bound_track_motion_run(
@@ -10550,7 +11904,7 @@ def _validate_direct_track_kinematics_run_before_selection(
     run_type: str,
     source_positions: BoundCanonicalCoordinateDescriptor,
     source_temporal_authority: Any,
-    physical_authority: BoundStimulusPhysicalCoordinateAuthority | None,
+    physical_authority: TrackPhysicalAuthority | None,
 ) -> Mapping[str, Any]:
     """Freshly validate one direct writer output while it remains ineligible."""
 
@@ -10653,6 +12007,25 @@ def stage_offline_track_kinematics_run(
         raise ValueError(
             "Track staging owns these writer arguments: " + ", ".join(forbidden)
         )
+    stimulus_selector: str | None = None
+    for index, item in enumerate(forwarded):
+        if item.startswith("--stimulus-run="):
+            stimulus_selector = item.split("=", 1)[1]
+        elif item == "--stimulus-run":
+            if index + 1 >= len(forwarded) or forwarded[index + 1].startswith("--"):
+                raise ValueError("--stimulus-run requires one nonempty run name.")
+            stimulus_selector = forwarded[index + 1]
+    source_root = open_zarr_root(source_path, mode="r")
+    stage_physical_authority, stage_physical_info = resolve_track_physical_authority(
+        source_root,
+        stimulus_run=stimulus_selector,
+    )
+    if stage_physical_authority is None:
+        raise ValueError(
+            "Offline track-kinematics publication requires sealed source-camera "
+            "physical calibration authority; none was available "
+            f"(reason_code={stage_physical_info.get('reason_code')!r})."
+        )
     main(
         [
             str(source_path),
@@ -10691,21 +12064,50 @@ def stage_offline_track_kinematics_run(
     }
 
 
+@proof_verification_operation
 def bind_staged_offline_track_kinematics_run(
     authoritative_root: zarr.Group,
     final_run_group: zarr.Group,
     *,
     expected_keypoint_run: str,
     expected_run_name: str,
+    payload_integrity_receipt: Mapping[str, Any] | None = None,
+    payload_run_path: str | Path | None = None,
+    payload_hash_workers: int = 4,
 ) -> Mapping[str, Any]:
     """Bind a validated stage only at its authoritative final archive path."""
 
+    receipt_mode = payload_integrity_receipt is not None or payload_run_path is not None
+    if receipt_mode and (
+        payload_integrity_receipt is None or payload_run_path is None
+    ):
+        raise ValueError(
+            "Receipt-backed track binding requires both integrity receipt and run path."
+        )
+    if type(payload_hash_workers) is not int or payload_hash_workers <= 0:
+        raise ValueError("Track binding payload hash workers must be positive.")
     if archive_identity(authoritative_root) != archive_identity(final_run_group):
         raise ValueError(
             "Final track run is not inside the supplied authoritative archive."
         )
+    phase_seconds: dict[str, float] = {}
+    canonical_integrity: dict[str, Any] | None = None
+    if receipt_mode:
+        assert payload_integrity_receipt is not None
+        started = time.perf_counter()
+        canonical_integrity = canonical_payload_integrity_receipt(
+            payload_integrity_receipt
+        )
+        if canonical_integrity["run_ref"] != f"/{final_run_group.path}":
+            raise ValueError(
+                "Track binding integrity receipt names a different canonical run."
+            )
+        phase_seconds["integrity_receipt_preflight"] = float(
+            time.perf_counter() - started
+        )
+    started = time.perf_counter()
     (
-        _,
+        staging_manifest,
         digest,
         surface,
         physical_authority,
@@ -10720,6 +12122,29 @@ def bind_staged_offline_track_kinematics_run(
         require_complete=False,
         expected_selector_eligible=False,
     )
+    phase_seconds["initial_exhaustive_payload_validation"] = float(
+        time.perf_counter() - started
+    )
+    binding_validation_receipt: dict[str, Any] | None = None
+    if canonical_integrity is not None:
+        binding_validation_receipt = build_payload_validation_receipt(
+            canonical_integrity,
+            scientific_manifest_schema_id=(
+                TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_ID
+            ),
+            scientific_manifest_schema_version=int(
+                staging_manifest["schema_version"]
+            ),
+            scientific_manifest_sha256=digest,
+            validator_schema_id=(
+                TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_ID
+            ),
+            validator_schema_version=(
+                TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+            ),
+            numerical_policy=TRACK_KINEMATICS_BINDING_NUMERICAL_POLICY,
+        )
+    started = time.perf_counter()
     attrs_targets: list[Any] = [final_run_group.attrs]
     for _, subgroup in groups:
         attrs_targets.extend(
@@ -10732,19 +12157,38 @@ def bind_staged_offline_track_kinematics_run(
         if physical_authority is not None:
             attrs_targets.append(subgroup["positions_mm"].attrs)
     snapshots = [copy.deepcopy(dict(attrs)) for attrs in attrs_targets]
+    phase_seconds["attribute_snapshot"] = float(time.perf_counter() - started)
     try:
+        started = time.perf_counter()
+        track_time_lineage_seconds = 0.0
+        track_identity_preparation_seconds = 0.0
+        track_identity_publication_seconds = 0.0
+        track_position_publication_seconds = 0.0
+        bound_publications: list[TrackPositionPublicationResult] = []
         for track_id, subgroup in groups:
+            track_sample_key_node = subgroup["track_sample_key"]
+            source_row_index_node = subgroup["source_row_index"]
+            source_acquisition_frame_node = subgroup[
+                "source_acquisition_frame_index"
+            ]
+            source_frame_interpolation_node = subgroup[
+                "source_frame_interpolation"
+            ]
+            source_instance_key_node = subgroup["source_instance_key"]
+            subphase_started = time.perf_counter()
             time_lineage = stamp_track_sample_time_lineage(
                 subgroup,
-                subgroup["track_sample_key"],
-                subgroup["source_row_index"],
-                subgroup["source_acquisition_frame_index"],
-                subgroup["source_frame_interpolation"],
-                subgroup["source_instance_key"],
+                track_sample_key_node,
+                source_row_index_node,
+                source_acquisition_frame_node,
+                source_frame_interpolation_node,
+                source_instance_key_node,
                 source_temporal_authority=surface.temporal_authority,
             )
+            track_time_lineage_seconds += time.perf_counter() - subphase_started
+            subphase_started = time.perf_counter()
             key_values = np.array(
-                subgroup["track_sample_key"][:],
+                track_sample_key_node[:],
                 copy=True,
                 order="C",
             )
@@ -10753,48 +12197,145 @@ def bind_staged_offline_track_kinematics_run(
                 values=key_values,
                 track_time_lineage=time_lineage,
             )
+            track_identity_preparation_seconds += (
+                time.perf_counter() - subphase_started
+            )
+            subphase_started = time.perf_counter()
             identity = stamp_and_bind_row_identity_contract(
                 subgroup,
-                subgroup["track_sample_key"],
+                track_sample_key_node,
                 contract=identity_contract,
                 track_time_lineage=time_lineage,
             )
+            track_identity_publication_seconds += (
+                time.perf_counter() - subphase_started
+            )
             if np.any(key_values[:, 0] != track_id):
                 raise ValueError("Track identity changed during final-path binding.")
-            publish_track_position_coordinates(
-                subgroup,
-                subgroup["positions_px"],
-                subgroup["source_row_index"],
-                track_row_identity=identity,
-                source_positions=surface.coordinates,
-                source_temporal_authority=surface.temporal_authority,
-                positions_mm_node=(
-                    subgroup["positions_mm"]
-                    if physical_authority is not None
-                    else None
-                ),
-                physical_frame=(
-                    physical_authority.physical_frame
-                    if physical_authority is not None
-                    else None
-                ),
+            subphase_started = time.perf_counter()
+            bound_publications.append(
+                publish_track_position_coordinates(
+                    subgroup,
+                    subgroup["positions_px"],
+                    subgroup["source_row_index"],
+                    track_row_identity=identity,
+                    source_positions=surface.coordinates,
+                    source_temporal_authority=surface.temporal_authority,
+                    positions_mm_node=(
+                        subgroup["positions_mm"]
+                        if physical_authority is not None
+                        else None
+                    ),
+                    physical_frame=(
+                        physical_authority.physical_frame
+                        if physical_authority is not None
+                        else None
+                    ),
+                )
             )
-        for _, subgroup in groups:
-            _load_bound_track_publication(
-                subgroup,
-                surface=surface,
-                physical_authority=physical_authority,
+            track_position_publication_seconds += (
+                time.perf_counter() - subphase_started
             )
+        phase_seconds["per_track_coordinate_publication"] = float(
+            time.perf_counter() - started
+        )
+        phase_seconds["track_time_lineage_publication"] = float(
+            track_time_lineage_seconds
+        )
+        phase_seconds["track_identity_preparation"] = float(
+            track_identity_preparation_seconds
+        )
+        phase_seconds["track_identity_publication"] = float(
+            track_identity_publication_seconds
+        )
+        phase_seconds["track_position_publication"] = float(
+            track_position_publication_seconds
+        )
+        if not receipt_mode:
+            started = time.perf_counter()
+            for _, subgroup in groups:
+                _load_bound_track_publication(
+                    subgroup,
+                    surface=surface,
+                    physical_authority=physical_authority,
+                )
+            phase_seconds["post_stamp_exhaustive_reload"] = float(
+                time.perf_counter() - started
+            )
+        elif len(bound_publications) != len(groups) or any(
+            not isinstance(publication, TrackPositionPublicationResult)
+            for publication in bound_publications
+        ):
+            raise RuntimeError(
+                "Receipt-backed track binding lost a freshly sealed track publication."
+            )
+        started = time.perf_counter()
         final_run_group.attrs[TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
             TRACK_KINEMATICS_BOUND_CANONICAL_STATUS
         )
-        validated = _validate_bound_offline_track_kinematics_run_or_raise(
-            authoritative_root,
-            final_run_group,
-            expected_keypoint_run=expected_keypoint_run,
-            expected_run_name=expected_run_name,
-            require_complete=False,
-            expected_selector_eligible=False,
+        phase_seconds["binding_status_commit"] = float(
+            time.perf_counter() - started
+        )
+        if receipt_mode:
+            assert payload_run_path is not None
+            assert canonical_integrity is not None
+            assert binding_validation_receipt is not None
+            started = time.perf_counter()
+            verified_integrity = verify_payload_integrity_receipt(
+                payload_run_path,
+                canonical_integrity,
+                expected_run_ref=f"/{final_run_group.path}",
+                hash_workers=payload_hash_workers,
+                verify_physical_payload=True,
+            )
+            verified_validation = verify_payload_validation_receipt(
+                binding_validation_receipt,
+                integrity_receipt=verified_integrity,
+                expected_scientific_manifest_sha256=digest,
+                expected_validator_schema_id=(
+                    TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_ID
+                ),
+                expected_validator_schema_version=(
+                    TRACK_KINEMATICS_BINDING_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+                ),
+            )
+            final_run_group.attrs[TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = (
+                json_attr_safe(verified_integrity)
+            )
+            final_run_group.attrs[
+                TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR
+            ] = json_attr_safe(verified_validation)
+            phase_seconds["post_binding_payload_reverification"] = float(
+                time.perf_counter() - started
+            )
+            validated: Mapping[str, Any] = {
+                "valid": True,
+                "status": TRACK_KINEMATICS_BOUND_CANONICAL_STATUS,
+                "run_name": expected_run_name,
+                "track_count": len(groups),
+                "row_count": total_rows,
+                "binding_manifest_sha256": digest,
+            }
+        else:
+            started = time.perf_counter()
+            validated = _validate_bound_offline_track_kinematics_run_or_raise(
+                authoritative_root,
+                final_run_group,
+                expected_keypoint_run=expected_keypoint_run,
+                expected_run_name=expected_run_name,
+                require_complete=False,
+                expected_selector_eligible=False,
+            )
+            phase_seconds["final_exhaustive_bound_validation"] = float(
+                time.perf_counter() - started
+            )
+        started = time.perf_counter()
+        # Close every operation-scoped array proof while attribute rollback is
+        # still available.  The decorator would otherwise close the proof only
+        # after this function returned, outside the rollback boundary.
+        finish_proof_verification()
+        phase_seconds["closing_array_proof_reverification"] = float(
+            time.perf_counter() - started
         )
         return {
             **validated,
@@ -10802,6 +12343,12 @@ def bind_staged_offline_track_kinematics_run(
             "track_count": len(groups),
             "row_count": total_rows,
             "binding_manifest_sha256": digest,
+            "binding_phase_seconds": phase_seconds,
+            "binding_validation_receipt_sha256": (
+                None
+                if binding_validation_receipt is None
+                else binding_validation_receipt["record_sha256"]
+            ),
         }
     except BaseException as exc:
         rollback_errors: list[str] = []
@@ -11618,6 +13165,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Keypoint run to use. Prefix with 'refined/' to target a refined run. Default: latest refined if available.",
     )
     parser.add_argument(
+        "--position-source-run",
+        help=(
+            "Optional current-v2 crop_runs successor that proves exact row identity "
+            "with the selected keypoint run's immutable historical crop source."
+        ),
+    )
+    parser.add_argument(
         "--run-name", help="Optional name for the output track kinematics run."
     )
     parser.add_argument(
@@ -12098,7 +13652,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         git=git_info,
                         environment=env_info.get("platform"),
                     )
-                    write_stage_provenance(run_group, provenance)
+                    write_stage_provenance(
+                        run_group,
+                        provenance,
+                        include_top_level_git=False,
+                    )
 
                     # Backward-compatible top-level attrs.
                     run_group.attrs.update(
@@ -12167,11 +13725,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         console.print("[blue]Building offline track kinematics run from all keypoint frames...[/blue]")
 
         keypoints_offline = resolve_keypoint_group(root, args.keypoint_run, console)
-        crop_group_offline = root[f"crop_runs/{keypoints_offline.crop_run}"]
+        position_crop_run = (
+            _controlled_run_leaf(
+                args.position_source_run,
+                label="position_source_run",
+            )
+            if args.position_source_run
+            else keypoints_offline.crop_run
+        )
+        crop_group_offline = root[f"crop_runs/{position_crop_run}"]
         position_source_offline = load_canonical_offline_position_source(
             root,
             crop_group_offline,
-            crop_run_name=keypoints_offline.crop_run,
+            crop_run_name=position_crop_run,
         )
         positions_offline = position_source_offline.positions_px
         frame_indices_offline = position_source_offline.frame_indices
@@ -12182,25 +13748,69 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 "Canonical offline track publication requires a sealed source-camera "
                 "position surface."
             )
-        detection_path_offline = _canonical_crop_detection_rowset_path(
-            canonical_position_surface.coordinates
-        )
-        detection_offline = resolve_detection_from_path(
-            root,
-            detection_path_offline,
-        )
-        console.print(
-            "[cyan]Using canonical crop-bound offline geometry:[/cyan] "
-            f"crop_runs/{keypoints_offline.crop_run} "
-            f"(detection_rowset={detection_path_offline})"
-        )
+        if args.position_source_run:
+            successor_tracking = resolve_collection_proxy_successor_tracking(
+                root,
+                keypoints=keypoints_offline,
+                position_crop_run=position_crop_run,
+            )
+            detection_path_offline = None
+            source_detection_run_id = successor_tracking.expected_detect_run
+            offline_publication_schema_version = (
+                TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+            )
+            expected_detect_run = successor_tracking.expected_detect_run
+            expected_refined_run = None
+            tracking_source_rowset_path = (
+                successor_tracking.historical_source_rowset_path
+            )
+            tracking_source_fingerprint = (
+                successor_tracking.expected_source_rowset_fingerprint
+            )
+            console.print(
+                "[cyan]Using verified coordinate-successor geometry:[/cyan] "
+                f"crop_runs/{position_crop_run} "
+                f"(historical_tracking_rowset={tracking_source_rowset_path})"
+            )
+        else:
+            detection_path_offline = _canonical_crop_detection_rowset_path(
+                canonical_position_surface.coordinates
+            )
+            detection_offline = resolve_detection_from_path(
+                root,
+                detection_path_offline,
+            )
+            expected_detect_run = (
+                detection_offline.source_detect_run or detection_offline.run_name
+            )
+            source_detection_run_id = None
+            offline_publication_schema_version = (
+                TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION
+            )
+            expected_refined_run = (
+                detection_offline.run_name if detection_offline.is_refined else None
+            )
+            tracking_source_rowset_path = position_source_offline.path
+            tracking_source_fingerprint = position_source_offline.rowset_fingerprint
+            console.print(
+                "[cyan]Using canonical crop-bound offline geometry:[/cyan] "
+                f"crop_runs/{position_crop_run} "
+                f"(detection_rowset={detection_path_offline})"
+            )
         (
             offline_physical_authority,
             offline_physical_calibration_info,
-        ) = resolve_canonical_track_physical_authority(
+        ) = resolve_track_physical_authority(
             root,
             stimulus_run=args.stimulus_run,
         )
+        if offline_physical_authority is None and not args.no_write:
+            raise ValueError(
+                "Offline track-kinematics publication requires sealed source-camera "
+                "physical calibration authority; none was available "
+                "(reason_code="
+                f"{offline_physical_calibration_info.get('reason_code')!r})."
+            )
         offline_mm_per_pixel = (
             offline_physical_authority.mm_per_pixel
             if offline_physical_authority is not None
@@ -12238,9 +13848,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
         )
 
-        expected_detect_run = (
-            detection_offline.source_detect_run or detection_offline.run_name
-        )
         if not expected_detect_run:
             raise ValueError(
                 "Offline: unable to determine source_detect_run for tracking lookup."
@@ -12249,12 +13856,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             root,
             frame_indices_offline.shape[0],
             expected_detect_run=expected_detect_run,
-            expected_refined_run=(
-                detection_offline.run_name if detection_offline.is_refined else None
-            ),
-            expected_source_rowset_path=position_source_offline.path,
+            expected_refined_run=expected_refined_run,
+            expected_source_rowset_path=tracking_source_rowset_path,
             expected_instance_key=position_source_offline.instance_key,
-            expected_source_rowset_fingerprint=position_source_offline.rowset_fingerprint,
+            expected_source_rowset_fingerprint=tracking_source_fingerprint,
             return_metadata=True,
         )
         track_ids_offline = track_ids_offline.astype(np.int64, copy=False)
@@ -12478,7 +14083,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         env_info = get_environment_info()
 
                         offline_inputs = {
-                            "detection_path": detection_path_offline,
                             **_offline_position_source_inputs(
                                 position_source_offline
                             ),
@@ -12488,9 +14092,28 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 else "keypoints_runs/"
                             )
                             + keypoints_offline.run_name,
-                            "crop_run": keypoints_offline.crop_run,
+                            "crop_run": position_crop_run,
                             "tracking_path": f"tracking_runs/{tracking_run_name}",
                         }
+                        if args.position_source_run:
+                            offline_inputs.update(
+                                {
+                                    "position_lineage_mode": (
+                                        TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+                                    ),
+                                    "keypoint_source_crop_run": (
+                                        keypoints_offline.crop_run
+                                    ),
+                                    "tracking_source_rowset_path": (
+                                        tracking_source_rowset_path
+                                    ),
+                                    "source_detection_run_id": (
+                                        source_detection_run_id
+                                    ),
+                                }
+                            )
+                        else:
+                            offline_inputs["detection_path"] = detection_path_offline
                         if metrics_metadata:
                             offline_inputs["chaser_metrics"] = metrics_metadata
                         if swim_bout_mirror:
@@ -12520,7 +14143,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             git=git_info,
                             environment=env_info.get("platform"),
                         )
-                        write_stage_provenance(offline_group, offline_provenance)
+                        write_stage_provenance(
+                            offline_group,
+                            offline_provenance,
+                            include_top_level_git=False,
+                        )
 
                         # Backward-compatible top-level attrs.
                         offline_group.attrs.update(
@@ -12530,6 +14157,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                     method="track_kinematics_offline",
                                     parameters=offline_params,
                                     inputs=offline_inputs,
+                                    publication_schema_version=(
+                                        offline_publication_schema_version
+                                    ),
                                 ),
                                 "created_at_utc": created_at,
                                 "fps": fps,
@@ -12616,9 +14246,12 @@ __all__ = [
     "BoundTrackMotionTrack",
     "BoundTrackPositionBindings",
     "DeferredTrackKinematicsSelectorActivation",
+    "TrackPhysicalAuthority",
     "TrackSpeeds",
+    "TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR",
     "_ordered_track_arena_ids",
     "bind_staged_offline_track_kinematics_run",
+    "build_track_motion_staged_scientific_validation",
     "compute_track_speed",
     "find_fps",
     "_filter_public_track_rows",
@@ -12627,9 +14260,11 @@ __all__ = [
     "load_bound_track_position_bindings",
     "resolve_dimensions",
     "rollback_deferred_track_kinematics_selector_activation",
+    "resolve_track_physical_authority",
     "stage_offline_track_kinematics_run",
     "validate_bound_track_motion_run",
     "validate_bound_track_position_bindings",
+    "verify_track_motion_staged_scientific_validation",
     "main",
 ]
 

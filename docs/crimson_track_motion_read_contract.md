@@ -120,6 +120,25 @@ use `track_sample_key` and `source_acquisition_frame_index`; row offset and
 `frame_indices` alone are not identity. A future no-alias schema may omit it
 only through an explicit manifest/reader schema-version change.
 
+Publication-manifest schema v1 is frozen and is selected by the absence of
+`track_motion_publication_manifest_schema_version`. Its offline position
+lineage is one direct crop-selection record and one exact detection rowset.
+
+Schema v2 is selected only when that root attr equals `2`. It carries an
+explicit `position_lineage_mode` and a versioned run-derivation wrapper. The
+supported modes are:
+
+- `direct_crop_selection_v1`, which seals the exact persisted crop-selection
+  record reference/digest and detection rowset; and
+- `verified_collection_proxy_successor_v1`, which seals the exact current
+  successor-mapping record reference/digest, historical source rowset,
+  detection-run identity, and keypoint/tracking run and rowset references.
+
+The v2 publication commit is also schema version 2 and binds the v2 manifest.
+Readers dispatch on the persisted manifest version, reconstruct the matching
+live contract, and reject v2 fields in v1 or missing v2 lineage fields. They do
+not reinterpret an existing v1 seal as v2.
+
 `positions_mm` and the `*_mm` motion fields are optional. They are present only
 when Palette bound an exact compatible typed physical-frame calibration. Their
 absence means physical output is unavailable, not that Crimson should infer a

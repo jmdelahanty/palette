@@ -11,6 +11,7 @@ import pytest
 
 from fisheye.analysis import track_kinematics as mod
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.shared.coordinate_record import stamp_and_bind_persisted_coordinate_record
 from tests.unit.fisheye.test_directed_transform_chain import _world
 from tests.unit.fisheye.test_track_kinematics_coordinate_contract import (
     _WritableGroup,
@@ -414,6 +415,116 @@ def _restore_publication_attrs(run, manifest, digest, commit) -> None:
     run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR] = copy.deepcopy(commit)
 
 
+def _decoded_payload_receipt_fixture(*, root_sha256: str = "8" * 64):
+    return {
+        "canonicalization": "test.decoded_payload.v1",
+        "array_count": 1,
+        "decoded_bytes": 16,
+        "root_sha256": root_sha256,
+        "arrays": [{}],
+    }
+
+
+def test_staged_scientific_validation_binds_full_numeric_check_to_decoded_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    )
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR] = "7" * 64
+
+    receipt = mod.build_track_motion_staged_scientific_validation(
+        run,
+        decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+        run_name=str(run.path).rsplit("/", 1)[-1],
+    )
+
+    assert receipt["result"] == "valid"
+    assert receipt["decoded_payload"]["root_sha256"] == "8" * 64
+    assert receipt["validated_tracks"] == [{"track_id": 7, "sample_count": 2}]
+    assert len(receipt["record_sha256"]) == 64
+    run.attrs[mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR] = receipt
+    root_attrs = mod._motion_run_root_attrs_record(run, _sealed.position_bindings)
+    assert root_attrs["record"]["immutable_attrs"][
+        mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+    ] == receipt
+
+
+def test_staged_scientific_validation_rejects_wrong_numeric_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    )
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR] = "7" * 64
+    track["speed_raw_px"].data[1] += np.float32(5.0)
+
+    with pytest.raises(ValueError, match="numeric derivation invariant"):
+        mod.build_track_motion_staged_scientific_validation(
+            run,
+            decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+            run_name=str(run.path).rsplit("/", 1)[-1],
+        )
+
+
+def test_staged_scientific_validation_rejects_another_installed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+    )
+    run.attrs[mod.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR] = "7" * 64
+    receipt = mod.build_track_motion_staged_scientific_validation(
+        run,
+        decoded_payload_receipt=_decoded_payload_receipt_fixture(),
+        run_name=str(run.path).rsplit("/", 1)[-1],
+    )
+    run.attrs[mod.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR] = receipt
+    monkeypatch.setattr(
+        mod,
+        "canonical_payload_integrity_receipt",
+        lambda _value: {
+            "decoded_payload": _decoded_payload_receipt_fixture(
+                root_sha256="6" * 64
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="another decoded payload"):
+        mod.verify_track_motion_staged_scientific_validation(
+            run,
+            receipt,
+            payload_integrity_receipt={},
+        )
+
+
+def test_seal_reuses_one_position_binding_within_same_publication_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    original = mod._load_bound_track_position_bindings_before_selection
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "_load_bound_track_position_bindings_before_selection",
+        counted,
+    )
+
+    rebound = mod._seal_and_load_track_motion_run_before_selection(root, run)
+
+    assert calls == 1
+    assert rebound.position_bindings.run_group.path == run.path
+
+
 def _replace_motion_derivation_inputs(run, inputs: dict[str, object]) -> None:
     """Replace every duplicated derivation input copy coherently."""
 
@@ -422,6 +533,9 @@ def _replace_motion_derivation_inputs(run, inputs: dict[str, object]) -> None:
     run.attrs["source_refs"] = mod._track_kinematics_source_refs(
         run_type="offline",
         inputs=copied,
+        publication_schema_version=(
+            mod._track_motion_publication_schema_version(run)
+        ),
     )
     stage_provenance = copy.deepcopy(run.attrs["provenance"])
     stage_provenance["inputs"] = copy.deepcopy(copied)
@@ -625,6 +739,12 @@ def test_fresh_full_motion_writer_seal_round_trips_domains_and_authority(
 
     assert isinstance(sealed, mod.BoundTrackMotionRun)
     assert isinstance(sealed.manifest, MappingProxyType)
+    assert sealed.manifest["schema_version"] == 1
+    assert mod.TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR not in run.attrs
+    assert "position_lineage_mode" not in sealed.manifest
+    assert "position_lineage" not in sealed.manifest["source_authority"]
+    assert "schema_id" not in sealed.manifest["run_derivation"]
+    assert "schema_version" not in sealed.manifest["run_derivation"]
     track = sealed.track(7)
     assert track.surface("time_seconds").axis0_domain == (
         mod.TRACK_MOTION_AXIS_TRACK_SAMPLE
@@ -919,6 +1039,38 @@ def test_motion_commit_rejects_recomputed_group_and_root_auxiliary_payloads(
         mod.load_bound_track_motion_run(root, run)
 
 
+def test_live_manifest_rebuild_hashes_every_published_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not replace exhaustive reader proof with an output-only receipt."""
+
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    expected_paths = {
+        str(run[name].path) for name in run.array_keys()
+    }
+    for _track_id, track_group in mod._live_track_groups(run):
+        expected_paths.update(
+            str(node.path)
+            for _relative_path, node in mod._iter_track_array_nodes(track_group)
+        )
+
+    original = mod.array_payload_sha256
+    hashed_paths: list[str] = []
+
+    def record_live_hash(node):
+        hashed_paths.append(str(node.path))
+        return original(node)
+
+    monkeypatch.setattr(mod, "array_payload_sha256", record_live_hash)
+    mod._build_track_motion_publication_manifest(
+        root,
+        run,
+        sealed.position_bindings,
+    )
+
+    assert expected_paths <= set(hashed_paths)
+
+
 def test_full_motion_loader_rejects_recomputed_physical_authority_attack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1206,6 +1358,58 @@ def test_full_motion_recomputes_summary_values_and_inventory(
         mod._build_track_motion_publication_manifest(root, run, positions)
 
 
+def test_acceleration_summary_uses_persisted_float32_reduction_domain() -> None:
+    values = np.linspace(-1000.0, 1000.0, 1_182_938, dtype=np.float32)
+
+    mean, standard_deviation = mod._acceleration_summary_statistics(values)
+
+    assert mean == float(np.mean(values))
+    assert standard_deviation == float(np.std(values))
+    assert mean != float(np.mean(values.astype(np.float64)))
+    assert standard_deviation != float(np.std(values.astype(np.float64)))
+
+
+def test_resultant_domain_allows_only_one_float32_boundary_step() -> None:
+    one = np.float32(1.0)
+    one_step = np.nextafter(one, np.float32(np.inf))
+    two_steps = np.nextafter(one_step, np.float32(np.inf))
+
+    assert mod._float32_resultants_within_unit_interval(
+        np.asarray([0.0, one, one_step, np.nan], dtype=np.float32)
+    )
+    assert not mod._float32_resultants_within_unit_interval(
+        np.asarray([two_steps], dtype=np.float32)
+    )
+    assert not mod._float32_resultants_within_unit_interval(
+        np.asarray([-np.finfo(np.float32).tiny], dtype=np.float32)
+    )
+
+
+def test_smoothed_turning_uses_persisted_float32_heading_parent() -> None:
+    smoothed = np.asarray(
+        [45.034366607666016, 142.99696350097656, 99.2468490600586],
+        dtype=np.float64,
+    )
+    delta_seconds = np.asarray([0.0, 1.0 / 30.0, 1.0 / 30.0])
+    valid = np.ones(smoothed.shape, dtype=bool)
+
+    observed = mod._compute_turning_from_persisted_smoothed_heading(
+        smoothed,
+        delta_seconds,
+        transition_valid=valid,
+        sample_valid=valid,
+    )
+    expected = mod._compute_heading_turning(
+        smoothed.astype(np.float32),
+        delta_seconds,
+        transition_valid=valid,
+        sample_valid=valid,
+    )
+
+    for observed_array, expected_array in zip(observed, expected, strict=True):
+        np.testing.assert_array_equal(observed_array, expected_array)
+
+
 def test_motion_seal_accepts_materializer_storage_and_dynamic_staging_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1451,6 +1655,228 @@ def test_manifest_rejects_coherent_detection_path_outside_crop_lineage(
     _replace_motion_derivation_inputs(run, inputs)
 
     with pytest.raises(ValueError, match="detection_path does not identify"):
+        mod._build_track_motion_publication_manifest(
+            root,
+            run,
+            sealed.position_bindings,
+        )
+
+
+def _configure_v2_successor_run(root, run) -> tuple[str, str]:
+    historical_rowset = "crop_runs/historical_collection"
+    detection_run_id = "finalized_collection_proxy:collection_1"
+    root["keypoints_runs"]["kp_1"].attrs.update(
+        {
+            "source_crop_run": "historical_collection",
+            "source_detect_run": detection_run_id,
+        }
+    )
+    root["tracking_runs"]["trk_1"].attrs.update(
+        {
+            "source_rowset_path": historical_rowset,
+            "source_detect_run": detection_run_id,
+        }
+    )
+    mapping_record = {
+        "schema_id": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID,
+        "schema_version": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION,
+        "operation": mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION,
+        "historical_source": {"rowset_ref": f"/{historical_rowset}"},
+    }
+    stamp_and_bind_persisted_coordinate_record(
+        root["crop_runs"]["c1"],
+        mapping_record,
+        attr_name=mod.COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    )
+    run.attrs[mod.TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR] = (
+        mod.TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    )
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs.pop("detection_path")
+    inputs.update(
+        {
+            "position_lineage_mode": (
+                mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+            ),
+            "keypoint_source_crop_run": "historical_collection",
+            "tracking_source_rowset_path": historical_rowset,
+            "source_detection_run_id": detection_run_id,
+        }
+    )
+    _replace_motion_derivation_inputs(run, inputs)
+    return historical_rowset, detection_run_id
+
+
+def _configure_v2_direct_run(root, run, positions) -> None:
+    selection_records = [
+        record
+        for record in positions.source_positions.lineage_records
+        if record.record.get("schema_id")
+        == mod.CROP_GEOMETRY_SELECTION_SCHEMA_ID
+    ]
+    assert len(selection_records) == 1
+    stamp_and_bind_persisted_coordinate_record(
+        root["crop_runs"]["c1"],
+        selection_records[0].record,
+        attr_name=mod.CROP_GEOMETRY_SELECTION_ATTR,
+    )
+    run.attrs[mod.TRACK_MOTION_PUBLICATION_SCHEMA_VERSION_ATTR] = (
+        mod.TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_VERSION_V2
+    )
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs["position_lineage_mode"] = mod.TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
+    _replace_motion_derivation_inputs(run, inputs)
+
+
+def test_manifest_accepts_verified_merged_rowset_coordinate_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, detection_run_id = _configure_v2_successor_run(
+        root,
+        run,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    manifest = mod._build_track_motion_publication_manifest(
+        root,
+        run,
+        sealed.position_bindings,
+    )
+
+    refs = manifest["run_derivation"]["record"]["source_refs"]
+    assert manifest["schema_version"] == 2
+    assert manifest["run_derivation"]["schema_version"] == 2
+    assert manifest["position_lineage_mode"] == (
+        mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+    )
+    assert refs["source_detection_run_id"] == detection_run_id
+    assert "source_detection_path" not in refs
+    assert refs["source_tracking_rowset_path"] == historical_rowset
+    lineage = manifest["source_authority"]["position_lineage"]
+    assert lineage["historical_source_rowset_ref"] == f"/{historical_rowset}"
+    assert lineage["successor_mapping"]["record_ref"] == (
+        "/crop_runs/c1@collection_proxy_coordinate_successor_mapping"
+    )
+    assert len(lineage["successor_mapping"]["record_sha256"]) == 64
+
+
+def test_manifest_accepts_unknown_keypoint_detection_with_exact_tracking_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, detection_run_id = _configure_v2_successor_run(root, run)
+    root["keypoints_runs"]["kp_1"].attrs["source_detect_run"] = "unknown"
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    manifest = mod._build_track_motion_publication_manifest(
+        root,
+        run,
+        sealed.position_bindings,
+    )
+
+    assert (
+        manifest["source_authority"]["position_lineage"][
+            "source_detection_run_id"
+        ]
+        == detection_run_id
+    )
+
+
+def test_manifest_rejects_successor_tracking_detection_identity_disagreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, _detection_run_id = _configure_v2_successor_run(root, run)
+    root["tracking_runs"]["trk_1"].attrs["source_detect_run"] = "decoy"
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    with pytest.raises(ValueError, match="conflicts with the verified successor"):
+        mod._build_track_motion_publication_manifest(
+            root,
+            run,
+            sealed.position_bindings,
+        )
+
+
+def test_v2_direct_crop_seal_round_trips_through_versioned_reader_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, original, _physical = _clone_full_motion_run(monkeypatch)
+    _configure_v2_direct_run(root, run, original.position_bindings)
+
+    sealed = mod._seal_and_load_track_motion_run_before_selection(root, run)
+
+    assert sealed.manifest["schema_version"] == 2
+    assert sealed.manifest["position_lineage_mode"] == (
+        mod.TRACK_POSITION_LINEAGE_DIRECT_CROP_V1
+    )
+    lineage = sealed.manifest["source_authority"]["position_lineage"]
+    assert lineage["crop_selection"]["record_ref"] == (
+        "/crop_runs/c1@crop_geometry_selection"
+    )
+    assert run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR]["schema_version"] == 2
+    sealed.assert_verified()
+
+
+def test_v2_successor_seal_round_trips_through_versioned_reader_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, _sealed, _physical = _clone_full_motion_run(monkeypatch)
+    historical_rowset, _detection_run_id = _configure_v2_successor_run(root, run)
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda candidate_root, rowset_path: historical_rowset
+        if candidate_root is root and rowset_path == "crop_runs/c1"
+        else None,
+    )
+
+    sealed = mod._seal_and_load_track_motion_run_before_selection(root, run)
+
+    assert sealed.manifest["schema_version"] == 2
+    assert sealed.manifest["position_lineage_mode"] == (
+        mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+    )
+    assert run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR] == (
+        mod._track_motion_publication_commit(
+            mod._thaw_motion_manifest(sealed.manifest)
+        )
+    )
+    assert run.attrs[mod.TRACK_MOTION_PUBLICATION_COMMIT_ATTR]["schema_version"] == 2
+    sealed.assert_verified()
+
+
+def test_manifest_rejects_successor_that_maps_to_another_historical_rowset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    _configure_v2_successor_run(root, run)
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _rowset_path: "crop_runs/another_collection",
+    )
+
+    with pytest.raises(ValueError, match="mapping contract is invalid"):
         mod._build_track_motion_publication_manifest(
             root,
             run,
@@ -1834,6 +2260,39 @@ def test_run_derivation_rejects_all_conflicting_duplicate_metadata(
         mod._motion_run_derivation_record(run, positions)
 
 
+def test_v2_rejects_duplicate_top_level_git_outside_stage_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    _configure_v2_successor_run(root, run)
+    run.attrs["git_commit"] = "b" * 40
+    run.attrs["git_branch"] = "agent/decoy"
+
+    with pytest.raises(ValueError, match="unsupported run-root attrs"):
+        mod._motion_run_root_attrs_record(run, sealed.position_bindings)
+
+
+def test_frozen_v1_derivation_rejects_successor_only_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, run, _track, sealed, _physical = _clone_full_motion_run(monkeypatch)
+    inputs = copy.deepcopy(run.attrs["inputs"])
+    inputs.update(
+        {
+            "position_lineage_mode": (
+                mod.TRACK_POSITION_LINEAGE_COLLECTION_PROXY_SUCCESSOR_V1
+            ),
+            "keypoint_source_crop_run": "c1",
+            "tracking_source_rowset_path": "crop_runs/c1",
+            "source_detection_run_id": "collection_1",
+        }
+    )
+    _replace_motion_derivation_inputs(run, inputs)
+
+    with pytest.raises(ValueError, match="input inventory is not closed"):
+        mod._motion_run_derivation_record(run, sealed.position_bindings)
+
+
 @pytest.mark.parametrize(
     ("path", "replacement"),
     (
@@ -2036,7 +2495,69 @@ def test_validator_rejects_omitted_tracking_arena_authorities(
             [(7, track)],
         )
 
-    missing_inventory = copy.deepcopy(original)
+
+def test_validator_accepts_negative_unassigned_tracking_rows_outside_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, track, sealed, _physical = _fresh_full_motion_run(
+        monkeypatch,
+        source_rows=np.asarray([0], dtype=np.int64),
+    )
+    tracking = root["tracking_runs"]["trk_1"]
+    tracking["track_ids"].data[1] = np.int32(-1)
+    authority = mod.build_track_motion_input_authority(
+        root,
+        source_positions=sealed.position_bindings.source_positions,
+        mode="offline_exact_sources_v1",
+        heading_node=root["keypoints_runs"]["kp_1"]["heading"],
+        keypoint_usability_node=root["keypoints_runs"]["kp_1"]["heading_usable"],
+        keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
+        tracking_group=tracking,
+    )
+    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = mod._thaw_motion_manifest(
+        authority.record
+    )
+
+    _manifest, values = mod._validate_track_motion_input_authority(
+        root,
+        run,
+        sealed.position_bindings,
+        [(7, track)],
+    )
+
+    assert values["track_id"].tolist() == [7, -1]
+
+
+def test_validator_rejects_nonnegative_tracking_row_missing_from_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, run, track, sealed, _physical = _fresh_full_motion_run(
+        monkeypatch,
+        source_rows=np.asarray([0], dtype=np.int64),
+    )
+    tracking = root["tracking_runs"]["trk_1"]
+    tracking["track_ids"].data[1] = np.int32(8)
+    authority = mod.build_track_motion_input_authority(
+        root,
+        source_positions=sealed.position_bindings.source_positions,
+        mode="offline_exact_sources_v1",
+        heading_node=root["keypoints_runs"]["kp_1"]["heading"],
+        keypoint_usability_node=root["keypoints_runs"]["kp_1"]["heading_usable"],
+        keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
+        tracking_group=tracking,
+    )
+    authority_record = mod._thaw_motion_manifest(authority.record)
+    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority_record
+
+    with pytest.raises(ValueError, match="assigned track IDs disagree"):
+        mod._validate_track_motion_input_authority(
+            root,
+            run,
+            sealed.position_bindings,
+            [(7, track)],
+        )
+
+    missing_inventory = copy.deepcopy(authority_record)
     missing_inventory["arena_inventory"] = None
     run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = missing_inventory
     with pytest.raises(ValueError, match="omits the selected tracking arena inventory"):

@@ -63,7 +63,9 @@ from fisheye.shared.coordinate_frame_record import (
     verify_bound_body_estimator_source,
     verify_bound_selected_camera_frame_evidence,
     verify_bound_body_source_coordinate_descriptor,
+    array_payload_sha256,
 )
+from fisheye.shared.proof_verification import proof_verification_scope
 from fisheye.shared.coordinate_identity import (
     OBSERVATION_INSTANCE_DOMAIN,
     STIMULUS_STATE_DOMAIN,
@@ -141,6 +143,37 @@ class _MutatingArrayNode(_Node):
             self._data = self._data.copy()
             self._data.flat[0] = self._data.flat[0] + 1
         return self._data[key]
+
+
+class _CountingArrayNode(_Node):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.read_count = 0
+
+    def __getitem__(self, key: Any) -> Any:
+        self.read_count += 1
+        return self._data[key]
+
+
+def test_array_payload_hash_reuses_only_one_operation_scoped_proof() -> None:
+    node = _CountingArrayNode(
+        "analysis/run/values",
+        token=object(),
+        data=np.arange(12, dtype=np.float32),
+    )
+
+    with proof_verification_scope():
+        first = array_payload_sha256(node)
+        second = array_payload_sha256(node)
+        assert first == second
+        # One stable initial proof performs the traditional two reads.
+        assert node.read_count == 2
+
+    # The outer scope closes with one fresh read and comparison.
+    assert node.read_count == 3
+    array_payload_sha256(node)
+    # Outside a scope, each call retains the traditional two-read proof.
+    assert node.read_count == 5
 
 
 class _FailOnceAttrs(dict[str, Any]):

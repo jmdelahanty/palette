@@ -62,6 +62,9 @@ from fisheye.shared.selected_calibration import (
     load_selected_calibration_snapshot,
     selected_calibration_paths,
 )
+from fisheye.shared.source_camera_physical_authority import (
+    load_source_camera_physical_authority,
+)
 from fisheye.shared.pixel_frame_authority import (
     PIXEL_FRAME_AUTHORITY_ATTR,
     PIXEL_FRAME_AUTHORITY_DIGEST_ATTR,
@@ -856,6 +859,7 @@ def test_import_preserves_global_calibration_and_copies_run_local_snapshot(
         data=np.array([11.0, 13.0], dtype=np.float64),
         chunks=(2,),
     )
+    _prepare_acquisition_authority(zarr_path)
 
     run_name = mod.import_stimulus_to_zarr(
         stimulus_h5=h5_path,
@@ -918,6 +922,10 @@ def test_import_preserves_global_calibration_and_copies_run_local_snapshot(
     assert snapshot.manifest.source_homography.numeric_matrix_sha256 == (
         snapshot.manifest.matrix_sha256
     )
+    recording_physical = load_source_camera_physical_authority(root)
+    assert recording_physical.camera_id == "2010093"
+    assert recording_physical.source_kind == "stimulus_h5_calibration_snapshot"
+    assert recording_physical.mm_per_pixel == pytest.approx(1.0 / 50.0)
     assert "source_h5_evidence" not in run_calib
     projected_surface = run_calib["scale_models"]["projected_surface"]
     assert projected_surface.attrs["model_name"] == "projected_surface"

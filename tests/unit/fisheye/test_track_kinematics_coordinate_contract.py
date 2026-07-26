@@ -30,6 +30,9 @@ from fisheye.shared.stimulus_physical_coordinate import (
     publish_stimulus_physical_coordinate_authority,
     require_bound_stimulus_physical_coordinate_authority,
 )
+from fisheye.shared.source_camera_physical_authority import (
+    publish_source_camera_physical_authority,
+)
 from tests.unit.fisheye.test_directed_transform_chain import (
     FakeArray,
     FakeGroup,
@@ -48,6 +51,7 @@ from tests.unit.fisheye.test_observation_coordinate_publication import (
 class _WritableGroup(FakeGroup):
     def __init__(self, *, path: str, archive_token: object) -> None:
         super().__init__(path=path, archive_token=archive_token)
+        self.fresh_array_handle_names: set[str] = set()
         parts = path.split("/")
         if parts[:2] == ["analysis", "track_kinematics_runs"] and len(parts) == 4:
             self.attrs["stage_selector_eligible"] = False
@@ -82,7 +86,20 @@ class _WritableGroup(FakeGroup):
     def __getitem__(self, name: str) -> Any:
         node: Any = self
         for part in name.split("/"):
-            node = node.children[part]
+            child = node.children[part]
+            if (
+                part in getattr(node, "fresh_array_handle_names", ())
+                and isinstance(child, FakeArray)
+            ):
+                child = FakeArray(
+                    child.data,
+                    path=child.path,
+                    attrs=child.attrs,
+                    archive_token=child._coordinate_archive_token,
+                    chunks=child.chunks,
+                    shards=child.shards,
+                )
+            node = child
         return node
 
     def __contains__(self, name: object) -> bool:
@@ -443,6 +460,98 @@ def _selected_stimulus_physical_authority(world):
     return reloaded
 
 
+def _recording_physical_authority(world):
+    _selected_stimulus_physical_authority(world)
+    return publish_source_camera_physical_authority(
+        world["root"],
+        source_camera_evidence=world["camera_evidence"],
+        source_kind="operator_verified_donor",
+        provenance={"operator_verified": True, "donor_zarr": "/donor.zarr"},
+    )
+
+
+def test_writer_accepts_recording_physical_authority_without_stimulus_selector() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    physical = _recording_physical_authority(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+        pixel_to_mm=physical.mm_per_pixel,
+    )
+    run = _WritableGroup(
+        path="analysis/track_kinematics_runs/offline/tk_recording_physical",
+        archive_token=world["archive_token"],
+    )
+
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        physical_authority=physical,
+    )
+
+    manifest = run.attrs["physical_coordinate_authority"]
+    assert manifest["authority_kind"] == "recording_calibration"
+    assert manifest["recording_calibration"] is True
+    assert "stimulus_run" not in manifest
+    assert run["tracks/id_7/positions_mm"].shape == (2, 2)
+
+
+def test_track_resolver_falls_back_to_recording_physical_authority() -> None:
+    world = _world(convention="continuous", archive_token=object())
+    physical = _recording_physical_authority(world)
+
+    resolved, info = mod.resolve_track_physical_authority(
+        world["root"],
+        stimulus_run=None,
+    )
+
+    assert resolved is not None
+    assert resolved.manifest.record_sha256 == physical.manifest.record_sha256
+    assert info["authority_kind"] == "recording_calibration"
+    assert info["reason_code"] == "NONE"
+
+
+def test_track_stage_fails_before_compute_without_physical_authority(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.zarr"
+    source.mkdir()
+    staging = tmp_path / "staging.zarr"
+    called = False
+
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mod,
+        "resolve_track_physical_authority",
+        lambda *_args, **_kwargs: (
+            None,
+            {"reason_code": "NO_RECORDING_PHYSICAL_AUTHORITY"},
+        ),
+    )
+
+    def _unexpected_main(_argv):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mod, "main", _unexpected_main)
+
+    with pytest.raises(ValueError, match="requires sealed source-camera"):
+        mod.stage_offline_track_kinematics_run(
+            source,
+            staging,
+            keypoint_run="keypoints",
+            run_name="track",
+        )
+
+    assert called is False
+    assert not staging.exists()
+
+
 def test_writer_publishes_all_mm_surfaces_with_selected_stimulus_authority() -> None:
     world = _world(convention="continuous", archive_token=object())
     surface = _canonical_crop_position_surface(world)
@@ -507,7 +616,7 @@ def test_direct_physical_writer_rejects_unsealed_mm_payload_before_mutation(
         archive_token=world["archive_token"],
     )
 
-    with pytest.raises(ValueError, match="exact selected-stimulus mm_per_pixel"):
+    with pytest.raises(ValueError, match="exact source-camera mm_per_pixel"):
         mod.save_track_kinematics_tracks(
             run,
             tracks,
@@ -588,6 +697,11 @@ def test_deferred_track_stage_binds_only_at_authoritative_final_path(
         staging_run_name=run_name,
     )
     track = run["tracks/id_7"]
+    # Real Zarr groups may return a distinct Python Array wrapper for every
+    # lookup.  The final-path binder must retain one handle while stamping the
+    # time lineage and the row-identity contract because those two operations
+    # intentionally require exact in-memory authority continuity.
+    track.fresh_array_handle_names.add("track_sample_key")
     assert run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] == (
         mod.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
     )
@@ -652,6 +766,168 @@ def test_deferred_track_stage_binds_only_at_authoritative_final_path(
     track_position = published.position_for_track(7)
     assert track_position.positions_px.coordinate_node is track["positions_px"]
     assert track_position.positions_mm is None
+
+
+def test_receipt_backed_binding_reuses_fresh_publications_and_skips_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+    )
+    run_name = "tk_receipt_bound"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, path: surface if path == "crop_runs/c1" else None,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    root = _WritableGroup(path="", archive_token=world["archive_token"])
+    analysis = root.create_group("analysis")
+    runs = analysis.create_group("track_kinematics_runs")
+    offline = runs.create_group("offline")
+    offline.children[run_name] = run
+    run_ref = f"/{run.path}"
+    integrity = {"run_ref": run_ref, "record_sha256": "e" * 64}
+    validation = {"record_sha256": "f" * 64}
+
+    monkeypatch.setattr(
+        mod,
+        "canonical_payload_integrity_receipt",
+        lambda value: dict(integrity) if value is integrity else dict(value),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_payload_validation_receipt",
+        lambda *_args, **_kwargs: dict(validation),
+    )
+
+    def verify_integrity(
+        path,
+        value,
+        *,
+        expected_run_ref,
+        hash_workers,
+        verify_physical_payload,
+    ):
+        assert str(path).endswith(run_name)
+        assert value == integrity
+        assert expected_run_ref == run_ref
+        assert hash_workers == 3
+        assert verify_physical_payload is True
+        return dict(integrity)
+
+    monkeypatch.setattr(mod, "verify_payload_integrity_receipt", verify_integrity)
+    monkeypatch.setattr(
+        mod,
+        "verify_payload_validation_receipt",
+        lambda value, **_kwargs: dict(value),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_bound_track_publication",
+        lambda *_args, **_kwargs: pytest.fail(
+            "receipt-backed binding must reuse the freshly sealed publication"
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_validate_bound_offline_track_kinematics_run_or_raise",
+        lambda *_args, **_kwargs: pytest.fail(
+            "receipt-backed binding must not repeat the exhaustive validator"
+        ),
+    )
+
+    bound = mod.bind_staged_offline_track_kinematics_run(
+        root,
+        run,
+        expected_keypoint_run="kp_1",
+        expected_run_name=run_name,
+        payload_integrity_receipt=integrity,
+        payload_run_path=f"/tmp/{run_name}",
+        payload_hash_workers=3,
+    )
+
+    assert bound["valid"] is True
+    assert bound["binding_validation_receipt_sha256"] == "f" * 64
+    assert "post_stamp_exhaustive_reload" not in bound["binding_phase_seconds"]
+    assert "final_exhaustive_bound_validation" not in bound[
+        "binding_phase_seconds"
+    ]
+    assert run.attrs[mod.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] == integrity
+    assert run.attrs[mod.TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR] == (
+        validation
+    )
+
+
+def test_binding_closes_array_proofs_before_rollback_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="continuous", archive_token=object())
+    surface = _canonical_crop_position_surface(world)
+    tracks, summaries = _build_from_source(
+        surface.coordinates,
+        surface.temporal_authority,
+    )
+    run_name = "tk_proof_close_failure"
+    run = _WritableGroup(
+        path=f"analysis/track_kinematics_runs/offline/{run_name}",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run,
+        tracks,
+        summaries,
+        source_temporal_authority=surface.temporal_authority,
+        positions_px_source=surface.coordinates,
+        defer_coordinate_binding=True,
+        staging_keypoint_run="kp_1",
+        staging_run_name=run_name,
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_persisted_source_camera_position_surface",
+        lambda _root, path: surface if path == "crop_runs/c1" else None,
+    )
+    run.attrs["palette_run_completion_status"] = "running"
+    run.attrs[mod.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+        mod.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+    )
+    before = copy.deepcopy(dict(run.attrs))
+    monkeypatch.setattr(
+        mod,
+        "finish_proof_verification",
+        lambda: (_ for _ in ()).throw(RuntimeError("closing proof drift")),
+    )
+
+    with pytest.raises(RuntimeError, match="closing proof drift"):
+        mod.bind_staged_offline_track_kinematics_run(
+            world["root"],
+            run,
+            expected_keypoint_run="kp_1",
+            expected_run_name=run_name,
+        )
+
+    assert dict(run.attrs) == before
 
 
 def test_deferred_physical_payload_is_unbound_until_final_path(
@@ -978,3 +1254,180 @@ def test_refined_source_path_and_digest_are_normalized_in_provenance() -> None:
     assert attrs["source_refs"][
         "source_positions_px_coordinate_descriptor_sha256"
     ] == descriptor.digest()
+
+
+def test_successor_tracking_resolution_requires_exact_keypoint_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Node:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    historical = Node({"edit_revision": 3})
+    base = Node({"source_detect_run": "detect-authority"})
+    refined = Node({"source_detect_run": "detect-authority"})
+    root = {
+        "crop_runs/historical": historical,
+        "keypoints_runs/base": base,
+    }
+    fingerprint = mod.RowsetFingerprint(
+        source_rowset_path="crop_runs/historical",
+        row_count=2,
+        source_edit_revision=3,
+        instance_key_digest="a" * 64,
+        fingerprint="b" * 64,
+        status="complete",
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, path: (
+            "crop_runs/historical"
+            if path == "crop_runs/successor"
+            else "unexpected"
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_group_rowset_fingerprint",
+        lambda group, **_kwargs: fingerprint if group is historical else None,
+    )
+
+    resolved = mod.resolve_collection_proxy_successor_tracking(
+        root,
+        keypoints=mod.KeypointResolution(
+            group=refined,
+            run_name="refined",
+            is_refined=True,
+            base_run_name="base",
+            crop_run="historical",
+        ),
+        position_crop_run="successor",
+    )
+
+    assert resolved.position_crop_run == "successor"
+    assert resolved.historical_source_rowset_path == "crop_runs/historical"
+    assert resolved.expected_detect_run == "detect-authority"
+    assert resolved.expected_source_rowset_fingerprint is fingerprint
+
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _path: "crop_runs/other",
+    )
+    with pytest.raises(ValueError, match="does not prove exact identity"):
+        mod.resolve_collection_proxy_successor_tracking(
+            root,
+            keypoints=mod.KeypointResolution(
+                group=refined,
+                run_name="refined",
+                is_refined=True,
+                base_run_name="base",
+                crop_run="historical",
+            ),
+            position_crop_run="successor",
+        )
+
+
+def test_successor_tracking_resolution_uses_historical_identity_for_unknown_keypoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Node:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    historical = Node(
+        {
+            "edit_revision": 3,
+            "source_detect_run": "detect-authority",
+        }
+    )
+    base = Node({"source_detect_run": "unknown"})
+    refined = Node({"source_detect_run": "unknown"})
+    root = {
+        "crop_runs/historical": historical,
+        "keypoints_runs/base": base,
+    }
+    fingerprint = mod.RowsetFingerprint(
+        source_rowset_path="crop_runs/historical",
+        row_count=2,
+        source_edit_revision=3,
+        instance_key_digest="a" * 64,
+        fingerprint="b" * 64,
+        status="complete",
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _path: "crop_runs/historical",
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_group_rowset_fingerprint",
+        lambda group, **_kwargs: fingerprint if group is historical else None,
+    )
+
+    resolved = mod.resolve_collection_proxy_successor_tracking(
+        root,
+        keypoints=mod.KeypointResolution(
+            group=refined,
+            run_name="refined",
+            is_refined=True,
+            base_run_name="base",
+            crop_run="historical",
+        ),
+        position_crop_run="successor",
+    )
+
+    assert resolved.expected_detect_run == "detect-authority"
+
+
+def test_successor_tracking_resolution_rejects_detection_identity_disagreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Node:
+        def __init__(self, attrs: dict[str, Any]) -> None:
+            self.attrs = attrs
+
+    historical = Node(
+        {
+            "edit_revision": 3,
+            "source_detect_run": "historical-detect",
+        }
+    )
+    base = Node({"source_detect_run": "keypoint-detect"})
+    refined = Node({"source_detect_run": "keypoint-detect"})
+    root = {
+        "crop_runs/historical": historical,
+        "keypoints_runs/base": base,
+    }
+    monkeypatch.setattr(
+        mod,
+        "load_collection_proxy_successor_source_rowset",
+        lambda _root, _path: "crop_runs/historical",
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_group_rowset_fingerprint",
+        lambda _group, **_kwargs: mod.RowsetFingerprint(
+            source_rowset_path="crop_runs/historical",
+            row_count=2,
+            source_edit_revision=3,
+            instance_key_digest="a" * 64,
+            fingerprint="b" * 64,
+            status="complete",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="do not identify one exact"):
+        mod.resolve_collection_proxy_successor_tracking(
+            root,
+            keypoints=mod.KeypointResolution(
+                group=refined,
+                run_name="refined",
+                is_refined=True,
+                base_run_name="base",
+                crop_run="historical",
+            ),
+            position_crop_run="successor",
+        )

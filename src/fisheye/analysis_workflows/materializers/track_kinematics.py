@@ -29,12 +29,21 @@ from ...analysis import track_kinematics as track_writer
 from ...shared.json_safety import json_attr_safe
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import require_runs_parent
-from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
+from ...shared.zarr_payload_receipt import (
+    build_payload_integrity_receipt,
+    decoded_payload_receipt_from_copy_report,
+    verify_payload_integrity_receipt,
+)
+from ...shared.zarr_sharded_copy import (
+    STRUCTURED_DTYPE_SINGLE_CHUNK_LAYOUT,
+    copy_completed_run_to_sharded,
+)
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from .runtime_telemetry import PhaseTelemetry
 
 
-MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v2"
-PUBLISH_SCHEMA_ID = "palette.track_kinematics_run_publish.v2"
+MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v3"
+PUBLISH_SCHEMA_ID = "palette.track_kinematics_run_publish.v3"
 COORDINATE_BINDING_STATUS_ATTR = (
     track_writer.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR
 )
@@ -316,6 +325,7 @@ def _validate_track_run(
     expected_binding_status: str,
     require_complete: bool,
     expected_selector_eligible: bool,
+    verify_decoded_payloads: bool = True,
 ) -> dict[str, Any]:
     errors: list[str] = []
     group = open_zarr_root(path, mode="r")
@@ -432,8 +442,10 @@ def _validate_track_run(
         if isinstance(sample_key, zarr.Array) and tuple(sample_key.shape) != (row_count, 2):
             errors.append(f"{name}: track_sample_key must have shape (N, 2)")
 
+    layout = group.attrs.get("physical_storage_layout")
     array_count = 0
     sharded_count = 0
+    structured_single_chunk_count = 0
     for array_path, array in _iter_arrays(group):
         array_count += 1
         shards = getattr(array, "shards", None)
@@ -444,13 +456,42 @@ def _validate_track_run(
             if any(outer[i] % chunks[i] for i in range(len(chunks))):
                 errors.append(f"{array_path}: shard grid is not chunk aligned")
         elif require_sharded and int(array.ndim) >= 1:
-            errors.append(f"{array_path}: expected indexed sharding")
-    layout = group.attrs.get("physical_storage_layout")
+            overrides = (
+                layout.get("effective_overridden_array_layouts")
+                if isinstance(layout, dict)
+                else None
+            )
+            record = overrides.get(array_path) if isinstance(overrides, dict) else None
+            expected_chunks = tuple(max(1, int(value)) for value in array.shape)
+            if (
+                np.dtype(array.dtype).kind == "V"
+                and isinstance(record, dict)
+                and record.get("layout_profile")
+                == STRUCTURED_DTYPE_SINGLE_CHUNK_LAYOUT
+                and record.get("effective_outer_shards") is None
+                and tuple(record.get("effective_inner_chunks") or ())
+                == expected_chunks
+                and tuple(int(value) for value in array.chunks) == expected_chunks
+            ):
+                structured_single_chunk_count += 1
+            else:
+                errors.append(f"{array_path}: expected indexed sharding")
     if require_sharded and not isinstance(layout, dict):
         errors.append("missing physical_storage_layout")
     elif require_sharded and layout.get("exact_decoded_validation") is not True:
         errors.append("physical_storage_layout lacks exact decoded validation")
-    decoded_payloads = _decoded_contract_payloads(group)
+    decoded_payloads = (
+        _decoded_contract_payloads(group)
+        if verify_decoded_payloads
+        else {
+            "valid": True,
+            "errors": [],
+            "scope": "covered_by_bound_payload_integrity_receipt",
+            "array_count": 0,
+            "aggregate_sha256": None,
+            "arrays": {},
+        }
+    )
     errors.extend(str(error) for error in decoded_payloads["errors"])
     return {
         "valid": not errors,
@@ -458,9 +499,11 @@ def _validate_track_run(
         "track_rows": track_rows,
         "array_count": array_count,
         "sharded_array_count": sharded_count,
+        "structured_single_chunk_array_count": structured_single_chunk_count,
         "require_sharded": bool(require_sharded),
         "require_complete": bool(require_complete),
         "expected_binding_status": expected_binding_status,
+        "verify_decoded_payloads": bool(verify_decoded_payloads),
         "decoded_payload_validation": decoded_payloads,
     }
 
@@ -488,6 +531,21 @@ def _writer_result_summary(value: Any, *, label: str) -> dict[str, Any]:
             summary[name] = raw_value
         elif name == "errors" and isinstance(raw_value, (list, tuple)):
             summary[name] = [str(item) for item in raw_value]
+        elif name == "binding_phase_seconds" and isinstance(raw_value, Mapping):
+            phases: dict[str, float] = {}
+            for raw_phase_name, raw_seconds in raw_value.items():
+                phase_name = str(raw_phase_name)
+                if (
+                    not phase_name
+                    or type(raw_seconds) not in {int, float}
+                    or not np.isfinite(raw_seconds)
+                    or float(raw_seconds) < 0.0
+                ):
+                    raise ValueError(
+                        f"{label} returned an invalid binding phase duration."
+                    )
+                phases[phase_name] = float(raw_seconds)
+            summary[name] = phases
     return summary
 
 
@@ -510,6 +568,8 @@ def publish_track_kinematics_run(
         "binding_complete": False,
         "completion_published": False,
         "publication_owner_uuid": None,
+        "payload_integrity_receipt": None,
+        "scientific_validation_receipt": None,
     }
     deferred_activation: list[Any] = []
 
@@ -552,6 +612,7 @@ def publish_track_kinematics_run(
             expected_binding_status=BOUND_CANONICAL_STATUS,
             require_complete=transaction["completion_published"],
             expected_selector_eligible=False,
+            verify_decoded_payloads=False,
         )
         if not structural["valid"]:
             return structural
@@ -560,34 +621,43 @@ def publish_track_kinematics_run(
             run_group = authoritative_root[
                 f"analysis/track_kinematics_runs/offline/{plan.run_name}"
             ]
+            receipt = transaction["payload_integrity_receipt"]
+            if not isinstance(receipt, Mapping):
+                raise RuntimeError(
+                    "Bound track publication lacks its payload integrity receipt."
+                )
             if transaction["completion_published"]:
-                canonical = (
-                    track_writer._validate_bound_offline_track_kinematics_run_before_selection(
-                        authoritative_root,
-                        run_group,
-                        expected_keypoint_run=plan.keypoint_run,
-                        expected_run_name=plan.run_name,
-                        require_complete=True,
+                publication_owner_uuid = transaction["publication_owner_uuid"]
+                if not isinstance(publication_owner_uuid, str):
+                    raise RuntimeError(
+                        "Completed track publication lacks its exact owner."
                     )
+                canonical = track_writer.verify_track_motion_payload_validation_receipt(
+                    authoritative_root,
+                    run_group,
+                    expected_publication_owner_uuid=publication_owner_uuid,
+                    run_path=plan.target_run_path,
+                    require_complete=True,
+                    verify_physical_payload=False,
+                    hash_workers=max(1, int(plan.shard_workers)),
                 )
                 canonical_summary = _writer_result_summary(
                     canonical,
-                    label="Completed ineligible canonical track validation",
+                    label="Completed receipt-bound canonical track validation",
                 )
             else:
-                canonical = (
-                    track_writer._validate_bound_offline_track_kinematics_run_before_selection(
-                        authoritative_root,
-                        run_group,
-                        expected_keypoint_run=plan.keypoint_run,
-                        expected_run_name=plan.run_name,
-                        require_complete=False,
-                    )
+                integrity = verify_payload_integrity_receipt(
+                    plan.target_run_path,
+                    receipt,
+                    expected_run_ref=f"/{run_group.path}",
+                    hash_workers=max(1, int(plan.shard_workers)),
+                    verify_physical_payload=False,
                 )
-                canonical_summary = _writer_result_summary(
-                    canonical,
-                    label="Canonical track validation",
-                )
+                canonical_summary = {
+                    "valid": True,
+                    "status": "bound_payload_integrity_receipt_valid",
+                    "integrity_receipt_sha256": integrity["record_sha256"],
+                }
         except Exception as exc:
             canonical_summary = {"valid": False, "errors": [str(exc)]}
         structural["canonical_validation"] = canonical_summary
@@ -605,6 +675,46 @@ def publish_track_kinematics_run(
         )
         return track_parent, track_parent.require_group("offline")
 
+    def validate_completed_receipt(_fresh_run: zarr.Group) -> Mapping[str, Any]:
+        structural = _validate_track_run(
+            plan.target_run_path,
+            require_sharded=True,
+            expected_binding_status=BOUND_CANONICAL_STATUS,
+            require_complete=True,
+            expected_selector_eligible=False,
+            verify_decoded_payloads=False,
+        )
+        if not structural["valid"]:
+            return structural
+        publication_owner_uuid = transaction["publication_owner_uuid"]
+        if not isinstance(publication_owner_uuid, str):
+            return {
+                "valid": False,
+                "errors": ["completed track publication lacks its exact owner"],
+            }
+        authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
+        run_group = authoritative_root[
+            f"analysis/track_kinematics_runs/offline/{plan.run_name}"
+        ]
+        receipt_validation = (
+            track_writer.verify_track_motion_payload_validation_receipt(
+                authoritative_root,
+                run_group,
+                expected_publication_owner_uuid=publication_owner_uuid,
+                run_path=plan.target_run_path,
+                require_complete=True,
+                verify_physical_payload=False,
+                hash_workers=max(1, int(plan.shard_workers)),
+            )
+        )
+        structural["canonical_validation"] = dict(receipt_validation)
+        if receipt_validation.get("valid") is not True:
+            structural["valid"] = False
+            structural["errors"].append(
+                "receipt-bound canonical validation did not report valid=true"
+            )
+        return structural
+
     def after_rename(
         root: zarr.Group,
         run: zarr.Group,
@@ -619,15 +729,47 @@ def publish_track_kinematics_run(
             raise RuntimeError(
                 "Final-path binder requires a generically incomplete run."
             )
+        decoded_copy_report = materialization_payload.get("sharded_copy")
+        if not isinstance(decoded_copy_report, Mapping):
+            raise RuntimeError(
+                "Track publication lacks its exact decoded sharded-copy report."
+            )
+        receipt_started = time.perf_counter()
+        integrity_receipt = build_payload_integrity_receipt(
+            plan.target_run_path,
+            run_ref=f"/{run.path}",
+            decoded_copy_report=decoded_copy_report,
+            hash_workers=max(1, int(plan.shard_workers)),
+        )
+        receipt_build_seconds = float(time.perf_counter() - receipt_started)
         transaction["publication_owner_uuid"] = (
             track_writer._track_publication_owner_uuid(run)
         )
+        scientific_validation = materialization_payload.get(
+            "scientific_validation"
+        )
+        if not isinstance(scientific_validation, Mapping):
+            raise RuntimeError(
+                "Track publication lacks staged scientific validation."
+            )
+        verified_scientific_validation = (
+            track_writer.verify_track_motion_staged_scientific_validation(
+                run,
+                scientific_validation,
+                payload_integrity_receipt=integrity_receipt,
+            )
+        )
+        binding_started = time.perf_counter()
         result = track_writer.bind_staged_offline_track_kinematics_run(
             root,
             run,
             expected_keypoint_run=plan.keypoint_run,
             expected_run_name=plan.run_name,
+            payload_integrity_receipt=integrity_receipt,
+            payload_run_path=plan.target_run_path,
+            payload_hash_workers=max(1, int(plan.shard_workers)),
         )
+        canonical_binding_seconds = float(time.perf_counter() - binding_started)
         summary = _require_valid_writer_result(
             result,
             label="Final-path canonical track binding",
@@ -640,8 +782,55 @@ def publish_track_kinematics_run(
             raise RuntimeError(
                 "Canonical binder must not mark the run complete or update pointers."
             )
+        post_binding_receipt_check_started = time.perf_counter()
+        bound_integrity = run.attrs.get(
+            track_writer.TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR
+        )
+        if bound_integrity != json_attr_safe(integrity_receipt):
+            raise RuntimeError(
+                "Canonical binder did not retain the exact verified payload receipt."
+            )
+        binding_validation = run.attrs.get(
+            track_writer.TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR
+        )
+        if (
+            not isinstance(binding_validation, Mapping)
+            or binding_validation.get("record_sha256")
+            != summary.get("binding_validation_receipt_sha256")
+        ):
+            raise RuntimeError(
+                "Canonical binder did not retain its exact validation receipt."
+            )
+        post_binding_receipt_check_seconds = float(
+            time.perf_counter() - post_binding_receipt_check_started
+        )
+        transaction["payload_integrity_receipt"] = integrity_receipt
+        transaction["scientific_validation_receipt"] = (
+            verified_scientific_validation
+        )
         transaction["binding_complete"] = True
-        return {"canonical_binding": summary}
+        return {
+            "canonical_binding": summary,
+            "payload_integrity_receipt": {
+                "schema_id": integrity_receipt["schema_id"],
+                "schema_version": integrity_receipt["schema_version"],
+                "record_sha256": integrity_receipt["record_sha256"],
+                "decoded_payload_root_sha256": integrity_receipt[
+                    "decoded_payload"
+                ]["root_sha256"],
+                "physical_payload_root_sha256": integrity_receipt[
+                    "physical_payload"
+                ]["root_sha256"],
+                "immutable_metadata_root_sha256": integrity_receipt[
+                    "immutable_metadata"
+                ]["root_sha256"],
+                "receipt_build_seconds": receipt_build_seconds,
+                "canonical_binding_seconds": canonical_binding_seconds,
+                "post_binding_receipt_check_seconds": (
+                    post_binding_receipt_check_seconds
+                ),
+            },
+        }
 
     def complete(
         root: zarr.Group,
@@ -663,14 +852,12 @@ def publish_track_kinematics_run(
             run_name=plan.run_name,
             run_type="offline",
             publication_owner_uuid=publication_owner_uuid,
-            validate_complete_run=lambda fresh_run: (
-                track_writer._validate_bound_offline_track_kinematics_run_before_selection(
-                    root,
-                    fresh_run,
-                    expected_keypoint_run=plan.keypoint_run,
-                    expected_run_name=plan.run_name,
-                    require_complete=True,
-                )
+            validate_complete_run=validate_completed_receipt,
+            payload_integrity_receipt=transaction["payload_integrity_receipt"],
+            payload_run_path=plan.target_run_path,
+            payload_hash_workers=max(1, int(plan.shard_workers)),
+            staged_scientific_validation=(
+                transaction["scientific_validation_receipt"]
             ),
             defer_selector_eligibility=True,
             deferred_activation_sink=retain_deferred_activation,
@@ -705,15 +892,7 @@ def publish_track_kinematics_run(
             root,
             parent,
             run,
-            validate_fresh_complete_run=lambda fresh_run: (
-                track_writer._validate_bound_offline_track_kinematics_run_before_selection(
-                    root,
-                    fresh_run,
-                    expected_keypoint_run=plan.keypoint_run,
-                    expected_run_name=plan.run_name,
-                    require_complete=True,
-                )
-            ),
+            validate_fresh_complete_run=validate_completed_receipt,
             expected_cluster_output_staging=json_attr_safe(
                 dict(final_publisher_payload)
             ),
@@ -803,15 +982,24 @@ def materialize_track_kinematics(
     apply: bool = False,
     keep_scratch: bool = False,
 ) -> dict[str, Any]:
-    plan = build_track_kinematics_materialization_plan(
-        source_zarr,
-        scratch_root=scratch_root,
-        keypoint_run=keypoint_run,
-        run_name=run_name,
-        output_shard_rows=output_shard_rows,
-        shard_workers=shard_workers,
-        writer_arguments=writer_arguments,
+    telemetry = PhaseTelemetry(
+        materializer="track_kinematics",
+        context={
+            "requested_shard_workers": int(shard_workers),
+            "output_shard_rows": int(output_shard_rows),
+            "copy_backend": str(copy_backend),
+        },
     )
+    with telemetry.phase("materialization_plan"):
+        plan = build_track_kinematics_materialization_plan(
+            source_zarr,
+            scratch_root=scratch_root,
+            keypoint_run=keypoint_run,
+            run_name=run_name,
+            output_shard_rows=output_shard_rows,
+            shard_workers=shard_workers,
+            writer_arguments=writer_arguments,
+        )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
@@ -819,51 +1007,71 @@ def materialize_track_kinematics(
         "plan": plan.to_json(),
     }
     if not apply:
+        result["runtime_telemetry"] = telemetry.to_json()
         return result
     if plan.scratch_root.exists():
         raise FileExistsError(f"Refusing existing scratch root: {plan.scratch_root}")
-    plan.scratch_root.mkdir(parents=True)
+    with telemetry.phase("scratch_prepare"):
+        plan.scratch_root.mkdir(parents=True)
     succeeded = False
     try:
-        compute_started = time.perf_counter()
-        stage_result = track_writer.stage_offline_track_kinematics_run(
-            plan.source_zarr,
-            plan.staging_zarr,
-            keypoint_run=plan.keypoint_run,
-            run_name=plan.run_name,
-            writer_arguments=plan.writer_arguments,
-        )
-        compute_seconds = float(time.perf_counter() - compute_started)
-        stage_summary = _writer_result_summary(
-            stage_result,
-            label="Offline track numerical staging",
-        )
+        with telemetry.phase("offline_numeric_staging"):
+            stage_result = track_writer.stage_offline_track_kinematics_run(
+                plan.source_zarr,
+                plan.staging_zarr,
+                keypoint_run=plan.keypoint_run,
+                run_name=plan.run_name,
+                writer_arguments=plan.writer_arguments,
+            )
+        compute_seconds = telemetry.duration_seconds("offline_numeric_staging") or 0.0
+        with telemetry.phase("staging_result_summary"):
+            stage_summary = _writer_result_summary(
+                stage_result,
+                label="Offline track numerical staging",
+            )
         if stage_summary.get("valid") is False:
             raise RuntimeError(
                 f"Offline track numerical staging reported invalid: {stage_summary}"
             )
-        regular_validation = _validate_track_run(
-            plan.local_run_path,
-            require_sharded=False,
-            expected_binding_status=UNBOUND_STAGE_STATUS,
-            require_complete=True,
-            expected_selector_eligible=False,
-        )
+        with telemetry.phase("local_unbound_validation"):
+            regular_validation = _validate_track_run(
+                plan.local_run_path,
+                require_sharded=False,
+                expected_binding_status=UNBOUND_STAGE_STATUS,
+                require_complete=True,
+                expected_selector_eligible=False,
+            )
         if not regular_validation["valid"]:
             raise RuntimeError(
                 f"Local unbound numerical track stage is invalid: {regular_validation}"
             )
-        sharded_copy = copy_completed_run_to_sharded(
-            plan.local_run_path,
-            plan.sharded_run,
-            row_count_array=None,
-            shard_rows=plan.output_shard_rows,
-            workers=plan.shard_workers,
-        )
-        if sharded_copy.get("exact_decoded_validation") is not True:
-            raise RuntimeError(
-                "Sharded track copy did not report exact decoded validation."
+        with telemetry.phase("shard_materialization_and_decoded_validation"):
+            sharded_copy = copy_completed_run_to_sharded(
+                plan.local_run_path,
+                plan.sharded_run,
+                row_count_array=None,
+                shard_rows=plan.output_shard_rows,
+                workers=plan.shard_workers,
             )
+            if sharded_copy.get("exact_decoded_validation") is not True:
+                raise RuntimeError(
+                    "Sharded track copy did not report exact decoded validation."
+                )
+        with telemetry.phase("staged_scientific_validation"):
+            decoded_payload = decoded_payload_receipt_from_copy_report(
+                sharded_copy
+            )
+            sharded_scientific = open_zarr_root(plan.sharded_run, mode="a")
+            scientific_validation = (
+                track_writer.build_track_motion_staged_scientific_validation(
+                    sharded_scientific,
+                    decoded_payload_receipt=decoded_payload,
+                    run_name=plan.run_name,
+                )
+            )
+            sharded_scientific.attrs[
+                track_writer.TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
+            ] = json_attr_safe(scientific_validation)
         local_payload = {
             "source_access": "authoritative_zarr_read_only",
             "compute_output": "node_local_unbound_numeric_stage",
@@ -872,40 +1080,48 @@ def materialize_track_kinematics(
             "stage_result": stage_summary,
             "regular_validation": regular_validation,
             "sharded_copy": sharded_copy,
+            "scientific_validation": scientific_validation,
         }
-        sharded = open_zarr_root(plan.sharded_run, mode="a")
-        if str(sharded.attrs.get(COORDINATE_BINDING_STATUS_ATTR)) != UNBOUND_STAGE_STATUS:
-            raise RuntimeError(
-                "Sharded copy did not preserve exact unbound coordinate status."
+        with telemetry.phase("publishing_state_transition"):
+            sharded = open_zarr_root(plan.sharded_run, mode="a")
+            if (
+                str(sharded.attrs.get(COORDINATE_BINDING_STATUS_ATTR))
+                != UNBOUND_STAGE_STATUS
+            ):
+                raise RuntimeError(
+                    "Sharded copy did not preserve exact unbound coordinate status."
+                )
+            if str(sharded.attrs.get("palette_run_completion_status")) != "complete":
+                raise RuntimeError(
+                    "Sharded copy did not preserve generic stage completion."
+                )
+            sharded.attrs[COORDINATE_BINDING_STATUS_ATTR] = PUBLISHING_BINDING_STATUS
+            sharded.attrs["palette_run_completion_status"] = "running"
+            if "palette_run_completed_at_utc" in sharded.attrs:
+                del sharded.attrs["palette_run_completed_at_utc"]
+            sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
+        with telemetry.phase("sharded_publishing_validation"):
+            publishing_validation = _validate_track_run(
+                plan.sharded_run,
+                require_sharded=True,
+                expected_binding_status=PUBLISHING_BINDING_STATUS,
+                require_complete=False,
+                expected_selector_eligible=False,
             )
-        if str(sharded.attrs.get("palette_run_completion_status")) != "complete":
-            raise RuntimeError(
-                "Sharded copy did not preserve generic stage completion."
-            )
-        sharded.attrs[COORDINATE_BINDING_STATUS_ATTR] = PUBLISHING_BINDING_STATUS
-        sharded.attrs["palette_run_completion_status"] = "running"
-        if "palette_run_completed_at_utc" in sharded.attrs:
-            del sharded.attrs["palette_run_completed_at_utc"]
-        sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
-        publishing_validation = _validate_track_run(
-            plan.sharded_run,
-            require_sharded=True,
-            expected_binding_status=PUBLISHING_BINDING_STATUS,
-            require_complete=False,
-            expected_selector_eligible=False,
-        )
         if not publishing_validation["valid"]:
             raise RuntimeError(
                 "Sharded publishing-stage track run is invalid: "
                 f"{publishing_validation}"
             )
         local_payload["publishing_validation"] = publishing_validation
-        sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
-        publish = publish_track_kinematics_run(
-            plan,
-            materialization_payload=local_payload,
-            copy_backend=copy_backend,
-        )
+        with telemetry.phase("local_materialization_metadata_write"):
+            sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
+        with telemetry.phase("authoritative_publish"):
+            publish = publish_track_kinematics_run(
+                plan,
+                materialization_payload=local_payload,
+                copy_backend=copy_backend,
+            )
         result.update(
             {
                 "status": "complete",
@@ -917,7 +1133,9 @@ def materialize_track_kinematics(
         return result
     finally:
         if succeeded and not keep_scratch and plan.scratch_root.exists():
-            shutil.rmtree(plan.scratch_root)
+            with telemetry.phase("scratch_cleanup"):
+                shutil.rmtree(plan.scratch_root)
+        result["runtime_telemetry"] = telemetry.to_json()
 
 
 def _default_scratch_root(run_name: str) -> Path:
