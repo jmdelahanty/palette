@@ -149,6 +149,25 @@ Emitted after a recording finishes processing (even if some files are missing).
 }
 ```
 
+### recording_geometry_bundle_verified
+
+Emitted after the organizer has verified the source bundle, copied it through
+a temporary sibling, atomically published it at
+`raw/recording_geometry_bundle/`, and verified the destination again. Each
+newly published source file also receives its normal `file_copied` event so the
+batch-disposition auditor can prove every fan-out destination by SHA-256.
+
+The event records `contract_sha256`, `manifest_sha256`, manifest file count,
+materialized-asset status, snapshot-pointer status, and whether this invocation
+published or reverified an identical existing bundle. A
+`recording_geometry_bundle_failed` event is fatal for that organizer run and
+ordinary recording moves do not begin when source preflight fails.
+
+Early producer bundles may have `snapshot_pointer_status = "missing"`. They
+are preserved as evidence, but the strict scientific folder loader continues
+to classify them as legacy rather than treating the conventional filename as
+an authority pointer.
+
 ### warning
 Emitted for any warning (missing files, destination exists, snapshot issues, cleanup failures).
 ```json
@@ -171,6 +190,48 @@ Emitted once at the end of the run.
   "run_id": "20260201T120000Z_12345"
 }
 ```
+
+## Citrus Batch Disposition Manifest
+
+`fisheye.utils.run_citrus_session_import` treats an applied organizer run with
+zero `recording_applied` events as a workflow failure. A zero-row organizer is
+not a successful no-op: the batch may still contain acquisition videos that
+were never organized.
+
+Every Citrus workflow also writes a
+`palette.staging_batch_disposition.v1` JSON document. The run-local copy is
+`<run-dir>/batch_disposition.json`; applied workflows additionally write
+`<staging-batch>/_palette_batch_disposition.json`. The document is an audit and
+cleanup-planning surface only. Its writer never removes source data.
+
+The inventory is the union of sources named by `file_moved`/`file_copied`
+events and files still physically present under the batch. Every source has one
+of these dispositions:
+
+| Disposition | Meaning |
+| --- | --- |
+| `moved` | Organizer logged a move, the source is absent, and the destination remains present. |
+| `verified_fanout_copy` | Every logged copy destination exists and matches the source SHA-256. |
+| `retained_authority` | Acquisition or geometry authority is still present and has not been safely archived/fanned out. |
+| `disposable_diagnostic` | A shard-local diagnostic is superseded by a present merged video/keyframe artifact and a zero-drop, nonfailed aggregate shard summary. |
+| `unknown` | No safe policy applies, a destination is missing, or copied content does not match. |
+
+`cleanup_assessment.safe_to_delete_batch` remains false when the workflow did
+not apply successfully, Zarr coverage is incomplete, or any physically present
+artifact is `retained_authority` or `unknown`. PTP enablement, transfer-complete
+markers, or a scheduler return code alone never authorize cleanup.
+
+Recording geometry contracts and `recording_geometry_assets/` remain
+`retained_authority` while they are unconsumed acquisition inputs. Phase 1 now
+copies the intact versioned subtree to every organized recording and verifies
+the source, temporary copy, and atomically published destination. Cleanup
+remains blocked in phases 0--2: acquisition-candidate publication and a fresh
+disposition audit are still required before staging geometry becomes eligible
+for deletion. Independent image-fit agreement may be required for later
+analysis use, but is not required merely to prove that the staging bytes were
+preserved.
+See
+[Recording-Bound Geometry Import and Independent Validation](recording_bound_geometry_import_and_validation_design.md).
 
 ## Query Examples
 

@@ -17,6 +17,7 @@ from typing import Any, Callable, List, Mapping, Optional
 
 import zarr
 
+from fisheye.shared.acquisition_frame_clock import import_acquisition_frame_clock
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
 from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PUBLISHED,
@@ -192,7 +193,7 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
 def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, object]]:
     plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if plan.zarr_path.exists() else "w"
-    root = zarr.open_group(str(plan.zarr_path), mode=mode)
+    root = zarr.open_group(str(plan.zarr_path), mode=mode, zarr_format=3)
     attrs = dict(root.attrs)
     recording_id = plan.recording_dir.name
     manifest = _load_recording_manifest(plan.recording_dir)
@@ -276,6 +277,54 @@ def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dic
     return {
         "root_attrs_updated": len(updates.get("root", {})) + h5_updates["root_attrs_updated"],
         "raw_video_attrs_updated": len(updates.get("raw_video", {})) + h5_updates["raw_video_attrs_updated"],
+    }
+
+
+def apply_acquisition_frame_clock(plan: RecordingAnalysisPlan) -> dict[str, object]:
+    """Publish the full recording clock when Orange timing metadata exists."""
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", zarr_format=3)
+    camera_id = str(root.attrs.get("camera_id") or "").strip()
+    if not camera_id:
+        raise ValueError(
+            "Acquisition frame-clock import requires camera_id recording context."
+        )
+    raw = root.get("raw_video")
+    candidates = (
+        root.attrs.get("source_video_total_frames"),
+        root.attrs.get("total_frames"),
+        raw.attrs.get("source_video_total_frames") if raw is not None else None,
+        raw.attrs.get("total_frames") if raw is not None else None,
+    )
+    expected_frame_count: int | None = None
+    for value in candidates:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            expected_frame_count = parsed
+            break
+    resolved = import_acquisition_frame_clock(
+        root,
+        recording_dir=plan.recording_dir,
+        camera_id=camera_id,
+        video_path=plan.cam_video,
+        expected_frame_count=expected_frame_count,
+    )
+    if resolved is None:
+        return {
+            "available": False,
+            "status": "unavailable_no_camera_clock_source",
+        }
+    return {
+        "available": True,
+        "status": "complete",
+        "run_name": resolved.run_name,
+        "group_path": resolved.group_path,
+        "record_sha256": resolved.record_sha256,
+        "row_count": resolved.row_count,
+        "camera_id": resolved.camera_id,
     }
 
 
@@ -430,6 +479,22 @@ def process_recording_import(
             raw_video_attrs_updated=updates["raw_video_attrs_updated"],
             overwrite=bool(opts.video_metadata_overwrite),
         )
+
+    try:
+        frame_clock = apply_acquisition_frame_clock(plan)
+    except Exception as exc:
+        return RecordingImportResult(
+            ok=False,
+            failed_step="import_acquisition_frame_clock",
+            error=str(exc),
+        )
+    _log(
+        logger,
+        "acquisition_frame_clock_imported",
+        recording_dir=str(plan.recording_dir),
+        zarr_path=str(plan.zarr_path),
+        **frame_clock,
+    )
 
     if plan.h5_path is not None:
         try:

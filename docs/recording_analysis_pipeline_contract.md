@@ -32,9 +32,21 @@ Related detection publication contract:
   - Explicit non-goal: no detect or refine orchestration.
 - Stage 2 dish-mask tuning/import:
   - Module: `fisheye.tune.mask_tuner` for operator tuning; acquisition-provided
-    masks should be imported into the same Zarr attr surface.
+    masks currently use the same compatibility attr surface. The approved
+    target model preserves acquisition and Palette fits as separate immutable
+    candidates, compares them, and materializes the compatibility attr only
+    from an explicit selection. See
+    [recording_bound_geometry_import_and_validation_design.md](recording_bound_geometry_import_and_validation_design.md).
   - Responsibility: populate or verify
     `analysis_metadata.attrs["dish_mask"]` before production detect/refine.
+  - Recording-bound import status:
+    - `fisheye.shared.recording_geometry` now verifies and normalizes exact
+      Orange-folder and Citrus-H5 geometry into an immutable acquisition model.
+    - The model distinguishes the physical rim from the outward producer gate
+      and can bind only to the matching persisted Palette source-camera pixel
+      frame.
+    - It does not yet publish a Zarr candidate or materialize the compatibility
+      `dish_mask` attr; those remain explicit later phases.
   - Current behavior note:
     - raw detect can run without a dish mask, but `refine_detect` applies the
       dish-mask bbox-center gate only when this metadata exists.

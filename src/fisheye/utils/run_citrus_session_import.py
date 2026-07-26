@@ -21,6 +21,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
+from fisheye.shared.staging_batch_disposition import (
+    STAGING_BATCH_DISPOSITION_FILENAME,
+    build_staging_batch_disposition,
+    write_staging_batch_disposition,
+)
+
 
 DEFAULT_DEST_ROOT = Path("/groups/johnson/johnsonlab/jeremy/recordings")
 
@@ -176,6 +182,22 @@ def _read_recording_dirs_from_organize_log(log_path: Optional[Path]) -> list[Pat
     return paths
 
 
+def _organize_failure_reason(
+    *,
+    apply: bool,
+    returncode: int,
+    organize_log: Optional[Path],
+    organized_recording_dirs: Sequence[Path],
+) -> str | None:
+    if returncode != 0:
+        return f"organizer exited with return code {returncode}"
+    if organize_log is None:
+        return "organizer produced no JSONL log"
+    if apply and not organized_recording_dirs:
+        return "applied organizer produced zero recording_applied entries"
+    return None
+
+
 def _status_payload(
     *,
     args: argparse.Namespace,
@@ -187,6 +209,8 @@ def _status_payload(
     zarr_paths: list[Path],
     commands: list[CommandRecord],
     registry_file_list: Optional[Path],
+    disposition_paths: Sequence[Path],
+    disposition_error: str | None,
 ) -> dict[str, object]:
     return {
         "schema_id": "palette.citrus_session_import.status.v1",
@@ -203,6 +227,8 @@ def _status_payload(
         "import_log": str(import_log) if import_log is not None else None,
         "registry_file_list": str(registry_file_list) if registry_file_list is not None else None,
         "zarr_paths": [str(path) for path in zarr_paths],
+        "batch_disposition_paths": [str(path) for path in disposition_paths],
+        "batch_disposition_error": disposition_error,
         "commands": [asdict(command) for command in commands],
     }
 
@@ -283,14 +309,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     organized_recording_dirs: list[Path] = []
     zarr_paths: list[Path] = []
     registry_file_list: Optional[Path] = None
+    disposition_paths: list[Path] = []
+    disposition_error: str | None = None
     status = "ok"
 
-    if organize_result.returncode != 0 or organize_log is None:
+    organized_recording_dirs = _read_recording_dirs_from_organize_log(organize_log)
+    organize_failure = _organize_failure_reason(
+        apply=bool(args.apply),
+        returncode=organize_result.returncode,
+        organize_log=organize_log,
+        organized_recording_dirs=organized_recording_dirs,
+    )
+    if organize_failure is not None:
         status = "failed"
+        print(f"ERROR: {organize_failure}", file=sys.stderr)
     else:
-        organized_recording_dirs = _read_recording_dirs_from_organize_log(organize_log)
         if not organized_recording_dirs:
-            print("Skipping import: organizer log has no recording_applied entries.")
+            print("Dry-run organizer produced no applied recording destinations; import skipped.")
         else:
             import_before = set(import_log_dir.glob("import_organized_recordings_analysis_*.jsonl"))
             import_command = build_import_command(
@@ -314,6 +349,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             if import_result.returncode != 0:
                 status = "failed"
 
+    try:
+        disposition = build_staging_batch_disposition(
+            args.session_dir,
+            organize_log=organize_log,
+            workflow_status=status,
+            apply=bool(args.apply),
+            organized_recording_dirs=organized_recording_dirs,
+            zarr_paths=zarr_paths,
+        )
+        run_disposition_path = run_dir / "batch_disposition.json"
+        write_staging_batch_disposition(run_disposition_path, disposition)
+        disposition_paths.append(run_disposition_path)
+        if args.apply:
+            batch_disposition_path = (
+                args.session_dir / STAGING_BATCH_DISPOSITION_FILENAME
+            )
+            write_staging_batch_disposition(batch_disposition_path, disposition)
+            disposition_paths.append(batch_disposition_path)
+    except Exception as exc:
+        disposition_error = str(exc)
+        status = "failed"
+        print(f"ERROR: failed to write batch disposition: {exc}", file=sys.stderr)
+
     status_json = args.status_json or (run_dir / "citrus_session_import.status.json")
     payload = _status_payload(
         args=args,
@@ -325,6 +383,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         zarr_paths=zarr_paths,
         commands=commands,
         registry_file_list=registry_file_list,
+        disposition_paths=disposition_paths,
+        disposition_error=disposition_error,
     )
     status_json.parent.mkdir(parents=True, exist_ok=True)
     status_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -336,6 +396,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"import_log={import_log}")
     for path in zarr_paths:
         print(f"zarr_path={path}")
+    for path in disposition_paths:
+        print(f"batch_disposition_path={path}")
     return 0 if status == "ok" else 1
 
 

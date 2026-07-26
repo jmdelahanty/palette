@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -34,6 +35,22 @@ def test_import_sampled_training_pynvvc_writes_luma_training_zarr(
 ) -> None:
     video = tmp_path / "Cam2010093_demo.mp4"
     video.write_bytes(b"placeholder")
+    with video.with_name(f"{video.stem}_meta.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["recording_frame_id", "timestamp", "timestamp_sys"],
+        )
+        writer.writeheader()
+        for index in range(10):
+            writer.writerow(
+                {
+                    "recording_frame_id": index,
+                    "timestamp": 1_000_000_000 + index * 10_000_000,
+                    "timestamp_sys": 2_000_000_000 + index * 10_000_000,
+                }
+            )
     h5_path = tmp_path / "raw" / "demo.h5"
     h5_path.parent.mkdir(parents=True)
     h5_path.write_bytes(b"h5-placeholder")
@@ -146,6 +163,15 @@ import:
     assert raw.attrs["original_resolution"] == [4, 5]
     assert resolve_full_frame_shape(root) == (4, 5)
     assert raw["original_frame_indices"][:].tolist() == [0, 3, 6]
+    assert "timestamps" not in raw
+    assert raw.attrs["source_acquisition_frame_clock_available"] is True
+    assert (
+        raw.attrs["source_acquisition_frame_clock_join"]
+        == "raw_video/original_frame_indices -> parent_frame_index"
+    )
+    clock = root[root.attrs["acquisition_frame_clock_ref"]]
+    assert clock["parent_frame_index"][:].tolist() == list(range(10))
+    assert clock["camera_timestamp_ns"][:].tolist()[3] == 1_030_000_000
     assert raw["images_full"].shape == (3, 4, 5)
     assert raw["images_ds"].shape == (3, 2, 3)
     np.testing.assert_array_equal(raw["images_full"][:, 0, 0], np.array([0, 3, 6], dtype=np.uint8))

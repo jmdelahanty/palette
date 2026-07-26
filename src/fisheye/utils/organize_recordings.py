@@ -34,6 +34,19 @@ from fisheye.shared.recording_preflight import (
     build_video_preflight_payload,
     default_preflight_payload,
 )
+from fisheye.shared.recording_geometry import (
+    RECORDING_GEOMETRY_ASSETS_NAME,
+    RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH,
+    RECORDING_GEOMETRY_CONTRACT_NAME,
+    RECORDING_SNAPSHOT_NAME,
+    RecordingGeometryBundleVerification,
+    RecordingGeometryError,
+    verify_recording_geometry_bundle,
+)
+from fisheye.shared.recording_geometry_bundle import (
+    iter_recording_geometry_bundle_files,
+    publish_recording_geometry_bundle,
+)
 
 try:
     from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
@@ -69,6 +82,12 @@ class RecordingPlan:
     meta: Dict[str, Any] = field(default_factory=dict)
     missing: List[str] = field(default_factory=list)
     keyframe_checks: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    geometry_bundle_source: Optional[Path] = None
+    geometry_bundle_verification: Optional[RecordingGeometryBundleVerification] = None
+
+
+class RecordingGeometryApplyError(RuntimeError):
+    """Raised before ordinary recording moves when geometry preservation fails."""
 
 
 @dataclass(frozen=True)
@@ -809,6 +828,21 @@ def _append_external_ipc_batch_context(
         )
 
 
+def _recording_geometry_bundle_source(root: Path) -> Optional[Path]:
+    """Return a fixed-layout geometry root when any v1 child is present.
+
+    Returning partial roots is intentional: apply-time verification then fails
+    closed instead of silently organizing the recording without its geometry.
+    """
+
+    children = (
+        root / RECORDING_SNAPSHOT_NAME,
+        root / RECORDING_GEOMETRY_CONTRACT_NAME,
+        root / RECORDING_GEOMETRY_ASSETS_NAME,
+    )
+    return root if any(path.exists() for path in children[1:]) else None
+
+
 def _append_external_ipc_video_artifacts(
     *,
     batch_root: Path,
@@ -1106,6 +1140,7 @@ def _build_external_ipc_plan(
             camera_id=None,
             meta=meta,
             missing=missing,
+            geometry_bundle_source=_recording_geometry_bundle_source(batch_root),
         )
 
     outputs = _external_ipc_output_for_camera(session, camera_id)
@@ -1133,6 +1168,7 @@ def _build_external_ipc_plan(
         camera_id=camera_id,
         meta=meta,
         missing=missing,
+        geometry_bundle_source=_recording_geometry_bundle_source(batch_root),
     )
 
 
@@ -1240,6 +1276,7 @@ def _build_external_ipc_recording_only_plan(
         camera_id=str(camera_id),
         meta=meta,
         missing=missing,
+        geometry_bundle_source=_recording_geometry_bundle_source(batch_root),
     )
 
 
@@ -1399,6 +1436,14 @@ def _build_plan(
         camera_id=camera_id,
         meta=meta,
         missing=missing,
+        geometry_bundle_source=next(
+            (
+                source
+                for root in search_roots
+                if (source := _recording_geometry_bundle_source(root)) is not None
+            ),
+            None,
+        ),
     )
 
 
@@ -1418,6 +1463,12 @@ def _format_recording_summary(plan: RecordingPlan) -> List[str]:
     if plan.derived_files:
         derived_names = ", ".join(file.dest_name for file in plan.derived_files)
         lines.append(f"  derived files: {derived_names}")
+    if plan.geometry_bundle_source is not None:
+        lines.append(
+            "  recording geometry: "
+            f"{plan.geometry_bundle_source} -> "
+            f"{RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH.as_posix()}/"
+        )
     if plan.missing:
         missing = ", ".join(plan.missing)
         lines.append(f"  missing: {missing}")
@@ -1488,6 +1539,23 @@ def _write_manifest(
         "cams": [f"cams/{file.dest_name}" for file in plan.cam_files],
         "derived": [f"derived/{file.dest_name}" for file in plan.derived_files],
     }
+    geometry_bundle = None
+    if plan.geometry_bundle_source is not None:
+        verification = plan.geometry_bundle_verification
+        if verification is None:
+            return f"Geometry bundle was planned but not verified for {plan.name}."
+        geometry_bundle = {
+            "schema_id": "palette.recording_geometry_bundle.v1",
+            "relative_path": RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH.as_posix(),
+            "source_root": str(plan.geometry_bundle_source),
+            "contract_sha256": verification.contract_sha256,
+            "manifest_sha256": verification.manifest_sha256,
+            "manifest_file_count": verification.manifest_file_count,
+            "materialized_asset_status": verification.materialized_asset_status.value,
+            "snapshot_pointer_status": verification.snapshot_pointer_status,
+            "verification_status": "verified",
+        }
+        files["raw"].append(f"{RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH.as_posix()}/")
     snapshot_path = plan.dest_dir / "derived" / "recording_snapshot.json"
     payload = {
         "recording_name": plan.meta.get("recording_name") or plan.name,
@@ -1532,6 +1600,7 @@ def _write_manifest(
         "files": files,
         "hevc_keyframe_flags": plan.keyframe_checks if plan.keyframe_checks else None,
         "recording_snapshot": f"derived/{snapshot_path.name}" if snapshot_path.exists() else None,
+        "recording_geometry_bundle": geometry_bundle,
         "preflight": default_preflight_payload(),
     }
     try:
@@ -1598,6 +1667,27 @@ def _apply_plan(
     moved: Set[Path] = set()
     planned_destinations: Set[Path] = set()
 
+    # Geometry is a recording-bound authority.  Prove every shared source
+    # before moving any ordinary artifact so a malformed/partial bundle cannot
+    # yield apparently successful recordings without their geometry.
+    for source_root in sorted(
+        {
+            plan.geometry_bundle_source.resolve()
+            for plan in plans
+            if plan.geometry_bundle_source is not None
+        }
+    ):
+        try:
+            verify_recording_geometry_bundle(
+                source_root,
+                require_snapshot_pointer=False,
+                verify_all_assets=True,
+            )
+        except (OSError, RecordingGeometryError) as exc:
+            raise RecordingGeometryApplyError(
+                f"Recording geometry source failed preflight: {source_root}: {exc}"
+            ) from exc
+
     def record_video_keyframe_status(
         *,
         plan: RecordingPlan,
@@ -1641,6 +1731,60 @@ def _apply_plan(
                     recording_name=plan.name,
                     session_uuid=session_uuid,
                     message=message,
+                )
+
+        if plan.geometry_bundle_source is not None:
+            source_root = plan.geometry_bundle_source.resolve()
+            destination_root = plan.dest_dir / RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH
+            try:
+                publication = publish_recording_geometry_bundle(
+                    source_root=source_root,
+                    recording_root=plan.dest_dir,
+                )
+            except (OSError, RecordingGeometryError, shutil.Error) as exc:
+                if logger:
+                    logger.log(
+                        "recording_geometry_bundle_failed",
+                        recording_name=plan.name,
+                        session_uuid=session_uuid,
+                        source_root=str(source_root),
+                        dest_root=str(destination_root),
+                        message=str(exc),
+                    )
+                raise RecordingGeometryApplyError(
+                    f"Failed to preserve recording geometry for {plan.name}: {exc}"
+                ) from exc
+            plan.geometry_bundle_verification = publication.verification
+            if publication.published:
+                for source_file in iter_recording_geometry_bundle_files(source_root):
+                    relative = source_file.relative_to(source_root)
+                    destination_file = destination_root / relative
+                    if logger:
+                        logger.log(
+                            "file_copied",
+                            recording_name=plan.name,
+                            session_uuid=session_uuid,
+                            source=str(source_file),
+                            dest=str(destination_file),
+                            action="copy",
+                            authority_role="recording_geometry_bundle",
+                        )
+                moved_count += len(iter_recording_geometry_bundle_files(source_root))
+            if logger:
+                logger.log(
+                    "recording_geometry_bundle_verified",
+                    recording_name=plan.name,
+                    session_uuid=session_uuid,
+                    source_root=str(source_root),
+                    dest_root=str(destination_root),
+                    published=publication.published,
+                    contract_sha256=publication.verification.contract_sha256,
+                    manifest_sha256=publication.verification.manifest_sha256,
+                    manifest_file_count=publication.verification.manifest_file_count,
+                    materialized_asset_status=(
+                        publication.verification.materialized_asset_status.value
+                    ),
+                    snapshot_pointer_status=publication.verification.snapshot_pointer_status,
                 )
 
         targets = [
@@ -2536,6 +2680,11 @@ def main() -> int:
                     raw_files=[file.dest_name for file in plan.raw_files],
                     cam_files=[file.dest_name for file in plan.cam_files],
                     derived_files=[file.dest_name for file in plan.derived_files],
+                    recording_geometry_bundle_source=(
+                        str(plan.geometry_bundle_source)
+                        if plan.geometry_bundle_source is not None
+                        else None
+                    ),
                 )
 
         if args.dry_run:
@@ -2546,16 +2695,29 @@ def main() -> int:
 
         if args.apply:
             print("\nApplying moves:")
-            warnings = _apply_plan(
-                plans,
-                create_empty=False,
-                write_manifest=effective_write_manifest,
-                snapshot=snapshot_payload,
-                snapshot_mode=args.snapshot_mode,
-                logger=logger,
-                run_id=run_id,
-                log_path=log_path,
-            )
+            try:
+                warnings = _apply_plan(
+                    plans,
+                    create_empty=False,
+                    write_manifest=effective_write_manifest,
+                    snapshot=snapshot_payload,
+                    snapshot_mode=args.snapshot_mode,
+                    logger=logger,
+                    run_id=run_id,
+                    log_path=log_path,
+                )
+            except RecordingGeometryApplyError as exc:
+                print(str(exc), file=sys.stderr)
+                if logger:
+                    logger.log(
+                        "batch_apply_failed",
+                        batch_source=str(source_path),
+                        reason="recording_geometry_preservation_failed",
+                        message=str(exc),
+                    )
+                    logger.log("run_end", status="failed")
+                    logger.close()
+                return 1
             if args.cleanup_empty:
                 cleanup_warnings = _cleanup_empty_dirs(source_path)
                 warnings.extend(cleanup_warnings)

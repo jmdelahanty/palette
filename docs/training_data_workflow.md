@@ -177,6 +177,20 @@ add `--submit` on an LSF login node. It submits one GPU array task per recording
 uses `--decode-backend pynvvc-luma`, imports stimulus, and registers outputs in
 the PRFS registry by default.
 
+When Orange camera metadata is available, sampled PyNvVC imports also publish
+the complete recording clock under `analysis/acquisition_frame_clock_runs`.
+`raw_video/original_frame_indices` binds sampled image rows to that authority.
+The active writer intentionally omits the former all-NaN
+`raw_video/timestamps` placeholder; no nominal `frame / fps` values are
+presented as measured acquisition time.
+
+The selected clock record makes the temporal basis machine-readable. Host
+timestamps are POSIX/`CLOCK_REALTIME` nanoseconds from the UTC 1970 epoch, not
+program-relative time. Camera timestamps are labeled IEEE-1588/TAI only when
+the individual recording's synchronization, PTP-offset, latch-agreement, and
+camera-versus-host evidence supports that inference; otherwise their epoch and
+timescale remain explicitly unspecified.
+
 ### Acquisition crop-video pose training
 External-IPC recordings can include acquisition-time crop videos under
 `derived/external_crop_recorder/`. For pose training that should match Orange's
