@@ -14,7 +14,6 @@ import os
 import re
 import sys
 import shutil
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -43,6 +42,10 @@ from fisheye.shared.recording_geometry import (
     RecordingGeometryBundleVerification,
     RecordingGeometryError,
     verify_recording_geometry_bundle,
+)
+from fisheye.shared.recording_geometry_bundle import (
+    iter_recording_geometry_bundle_files,
+    publish_recording_geometry_bundle,
 )
 
 try:
@@ -838,93 +841,6 @@ def _recording_geometry_bundle_source(root: Path) -> Optional[Path]:
         root / RECORDING_GEOMETRY_ASSETS_NAME,
     )
     return root if any(path.exists() for path in children[1:]) else None
-
-
-def _iter_geometry_bundle_files(root: Path) -> List[Path]:
-    files = [
-        root / RECORDING_SNAPSHOT_NAME,
-        root / RECORDING_GEOMETRY_CONTRACT_NAME,
-    ]
-    assets_root = root / RECORDING_GEOMETRY_ASSETS_NAME
-    files.extend(sorted(path for path in assets_root.rglob("*") if path.is_file()))
-    return files
-
-
-def _same_geometry_verification(
-    left: RecordingGeometryBundleVerification,
-    right: RecordingGeometryBundleVerification,
-) -> bool:
-    return (
-        left.contract_sha256 == right.contract_sha256
-        and left.manifest_sha256 == right.manifest_sha256
-        and left.manifest_file_count == right.manifest_file_count
-        and left.materialized_asset_status == right.materialized_asset_status
-        and left.snapshot_pointer_status == right.snapshot_pointer_status
-    )
-
-
-def _publish_recording_geometry_bundle(
-    *,
-    source_root: Path,
-    recording_root: Path,
-) -> tuple[RecordingGeometryBundleVerification, bool]:
-    """Copy, verify, and atomically publish the fixed v1 geometry subtree."""
-
-    source = verify_recording_geometry_bundle(
-        source_root,
-        require_snapshot_pointer=False,
-        verify_all_assets=True,
-    )
-    destination = recording_root / RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH
-    if destination.exists():
-        existing = verify_recording_geometry_bundle(
-            destination,
-            require_snapshot_pointer=False,
-            verify_all_assets=True,
-        )
-        if not _same_geometry_verification(source, existing):
-            raise RecordingGeometryError(
-                f"Existing geometry bundle conflicts with source: {destination}"
-            )
-        return existing, False
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(
-        tempfile.mkdtemp(
-            prefix=f".{destination.name}.incoming.",
-            dir=str(destination.parent),
-        )
-    )
-    try:
-        shutil.copy2(source_root / RECORDING_SNAPSHOT_NAME, temporary / RECORDING_SNAPSHOT_NAME)
-        shutil.copy2(
-            source_root / RECORDING_GEOMETRY_CONTRACT_NAME,
-            temporary / RECORDING_GEOMETRY_CONTRACT_NAME,
-        )
-        shutil.copytree(
-            source_root / RECORDING_GEOMETRY_ASSETS_NAME,
-            temporary / RECORDING_GEOMETRY_ASSETS_NAME,
-        )
-        copied = verify_recording_geometry_bundle(
-            temporary,
-            require_snapshot_pointer=False,
-            verify_all_assets=True,
-        )
-        if not _same_geometry_verification(source, copied):
-            raise RecordingGeometryError("Copied geometry bundle does not match its source.")
-        os.replace(temporary, destination)
-    except Exception:
-        if temporary.exists():
-            shutil.rmtree(temporary)
-        raise
-    published = verify_recording_geometry_bundle(
-        destination,
-        require_snapshot_pointer=False,
-        verify_all_assets=True,
-    )
-    if not _same_geometry_verification(source, published):
-        raise RecordingGeometryError("Published geometry bundle failed post-rename verification.")
-    return published, True
 
 
 def _append_external_ipc_video_artifacts(
@@ -1821,7 +1737,7 @@ def _apply_plan(
             source_root = plan.geometry_bundle_source.resolve()
             destination_root = plan.dest_dir / RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH
             try:
-                verification, published = _publish_recording_geometry_bundle(
+                publication = publish_recording_geometry_bundle(
                     source_root=source_root,
                     recording_root=plan.dest_dir,
                 )
@@ -1838,9 +1754,9 @@ def _apply_plan(
                 raise RecordingGeometryApplyError(
                     f"Failed to preserve recording geometry for {plan.name}: {exc}"
                 ) from exc
-            plan.geometry_bundle_verification = verification
-            if published:
-                for source_file in _iter_geometry_bundle_files(source_root):
+            plan.geometry_bundle_verification = publication.verification
+            if publication.published:
+                for source_file in iter_recording_geometry_bundle_files(source_root):
                     relative = source_file.relative_to(source_root)
                     destination_file = destination_root / relative
                     if logger:
@@ -1853,7 +1769,7 @@ def _apply_plan(
                             action="copy",
                             authority_role="recording_geometry_bundle",
                         )
-                moved_count += len(_iter_geometry_bundle_files(source_root))
+                moved_count += len(iter_recording_geometry_bundle_files(source_root))
             if logger:
                 logger.log(
                     "recording_geometry_bundle_verified",
@@ -1861,12 +1777,14 @@ def _apply_plan(
                     session_uuid=session_uuid,
                     source_root=str(source_root),
                     dest_root=str(destination_root),
-                    published=published,
-                    contract_sha256=verification.contract_sha256,
-                    manifest_sha256=verification.manifest_sha256,
-                    manifest_file_count=verification.manifest_file_count,
-                    materialized_asset_status=verification.materialized_asset_status.value,
-                    snapshot_pointer_status=verification.snapshot_pointer_status,
+                    published=publication.published,
+                    contract_sha256=publication.verification.contract_sha256,
+                    manifest_sha256=publication.verification.manifest_sha256,
+                    manifest_file_count=publication.verification.manifest_file_count,
+                    materialized_asset_status=(
+                        publication.verification.materialized_asset_status.value
+                    ),
+                    snapshot_pointer_status=publication.verification.snapshot_pointer_status,
                 )
 
         targets = [

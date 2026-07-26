@@ -679,6 +679,104 @@ An explicitly configured legacy/manual import may remain available as a
 separate authority. The current July 21 Batman recordings are expected to
 remain ungated under the registered-mask policy.
 
+## Historical recovery receipt
+
+The July 22 Batman acquisition bundles expose a narrower historical defect than
+the July 21 recordings. Their exact Orange contract and complete 49-file asset
+manifest are present and verify successfully, but the original
+`recording_snapshot.json` does not contain the producer-declared pointer from
+the snapshot to `recording_geometry_contract.json`. Their arena H5 files also
+say that recording geometry was not referenced. Palette must not edit either
+producer artifact to make that missing relationship appear native.
+
+The approved recovery is therefore a separate immutable sidecar at:
+
+```text
+<recording>/raw/recording_geometry_recovery.json
+```
+
+The unmodified acquisition bundle is copied to:
+
+```text
+<recording>/raw/recording_geometry_bundle/
+```
+
+Each receipt binds exactly one target recording and contains:
+
+- the original snapshot SHA-256, Orange recording ID, and explicit
+  `contract_pointer_status = missing`;
+- the exact contract and asset-manifest SHA-256 values;
+- the exact target H5 relative path, full-file SHA-256, session UUID, camera
+  serial, arena ID, and its explicit `not_referenced` geometry status;
+- the exact resolved camera/arena entry proved by the contract;
+- a human/operator approval identity and construction timestamp;
+- the Palette Git identity and recovery algorithm version; and
+- explicit negative claims: producer artifacts were not changed, Orange did
+  not declare the missing snapshot link, and Citrus runtime application is not
+  claimed.
+
+The receipt is an attestation of an operator-approved historical association,
+not a rewritten acquisition record and not a cryptographic human signature.
+Its stable `receipt_id` is content-derived from the contract, H5, camera, and
+arena. Its serialized bytes receive their own SHA-256 when loaded or published.
+
+Receipt validation always re-hashes and revalidates the referenced evidence.
+It fails closed unless:
+
+1. the source bundle is a complete, checksummed Orange schema-v1 bundle;
+2. the producer snapshot pointer is genuinely absent, rather than invalid or
+   contradictory;
+3. the target H5 has no verified producer-native geometry authority;
+4. the H5 camera and arena select exactly one resolved contract entry;
+5. native dimensions agree between snapshot and rim observation;
+6. the full-precision rim observation agrees with the asset-manifest checksum;
+7. every receipt path is relative and remains within the recording `raw/`
+   directory, so moving or renaming the enclosing recording root does not
+   invalidate the evidence; and
+8. every recorded digest and identity still matches current bytes.
+
+The normal Orange-folder loader remains unchanged and continues to classify
+the copied pointerless bundle as `legacy_missing_recording_bound_mask`. A caller
+must explicitly invoke the recovery-receipt loader. Recovered masks are labeled:
+
+```text
+source_kind = palette_recovered_recording_geometry
+producer_contract_linkage_status = operator_approved_recovery_receipt
+citrus_registration_status = missing
+selected_daily_registration_applied_by_citrus = false
+independent_fit_required_before_operational_use = true
+```
+
+Thus recovery permits acquisition-candidate import and comparison without
+silently making the acquisition fit operational. Palette's independent
+recording-image fit and the candidate comparison remain required before the
+recovered acquisition gate may be selected for production use.
+
+Publication is receipt-last. Palette first verifies and atomically publishes
+the fixed-layout bundle, then builds and atomically writes the receipt, then
+reopens and revalidates the complete chain. A copied bundle without a receipt
+does not grant recovered reader authority. Existing verified receipts are
+idempotent and are never overwritten.
+
+The operator workflow is dry-run-first:
+
+```bash
+scripts/py -m fisheye.utils.recover_recording_geometry \
+  --source-bundle <staging-session-root> \
+  --target-recording <recording-root> \
+  --approved-by <operator>
+
+scripts/py -m fisheye.utils.recover_recording_geometry \
+  --source-bundle <staging-session-root> \
+  --target-recording <recording-root> \
+  --approved-by <operator> \
+  --apply
+```
+
+The command accepts repeated `--target-recording` arguments. Every target is
+independently hashed and checked; the utility never infers a target by scanning
+for a newest calibration, contract, or recording.
+
 ## Implementation sequence
 
 The recommended slices are:
@@ -693,6 +791,8 @@ The recommended slices are:
    - Implement the path-safe Orange-folder adapter.
    - Implement the exact-byte Citrus-H5 adapter.
    - Resolve both into one immutable normalized model.
+   - For the bounded July 22 pointer omission only, preserve the original
+     bundle and publish one explicit per-recording recovery receipt.
 
 3. **Acquisition candidate publication**
    - Add the versioned Zarr candidate surface.

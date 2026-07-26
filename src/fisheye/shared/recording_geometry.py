@@ -126,6 +126,9 @@ class RegisteredDishMask:
     selected_daily_registration_applied_by_citrus: bool | None
     source_kind: str
     source_location: str
+    producer_contract_linkage_status: str = "producer_native"
+    recovery_receipt_sha256: str | None = None
+    independent_fit_required_before_operational_use: bool = False
 
 
 @dataclass(frozen=True)
@@ -157,6 +160,8 @@ class RegisteredDishMaskCollection:
     h5_scope_sha256: str | None = None
     enclosing_selection_status: str | None = None
     issues: tuple[GeometryLoadIssue, ...] = field(default_factory=tuple)
+    producer_contract_linkage_status: str = "producer_native"
+    recovery_receipt_sha256: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "masks", MappingProxyType(dict(self.masks)))

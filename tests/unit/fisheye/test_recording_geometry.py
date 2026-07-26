@@ -19,6 +19,12 @@ from fisheye.shared.recording_geometry import (
     load_registered_dish_masks_from_recording_folder,
     verify_recording_geometry_bundle,
 )
+from fisheye.shared.recording_geometry_recovery import (
+    build_recording_geometry_recovery_receipt,
+    load_registered_dish_mask_from_recovery_receipt,
+    publish_recording_geometry_recovery,
+    validate_recording_geometry_recovery_receipt,
+)
 from fisheye.utils import organize_recordings
 
 
@@ -161,6 +167,7 @@ def _write_folder_bundle(
     (root / "recording_geometry_contract.json").write_bytes(contract_bytes)
     snapshot: dict[str, object] = {
         "schema_version": 2,
+        "recording_id": "orange-session-1",
         "camera_runtime": {
             "2010093": {
                 "coordinate_frame": {
@@ -273,6 +280,119 @@ def test_bundle_verifier_preserves_early_bundle_without_snapshot_pointer(tmp_pat
     assert verification.snapshot_pointer_status == "missing"
     assert verification.manifest_file_count == 1
     assert result.mask_geometry_status is MaskGeometryStatus.LEGACY_MISSING
+
+
+def _write_recovery_target_h5(
+    path: Path,
+    *,
+    camera: str = "2010093",
+    arena: str = "arena_1",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        h5.attrs["session_uuid"] = f"2026-07-22T15-44-40Z_{arena}"
+        h5.attrs["arena_id"] = arena
+        h5.attrs["ipc_source_name"] = f"/shm_cam_{camera}"
+        group = h5.create_group("recording_geometry_contract")
+        group.attrs["capture_status"] = "not_referenced"
+        group.attrs["checksum_verified"] = 0
+
+
+def test_recovery_receipt_is_explicit_immutable_and_revalidated(tmp_path: Path) -> None:
+    source = tmp_path / "staging"
+    _write_folder_bundle(source, include_pointer=False)
+    recording = tmp_path / "recordings" / "recording-1"
+    target_h5 = recording / "raw" / "recording-1.h5"
+    _write_recovery_target_h5(target_h5)
+    original_snapshot_sha = _sha((source / "recording_snapshot.json").read_bytes())
+
+    planned = build_recording_geometry_recovery_receipt(
+        bundle_root=source,
+        target_h5_path=target_h5,
+        approved_by="test-operator",
+        created_at_utc="2026-07-26T12:00:00+00:00",
+    )
+    assert planned["claims"]["producer_declared_snapshot_contract_link"] is False
+
+    publication = publish_recording_geometry_recovery(
+        source_bundle_root=source,
+        recording_root=recording,
+        target_h5_path=target_h5,
+        approved_by="test-operator",
+    )
+    assert publication.bundle_publication.published is True
+    assert publication.receipt_published is True
+    assert _sha((source / "recording_snapshot.json").read_bytes()) == original_snapshot_sha
+    assert load_registered_dish_masks_from_recording_folder(
+        recording / "raw/recording_geometry_bundle"
+    ).mask_geometry_status is MaskGeometryStatus.LEGACY_MISSING
+
+    verified = validate_recording_geometry_recovery_receipt(publication.receipt_path)
+    recovered = load_registered_dish_mask_from_recovery_receipt(publication.receipt_path)
+    mask = next(iter(recovered.masks.values()))
+    assert verified.evidence.camera_serial == "2010093"
+    assert mask.producer_contract_linkage_status == "operator_approved_recovery_receipt"
+    assert mask.recovery_receipt_sha256 == verified.receipt_sha256
+    assert mask.independent_fit_required_before_operational_use is True
+    assert mask.selected_daily_registration_applied_by_citrus is False
+
+    repeated = publish_recording_geometry_recovery(
+        source_bundle_root=source,
+        recording_root=recording,
+        target_h5_path=target_h5,
+        approved_by="test-operator",
+    )
+    assert repeated.bundle_publication.published is False
+    assert repeated.receipt_published is False
+
+    relocated = recording.with_name("relocated-recording")
+    recording.rename(relocated)
+    relocated_verified = validate_recording_geometry_recovery_receipt(
+        relocated / "raw/recording_geometry_recovery.json"
+    )
+    assert relocated_verified.evidence.session_uuid == verified.evidence.session_uuid
+
+
+def test_recovery_receipt_fails_after_target_h5_changes(tmp_path: Path) -> None:
+    source = tmp_path / "staging"
+    _write_folder_bundle(source, include_pointer=False)
+    recording = tmp_path / "recordings" / "recording-1"
+    target_h5 = recording / "raw" / "recording-1.h5"
+    _write_recovery_target_h5(target_h5)
+    publication = publish_recording_geometry_recovery(
+        source_bundle_root=source,
+        recording_root=recording,
+        target_h5_path=target_h5,
+        approved_by="test-operator",
+    )
+    with h5py.File(target_h5, "a") as h5:
+        h5.attrs["arena_id"] = "arena_2"
+
+    with pytest.raises(RecordingGeometryError, match="arena|checksum"):
+        validate_recording_geometry_recovery_receipt(publication.receipt_path)
+
+
+def test_recovery_refuses_wrong_camera_or_producer_native_link(tmp_path: Path) -> None:
+    source = tmp_path / "staging"
+    _write_folder_bundle(source, include_pointer=False)
+    target_h5 = tmp_path / "recording" / "raw" / "recording.h5"
+    _write_recovery_target_h5(target_h5, camera="2010094", arena="arena_1")
+    with pytest.raises(RecordingGeometryError, match=r"cameras\[2010094\]"):
+        build_recording_geometry_recovery_receipt(
+            bundle_root=source,
+            target_h5_path=target_h5,
+            approved_by="test-operator",
+        )
+
+    native = tmp_path / "native"
+    _write_folder_bundle(native, include_pointer=True)
+    _write_recovery_target_h5(target_h5)
+    with pytest.raises(RecordingGeometryError, match="pointer is missing"):
+        build_recording_geometry_recovery_receipt(
+            bundle_root=native,
+            target_h5_path=target_h5,
+            approved_by="test-operator",
+        )
 
 
 def test_bundle_verifier_rejects_tampered_asset(tmp_path: Path) -> None:
