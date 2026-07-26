@@ -3,7 +3,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-07-17
+last_verified: 2026-07-26
 -->
 
 This is the canonical index for Palette's recording-local derived analytics
@@ -25,13 +25,14 @@ reference in `src/fisheye/docs/zarr_structure.md`.
   must own complete, non-overlapping physical chunks or shards.
 - Production materializers compute in node-local Zarr storage and publish a
   validated run through `palette.atomic_run_group_publisher` version 1: hidden
-  same-parent sibling, verified copy, atomic rename, completion/pointer update,
-  and rollback on failure.
+  same-parent sibling, verified copy, atomic rename, completion, configured
+  selector or eligibility activation, and rollback on failure.
 
 ## Current family matrix
 
 | Family | Authority role | Schema and method | Default logical/physical layout | Axis and identity | Logical reader | Publication | Compatibility |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| `analysis/arena_geometry_runs` | Immutable geometry candidates for later comparison and explicit selection; publication alone is not operational authority | `palette.arena_geometry_candidate_run` v1 containing `palette.arena_geometry_candidate_record` v1; first candidate kind is `acquisition_registered_dish` | Metadata-only Zarr v3 run groups; canonical-JSON digest supplies the content-derived candidate ID | Exact rig, canvas, arena, camera, source-camera continuous pixel-frame authority, recovery receipt, and Orange contract checksums | `fisheye.analysis_workflows.materializers.arena_geometry_candidates` | shared atomic publisher; completion and eligibility do not set `latest`, project `dish_mask`, or activate gating | legacy `analysis_metadata.attrs["dish_mask"]` may only be a future derived projection of an explicitly selected candidate |
 | `analysis/track_kinematics_runs/<online|offline>` | Identity-resolved framewise position, motion, heading, and derivatives | `analysis.track_kinematics_runs` v1; `track_kinematics.v1`; grouped movement subcontracts remain `palette.track_movement.v2` | Per-track semantic groups; node-local output converted to 262,144-row indexed shards | `track_samples`; each track persists exact `frame_indices`, detection lineage, and track ID | `fisheye.analysis.track_kinematics_io` | shared atomic publisher | flat speed/acceleration arrays and track-local `swim_bouts` are deprecated mirrors |
 | `analysis/swim_bout_runs` | Authoritative event segmentation candidates | `palette.swim_bout_runs` v8 for compact runs; algorithm contract v1 | `compact_tabular_v2`; columnar tables plus signal-major detector trace; adaptive columnar sharding | `swim_bout_rows`; frame coordinate uses `palette.swim_bout_frame_axis_reference` v1 by default | `fisheye.analysis.swim_bout_io` | shared atomic publisher | schema-7 embedded frame axes and `hierarchical_v1` remain readable |
 | `analysis/bout_kinematics_runs` | Per-bout movement, heading, and optional eye-gaze measurements | `analysis.bout_kinematics_runs` v7; `bout_kinematics.v7` | `compact_tabular_v2`; shared columnar sharding | source swim-bout rows plus exact track, segmentation, heading, and eye-run lineage | `fisheye.analysis.bout_kinematics_io` | shared atomic publisher | `hierarchical_v1` remains explicit legacy/debug output |

@@ -630,7 +630,9 @@ def _mask_from_entry(
         coordinate_space="camera_native_pixels",
         palette_space_id="source_camera_image_px",
         coordinate_profile_id="source_camera_image_px.top_left_y_down.v1",
-        pixel_convention="pixel_center",
+        # Circle centers and radii are continuous point geometry in the native
+        # camera image plane. They are not discrete array-index samples.
+        pixel_convention="continuous",
         origin="top_left",
         positive_x="right",
         positive_y="down",

@@ -626,13 +626,7 @@ def load_registered_dish_mask_from_recovery_receipt(
             producer_contract_linkage_status=RECOVERY_LINKAGE_STATUS,
         )
     evidence = verified.evidence
-    mask = replace(
-        evidence.mask,
-        source_location=str(verified.receipt_path),
-        producer_contract_linkage_status=RECOVERY_LINKAGE_STATUS,
-        recovery_receipt_sha256=verified.receipt_sha256,
-        independent_fit_required_before_operational_use=True,
-    )
+    mask = registered_dish_mask_from_verified_recovery(verified)
     return RegisteredDishMaskCollection(
         masks={mask.key: mask},
         mask_geometry_status=MaskGeometryStatus.VALID,
@@ -642,6 +636,22 @@ def load_registered_dish_mask_from_recovery_receipt(
         enclosing_selection_status="selected_resolved",
         producer_contract_linkage_status=RECOVERY_LINKAGE_STATUS,
         recovery_receipt_sha256=verified.receipt_sha256,
+    )
+
+
+def registered_dish_mask_from_verified_recovery(
+    verified: VerifiedRecordingGeometryRecovery,
+) -> RegisteredDishMask:
+    """Return the recovered mask represented by one already-verified receipt."""
+
+    if type(verified) is not VerifiedRecordingGeometryRecovery:
+        raise RecordingGeometryError("A verified recording-geometry recovery is required.")
+    return replace(
+        verified.evidence.mask,
+        source_location=str(verified.receipt_path),
+        producer_contract_linkage_status=RECOVERY_LINKAGE_STATUS,
+        recovery_receipt_sha256=verified.receipt_sha256,
+        independent_fit_required_before_operational_use=True,
     )
 
 
@@ -715,5 +725,6 @@ __all__ = [
     "inspect_recording_geometry_recovery",
     "load_registered_dish_mask_from_recovery_receipt",
     "publish_recording_geometry_recovery",
+    "registered_dish_mask_from_verified_recovery",
     "validate_recording_geometry_recovery_receipt",
 ]

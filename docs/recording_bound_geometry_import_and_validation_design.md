@@ -201,7 +201,8 @@ When `materialized_assets.status == "complete"`, Palette must:
 The embedded checksummed recording-contract geometry remains the full-precision
 numerical authority. The Palette-v2 compatibility export rounds center and
 radius to integer pixels and must not replace the full-precision calculation
-source.
+source. Circle centers and radii are continuous point geometry in the native
+camera image plane; they are not discrete pixel indices or half-open box edges.
 
 ## Citrus H5 authority
 
@@ -491,14 +492,35 @@ canary and repeat-recording variability, not guessed in advance.
 
 ## Immutable candidate and selection model
 
-Palette should add a small versioned geometry-run surface. The exact final Zarr
-group name remains an implementation decision; conceptually it provides:
+Palette uses a small versioned geometry-run surface:
 
 ```text
 arena_geometry_runs/<candidate_run>/
 arena_geometry_comparison_runs/<comparison_run>/
 arena_geometry_selection/<selection_record>/
 ```
+
+The first implemented surface is
+`analysis/arena_geometry_runs/<candidate_id>`. Acquisition candidates use
+`palette.arena_geometry_candidate_record` version 1 inside
+`palette.arena_geometry_candidate_run` version 1. They are metadata-only Zarr
+v3 groups. The candidate ID is derived from the canonical candidate-record
+SHA-256, so retrying the same evidence is idempotent and changed evidence
+produces a new immutable name.
+
+Candidate publication is intentionally weaker than operational selection. A
+published acquisition candidate is complete and `stage_selector_eligible`,
+meaning that it is safe for comparison and review code to read. Publication
+does not set `latest` or `latest_complete`, write
+`analysis_metadata.attrs["dish_mask"]`, select a detection gate, or alter any
+detection. The run records each of those negative assertions explicitly.
+
+The publisher creates and validates the candidate in node-local Zarr storage,
+copies it to a hidden same-parent sibling, verifies the copy, atomically
+renames it, completes it, and only then marks it readable. Immediately after
+the rename it revalidates the recovery receipt, Orange contract, and persisted
+source-camera coordinate authority. A source change aborts publication rather
+than publishing a candidate bound to mixed evidence.
 
 Each candidate records:
 
@@ -795,9 +817,11 @@ The recommended slices are:
      bundle and publish one explicit per-recording recovery receipt.
 
 3. **Acquisition candidate publication**
-   - Add the versioned Zarr candidate surface.
-   - Publish physical rim and valid gate separately.
-   - Record asset completeness and runtime-registration status.
+   - Implemented as metadata-only
+     `analysis/arena_geometry_runs/<candidate_id>` groups.
+   - Physical rim and valid gate are published separately.
+   - Asset completeness and runtime-registration status are retained.
+   - Completion makes a candidate readable, never operationally selected.
 
 4. **Independent fitter and comparison**
    - Implement multi-window robust fitting and quality metrics.
@@ -849,7 +873,8 @@ Focused unit and integration coverage should include:
 
 Two implementation decisions intentionally remain open:
 
-1. The final Zarr group names for candidates, comparisons, and selections.
+1. The final Zarr group names and schemas for comparisons and selections. The
+   candidate family is now fixed at `analysis/arena_geometry_runs`.
 2. Numerical agreement thresholds. These should be derived from the July 22
    four-camera canary and repeated-recording variability after the independent
    fitter exists.

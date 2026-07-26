@@ -217,7 +217,7 @@ def test_folder_loader_returns_normalized_full_precision_mask(tmp_path: Path) ->
     assert mask.materialized_asset_status is MaterializedAssetStatus.COMPLETE
     assert mask.palette_space_id == "source_camera_image_px"
     assert mask.coordinate_profile_id == "source_camera_image_px.top_left_y_down.v1"
-    assert mask.pixel_convention == "pixel_center"
+    assert mask.pixel_convention == "continuous"
 
 
 def test_mask_binds_only_to_matching_palette_source_camera_frame(
@@ -232,7 +232,7 @@ def test_mask_binds_only_to_matching_palette_source_camera_frame(
     frame = SimpleNamespace(
         endpoint=SimpleNamespace(
             space_id="source_camera_image_px",
-            pixel_convention="pixel_center",
+            pixel_convention="continuous",
             units="px",
             width=640,
             height=480,
