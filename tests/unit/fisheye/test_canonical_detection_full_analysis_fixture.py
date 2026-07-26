@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import math
 import os
 from pathlib import Path
 
@@ -28,18 +29,23 @@ class _Array:
 
 
 def _benchmark_input():
-    frames = np.arange(10, dtype=np.int32)
+    frames = np.asarray([0, 0, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9], dtype=np.int32)
+    centers = np.linspace(0.25, 0.75, frames.size, dtype=np.float32)
     return build_canonical_detection_benchmark_input(
         {
             "frame_indices": _Array(frames),
             "bbox_norm_coords": _Array(
-                np.tile(
-                    np.asarray([[0.5, 0.5, 0.2, 0.2]], dtype=np.float32),
-                    (10, 1),
-                )
+                np.column_stack(
+                    (
+                        centers,
+                        centers,
+                        np.full(frames.size, 0.1, dtype=np.float32),
+                        np.full(frames.size, 0.1, dtype=np.float32),
+                    )
+                ).astype(np.float32)
             ),
-            "scores": _Array(np.linspace(0.5, 0.95, 10, dtype=np.float32)),
-            "class_ids": _Array(np.zeros(10, dtype=np.int32)),
+            "scores": _Array(np.linspace(0.5, 0.95, frames.size, dtype=np.float32)),
+            "class_ids": _Array(np.zeros(frames.size, dtype=np.int32)),
         },
         recording_identity="recording-a",
         frame_count=10,
@@ -53,7 +59,11 @@ def _make_group(root: zarr.Group, path: str, *, value: int) -> None:
     group.create_array("value", data=np.asarray([value], dtype=np.int32), chunks=(1,))
 
 
-def _fixture_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _fixture_inputs(
+    tmp_path: Path,
+    *,
+    integration: bool = False,
+) -> tuple[Path, Path, Path, Path]:
     benchmark_root = tmp_path / "benchmarks"
     source_recording = tmp_path / "recording-a"
     source_video = source_recording / "cams" / "camera.mp4"
@@ -76,8 +86,71 @@ def _fixture_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     _make_group(root, "analysis/calibration", value=2)
     refined_parent = root.create_group("refined_keypoints_runs")
     refined_parent.attrs.update({"latest": "selected", "latest_complete": "selected"})
-    _make_group(root, "refined_keypoints_runs/selected", value=3)
+    keypoints = root.create_group("refined_keypoints_runs/selected")
+    keypoints.create_array(
+        "value",
+        data=np.asarray([3], dtype=np.int32),
+        chunks=(1,),
+    )
+    row_frames = np.asarray(
+        [0, 0, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9],
+        dtype=np.int64,
+    )
+    frame_counts = np.bincount(row_frames, minlength=10).astype(np.int32)
+    keypoints.create_array("frame_counts", data=frame_counts, chunks=(4,))
+    keypoints.create_array("n_rois", data=frame_counts, chunks=(4,))
+    keypoints.create_array("frame_indices", data=row_frames, chunks=(4,))
+    keypoints.create_array(
+        "keypoints_img",
+        data=np.arange(24, dtype=np.float32).reshape(12, 2),
+        chunks=(4, 2),
+    )
+
+    masks_parent = root.create_group("refined_subject_masks_runs")
+    masks_parent.attrs.update({"latest": "selected", "latest_complete": "selected"})
+    masks = root.create_group("refined_subject_masks_runs/selected")
+    masks.create_array("frame_counts", data=frame_counts, chunks=(4,))
+    masks.create_array("frame_indices", data=row_frames, chunks=(4,))
+    masks.create_array(
+        "masks_roi",
+        data=np.arange(12 * 2 * 4 * 4, dtype=np.uint8).reshape(12, 2, 4, 4),
+        chunks=(4, 1, 4, 4),
+    )
+    contours = masks.create_group("components/subject_body/contours")
+    contour_lengths = np.asarray([2, 0, 1, 3, 1, 2, 0, 1, 2, 1, 1, 2], dtype=np.int32)
+    contour_ptr = np.full(12, -1, dtype=np.int64)
+    next_point = 0
+    for row_index, row_length in enumerate(contour_lengths):
+        if row_length:
+            contour_ptr[row_index] = next_point
+            next_point += int(row_length)
+    contour_points = np.arange(
+        int(contour_lengths.sum()) * 2,
+        dtype=np.float32,
+    ).reshape(-1, 2)
+    contours.create_array("ptr", data=contour_ptr, chunks=(4,))
+    contours.create_array("len", data=contour_lengths, chunks=(4,))
+    contours.create_array("points_xy", data=contour_points, chunks=(4, 2))
+
+    timeline = root.create_group("analysis/timeline")
+    timeline.create_array(
+        "second_indices",
+        data=np.arange(5, dtype=np.int64),
+        chunks=(2,),
+    )
+    timeline.create_array(
+        "speed_per_second",
+        data=np.linspace(0.0, 1.0, 5, dtype=np.float32),
+        chunks=(2,),
+    )
     zarr.consolidate_metadata(str(source_archive))
+    root_metadata_path = source_archive / "zarr.json"
+    root_metadata = json.loads(root_metadata_path.read_text(encoding="utf-8"))
+    root_metadata["attributes"]["imageio_metadata"] = {"nframes": float("inf")}
+    root_metadata_path.write_text(
+        json.dumps(root_metadata, allow_nan=True),
+        encoding="utf-8",
+    )
 
     benchmark_input = _benchmark_input()
     candidate_root = benchmark_root / "canonical_detection_storage" / "candidates"
@@ -117,6 +190,54 @@ def _fixture_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     )
 
     spec_path = tmp_path / "fixture-spec.json"
+    selected_products = [
+        {"product": "raw_video", "path": "raw_video"},
+        {"product": "calibration", "path": "analysis/calibration"},
+        {
+            "product": "refined_keypoints",
+            "path": "refined_keypoints_runs/selected",
+        },
+    ]
+    selector_overrides = {
+        "refined_keypoints_runs": {
+            "latest": "selected",
+            "latest_complete": "selected",
+        }
+    }
+    integration_window = None
+    if integration:
+        selected_products.extend(
+            [
+                {
+                    "product": "refined_subject_masks",
+                    "path": "refined_subject_masks_runs/selected",
+                },
+                {"product": "timeline", "path": "analysis/timeline"},
+            ]
+        )
+        selector_overrides["refined_subject_masks_runs"] = {
+            "latest": "selected",
+            "latest_complete": "selected",
+        }
+        integration_window = {
+            "classification": "integration_fixture",
+            "camera_frame_start": 0,
+            "camera_frame_stop": 4,
+            "source_observation_rows": 12,
+            "frame_counts_path": "refined_subject_masks_runs/selected/frame_counts",
+            "frame_indices_path": "refined_subject_masks_runs/selected/frame_indices",
+            "additional_prefix_axes": [
+                {
+                    "name": "seconds",
+                    "source_length": 5,
+                    "selected_length": 2,
+                    "index_path": "analysis/timeline/second_indices",
+                }
+            ],
+            "csr_group_paths": [
+                "refined_subject_masks_runs/selected/components/subject_body/contours"
+            ],
+        }
     spec_path.write_text(
         json.dumps(
             {
@@ -137,20 +258,8 @@ def _fixture_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                     "source_video_total_frames": 10,
                     "fps": 30.0,
                 },
-                "selected_products": [
-                    {"product": "raw_video", "path": "raw_video"},
-                    {"product": "calibration", "path": "analysis/calibration"},
-                    {
-                        "product": "refined_keypoints",
-                        "path": "refined_keypoints_runs/selected",
-                    },
-                ],
-                "selector_overrides": {
-                    "refined_keypoints_runs": {
-                        "latest": "selected",
-                        "latest_complete": "selected",
-                    }
-                },
+                "selected_products": selected_products,
+                "selector_overrides": selector_overrides,
                 "candidates": {
                     "regular": {
                         "path": str(regular_path),
@@ -165,6 +274,7 @@ def _fixture_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                     "commit": fixture.CRIMSON_CONTRACT_COMMIT,
                     "document_sha256": fixture.CRIMSON_CONTRACT_SHA256,
                 },
+                "integration_window": integration_window,
             }
         ),
         encoding="utf-8",
@@ -247,9 +357,10 @@ def test_publish_builds_exact_immutable_pair(
         assert result["pair_copy_mode_resolved"] == "copy"
         assert result["nondetection_pair_exact"] is True
         assert result["decoded_detection_pair_exact"] is True
-        assert result["publication_receipt"][
-            "exact_relative_path_size_content_match"
-        ] is True
+        assert (
+            result["publication_receipt"]["exact_relative_path_size_content_match"]
+            is True
+        )
         pair_manifest = json.loads(
             (destination / "pair_manifest.json").read_text(encoding="utf-8")
         )
@@ -259,7 +370,9 @@ def test_publish_builds_exact_immutable_pair(
         )
         assert source_metadata_before == (source_archive / "zarr.json").read_bytes()
         assert video_before == source_video.read_bytes()
-        assert not any(source_video.name == path.name for path in destination.rglob("*"))
+        assert not any(
+            source_video.name == path.name for path in destination.rglob("*")
+        )
 
         arrays_by_layout: dict[str, dict[str, np.ndarray]] = {}
         for layout in ("regular", "hybrid"):
@@ -279,9 +392,14 @@ def test_publish_builds_exact_immutable_pair(
             }
             assert np.asarray(root["raw_video/value"][:]).tolist() == [1]
             assert np.asarray(root["analysis/calibration/value"][:]).tolist() == [2]
-            assert json.loads(
-                (destination / f"{layout}_manifest.json").read_text(encoding="utf-8")
-            )["source_unchanged"] is True
+            assert (
+                json.loads(
+                    (destination / f"{layout}_manifest.json").read_text(
+                        encoding="utf-8"
+                    )
+                )["source_unchanged"]
+                is True
+            )
         assert all(
             np.array_equal(
                 arrays_by_layout["regular"][path],
@@ -294,7 +412,121 @@ def test_publish_builds_exact_immutable_pair(
             (path.stat().st_mode & 0o777) == (0o555 if path.is_dir() else 0o444)
             for path in destination.rglob("*")
         )
-        assert not list(scratch_root.glob("palette_canonical_detection_full_analysis_*"))
+        assert not list(
+            scratch_root.glob("palette_canonical_detection_full_analysis_*")
+        )
+    finally:
+        _thaw(destination)
+
+
+def test_publish_builds_bounded_integration_pair_with_exact_prefixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec_path, benchmark_root, source_archive, _source_video = _fixture_inputs(
+        tmp_path,
+        integration=True,
+    )
+    spec = fixture.load_full_analysis_fixture_spec(spec_path)
+    destination = (
+        benchmark_root / "canonical_detection_storage" / "full_analysis" / "tiny"
+    )
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+    source_metadata_before = (source_archive / "zarr.json").read_bytes()
+    monkeypatch.setattr(
+        fixture,
+        "_palette_code_identity",
+        lambda: {
+            "repository": "/test/palette",
+            "commit": "test-commit",
+            "clean": True,
+            "dirty_path_count": 0,
+        },
+    )
+
+    result = fixture.publish_full_analysis_fixture_pair(
+        spec,
+        destination=destination,
+        benchmark_root=benchmark_root,
+        pair_copy_mode="copy",
+        expected_palette_commit="test-commit",
+        scratch_root=scratch_root,
+    )
+
+    try:
+        assert result["evidence_scope"]["classification"] == "integration_fixture"
+        assert result["summary"]["selected_camera_frames"] == 4
+        assert result["summary"]["selected_observation_rows"] == 6
+        assert result["summary"]["full_duration_gate_satisfied"] is False
+        assert result["nondetection_pair_exact"] is True
+        assert result["decoded_detection_pair_exact"] is True
+        assert source_metadata_before == (source_archive / "zarr.json").read_bytes()
+        source_root = json.loads(source_metadata_before)
+        assert math.isinf(source_root["attributes"]["imageio_metadata"]["nframes"])
+
+        pair_manifest = json.loads(
+            (destination / "pair_manifest.json").read_text(encoding="utf-8")
+        )
+        normalizations = pair_manifest["logical_slice_manifest"][
+            "nonfinite_normalizations"
+        ]
+        assert any(
+            item["source_metadata_path"] == "zarr.json"
+            and item["json_pointer"] == "/attributes/imageio_metadata/nframes"
+            and item["original_value"] == "positive_infinity"
+            and item["fixture_value"] is None
+            for item in normalizations
+        )
+
+        arrays_by_layout: dict[str, dict[str, np.ndarray]] = {}
+        for layout in ("regular", "hybrid"):
+            archive_path = destination / f"{layout}.zarr"
+            root = zarr.open_group(
+                str(archive_path),
+                mode="r",
+                use_consolidated=True,
+            )
+            assert (
+                root.attrs["fixture_evidence_classification"] == "integration_fixture"
+            )
+            assert root.attrs["imageio_metadata"]["nframes"] is None
+            assert root["refined_keypoints_runs/selected/frame_counts"].shape == (4,)
+            assert root["refined_keypoints_runs/selected/frame_indices"].shape == (6,)
+            assert root["refined_subject_masks_runs/selected/masks_roi"].shape == (
+                6,
+                2,
+                4,
+                4,
+            )
+            assert root["analysis/timeline/second_indices"].shape == (2,)
+            contour_group = root[
+                "refined_subject_masks_runs/selected/components/subject_body/contours"
+            ]
+            assert contour_group["ptr"].shape == (6,)
+            assert contour_group["len"].shape == (6,)
+            assert contour_group["points_xy"].shape == (9, 2)
+            run = root[f"detect_runs/{fixture.FIXTURE_RUN_NAME}"]
+            offsets = np.asarray(run["instances/frame_row_offsets"][:])
+            frame_indices = np.asarray(run["instances/frame_indices"][:])
+            assert offsets.shape == (5,)
+            assert offsets.tolist() == [0, 2, 3, 5, 6]
+            assert offsets[-1] == frame_indices.shape[0]
+            arrays_by_layout[layout] = {
+                path: np.asarray(run[path][:])
+                for path in fixture.CANONICAL_DETECTION_SCHEMA_V1.binding_paths
+            }
+        assert all(
+            np.array_equal(
+                arrays_by_layout["regular"][path],
+                arrays_by_layout["hybrid"][path],
+            )
+            for path in arrays_by_layout["regular"]
+        )
+        assert result["publication_receipt"]["payload_verification"] == (
+            "exact_logical_slice_hashes"
+        )
+        assert not list(scratch_root.glob("palette_canonical_detection_integration_*"))
     finally:
         _thaw(destination)
 
@@ -379,3 +611,12 @@ def test_destination_and_source_detection_selection_fail_closed(tmp_path: Path) 
     }
     with pytest.raises(ValueError, match="Source detect_runs cannot be copied"):
         fixture.FullAnalysisFixtureSpec.from_payload(payload)
+
+
+def test_integration_shape_planning_rejects_undeclared_large_axis() -> None:
+    with pytest.raises(ValueError, match="undeclared large leading axis"):
+        fixture._target_array_shape(
+            "selected/unknown",
+            (2049, 2),
+            cardinalities={"leading_axes": {}, "point_axes": {}},
+        )

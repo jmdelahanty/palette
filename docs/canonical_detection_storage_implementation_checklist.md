@@ -5,7 +5,7 @@ gate
 
 Date established: 2026-07-23
 
-Last updated: 2026-07-25
+Last updated: 2026-07-26
 
 ## Goal
 
@@ -242,13 +242,92 @@ The corrected five-repetition access-aware result and exact Crimson handoff are
 recorded in
 [`diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md`](diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md).
 
-## Remaining Completion Order — Frozen 2026-07-25
+## Remaining Completion Order — Updated 2026-07-26
 
 The remaining work follows the order below even though the older phase numbers
 place production integration before consumer adoption. The paired consumer gate
-must pass before Phase 5 changes `detect_yolo`.
+must pass before Phase 5 changes `detect_yolo`. A bounded integration fixture
+now precedes the frozen full-duration gate; it does not replace or satisfy that
+gate.
+
+### Checkpoint A0 — 2,048-Frame Full-Product Integration Fixture
+
+The first full-duration publication attempt stopped before copying any source
+payload. It spent most of its time hashing the complete selected subject-mask
+tree, then failed when strict JSON serialization encountered the source root's
+legacy non-finite `imageio_metadata.nframes=+inf` attribute. No final fixture,
+registry entry, production selector, or training artifact was created. Failed
+scratch and shared incomplete evidence remains subject to explicit cleanup.
+
+The corrective integration spec is
+[`canonical_detection_integration_sleepyfish_cam2010095_2048_v1.json`](../configs/benchmarks/canonical_detection_integration_sleepyfish_cam2010095_2048_v1.json).
+It selects camera frames `[0, 2048)` without rebasing and retains the same 12
+maintained product trees as the full-duration spec. Array payloads are copied
+as exact logical prefixes across four declared axis classes:
+
+- 2,048 of 1,188,000 camera-frame rows;
+- the observation-row prefix derived by summing the selected source
+  `frame_counts` and validating it against `frame_indices`;
+- 69 of 39,214 identity-indexed per-second rows; and
+- four CSR contour point prefixes derived from each selected `ptr`/`len`
+  endpoint.
+
+Small constants and channel tables are copied in full. Any undeclared leading
+axis larger than 2,048 fails closed. Source aggregate provenance is retained
+and explicitly labeled as unrecomputed; it is not misrepresented as a new
+scientific publication.
+
+Implementation:
+
+- [x] Classify the bounded pair as `integration_fixture` and record that it is
+      invalid for full-duration startup, object-count, cache-pressure, long-
+      traversal, and promotion gates.
+- [x] Keep source camera-frame identity unchanged with a required zero-based
+      prefix; introduce no rebasing contract.
+- [x] Derive the observation-row stop from the source frame-count authority and
+      require every selected frame-index/count surface to match it exactly.
+- [x] Slice dense masks, crop geometry, keypoints, shape, eye, tail, motion,
+      timeline, and CSR contour payloads through declared axis cardinalities.
+- [x] Preserve the observed contour empty-row sentinel `ptr=-1, len=0`; derive
+      point endpoints from contiguous positive spans rather than assuming every
+      row has a nonnegative pointer.
+- [x] Slice the two full-duration canonical-detection candidates to `F=2048`,
+      require `frame_row_offsets.shape == (2049,)`, and preserve exact instance
+      keys and decoded values.
+- [x] Regenerate regular and hybrid detection arrays through their existing
+      physical profiles so only canonical-detection storage metadata differs.
+- [x] Replace complete selected-tree payload hashing with deterministic hashes
+      of every copied metadata node and exact logical array block in the
+      selected prefix, followed by direct regular/hybrid and post-copy logical
+      equivalence checks.
+- [x] Omit stale source consolidated metadata, normalize non-finite direct
+      attributes to JSON `null` only in benchmark copies, and record the exact
+      source metadata path, JSON pointer, symbolic original value, and
+      replacement.
+- [x] Require strict JSON, inline consolidated metadata, direct/consolidated
+      agreement, immutable publication, and selector/registry ineligibility.
+- [x] Cover multi-detection frames, `F+1` offsets, frame/row arrays, dense
+      masks, a per-second timeline, CSR points, source immutability, and paired
+      equivalence in a focused real-Zarr test.
+- [ ] Run the real-source plan from a clean commit-pinned deployment.
+- [ ] Publish the immutable 2,048-frame `regular.zarr` and `hybrid.zarr` pair
+      through node-local scratch and provide both paths and manifests to
+      Crimson.
+- [ ] Run Crimson's quick schema/open/readiness/overlay/cancellation gate using
+      only frame IDs in `[0, 2048)`.
+
+Integration exit gate:
+
+- [ ] Palette and Crimson both accept the bounded pair for functional
+      integration. No result from this checkpoint is cited as full-duration
+      promotion evidence.
 
 ### Checkpoint A — Paired Full-Analysis Fixtures
+
+This remains the later scalability checkpoint. Resume it only after the
+bounded integration pair passes and after retaining the prefix/slice hashing
+strategy; do not restore the original complete dense-mask tree hash as the
+source-integrity mechanism.
 
 Fixture scope is product-complete for the frozen Crimson workload, not a copy
 of every historical run. The versioned allowlist is
