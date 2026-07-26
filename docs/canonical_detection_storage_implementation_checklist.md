@@ -1,8 +1,11 @@
 # Canonical Detection Storage Implementation Checklist
 
-Status: active implementation checklist
+Status: active; production adoption blocked on the paired Crimson full-archive
+gate
 
 Date established: 2026-07-23
+
+Last updated: 2026-07-25
 
 ## Goal
 
@@ -239,6 +242,202 @@ The corrected five-repetition access-aware result and exact Crimson handoff are
 recorded in
 [`diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md`](diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md).
 
+## Remaining Completion Order — Frozen 2026-07-25
+
+The remaining work follows the order below even though the older phase numbers
+place production integration before consumer adoption. The paired consumer gate
+must pass before Phase 5 changes `detect_yolo`.
+
+### Checkpoint A — Paired Full-Analysis Fixtures
+
+Frozen Crimson dependency:
+
+- [x] Pin the fixture contract to Crimson commit
+      `dadd9d779f0737c9643f15e3831a7c514bf99665` on branch
+      `agent/phase5o4-full-analysis-fixture-contract`.
+- [x] Verify the contract document SHA-256 is
+      `aa64a94de7096b6a22e53d76357a619ca92bc5296b38f0549202fd67aee36a86`.
+- [x] Freeze the explicit run name as
+      `crimson_storage_fixture_sleepyfish_cam2010095_v1` under
+      `detect_runs`.
+- [x] Keep Crimson's production cache at 64 MiB for the first layout-only
+      comparison.
+
+Fixture input and safety plan:
+
+- [ ] Record the maintained Sleepyfish source-archive metadata fingerprint
+      before any copy.
+- [ ] Enumerate the exact selected nondetection runs required for refined
+      keypoints, refined subject masks, subject shape, eye geometry, motion,
+      eye-angle and tail-kinematics timelines, and crop geometry.
+- [ ] Confirm the exact refined-subject-mask arrays opened by Crimson before
+      copying the selected dense run.
+- [ ] Record that the current selected subject-mask run stores unsharded dense
+      `uint8 masks_roi` with chunks `(256,1,512,512)`, lacks a compact mask
+      cache, and is not silently optimized as part of the detection comparison.
+- [ ] Probe server-side reflink/clone and hardlink behavior using disposable
+      benchmark files only.
+- [ ] Never reflink, hardlink, chmod, or otherwise share mutable inode state
+      directly with a production archive.
+- [ ] If physical sharing is used, create one independent immutable benchmark
+      base first and share only between the two benchmark fixtures; disclose
+      that relationship in both manifests.
+- [ ] Fall back to verified ordinary copies if safe clone/link semantics are
+      unavailable or would change the benchmark interpretation.
+
+Builder implementation:
+
+- [ ] Add separate plan and apply modes; plan mode performs no payload writes.
+- [ ] Accept only a fresh destination below
+      `.palette_benchmarks/canonical_detection_storage/full_analysis`.
+- [ ] Reject production recording, registry, selector, training, and existing
+      destination paths.
+- [ ] Stage each archive under a unique visibly incomplete sibling and install
+      it only after validation.
+- [ ] Preserve the source-video association without copying or transcoding the
+      video.
+- [ ] Copy only the maintained required nondetection selections, their parent
+      group envelopes, and required archive metadata—not every historical run.
+- [ ] Install the regular and hybrid candidate trees under the same exact
+      canonical detection run name.
+- [ ] Mark both roots `benchmark_only=true`, `canonical=false`,
+      `registry_registered=false`, and `selector_eligible=false`.
+- [ ] Permit benchmark-local selectors only; the Crimson invocation must still
+      supply `--detection-run` explicitly.
+- [ ] Generate and validate inline Zarr v3 consolidated metadata after the
+      complete direct-metadata tree is installed.
+- [ ] Require consolidated and direct declarations to agree for the run and all
+      nine detection arrays.
+- [ ] Freeze successful fixture trees read-only and preserve failed attempts as
+      explicitly incomplete evidence or remove them only through an explicit
+      cleanup command.
+
+Pair validation and manifest:
+
+- [ ] Validate the nine exact canonical array dtypes and shapes.
+- [ ] Validate offsets start at zero, are nondecreasing, have shape `(F+1,)`,
+      and terminate at `N`.
+- [ ] Validate decoded detection values and array fingerprints are identical
+      between regular and hybrid fixtures.
+- [ ] Validate all included nondetection direct metadata and payload bytes are
+      identical between fixtures.
+- [ ] Normalize consolidated inventories and prove only detection physical
+      layout declarations and necessarily regenerated consolidated bytes differ.
+- [ ] Record source archive, video, Palette commit, Crimson contract commit and
+      digest, candidate fingerprints, copy/clone method, inventories, and
+      validation results in each fixture manifest.
+- [ ] Recheck the maintained source fingerprint after publication.
+- [ ] Confirm zero registry, production-selector, and training-artifact updates.
+
+Publication exit gate:
+
+- [ ] Publish immutable `regular.zarr` and `hybrid.zarr` with complete manifests
+      and provide their mounted paths to Crimson.
+
+### Checkpoint B — Crimson Full-Archive Gate
+
+Stage 1, storage layout only:
+
+- [ ] Run regular and hybrid with the unchanged 64 MiB cache in five fresh,
+      balanced processes.
+- [ ] Require exact explicit-run selection, zero dtype/fallback probes, one
+      retained offsets read, and identical required-product/frame identity.
+- [ ] Measure all required simultaneous products, Ready time, first overlay,
+      offset initialization, deterministic seeks, rapid-seek cancellation,
+      3,500-frame forward/reverse traversal, shutdown, physical reads, and RSS.
+- [ ] Apply the frozen correctness, latency, transfer, cancellation, deadline,
+      and 2 GiB RSS gates without changing thresholds after observation.
+- [ ] Run one native-30-FPS GUI correctness smoke for each accepted fixture.
+
+Stage 2, cache policy only:
+
+- [ ] Run only if the hybrid passes every Stage 1 gate.
+- [ ] Compare hybrid at 16 MiB and 64 MiB in five fresh processes with layout
+      and read-ahead held fixed.
+- [ ] Select 16 MiB only if it passes the frozen absolute and relative gates;
+      otherwise retain 64 MiB.
+- [ ] Preserve complete raw and reduced evidence; neither result automatically
+      promotes Palette's writer profile.
+
+Consumer exit gate:
+
+- [ ] Crimson accepts the hybrid physical layout and one bounded cache policy
+      through the frozen full-archive workload.
+
+### Checkpoint C — Versioned Physical-Profile Promotion
+
+- [ ] Review the complete Palette cluster and Crimson full-archive evidence.
+- [ ] Add one exact versioned canonical-detection physical profile; do not
+      mutate the generic benchmark candidate in place.
+- [ ] Bind Zarr v3, immutable indexed sharding, access-aware chunk budgets,
+      outer-shard budget, codec chain, shard-index chain, and consolidated
+      metadata requirements.
+- [ ] Use approximately 128 KiB inner chunks for `WINDOWED` instance columns,
+      1 MiB inner chunks for the `EAGER` offsets array, and 8 MiB outer shards
+      only if the consumer gate approves that exact layout.
+- [ ] Preserve the regular control and rejected candidates as benchmark
+      evidence rather than supported aliases of the promoted profile.
+- [ ] Add manifest round-trip and resolved-plan tests for the promoted identity.
+
+Profile exit gate:
+
+- [ ] One reviewed profile ID maps deterministically from every canonical
+      detection array contract to its exact chunks, shards, and codecs.
+
+### Checkpoint D — Production Writer Integration
+
+- [ ] Route `detect_yolo` canonical array creation through the shared
+      schema/storage owner.
+- [ ] Write all nine canonical arrays at exact v1 dtypes, including authoritative
+      `int64 frame_row_offsets`.
+- [ ] Support empty runs, empty frames, one detection, and multiple detections
+      per frame without sentinel observation rows.
+- [ ] Exclude `frame_counts` and `n_detections` from canonical publication;
+      derive them only in explicit compatibility adapters.
+- [ ] Compute on node-local scratch and make every parallel writer own complete,
+      nonoverlapping physical chunks or shards.
+- [ ] Validate logical schema, row ordering, unique `instance_key`, geometry,
+      offsets, candidate plan, codecs, and decoded readback before publication.
+- [ ] Record logical-schema ID, physical-profile ID, resolved array plans,
+      worker ownership, source identity, and validation receipts in provenance.
+- [ ] Publish a fresh immutable run through the atomic publisher.
+- [ ] Validate direct metadata before the final consolidated-metadata generation.
+- [ ] Update production selectors only after payload, metadata, manifest, and
+      Crimson compatibility validation succeed.
+- [ ] Leave `detection_artifact_runs` and historical archives unchanged.
+
+Production validation:
+
+- [ ] Deterministic in-memory tests for schema and failure paths.
+- [ ] Outside-sandbox real-Zarr tests for regular and nonempty publications.
+- [ ] Empty-run and empty-frame tests.
+- [ ] Multiple-detection-per-frame and row-order tests.
+- [ ] Exact dtype rejection and offsets corruption tests.
+- [ ] Partial-write, failed-consolidation, and pre-selector rollback tests.
+- [ ] Parallel physical-ownership validation.
+- [ ] Consolidated-only Crimson readback with no dtype probing.
+- [ ] Selector-ineligible production canary followed by explicit reviewed
+      promotion.
+
+Canonical completion gate:
+
+- [ ] A newly promoted `detect_yolo` run conforms to the logical and physical
+      contracts, survives failure testing, and is read through Crimson's exact
+      canonical adapter.
+
+### Checkpoint E — Compatibility, Migration, And Expansion
+
+- [ ] Keep historical `float64`, `frame_counts`, and `n_detections` behavior in
+      explicit legacy adapters, not in canonical v1.
+- [ ] Inventory old archives only after new production publication is stable.
+- [ ] Decide separately whether important old runs need migration or may remain
+      adapter-readable.
+- [ ] Begin `detect_quality_runs`, refinement, and training storage contracts
+      only after the canonical raw-detection completion gate passes.
+- [ ] Treat refined-subject-mask storage as its own next-family project: retain
+      dense editable authority and design explicit immutable compact display and
+      training publications rather than silently changing it in this work.
+
 ## Phase 5 — `detect_yolo` Production Integration
 
 - [ ] Route canonical array creation through the shared schema/storage owner.
@@ -348,6 +547,9 @@ reusing shared logical contracts where the semantics are genuinely identical.
       1 MiB control to full-duration validation without promoting either.
 - [x] Implement and benchmark the access-aware hybrid identified by the
       full-duration result before beginning HTTP/Crimson promotion testing.
-- [ ] Run the documented exact-dtype, persisted-offset, cache, file-range, and
-      UI workload through Crimson on the actual Mac/VPN mount; do not promote a
-      production profile before this consumer gate passes.
+- [x] Run the standalone exact-dtype, persisted-offset, cache, file-range, and
+      UI workloads through Crimson on the actual Mac/SMB mount.
+- [x] Complete the controlled Crimson cache/read-ahead checkpoint; retain the
+      production 64 MiB policy until full-archive validation.
+- [ ] Implement the fail-closed paired fixture builder beginning at Checkpoint A;
+      do not promote a profile or modify `detect_yolo` before Checkpoint B passes.
