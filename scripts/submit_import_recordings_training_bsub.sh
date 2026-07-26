@@ -50,7 +50,7 @@ Discovery/import:
   --target-sampled-frames N Target sampled frames per recording (default: 200)
   --frame-step N            Fixed frame step instead of target-sampled-frames
   --skip-tail-frames N      Frames to skip at EOF (default: 200)
-  --decode-backend NAME     Import backend (default: pynvvc-luma)
+  --decode-backend NAME     Must be pynvvc-luma; retained for command compatibility
   --gpu-id N                PyNvVC GPU id visible inside the job (default: 0)
   --overwrite               Overwrite existing *_training.zarr outputs
 
@@ -132,6 +132,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage; exit 2;;
   esac
 done
+
+if [[ "$DECODE_BACKEND" != "pynvvc-luma" ]]; then
+  echo "Unsupported import backend: $DECODE_BACKEND (only pynvvc-luma is supported)" >&2
+  exit 2
+fi
 
 if [[ -z "$RUN_ID" ]]; then
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -26,33 +26,34 @@ imports. Use it when a recording has one manageable MP4 per camera. Rolling
 segments or when clip-local parallel processing is the workflow target.
 
 ```bash
-scripts/py -m fisheye.capture.import_video /path/to/Cam2010093.mp4 \
-  --training-data \
+scripts/py -m fisheye.utils.import_sampled_training_pynvvc \
+  /path/to/Cam2010093.mp4 \
+  /path/to/output/training_sample.zarr \
+  --source-frame-count 54000 \
   --frame-step 100 \
-  --config configs/fisheye/import_local.yaml \
-  --zarr-path /path/to/output/training_sample.zarr
+  --config configs/fisheye/import_local.yaml
 ```
 
 This imports every 100th frame (frames 0, 100, 200, ...) from the video.
 
 ### Required flags
 
-Both `--training-data` and `--frame-step` must be used together — the script
-will error if you use one without the other. This is intentional: you can't
-accidentally create a truncated import by forgetting a flag.
+`--source-frame-count` and `--frame-step` are both required. Organized batch
+imports resolve the source count from the recording manifest; direct imports
+require it explicitly so an incomplete decode cannot masquerade as success.
 
 ### Arguments
 
 | Argument | Description |
 |----------|-------------|
-| `video_path` | Source video file (positional, required) |
-| `--training-data` | Enable sampled import mode |
+| `video_path` | Source video file (first positional, required) |
+| `zarr_path` | Output Zarr path (second positional, required) |
+| `--source-frame-count N` | Canonical acquisition frame count |
 | `--frame-step N` | Import every Nth frame (e.g. 100 = frames 0, 100, 200, ...) |
 | `--config PATH` | Import config YAML (controls resolution, format, chunking) |
-| `--zarr-path PATH` | Output Zarr path (default: `<video_stem>.zarr` next to the video) |
 | `--skip-tail-frames N` | Skip the last N frames (default: 0). See [below](#tail-frame-issues) |
 | `--overwrite` | Delete existing Zarr before importing |
-| `--cpu-only` | Force CPU decoding (default uses GPU) |
+| `--gpu-id N` | CUDA device visible to PyNvVC |
 
 ### Choosing a frame step
 
@@ -136,8 +137,8 @@ recorder summary sidecars. Use a fixed `--frame-step` only when you explicitly
 want the same interval for every recording or as a fallback for recordings with
 no frame-count metadata.
 
-New sampled training imports default to `--decode-backend pynvvc-luma`. This is
-the current canonical-candidate path: PyNvVideoCodec decodes the source video,
+New sampled training imports use the canonical PyNvVC luma contract.
+PyNvVideoCodec decodes the source video,
 Palette stores the raw NV12 Y/luma plane as `uint8`, writes
 `raw_video/original_frame_indices`, and stamps
 `pixel_contract_name = orange_mono_pynvvc_luma_uint8_v1`. The backend is
@@ -149,16 +150,9 @@ Use `--recursive` only for genuinely nested recording layouts; for the standard
 on PRFS.
 Use `--limit 1` for the first wrapper-managed smoke import.
 
-The older Decord-derived path remains available only for explicit legacy
-backfills:
-
-```bash
-scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
-  --decode-backend legacy-decord \
-  --allow-legacy-decode-contract \
-  --target-sampled-frames 200 \
-  --apply
-```
+Historical Decord-derived Zarrs remain readable for compatibility, but the
+writer is retired. Regenerate sampled pixels with PyNvVC rather than extending
+or backfilling through the historical writer.
 
 Current GoodCopBadCop smoke:
 
@@ -441,11 +435,12 @@ If you see decoding errors near the end of an import, try increasing
 `--skip-tail-frames`:
 
 ```bash
-scripts/py -m fisheye.capture.import_video /path/to/video.mp4 \
-  --training-data \
+scripts/py -m fisheye.utils.import_sampled_training_pynvvc \
+  /path/to/video.mp4 \
+  /path/to/output.zarr \
+  --source-frame-count 54000 \
   --frame-step 100 \
-  --skip-tail-frames 500 \
-  --zarr-path /path/to/output.zarr
+  --skip-tail-frames 500
 ```
 
 ---

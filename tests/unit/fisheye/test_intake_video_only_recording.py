@@ -161,6 +161,7 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
         root.require_group("analysis_metadata")
 
     monkeypatch.setattr(mod, "_run_import_command", fake_run_import)
+    monkeypatch.setattr(mod, "probe_video_metadata", lambda _path: {"total_frames": 1234})
 
     rc = mod.main(
         [
@@ -193,7 +194,9 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
 
     assert rc == 0
     assert calls
-    assert "--training-data" in calls[0]
+    assert "fisheye.utils.import_sampled_training_pynvvc" in calls[0]
+    assert "--source-frame-count" in calls[0]
+    assert "1234" in calls[0]
     assert "--frame-step" in calls[0]
 
     root = roots[str(zarr_path)]

@@ -20,12 +20,8 @@ from dataclasses import dataclass, field
 import zarr
 from rich import box
 from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 # Import stage modules
-from ..capture.import_video import import_video, get_import_stats
 from ..preprocessing.background import compute_background
 from ..detection.detect_traditional import detect_fish
 from ..detection.detect_keypoints_traditional import detect_keypoints as detect_keypoints_traditional
@@ -40,7 +36,6 @@ from ..refinement.refine_keypoints import (
 from ..registry.stage_catalog import canonical_stage_id
 from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
-from ..shared.zarr.schema import validate_zarr_structure
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -448,26 +443,12 @@ class Pipeline:
             self.stage_timings[stage] = time.perf_counter() - stage_start
 
     def _run_import(self) -> None:
-        """Run video import stage."""
-        if not self.config.video_path:
-            raise ValueError("Video path required for import stage")
-
-        # Build cli_args dict for import_video
-        cli_args = {
-            'video_path': self.config.video_path,
-            'zarr_path': self.config.zarr_path,
-            'training_data': self.config.training_data,
-            'frame_step': self.config.frame_step,
-        }
-
-        self.zarr_root = import_video(
-            video_path=self.config.video_path,
-            zarr_path=self.config.zarr_path,
-            config=self.pipeline_params,
-            cli_args=cli_args,
-            console=self.console,
-            use_gpu=self.config.use_gpu,
-            force_cpu=self.config.force_cpu
+        """Reject the retired Decord import stage with canonical replacements."""
+        raise RuntimeError(
+            "fisheye.core.pipeline import was retired with the Decord writer. "
+            "Use fisheye.utils.import_recording_analysis for metadata-only analysis "
+            "archives or fisheye.utils.import_sampled_training_pynvvc for sampled "
+            "training pixels."
         )
 
     
@@ -846,11 +827,6 @@ class Pipeline:
     
     def _validate_stage(self, stage: str) -> None:
         """Validate the output of a stage."""
-        if stage == 'import':
-            # Validate import using the utility function
-            if self.zarr_root:
-                stats = get_import_stats(self.config.zarr_path)
-                self.console.print(f"✓ Imported {stats['total_frames']} frames")
 
     def _is_stage_explicitly_requested(self, stage: str) -> bool:
         return stage in self._explicitly_requested_stages
@@ -892,7 +868,7 @@ class Pipeline:
                         border_style=setup_color,
                         padding=(1, 2)
                     )
-            except Exception as e:
+            except Exception:
                 # Silently fail if can't read zarr
                 pass
         
@@ -1095,7 +1071,7 @@ class Pipeline:
                     self.console.print(results_panel)
                     self.console.print()
             
-            except Exception as e:
+            except Exception:
                 # Silently fail if can't read results
                 pass
         
@@ -1500,8 +1476,12 @@ Examples:
     if not args.zarr_path:
         parser.error("zarr_path is required")
     
-    if 'import' in args.stages and not args.video_path:
-        parser.error("--video-path required when running import stage")
+    if 'import' in args.stages:
+        parser.error(
+            "The legacy core import stage was retired with Decord. Use "
+            "fisheye.utils.import_recording_analysis or "
+            "fisheye.utils.import_sampled_training_pynvvc."
+        )
     
     # Create pipeline config
     config = PipelineConfig.from_args(args)

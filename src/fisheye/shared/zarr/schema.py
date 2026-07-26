@@ -1,28 +1,22 @@
 """
-Standardized Zarr schema for the Palette ecosystem using Zarr v3.
-
-Legacy schema helpers for broad archive structure and metadata.
+Legacy run-group helpers for Palette Zarr v3 archives.
 
 Per-stage array contracts are maintained in `fisheye.shared.zarr.stage_arrays`.
+Import bootstrapping is owned by `ensure_analysis_archive` and
+`import_sampled_training_pynvvc`; this module no longer creates archive roots.
 """
 
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple
 import warnings
 import zarr
 from zarr.storage import LocalStore
 import zarr.codecs
 import numpy as np
 from datetime import datetime, timezone
-from pathlib import Path
 import platform
 from rich.console import Console
 
 from fisheye.shared.system_metadata import (
-    get_git_info,
-    get_platform_info,
-    get_gpu_info,
-    get_software_versions,
-    get_environment_summary,
     get_environment_info
 )
 from fisheye.shared.zarr_run_completion import (
@@ -152,196 +146,6 @@ ZARR_SCHEMA = {
         "calibration": {"description": "Calibration data"},
     },
 }
-def _auto_shard_frames(height: int, width: int, bytes_per_pixel: int = 1,
-                       target_mb: int = 128, min_frames: int = 1, max_frames: int = 64) -> int:
-    """Choose frames/shard so each shard ≈ target_mb (clamped)."""
-    bytes_per_frame = height * width * bytes_per_pixel
-    if bytes_per_frame == 0:
-        return min_frames
-    frames = max(min_frames, int((target_mb * 1024 * 1024) // bytes_per_frame))
-    return max(min_frames, min(max_frames, frames))
-
-
-def create_palette_zarr(
-    path: str,
-    video_metadata: Dict[str, Any],
-    config: Dict[str, Any],
-    use_sharding: bool = False,
-    cli_args: Optional[Dict[str, Any]] = None
-) -> zarr.Group:
-    store = LocalStore(path)
-    root = zarr.open_group(store=store, mode='w', zarr_format=3)
-
-    # ---- Root attrs ---------------------------------------------------------
-    if cli_args:
-        root.attrs['command_line_args'] = cli_args
-    root.attrs['git_info'] = get_git_info()
-    root.attrs['platform_info'] = get_platform_info(collect_ip=False, disk_path=path)
-    root.attrs['source_video_metadata'] = video_metadata
-
-    env_summary = get_environment_summary()
-    root.attrs['software_versions'] = env_summary.get('key_packages', {})
-    root.attrs['environment'] = {
-        'type': env_summary.get('environment_type', 'unknown'),
-        'name': env_summary.get('environment_name', 'none'),
-        'python_version': env_summary.get('python_version', platform.python_version()),
-    }
-    root.attrs['pipeline_version'] = '2.0-multi-fish'
-    root.attrs['zarr_format'] = 3
-    root.attrs['zarr_python'] = zarr.__version__
-    root.attrs['schema_version'] = '3.0.0'  # keep consistent with your constant
-    root.attrs['created_at'] = datetime.now(timezone.utc).isoformat()
-    root.attrs['fps'] = video_metadata.get('fps')
-    root.attrs['width'] = int(video_metadata.get('width', 0))
-    root.attrs['height'] = int(video_metadata.get('height', 0))
-    root.attrs['total_frames'] = int(video_metadata.get('total_frames', 0))
-    root.attrs['has_raw_video'] = True
-    if cli_args and cli_args.get("training_data"):
-        root.attrs["zarr_purpose"] = "training"
-    else:
-        root.attrs["zarr_purpose"] = "analysis"
-    source_path = video_metadata.get('source_path') or video_metadata.get('source_video_path')
-    if source_path:
-        root.attrs['source_video_path'] = str(source_path)
-
-    # ---- Pipeline params ----------------------------------------------------
-    param_group = root.create_group('pipeline_params')
-    for stage, stage_params in config.items():
-        param_group.attrs[stage] = stage_params
-
-    # ---- Groups -------------------------------------------------------------
-    raw_video = root.create_group('raw_video')
-
-    height  = int(video_metadata.get('height', 1080))
-    width   = int(video_metadata.get('width', 1920))
-    n_frames = int(video_metadata.get('total_frames', 1))
-
-    # Import config
-    import_config = config.get('import', {}) if isinstance(config, dict) else {}
-    down_cfg = import_config.get('downsampled', {}) if isinstance(import_config, dict) else {}
-    ds_size = down_cfg.get('size') or import_config.get('downsample_size') or [640, 640]
-    ds_height, ds_width = [int(x) for x in ds_size]
-
-    # ---- compression mapping ------------------------------------------------
-    comp_name = (import_config.get('compression', 'lz4') or 'none').lower()
-    clevel    = int(import_config.get('compression_level', 1))
-
-    def compressors_for(name: str, level: int):
-        if name == 'none':
-            return []
-        if name in ('lz4', 'zstd'):
-            return [zarr.codecs.BloscCodec(cname=name, clevel=level, shuffle='bitshuffle')]
-        if name == 'blosc':  # treat 'blosc' as lz4 default
-            return [zarr.codecs.BloscCodec(cname='lz4', clevel=level, shuffle='bitshuffle')]
-        # fallback: no compression
-        return []
-
-    compressors_full = compressors_for(comp_name, clevel)
-    compressors_ds   = compressors_for(comp_name, clevel)
-
-    # ---- shard sizes ----------------------------------
-    use_sharding = bool(import_config.get('use_sharding', use_sharding))
-    chunks_per_shard = int(import_config.get('chunks_per_shard', 1))
-    full_chunk = int(import_config.get('chunk_size', 1))
-    ds_chunk = int(down_cfg.get('chunk_size', full_chunk))
-    if use_sharding:
-        shard_size_full = int(import_config.get('shard_size', max(1, full_chunk * chunks_per_shard)))
-        shard_size_ds = int(import_config.get('shard_size_ds', max(1, ds_chunk * chunks_per_shard)))
-    else:
-        shard_size_full = None
-        shard_size_ds = None
-
-    # ---- serializer (CRC enabled; set checksum=False to disable) ------------
-    ser = zarr.codecs.BytesCodec()  # or BytesCodec(checksum=False) while debugging
-
-    # Record sharding choices
-    if use_sharding and shard_size_full and shard_size_ds:
-        raw_video.attrs['sharding'] = {
-            'images_full': {'frames_per_shard': shard_size_full, 'shard_shape': (shard_size_full, height, width)},
-            'images_ds': {'frames_per_shard': shard_size_ds, 'shard_shape': (shard_size_ds, ds_height, ds_width)},
-        }
-
-    # Raw-video attrs (reflect actual compressor choice)
-    raw_video.attrs.update({
-        'import_timestamp_utc': datetime.now(timezone.utc).isoformat(),
-        'original_resolution': (height, width),
-        'downsampled_resolution': (ds_height, ds_width),
-        'fps': video_metadata.get('fps', 30),
-        'total_frames': n_frames,
-        'source_video': video_metadata.get('source_video', 'unknown'),
-        'decoding_device': (get_gpu_info().get('devices', [{'name': 'N/A'}])[0].get('name', 'N/A')),
-        'compressor': {'name': comp_name, 'clevel': clevel, 'shuffle': 'bitshuffle'},
-        'duration_seconds': None,
-    })
-
-    # ---- arrays -------------------------------------------------------------
-    full_kwargs = {}
-    ds_kwargs = {}
-    if use_sharding and shard_size_full:
-        full_kwargs["shards"] = (shard_size_full, height, width)
-    if use_sharding and shard_size_ds:
-        ds_kwargs["shards"] = (shard_size_ds, ds_height, ds_width)
-
-    raw_video.create_array(
-        name='images_full',
-        shape=(n_frames, height, width),
-        chunks=(max(1, full_chunk), height, width),
-        dtype=np.uint8,
-        fill_value=0,
-        serializer=ser,
-        compressors=compressors_full,
-        **full_kwargs,
-    )
-    raw_video.create_array(
-        name='images_ds',
-        shape=(n_frames, ds_height, ds_width),
-        chunks=(max(1, ds_chunk), ds_height, ds_width),
-        dtype=np.uint8,
-        fill_value=0,
-        serializer=ser,
-        compressors=compressors_ds,
-        **ds_kwargs,
-    )
-    raw_video.create_array(
-        name='timestamps',
-        shape=(n_frames,),
-        chunks=(min(1000, n_frames),),
-        dtype=np.float64,
-        fill_value=np.nan,
-        serializer=ser,
-        compressors=[],  # no compression for small 1D
-    )
-
-    # Run groups at root
-    run_groups = (
-        'background_runs',
-        'detect_runs',
-        'refined_detect_runs',
-        'crop_runs',
-        'keypoints_runs',
-        'refined_keypoints_runs',
-        'eye_masks_runs',
-        'refined_eye_masks_runs',
-        'subject_mask_runs',
-        'refined_subject_masks_runs',
-        'refined_online_runs',
-        'tracking_runs',
-        'arena_assignment_runs',
-    )
-    for group_name in run_groups:
-        group = root.require_group(group_name)
-        if 'latest' not in group.attrs:
-            group.attrs['latest'] = None
-
-    # Non-run groups
-    root.require_group('analysis')
-    root.require_group('analysis_metadata')
-    root.require_group('calibration')
-    return root
-
-
-
-
 def get_run_group(
     root: zarr.Group, 
     stage_name: str, 
@@ -373,7 +177,7 @@ def get_run_group(
         )
     else:
         if parent_group_name not in root:
-            raise ValueError(f"No runs found for {stage}")
+            raise ValueError(f"No runs found for {stage_name}")
         parent_group = root[parent_group_name]
     
     if create_new:
@@ -666,18 +470,6 @@ def get_latest_run(root: zarr.Group, stage: str) -> Optional[zarr.Group]:
     
     _, latest_group = resolve_latest_complete_run_group(parent_group)
     return latest_group
-
-
-def update_import_duration(root: zarr.Group, duration_seconds: float) -> None:
-    """
-    Update the raw_video group with import duration after completion.
-    
-    Args:
-        root: Root zarr group
-        duration_seconds: Time taken for import in seconds
-    """
-    if 'raw_video' in root:
-        root['raw_video'].attrs['duration_seconds'] = duration_seconds
 
 
 def validate_zarr_structure(zarr_path: str) -> Dict[str, Any]:

@@ -42,20 +42,9 @@ def test_utils():
     print("\nAll utils tests passed!")
     return True
 
-def test_video_import():
-    """Test video import (if zarr schema exists)."""
-    try:
-        from fisheye.capture.import_video import import_video
-        print("\n✓ Video import module loads")
-        return True
-    except ImportError as e:
-        print(f"\n⚠ Video import not ready: {e}")
-        return False
-
 if __name__ == "__main__":
     # Run tests
     utils_ok = test_utils()
-    video_ok = test_video_import()
     
     if utils_ok:
         print("\n✅ Core utilities working!")

@@ -9,6 +9,42 @@ treated as the runtime-validation counterpart to this document.
 
 ---
 
+## Import profiles and bootstrap requirements
+
+Palette Zarrs are sparse, stage-built archives. A valid archive does not need
+every run family listed in this document at creation time. The machine-readable
+singleton import-profile authority is
+`fisheye.shared.import_profile_contract`; inspect an archive without mutation
+using:
+
+```bash
+scripts/py -m fisheye.utils.check_import_profile /path/to/archive.zarr
+```
+
+| Profile | Active writer authority | Required bootstrap surface | Allowed omissions | Frame universe |
+| --- | --- | --- | --- | --- |
+| `metadata_only_analysis` | `fisheye.utils.import_recording_analysis` (`ensure_analysis_archive` plus acquisition-metadata publication) | `raw_video/`; canonical source-video locator; `import_method`, `import_stage`, positive `total_frames`, and positive `fps` across root/`raw_video` attrs | All frame arrays and all unexecuted stage/run families | Acquisition video frames described by `source_video_metadata`; no stored-frame row domain exists until a later artifact creates one |
+| `sampled_training_pynvvc_luma` | `fisheye.utils.import_sampled_training_pynvvc` | `raw_video/images_full`, `raw_video/original_frame_indices`; source-video locator; PyNvVC import/decode/pixel-contract attrs; positive source frame count and frame step | Downsampled pixels, stimulus runs, and all later analysis families | Stored row `i` maps to acquisition frame `original_frame_indices[i]`; stored row count is not the acquisition frame count |
+| `legacy_decord_training_or_full` | None; historical read compatibility only | Classified from historical attrs and stored pixel arrays | No new writes, extensions, or backfills are supported | Interpret only through the persisted historical frame mapping/attrs; regenerate with PyNvVC for a new canonical artifact |
+
+The classifier reports two different severities:
+
+- `required_missing` means the claimed profile is incomplete and consumers
+  must fail closed for operations that depend on that authority.
+- `recommended_missing` means the profile is structurally valid but provenance
+  is degraded, for example a missing source fingerprint or colorimetry field.
+
+Consumer rule: absence of `detect_runs/`, `crop_runs/`, `analysis/`, or any
+other optional stage family is normal for a valid newly imported archive.
+Consumers must not infer corruption from those omissions or from filenames.
+Missing `raw_video/` or a profile-required field is an incomplete import.
+
+The old broad `create_palette_zarr`/Decord bootstrap has been retired. Do not
+create empty run-family placeholders merely to make a metadata-only archive
+look like a fully processed one.
+
+---
+
 ## Root Group
 
 **Attributes**
@@ -36,7 +72,10 @@ it indexes both video-only training Zarrs and recording-only analysis Zarrs in
 `recordings` and exposes the experiment-context fields through
 `dataset_context_current`.
 
-**Immediate children**
+**Possible immediate children (profile- and stage-dependent)**
+
+Only `raw_video/` is required at bootstrap for the active singleton profiles.
+Other children appear when their owning stage or metadata publisher runs.
 
 - `raw_video/`
 - `background_runs/`

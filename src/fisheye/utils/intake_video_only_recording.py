@@ -17,6 +17,7 @@ from typing import Any, Optional
 import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.import_video_metadata import probe_video_metadata
 
 
 DEFAULT_RECORDING_TYPE = "behavior"
@@ -298,7 +299,7 @@ def apply_manual_metadata(
 def _run_import_command(command: list[str]) -> None:
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
-        raise RuntimeError(f"import_video failed with exit code {result.returncode}")
+        raise RuntimeError(f"sampled PyNvVC import failed with exit code {result.returncode}")
 
 
 def run_video_import(
@@ -308,27 +309,37 @@ def run_video_import(
     config_path: Optional[Path],
     frame_step: int,
     overwrite_zarr: bool,
-    cpu_only: bool,
     skip_tail_frames: int,
+    recording_dir: Path,
+    camera_id: Optional[str],
+    gpu_id: int,
 ) -> None:
+    source_metadata = probe_video_metadata(video_path)
+    source_frame_count = _normalize_int(source_metadata.get("total_frames"))
+    if source_frame_count is None or source_frame_count < 1:
+        raise ValueError("Unable to resolve a positive source frame count for PyNvVC import.")
     zarr_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         "-m",
-        "fisheye.capture.import_video",
+        "fisheye.utils.import_sampled_training_pynvvc",
         str(video_path),
-        "--training-data",
+        str(zarr_path),
+        "--source-frame-count",
+        str(source_frame_count),
         "--frame-step",
         str(frame_step),
-        "--zarr-path",
-        str(zarr_path),
+        "--recording-dir",
+        str(recording_dir),
+        "--gpu-id",
+        str(int(gpu_id)),
     ]
+    if camera_id:
+        command.extend(["--camera-id", str(camera_id)])
     if config_path is not None:
         command.extend(["--config", str(config_path)])
     if overwrite_zarr:
         command.append("--overwrite")
-    if cpu_only:
-        command.append("--cpu-only")
     if skip_tail_frames:
         command.extend(["--skip-tail-frames", str(skip_tail_frames)])
     _run_import_command(command)
@@ -350,7 +361,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        help="Optional import_video config path.",
+        help="Optional sampled PyNvVC import config path.",
     )
     parser.add_argument(
         "--frame-step",
@@ -368,7 +379,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip MP4 import and only patch metadata on an existing Zarr.",
     )
-    parser.add_argument("--cpu-only", action="store_true", help="Force CPU import.")
+    parser.add_argument("--gpu-id", type=int, default=0, help="CUDA device for PyNvVC import.")
     parser.add_argument(
         "--overwrite-zarr",
         action="store_true",
@@ -544,8 +555,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             config_path=args.config.expanduser().resolve() if args.config is not None else None,
             frame_step=int(args.frame_step),
             overwrite_zarr=bool(args.overwrite_zarr),
-            cpu_only=bool(args.cpu_only),
             skip_tail_frames=int(args.skip_tail_frames or 0),
+            recording_dir=recording_dir,
+            camera_id=metadata.camera_id,
+            gpu_id=int(args.gpu_id),
         )
 
     apply_manual_metadata(

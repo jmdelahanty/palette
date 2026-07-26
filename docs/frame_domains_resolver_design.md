@@ -67,13 +67,13 @@ contract.
 
 ### Producer and Reader Evidence
 
-Sampled raw imports are produced by `import_video.py`. `_compute_frame_indices()` samples
-`range(0, total_frames, frame_step)` (`src/fisheye/capture/import_video.py:68`), sampled
-training mode computes `frame_indices_to_import` from that helper
-(`src/fisheye/capture/import_video.py:784`), and sampled metadata records `import_mode`,
-`frame_step`, `original_video_length`, and `imported_frame_count`
-(`src/fisheye/capture/import_video.py:991`). The stored mapping array is
-`raw_video/original_frame_indices` (`src/fisheye/capture/import_video.py:1146`). The zarr
+Sampled raw imports are produced by `import_sampled_training_pynvvc.py`.
+`_compute_frame_indices()` samples `range(0, effective_total, frame_step)` after
+applying the explicit tail exclusion, and the writer requires the acquisition
+`source_frame_count` before decoding. Sampled metadata records `import_mode`,
+`frame_step`, `original_video_length`, and `imported_frame_count`. The stored mapping
+array is `raw_video/original_frame_indices`; it is written from that exact selected
+frame list before pixel publication. The Zarr
 structure doc states that this array maps sampled imports to original video indices
 (`src/fisheye/docs/zarr_structure.md:219`) and that clipped training zarr
 stage-level `frame_indices` remain sample-local while source provenance lives elsewhere

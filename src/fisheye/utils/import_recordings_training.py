@@ -41,8 +41,7 @@ from fisheye.registry.db import Registry, RegistryPaths
 
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")
 DECODE_BACKEND_PYNVVC_LUMA = "pynvvc-luma"
-DECODE_BACKEND_LEGACY_DECORD = "legacy-decord"
-DECODE_BACKENDS = (DECODE_BACKEND_PYNVVC_LUMA, DECODE_BACKEND_LEGACY_DECORD)
+DECODE_BACKENDS = (DECODE_BACKEND_PYNVVC_LUMA,)
 
 
 _utc_now = utc_now
@@ -427,20 +426,6 @@ def _run_import(
         if plan.camera_id:
             cmd.extend(["--camera-id", str(plan.camera_id)])
         cmd.extend(["--recording-dir", str(plan.recording_dir), "--h5-path", str(plan.h5_path)])
-    elif decode_backend == DECODE_BACKEND_LEGACY_DECORD:
-        cmd = [
-            sys.executable,
-            "-m",
-            "fisheye.capture.import_video",
-            str(plan.cam_video),
-            "--config",
-            str(config_path),
-            "--training-data",
-            "--frame-step",
-            str(plan.frame_step),
-            "--zarr-path",
-            str(plan.zarr_path),
-        ]
     else:
         raise ValueError(f"Unsupported decode backend: {decode_backend}")
     if skip_tail_frames:
@@ -724,8 +709,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         choices=DECODE_BACKENDS,
         default=DECODE_BACKEND_PYNVVC_LUMA,
         help=(
-            "Decode backend for sampled training imports. Default: pynvvc-luma "
-            "(canonical candidate). legacy-decord keeps the older capture.import_video path."
+            "Decode backend for sampled training imports. PyNvVC luma is the sole "
+            "supported writer contract."
         ),
     )
     parser.add_argument(
@@ -733,14 +718,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=int,
         default=0,
         help="GPU id for PyNvVC sampled training imports.",
-    )
-    parser.add_argument(
-        "--allow-legacy-decode-contract",
-        action="store_true",
-        help=(
-            "Allow apply with --decode-backend legacy-decord. Without this flag, "
-            "legacy Decord-derived sampled training imports fail closed."
-        ),
     )
     parser.add_argument(
         "--include-acquisition-crop-video",
@@ -786,15 +763,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.gpu_id < 0:
         print(f"--gpu-id must be >= 0 (got {args.gpu_id})")
         return 1
-    if args.apply and args.decode_backend == DECODE_BACKEND_LEGACY_DECORD and not args.allow_legacy_decode_contract:
-        print(
-            "--apply with --decode-backend legacy-decord is blocked until the "
-            "Decord-derived import pixel contract is explicitly acknowledged. "
-            "Re-run with --allow-legacy-decode-contract if these sampled training "
-            "zarrs are acceptable before pynvvc decode unification lands."
-        )
-        return 2
-
     skip_existing = not args.overwrite and not args.no_skip_existing
     requested_frame_step = args.frame_step
     if requested_frame_step is None and args.target_sampled_frames is None:
@@ -827,7 +795,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             import_stimulus=bool(args.import_stimulus),
             path_contains=args.path_contains,
             limit=args.limit,
-            legacy_decode_contract_acknowledged=bool(args.allow_legacy_decode_contract),
             decode_backend=args.decode_backend,
             gpu_id=int(args.gpu_id),
             include_acquisition_crop_video=bool(args.include_acquisition_crop_video),
@@ -846,7 +813,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         skip_tail_frames=args.skip_tail_frames,
         path_contains=args.path_contains,
         limit=args.limit,
-        require_source_frame_count=args.decode_backend == DECODE_BACKEND_PYNVVC_LUMA,
+        require_source_frame_count=True,
     )
 
     if args.dry_run:

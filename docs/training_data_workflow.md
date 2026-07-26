@@ -46,13 +46,10 @@ recording publication. See `docs/recording_analysis_pipeline_contract.md` and
 ## Recommended Workflow
 
 ### 1) Sampled import for training frames (full + downsampled)
-Use the batch wrapper for new sampled training Zarrs. Its default backend is
-`--decode-backend pynvvc-luma`, which decodes with PyNvVideoCodec, stores raw
+Use the batch wrapper for new sampled training Zarrs. PyNvVC luma is the only
+supported import backend; it decodes with PyNvVideoCodec, stores raw
 NV12 Y/luma frames as `uint8`, writes `raw_video/original_frame_indices`, and
 stamps the `orange_mono_pynvvc_luma_uint8_v1` pixel contract.
-
-The direct `capture.import_video --training-data` path is retained as a legacy
-Decord-derived path, not the preferred path for new long-lived training assets.
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /path/to/recordings \
@@ -67,9 +64,9 @@ Notes:
 - Keep the sampled Zarr in the recording’s `zarr/` folder or a dedicated training workspace.
 - PyNvVC sampled imports are GPU-only and fail before creating the final Zarr if
   CUDA/PyNvVideoCodec is unavailable.
-- The older Decord path is still available as
-  `--decode-backend legacy-decord --allow-legacy-decode-contract` for explicit
-  legacy backfills only.
+- Historical Decord-authored archives remain readable but cannot be produced by
+  current Palette import commands. Regenerate pixels through PyNvVC when a new
+  canonical training artifact is required.
 
 ### Batch import from `recordings/` layout (camera videos)
 If recordings are organized as:

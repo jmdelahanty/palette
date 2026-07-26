@@ -1,9 +1,15 @@
 # Import surface audit — 2026-07-05
 
-status: active — diagnostic. Read-only investigation (3-agent parallel sweep, followed by
+status: superseded — historical diagnostic. Read-only investigation (3-agent parallel sweep, followed by
 a focused correction pass) of the experiment-import surface: the import structures,
 registry linkage, and metadata-capture reliability. No code changed. Seeds the "bring
 import inside the perimeter" brief family.
+
+Superseded 2026-07-25: the Decord import writer and broad
+`create_palette_zarr` bootstrap described below were retired. Current writers are
+`import_recording_analysis` for metadata-only analysis archives and
+`import_sampled_training_pynvvc` for sampled training pixels. Historical Decord
+attrs remain classifier/read compatibility only.
 
 ## Motivating question
 

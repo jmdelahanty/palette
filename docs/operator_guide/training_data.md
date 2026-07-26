@@ -732,14 +732,15 @@ frame. See [sampled_import.md](sampled_import.md) for the full operator guide,
 including the recording-only/video-only path.
 
 ```bash
-scripts/py -m fisheye.capture.import_video /path/to/video.mp4 \
-  --config configs/fisheye/default.yaml \
-  --training-data \
+scripts/py -m fisheye.utils.import_sampled_training_pynvvc \
+  /path/to/video.mp4 \
+  /path/to/training_sample.zarr \
+  --source-frame-count 54000 \
   --frame-step 100 \
-  --zarr-path /path/to/training_sample.zarr
+  --config configs/fisheye/default.yaml
 ```
 
-`--training-data --frame-step 100` imports every 100th frame (both full
+`--frame-step 100` imports every 100th frame (both full
 resolution and downsampled). This is useful for building compact training
 datasets without importing entire videos.
 

@@ -256,17 +256,16 @@ def test_run_acquisition_crop_video_append_uses_recording_scoped_run_name(
     assert "--overwrite-run" in cmd
 
 
-def test_legacy_decord_apply_requires_explicit_ack(tmp_path: Path) -> None:
+def test_decord_decode_backend_is_not_supported(tmp_path: Path) -> None:
     _write_recording(tmp_path, "rec_legacy_GoodCopBadCop", frame_count=100)
 
-    rc = mod.main([
-        str(tmp_path),
-        "--path-contains",
-        "GoodCopBadCop",
-        "--decode-backend",
-        mod.DECODE_BACKEND_LEGACY_DECORD,
-        "--apply",
-        "--no-log",
-    ])
-
-    assert rc == 2
+    with pytest.raises(SystemExit, match="2"):
+        mod.main([
+            str(tmp_path),
+            "--path-contains",
+            "GoodCopBadCop",
+            "--decode-backend",
+            "legacy-decord",
+            "--apply",
+            "--no-log",
+        ])

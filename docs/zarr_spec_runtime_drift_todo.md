@@ -37,18 +37,11 @@ compatibility surface.
 
 ## Remaining drift
 
-1. `src/fisheye/docs/zarr_structure.md` still presents one broad set of root
-   attrs and immediate child groups as though every valid archive materializes
-   all of them at bootstrap. It needs a profile-aware required/optional table.
-2. `ensure_analysis_archive` deliberately creates a minimal analysis authority,
-   while legacy `create_palette_zarr` creates a much broader skeleton. The
-   repository has not yet either consolidated those behind one profile-aware
-   bootstrap helper or formally retired the broad helper.
-3. The runtime classifier is the machine-readable authority for import-profile
-   validation, but the human-readable Zarr spec does not yet point to it or
-   describe its reason codes and compatibility boundary.
-4. External-consumer guidance should explicitly distinguish missing optional
-   groups in a valid metadata-only archive from a corrupt/incomplete archive.
+The profile-aware Zarr specification and runtime classifier are now aligned.
+The remaining import-contract work is operational rather than structural:
+decide where the profile checker should become a mandatory preflight in batch
+publication and registry reconciliation, without making recommended provenance
+warnings block otherwise valid historical archives.
 
 ## Completed work
 
@@ -68,28 +61,31 @@ compatibility surface.
   construction and atomic publication.
 - [x] Update the recording pipeline and operator detection guidance to use the
   registry-resolved publication path.
+- [x] Retire the Decord pixel-import writer and its broad
+  `create_palette_zarr` bootstrap; retain historical profile recognition as a
+  read-only compatibility surface.
+- [x] Add active-profile requirements, optional omissions, frame-universe
+  semantics, and consumer guidance to the authoritative Zarr layout.
 
 ## Remaining plan
 
-- [ ] Add an import-profile section to
+- [x] Add an import-profile section to
   `src/fisheye/docs/zarr_structure.md`, including required root attrs, required
   groups, allowed omissions, and frame-universe semantics for each active
   profile.
-- [ ] Decide whether to replace `create_palette_zarr` with a shared
-  profile-aware bootstrap or mark it as a legacy training-only helper. Do not
-  make metadata-only analysis archives eagerly create empty run families merely
-  to resemble the old broad skeleton.
-- [ ] Link the authoritative Zarr spec to
+- [x] Retire `create_palette_zarr` with the Decord importer. Metadata-only
+  analysis archives do not eagerly create empty run families.
+- [x] Link the authoritative Zarr spec to
   `fisheye.shared.import_profile_contract` and document the classifier's
   required-versus-recommended distinction.
-- [ ] Add a short external-consumer note describing valid optional omissions in
+- [x] Add external-consumer guidance describing valid optional omissions in
   metadata-only analysis archives.
 
 ## Exit criteria
 
-- [ ] The human-readable Zarr layout and runtime classifier describe the same
+- [x] The human-readable Zarr layout and runtime classifier describe the same
   active profiles.
-- [ ] Analysis bootstrap and sampled-training bootstrap each have one declared
+- [x] Analysis bootstrap and sampled-training bootstrap each have one declared
   implementation authority.
-- [ ] A consumer can distinguish a valid sparse profile from an incomplete
+- [x] A consumer can distinguish a valid sparse profile from an incomplete
   archive without relying on filename suffixes or empty placeholder groups.

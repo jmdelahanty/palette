@@ -5,16 +5,15 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from fisheye.capture.import_video import _decode_contract_metadata
-from fisheye.shared.crop_image_source import _to_grayscale_uint8
-from fisheye.shared.grayscale import (
+from fisheye.shared.crop_image_source import _to_grayscale_uint8  # noqa: E402
+from fisheye.shared.grayscale import (  # noqa: E402
     LUMA_BT601_MATLAB,
     LUMA_BT601_CV2,
     UNWEIGHTED_MEAN,
     rgb_to_gray_bt601_matlab_torch,
     rgb_to_gray_unweighted_mean_torch,
 )
-from fisheye.shared.roi_pixel_contract import crop_run_pixel_contract
+from fisheye.shared.roi_pixel_contract import crop_run_pixel_contract  # noqa: E402
 
 
 def test_import_video_matlab_luma_matches_legacy_inline_expression() -> None:
@@ -102,13 +101,6 @@ def test_tracking_crop_gpu_chunk_mean_float16_matches_legacy_inline_expression()
     actual = rgb_to_gray_unweighted_mean_torch(frames, accumulator_dtype=torch.float16)
 
     assert torch.equal(actual, expected)
-
-
-def test_decode_contract_metadata_records_import_video_convention_name() -> None:
-    metadata = _decode_contract_metadata("cuda:0")
-
-    assert metadata["stored_luma_convention"] == LUMA_BT601_MATLAB.name
-    assert metadata["stored_luma_weights"] == list(LUMA_BT601_MATLAB.weights or ())
 
 
 def test_crop_gpu_pixel_contract_records_channel_mean_convention_name() -> None:
