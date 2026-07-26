@@ -313,7 +313,7 @@ Implementation:
 - [x] Publish the immutable 2,048-frame `regular.zarr` and `hybrid.zarr` pair
       through node-local scratch and provide both paths and manifests to
       Crimson.
-- [ ] Run Crimson's quick schema/open/readiness/overlay/cancellation gate using
+- [x] Run Crimson's quick schema/open/readiness/overlay/cancellation gate using
       only frame IDs in `[0, 2048)`.
 
 Palette publication completed on 2026-07-26 from commit
@@ -341,16 +341,22 @@ or relationship defect.
 
 Integration exit gate:
 
-- [ ] Palette and Crimson both accept the bounded pair for functional
+- [x] Palette and Crimson both accept the bounded pair for functional
       integration. No result from this checkpoint is cited as full-duration
       promotion evidence.
 
+Crimson completed the bounded gate on 2026-07-26. Regular and hybrid headless
+runs produced identical detection digests and zero stale publications; both
+Metal GUI smokes reached frame 300 with zero skipped or late frames; and the
+three focused consumer tests passed. This closes compatibility and application
+behavior only. It does not establish full-duration storage performance.
+
 ### Checkpoint A — Paired Full-Analysis Fixtures
 
-This remains the later scalability checkpoint. Resume it only after the
-bounded integration pair passes and after retaining the prefix/slice hashing
-strategy; do not restore the original complete dense-mask tree hash as the
-source-integrity mechanism.
+This is now the active scalability checkpoint. The bounded integration pair
+passed, so Palette can publish one full-duration pair for Crimson's balanced
+five-process comparison. Do not restore the original repeated complete
+dense-mask tree hashes as the source-integrity mechanism.
 
 Fixture scope is product-complete for the frozen Crimson workload, not a copy
 of every historical run. The versioned allowlist is
@@ -385,11 +391,29 @@ the complete plan. Apply mode requires
 `--expected-palette-commit <full-40-character-commit>` and an existing
 node-local `--scratch-root`; it refuses a dirty or mismatched checkout. Assembly,
 consolidation, and validation happen on scratch. The completed pair is copied
-back to a fresh shared-storage incomplete sibling, content-verified, opened
+back to a fresh shared-storage incomplete sibling, validation-sampled, opened
 through direct and consolidated metadata, frozen, and atomically renamed. The
 implementation probes reflink isolation only between the new incomplete
 benchmark base and its sibling; it never reflinks or hardlinks a production
 source. `--pair-copy-mode copy` forces an ordinary independent scratch copy.
+
+The full-duration builder intentionally uses a different validation budget
+from the bounded logical-slice fixture. Copy operations must complete without
+error; all selected direct Zarr metadata is hashed exactly before and after;
+every selected array is checked at deterministic origin, midpoint, and endpoint
+coordinates; all nine detection arrays are fully decoded and hashed; and the
+complete frame/count, sparse second-index, and contour CSR relationships are
+validated on scratch and again after the shared copy. It does not recursively
+hash every nondetection payload object. The original implementation performed
+that high-fanout walk repeatedly and spent 25 minutes before copying any data.
+The manifest records this distinction explicitly rather than claiming a full
+nondetection content hash.
+
+The declared full axes are 1,188,000 camera frames, 1,169,010 maintained
+analysis rows, 39,214 sparse per-second rows, and four contour point stores.
+`second_indices` is strictly increasing and unique, but not dense: it spans
+0–39,599 with 386 gaps. The fixture preserves those values and does not relabel
+them as a dense identity axis.
 
 Use the LSF wrapper for the node-local preflight and publication job. It is
 render-only by default, records the exact commit, scratch capacity, reflink
@@ -431,7 +455,7 @@ Fixture input and safety plan:
 - [x] Record and validate that the current selected subject-mask run stores unsharded dense
       `uint8 masks_roi` with chunks `(256,1,512,512)`, lacks a compact mask
       cache, and is not silently optimized as part of the detection comparison.
-- [ ] Probe server-side reflink/clone and hardlink behavior using disposable
+- [x] Probe node-local reflink/clone behavior using disposable
       benchmark files only.
 - [x] Never reflink, hardlink, chmod, or otherwise share mutable inode state
       directly with a production archive.
@@ -477,13 +501,15 @@ Pair validation and manifest:
       and terminate at `N`.
 - [x] Validate decoded detection values and array fingerprints are identical
       between regular and hybrid fixtures.
-- [x] Validate all included nondetection direct metadata and payload bytes are
-      identical between fixtures.
+- [x] Construct both nondetection trees from one independent scratch base and
+      require exact direct metadata plus identical deterministic array samples
+      before and after shared publication.
 - [x] Normalize consolidated inventories and prove only detection physical
       layout declarations and necessarily regenerated consolidated bytes differ.
 - [x] Record source archive, video, Palette commit, Crimson contract commit and
-      digest, candidate fingerprints, copy/clone method, inventories, and
-      validation results in each fixture manifest.
+      digest, candidate fingerprints, copy/clone method, exact metadata
+      inventory, sample ledger, and validation results in each fixture
+      manifest.
 - [x] Recheck the maintained source fingerprint immediately before atomic
       publication.
 - [x] Confirm zero registry, production-selector, and training-artifact updates.

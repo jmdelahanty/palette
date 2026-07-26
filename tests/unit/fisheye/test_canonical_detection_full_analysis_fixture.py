@@ -63,7 +63,10 @@ def _fixture_inputs(
     tmp_path: Path,
     *,
     integration: bool = False,
+    full_duration: bool = False,
 ) -> tuple[Path, Path, Path, Path]:
+    if integration and full_duration:
+        raise ValueError("A fixture cannot be both bounded and full-duration.")
     benchmark_root = tmp_path / "benchmarks"
     source_recording = tmp_path / "recording-a"
     source_video = source_recording / "cams" / "camera.mp4"
@@ -205,7 +208,7 @@ def _fixture_inputs(
         }
     }
     integration_window = None
-    if integration:
+    if integration or full_duration:
         selected_products.extend(
             [
                 {
@@ -220,9 +223,13 @@ def _fixture_inputs(
             "latest_complete": "selected",
         }
         integration_window = {
-            "classification": "integration_fixture",
+            "classification": (
+                "integration_fixture"
+                if integration
+                else "full_duration_promotion_fixture"
+            ),
             "camera_frame_start": 0,
-            "camera_frame_stop": 4,
+            "camera_frame_stop": 4 if integration else 10,
             "source_observation_rows": 12,
             "frame_counts_path": "refined_subject_masks_runs/selected/frame_counts",
             "frame_indices_path": "refined_subject_masks_runs/selected/frame_indices",
@@ -230,8 +237,11 @@ def _fixture_inputs(
                 {
                     "name": "seconds",
                     "source_length": 5,
-                    "selected_length": 2,
+                    "selected_length": 2 if integration else 5,
                     "index_path": "analysis/timeline/second_indices",
+                    "index_validation": (
+                        "identity_prefix" if integration else "monotonic_unique"
+                    ),
                 }
             ],
             "csr_group_paths": [
@@ -322,7 +332,10 @@ def test_publish_builds_exact_immutable_pair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec_path, benchmark_root, source_archive, source_video = _fixture_inputs(tmp_path)
+    spec_path, benchmark_root, source_archive, source_video = _fixture_inputs(
+        tmp_path,
+        full_duration=True,
+    )
     spec = fixture.load_full_analysis_fixture_spec(spec_path)
     destination = (
         benchmark_root / "canonical_detection_storage" / "full_analysis" / "tiny"
@@ -357,10 +370,12 @@ def test_publish_builds_exact_immutable_pair(
         assert result["pair_copy_mode_resolved"] == "copy"
         assert result["nondetection_pair_exact"] is True
         assert result["decoded_detection_pair_exact"] is True
-        assert (
-            result["publication_receipt"]["exact_relative_path_size_content_match"]
-            is True
-        )
+        assert result["publication_receipt"]["complete_tree_payload_hashing"] is False
+        assert result["publication_receipt"]["direct_and_consolidated_open"] is True
+        assert result["row_relationship_validation"]["all_relationships_valid"]
+        assert result["summary"]["camera_frames"] == 10
+        assert result["summary"]["full_duration_fixture_published"] is True
+        assert result["summary"]["full_duration_gate_satisfied"] is False
         pair_manifest = json.loads(
             (destination / "pair_manifest.json").read_text(encoding="utf-8")
         )

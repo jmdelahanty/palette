@@ -28,7 +28,6 @@ import zarr
 from fisheye.shared.zarr.benchmark_fixture import (
     TreeInventory,
     freeze_tree,
-    inventory_tree,
     thaw_tree_for_cleanup,
 )
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, storage_stats
@@ -85,6 +84,7 @@ class AdditionalPrefixAxis:
     source_length: int
     selected_length: int
     index_path: str | None = None
+    index_validation: str = "identity_prefix"
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "AdditionalPrefixAxis":
@@ -96,6 +96,15 @@ class AdditionalPrefixAxis:
         if source_length < 0 or not 0 <= selected_length <= source_length:
             raise ValueError(f"Invalid prefix lengths for additional axis {name!r}.")
         raw_index_path = str(payload.get("index_path", "")).strip()
+        index_validation = str(
+            payload.get("index_validation", "identity_prefix")
+        ).strip()
+        if index_validation not in {"identity_prefix", "monotonic_unique"}:
+            raise ValueError(f"Invalid index_validation for additional axis {name!r}.")
+        if not raw_index_path and "index_validation" in payload:
+            raise ValueError(
+                f"Additional axis {name!r} cannot validate an absent index path."
+            )
         return cls(
             name=name,
             source_length=source_length,
@@ -105,6 +114,7 @@ class AdditionalPrefixAxis:
                 if raw_index_path
                 else None
             ),
+            index_validation=index_validation,
         )
 
     def as_manifest(self) -> dict[str, Any]:
@@ -113,13 +123,15 @@ class AdditionalPrefixAxis:
             "source_length": self.source_length,
             "selected_length": self.selected_length,
             "index_path": self.index_path,
+            "index_validation": self.index_validation,
         }
 
 
 @dataclass(frozen=True)
 class IntegrationWindow:
-    """Prefix-only integration evidence that is ineligible for scale gates."""
+    """Declared frame/row axes for bounded or full-duration fixture evidence."""
 
+    classification: str
     camera_frame_start: int
     camera_frame_stop: int
     source_observation_rows: int
@@ -131,9 +143,13 @@ class IntegrationWindow:
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "IntegrationWindow":
         classification = str(payload.get("classification", "")).strip()
-        if classification != "integration_fixture":
+        if classification not in {
+            "integration_fixture",
+            "full_duration_promotion_fixture",
+        }:
             raise ValueError(
-                "integration_window.classification must be 'integration_fixture'."
+                "integration_window.classification must be 'integration_fixture' "
+                "or 'full_duration_promotion_fixture'."
             )
         start = int(payload.get("camera_frame_start", -1))
         stop = int(payload.get("camera_frame_stop", -1))
@@ -162,6 +178,7 @@ class IntegrationWindow:
         if len(set(csr_paths)) != len(csr_paths):
             raise ValueError("CSR group paths must be unique.")
         return cls(
+            classification=classification,
             camera_frame_start=start,
             camera_frame_stop=stop,
             source_observation_rows=source_rows,
@@ -177,7 +194,7 @@ class IntegrationWindow:
 
     def as_manifest(self) -> dict[str, Any]:
         return {
-            "classification": "integration_fixture",
+            "classification": self.classification,
             "camera_frame_start": self.camera_frame_start,
             "camera_frame_stop": self.camera_frame_stop,
             "source_observation_rows": self.source_observation_rows,
@@ -738,46 +755,12 @@ def _inventory_files(root: Path, files: Iterable[Path]) -> TreeInventory:
     )
 
 
-def _selected_tree_files(root: Path, selected_paths: Sequence[str]) -> tuple[Path, ...]:
-    files: set[Path] = set()
-    for relative in selected_paths:
-        selected = root / relative
-        if selected.is_symlink():
-            raise ValueError(
-                f"Selected source trees cannot contain symlinks: {selected}"
-            )
-        if not selected.is_dir():
-            raise FileNotFoundError(f"Selected product tree is absent: {selected}")
-        for path in selected.rglob("*"):
-            if path.is_symlink():
-                raise ValueError(
-                    f"Selected source trees cannot contain symlinks: {path}"
-                )
-            if path.is_file():
-                files.add(path)
-    return tuple(sorted(files))
-
-
-def _selected_tree_inventory(
-    root: Path, selected_paths: Sequence[str]
-) -> TreeInventory:
-    return _inventory_files(root, _selected_tree_files(root, selected_paths))
-
-
 def _same_inventory_content(left: TreeInventory, right: TreeInventory) -> bool:
     return (
         left.file_count == right.file_count
         and left.apparent_bytes == right.apparent_bytes
         and left.tree_sha256 == right.tree_sha256
     )
-
-
-def _nondetection_inventory(root: Path, selected_paths: Sequence[str]) -> TreeInventory:
-    files = set(_selected_tree_files(root, selected_paths))
-    for relative in selected_paths:
-        for ancestor in _ancestors(relative):
-            files.add(root / ancestor / "zarr.json")
-    return _inventory_files(root, files)
 
 
 def _candidate_direct_metadata(candidate: Path) -> dict[str, dict[str, Any]]:
@@ -989,6 +972,10 @@ def plan_full_analysis_fixture_pair(
     ):
         raise ValueError("Candidate dimensions do not match the maintained recording.")
 
+    bounded_integration = (
+        spec.integration_window is not None
+        and spec.integration_window.classification == "integration_fixture"
+    )
     evidence_scope = (
         {
             "classification": "integration_fixture",
@@ -1010,12 +997,17 @@ def plan_full_analysis_fixture_pair(
                 "long_traversal",
             ],
         }
-        if spec.integration_window is not None
+        if bounded_integration
         else {
             "classification": "full_duration_promotion_fixture",
             "valid_for": ["frozen_full_duration_promotion_gate"],
             "not_valid_for": [],
         }
+    )
+    frame_relationship_plan = (
+        _resolve_integration_cardinalities(spec)
+        if spec.integration_window is not None
+        else None
     )
 
     metadata_inventory = _inventory_files(
@@ -1046,6 +1038,7 @@ def plan_full_analysis_fixture_pair(
             if spec.integration_window is not None
             else None
         ),
+        "frame_relationship_plan": frame_relationship_plan,
         "destination": str(resolved_destination),
         "benchmark_root": str(resolved_root),
         "pair_copy_mode_requested": pair_copy_mode,
@@ -1135,7 +1128,7 @@ def _assemble_nondetection_base(
     *,
     destination: Path,
     created_at_utc: str,
-) -> None:
+) -> dict[str, Any]:
     destination.mkdir(parents=True)
     root_normalizations: list[dict[str, Any]] = []
     source_root_metadata = _sanitized_direct_metadata(
@@ -1147,6 +1140,12 @@ def _assemble_nondetection_base(
     source_attributes = source_root_metadata.get("attributes")
     if not isinstance(source_attributes, Mapping):
         source_attributes = {}
+    window = spec.integration_window
+    classification = (
+        window.classification
+        if window is not None
+        else "full_duration_promotion_fixture"
+    )
     source_root_metadata["attributes"] = {
         **dict(source_attributes),
         "benchmark_only": True,
@@ -1160,8 +1159,14 @@ def _assemble_nondetection_base(
         "fixture_detection_run": spec.detection_run_name,
         "fixture_source_archive": str(spec.source_archive),
         "fixture_source_video_relative_path": spec.source_video_relative_path,
+        "fixture_evidence_classification": classification,
         "fixture_nonfinite_normalizations": root_normalizations,
     }
+    if window is not None:
+        source_root_metadata["attributes"]["fixture_camera_frame_range"] = [
+            window.camera_frame_start,
+            window.camera_frame_stop,
+        ]
     _write_json_exclusive(destination / "zarr.json", source_root_metadata)
 
     copied_ancestors: set[str] = set()
@@ -1193,6 +1198,12 @@ def _assemble_nondetection_base(
             "selector_eligible": False,
         },
     )
+    return {
+        "nonfinite_normalizations": root_normalizations,
+        "source_modified": False,
+        "payload_copy": "whole_selected_product_trees",
+        "source_video": "reference_only_not_copied",
+    }
 
 
 def _json_pointer_component(value: object) -> str:
@@ -1340,6 +1351,21 @@ def _resolve_integration_cardinalities(
     if window is None:  # pragma: no cover - caller guard
         raise ValueError("An integration window is required.")
     source_frame_count = int(spec.source_expectations["n_frames"])
+    if window.classification == "full_duration_promotion_fixture":
+        if window.camera_frame_stop != source_frame_count:
+            raise ValueError(
+                "A full-duration fixture window must cover every camera frame."
+            )
+        incomplete_axes = [
+            axis.name
+            for axis in window.additional_prefix_axes
+            if axis.selected_length != axis.source_length
+        ]
+        if incomplete_axes:
+            raise ValueError(
+                "A full-duration fixture cannot truncate additional axes: "
+                f"{incomplete_axes}."
+            )
     if source_frame_count == window.source_observation_rows:
         raise ValueError(
             "Frame and observation source cardinalities collide; declare an "
@@ -1424,13 +1450,44 @@ def _resolve_integration_cardinalities(
                 )[: axis.selected_length],
                 dtype=np.int64,
             )
-            expected_index = np.arange(axis.selected_length, dtype=np.int64)
-            if not np.array_equal(selected_index, expected_index):
+            if selected_index.shape != (axis.selected_length,):
                 raise ValueError(
-                    f"Additional axis index {axis.index_path!r} is not an "
-                    "identity prefix."
+                    f"Additional axis index {axis.index_path!r} has an "
+                    "unexpected shape."
                 )
-            report["identity_prefix_valid"] = True
+            if axis.index_validation == "identity_prefix":
+                expected_index = np.arange(axis.selected_length, dtype=np.int64)
+                if not np.array_equal(selected_index, expected_index):
+                    raise ValueError(
+                        f"Additional axis index {axis.index_path!r} is not an "
+                        "identity prefix."
+                    )
+                report["identity_prefix_valid"] = True
+            else:
+                if selected_index.size and (
+                    int(selected_index[0]) < 0 or np.any(np.diff(selected_index) <= 0)
+                ):
+                    raise ValueError(
+                        f"Additional axis index {axis.index_path!r} is not "
+                        "strictly increasing and nonnegative."
+                    )
+                report.update(
+                    {
+                        "monotonic_unique_valid": True,
+                        "selected_index_min": (
+                            int(selected_index[0]) if selected_index.size else None
+                        ),
+                        "selected_index_max": (
+                            int(selected_index[-1]) if selected_index.size else None
+                        ),
+                        "selected_index_gap_count": (
+                            int(selected_index[-1] - selected_index[0] + 1)
+                            - int(selected_index.size)
+                            if selected_index.size
+                            else 0
+                        ),
+                    }
+                )
         leading_axes[axis.source_length] = {
             "axis": axis.name,
             "source_length": axis.source_length,
@@ -2234,6 +2291,19 @@ def _consolidate_and_validate(root: Path) -> dict[str, Any]:
     }
 
 
+def _validate_existing_consolidated_metadata(root: Path) -> dict[str, Any]:
+    direct = _direct_metadata_map(root)
+    count = _validate_direct_consolidated_map(direct, label=str(root))
+    zarr.open_group(str(root), mode="r", use_consolidated=False)
+    zarr.open_group(str(root), mode="r", use_consolidated=True)
+    return {
+        "direct_consolidated_node_count": count,
+        "direct_open": True,
+        "consolidated_open": True,
+        "metadata_mutated": False,
+    }
+
+
 def _candidate_dimensions(run: Any) -> CanonicalDetectionDimensions:
     logical_schema = run.attrs.get("logical_schema")
     if not isinstance(logical_schema, Mapping):
@@ -2369,6 +2439,122 @@ def _validate_strict_json_files(root: Path) -> dict[str, Any]:
         )
         checked += 1
     return {"strict_json": True, "json_file_count": checked}
+
+
+def _validate_strict_direct_metadata(root: Path) -> dict[str, Any]:
+    """Validate Zarr declarations without walking payload chunk directories."""
+
+    direct = _direct_metadata_map(root)
+    for relative_path in direct:
+        metadata_path = (
+            root / relative_path / "zarr.json" if relative_path else root / "zarr.json"
+        )
+        json.loads(
+            metadata_path.read_text(encoding="utf-8"),
+            parse_constant=_raise_nonfinite_json,
+        )
+    return {
+        "strict_json": True,
+        "json_file_count": len(direct),
+        "scope": "direct_zarr_metadata_only",
+        "payload_directories_walked": False,
+    }
+
+
+def _selected_array_metadata_paths(
+    root: Path,
+    selected_paths: Sequence[str],
+) -> tuple[tuple[str, Path, dict[str, Any]], ...]:
+    selected_prefixes = tuple(f"{path}/" for path in selected_paths)
+    reports: list[tuple[str, Path, dict[str, Any]]] = []
+    for metadata_path in _metadata_file_paths(root, selected_paths):
+        relative_metadata = metadata_path.relative_to(root).as_posix()
+        if not relative_metadata.endswith("/zarr.json"):
+            continue
+        relative_path = relative_metadata.removesuffix("/zarr.json")
+        if not any(
+            relative_path == selected or relative_path.startswith(prefix)
+            for selected, prefix in zip(selected_paths, selected_prefixes)
+        ):
+            continue
+        metadata = _read_json(metadata_path)
+        if metadata.get("node_type") == "array":
+            reports.append((relative_path, metadata_path.parent, metadata))
+    return tuple(sorted(reports, key=lambda item: item[0]))
+
+
+def _sample_coordinates(shape: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
+    if any(length == 0 for length in shape):
+        return ()
+    if not shape:
+        return ((),)
+    coordinates = {
+        tuple(0 for _ in shape),
+        tuple(length // 2 for length in shape),
+        tuple(length - 1 for length in shape),
+    }
+    return tuple(sorted(coordinates))
+
+
+def _sample_selected_arrays(
+    root: Path,
+    selected_paths: Sequence[str],
+) -> dict[str, Any]:
+    """Hash deterministic boundary samples without enumerating every chunk."""
+
+    arrays: list[dict[str, Any]] = []
+    sample_count = 0
+    for relative_path, array_path, metadata in _selected_array_metadata_paths(
+        root,
+        selected_paths,
+    ):
+        shape = tuple(int(value) for value in metadata.get("shape", []))
+        coordinates = _sample_coordinates(shape)
+        digest = _logical_digest_header(
+            metadata=metadata,
+            shape=shape,
+            unit_shape=tuple(1 for _ in shape),
+        )
+        array = _open_direct_array(array_path, mode="r")
+        string_payload = metadata.get("data_type") == "string"
+        for coordinate in coordinates:
+            selection = tuple(slice(index, index + 1) for index in coordinate)
+            _update_logical_digest(
+                digest,
+                selection=selection,
+                values=np.asarray(array[coordinate]),
+                string_payload=string_payload,
+            )
+        arrays.append(
+            {
+                "path": relative_path,
+                "shape": list(shape),
+                "data_type": metadata.get("data_type"),
+                "direct_metadata_sha256": _sha256_file(array_path / "zarr.json"),
+                "sample_coordinates": [list(value) for value in coordinates],
+                "sample_sha256": digest.hexdigest(),
+            }
+        )
+        sample_count += len(coordinates)
+    return {
+        "schema_id": "palette.deterministic_array_sample_ledger",
+        "schema_version": 1,
+        "array_count": len(arrays),
+        "sample_count": sample_count,
+        "coordinate_policy": "origin_midpoint_endpoint_per_array",
+        "payload_chunk_directories_enumerated": False,
+        "arrays": arrays,
+    }
+
+
+def _require_matching_sample_ledgers(
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if expected != actual:
+        raise RuntimeError(f"Deterministic array sample ledger differs for {label}.")
 
 
 def _validate_integration_logical_slices(
@@ -2521,14 +2707,16 @@ def _fixture_manifest(
     layout: str,
     archive: Path,
     plan: Mapping[str, Any],
-    source_pre: TreeInventory,
-    source_post: TreeInventory,
     source_metadata_pre: TreeInventory,
     source_metadata_post: TreeInventory,
-    selected_inventory: TreeInventory,
-    nondetection_inventory: TreeInventory,
+    source_samples_pre: Mapping[str, Any],
+    source_samples_post: Mapping[str, Any],
+    copied_samples: Mapping[str, Any],
     detection_validation: Mapping[str, Any],
     metadata_validation: Mapping[str, Any],
+    strict_json_validation: Mapping[str, Any],
+    row_relationship_validation: Mapping[str, Any] | None,
+    assembly_report: Mapping[str, Any],
     copy_report: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -2542,18 +2730,36 @@ def _fixture_manifest(
         "registry_registered": False,
         "selector_eligible": False,
         "source": plan["source"],
-        "source_selected_inventory_before": source_pre.as_manifest(),
-        "source_selected_inventory_after": source_post.as_manifest(),
         "source_direct_metadata_inventory_before": source_metadata_pre.as_manifest(),
         "source_direct_metadata_inventory_after": source_metadata_post.as_manifest(),
-        "source_unchanged": _same_inventory_content(source_pre, source_post)
-        and _same_inventory_content(source_metadata_pre, source_metadata_post),
-        "selected_product_inventory": selected_inventory.as_manifest(),
-        "nondetection_inventory": nondetection_inventory.as_manifest(),
+        "source_sample_ledger_before": dict(source_samples_pre),
+        "source_sample_ledger_after": dict(source_samples_post),
+        "copied_sample_ledger": dict(copied_samples),
+        "source_unchanged": _same_inventory_content(
+            source_metadata_pre,
+            source_metadata_post,
+        )
+        and source_samples_pre == source_samples_post,
+        "nondetection_payload_validation": {
+            "method": "copy_completion_plus_exact_metadata_and_deterministic_samples",
+            "complete_payload_hashing": False,
+            "rationale": (
+                "benchmark fixture avoids repeated enumeration and hashing of "
+                "high-fanout dense-mask chunks"
+            ),
+            "sample_ledger": dict(copied_samples),
+        },
         "detection_run": plan["detection_run"],
         "detection_candidate": plan["candidates"][layout],
         "detection_validation": dict(detection_validation),
         "metadata_validation": dict(metadata_validation),
+        "strict_json_validation": dict(strict_json_validation),
+        "row_relationship_validation": (
+            dict(row_relationship_validation)
+            if row_relationship_validation is not None
+            else None
+        ),
+        "assembly": dict(assembly_report),
         "pair_base_copy": dict(copy_report),
         "crimson_contract": plan["crimson_contract"],
         "palette_code": plan["palette_code"],
@@ -2932,7 +3138,10 @@ def publish_full_analysis_fixture_pair(
         raise ValueError("Apply mode requires a clean commit-pinned Palette worktree.")
     if plan["scratch_root"] is None:
         raise ValueError("Apply mode requires an existing node-local scratch root.")
-    if spec.integration_window is not None:
+    if (
+        spec.integration_window is not None
+        and spec.integration_window.classification == "integration_fixture"
+    ):
         return _publish_integration_fixture_pair(
             spec,
             plan=plan,
@@ -2953,18 +3162,25 @@ def publish_full_analysis_fixture_pair(
     created_at = _utc_now()
 
     try:
-        source_selected_pre = _selected_tree_inventory(
-            spec.source_archive, selected_paths
-        )
         source_metadata_pre = _inventory_files(
             spec.source_archive,
             _metadata_file_paths(spec.source_archive, selected_paths),
         )
+        source_samples_pre = _sample_selected_arrays(
+            spec.source_archive,
+            selected_paths,
+        )
         video_pre = spec.source_video.stat()
+        raw_cardinalities = plan.get("frame_relationship_plan")
+        cardinalities = (
+            raw_cardinalities if isinstance(raw_cardinalities, Mapping) else None
+        )
+        if spec.integration_window is not None and cardinalities is None:
+            raise ValueError("The planned frame relationship evidence is missing.")
 
         regular = temporary / "regular.zarr"
         hybrid = temporary / "hybrid.zarr"
-        _assemble_nondetection_base(
+        assembly_report = _assemble_nondetection_base(
             spec,
             destination=regular,
             created_at_utc=created_at,
@@ -2985,6 +3201,10 @@ def publish_full_analysis_fixture_pair(
             "regular": _consolidate_and_validate(regular),
             "hybrid": _consolidate_and_validate(hybrid),
         }
+        strict_json_validations = {
+            "regular": _validate_strict_direct_metadata(regular),
+            "hybrid": _validate_strict_direct_metadata(hybrid),
+        }
         detection_validations = {
             "regular": _validate_detection_archive(
                 regular,
@@ -2998,20 +3218,54 @@ def publish_full_analysis_fixture_pair(
         if detection_validations["regular"] != detection_validations["hybrid"]:
             raise RuntimeError("Regular and hybrid decoded detection content differs.")
 
-        source_selected_post = _selected_tree_inventory(
-            spec.source_archive, selected_paths
+        row_relationship_validations = (
+            {
+                layout: _validate_integration_row_relationships(
+                    regular if layout == "regular" else hybrid,
+                    spec=spec,
+                    cardinalities=cardinalities,
+                )
+                for layout in _LAYOUTS
+            }
+            if cardinalities is not None
+            else None
         )
+        if (
+            row_relationship_validations is not None
+            and row_relationship_validations["regular"]
+            != row_relationship_validations["hybrid"]
+        ):
+            raise RuntimeError("Paired full-duration row relationships differ.")
+
+        copied_samples = {
+            "regular": _sample_selected_arrays(regular, selected_paths),
+            "hybrid": _sample_selected_arrays(hybrid, selected_paths),
+        }
+        for layout in _LAYOUTS:
+            _require_matching_sample_ledgers(
+                source_samples_pre,
+                copied_samples[layout],
+                label=f"scratch {layout}",
+            )
+
         source_metadata_post = _inventory_files(
             spec.source_archive,
             _metadata_file_paths(spec.source_archive, selected_paths),
         )
+        source_samples_post = _sample_selected_arrays(
+            spec.source_archive,
+            selected_paths,
+        )
         video_post = spec.source_video.stat()
-        if not _same_inventory_content(
-            source_selected_pre, source_selected_post
-        ) or not _same_inventory_content(source_metadata_pre, source_metadata_post):
+        if not _same_inventory_content(source_metadata_pre, source_metadata_post):
             raise RuntimeError(
-                "Maintained source archive changed while fixtures were built."
+                "Maintained source metadata changed while fixtures were built."
             )
+        _require_matching_sample_ledgers(
+            source_samples_pre,
+            source_samples_post,
+            label="source after copy",
+        )
         if (
             video_pre.st_size != video_post.st_size
             or video_pre.st_mtime_ns != video_post.st_mtime_ns
@@ -3020,28 +3274,6 @@ def publish_full_analysis_fixture_pair(
                 "Source video identity changed while fixtures were built."
             )
 
-        selected_inventories = {
-            "regular": _selected_tree_inventory(regular, selected_paths),
-            "hybrid": _selected_tree_inventory(hybrid, selected_paths),
-        }
-        if any(
-            not _same_inventory_content(value, source_selected_pre)
-            for value in selected_inventories.values()
-        ):
-            raise RuntimeError(
-                "A copied nondetection product tree differs from the source."
-            )
-        nondetection_inventories = {
-            "regular": _nondetection_inventory(regular, selected_paths),
-            "hybrid": _nondetection_inventory(hybrid, selected_paths),
-        }
-        if not _same_inventory_content(
-            nondetection_inventories["regular"],
-            nondetection_inventories["hybrid"],
-        ):
-            raise RuntimeError(
-                "Paired nondetection direct metadata or payload bytes differ."
-            )
         pair_metadata = _validate_pair_metadata_difference(
             regular,
             hybrid,
@@ -3053,14 +3285,20 @@ def publish_full_analysis_fixture_pair(
                 layout=layout,
                 archive=resolved_destination / f"{layout}.zarr",
                 plan=plan,
-                source_pre=source_selected_pre,
-                source_post=source_selected_post,
                 source_metadata_pre=source_metadata_pre,
                 source_metadata_post=source_metadata_post,
-                selected_inventory=selected_inventories[layout],
-                nondetection_inventory=nondetection_inventories[layout],
+                source_samples_pre=source_samples_pre,
+                source_samples_post=source_samples_post,
+                copied_samples=copied_samples[layout],
                 detection_validation=detection_validations[layout],
                 metadata_validation=metadata_validations[layout],
+                strict_json_validation=strict_json_validations[layout],
+                row_relationship_validation=(
+                    row_relationship_validations[layout]
+                    if row_relationship_validations is not None
+                    else None
+                ),
+                assembly_report=assembly_report,
                 copy_report=copy_report,
             )
             for layout in _LAYOUTS
@@ -3074,11 +3312,30 @@ def publish_full_analysis_fixture_pair(
             "payload_io_performed": True,
             "created_at_utc": created_at,
             "pair_copy_mode_resolved": copy_report["method"],
-            "source_selected_inventory": source_selected_pre.as_manifest(),
             "source_unchanged": True,
+            "source_payload_validation": {
+                "method": (
+                    "copy_completion_plus_exact_direct_metadata_and_"
+                    "deterministic_array_samples"
+                ),
+                "complete_payload_hashing": False,
+                "sample_ledger": source_samples_post,
+                "source_direct_metadata_inventory_before": (
+                    source_metadata_pre.as_manifest()
+                ),
+                "source_direct_metadata_inventory_after": (
+                    source_metadata_post.as_manifest()
+                ),
+            },
+            "assembly": assembly_report,
             "nondetection_pair_exact": True,
             "decoded_detection_pair_exact": True,
             "metadata_difference_validation": pair_metadata,
+            "row_relationship_validation": (
+                row_relationship_validations["regular"]
+                if row_relationship_validations is not None
+                else None
+            ),
             "publication_receipt_relative_path": "publication_receipt.json",
             "manifests": {
                 layout: {
@@ -3100,29 +3357,68 @@ def publish_full_analysis_fixture_pair(
             "summary": {
                 "archives": 2,
                 "selected_nondetection_products": len(selected_paths),
+                "camera_frames": int(spec.source_expectations["n_frames"]),
+                "detection_instances": int(
+                    detection_validations["regular"]["dimensions"]["n_instances"]
+                ),
                 "registry_updates": 0,
                 "production_selector_updates": 0,
                 "training_artifacts": 0,
                 "profile_promoted": False,
+                "full_duration_fixture_published": True,
+                "full_duration_gate_satisfied": False,
             },
         }
         _write_json_exclusive(temporary / "pair_manifest.json", pair_manifest)
-        scratch_inventory = inventory_tree(temporary)
         _copy_tree(temporary, publication_temporary)
-        published_inventory = inventory_tree(publication_temporary)
-        if not _same_inventory_content(scratch_inventory, published_inventory):
-            raise RuntimeError("Shared-storage publication copy differs from scratch.")
+        published_metadata_validations: dict[str, Any] = {}
+        published_strict_json_validations: dict[str, Any] = {}
+        published_detection_validations: dict[str, Any] = {}
+        published_sample_validations: dict[str, Any] = {}
+        published_row_relationship_validations: dict[str, Any] = {}
         for layout in _LAYOUTS:
-            zarr.open_group(
-                str(publication_temporary / f"{layout}.zarr"),
-                mode="r",
-                use_consolidated=False,
+            archive = publication_temporary / f"{layout}.zarr"
+            published_metadata_validations[layout] = (
+                _validate_existing_consolidated_metadata(archive)
             )
-            zarr.open_group(
-                str(publication_temporary / f"{layout}.zarr"),
-                mode="r",
-                use_consolidated=True,
+            published_strict_json_validations[layout] = (
+                _validate_strict_direct_metadata(archive)
             )
+            published_detection_validations[layout] = _validate_detection_archive(
+                archive,
+                run_name=spec.detection_run_name,
+            )
+            if published_detection_validations[layout] != detection_validations[layout]:
+                raise RuntimeError(f"Published detection payload differs for {layout}.")
+            published_samples = _sample_selected_arrays(archive, selected_paths)
+            _require_matching_sample_ledgers(
+                source_samples_pre,
+                published_samples,
+                label=f"published {layout}",
+            )
+            published_sample_validations[layout] = published_samples
+            if cardinalities is not None:
+                published_row_relationship_validations[layout] = (
+                    _validate_integration_row_relationships(
+                        archive,
+                        spec=spec,
+                        cardinalities=cardinalities,
+                    )
+                )
+                if (
+                    published_row_relationship_validations[layout]
+                    != row_relationship_validations[layout]
+                ):
+                    raise RuntimeError(
+                        f"Published row relationships differ for {layout}."
+                    )
+        published_pair_metadata = _validate_pair_metadata_difference(
+            publication_temporary / "regular.zarr",
+            publication_temporary / "hybrid.zarr",
+            run_name=spec.detection_run_name,
+        )
+        if published_pair_metadata != pair_metadata:
+            raise RuntimeError("Published pair metadata evidence differs from scratch.")
         publication_receipt = {
             "schema_id": "palette.canonical_detection_full_analysis_fixture_publication",
             "schema_version": 1,
@@ -3130,9 +3426,19 @@ def publish_full_analysis_fixture_pair(
             "copy_method": "node_local_scratch_to_shared_copytree",
             "scratch_source": str(temporary),
             "destination": str(resolved_destination),
-            "scratch_inventory": scratch_inventory.as_manifest(),
-            "shared_inventory_before_receipt": published_inventory.as_manifest(),
-            "exact_relative_path_size_content_match": True,
+            "payload_verification": (
+                "copy_completion_exact_metadata_full_detection_hashes_"
+                "and_deterministic_nondetection_samples"
+            ),
+            "complete_tree_payload_hashing": False,
+            "published_metadata_validations": published_metadata_validations,
+            "published_strict_json_validations": (published_strict_json_validations),
+            "published_detection_validations": (published_detection_validations),
+            "published_sample_validations": published_sample_validations,
+            "published_row_relationship_validations": (
+                published_row_relationship_validations
+            ),
+            "published_metadata_difference_validation": published_pair_metadata,
             "direct_and_consolidated_open": True,
         }
         _write_json_exclusive(
