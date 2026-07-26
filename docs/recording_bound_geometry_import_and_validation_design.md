@@ -85,6 +85,9 @@ These surfaces have different meanings and must not be collapsed into one
 unqualified circle. In particular:
 
 - the observed dish-top inner rim is a physical-boundary candidate;
+- a visible upper/top-rim edge fitted from recording images is a distinct
+  image-observation candidate and must not be relabeled as the physical inner
+  rim;
 - `valid_detection_region` is a derived centroid gate;
 - the nominal experimental area is not a substitute for an observed rim;
 - dish-top-rim scale and projected-surface scale describe different physical
@@ -125,7 +128,7 @@ Recording-bound evidence
           v
 Normalized immutable candidates
   acquisition physical rim + acquisition gate
-  Palette recording-image physical-rim fit
+  Palette recording-image observed-boundary fit
   optional manual-review fit
           |
           | candidate-to-candidate comparison
@@ -466,14 +469,33 @@ The target independent fitter should:
 8. Optionally fit an ellipse as a diagnostic. An ellipse must not become an
    operational gate without a new explicit geometry contract.
 
-The independent fit represents a physical-rim candidate. It must not include
-the acquisition gate's 17-pixel forgiveness in the fitted physical radius.
+The fitter's declared target and the feature actually supported by the image
+must remain separate. A visually reviewed fit may be accepted as a
+`visible_dish_top_rim_edge` observation even when the probe originally labeled
+its target as an inner water-side edge. That semantic correction is part of
+the immutable review record; it does not rewrite the frozen probe report or
+turn the visible top edge into an acquisition physical-inner-rim observation.
+
+An image-derived physical-inner-rim fit must not include the acquisition
+gate's forgiveness in the fitted physical radius. A reviewed visible-top-rim
+fit may instead derive an offline centroid gate directly from that observed
+circle, with an inclusive boundary and zero additional Palette tolerance. The
+two derivations have different semantics and must not be silently compared as
+the same physical boundary.
 
 ## Candidate comparison
 
-A comparison binds two exact immutable candidate IDs and compares the physical
-rim candidates in native camera coordinates. It must not compare Palette's
-physical rim to Orange's expanded detection gate.
+A physical-boundary comparison binds two exact immutable candidate IDs whose
+observed features are semantically compatible and compares them in native
+camera coordinates. It must not compare a Palette visible-top-rim observation
+to Orange's physical inner rim as though they were measurements of the same
+edge.
+
+A detection-gate disagreement audit is a different comparison. It may compare
+the exact `valid_detection_region` from each candidate against one exact
+detection rowset. That audit reports the operational consequences of choosing
+one gate or the other; it does not claim that the two source circles represent
+the same physical feature.
 
 Persist at least:
 
@@ -539,6 +561,31 @@ stable publication contract—command, configuration hash, parameters, input
 run IDs, and input artifact identities and digests—rather than incorrectly
 requiring the validator's current runtime provenance to equal the historical
 producer context.
+
+Reviewed Palette image candidates use the same immutable publication surface
+with `candidate_kind = palette_recording_image_fit`. The record binds the
+frozen fit-report bytes, review-montage bytes, exact source-video identity,
+early/middle/late source-frame hashes, canonical continuous source-camera
+pixel-frame authority, the semantic correction made during review, and the
+reviewer decision. Publication remains pointerless and explicitly audit-only.
+
+For the first Batman canary, visual review found that the blind Palette circle
+followed the visible top of the rim well, while the acquisition observation
+followed the inner surface. Palette therefore preserves the acquisition
+physical inner-rim circle unchanged and publishes the Palette circle as
+`visible_dish_top_rim_edge`, not as a replacement physical-inner-rim claim.
+The Palette circle's offline gate is derived directly from that reviewed
+circle; the legacy 0.5 mm expansion is not added.
+
+`audit_arena_geometry_detection_gates` performs the next fail-closed step. It
+binds exact Palette candidate, acquisition candidate, and raw-detect run names;
+requires their native-camera coordinate authorities to agree; verifies every
+stored center against its source box; preserves `instance_key`; calculates
+both unrounded signed distances; writes every asymmetric decision to CSV; and
+selects deterministic temporal samples from both `palette_only` and
+`acquisition_only`. Optional PyNvVC rendering produces full-frame plus local
+review panels on an LSF GPU worker. The diagnostic never selects a candidate,
+filters detections, modifies the Zarr, or updates the registry.
 
 Each candidate records:
 
@@ -842,9 +889,12 @@ The recommended slices are:
    - Completion makes a candidate readable, never operationally selected.
 
 4. **Independent fitter and comparison**
-   - Implement multi-window robust fitting and quality metrics.
-   - Publish a separate Palette candidate.
-   - Publish continuous comparison measurements.
+   - Multi-window robust fitting and a reviewed, pointerless Palette candidate
+     are implemented for the first Batman canary.
+   - The exact raw-detection disagreement audit and review rendering are
+     implemented.
+   - Repeat across the four-camera canary before defining any automatic
+     agreement threshold or operational selection policy.
 
 5. **Selection and compatibility projection**
    - Add explicit selection/review state.

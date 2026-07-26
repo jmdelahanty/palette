@@ -56,7 +56,10 @@ CANDIDATE_RECORD_SCHEMA_ID = "palette.arena_geometry_candidate_record"
 CANDIDATE_RECORD_SCHEMA_VERSION = 1
 CANDIDATE_RUN_SCHEMA_ID = "palette.arena_geometry_candidate_run"
 CANDIDATE_RUN_SCHEMA_VERSION = 1
-CANDIDATE_KIND = "acquisition_registered_dish"
+ACQUISITION_CANDIDATE_KIND = "acquisition_registered_dish"
+PALETTE_CANDIDATE_KIND = "palette_recording_image_fit"
+# Compatibility export for callers written before Palette image candidates.
+CANDIDATE_KIND = ACQUISITION_CANDIDATE_KIND
 CANDIDATE_RUNS_PARENT = "arena_geometry_runs"
 PUBLISH_SCHEMA_ID = "palette.arena_geometry_candidate_publish"
 PUBLISH_ALGORITHM_VERSION = 1
@@ -74,6 +77,7 @@ class ArenaGeometryCandidatePlan:
     run_name: str
     target_run_path: Path
     run_provenance: Mapping[str, Any]
+    candidate_kind: str = ACQUISITION_CANDIDATE_KIND
 
 
 def _canonical_copy(value: Any) -> Any:
@@ -82,6 +86,14 @@ def _canonical_copy(value: Any) -> Any:
 
 def _payload_sha256(value: Any) -> str:
     return hashlib.sha256(strict_json_dumps(value).encode("utf-8")).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _required_mapping(value: Any, *, label: str) -> Mapping[str, Any]:
@@ -181,9 +193,7 @@ def build_acquisition_geometry_candidate_record(
             "selected_daily_registration_applied_by_citrus": (
                 mask.selected_daily_registration_applied_by_citrus
             ),
-            "producer_contract_linkage_status": (
-                mask.producer_contract_linkage_status
-            ),
+            "producer_contract_linkage_status": (mask.producer_contract_linkage_status),
             "source_valid_until_utc": mask.source_valid_until_utc,
             "producer_operator_accepted": mask.producer_operator_accepted,
             "producer_quality_flags": list(mask.producer_quality_flags),
@@ -210,9 +220,10 @@ def build_acquisition_geometry_candidate_record(
 def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) -> None:
     """Validate scientific and coordinate invariants of one candidate record."""
 
-    if record.get("schema_id") != CANDIDATE_RECORD_SCHEMA_ID or record.get(
-        "schema_version"
-    ) != CANDIDATE_RECORD_SCHEMA_VERSION:
+    if (
+        record.get("schema_id") != CANDIDATE_RECORD_SCHEMA_ID
+        or record.get("schema_version") != CANDIDATE_RECORD_SCHEMA_VERSION
+    ):
         raise RecordingGeometryError("Unsupported arena-geometry candidate schema.")
     if record.get("candidate_kind") != CANDIDATE_KIND:
         raise RecordingGeometryError("Unsupported arena-geometry candidate kind.")
@@ -220,31 +231,42 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
     for name in ("rig_id", "canvas_name", "arena_id", "camera_serial"):
         _required_text(arena.get(name), label=f"arena_binding.{name}")
 
-    physical = _required_mapping(record.get("physical_inner_rim"), label="physical_inner_rim")
+    physical = _required_mapping(
+        record.get("physical_inner_rim"), label="physical_inner_rim"
+    )
     gate = _required_mapping(
         record.get("valid_detection_region"),
         label="valid_detection_region",
     )
-    if physical.get("coordinate_space") != "camera_native_pixels" or gate.get(
-        "coordinate_space"
-    ) != "camera_native_pixels":
+    if (
+        physical.get("coordinate_space") != "camera_native_pixels"
+        or gate.get("coordinate_space") != "camera_native_pixels"
+    ):
         raise RecordingGeometryError("Candidate circles must use native camera pixels.")
     if physical.get("target_plane") != "dish_top_rim":
         raise RecordingGeometryError("Physical rim must target dish_top_rim.")
-    if gate.get("purpose") != "bounding_box_centroid_detection_gating" or gate.get(
-        "offset_direction"
-    ) != "outward":
+    if (
+        gate.get("purpose") != "bounding_box_centroid_detection_gating"
+        or gate.get("offset_direction") != "outward"
+    ):
         raise RecordingGeometryError("Detection gate semantics are invalid.")
-    if gate.get("is_final_acquisition_tolerance") is not True or gate.get(
-        "additional_palette_tolerance_px"
-    ) != 0.0:
-        raise RecordingGeometryError("Acquisition gate must not receive added Palette tolerance.")
+    if (
+        gate.get("is_final_acquisition_tolerance") is not True
+        or gate.get("additional_palette_tolerance_px") != 0.0
+    ):
+        raise RecordingGeometryError(
+            "Acquisition gate must not receive added Palette tolerance."
+        )
 
     def circle(container: Mapping[str, Any], label: str) -> tuple[float, float, float]:
-        geometry = _required_mapping(container.get("geometry"), label=f"{label}.geometry")
+        geometry = _required_mapping(
+            container.get("geometry"), label=f"{label}.geometry"
+        )
         if geometry.get("type") != "circle":
             raise RecordingGeometryError(f"{label} must be circular.")
-        center = _required_mapping(geometry.get("center_px"), label=f"{label}.center_px")
+        center = _required_mapping(
+            geometry.get("center_px"), label=f"{label}.center_px"
+        )
         x = _required_finite(center.get("x"), label=f"{label}.center.x")
         y = _required_finite(center.get("y"), label=f"{label}.center.y")
         radius = _required_finite(geometry.get("radius_px"), label=f"{label}.radius")
@@ -259,9 +281,13 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
     ):
         raise RecordingGeometryError("Physical rim and valid gate must be concentric.")
     if gate_radius < physical_radius:
-        raise RecordingGeometryError("Valid gate cannot be smaller than the physical rim.")
+        raise RecordingGeometryError(
+            "Valid gate cannot be smaller than the physical rim."
+        )
 
-    coordinate = _required_mapping(record.get("coordinate_binding"), label="coordinate_binding")
+    coordinate = _required_mapping(
+        record.get("coordinate_binding"), label="coordinate_binding"
+    )
     if (
         coordinate.get("space_id") != "source_camera_image_px"
         or coordinate.get("profile_id") != "source_camera_image_px.top_left_y_down.v1"
@@ -271,7 +297,9 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
         or coordinate.get("positive_x") != "right"
         or coordinate.get("positive_y") != "down"
     ):
-        raise RecordingGeometryError("Candidate source-camera coordinate binding is invalid.")
+        raise RecordingGeometryError(
+            "Candidate source-camera coordinate binding is invalid."
+        )
     for name in ("native_width_px", "native_height_px"):
         value = coordinate.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -281,13 +309,17 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
         "/continuous@pixel_frame_authority"
     )
     if coordinate.get("pixel_frame_record_ref") != expected_ref:
-        raise RecordingGeometryError("Candidate does not bind the canonical continuous frame.")
+        raise RecordingGeometryError(
+            "Candidate does not bind the canonical continuous frame."
+        )
     _required_sha256(
         coordinate.get("pixel_frame_record_sha256"),
         label="pixel_frame_record_sha256",
     )
 
-    source = _required_mapping(record.get("acquisition_source"), label="acquisition_source")
+    source = _required_mapping(
+        record.get("acquisition_source"), label="acquisition_source"
+    )
     for name in ("source_kind", "artifact_id", "registration_id"):
         _required_text(source.get(name), label=f"acquisition_source.{name}")
     for name in ("source_observation_sha256", "source_contract_sha256"):
@@ -302,9 +334,10 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
         recovery_map = _required_mapping(recovery, label="recovery_binding")
         _required_sha256(recovery_map.get("receipt_sha256"), label="receipt_sha256")
         _required_sha256(recovery_map.get("target_h5_sha256"), label="target_h5_sha256")
-        if recovery_map.get("authority") != RECOVERY_AUTHORITY or recovery_map.get(
-            "reason"
-        ) != RECOVERY_REASON:
+        if (
+            recovery_map.get("authority") != RECOVERY_AUTHORITY
+            or recovery_map.get("reason") != RECOVERY_REASON
+        ):
             raise RecordingGeometryError("Recovery binding authority is invalid.")
 
     policy = _required_mapping(record.get("candidate_policy"), label="candidate_policy")
@@ -320,7 +353,466 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
     if record.get("canonicalization") != "canonical_json_sort_keys_v1":
         raise RecordingGeometryError("Candidate canonicalization is unsupported.")
     if _canonical_copy(record) != dict(record):
-        raise RecordingGeometryError("Candidate record is not strict canonical JSON data.")
+        raise RecordingGeometryError(
+            "Candidate record is not strict canonical JSON data."
+        )
+
+
+def _circle_mapping(
+    value: Any,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], tuple[float, float, float]]:
+    geometry = _required_mapping(value, label=label)
+    if geometry.get("type") != "circle":
+        raise RecordingGeometryError(f"{label} must be circular.")
+    center = _required_mapping(geometry.get("center_px"), label=f"{label}.center_px")
+    x = _required_finite(center.get("x"), label=f"{label}.center_px.x")
+    y = _required_finite(center.get("y"), label=f"{label}.center_px.y")
+    radius = _required_finite(geometry.get("radius_px"), label=f"{label}.radius_px")
+    if radius <= 0:
+        raise RecordingGeometryError(f"{label}.radius_px must be positive.")
+    return (
+        {
+            "type": "circle",
+            "center_px": {"x": x, "y": y},
+            "radius_px": radius,
+        },
+        (x, y, radius),
+    )
+
+
+def _source_camera_candidate_binding(
+    source_zarr: Path,
+    *,
+    expected_camera_serial: str,
+) -> tuple[dict[str, Any], dict[str, str], Mapping[str, Any]]:
+    root = open_zarr_root(source_zarr, mode="r")
+    attrs = dict(root.attrs)
+    camera_serial = str(attrs.get("camera_id") or "")
+    if camera_serial != expected_camera_serial:
+        raise RecordingGeometryError(
+            "Palette fit camera does not match the analysis Zarr camera."
+        )
+    arena = {
+        "rig_id": _required_text(attrs.get("rig_id"), label="root.rig_id"),
+        "canvas_name": _required_text(
+            attrs.get("canvas_name"), label="root.canvas_name"
+        ),
+        "arena_id": _required_text(attrs.get("arena_id"), label="root.arena_id"),
+        "camera_serial": camera_serial,
+    }
+    source_video_metadata = _required_mapping(
+        attrs.get("source_video_metadata"), label="root.source_video_metadata"
+    )
+    _ownership, acquisition = load_persisted_acquisition_camera_authority(
+        root,
+        expected_camera_id=camera_serial,
+    )
+    frame_path = f"analysis/coordinate_frames/source_camera/{camera_serial}/continuous"
+    try:
+        frame_node = root[frame_path]
+    except KeyError as exc:
+        raise RecordingGeometryError(
+            f"Analysis Zarr lacks canonical continuous source-camera authority {frame_path}."
+        ) from exc
+    source_frame = load_source_camera_pixel_frame_authority(
+        frame_node,
+        acquisition_frame=acquisition,
+    )
+    source_frame.assert_verified()
+    endpoint = source_frame.endpoint
+    coordinate = {
+        "space_id": endpoint.space_id,
+        "profile_id": "source_camera_image_px.top_left_y_down.v1",
+        "pixel_convention": endpoint.pixel_convention,
+        "units": endpoint.units,
+        "origin": "top_left",
+        "positive_x": "right",
+        "positive_y": "down",
+        "native_width_px": endpoint.width,
+        "native_height_px": endpoint.height,
+        "pixel_frame_record_ref": endpoint.record_ref,
+        "pixel_frame_record_sha256": endpoint.record_sha256,
+    }
+    return coordinate, arena, source_video_metadata
+
+
+def build_reviewed_palette_geometry_candidate_record(
+    *,
+    source_zarr: str | Path,
+    fit_report_path: str | Path,
+    montage_path: str | Path,
+    review: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize one reviewed blind fit without reinterpreting acquisition geometry."""
+
+    zarr_path = Path(source_zarr).expanduser().resolve()
+    report_path = Path(fit_report_path).expanduser().resolve()
+    review_montage = Path(montage_path).expanduser().resolve()
+    if not report_path.is_file() or not review_montage.is_file():
+        raise FileNotFoundError(
+            "Palette fit report and review montage must both exist."
+        )
+    report_bytes = report_path.read_bytes()
+    try:
+        report = json.loads(report_bytes)
+    except json.JSONDecodeError as exc:
+        raise RecordingGeometryError("Palette fit report is not valid JSON.") from exc
+    if (
+        report.get("schema_id") != "palette.diagnostics.recording_dish_rim_probe"
+        or report.get("schema_version") != 1
+        or report.get("status") != "provisional_visual_review_required"
+        or report.get("fit_frozen_before_acquisition_reveal") is not True
+    ):
+        raise RecordingGeometryError("Palette fit report contract is unsupported.")
+    source = _required_mapping(report.get("source"), label="fit_report.source")
+    camera_serial = _required_text(
+        source.get("camera_serial"), label="fit_report.source.camera_serial"
+    )
+    coordinate, arena, source_video_metadata = _source_camera_candidate_binding(
+        zarr_path,
+        expected_camera_serial=camera_serial,
+    )
+    shape = _required_mapping(
+        source.get("image_shape_px"), label="fit_report.source.image_shape_px"
+    )
+    if (
+        int(shape.get("width", 0)) != coordinate["native_width_px"]
+        or int(shape.get("height", 0)) != coordinate["native_height_px"]
+    ):
+        raise RecordingGeometryError(
+            "Palette fit raster dimensions do not match the source-camera authority."
+        )
+    if source.get("pixel_contract") != "orange.camera.mono8.full_frame.v1":
+        raise RecordingGeometryError(
+            "Palette fit used an unsupported source pixel contract."
+        )
+    if (
+        int(source.get("frame_count", 0))
+        != int(source_video_metadata.get("total_frames", 0))
+        or int(source.get("video_size_bytes", 0))
+        != int(
+            _required_mapping(
+                source_video_metadata.get("file_fingerprint"),
+                label="root.source_video_metadata.file_fingerprint",
+            ).get("size_bytes", 0)
+        )
+        or Path(str(source.get("video_path"))).name
+        != str(source_video_metadata.get("source_video"))
+    ):
+        raise RecordingGeometryError(
+            "Palette fit source video does not match the analysis Zarr source identity."
+        )
+
+    consensus = _required_mapping(
+        report.get("consensus_fit"), label="fit_report.consensus_fit"
+    )
+    observed_geometry, observed_values = _circle_mapping(
+        consensus.get("geometry"), label="fit_report.consensus_fit.geometry"
+    )
+    if consensus.get("coordinate_space") != "camera_native_pixels":
+        raise RecordingGeometryError(
+            "Palette consensus is not in native camera pixels."
+        )
+    cx, cy, radius = observed_values
+    width = int(coordinate["native_width_px"])
+    height = int(coordinate["native_height_px"])
+    if not (
+        0.0 <= cx <= width and 0.0 <= cy <= height and radius <= max(width, height)
+    ):
+        raise RecordingGeometryError(
+            "Palette consensus circle is outside its native raster."
+        )
+
+    windows = _required_mapping(report.get("windows"), label="fit_report.windows")
+    if set(windows) != {"early", "middle", "late"}:
+        raise RecordingGeometryError(
+            "Palette fit must contain early, middle, and late windows."
+        )
+    normalized_windows: dict[str, Any] = {}
+    window_values: list[tuple[float, float, float]] = []
+    for name in ("early", "middle", "late"):
+        window = _required_mapping(windows[name], label=f"fit_report.windows.{name}")
+        fit = _required_mapping(
+            window.get("fit"), label=f"fit_report.windows.{name}.fit"
+        )
+        geometry, values = _circle_mapping(
+            fit.get("geometry"), label=f"fit_report.windows.{name}.fit.geometry"
+        )
+        window_values.append(values)
+        normalized_windows[name] = {
+            "center_frame": int(window.get("center_frame")),
+            "frame_indices": [int(value) for value in window.get("frame_indices", [])],
+            "decoded_luma_sequence_sha256": _required_sha256(
+                window.get("decoded_luma_sequence_sha256"),
+                label=f"fit_report.windows.{name}.decoded_luma_sequence_sha256",
+            ),
+            "composite_pixel_sha256": _required_sha256(
+                window.get("composite_pixel_sha256"),
+                label=f"fit_report.windows.{name}.composite_pixel_sha256",
+            ),
+            "geometry": geometry,
+            "angular_support_fraction": _required_finite(
+                fit.get("angular_support_fraction"),
+                label=f"fit_report.windows.{name}.angular_support_fraction",
+            ),
+            "median_radial_gradient": _required_finite(
+                fit.get("median_radial_gradient"),
+                label=f"fit_report.windows.{name}.median_radial_gradient",
+            ),
+        }
+        if not normalized_windows[name]["frame_indices"]:
+            raise RecordingGeometryError(
+                f"Palette {name} fit has no source frame indices."
+            )
+
+    review_payload = _canonical_copy(review)
+    if review_payload != {
+        "status": "reviewer_accepted_for_offline_detection_gate_audit",
+        "reviewer": review_payload.get("reviewer"),
+        "reviewed_at_utc": review_payload.get("reviewed_at_utc"),
+        "decision_source": "interactive_visual_review",
+        "reviewed_feature": "visible_dish_top_rim_edge",
+        "decision_scope": "candidate_and_detection_disagreement_audit_only",
+    }:
+        raise RecordingGeometryError("Palette fit review contract is invalid.")
+    _required_text(review_payload.get("reviewer"), label="review.reviewer")
+    _required_text(
+        review_payload.get("reviewed_at_utc"), label="review.reviewed_at_utc"
+    )
+
+    xs = [value[0] for value in window_values]
+    ys = [value[1] for value in window_values]
+    radii = [value[2] for value in window_values]
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    record = {
+        "schema_id": CANDIDATE_RECORD_SCHEMA_ID,
+        "schema_version": CANDIDATE_RECORD_SCHEMA_VERSION,
+        "candidate_kind": PALETTE_CANDIDATE_KIND,
+        "arena_binding": arena,
+        "observed_boundary": {
+            "coordinate_space": "camera_native_pixels",
+            "target_plane": "dish_top_rim",
+            "observed_feature": "visible_dish_top_rim_edge",
+            "interpretation": (
+                "recording_image_observation_not_acquisition_physical_inner_rim"
+            ),
+            "geometry": observed_geometry,
+        },
+        "valid_detection_region": {
+            "coordinate_space": "camera_native_pixels",
+            "purpose": "bounding_box_centroid_detection_gating",
+            "geometry": observed_geometry,
+            "derivation": "direct_from_reviewed_visible_dish_top_rim_edge",
+            "boundary_inclusion": "inclusive",
+            "additional_palette_tolerance_px": 0.0,
+            "is_final_acquisition_tolerance": False,
+        },
+        "coordinate_binding": coordinate,
+        "palette_fit_source": {
+            "fit_report_path": str(report_path),
+            "fit_report_sha256": report_sha256,
+            "fit_report_schema_id": report.get("schema_id"),
+            "fit_report_schema_version": report.get("schema_version"),
+            "fit_method": report.get("fit_method"),
+            "blind_to_acquisition_geometry": (
+                _required_mapping(
+                    report.get("parameters"), label="fit_report.parameters"
+                ).get("acquisition_geometry_available_to_fitter")
+                is False
+            ),
+            "source_video_path": source.get("video_path"),
+            "source_video_size_bytes": int(source.get("video_size_bytes")),
+            "source_summary_sha256": _required_sha256(
+                source.get("summary_sha256"), label="fit_report.source.summary_sha256"
+            ),
+            "probe_declared_target_feature": report.get("target_feature"),
+            "reviewed_semantic_correction": {
+                "status": "reviewer_corrected_probe_feature_label",
+                "reviewed_feature": "visible_dish_top_rim_edge",
+                "reason": "visual_review_found_fit_on_top_rim_not_inner_water_side",
+            },
+            "review_montage_path": str(review_montage),
+            "review_montage_sha256": _file_sha256(review_montage),
+            "windows": normalized_windows,
+            "temporal_stability_px": {
+                "center_x_range": max(xs) - min(xs),
+                "center_y_range": max(ys) - min(ys),
+                "radius_range": max(radii) - min(radii),
+            },
+        },
+        "review": review_payload,
+        "candidate_policy": {
+            "publication_role": "candidate_only",
+            "operationally_selected": False,
+            "legacy_dish_mask_projection_written": False,
+            "detection_gate_applied": False,
+            "eligible_for_detection_disagreement_audit": True,
+            "requires_explicit_selection_before_gating": True,
+        },
+        "canonicalization": "canonical_json_sort_keys_v1",
+    }
+    normalized = _canonical_copy(record)
+    validate_palette_geometry_candidate_record(normalized)
+    return normalized
+
+
+def validate_palette_geometry_candidate_record(record: Mapping[str, Any]) -> None:
+    if (
+        record.get("schema_id") != CANDIDATE_RECORD_SCHEMA_ID
+        or record.get("schema_version") != CANDIDATE_RECORD_SCHEMA_VERSION
+    ):
+        raise RecordingGeometryError("Unsupported arena-geometry candidate schema.")
+    if record.get("candidate_kind") != PALETTE_CANDIDATE_KIND:
+        raise RecordingGeometryError("Unsupported Palette candidate kind.")
+    arena = _required_mapping(record.get("arena_binding"), label="arena_binding")
+    for name in ("rig_id", "canvas_name", "arena_id", "camera_serial"):
+        _required_text(arena.get(name), label=f"arena_binding.{name}")
+    observed = _required_mapping(
+        record.get("observed_boundary"), label="observed_boundary"
+    )
+    gate = _required_mapping(
+        record.get("valid_detection_region"), label="valid_detection_region"
+    )
+    if (
+        observed.get("coordinate_space") != "camera_native_pixels"
+        or observed.get("target_plane") != "dish_top_rim"
+        or observed.get("observed_feature") != "visible_dish_top_rim_edge"
+        or observed.get("interpretation")
+        != "recording_image_observation_not_acquisition_physical_inner_rim"
+    ):
+        raise RecordingGeometryError("Palette observed-boundary semantics are invalid.")
+    observed_geometry, _ = _circle_mapping(
+        observed.get("geometry"), label="observed_boundary.geometry"
+    )
+    gate_geometry, _ = _circle_mapping(
+        gate.get("geometry"), label="valid_detection_region.geometry"
+    )
+    if (
+        gate.get("coordinate_space") != "camera_native_pixels"
+        or gate.get("purpose") != "bounding_box_centroid_detection_gating"
+        or gate.get("derivation") != "direct_from_reviewed_visible_dish_top_rim_edge"
+        or gate.get("boundary_inclusion") != "inclusive"
+        or gate.get("additional_palette_tolerance_px") != 0.0
+        or gate.get("is_final_acquisition_tolerance") is not False
+        or gate_geometry != observed_geometry
+    ):
+        raise RecordingGeometryError("Palette detection-gate derivation is invalid.")
+    coordinate = _required_mapping(
+        record.get("coordinate_binding"), label="coordinate_binding"
+    )
+    if (
+        coordinate.get("space_id") != "source_camera_image_px"
+        or coordinate.get("profile_id") != "source_camera_image_px.top_left_y_down.v1"
+        or coordinate.get("pixel_convention") != "continuous"
+        or coordinate.get("units") != "px"
+        or coordinate.get("origin") != "top_left"
+        or coordinate.get("positive_x") != "right"
+        or coordinate.get("positive_y") != "down"
+    ):
+        raise RecordingGeometryError(
+            "Palette source-camera coordinate binding is invalid."
+        )
+    for name in ("native_width_px", "native_height_px"):
+        value = coordinate.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise RecordingGeometryError(f"coordinate_binding.{name} must be positive.")
+    _required_sha256(
+        coordinate.get("pixel_frame_record_sha256"),
+        label="coordinate_binding.pixel_frame_record_sha256",
+    )
+    expected_ref = (
+        f"/analysis/coordinate_frames/source_camera/{arena['camera_serial']}"
+        "/continuous@pixel_frame_authority"
+    )
+    if coordinate.get("pixel_frame_record_ref") != expected_ref:
+        raise RecordingGeometryError(
+            "Palette candidate binds the wrong source-camera frame."
+        )
+    source = _required_mapping(
+        record.get("palette_fit_source"), label="palette_fit_source"
+    )
+    for name in (
+        "fit_report_path",
+        "fit_method",
+        "source_video_path",
+        "review_montage_path",
+    ):
+        _required_text(source.get(name), label=f"palette_fit_source.{name}")
+    for name in ("fit_report_sha256", "source_summary_sha256", "review_montage_sha256"):
+        _required_sha256(source.get(name), label=f"palette_fit_source.{name}")
+    if source.get("blind_to_acquisition_geometry") is not True:
+        raise RecordingGeometryError(
+            "Palette fit was not blind to acquisition geometry."
+        )
+    correction = _required_mapping(
+        source.get("reviewed_semantic_correction"),
+        label="palette_fit_source.reviewed_semantic_correction",
+    )
+    if correction != {
+        "status": "reviewer_corrected_probe_feature_label",
+        "reviewed_feature": "visible_dish_top_rim_edge",
+        "reason": "visual_review_found_fit_on_top_rim_not_inner_water_side",
+    }:
+        raise RecordingGeometryError("Palette fit semantic correction is invalid.")
+    windows = _required_mapping(
+        source.get("windows"), label="palette_fit_source.windows"
+    )
+    if set(windows) != {"early", "middle", "late"}:
+        raise RecordingGeometryError("Palette fit source windows are incomplete.")
+    stability = _required_mapping(
+        source.get("temporal_stability_px"),
+        label="palette_fit_source.temporal_stability_px",
+    )
+    for name in ("center_x_range", "center_y_range", "radius_range"):
+        if (
+            _required_finite(stability.get(name), label=f"temporal_stability_px.{name}")
+            < 0
+        ):
+            raise RecordingGeometryError(
+                "Palette temporal stability ranges cannot be negative."
+            )
+    review = _required_mapping(record.get("review"), label="review")
+    if (
+        review.get("status") != "reviewer_accepted_for_offline_detection_gate_audit"
+        or review.get("decision_source") != "interactive_visual_review"
+        or review.get("reviewed_feature") != "visible_dish_top_rim_edge"
+        or review.get("decision_scope")
+        != "candidate_and_detection_disagreement_audit_only"
+    ):
+        raise RecordingGeometryError("Palette candidate review is invalid.")
+    _required_text(review.get("reviewer"), label="review.reviewer")
+    _required_text(review.get("reviewed_at_utc"), label="review.reviewed_at_utc")
+    policy = _required_mapping(record.get("candidate_policy"), label="candidate_policy")
+    if dict(policy) != {
+        "publication_role": "candidate_only",
+        "operationally_selected": False,
+        "legacy_dish_mask_projection_written": False,
+        "detection_gate_applied": False,
+        "eligible_for_detection_disagreement_audit": True,
+        "requires_explicit_selection_before_gating": True,
+    }:
+        raise RecordingGeometryError("Palette candidate policy is not fail-closed.")
+    if record.get("canonicalization") != "canonical_json_sort_keys_v1":
+        raise RecordingGeometryError("Candidate canonicalization is unsupported.")
+    if _canonical_copy(record) != dict(record):
+        raise RecordingGeometryError(
+            "Candidate record is not strict canonical JSON data."
+        )
+
+
+def validate_arena_geometry_candidate_record(record: Mapping[str, Any]) -> None:
+    kind = record.get("candidate_kind")
+    if kind == ACQUISITION_CANDIDATE_KIND:
+        validate_acquisition_geometry_candidate_record(record)
+        return
+    if kind == PALETTE_CANDIDATE_KIND:
+        validate_palette_geometry_candidate_record(record)
+        return
+    raise RecordingGeometryError(
+        f"Unsupported arena-geometry candidate kind: {kind!r}."
+    )
 
 
 def _recovery_binding(verified: VerifiedRecordingGeometryRecovery) -> dict[str, Any]:
@@ -414,7 +906,9 @@ def plan_recovered_acquisition_geometry_candidate(
             },
             {
                 "role": "orange_recording_geometry_contract",
-                "path": str(verified.evidence.bundle_root / "recording_geometry_contract.json"),
+                "path": str(
+                    verified.evidence.bundle_root / "recording_geometry_contract.json"
+                ),
                 "sha256": verified.evidence.bundle_verification.contract_sha256,
             },
         ),
@@ -436,6 +930,82 @@ def plan_recovered_acquisition_geometry_candidate(
         run_name=run_name,
         target_run_path=zarr_path / "analysis" / CANDIDATE_RUNS_PARENT / run_name,
         run_provenance=provenance,
+        candidate_kind=ACQUISITION_CANDIDATE_KIND,
+    )
+
+
+def plan_reviewed_palette_geometry_candidate(
+    *,
+    source_zarr: str | Path,
+    fit_report_path: str | Path,
+    montage_path: str | Path,
+    reviewer: str,
+    reviewed_at_utc: str,
+) -> ArenaGeometryCandidatePlan:
+    """Plan a reviewed image-derived candidate without selecting or applying it."""
+
+    zarr_path = Path(source_zarr).expanduser().resolve()
+    report_path = Path(fit_report_path).expanduser().resolve()
+    review_montage = Path(montage_path).expanduser().resolve()
+    review = {
+        "status": "reviewer_accepted_for_offline_detection_gate_audit",
+        "reviewer": _required_text(reviewer, label="reviewer"),
+        "reviewed_at_utc": _required_text(reviewed_at_utc, label="reviewed_at_utc"),
+        "decision_source": "interactive_visual_review",
+        "reviewed_feature": "visible_dish_top_rim_edge",
+        "decision_scope": "candidate_and_detection_disagreement_audit_only",
+    }
+    record = build_reviewed_palette_geometry_candidate_record(
+        source_zarr=zarr_path,
+        fit_report_path=report_path,
+        montage_path=review_montage,
+        review=review,
+    )
+    digest = _payload_sha256(record)
+    candidate_id = f"arena-geometry-palette-{digest[:24]}"
+    provenance = build_writer_run_provenance(
+        command="publish_reviewed_palette_geometry_candidate",
+        params={
+            "algorithm_version": PUBLISH_ALGORITHM_VERSION,
+            "candidate_id": candidate_id,
+            "candidate_record_sha256": digest,
+            "candidate_kind": PALETTE_CANDIDATE_KIND,
+            "reviewed_feature": "visible_dish_top_rim_edge",
+            "gate_derivation": "direct_from_reviewed_visible_dish_top_rim_edge",
+            "operational_selection": "not_performed",
+        },
+        input_run_ids={},
+        input_artifacts=(
+            {
+                "role": "palette_blind_dish_rim_fit_report",
+                "path": str(report_path),
+                "sha256": _file_sha256(report_path),
+            },
+            {
+                "role": "palette_dish_rim_review_montage",
+                "path": str(review_montage),
+                "sha256": _file_sha256(review_montage),
+            },
+        ),
+        include_system_context=False,
+    )
+    provenance_validation = validate_run_provenance(provenance)
+    if not provenance_validation.valid:
+        raise RuntimeError(
+            "Palette candidate publication provenance is invalid: "
+            f"{provenance_validation.errors}"
+        )
+    return ArenaGeometryCandidatePlan(
+        source_zarr=zarr_path,
+        receipt_path=report_path,
+        receipt_sha256=_file_sha256(report_path),
+        candidate_id=candidate_id,
+        candidate_record_sha256=digest,
+        candidate_record=record,
+        run_name=candidate_id,
+        target_run_path=zarr_path / "analysis" / CANDIDATE_RUNS_PARENT / candidate_id,
+        run_provenance=provenance,
+        candidate_kind=PALETTE_CANDIDATE_KIND,
     )
 
 
@@ -444,7 +1014,7 @@ def _candidate_attrs(plan: ArenaGeometryCandidatePlan) -> dict[str, Any]:
         "schema_id": CANDIDATE_RUN_SCHEMA_ID,
         "schema_version": CANDIDATE_RUN_SCHEMA_VERSION,
         "candidate_id": plan.candidate_id,
-        "candidate_kind": CANDIDATE_KIND,
+        "candidate_kind": plan.candidate_kind,
         "candidate_record": _canonical_copy(plan.candidate_record),
         "candidate_record_sha256": plan.candidate_record_sha256,
         "run_provenance": _canonical_copy(plan.run_provenance),
@@ -475,7 +1045,9 @@ def validate_arena_geometry_candidate_run(
         record = attrs.get("candidate_record")
         if isinstance(record, Mapping):
             try:
-                validate_acquisition_geometry_candidate_record(record)
+                validate_arena_geometry_candidate_record(record)
+                if record.get("candidate_kind") != expected_plan.candidate_kind:
+                    errors.append("candidate kind mismatch")
                 if _payload_sha256(record) != attrs.get("candidate_record_sha256"):
                     errors.append("candidate record digest mismatch")
             except RecordingGeometryError as exc:
@@ -504,9 +1076,9 @@ def validate_arena_geometry_candidate_run(
             errors.append("candidate run is not complete")
         elif status not in {"running", "complete"}:
             errors.append("candidate run has invalid completion status")
-        if require_eligible is not None and attrs.get("stage_selector_eligible") is not (
-            require_eligible
-        ):
+        if require_eligible is not None and attrs.get(
+            "stage_selector_eligible"
+        ) is not (require_eligible):
             errors.append("candidate selector eligibility mismatch")
     except Exception as exc:
         errors.append(f"{type(exc).__name__}: {exc}")
@@ -534,7 +1106,64 @@ def _materialize_local_run(plan: ArenaGeometryCandidatePlan, path: Path) -> None
         expected_plan=plan,
     )
     if not validation["valid"]:
-        raise RuntimeError(f"Local acquisition candidate validation failed: {validation}")
+        raise RuntimeError(
+            f"Local arena-geometry candidate validation failed: {validation}"
+        )
+
+
+def _revalidate_candidate_sources(
+    plan: ArenaGeometryCandidatePlan,
+) -> dict[str, Any]:
+    if plan.candidate_kind == ACQUISITION_CANDIDATE_KIND:
+        verified, current_record, current_digest = _record_from_receipt_and_zarr(
+            plan.source_zarr,
+            plan.receipt_path,
+        )
+        if (
+            verified.receipt_sha256 != plan.receipt_sha256
+            or current_digest != plan.candidate_record_sha256
+            or current_record != plan.candidate_record
+        ):
+            raise RuntimeError(
+                "Acquisition geometry source changed during publication."
+            )
+        return {
+            "status": "current",
+            "source_kind": ACQUISITION_CANDIDATE_KIND,
+            "receipt_sha256": verified.receipt_sha256,
+            "candidate_record_sha256": current_digest,
+        }
+    if plan.candidate_kind == PALETTE_CANDIDATE_KIND:
+        source = _required_mapping(
+            plan.candidate_record.get("palette_fit_source"),
+            label="palette_fit_source",
+        )
+        review = _required_mapping(plan.candidate_record.get("review"), label="review")
+        current_record = build_reviewed_palette_geometry_candidate_record(
+            source_zarr=plan.source_zarr,
+            fit_report_path=plan.receipt_path,
+            montage_path=_required_text(
+                source.get("review_montage_path"),
+                label="palette_fit_source.review_montage_path",
+            ),
+            review=review,
+        )
+        current_digest = _payload_sha256(current_record)
+        current_report_sha256 = _file_sha256(plan.receipt_path)
+        if (
+            current_report_sha256 != plan.receipt_sha256
+            or current_digest != plan.candidate_record_sha256
+            or current_record != plan.candidate_record
+        ):
+            raise RuntimeError("Palette geometry source changed during publication.")
+        return {
+            "status": "current",
+            "source_kind": PALETTE_CANDIDATE_KIND,
+            "fit_report_sha256": current_report_sha256,
+            "review_montage_sha256": source.get("review_montage_sha256"),
+            "candidate_record_sha256": current_digest,
+        }
+    raise RuntimeError(f"Unsupported candidate source kind: {plan.candidate_kind!r}.")
 
 
 def publish_arena_geometry_candidate(
@@ -578,23 +1207,7 @@ def publish_arena_geometry_candidate(
             return (require_runs_parent(analysis, CANDIDATE_RUNS_PARENT),)
 
         def after_rename(_root: zarr.Group, _run: zarr.Group) -> dict[str, Any]:
-            verified, current_record, current_digest = _record_from_receipt_and_zarr(
-                plan.source_zarr,
-                plan.receipt_path,
-            )
-            if (
-                verified.receipt_sha256 != plan.receipt_sha256
-                or current_digest != plan.candidate_record_sha256
-                or current_record != plan.candidate_record
-            ):
-                raise RuntimeError("Acquisition geometry source changed during publication.")
-            return {
-                "source_revision_audit": {
-                    "status": "current",
-                    "receipt_sha256": verified.receipt_sha256,
-                    "candidate_record_sha256": current_digest,
-                }
-            }
+            return {"source_revision_audit": _revalidate_candidate_sources(plan)}
 
         def complete(
             _root: zarr.Group,
@@ -627,7 +1240,9 @@ def publish_arena_geometry_candidate(
             run_group: zarr.Group,
         ) -> None:
             if run_group.attrs.get("operational_selection_status") != "not_selected":
-                raise RuntimeError("Candidate activation cannot perform operational selection.")
+                raise RuntimeError(
+                    "Candidate activation cannot perform operational selection."
+                )
             run_group.attrs["stage_selector_eligible"] = True
 
         publication = atomic_publish_run_group(
@@ -667,7 +1282,9 @@ def publish_arena_geometry_candidate(
         require_eligible=True,
     )
     if not final["valid"]:
-        raise RuntimeError(f"Published acquisition candidate failed validation: {final}")
+        raise RuntimeError(
+            f"Published arena-geometry candidate failed validation: {final}"
+        )
     return {
         "published": True,
         "status": "complete_candidate_not_selected",
@@ -677,6 +1294,7 @@ def publish_arena_geometry_candidate(
 
 
 __all__ = [
+    "ACQUISITION_CANDIDATE_KIND",
     "ArenaGeometryCandidatePlan",
     "CANDIDATE_KIND",
     "CANDIDATE_RECORD_SCHEMA_ID",
@@ -686,9 +1304,14 @@ __all__ = [
     "CANDIDATE_RUN_SCHEMA_VERSION",
     "PUBLISH_ALGORITHM_VERSION",
     "PUBLISH_SCHEMA_ID",
+    "PALETTE_CANDIDATE_KIND",
     "build_acquisition_geometry_candidate_record",
+    "build_reviewed_palette_geometry_candidate_record",
     "plan_recovered_acquisition_geometry_candidate",
+    "plan_reviewed_palette_geometry_candidate",
     "publish_arena_geometry_candidate",
     "validate_acquisition_geometry_candidate_record",
+    "validate_arena_geometry_candidate_record",
     "validate_arena_geometry_candidate_run",
+    "validate_palette_geometry_candidate_record",
 ]

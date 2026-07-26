@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,6 +109,88 @@ def _plan(source_zarr: Path) -> mod.ArenaGeometryCandidatePlan:
     )
 
 
+def _palette_fit_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    fit = {
+        "schema_id": "palette.diagnostics.recording_dish_rim_probe",
+        "schema_version": 1,
+        "status": "provisional_visual_review_required",
+        "fit_frozen_before_acquisition_reveal": True,
+        "fit_method": "temporal_median_multicandidate_radial_edge_circle_v1",
+        "target_feature": "dish_inner_rim_water_side_edge",
+        "parameters": {"acquisition_geometry_available_to_fitter": False},
+        "source": {
+            "camera_serial": "2010093",
+            "image_shape_px": {"width": 640, "height": 480},
+            "pixel_contract": "orange.camera.mono8.full_frame.v1",
+            "video_path": "/recording/cams/Cam2010093_test.mp4",
+            "video_size_bytes": 1234,
+            "frame_count": 1000,
+            "summary_sha256": "1" * 64,
+        },
+        "consensus_fit": {
+            "coordinate_space": "camera_native_pixels",
+            "geometry": {
+                "type": "circle",
+                "center_px": {"x": 320.0, "y": 240.0},
+                "radius_px": 210.0,
+            },
+        },
+        "windows": {},
+    }
+    for index, name in enumerate(("early", "middle", "late")):
+        fit["windows"][name] = {
+            "center_frame": 100 + index * 300,
+            "frame_indices": [99 + index * 300, 100 + index * 300, 101 + index * 300],
+            "decoded_luma_sequence_sha256": str(index + 2) * 64,
+            "composite_pixel_sha256": str(index + 5) * 64,
+            "fit": {
+                "geometry": {
+                    "type": "circle",
+                    "center_px": {"x": 320.0 + index * 0.2, "y": 240.0},
+                    "radius_px": 210.0 + index * 0.1,
+                },
+                "angular_support_fraction": 0.98,
+                "median_radial_gradient": 700.0,
+            },
+        }
+    report = tmp_path / "fit_report.json"
+    report.write_text(json.dumps(fit), encoding="utf-8")
+    montage = tmp_path / "review_montage.png"
+    montage.write_bytes(b"deterministic-review-montage")
+    return report, montage
+
+
+def _palette_binding() -> tuple[dict[str, object], dict[str, str], dict[str, object]]:
+    coordinate = {
+        "space_id": "source_camera_image_px",
+        "profile_id": "source_camera_image_px.top_left_y_down.v1",
+        "pixel_convention": "continuous",
+        "units": "px",
+        "origin": "top_left",
+        "positive_x": "right",
+        "positive_y": "down",
+        "native_width_px": 640,
+        "native_height_px": 480,
+        "pixel_frame_record_ref": (
+            "/analysis/coordinate_frames/source_camera/2010093/"
+            "continuous@pixel_frame_authority"
+        ),
+        "pixel_frame_record_sha256": "e" * 64,
+    }
+    arena = {
+        "rig_id": "omnifin0",
+        "canvas_name": "shadow",
+        "arena_id": "arena_1",
+        "camera_serial": "2010093",
+    }
+    source = {
+        "total_frames": 1000,
+        "source_video": "Cam2010093_test.mp4",
+        "file_fingerprint": {"size_bytes": 1234},
+    }
+    return coordinate, arena, source
+
+
 def test_candidate_record_keeps_physical_rim_gate_and_selection_distinct() -> None:
     record = mod.build_acquisition_geometry_candidate_record(
         _bound_mask(),
@@ -143,6 +226,80 @@ def test_candidate_record_rejects_added_tolerance_or_nonconcentric_gate() -> Non
     record["valid_detection_region"]["geometry"]["center_px"]["x"] += 1.0
     with pytest.raises(RecordingGeometryError, match="concentric"):
         mod.validate_acquisition_geometry_candidate_record(record)
+
+
+def test_reviewed_palette_candidate_corrects_semantics_and_keeps_gate_pointerless(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report, montage = _palette_fit_inputs(tmp_path)
+    monkeypatch.setattr(
+        mod,
+        "_source_camera_candidate_binding",
+        lambda *_args, **_kwargs: _palette_binding(),
+    )
+
+    record = mod.build_reviewed_palette_geometry_candidate_record(
+        source_zarr=tmp_path / "recording.zarr",
+        fit_report_path=report,
+        montage_path=montage,
+        review={
+            "status": "reviewer_accepted_for_offline_detection_gate_audit",
+            "reviewer": "delahantyj",
+            "reviewed_at_utc": "2026-07-26T23:40:00Z",
+            "decision_source": "interactive_visual_review",
+            "reviewed_feature": "visible_dish_top_rim_edge",
+            "decision_scope": "candidate_and_detection_disagreement_audit_only",
+        },
+    )
+
+    assert record["candidate_kind"] == mod.PALETTE_CANDIDATE_KIND
+    assert (
+        record["observed_boundary"]["observed_feature"] == "visible_dish_top_rim_edge"
+    )
+    assert (
+        record["palette_fit_source"]["probe_declared_target_feature"]
+        == "dish_inner_rim_water_side_edge"
+    )
+    assert record["palette_fit_source"]["reviewed_semantic_correction"]["status"] == (
+        "reviewer_corrected_probe_feature_label"
+    )
+    assert (
+        record["valid_detection_region"]["geometry"]
+        == record["observed_boundary"]["geometry"]
+    )
+    assert record["valid_detection_region"]["additional_palette_tolerance_px"] == 0.0
+    assert record["candidate_policy"]["operationally_selected"] is False
+    assert record["candidate_policy"]["detection_gate_applied"] is False
+
+
+def test_reviewed_palette_candidate_rejects_mutated_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report, montage = _palette_fit_inputs(tmp_path)
+    monkeypatch.setattr(
+        mod,
+        "_source_camera_candidate_binding",
+        lambda *_args, **_kwargs: _palette_binding(),
+    )
+    record = mod.build_reviewed_palette_geometry_candidate_record(
+        source_zarr=tmp_path / "recording.zarr",
+        fit_report_path=report,
+        montage_path=montage,
+        review={
+            "status": "reviewer_accepted_for_offline_detection_gate_audit",
+            "reviewer": "delahantyj",
+            "reviewed_at_utc": "2026-07-26T23:40:00Z",
+            "decision_source": "interactive_visual_review",
+            "reviewed_feature": "visible_dish_top_rim_edge",
+            "decision_scope": "candidate_and_detection_disagreement_audit_only",
+        },
+    )
+    record["valid_detection_region"]["geometry"]["radius_px"] += 1.0
+
+    with pytest.raises(RecordingGeometryError, match="gate derivation"):
+        mod.validate_palette_geometry_candidate_record(record)
 
 
 def test_atomic_candidate_publication_never_sets_latest_or_selection(
@@ -188,6 +345,52 @@ def test_atomic_candidate_publication_never_sets_latest_or_selection(
     )
     assert repeated["published"] is False
     assert repeated["status"] == "already_complete"
+
+
+def test_atomic_palette_candidate_publication_remains_audit_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_zarr = tmp_path / "recording.zarr"
+    zarr.open_group(str(source_zarr), mode="w", zarr_format=3).require_group("analysis")
+    report, montage = _palette_fit_inputs(tmp_path)
+    monkeypatch.setattr(
+        mod,
+        "_source_camera_candidate_binding",
+        lambda *_args, **_kwargs: _palette_binding(),
+    )
+    plan = mod.plan_reviewed_palette_geometry_candidate(
+        source_zarr=source_zarr,
+        fit_report_path=report,
+        montage_path=montage,
+        reviewer="delahantyj",
+        reviewed_at_utc="2026-07-26T23:40:00Z",
+    )
+    monkeypatch.setattr(
+        mod,
+        "_revalidate_candidate_sources",
+        lambda _plan: {
+            "status": "current",
+            "source_kind": mod.PALETTE_CANDIDATE_KIND,
+        },
+    )
+
+    result = mod.publish_arena_geometry_candidate(
+        plan,
+        scratch_root=tmp_path / "scratch",
+        copy_backend="python",
+    )
+
+    assert result["published"] is True
+    root = open_zarr_root(source_zarr, mode="r")
+    parent = root[f"analysis/{mod.CANDIDATE_RUNS_PARENT}"]
+    run = parent[plan.run_name]
+    assert run.attrs["candidate_kind"] == mod.PALETTE_CANDIDATE_KIND
+    assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs["operational_selection_status"] == "not_selected"
+    assert run.attrs["detection_gate_applied"] is False
+    assert "latest" not in parent.attrs
+    assert "latest_complete" not in parent.attrs
 
 
 def test_candidate_reread_preserves_creation_provenance_across_software_contexts(
