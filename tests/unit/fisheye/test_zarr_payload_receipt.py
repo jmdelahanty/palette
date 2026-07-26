@@ -9,9 +9,7 @@ from fisheye.shared.zarr_payload_receipt import (
     build_payload_integrity_receipt,
     build_payload_validation_receipt,
     canonical_json_sha256,
-    canonical_decoded_content_inventory,
     canonical_payload_integrity_receipt,
-    decoded_content_inventory_from_copy_report,
     decoded_payload_receipt_from_copy_report,
     verify_payload_integrity_receipt,
     verify_payload_validation_receipt,
@@ -25,28 +23,17 @@ def _copy_report() -> dict:
         "schema_id": "palette.zarr_sharded_run_copy.v1",
         "status": "complete",
         "exact_decoded_validation": True,
-        "exact_full_decoded_content_hashes": True,
         "arrays": [
-            {
-                "path": "track_ids",
-                "dtype": "int32",
-                "shape": [2],
-                "decoded_content_bytes": 8,
-                "decoded_content_sha256": "a" * 64,
-            },
+            {"path": "track_ids", "dtype": "int32", "shape": [2]},
             {
                 "path": "tracks/id_0/speed_raw_px",
                 "dtype": "float32",
                 "shape": [5],
-                "decoded_content_bytes": 20,
-                "decoded_content_sha256": "b" * 64,
             },
             {
                 "path": "tracks/id_0/source_instance_key",
                 "dtype": "[('valid', '?'), ('instance_key', '<u8')]",
                 "shape": [5],
-                "decoded_content_bytes": 45,
-                "decoded_content_sha256": "c" * 64,
             },
         ],
         "shards": [
@@ -175,22 +162,6 @@ def test_decoded_receipt_can_bind_local_science_before_physical_publication(
     )
 
     assert decoded == integrity["decoded_payload"]
-
-
-def test_whole_array_content_inventory_is_closed_and_bound_to_decoded_root() -> None:
-    report = _copy_report()
-    decoded = decoded_payload_receipt_from_copy_report(report)
-    inventory = decoded_content_inventory_from_copy_report(report)
-
-    assert inventory["decoded_payload_root_sha256"] == decoded["root_sha256"]
-    assert inventory["array_count"] == 3
-    assert inventory["decoded_bytes"] == 73
-    assert canonical_decoded_content_inventory(inventory) == inventory
-
-    tampered = deepcopy(inventory)
-    tampered["arrays"][0]["content_sha256"] = "d" * 64
-    with pytest.raises(ValueError, match="digest is stale"):
-        canonical_decoded_content_inventory(tampered)
 
 
 def test_receipt_rejects_decoded_gaps_and_tampered_records(tmp_path: Path) -> None:

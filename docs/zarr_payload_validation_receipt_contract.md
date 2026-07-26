@@ -2,9 +2,7 @@
 
 Status: production-scale canary validated; guarded track publisher pilot
 Schema versions: `palette.zarr_payload_integrity_receipt` v1 and
-`palette.zarr_payload_validation_receipt` v1;
-`palette.decoded_array_content_inventory` v1;
-`palette.track_motion_staged_scientific_validation` v1/v2
+`palette.zarr_payload_validation_receipt` v1
 Initial adopter: guarded track-kinematics materialization
 
 ## Purpose
@@ -56,14 +54,6 @@ then hashed into a run decoded-payload root. The receipt requires a closed
 array inventory and gap-free, overlap-free coverage of every row-sharded
 array.
 
-When explicitly requested by a stage contract, the sharded-copy report also
-computes one bounded whole-array decoded SHA-256 per array after copy
-validation.  These hashes are not a replacement for the
-gap-free shard Merkle tree: they are a second, closed content inventory used by
-scientific manifests whose public surface contract historically names a
-whole-array C-order digest.  The staged scientific receipt binds that inventory
-to the decoded-payload root before it may be reused.
-
 ### Immutable Zarr metadata root
 
 Each `zarr.json` document is canonicalized after removing only its
@@ -101,30 +91,22 @@ The validation receipt binds:
 - numerical-policy record and digest; and
 - a literal successful result.
 
-For track motion, staged scientific receipt version 2 validates numeric
-invariants, physical scaling, summaries, aliases, and bout domains against the
-node-local sharded payload.  It binds those results and the closed whole-array
-content inventory to the decoded-copy root.  The authoritative manifest
-builder still checks controlled inventories, input lineage, row and time
-domains, semantic attributes, coordinate authorities, and lifecycle state from
-fresh handles, but may reuse the receipt-bound whole-array hashes.  Version-1
-or absent staged receipts retain exhaustive authoritative decoding.
-The resulting track-motion payload validator uses version 3 and numerical
-policy version 3; version 2 retains its original legacy meaning.
+For track motion, the validator remains the exhaustive full-motion manifest
+builder. It checks controlled inventories, input lineage, row and time domains,
+numeric invariants, physical scaling, summaries, semantic attributes, and
+aliases. The receipt merely permits later guarded publication checkpoints to
+refer to that completed work.
 
 ## Guarded track-kinematics flow
 
 The v3 materializer/publisher performs:
 
-1. exhaustive local scientific and decoded-copy validation, including the
-   whole-array content inventory;
+1. exhaustive local scientific and decoded-copy validation;
 2. atomic-publisher physical copy verification;
 3. a physical payload root at the hidden run's renamed canonical path;
 4. final-path coordinate binding;
 5. a second physical-root check proving binding was metadata-only;
-6. one authoritative full-motion manifest build after completion, reusing
-   receipt-bound content hashes while freshly validating metadata and
-   authority contracts;
+6. one exhaustive full-motion manifest build after completion;
 7. persistence of the validation receipt;
 8. lightweight completion and pointer checks against the receipt; and
 9. a fresh complete physical-payload rehash immediately before the literal

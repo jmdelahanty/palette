@@ -333,56 +333,6 @@ def _copy_shard_task(task: tuple[str, int, int]) -> dict[str, Any]:
     }
 
 
-def _hash_destination_array_task(path: str) -> dict[str, Any]:
-    """Hash one complete decoded destination array in bounded row blocks."""
-
-    if _DESTINATION_ROOT is None:
-        raise RuntimeError("Sharded-copy hash worker was not initialized.")
-    array = _DESTINATION_ROOT[path]
-    dtype = np.dtype(array.dtype)
-    if dtype.hasobject:
-        raise TypeError("Object arrays have no stable decoded-content hash.")
-    digest = hashlib.sha256()
-    decoded_bytes = 0
-    if int(array.ndim) == 0:
-        blocks = (np.asarray(array[...]),)
-    else:
-        outer = getattr(array, "shards", None)
-        chunks = getattr(array, "chunks", None)
-        block_rows = (
-            max(1, int(outer[0]))
-            if outer is not None and len(outer) >= 1
-            else (
-                max(1, int(chunks[0]))
-                if chunks is not None and len(chunks) >= 1
-                else max(1, int(array.shape[0]))
-            )
-        )
-        trailing = (slice(None),) * (int(array.ndim) - 1)
-        blocks = (
-            np.asarray(
-                array[
-                    (
-                        slice(start, min(start + block_rows, int(array.shape[0]))),
-                        *trailing,
-                    )
-                ]
-            )
-            for start in range(0, int(array.shape[0]), block_rows)
-        )
-    for values in blocks:
-        if values.dtype != dtype:
-            raise TypeError(f"Decoded dtype changed while hashing {path!r}.")
-        payload = np.ascontiguousarray(values).tobytes(order="C")
-        digest.update(payload)
-        decoded_bytes += len(payload)
-    return {
-        "path": str(path),
-        "decoded_content_bytes": int(decoded_bytes),
-        "decoded_content_sha256": digest.hexdigest(),
-    }
-
-
 def copy_completed_run_to_sharded(
     source_run: str | Path,
     destination_run: str | Path,
@@ -392,7 +342,6 @@ def copy_completed_run_to_sharded(
     array_layouts: Mapping[str, ShardedArrayLayout] | None = None,
     shard_policy: str = SHARD_POLICY_ALL_ROW_ALIGNED,
     workers: int = 1,
-    compute_full_decoded_content_hashes: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Copy a completed run, validating every decoded outer shard after write."""
@@ -456,36 +405,6 @@ def copy_completed_run_to_sharded(
         ) as executor:
             shard_results = list(executor.map(_copy_shard_task, tasks, chunksize=1))
 
-    plan_paths = [str(plan.path) for plan in plans]
-    content_hashes: dict[str, dict[str, Any]] = {}
-    content_hash_seconds: float | None = None
-    if compute_full_decoded_content_hashes:
-        content_hash_started = time.perf_counter()
-        if worker_count == 1:
-            _init_worker(str(source_path), str(destination_path))
-            content_hash_results = [
-                _hash_destination_array_task(path) for path in plan_paths
-            ]
-        else:
-            with ProcessPoolExecutor(
-                max_workers=worker_count,
-                initializer=_init_worker,
-                initargs=(str(source_path), str(destination_path)),
-            ) as executor:
-                content_hash_results = list(
-                    executor.map(
-                        _hash_destination_array_task,
-                        plan_paths,
-                        chunksize=1,
-                    )
-                )
-        content_hash_seconds = float(time.perf_counter() - content_hash_started)
-        content_hashes = {
-            str(record["path"]): record for record in content_hash_results
-        }
-        if set(content_hashes) != set(plan_paths):
-            raise RuntimeError("Decoded-content hash inventory differs from copy plan.")
-
     effective_values = sorted(
         {int(plan.effective_shard_rows) for plan in plans if plan.effective_shard_rows is not None}
     )
@@ -522,30 +441,8 @@ def copy_completed_run_to_sharded(
             else None
         ),
         "exact_decoded_validation": True,
-        "exact_full_decoded_content_hashes": bool(
-            compute_full_decoded_content_hashes
-        ),
-        "full_decoded_content_hash_seconds": content_hash_seconds,
-        "full_decoded_content_hash_worker_count": (
-            worker_count if compute_full_decoded_content_hashes else 0
-        ),
         "array_layout_override_count": len(array_layouts or {}),
-        "arrays": [
-            (
-                {
-                    **asdict(plan),
-                    "decoded_content_bytes": int(
-                        content_hashes[plan.path]["decoded_content_bytes"]
-                    ),
-                    "decoded_content_sha256": str(
-                        content_hashes[plan.path]["decoded_content_sha256"]
-                    ),
-                }
-                if compute_full_decoded_content_hashes
-                else asdict(plan)
-            )
-            for plan in plans
-        ],
+        "arrays": [asdict(plan) for plan in plans],
         "shards": sorted(shard_results, key=lambda item: (item["path"], item["start_row"])),
         "static_arrays": sorted(static_results, key=lambda item: item["path"]),
     }

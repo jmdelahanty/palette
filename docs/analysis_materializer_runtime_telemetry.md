@@ -298,32 +298,3 @@ a standalone run root has Zarr path `/` and therefore requires an explicit
 logical run name.  The second exposed that the new receipt had not yet been
 added to the closed immutable run-root attribute inventory.  Both conditions
 are now explicit contract checks covered by focused tests.
-
-## Receipt-backed full-motion manifest construction
-
-The next production contract revision extends the staged scientific receipt
-with a closed whole-array decoded-content inventory.  After shard-by-shard
-copy/readback validation, the sharded-copy worker pool computes one bounded,
-C-order SHA-256 for every complete decoded array.  The staged validator binds
-that inventory to the existing decoded-payload Merkle root and validates the
-value-dependent publication contracts locally:
-
-- exact alias payload identity;
-- exact physical `mm_per_pixel` scaling, or closed absence of physical data;
-- swim-bout axis-0 domain alignment; and
-- the existing full core numerical and summary invariants.
-
-Authoritative sealing still reconstructs the manifest from fresh Zarr handles
-and validates closed inventories, semantic attributes, coordinate and temporal
-authorities, run derivation, completion state, ownership, and selectors.  For a
-version-2 staged receipt bound to the installed decoded root, it reuses the
-whole-array content hashes and does not decode every authoritative array again
-to recreate those hashes or repeat physical-value comparisons.  Version-1 and
-missing receipts retain the exhaustive authoritative fallback.
-
-The guarded workflow submission default is now four CPU slots instead of
-eight.  The successful canary averaged only `1.14` effective cores across the
-whole job; eight workers were materially active only during the approximately
-four-second sharding phase.  `--ncores` remains an explicit override for
-profiles dominated by eye, tail, or subject-shape stages that scale beyond four
-workers.

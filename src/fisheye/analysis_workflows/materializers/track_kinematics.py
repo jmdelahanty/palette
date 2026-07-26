@@ -31,7 +31,6 @@ from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import require_runs_parent
 from ...shared.zarr_payload_receipt import (
     build_payload_integrity_receipt,
-    decoded_content_inventory_from_copy_report,
     decoded_payload_receipt_from_copy_report,
     verify_payload_integrity_receipt,
 )
@@ -1053,7 +1052,6 @@ def materialize_track_kinematics(
                 row_count_array=None,
                 shard_rows=plan.output_shard_rows,
                 workers=plan.shard_workers,
-                compute_full_decoded_content_hashes=True,
             )
             if sharded_copy.get("exact_decoded_validation") is not True:
                 raise RuntimeError(
@@ -1063,15 +1061,11 @@ def materialize_track_kinematics(
             decoded_payload = decoded_payload_receipt_from_copy_report(
                 sharded_copy
             )
-            decoded_content_inventory = (
-                decoded_content_inventory_from_copy_report(sharded_copy)
-            )
             sharded_scientific = open_zarr_root(plan.sharded_run, mode="a")
             scientific_validation = (
                 track_writer.build_track_motion_staged_scientific_validation(
                     sharded_scientific,
                     decoded_payload_receipt=decoded_payload,
-                    decoded_content_inventory=decoded_content_inventory,
                     run_name=plan.run_name,
                 )
             )

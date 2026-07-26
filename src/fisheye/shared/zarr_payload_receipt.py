@@ -26,8 +26,6 @@ PAYLOAD_INTEGRITY_RECEIPT_SCHEMA_ID = "palette.zarr_payload_integrity_receipt"
 PAYLOAD_INTEGRITY_RECEIPT_SCHEMA_VERSION = 1
 PAYLOAD_VALIDATION_RECEIPT_SCHEMA_ID = "palette.zarr_payload_validation_receipt"
 PAYLOAD_VALIDATION_RECEIPT_SCHEMA_VERSION = 1
-DECODED_CONTENT_INVENTORY_SCHEMA_ID = "palette.decoded_array_content_inventory"
-DECODED_CONTENT_INVENTORY_SCHEMA_VERSION = 1
 DECODED_PAYLOAD_CANONICALIZATION = "numpy_declared_dtype_shape_c_order_bytes_v1"
 PHYSICAL_PAYLOAD_CANONICALIZATION = "relative_path_size_sha256_v1"
 IMMUTABLE_METADATA_CANONICALIZATION = (
@@ -290,147 +288,6 @@ def decoded_payload_receipt_from_copy_report(
     """
 
     return _decoded_payload_record(copy_report)
-
-
-def decoded_content_inventory_from_copy_report(
-    copy_report: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Bind whole-array decoded hashes to one exact decoded-copy Merkle root."""
-
-    if copy_report.get("exact_full_decoded_content_hashes") is not True:
-        raise ValueError("Sharded copy lacks exact whole-array decoded hashes.")
-    decoded = _decoded_payload_record(copy_report)
-    decoded_by_path = {
-        str(record["path"]): record for record in decoded["arrays"]
-    }
-    raw_plans = copy_report.get("arrays")
-    if not isinstance(raw_plans, Sequence) or isinstance(raw_plans, (str, bytes)):
-        raise ValueError("Sharded copy lacks its array content-hash inventory.")
-    arrays: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw_plan in raw_plans:
-        if not isinstance(raw_plan, Mapping):
-            raise ValueError("Sharded copy content-hash record is malformed.")
-        path = raw_plan.get("path")
-        if type(path) is not str or path in seen or path not in decoded_by_path:
-            raise ValueError("Sharded copy content-hash path is invalid.")
-        seen.add(path)
-        decoded_record = decoded_by_path[path]
-        shape = raw_plan.get("shape")
-        normalized_shape = (
-            [int(value) for value in shape]
-            if isinstance(shape, Sequence) and not isinstance(shape, (str, bytes))
-            else None
-        )
-        content_bytes = raw_plan.get("decoded_content_bytes")
-        content_digest = raw_plan.get("decoded_content_sha256")
-        if (
-            raw_plan.get("dtype") != decoded_record["dtype"]
-            or normalized_shape != decoded_record["shape"]
-            or type(content_bytes) is not int
-            or content_bytes != decoded_record["decoded_bytes"]
-        ):
-            raise ValueError("Sharded copy whole-array identity or byte count changed.")
-        _require_sha256(content_digest, label="whole-array decoded content digest")
-        arrays.append(
-            {
-                "path": path,
-                "dtype": str(decoded_record["dtype"]),
-                "shape": list(decoded_record["shape"]),
-                "decoded_bytes": int(content_bytes),
-                "content_sha256": str(content_digest),
-            }
-        )
-    arrays.sort(key=lambda record: record["path"])
-    if set(decoded_by_path) != seen:
-        raise ValueError("Whole-array content hashes do not close decoded inventory.")
-    body = {
-        "schema_id": DECODED_CONTENT_INVENTORY_SCHEMA_ID,
-        "schema_version": DECODED_CONTENT_INVENTORY_SCHEMA_VERSION,
-        "canonicalization": DECODED_PAYLOAD_CANONICALIZATION,
-        "decoded_payload_root_sha256": decoded["root_sha256"],
-        "array_count": int(decoded["array_count"]),
-        "decoded_bytes": int(decoded["decoded_bytes"]),
-        "arrays": arrays,
-        "inventory_sha256": canonical_json_sha256(arrays),
-    }
-    return {**body, "record_sha256": canonical_json_sha256(body)}
-
-
-def canonical_decoded_content_inventory(value: Any) -> dict[str, Any]:
-    """Validate and canonicalize a whole-array decoded-content inventory."""
-
-    record = _canonical_copy(value, label="decoded array content inventory")
-    if not isinstance(record, dict):
-        raise ValueError("Decoded array content inventory must be an object.")
-    digest = record.pop("record_sha256", None)
-    expected = {
-        "schema_id",
-        "schema_version",
-        "canonicalization",
-        "decoded_payload_root_sha256",
-        "array_count",
-        "decoded_bytes",
-        "arrays",
-        "inventory_sha256",
-    }
-    arrays = record.get("arrays")
-    if (
-        set(record) != expected
-        or record.get("schema_id") != DECODED_CONTENT_INVENTORY_SCHEMA_ID
-        or record.get("schema_version") != DECODED_CONTENT_INVENTORY_SCHEMA_VERSION
-        or record.get("canonicalization") != DECODED_PAYLOAD_CANONICALIZATION
-        or type(record.get("array_count")) is not int
-        or record["array_count"] < 0
-        or type(record.get("decoded_bytes")) is not int
-        or record["decoded_bytes"] < 0
-        or not isinstance(arrays, list)
-        or len(arrays) != record["array_count"]
-        or type(digest) is not str
-    ):
-        raise ValueError("Decoded array content inventory fields are invalid.")
-    _require_sha256(
-        record.get("decoded_payload_root_sha256"),
-        label="decoded payload root",
-    )
-    _require_sha256(record.get("inventory_sha256"), label="content inventory root")
-    _require_sha256(digest, label="decoded content inventory record")
-    seen: set[str] = set()
-    for array in arrays:
-        if not isinstance(array, dict) or set(array) != {
-            "path",
-            "dtype",
-            "shape",
-            "decoded_bytes",
-            "content_sha256",
-        }:
-            raise ValueError("Decoded array content record fields are invalid.")
-        path = array.get("path")
-        shape = array.get("shape")
-        if (
-            type(path) is not str
-            or not path
-            or path in seen
-            or type(array.get("dtype")) is not str
-            or not array["dtype"]
-            or not isinstance(shape, list)
-            or any(type(item) is not int or item < 0 for item in shape)
-            or type(array.get("decoded_bytes")) is not int
-            or array["decoded_bytes"] < 0
-        ):
-            raise ValueError("Decoded array content record identity is invalid.")
-        _require_sha256(array.get("content_sha256"), label="array content digest")
-        seen.add(path)
-    if arrays != sorted(arrays, key=lambda item: item["path"]):
-        raise ValueError("Decoded array content records are not ordered.")
-    if (
-        record["decoded_bytes"]
-        != sum(int(array["decoded_bytes"]) for array in arrays)
-        or record["inventory_sha256"] != canonical_json_sha256(arrays)
-        or digest != canonical_json_sha256(record)
-    ):
-        raise ValueError("Decoded array content inventory digest is stale.")
-    return {**record, "record_sha256": digest}
 
 
 def _validate_decoded_payload_record(value: Any) -> dict[str, Any]:
@@ -907,8 +764,6 @@ def verify_payload_validation_receipt(
 
 
 __all__ = [
-    "DECODED_CONTENT_INVENTORY_SCHEMA_ID",
-    "DECODED_CONTENT_INVENTORY_SCHEMA_VERSION",
     "DECODED_PAYLOAD_CANONICALIZATION",
     "MERKLE_COMPOSITION",
     "IMMUTABLE_METADATA_CANONICALIZATION",
@@ -921,9 +776,7 @@ __all__ = [
     "build_payload_integrity_receipt",
     "build_payload_validation_receipt",
     "canonical_json_sha256",
-    "canonical_decoded_content_inventory",
     "canonical_payload_integrity_receipt",
-    "decoded_content_inventory_from_copy_report",
     "verify_payload_integrity_receipt",
     "verify_payload_validation_receipt",
 ]

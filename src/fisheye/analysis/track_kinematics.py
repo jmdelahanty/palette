@@ -154,7 +154,6 @@ from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.zarr_payload_receipt import (
     build_payload_validation_receipt,
-    canonical_decoded_content_inventory,
     canonical_payload_integrity_receipt,
     verify_payload_integrity_receipt,
     verify_payload_validation_receipt,
@@ -397,33 +396,17 @@ TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID = (
     "palette.track_motion_staged_scientific_validation"
 )
 TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION = 1
-TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2 = 2
 TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID = (
     "palette.track_motion_core_numeric_validator"
 )
 TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION = 1
-TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION_V2 = 2
-TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY_V1 = {
+TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY = {
     "schema_id": "palette.track_motion_staged_scientific_numerical_policy",
     "schema_version": 1,
     "scope": "all_tracks_full_core_numeric_derivation_and_summary_invariants",
     "payload_binding": "exact_decoded_copy_merkle_root",
     "publication_checks_retained": (
         "closed_inventory_semantic_attrs_payload_hashes_physical_scaling_aliases_domains"
-    ),
-}
-TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY = {
-    "schema_id": "palette.track_motion_staged_scientific_numerical_policy",
-    "schema_version": 2,
-    "scope": (
-        "all_tracks_full_core_numeric_derivation_summary_physical_scaling_"
-        "alias_and_bout_domain_invariants"
-    ),
-    "payload_binding": (
-        "exact_decoded_copy_merkle_root_plus_closed_whole_array_hash_inventory"
-    ),
-    "publication_checks_retained": (
-        "closed_inventory_semantic_attrs_authority_binding_and_selector_state"
     ),
 }
 TRACK_KINEMATICS_BINDING_VALIDATION_RECEIPT_ATTR = (
@@ -447,7 +430,6 @@ TRACK_KINEMATICS_BINDING_NUMERICAL_POLICY = {
 TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID = "palette.track_motion_full_validator"
 TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION = 1
 TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION = 2
-TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION_V2 = 3
 TRACK_MOTION_NUMERICAL_POLICY = {
     "schema_id": "palette.track_motion_numerical_policy",
     "schema_version": 1,
@@ -459,7 +441,7 @@ TRACK_MOTION_NUMERICAL_POLICY = {
     ),
     "integrity_after_validation": "exact_decoded_shards_plus_physical_payload_sha256",
 }
-TRACK_MOTION_RECEIPT_NUMERICAL_POLICY_V1 = {
+TRACK_MOTION_RECEIPT_NUMERICAL_POLICY = {
     "schema_id": "palette.track_motion_numerical_policy",
     "schema_version": 2,
     "scientific_validation": (
@@ -467,22 +449,6 @@ TRACK_MOTION_RECEIPT_NUMERICAL_POLICY_V1 = {
     ),
     "authoritative_publication_validation": (
         "closed_live_manifest_physical_scaling_domains_aliases_and_semantic_attrs"
-    ),
-    "floating_comparison": (
-        "persisted_dtype_exact_for_declared_aliases_and_versioned_tolerance_for_derivations"
-    ),
-    "integrity_after_validation": "exact_decoded_shards_plus_physical_payload_sha256",
-}
-TRACK_MOTION_RECEIPT_NUMERICAL_POLICY = {
-    "schema_id": "palette.track_motion_numerical_policy",
-    "schema_version": 3,
-    "scientific_validation": (
-        "staged_full_core_numeric_physical_scaling_alias_and_bout_domain_"
-        "invariants_bound_to_exact_decoded_payload"
-    ),
-    "authoritative_publication_validation": (
-        "closed_live_manifest_semantic_attrs_authority_binding_and_selector_state_"
-        "with_receipt_bound_whole_array_content_hashes"
     ),
     "floating_comparison": (
         "persisted_dtype_exact_for_declared_aliases_and_versioned_tolerance_for_derivations"
@@ -4362,7 +4328,6 @@ def _stage_array_payload_record(
     *,
     relative_ref: str,
     include_attrs: bool = False,
-    prevalidated_content: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     dtype = np.dtype(getattr(node, "dtype"))
     shape = tuple(int(item) for item in getattr(node, "shape"))
@@ -4378,38 +4343,13 @@ def _stage_array_payload_record(
             }
             for name, field in dtype.fields.items()
         ]
-    if prevalidated_content is None:
-        content_sha256 = array_payload_sha256(node)
-    else:
-        if set(prevalidated_content) != {
-            "path",
-            "dtype",
-            "shape",
-            "decoded_bytes",
-            "content_sha256",
-        }:
-            raise ValueError(
-                f"/{node.path} prevalidated content record is not closed."
-            )
-        expected_bytes = int(dtype.itemsize * math.prod(shape))
-        if (
-            prevalidated_content.get("path") != relative_ref
-            or prevalidated_content.get("dtype") != str(dtype)
-            or prevalidated_content.get("shape") != [int(item) for item in shape]
-            or prevalidated_content.get("decoded_bytes") != expected_bytes
-        ):
-            raise ValueError(
-                f"/{node.path} differs from its prevalidated decoded identity."
-            )
-        content_sha256 = str(prevalidated_content.get("content_sha256"))
-        _sha256_text(content_sha256, label=f"/{node.path} content sha256")
     record = {
         "relative_ref": relative_ref,
         "dtype": dtype.str,
         "dtype_fields": dtype_fields,
         "itemsize": int(dtype.itemsize),
         "shape": [int(item) for item in shape],
-        "content_sha256": content_sha256,
+        "content_sha256": array_payload_sha256(node),
     }
     if include_attrs:
         attrs = _motion_json_object(
@@ -8096,7 +8036,6 @@ def _motion_surface_record(
     second_identity_sha256: str,
     physical_authority_sha256: str | None,
     source_identity_domain: str,
-    prevalidated_content: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     contract = _motion_track_surface_contract(
         track_group,
@@ -8114,7 +8053,6 @@ def _motion_surface_record(
         node,
         relative_ref=relative_path,
         include_attrs=True,
-        prevalidated_content=prevalidated_content,
     )
     axis = contract["axis0_domain"]
     shape = record["shape"]
@@ -8856,143 +8794,6 @@ def _track_motion_decoded_payload_summary(value: Any) -> dict[str, Any]:
     )
 
 
-def _validate_staged_publication_value_contracts(
-    run_group: Any,
-    content_inventory: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Validate value-only manifest contracts on the exact staged payload."""
-
-    inventory = canonical_decoded_content_inventory(content_inventory)
-    records = {
-        str(record["path"]): record for record in inventory["arrays"]
-    }
-    live_nodes: dict[str, Any] = {
-        str(name): run_group[str(name)]
-        for name in run_group.array_keys()
-    }
-    for track_id, track_group in _live_track_groups(run_group):
-        for relative_path, node in _iter_track_array_nodes(track_group):
-            live_nodes[f"tracks/id_{track_id}/{relative_path}"] = node
-    if set(records) != set(live_nodes):
-        raise ValueError(
-            "Staged publication content inventory differs from live arrays."
-        )
-    for path, node in live_nodes.items():
-        record = records[path]
-        if (
-            record["dtype"] != str(node.dtype)
-            or record["shape"] != [int(value) for value in node.shape]
-        ):
-            raise ValueError(
-                f"Staged publication array {path!r} changed dtype or shape."
-            )
-
-    staging_manifest = run_group.attrs.get(
-        TRACK_KINEMATICS_STAGING_MANIFEST_ATTR
-    )
-    if not isinstance(staging_manifest, Mapping):
-        raise ValueError("Staged publication lacks its exact staging manifest.")
-    physical_record = staging_manifest.get("physical_authority")
-    scale_value: float | None = None
-    if physical_record is not None:
-        if not isinstance(physical_record, Mapping):
-            raise ValueError("Staged physical authority record is malformed.")
-        scale_value = float(physical_record.get("mm_per_pixel", float("nan")))
-        if not math.isfinite(scale_value) or scale_value <= 0:
-            raise ValueError("Staged physical authority has invalid mm_per_pixel.")
-
-    physical_surface_count = 0
-    alias_count = 0
-    bout_parents: dict[str, int] = {}
-    for track_id, track_group in _live_track_groups(run_group):
-        prefix = f"tracks/id_{track_id}/"
-        track_records = {
-            path[len(prefix) :]: record
-            for path, record in records.items()
-            if path.startswith(prefix)
-        }
-        for relative_path, record in track_records.items():
-            alias_target = _motion_alias_target(relative_path)
-            if alias_target is not None:
-                target = track_records.get(alias_target)
-                if target is None or any(
-                    record[field] != target[field]
-                    for field in ("dtype", "shape", "content_sha256")
-                ):
-                    raise ValueError(
-                        f"Staged alias {relative_path!r} differs from "
-                        f"{alias_target!r}."
-                    )
-                alias_count += 1
-
-            if relative_path.startswith("swim_bouts/"):
-                parent = relative_path.rsplit("/", 1)[0]
-                bout_domain = f"id_{track_id}/{parent}"
-                count = int(record["shape"][0])
-                prior = bout_parents.setdefault(bout_domain, count)
-                if prior != count:
-                    raise ValueError(
-                        f"Staged bout group {bout_domain!r} has misaligned fields."
-                    )
-
-            pixel_path = _motion_pixel_peer(relative_path)
-            if pixel_path is None:
-                continue
-            if scale_value is None:
-                raise ValueError(
-                    f"Staged physical surface {relative_path!r} lacks authority."
-                )
-            pixel_record = track_records.get(pixel_path)
-            if pixel_record is None or (
-                record["dtype"] != pixel_record["dtype"]
-                or record["shape"] != pixel_record["shape"]
-                or np.dtype(track_group[relative_path].dtype).kind != "f"
-            ):
-                raise ValueError(
-                    f"Staged physical surface {relative_path!r} lacks its pixel peer."
-                )
-            physical_values = np.array(
-                _relative_child(track_group, relative_path)[:],
-                copy=True,
-                order="C",
-            )
-            pixel_values = np.array(
-                _relative_child(track_group, pixel_path)[:],
-                copy=True,
-                order="C",
-            )
-            scale = np.asarray(scale_value, dtype=pixel_values.dtype)
-            with np.errstate(over="ignore", invalid="ignore"):
-                expected = np.asarray(
-                    pixel_values * scale,
-                    dtype=pixel_values.dtype,
-                )
-            if not np.array_equal(physical_values, expected, equal_nan=True):
-                raise ValueError(
-                    f"Staged physical surface {relative_path!r} is not the exact "
-                    "authoritative pixel scaling."
-                )
-            physical_surface_count += 1
-    if scale_value is not None and physical_surface_count == 0:
-        raise ValueError("Staged physical authority has no physical surfaces.")
-    return {
-        "schema_id": "palette.track_motion_staged_publication_value_validation",
-        "schema_version": 1,
-        "result": "valid",
-        "content_inventory_sha256": inventory["record_sha256"],
-        "array_count": int(inventory["array_count"]),
-        "alias_count": int(alias_count),
-        "physical_surface_count": int(physical_surface_count),
-        "bout_group_count": len(bout_parents),
-        "validated_contracts": [
-            "whole_array_decoded_content_sha256",
-            "exact_alias_payload_identity",
-            "exact_physical_mm_per_pixel_scaling_or_closed_absence",
-            "bout_axis0_domain_alignment",
-        ],
-    }
-
-
 def _canonical_track_motion_staged_scientific_validation(
     value: Any,
 ) -> dict[str, Any]:
@@ -9001,7 +8802,7 @@ def _canonical_track_motion_staged_scientific_validation(
         label="track staged scientific-validation receipt",
     )
     digest = record.pop("record_sha256", None)
-    base_expected = {
+    expected = {
         "schema_id",
         "schema_version",
         "receipt_role",
@@ -9013,10 +8814,6 @@ def _canonical_track_motion_staged_scientific_validation(
         "validated_tracks",
         "result",
     }
-    schema_version = record.get("schema_version")
-    expected = set(base_expected)
-    if schema_version == TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2:
-        expected.update({"decoded_content_inventory", "publication_value_validation"})
     if set(record) != expected:
         raise ValueError(
             "Track staged scientific-validation receipt inventory is not closed."
@@ -9027,42 +8824,29 @@ def _canonical_track_motion_staged_scientific_validation(
     if (
         record.get("schema_id")
         != TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID
-        or schema_version
-        not in {
-            TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION,
-            TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2,
-        }
+        or record.get("schema_version")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
         or record.get("receipt_role")
         != "scientific_derivation_validation_bound_to_exact_decoded_payload"
         or record.get("result") != "valid"
         or type(record.get("run_name")) is not str
         or not record["run_name"]
         or type(staging_digest) is not str
+        or validator
+        != {
+            "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID,
+            "schema_version": (
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
+            ),
+        }
+        or record.get("numerical_policy")
+        != TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
         or not isinstance(tracks, list)
         or not tracks
         or type(digest) is not str
     ):
         raise ValueError(
             "Track staged scientific-validation receipt is unsupported."
-        )
-    expected_validator_version = (
-        TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION_V2
-        if schema_version
-        == TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2
-        else TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
-    )
-    expected_policy = (
-        TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
-        if schema_version
-        == TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2
-        else TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY_V1
-    )
-    if validator != {
-        "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID,
-        "schema_version": expected_validator_version,
-    } or record.get("numerical_policy") != expected_policy:
-        raise ValueError(
-            "Track staged scientific validator or numerical policy is unsupported."
         )
     _sha256_text(staging_digest, label="track staging manifest sha256")
     _sha256_text(digest, label="track scientific-validation receipt sha256")
@@ -9078,60 +8862,6 @@ def _canonical_track_motion_staged_scientific_validation(
     }:
         raise ValueError("Track scientific decoded-payload summary is not closed.")
     _validate_track_motion_decoded_payload_summary(decoded_summary)
-    if schema_version == TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2:
-        content_inventory = canonical_decoded_content_inventory(
-            record.get("decoded_content_inventory")
-        )
-        value_validation = record.get("publication_value_validation")
-        expected_value_contracts = [
-            "whole_array_decoded_content_sha256",
-            "exact_alias_payload_identity",
-            "exact_physical_mm_per_pixel_scaling_or_closed_absence",
-            "bout_axis0_domain_alignment",
-        ]
-        if (
-            content_inventory["decoded_payload_root_sha256"]
-            != decoded_summary["root_sha256"]
-            or content_inventory["canonicalization"]
-            != decoded_summary["canonicalization"]
-            or content_inventory["array_count"] != decoded_summary["array_count"]
-            or content_inventory["decoded_bytes"] != decoded_summary["decoded_bytes"]
-            or not isinstance(value_validation, Mapping)
-            or set(value_validation)
-            != {
-                "schema_id",
-                "schema_version",
-                "result",
-                "content_inventory_sha256",
-                "array_count",
-                "alias_count",
-                "physical_surface_count",
-                "bout_group_count",
-                "validated_contracts",
-            }
-            or value_validation.get("schema_id")
-            != "palette.track_motion_staged_publication_value_validation"
-            or value_validation.get("schema_version") != 1
-            or value_validation.get("result") != "valid"
-            or value_validation.get("content_inventory_sha256")
-            != content_inventory["record_sha256"]
-            or value_validation.get("array_count")
-            != content_inventory["array_count"]
-            or any(
-                type(value_validation.get(name)) is not int
-                or value_validation[name] < 0
-                for name in (
-                    "alias_count",
-                    "physical_surface_count",
-                    "bout_group_count",
-                )
-            )
-            or value_validation.get("validated_contracts")
-            != expected_value_contracts
-        ):
-            raise ValueError(
-                "Track staged publication validation is not bound to decoded content."
-            )
     seen: set[int] = set()
     for track_record in tracks:
         if not isinstance(track_record, Mapping) or set(track_record) != {
@@ -9160,7 +8890,6 @@ def build_track_motion_staged_scientific_validation(
     run_group: Any,
     *,
     decoded_payload_receipt: Mapping[str, Any],
-    decoded_content_inventory: Mapping[str, Any] | None = None,
     run_name: str,
 ) -> dict[str, Any]:
     """Validate local numerical derivations once and bind them to copied values."""
@@ -9205,33 +8934,11 @@ def build_track_motion_staged_scientific_validation(
         or "\\" in run_name
     ):
         raise ValueError("Staged scientific validation requires one safe run name.")
-    receipt_schema_version = (
-        TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2
-        if decoded_content_inventory is not None
-        else TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
-    )
-    publication_value_validation = None
-    canonical_content_inventory = None
-    if decoded_content_inventory is not None:
-        canonical_content_inventory = canonical_decoded_content_inventory(
-            decoded_content_inventory
-        )
-        if (
-            canonical_content_inventory["decoded_payload_root_sha256"]
-            != decoded_summary["root_sha256"]
-            or canonical_content_inventory["canonicalization"]
-            != decoded_summary["canonicalization"]
-        ):
-            raise ValueError(
-                "Decoded content inventory names another copied payload."
-            )
-        publication_value_validation = _validate_staged_publication_value_contracts(
-            run_group,
-            canonical_content_inventory,
-        )
     body = {
         "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_ID,
-        "schema_version": receipt_schema_version,
+        "schema_version": (
+            TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
+        ),
         "receipt_role": (
             "scientific_derivation_validation_bound_to_exact_decoded_payload"
         ),
@@ -9241,22 +8948,15 @@ def build_track_motion_staged_scientific_validation(
         "validator": {
             "schema_id": TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_ID,
             "schema_version": (
-                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION_V2
-                if canonical_content_inventory is not None
-                else TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
+                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATOR_SCHEMA_VERSION
             ),
         },
         "numerical_policy": copy.deepcopy(
             TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY
-            if canonical_content_inventory is not None
-            else TRACK_MOTION_STAGED_SCIENTIFIC_NUMERICAL_POLICY_V1
         ),
         "validated_tracks": tracks,
         "result": "valid",
     }
-    if canonical_content_inventory is not None:
-        body["decoded_content_inventory"] = canonical_content_inventory
-        body["publication_value_validation"] = publication_value_validation
     return _canonical_track_motion_staged_scientific_validation(
         {**body, "record_sha256": _canonical_json_sha256(body)}
     )
@@ -9358,8 +9058,6 @@ def _build_track_motion_publication_manifest(
 ) -> dict[str, Any]:
     """Build and validate the exact live full-motion inventory."""
 
-    prevalidated_content_by_path: dict[str, Mapping[str, Any]] | None = None
-    consumed_prevalidated_paths: set[str] = set()
     if prevalidated_staged_scientific_validation is not None:
         prevalidated_staged_scientific_validation = (
             _canonical_track_motion_staged_scientific_validation(
@@ -9375,34 +9073,6 @@ def _build_track_motion_publication_manifest(
             raise ValueError(
                 "Full-motion manifest received an unpersisted scientific receipt."
             )
-        if (
-            prevalidated_staged_scientific_validation["schema_version"]
-            == TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2
-        ):
-            content_inventory = canonical_decoded_content_inventory(
-                prevalidated_staged_scientific_validation[
-                    "decoded_content_inventory"
-                ]
-            )
-            prevalidated_content_by_path = {
-                str(record["path"]): record
-                for record in content_inventory["arrays"]
-            }
-
-    def prevalidated_content(
-        inventory_path: str,
-        *,
-        manifest_relative_ref: str,
-    ) -> Mapping[str, Any] | None:
-        if prevalidated_content_by_path is None:
-            return None
-        record = prevalidated_content_by_path.get(inventory_path)
-        if record is None:
-            raise ValueError(
-                f"Full-motion receipt lacks array {inventory_path!r}."
-            )
-        consumed_prevalidated_paths.add(inventory_path)
-        return {**record, "path": manifest_relative_ref}
     if positions.run_group.path != run_group.path:
         raise ValueError("Position bindings and motion run paths disagree.")
     publication_schema_version = _track_motion_publication_schema_version(run_group)
@@ -9550,16 +9220,7 @@ def _build_track_motion_publication_manifest(
                 f"the controlled schema (missing={sorted(expected_paths - public_paths)!r}, "
                 f"extra={sorted(public_paths - expected_paths)!r})."
             )
-        second_relative_ref = f"tracks/id_{track_id}/second_indices"
-        second_content = prevalidated_content(
-            second_relative_ref,
-            manifest_relative_ref="second_indices",
-        )
-        second_digest = (
-            array_payload_sha256(track_group["second_indices"])
-            if second_content is None
-            else str(second_content["content_sha256"])
-        )
+        second_digest = array_payload_sha256(track_group["second_indices"])
         surfaces = {
             path: _motion_surface_record(
                 track_group,
@@ -9576,10 +9237,6 @@ def _build_track_motion_publication_manifest(
                 source_identity_domain=(
                     positions.source_temporal_authority.record.source_identity_domain
                 ),
-                prevalidated_content=prevalidated_content(
-                    f"tracks/id_{track_id}/{path}",
-                    manifest_relative_ref=path,
-                ),
             )
             for path, node in sorted(surface_nodes.items())
         }
@@ -9595,12 +9252,11 @@ def _build_track_motion_publication_manifest(
                 track_group,
                 track_id=track_id,
             )
-        if prevalidated_content_by_path is None:
-            _validate_motion_physical_values(
-                track_group,
-                surfaces,
-                physical_authority=positions.physical_authority,
-            )
+        _validate_motion_physical_values(
+            track_group,
+            surfaces,
+            physical_authority=positions.physical_authority,
+        )
         _validate_motion_alias_records(track_group, surfaces)
         _validate_motion_bout_domains(track_group, surfaces)
         track_records[f"id_{track_id}"] = {
@@ -9639,10 +9295,6 @@ def _build_track_motion_publication_manifest(
             node,
             relative_ref=name,
             include_attrs=True,
-            prevalidated_content=prevalidated_content(
-                name,
-                manifest_relative_ref=name,
-            ),
         )
         record.update(contract)
         if not record["shape"]:
@@ -9698,14 +9350,6 @@ def _build_track_motion_publication_manifest(
             run_group=run_group,
             local_array_records=absolute_run_arrays,
             manifest_context=manifest_context,
-        )
-
-    if (
-        prevalidated_content_by_path is not None
-        and consumed_prevalidated_paths != set(prevalidated_content_by_path)
-    ):
-        raise ValueError(
-            "Full-motion receipt contains arrays outside the closed live manifest."
         )
 
     manifest = {
@@ -12061,38 +11705,7 @@ def _persist_track_motion_payload_validation_receipt(
         raise ValueError(
             "Track payload integrity receipt names a different canonical run."
         )
-    canonical_staged = (
-        _canonical_track_motion_staged_scientific_validation(
-            staged_scientific_validation
-        )
-        if staged_scientific_validation is not None
-        else None
-    )
-    staged_schema_version = (
-        canonical_staged["schema_version"]
-        if canonical_staged is not None
-        else None
-    )
-    validator_schema_version = (
-        TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION_V2
-        if staged_schema_version
-        == TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2
-        else (
-            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
-            if canonical_staged is not None
-            else TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
-        )
-    )
-    numerical_policy = (
-        TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
-        if validator_schema_version
-        == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION_V2
-        else (
-            TRACK_MOTION_RECEIPT_NUMERICAL_POLICY_V1
-            if canonical_staged is not None
-            else TRACK_MOTION_NUMERICAL_POLICY
-        )
-    )
+    receipt_backed = staged_scientific_validation is not None
     validation = build_payload_validation_receipt(
         integrity,
         scientific_manifest_schema_id=TRACK_MOTION_PUBLICATION_MANIFEST_SCHEMA_ID,
@@ -12101,8 +11714,16 @@ def _persist_track_motion_payload_validation_receipt(
         ),
         scientific_manifest_sha256=sealed_motion.manifest_sha256,
         validator_schema_id=TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_ID,
-        validator_schema_version=validator_schema_version,
-        numerical_policy=numerical_policy,
+        validator_schema_version=(
+            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+            if receipt_backed
+            else TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION
+        ),
+        numerical_policy=(
+            TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
+            if receipt_backed
+            else TRACK_MOTION_NUMERICAL_POLICY
+        ),
     )
     run_group.attrs[TRACK_MOTION_PAYLOAD_INTEGRITY_RECEIPT_ATTR] = json_attr_safe(
         integrity
@@ -12197,28 +11818,19 @@ def verify_track_motion_payload_validation_receipt(
         if validator_version not in {
             TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION,
             TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION,
-            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION_V2,
         }:
             raise ValueError(
                 "Track payload validation receipt uses an unsupported validator."
             )
-        expected_numerical_policy = {
-            TRACK_MOTION_PAYLOAD_VALIDATOR_SCHEMA_VERSION: (
-                TRACK_MOTION_NUMERICAL_POLICY
-            ),
-            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION: (
-                TRACK_MOTION_RECEIPT_NUMERICAL_POLICY_V1
-            ),
-            TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION_V2: (
-                TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
-            ),
-        }[int(validator_version)]
+        expected_numerical_policy = (
+            TRACK_MOTION_RECEIPT_NUMERICAL_POLICY
+            if validator_version
+            == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
+            else TRACK_MOTION_NUMERICAL_POLICY
+        )
         if (
             validator_version
-            in {
-                TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION,
-                TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION_V2,
-            }
+            == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION
         ):
             staged_scientific = run_group.attrs.get(
                 TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_ATTR
@@ -12227,21 +11839,11 @@ def verify_track_motion_payload_validation_receipt(
                 raise ValueError(
                     "Receipt-backed track validation lacks staged scientific proof."
                 )
-            verified_staged = verify_track_motion_staged_scientific_validation(
+            verify_track_motion_staged_scientific_validation(
                 run_group,
                 staged_scientific,
                 payload_integrity_receipt=integrity,
             )
-            expected_staged_version = (
-                TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION_V2
-                if validator_version
-                == TRACK_MOTION_PAYLOAD_VALIDATOR_RECEIPT_SCHEMA_VERSION_V2
-                else TRACK_MOTION_STAGED_SCIENTIFIC_VALIDATION_SCHEMA_VERSION
-            )
-            if verified_staged["schema_version"] != expected_staged_version:
-                raise ValueError(
-                    "Track payload validator and staged receipt versions disagree."
-                )
         validation = verify_payload_validation_receipt(
             raw_validation,
             integrity_receipt=integrity,
