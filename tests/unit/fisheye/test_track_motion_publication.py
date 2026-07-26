@@ -2499,7 +2499,7 @@ def test_validator_rejects_omitted_tracking_arena_authorities(
 def test_validator_accepts_negative_unassigned_tracking_rows_outside_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, sealed, _physical = _clone_full_motion_run(
+    root, run, track, sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         source_rows=np.asarray([0], dtype=np.int64),
     )
@@ -2514,7 +2514,9 @@ def test_validator_accepts_negative_unassigned_tracking_rows_outside_inventory(
         keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
         tracking_group=tracking,
     )
-    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority.record
+    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = mod._thaw_motion_manifest(
+        authority.record
+    )
 
     _manifest, values = mod._validate_track_motion_input_authority(
         root,
@@ -2529,7 +2531,7 @@ def test_validator_accepts_negative_unassigned_tracking_rows_outside_inventory(
 def test_validator_rejects_nonnegative_tracking_row_missing_from_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, run, track, sealed, _physical = _clone_full_motion_run(
+    root, run, track, sealed, _physical = _fresh_full_motion_run(
         monkeypatch,
         source_rows=np.asarray([0], dtype=np.int64),
     )
@@ -2544,7 +2546,8 @@ def test_validator_rejects_nonnegative_tracking_row_missing_from_inventory(
         keypoint_row_key_node=root["keypoints_runs"]["kp_1"]["instance_key"],
         tracking_group=tracking,
     )
-    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority.record
+    authority_record = mod._thaw_motion_manifest(authority.record)
+    run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = authority_record
 
     with pytest.raises(ValueError, match="assigned track IDs disagree"):
         mod._validate_track_motion_input_authority(
@@ -2554,7 +2557,7 @@ def test_validator_rejects_nonnegative_tracking_row_missing_from_inventory(
             [(7, track)],
         )
 
-    missing_inventory = copy.deepcopy(original)
+    missing_inventory = copy.deepcopy(authority_record)
     missing_inventory["arena_inventory"] = None
     run.attrs[mod.TRACK_MOTION_INPUT_AUTHORITY_ATTR] = missing_inventory
     with pytest.raises(ValueError, match="omits the selected tracking arena inventory"):
