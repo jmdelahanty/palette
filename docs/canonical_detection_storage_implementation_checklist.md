@@ -250,6 +250,45 @@ must pass before Phase 5 changes `detect_yolo`.
 
 ### Checkpoint A — Paired Full-Analysis Fixtures
 
+Fixture scope is product-complete for the frozen Crimson workload, not a copy
+of every historical run. The versioned allowlist is
+[`canonical_detection_full_analysis_sleepyfish_cam2010095_v1.json`](../configs/benchmarks/canonical_detection_full_analysis_sleepyfish_cam2010095_v1.json).
+It currently selects 12 maintained product trees and 602 direct metadata files;
+the source archive's consolidated hierarchy has 6,534 entries. Every selected
+path and omission is therefore explicit and reviewable. Add a missing dependency
+to the allowlist only when a consumer requires it; do not silently widen the
+fixture to all historical runs.
+
+At the pinned Crimson commit, subject-mask initialization reads the selected
+run's `frame_indices`, `detection_indices`, `source_crop_row_ids`, optional
+`available_channels`, its source crop's frame/detection/ROI coordinate columns,
+and component contour stores. Pixel loading prefers `masks_roi`, then checks
+bitpacked and RLE compatibility surfaces. The fixture spec therefore validates
+that this selected run has dense `uint8 masks_roi (1169010,4,512,512)` with
+chunks `(256,1,512,512)` and top-level `bytes` plus Zstandard codecs, and that
+`mask_bitpacked` and `mask_rle` are absent. The builder copies that run unchanged;
+mask optimization is intentionally outside this detection-layout comparison.
+
+Plan mode is the default and performs no payload writes:
+
+```bash
+scripts/py -m fisheye.diagnostics.build_canonical_detection_full_analysis_fixtures \
+  --spec configs/benchmarks/canonical_detection_full_analysis_sleepyfish_cam2010095_v1.json \
+  --benchmark-root /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks \
+  --destination /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/canonical_detection_storage/full_analysis/sleepyfish_cam2010095_v1
+```
+
+Run `--apply` only from a clean, commit-pinned cluster deployment after reviewing
+the complete plan. Apply mode requires
+`--expected-palette-commit <full-40-character-commit>` and an existing
+node-local `--scratch-root`; it refuses a dirty or mismatched checkout. Assembly,
+consolidation, and validation happen on scratch. The completed pair is copied
+back to a fresh shared-storage incomplete sibling, content-verified, opened
+through direct and consolidated metadata, frozen, and atomically renamed. The
+implementation probes reflink isolation only between the new incomplete
+benchmark base and its sibling; it never reflinks or hardlinks a production
+source. `--pair-copy-mode copy` forces an ordinary independent scratch copy.
+
 Frozen Crimson dependency:
 
 - [x] Pin the fixture contract to Crimson commit
@@ -267,67 +306,70 @@ Fixture input and safety plan:
 
 - [ ] Record the maintained Sleepyfish source-archive metadata fingerprint
       before any copy.
-- [ ] Enumerate the exact selected nondetection runs required for refined
+- [x] Enumerate the exact selected nondetection runs required for refined
       keypoints, refined subject masks, subject shape, eye geometry, motion,
       eye-angle and tail-kinematics timelines, and crop geometry.
-- [ ] Confirm the exact refined-subject-mask arrays opened by Crimson before
+- [x] Confirm the exact refined-subject-mask arrays opened by Crimson before
       copying the selected dense run.
-- [ ] Record that the current selected subject-mask run stores unsharded dense
+- [x] Record and validate that the current selected subject-mask run stores unsharded dense
       `uint8 masks_roi` with chunks `(256,1,512,512)`, lacks a compact mask
       cache, and is not silently optimized as part of the detection comparison.
 - [ ] Probe server-side reflink/clone and hardlink behavior using disposable
       benchmark files only.
-- [ ] Never reflink, hardlink, chmod, or otherwise share mutable inode state
+- [x] Never reflink, hardlink, chmod, or otherwise share mutable inode state
       directly with a production archive.
-- [ ] If physical sharing is used, create one independent immutable benchmark
+- [x] If physical sharing is used, create one independent immutable benchmark
       base first and share only between the two benchmark fixtures; disclose
       that relationship in both manifests.
-- [ ] Fall back to verified ordinary copies if safe clone/link semantics are
+- [x] Fall back to verified ordinary copies if safe clone/link semantics are
       unavailable or would change the benchmark interpretation.
 
 Builder implementation:
 
-- [ ] Add separate plan and apply modes; plan mode performs no payload writes.
-- [ ] Accept only a fresh destination below
+- [x] Add separate plan and apply modes; plan mode performs no payload writes.
+- [x] Accept only a fresh destination below
       `.palette_benchmarks/canonical_detection_storage/full_analysis`.
-- [ ] Reject production recording, registry, selector, training, and existing
+- [x] Reject production recording, registry, selector, training, and existing
       destination paths.
-- [ ] Stage each archive under a unique visibly incomplete sibling and install
+- [x] Stage each archive under a unique visibly incomplete sibling and install
       it only after validation.
-- [ ] Preserve the source-video association without copying or transcoding the
+- [x] Assemble and validate on node-local scratch, then copy and verify the
+      completed pair back to shared benchmark storage before atomic install.
+- [x] Preserve the source-video association without copying or transcoding the
       video.
-- [ ] Copy only the maintained required nondetection selections, their parent
+- [x] Copy only the maintained required nondetection selections, their parent
       group envelopes, and required archive metadata—not every historical run.
-- [ ] Install the regular and hybrid candidate trees under the same exact
+- [x] Install the regular and hybrid candidate trees under the same exact
       canonical detection run name.
-- [ ] Mark both roots `benchmark_only=true`, `canonical=false`,
+- [x] Mark both roots `benchmark_only=true`, `canonical=false`,
       `registry_registered=false`, and `selector_eligible=false`.
-- [ ] Permit benchmark-local selectors only; the Crimson invocation must still
+- [x] Permit benchmark-local selectors only; the Crimson invocation must still
       supply `--detection-run` explicitly.
-- [ ] Generate and validate inline Zarr v3 consolidated metadata after the
+- [x] Generate and validate inline Zarr v3 consolidated metadata after the
       complete direct-metadata tree is installed.
-- [ ] Require consolidated and direct declarations to agree for the run and all
+- [x] Require consolidated and direct declarations to agree for the run and all
       nine detection arrays.
-- [ ] Freeze successful fixture trees read-only and preserve failed attempts as
+- [x] Freeze successful fixture trees read-only and preserve failed attempts as
       explicitly incomplete evidence or remove them only through an explicit
       cleanup command.
 
 Pair validation and manifest:
 
-- [ ] Validate the nine exact canonical array dtypes and shapes.
-- [ ] Validate offsets start at zero, are nondecreasing, have shape `(F+1,)`,
+- [x] Validate the nine exact canonical array dtypes and shapes.
+- [x] Validate offsets start at zero, are nondecreasing, have shape `(F+1,)`,
       and terminate at `N`.
-- [ ] Validate decoded detection values and array fingerprints are identical
+- [x] Validate decoded detection values and array fingerprints are identical
       between regular and hybrid fixtures.
-- [ ] Validate all included nondetection direct metadata and payload bytes are
+- [x] Validate all included nondetection direct metadata and payload bytes are
       identical between fixtures.
-- [ ] Normalize consolidated inventories and prove only detection physical
+- [x] Normalize consolidated inventories and prove only detection physical
       layout declarations and necessarily regenerated consolidated bytes differ.
-- [ ] Record source archive, video, Palette commit, Crimson contract commit and
+- [x] Record source archive, video, Palette commit, Crimson contract commit and
       digest, candidate fingerprints, copy/clone method, inventories, and
       validation results in each fixture manifest.
-- [ ] Recheck the maintained source fingerprint after publication.
-- [ ] Confirm zero registry, production-selector, and training-artifact updates.
+- [x] Recheck the maintained source fingerprint immediately before atomic
+      publication.
+- [x] Confirm zero registry, production-selector, and training-artifact updates.
 
 Publication exit gate:
 

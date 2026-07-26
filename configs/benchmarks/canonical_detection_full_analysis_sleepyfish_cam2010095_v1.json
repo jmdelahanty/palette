@@ -1,0 +1,156 @@
+{
+  "schema_id": "palette.canonical_detection_full_analysis_fixture_spec",
+  "schema_version": 1,
+  "fixture_id": "sleepyfish_cam2010095_v1",
+  "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010095",
+  "source_recording": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095",
+  "source_archive": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_analysis.zarr",
+  "source_video": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/cams/Cam2010095_sleepyfish_2026_05_05_17_45_30_cam2010095.mp4",
+  "source_video_relative_path": "cams/Cam2010095_sleepyfish_2026_05_05_17_45_30_cam2010095.mp4",
+  "detection_run_name": "crimson_storage_fixture_sleepyfish_cam2010095_v1",
+  "source_expectations": {
+    "camera_serials": [
+      "2010095"
+    ],
+    "fps": 30.0,
+    "n_frames": 1188000,
+    "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010095",
+    "source_video_height": 4512,
+    "source_video_total_frames": 1188000,
+    "source_video_width": 4512
+  },
+  "selected_products": [
+    {
+      "product": "raw_video_association",
+      "path": "raw_video"
+    },
+    {
+      "product": "acquisition_camera_authority",
+      "path": "analysis/acquisition_camera_frames/2010095"
+    },
+    {
+      "product": "calibration",
+      "path": "analysis/calibration"
+    },
+    {
+      "product": "coordinate_frames",
+      "path": "analysis/coordinate_frames"
+    },
+    {
+      "product": "refined_keypoints",
+      "path": "refined_keypoints_runs/refined_keypoints_sleepyfish_kp_allclips_sharded_20260715_01"
+    },
+    {
+      "product": "refined_subject_masks",
+      "path": "refined_subject_masks_runs/refined_subject_masks_sleepyfish_full_collection_canary_20260711_02"
+    },
+    {
+      "product": "keypoint_crop_geometry",
+      "path": "crop_runs/crop_proxy_sleepyfish_kp_allclips_20260708_01_collection"
+    },
+    {
+      "product": "subject_mask_crop_geometry",
+      "path": "crop_runs/crop_proxy_sleepyfish_sm_allclips_20260708_02_collection"
+    },
+    {
+      "product": "subject_shape",
+      "path": "analysis/subject_shape_runs/subject_shape_materializer_canary_20260715_01"
+    },
+    {
+      "product": "eye_geometry_and_angle",
+      "path": "analysis/eye_angle_runs/eye_angles_sleepyfish_semantic16_20260717_01"
+    },
+    {
+      "product": "tail_kinematics",
+      "path": "analysis/tail_kinematics_runs/tail_kinematics_hardened_w2_canary_20260715_01"
+    },
+    {
+      "product": "motion_timeline",
+      "path": "analysis/track_kinematics_runs/offline/track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003"
+    }
+  ],
+  "node_expectations": [
+    {
+      "path": "refined_subject_masks_runs/refined_subject_masks_sleepyfish_full_collection_canary_20260711_02/masks_roi",
+      "zarr_format": 3,
+      "node_type": "array",
+      "shape": [
+        1169010,
+        4,
+        512,
+        512
+      ],
+      "data_type": "uint8",
+      "chunk_shape": [
+        256,
+        1,
+        512,
+        512
+      ],
+      "codec_names": [
+        "bytes",
+        "zstd"
+      ]
+    },
+    {
+      "path": "refined_subject_masks_runs/refined_subject_masks_sleepyfish_full_collection_canary_20260711_02/mask_bitpacked",
+      "absent": true
+    },
+    {
+      "path": "refined_subject_masks_runs/refined_subject_masks_sleepyfish_full_collection_canary_20260711_02/mask_rle",
+      "absent": true
+    }
+  ],
+  "selector_overrides": {
+    "crop_runs": {
+      "latest": "crop_proxy_sleepyfish_kp_allclips_20260708_01_collection",
+      "latest_complete": "crop_proxy_sleepyfish_kp_allclips_20260708_01_collection"
+    },
+    "refined_keypoints_runs": {
+      "latest": "refined_keypoints_sleepyfish_kp_allclips_sharded_20260715_01",
+      "latest_complete": "refined_keypoints_sleepyfish_kp_allclips_sharded_20260715_01"
+    },
+    "refined_subject_masks_runs": {
+      "latest": "refined_subject_masks_sleepyfish_full_collection_canary_20260711_02",
+      "latest_complete": "refined_subject_masks_sleepyfish_full_collection_canary_20260711_02",
+      "refined_subject_mask_review_status_latest": "refined_subject_masks_sleepyfish_full_collection_canary_20260711_02"
+    },
+    "analysis/subject_shape_runs": {
+      "latest": "subject_shape_materializer_canary_20260715_01",
+      "latest_complete": "subject_shape_materializer_canary_20260715_01"
+    },
+    "analysis/eye_angle_runs": {
+      "latest": "eye_angles_sleepyfish_semantic16_20260717_01",
+      "latest_complete": "eye_angles_sleepyfish_semantic16_20260717_01"
+    },
+    "analysis/tail_kinematics_runs": {
+      "latest": "tail_kinematics_hardened_w2_canary_20260715_01",
+      "latest_complete": "tail_kinematics_hardened_w2_canary_20260715_01"
+    },
+    "analysis/track_kinematics_runs": {
+      "latest": "offline/track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003",
+      "latest_complete": "offline/track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003",
+      "latest_offline": "track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003"
+    },
+    "analysis/track_kinematics_runs/offline": {
+      "latest": "track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003"
+    }
+  },
+  "candidates": {
+    "regular": {
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/canonical_detection_storage/workflows/sleepyfish_det_storage_access_aware_full_20260724_03/candidates/sleepyfish_det_storage_access_aware_full_20260724_03/frames_full/repetition_000/frames_full__regular__chunk_1048576__1d67be02d6c9.zarr",
+      "expected_profile_id": "published_http_v1__benchmark_regular__chunk_1048576__shard_33554432"
+    },
+    "hybrid": {
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/canonical_detection_storage/workflows/sleepyfish_det_storage_access_aware_full_20260724_03/candidates/sleepyfish_det_storage_access_aware_full_20260724_03/frames_full/repetition_000/frames_full__sharded__chunk_131072__eager_chunk_1048576__shard_8388608__3224926babc9.zarr",
+      "expected_profile_id": "published_http_v1__benchmark_sharded__chunk_131072__eager_chunk_1048576__shard_8388608"
+    }
+  },
+  "crimson_contract": {
+    "repository": "https://github.com/jmdelahanty/crimson",
+    "branch": "agent/phase5o4-full-analysis-fixture-contract",
+    "commit": "dadd9d779f0737c9643f15e3831a7c514bf99665",
+    "document": "docs/crimson_macos_phase5o4_full_analysis_fixture_contract.md",
+    "document_sha256": "aa64a94de7096b6a22e53d76357a619ca92bc5296b38f0549202fd67aee36a86"
+  }
+}
