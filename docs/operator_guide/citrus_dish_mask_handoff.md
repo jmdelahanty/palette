@@ -1,5 +1,14 @@
 # Citrus/Orange Agent Handoff: Runtime Dish Mask Creation
 
+> **Historical compatibility design.** This document describes the earlier
+> proposal to pass a dish mask through ad hoc H5 attributes. New Orange/Citrus
+> recordings use checksummed recording-bound geometry contracts, schema-v2
+> dish-top-rim observations, and runtime-registration evidence. The active
+> Palette target design is
+> [Recording-Bound Geometry Import and Independent Validation](../recording_bound_geometry_import_and_validation_design.md).
+> Keep this document only for interpreting or recovering legacy inputs; do not
+> extend its H5-attribute surface for new production workflows.
+
 This document is a prompt/reference for Citrus and Orange data acquisition
 agents. It describes how Palette currently creates and consumes dish masks, and
 what acquisition should write into H5 output so Palette can skip the manual
