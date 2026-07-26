@@ -309,12 +309,35 @@ Implementation:
 - [x] Cover multi-detection frames, `F+1` offsets, frame/row arrays, dense
       masks, a per-second timeline, CSR points, source immutability, and paired
       equivalence in a focused real-Zarr test.
-- [ ] Run the real-source plan from a clean commit-pinned deployment.
-- [ ] Publish the immutable 2,048-frame `regular.zarr` and `hybrid.zarr` pair
+- [x] Run the real-source plan from a clean commit-pinned deployment.
+- [x] Publish the immutable 2,048-frame `regular.zarr` and `hybrid.zarr` pair
       through node-local scratch and provide both paths and manifests to
       Crimson.
 - [ ] Run Crimson's quick schema/open/readiness/overlay/cancellation gate using
       only frame IDs in `[0, 2048)`.
+
+Palette publication completed on 2026-07-26 from commit
+`4bf96646f873517bbcf921f78af151b41ce0ed78` in LSF job `153174098`. The
+immutable pair is at
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/canonical_detection_storage/full_analysis/sleepyfish_cam2010095_integration_2048_v1`.
+Its `pair_manifest.json`, per-layout manifests, and `publication_receipt.json`
+are the handoff authorities. The job completed in 3 minutes 7 seconds with a
+670,112 KiB peak RSS. The pair contains 507 exact selected logical array
+slices (2,178,127,952 logical bytes per layout) in approximately 104.6 MB of
+shared files across both layouts. Each layout passed strict JSON,
+direct/consolidated metadata agreement, source-postcopy logical hashing, and
+row/CSR relationship validation. The only regular/hybrid physical metadata
+differences are the canonical detection run group and its nine contract
+arrays; all nondetection consolidated metadata and decoded detection values
+match exactly.
+
+An earlier bounded attempt, LSF job `153174091` at commit `b99c554a`, built and
+validated both scratch stores but failed the paired gate because equivalent
+relationship path lists inherited different filesystem iteration order. No
+final destination was installed. Its failed-run record and incomplete evidence
+remain preserved; commit `4bf96646` canonicalizes those evidence lists and adds
+the regression assertion. This was an evidence-ordering defect, not a payload
+or relationship defect.
 
 Integration exit gate:
 
