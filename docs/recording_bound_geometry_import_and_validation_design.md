@@ -1,7 +1,7 @@
 # Recording-Bound Geometry Import and Independent Validation Design
 <!-- contract-meta
-version: 2
-status: phases-0-through-2-implemented
+version: 3
+status: phases-0-through-3-implemented
 last_verified: 2026-07-26
 -->
 
@@ -13,12 +13,13 @@ acquisition evidence, normalized geometry candidates, independent fitting from
 recorded imagery, comparison and review, operational selection, detection
 gating, registry reporting, and staging cleanup.
 
-The design is approved. Phases 0 through 2 are implemented: Palette can
-preserve and verify the exact recording-local bundle during organization, and
-the shared read-only normalization boundary supports strict Orange-folder and
-Citrus-H5 adapters. Candidate publication, independent fitting, comparison,
+The design is approved. Phases 0 through 3 are implemented: Palette can
+preserve and verify the exact recording-local bundle during organization; the
+shared read-only normalization boundary supports strict Orange-folder and
+Citrus-H5 adapters; and verified acquisition geometry can be published as an
+immutable, candidate-only analysis run. Independent fitting, comparison,
 selection, detection gating, registry projection, and cleanup remain future
-phases and are not activated by the loader.
+phases and are not activated by the loader or candidate publisher.
 
 The implementation lives in `fisheye.shared.recording_geometry`. Organized
 recordings retain the fixed version-1 subtree at:
@@ -521,6 +522,23 @@ renames it, completes it, and only then marks it readable. Immediately after
 the rename it revalidates the recovery receipt, Orange contract, and persisted
 source-camera coordinate authority. A source change aborts publication rather
 than publishing a candidate bound to mixed evidence.
+
+The production checkpoint on 2026-07-26 revalidated both affected July 22
+Batman session bundles against all eight recording targets. The recovery chain
+contains eight verified immutable receipts and eight complete acquisition
+candidates: one for each camera/arena in the `15:44:40Z` and `16:15:04Z`
+four-arena batches. Every candidate remained `not_selected`; no `latest` or
+`latest_complete` pointer, compatibility `dish_mask`, or detection gate was
+written. The copied acquisition snapshots remained byte-identical to their
+staging authorities. Staging inputs were deliberately retained pending the
+independent-fit and comparison phase.
+
+Candidate rereads preserve the original creation-time Git, software, host, and
+runtime provenance. Validation across later Palette versions compares the
+stable publication contract—command, configuration hash, parameters, input
+run IDs, and input artifact identities and digests—rather than incorrectly
+requiring the validator's current runtime provenance to equal the historical
+producer context.
 
 Each candidate records:
 

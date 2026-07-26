@@ -468,6 +468,8 @@ def validate_arena_geometry_candidate_run(
         attrs = group.attrs
         expected = _candidate_attrs(expected_plan)
         for name, value in expected.items():
+            if name == "run_provenance":
+                continue
             if attrs.get(name) != value:
                 errors.append(f"{name} mismatch")
         record = attrs.get("candidate_record")
@@ -483,6 +485,18 @@ def validate_arena_geometry_candidate_run(
         provenance = validate_run_provenance(attrs.get("run_provenance"))
         if not provenance.valid:
             errors.extend(f"run provenance: {item}" for item in provenance.errors)
+        else:
+            expected_provenance = expected_plan.run_provenance
+            persisted_provenance = provenance.normalized or {}
+            for name in (
+                "command",
+                "config_hash",
+                "params",
+                "input_run_ids",
+                "input_artifacts",
+            ):
+                if persisted_provenance.get(name) != expected_provenance.get(name):
+                    errors.append(f"run provenance {name} mismatch")
         if list(group.array_keys()) or list(group.group_keys()):
             errors.append("candidate run must be metadata-only")
         status = attrs.get("palette_run_completion_status")
