@@ -2,11 +2,14 @@
 
 Date anchored: 2026-07-19
 
-Status: branch-local future-normal contract for Palette commit `93177ed5`. The
-scoped Palette producer/strict reader passed independent review and the 101/101
-focused suite, but canonical-v2 is not deployed to current registry archives,
-no authoritative cross-repository contract is merged, and Crimson is not
-implemented for this future-normal track-motion boundary.
+Status: the Palette producer and strict-reader implementation through
+`a49a4f98` was integrated onto the current `sun` baseline by merge commit
+`9d24fd0c`. The active Sleepyfish acceptance run
+`track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003`
+passed the independent exhaustive public reader over all 104 motion surfaces.
+The Palette boundary is therefore production-accepted. Crimson consumer code
+and an authoritative cross-repository contract are still future work; this
+document defines that consumer boundary without claiming Crimson deployment.
 
 Purpose: define the Palette-side future-normal read contract Crimson should use
 for motion traces, swim-bout overlays, and per-bout metrics. This is the

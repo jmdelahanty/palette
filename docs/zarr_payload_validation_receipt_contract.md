@@ -1,5 +1,25 @@
 # Zarr payload integrity and validation receipts
 
+## Current production disposition
+
+As of 2026-07-25, the safe track-kinematics producer and strict reader through
+Palette implementation commit `a49a4f98` are integrated onto `sun` by merge
+commit `9d24fd0c`. The accepted active Sleepyfish run is
+`track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003`.
+LSF job `153172604` published it, and independent exhaustive-reader job
+`153172608` accepted its one track, 104 public motion surfaces, and manifest
+SHA-256 `b5b5561c9dd2cc559ae91425c382c79cbdfcc1020f0c5e2a4c872921e1d8fe13`.
+
+The later whole-array manifest-receipt shortcut is not part of this contract.
+Independent reader job `153173486` rejected that experiment, recovery job
+`153173488` disarmed it and restored the accepted run's selectors, and the code
+was removed before production integration. See
+[`diagnostics/track_manifest_receipt_canary_2026-07-25.md`](diagnostics/track_manifest_receipt_canary_2026-07-25.md).
+
+The workflow submission default is four CPU slots. This resource default does
+not alter the scientific, integrity, binding, rollback, or reader contracts
+defined below.
+
 Status: production-scale canary validated; guarded track publisher pilot
 Schema versions: `palette.zarr_payload_integrity_receipt` v1 and
 `palette.zarr_payload_validation_receipt` v1
