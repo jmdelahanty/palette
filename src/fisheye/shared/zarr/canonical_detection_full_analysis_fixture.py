@@ -2505,9 +2505,13 @@ def _validate_integration_row_relationships(
         "frame_count_reference": window.frame_counts_path,
         "frame_index_reference": window.frame_indices_path,
         "frame_counts_exact": True,
-        "observation_frame_identity_paths": observation_frame_paths,
-        "frame_count_paths": frame_count_paths,
-        "csr_group_paths": csr_paths,
+        # Directory iteration order is not a logical property of an archive and
+        # may differ after the regular tree is cloned and its detection run is
+        # rewritten with a different physical layout.  Keep relationship
+        # evidence canonical so equivalent stores compare and hash identically.
+        "observation_frame_identity_paths": sorted(observation_frame_paths),
+        "frame_count_paths": sorted(frame_count_paths),
+        "csr_group_paths": sorted(csr_paths),
         "all_relationships_valid": True,
     }
 

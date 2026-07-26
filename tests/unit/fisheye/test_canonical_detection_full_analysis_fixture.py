@@ -468,6 +468,13 @@ def test_publish_builds_bounded_integration_pair_with_exact_prefixes(
         pair_manifest = json.loads(
             (destination / "pair_manifest.json").read_text(encoding="utf-8")
         )
+        relationships = pair_manifest["row_relationship_validation"]
+        for path_key in (
+            "observation_frame_identity_paths",
+            "frame_count_paths",
+            "csr_group_paths",
+        ):
+            assert relationships[path_key] == sorted(relationships[path_key])
         normalizations = pair_manifest["logical_slice_manifest"][
             "nonfinite_normalizations"
         ]
