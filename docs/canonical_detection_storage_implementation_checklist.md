@@ -289,6 +289,21 @@ implementation probes reflink isolation only between the new incomplete
 benchmark base and its sibling; it never reflinks or hardlinks a production
 source. `--pair-copy-mode copy` forces an ordinary independent scratch copy.
 
+Use the LSF wrapper for the node-local preflight and publication job. It is
+render-only by default, records the exact commit, scratch capacity, reflink
+isolation, resource usage, and job status, and preserves scratch evidence after
+a failed publication:
+
+```bash
+scripts/submit_canonical_detection_full_analysis_fixture_bsub.sh \
+  --spec configs/benchmarks/canonical_detection_full_analysis_sleepyfish_cam2010095_v1.json \
+  --benchmark-root /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks \
+  --destination /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/canonical_detection_storage/full_analysis/sleepyfish_cam2010095_v1 \
+  --run-id sleepyfish_cam2010095_v1_<commit> \
+  --palette-repo <commit-pinned-groups-worktree> \
+  --preflight-only
+```
+
 Frozen Crimson dependency:
 
 - [x] Pin the fixture contract to Crimson commit
