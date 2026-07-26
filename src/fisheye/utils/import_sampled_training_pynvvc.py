@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -19,6 +19,7 @@ import torch.nn.functional as F
 import yaml
 import zarr
 
+from fisheye.shared.acquisition_frame_clock import import_acquisition_frame_clock
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.import_profile_contract import (
     IMPORT_PROFILE_SCHEMA_ID,
@@ -465,15 +466,6 @@ def import_sampled_training_pynvvc(
             chunks=(min(1000, len(frame_indices)),),
             overwrite=True,
         )
-        raw.create_array(
-            "timestamps",
-            shape=(len(frame_indices),),
-            chunks=(min(1000, len(frame_indices)),),
-            dtype="float64",
-            fill_value=float("nan"),
-            compressors=[],
-            overwrite=True,
-        )
         _write_attrs(
             root,
             raw,
@@ -493,6 +485,44 @@ def import_sampled_training_pynvvc(
             gpu_id=int(gpu_id),
             created_at_utc=created_at,
         )
+        clock = None
+        if recording_dir is not None and camera_id:
+            clock = import_acquisition_frame_clock(
+                root,
+                recording_dir=recording_dir,
+                camera_id=str(camera_id),
+                video_path=video_path,
+                expected_frame_count=int(source_frame_count),
+            )
+        else:
+            root.attrs.update(
+                {
+                    "acquisition_frame_clock_available": False,
+                    "acquisition_frame_clock_status": (
+                        "unavailable_missing_recording_or_camera_context"
+                    ),
+                }
+            )
+        if clock is None:
+            raw.attrs.update(
+                {
+                    "source_acquisition_frame_clock_available": False,
+                    "source_acquisition_frame_clock_status": root.attrs.get(
+                        "acquisition_frame_clock_status"
+                    ),
+                }
+            )
+        else:
+            raw.attrs.update(
+                {
+                    "source_acquisition_frame_clock_available": True,
+                    "source_acquisition_frame_clock_ref": clock.group_path,
+                    "source_acquisition_frame_clock_sha256": clock.record_sha256,
+                    "source_acquisition_frame_clock_join": (
+                        "raw_video/original_frame_indices -> parent_frame_index"
+                    ),
+                }
+            )
 
         def flush() -> None:
             nonlocal batch_start, full_batch, ds_batch

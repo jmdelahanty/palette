@@ -23,8 +23,8 @@ scripts/py -m fisheye.utils.check_import_profile /path/to/archive.zarr
 
 | Profile | Active writer authority | Required bootstrap surface | Allowed omissions | Frame universe |
 | --- | --- | --- | --- | --- |
-| `metadata_only_analysis` | `fisheye.utils.import_recording_analysis` (`ensure_analysis_archive` plus acquisition-metadata publication) | `raw_video/`; canonical source-video locator; `import_method`, `import_stage`, positive `total_frames`, and positive `fps` across root/`raw_video` attrs | All frame arrays and all unexecuted stage/run families | Acquisition video frames described by `source_video_metadata`; no stored-frame row domain exists until a later artifact creates one |
-| `sampled_training_pynvvc_luma` | `fisheye.utils.import_sampled_training_pynvvc` | `raw_video/images_full`, `raw_video/original_frame_indices`; source-video locator; PyNvVC import/decode/pixel-contract attrs; positive source frame count and frame step | Downsampled pixels, stimulus runs, and all later analysis families | Stored row `i` maps to acquisition frame `original_frame_indices[i]`; stored row count is not the acquisition frame count |
+| `metadata_only_analysis` | `fisheye.utils.import_recording_analysis` (`ensure_analysis_archive` plus acquisition-metadata publication) | `raw_video/`; canonical source-video locator; `import_method`, `import_stage`, positive `total_frames`, and positive `fps` across root/`raw_video` attrs | All frame arrays, acquisition clock when no camera clock source exists, and all unexecuted stage/run families | Acquisition video frames described by `source_video_metadata`; no stored-frame row domain exists until a later artifact creates one |
+| `sampled_training_pynvvc_luma` | `fisheye.utils.import_sampled_training_pynvvc` | `raw_video/images_full`, `raw_video/original_frame_indices`; source-video locator; PyNvVC import/decode/pixel-contract attrs; positive source frame count and frame step | Downsampled pixels, acquisition clock when no camera clock source exists, stimulus runs, and all later analysis families | Stored row `i` maps to acquisition frame `original_frame_indices[i]`; stored row count is not the acquisition frame count |
 | `legacy_decord_training_or_full` | None; historical read compatibility only | Classified from historical attrs and stored pixel arrays | No new writes, extensions, or backfills are supported | Interpret only through the persisted historical frame mapping/attrs; regenerate with PyNvVC for a new canonical artifact |
 
 The classifier reports two different severities:
@@ -65,6 +65,10 @@ look like a fully processed one.
 - `experiment_context_status_detail` *(optional human-readable explanation
   when context is absent or degraded)*
 - `source_h5`, `source_h5_path` *(when `experiment_context_source == "h5"`)*
+- `acquisition_frame_clock_available`, `acquisition_frame_clock_status`
+- `acquisition_frame_clock_ref`, `acquisition_frame_clock_sha256`,
+  `acquisition_frame_clock_camera_id`, `acquisition_frame_clock_row_count`
+  *(when a camera clock source is available)*
 - `processing_history` *(optional ordered list)*
 
 `Registry.scan_zarr` treats these root attrs as sufficient recording context:
@@ -135,6 +139,58 @@ and refinement bind the selected setup path and digest. Root
 `experiment_setup`/`subject_count` attrs and stimulus-run subject snapshots are
 historical compatibility projections, not the modern authority. See
 `docs/experiment_setup_contract.md`.
+
+### `analysis/acquisition_frame_clock_runs/`
+
+New analysis and sampled-training imports publish a compact, immutable
+`palette.acquisition_frame_clock.v1` authority when Orange camera timing is
+available. The selected run contains recording-wide numeric arrays:
+
+| Array | DType | Meaning |
+| --- | --- | --- |
+| `recording_frame_id` | `int64` | Session-continuous producer frame identifier |
+| `parent_frame_index` | `int64` | Complete, ordered zero-based source-video frame domain |
+| `camera_timestamp_ns` | `int64` | Orange `timestamp`, embedded camera-frame clock |
+| `system_timestamp_ns` | `int64` | Orange `timestamp_sys`, host `CLOCK_REALTIME` |
+| `camera_timestamp_valid` | `bool` | Whether the camera timestamp row is present |
+| `system_timestamp_valid` | `bool` | Whether the system timestamp row is present |
+
+The arrays retain exact integer nanoseconds and use explicit validity arrays;
+missing clock values are not represented as floating-point NaNs. Runs bind
+array digests, camera identity, source metadata, and the exact temporal-domain
+semantics in an immutable record. They use 4,096-row logical chunks and request
+131,072-row indexed outer shards through the shared columnar writer.
+
+Each clock surface declares `unit`, `clock_domain`, `time_reference_kind`,
+`origin`, `timescale`, and `semantic_status`; names ending in `_ns` alone are
+not sufficient temporal semantics. `system_timestamp_ns` is producer-declared
+POSIX time from `clock_gettime(CLOCK_REALTIME)`: nanoseconds since
+`1970-01-01T00:00:00 UTC`, excluding leap seconds, sampled immediately after
+`EVT_CameraGetFrame` returns. It is not time since process, stream, or recording
+start.
+
+Orange passes `camera_timestamp_ns` through unchanged from
+`Emergent::CEmergentFrame.timestamp`. It is classified as an absolute
+`IEEE-1588_PTP_TAI` clock only when that recording provides combined evidence:
+PTP synchronization configuration, valid low-offset PTP samples, agreement
+between the latched PTP clock and embedded frame timestamps, and a stable
+camera-minus-host offset near the TAI-UTC difference in force for the
+recording. The semantic status remains
+`inferred_from_recording_evidence_not_sdk_declared`. Merely enabling PTP is not
+enough. If the combined evidence is absent or contradictory, the camera clock
+is labeled `device_defined_unknown_epoch` with unspecified origin/timescale;
+it is never silently called epoch or recording-relative time.
+
+For a sampled training archive, `raw_video/original_frame_indices[i]` joins to
+`parent_frame_index`; `raw_video` records the selected clock reference and
+digest. The writer does not create a redundant sampled `timestamps` array.
+
+Source precedence is the manifest-declared full-stream
+`frame_clock_metadata`, then a conventional sibling `Cam*_meta.csv`, then an
+existing `recording_frame_index.parquet`. H5 stimulus timestamps remain under
+`analysis/stimulus_runs`: they are not relabeled as camera acquisition time.
+When no camera clock source exists, import explicitly records
+`acquisition_frame_clock_available=false` and continues.
 
 Shadow-mode registry telemetry can be inspected with:
 
@@ -267,7 +323,7 @@ Arrays written during import (kvikIO or standard path):
 | `images_ds` | `(n_frames, H_ds, W_ds)` | `uint8` | Downsampled frames (optional) |
 | `images_ds_rgb` | `(n_frames, H_ds, W_ds, 3)` | `uint8` | Downsampled RGB frames (optional) |
 | `original_frame_indices` | `(n_import_frames,)` | `int32` | Present for sampled imports (`frame_step > 1`) |
-| `timestamps` | `(n_frames,)` | `float64` | Seconds since start (optional) |
+| `timestamps` | `(n_frames,)` | `float64` | Historical/derived compatibility surface; active sampled PyNvVC imports omit it in favor of the acquisition-frame-clock authority |
 
 Attributes include import method, device, chunk/shard sizes, duration,
 throughput, and source video metadata.

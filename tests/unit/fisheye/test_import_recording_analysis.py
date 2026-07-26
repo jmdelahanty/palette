@@ -36,6 +36,7 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
         return False, 5, ["stimulus"]
 
     monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
     monkeypatch.setattr(mod, "import_experiment_setup", lambda _plan: None)
     monkeypatch.setattr(mod, "stimulus_runs_present", lambda _path: False)
     monkeypatch.setattr(mod, "run_stimulus_import", _fake_stim)
@@ -652,6 +653,7 @@ def test_process_recording_import_rejects_stimulus_import_without_h5(monkeypatch
     opts = _opts()
     opts.import_stimulus = True
     monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
 
     result = mod.process_recording_import(plan, opts, logger=None)
 
@@ -682,6 +684,7 @@ def test_process_recording_import_allows_failed_preflight_when_overridden(monkey
         seen["ensure"] = True
 
     monkeypatch.setattr(mod, "ensure_analysis_archive", _fake_ensure)
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
     monkeypatch.setattr(mod, "import_experiment_setup", lambda _plan: None)
 
     result = mod.process_recording_import(plan, opts, logger=None)

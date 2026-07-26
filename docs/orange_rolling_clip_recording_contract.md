@@ -218,7 +218,24 @@ not an n-dimensional tensor. It has one row per camera frame and mixed column
 types: ids, frame indices, timestamps, clip labels, and paths. Zarr attrs are
 not appropriate for millions of rows, and Zarr arrays make string/path columns
 and filtered table scans unnecessarily awkward. Zarr remains the analysis array
-store; Parquet is the table/index sidecar.
+store; Parquet is the table/index sidecar. Palette may additionally publish the
+compact numeric clock subset (`recording_frame_id`, `parent_frame_index`,
+camera/PTP time, system time, and validity) as a digest-bound
+`analysis/acquisition_frame_clock_runs` authority. That subset supports exact
+array alignment and does not replace the Parquet table's clip and source-path
+columns.
+
+The two timestamps are not interchangeable. `timestamp_sys` is
+producer-declared `clock_gettime(CLOCK_REALTIME)` in POSIX nanoseconds since the
+UTC 1970 epoch, excluding leap seconds. `timestamp` is an unchanged
+`Emergent::CEmergentFrame.timestamp` in the camera hardware clock domain. A
+recording may classify the latter as inferred IEEE-1588/TAI only from combined
+recording evidence: PTP synchronization configuration, valid PTP-offset
+samples, camera-latch/frame agreement, and a stable camera-minus-host offset
+near the applicable TAI-UTC difference. PTP enablement by itself is
+insufficient. Without that evidence the camera clock retains an unspecified,
+device-defined epoch. Neither field means time since Orange process, stream,
+or recording start.
 
 The analysis Zarr should point to the frame-index sidecar through small attrs or
 a manifest, not duplicate the full table in root metadata. Recommended root or
