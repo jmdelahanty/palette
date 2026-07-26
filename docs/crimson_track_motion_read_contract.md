@@ -2,11 +2,14 @@
 
 Date anchored: 2026-07-19
 
-Status: branch-local future-normal contract for Palette commit `93177ed5`. The
-scoped Palette producer/strict reader passed independent review and the 101/101
-focused suite, but canonical-v2 is not deployed to current registry archives,
-no authoritative cross-repository contract is merged, and Crimson is not
-implemented for this future-normal track-motion boundary.
+Status: the Palette producer and strict-reader implementation through
+`a49a4f98` was integrated onto the current `sun` baseline by merge commit
+`9d24fd0c`. The active Sleepyfish acceptance run
+`track_kinematics_sleepyfish_cam2010095_scientific_receipt_canary_20260724_v003`
+passed the independent exhaustive public reader over all 104 motion surfaces.
+The Palette boundary is therefore production-accepted. Crimson consumer code
+and an authoritative cross-repository contract are still future work; this
+document defines that consumer boundary without claiming Crimson deployment.
 
 Purpose: define the Palette-side future-normal read contract Crimson should use
 for motion traces, swim-bout overlays, and per-bout metrics. This is the
@@ -119,6 +122,25 @@ loader validates equality. It is never primary identity: canonical consumers
 use `track_sample_key` and `source_acquisition_frame_index`; row offset and
 `frame_indices` alone are not identity. A future no-alias schema may omit it
 only through an explicit manifest/reader schema-version change.
+
+Publication-manifest schema v1 is frozen and is selected by the absence of
+`track_motion_publication_manifest_schema_version`. Its offline position
+lineage is one direct crop-selection record and one exact detection rowset.
+
+Schema v2 is selected only when that root attr equals `2`. It carries an
+explicit `position_lineage_mode` and a versioned run-derivation wrapper. The
+supported modes are:
+
+- `direct_crop_selection_v1`, which seals the exact persisted crop-selection
+  record reference/digest and detection rowset; and
+- `verified_collection_proxy_successor_v1`, which seals the exact current
+  successor-mapping record reference/digest, historical source rowset,
+  detection-run identity, and keypoint/tracking run and rowset references.
+
+The v2 publication commit is also schema version 2 and binds the v2 manifest.
+Readers dispatch on the persisted manifest version, reconstruct the matching
+live contract, and reject v2 fields in v1 or missing v2 lineage fields. They do
+not reinterpret an existing v1 seal as v2.
 
 `positions_mm` and the `*_mm` motion fields are optional. They are present only
 when Palette bound an exact compatible typed physical-frame calibration. Their

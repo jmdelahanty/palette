@@ -398,7 +398,13 @@ def _write_metadata(
         source_path = Path(str(meta["source_path"])).expanduser().resolve()
         if source_path.parent.name == "cams":
             resolved_recording_path = source_path.parent.parent
-    source_metadata_input = dict(meta)
+    # ``imageio_metadata`` is a compatibility/debug payload written separately
+    # on the root below.  It may contain non-finite sentinels such as
+    # ``nframes=inf`` and therefore must never enter the canonical acquisition
+    # identity record, whose JSON representation is finite and digest-stable.
+    source_metadata_input = {
+        key: value for key, value in meta.items() if key != "imageio_metadata"
+    }
     camera_id = root.attrs.get("camera_id")
     if isinstance(camera_id, str) and camera_id.strip():
         source_metadata_input["camera_id"] = camera_id.strip()

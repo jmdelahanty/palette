@@ -29,6 +29,7 @@ import zarr
 
 from ...shared.json_safety import json_attr_safe
 from ...shared.zarr_io import open_zarr_root
+from .runtime_telemetry import PhaseTelemetry
 
 
 ATOMIC_RUN_PUBLISHER_SCHEMA_ID = "palette.atomic_run_group_publisher"
@@ -185,50 +186,63 @@ def _copy_and_verify(
     *,
     backend: str,
     content_checksum: bool,
+    telemetry: PhaseTelemetry,
 ) -> dict[str, Any]:
-    source_inventory = tree_inventory(source, hash_content=content_checksum)
-    _copy_tree(source, target, backend=backend)
+    with telemetry.phase("source_physical_inventory"):
+        source_inventory = tree_inventory(source, hash_content=content_checksum)
+    with telemetry.phase("physical_tree_copy"):
+        _copy_tree(source, target, backend=backend)
     if content_checksum and backend == "rsync":
-        check = subprocess.run(
-            [
-                "rsync",
-                "--archive",
-                "--dry-run",
-                "--checksum",
-                "--delete",
-                "--itemize-changes",
-                f"{source}/",
-                f"{target}/",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        with telemetry.phase("rsync_checksum_dry_run"):
+            check = subprocess.run(
+                [
+                    "rsync",
+                    "--archive",
+                    "--dry-run",
+                    "--checksum",
+                    "--delete",
+                    "--itemize-changes",
+                    f"{source}/",
+                    f"{target}/",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         if check.stdout.strip():
             raise RuntimeError(
                 "Rsync checksum validation found physical copy differences: "
                 f"{check.stdout}"
             )
-        target_inventory = tree_inventory(target, hash_content=False)
+        with telemetry.phase("target_physical_inventory"):
+            target_inventory = tree_inventory(target, hash_content=False)
         verification = "rsync_checksum_dry_run"
     else:
-        target_inventory = tree_inventory(target, hash_content=content_checksum)
+        with telemetry.phase("target_physical_inventory"):
+            target_inventory = tree_inventory(target, hash_content=content_checksum)
         verification = (
             "sha256_all_physical_files"
             if content_checksum
             else "relative_path_and_size_inventory"
         )
 
-    if source_inventory.files != target_inventory.files:
-        raise RuntimeError("Published temporary physical inventory differs from local run.")
-    if source_inventory.inventory_sha256 != target_inventory.inventory_sha256:
-        raise RuntimeError("Published temporary inventory digest differs from local run.")
-    if (
-        content_checksum
-        and target_inventory.content_sha256 is not None
-        and source_inventory.content_sha256 != target_inventory.content_sha256
-    ):
-        raise RuntimeError("Published temporary content digest differs from local run.")
+    with telemetry.phase("physical_inventory_comparison"):
+        if source_inventory.files != target_inventory.files:
+            raise RuntimeError(
+                "Published temporary physical inventory differs from local run."
+            )
+        if source_inventory.inventory_sha256 != target_inventory.inventory_sha256:
+            raise RuntimeError(
+                "Published temporary inventory digest differs from local run."
+            )
+        if (
+            content_checksum
+            and target_inventory.content_sha256 is not None
+            and source_inventory.content_sha256 != target_inventory.content_sha256
+        ):
+            raise RuntimeError(
+                "Published temporary content digest differs from local run."
+            )
     return {
         "backend": backend,
         "verification": verification,
@@ -595,6 +609,15 @@ def atomic_publish_run_group(
 ) -> dict[str, Any]:
     """Publish one completed local run as a fail-closed transaction."""
 
+    telemetry = PhaseTelemetry(
+        materializer="atomic_run_publisher",
+        context={
+            "publish_schema_id": spec.publish_schema_id,
+            "copy_backend": copy_backend,
+            "content_checksum": bool(spec.content_checksum),
+        },
+    )
+
     if rollback_activation is not None and (
         spec.selector_owner_attr is not None
         or spec.selector_generation_attr is not None
@@ -622,16 +645,18 @@ def atomic_publish_run_group(
         raise FileNotFoundError(
             f"Local materialized run not found: {spec.local_run_path}"
         )
-    local_validation = _require_valid(
-        validate_run(spec.local_run_path),
-        label="Local run",
-    )
+    with telemetry.phase("local_run_validation"):
+        local_validation = _require_valid(
+            validate_run(spec.local_run_path),
+            label="Local run",
+        )
 
     spec.lock_path.parent.mkdir(parents=True, exist_ok=True)
     with spec.lock_path.open("a+b") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        with telemetry.phase("publication_lock_wait"):
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
-            return _atomic_publish_locked(
+            result = _atomic_publish_locked(
                 spec,
                 copy_backend=copy_backend,
                 validate_run=validate_run,
@@ -643,9 +668,13 @@ def atomic_publish_run_group(
                 activate_run=activate_run,
                 rollback_activation=rollback_activation,
                 local_validation=local_validation,
+                telemetry=telemetry,
             )
         finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            with telemetry.phase("publication_lock_release"):
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    result["runtime_telemetry"] = telemetry.to_json()
+    return result
 
 
 def _atomic_publish_locked(
@@ -661,6 +690,7 @@ def _atomic_publish_locked(
     activate_run: ActivateRun | None,
     rollback_activation: RollbackActivation | None,
     local_validation: Mapping[str, Any],
+    telemetry: PhaseTelemetry,
 ) -> dict[str, Any]:
     publication_owner_attr = (
         spec.publication_owner_attr or ATOMIC_PUBLICATION_OWNER_ATTR
@@ -677,8 +707,9 @@ def _atomic_publish_locked(
             )
     else:
         expected_publication_owner = str(uuid.uuid4())
-    root = open_zarr_root(spec.source_zarr, mode="a")
-    parents = tuple(prepare_parents(root))
+    with telemetry.phase("initial_authoritative_open_and_parent_prepare"):
+        root = open_zarr_root(spec.source_zarr, mode="a")
+        parents = tuple(prepare_parents(root))
     if not parents:
         raise ValueError("prepare_parents must return at least the target parent group.")
     parent_paths = _parent_paths(parents)
@@ -716,13 +747,14 @@ def _atomic_publish_locked(
         raise FileExistsError(
             f"Refusing to replace existing authoritative run: {spec.target_run_path}"
         )
-    parent_snapshots = tuple(
-        (path, dict(parent.attrs)) for path, parent in zip(parent_paths, parents)
-    )
-    snapshot_payload = {
-        path or "/": json_attr_safe(dict(attrs))
-        for path, attrs in parent_snapshots
-    }
+    with telemetry.phase("parent_attribute_snapshot"):
+        parent_snapshots = tuple(
+            (path, dict(parent.attrs)) for path, parent in zip(parent_paths, parents)
+        )
+        snapshot_payload = {
+            path or "/": json_attr_safe(dict(attrs))
+            for path, attrs in parent_snapshots
+        }
 
     spec.target_run_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = spec.temporary_path
@@ -740,56 +772,63 @@ def _atomic_publish_locked(
             temporary,
             backend=copy_backend,
             content_checksum=bool(spec.content_checksum),
+            telemetry=telemetry,
         )
         # Before a tree can appear at a public canonical child path, persist one
         # exact attempt owner and fail-closed selector eligibility in the hidden
         # sibling. This also owner-binds older materializers that do not yet
         # carry a stage-specific publication-owner attribute.
-        temporary_group = open_zarr_root(temporary, mode="a")
-        temporary_group.attrs[publication_owner_attr] = expected_publication_owner
-        temporary_group.attrs["stage_selector_eligible"] = False
-        temporary_check = open_zarr_root(temporary, mode="r")
-        if (
-            temporary_check.attrs.get(publication_owner_attr)
-            != expected_publication_owner
-            or temporary_check.attrs.get("stage_selector_eligible") is not False
-        ):
-            raise RuntimeError(
-                "Hidden publication target did not persist its exact owner and "
-                "selector-ineligible state."
+        with telemetry.phase("hidden_target_owner_stamp_and_verification"):
+            temporary_group = open_zarr_root(temporary, mode="a")
+            temporary_group.attrs[publication_owner_attr] = expected_publication_owner
+            temporary_group.attrs["stage_selector_eligible"] = False
+            temporary_check = open_zarr_root(temporary, mode="r")
+            if (
+                temporary_check.attrs.get(publication_owner_attr)
+                != expected_publication_owner
+                or temporary_check.attrs.get("stage_selector_eligible") is not False
+            ):
+                raise RuntimeError(
+                    "Hidden publication target did not persist its exact owner and "
+                    "selector-ineligible state."
+                )
+        with telemetry.phase("hidden_target_validation"):
+            temporary_validation = _require_valid(
+                validate_run(temporary),
+                label="Temporary run",
             )
-        temporary_validation = _require_valid(
-            validate_run(temporary),
-            label="Temporary run",
-        )
-        os.replace(temporary, spec.target_run_path)
+        with telemetry.phase("atomic_rename"):
+            os.replace(temporary, spec.target_run_path)
 
         # The owner is selected from the local source before copying.  Prove
         # the renamed tree still carries that exact owner before invoking any
         # callback or mutating authoritative metadata.
-        renamed_owner = _persisted_publication_owner(
-            spec.target_run_path,
-            publication_owner_attr,
-        )
-        if renamed_owner != expected_publication_owner:
-            raise RuntimeError(
-                "Renamed atomic-publication target changed publication "
-                "owner before authoritative callbacks."
+        with telemetry.phase("renamed_target_owner_verification"):
+            renamed_owner = _persisted_publication_owner(
+                spec.target_run_path,
+                publication_owner_attr,
             )
+            if renamed_owner != expected_publication_owner:
+                raise RuntimeError(
+                    "Renamed atomic-publication target changed publication "
+                    "owner before authoritative callbacks."
+                )
 
-        root = open_zarr_root(spec.source_zarr, mode="a")
-        parents = tuple(prepare_parents(root))
-        _require_parent_paths(parents, expected=parent_paths)
-        target_parent = parents[-1]
-        run_group = target_parent[spec.run_name]
-        if not isinstance(run_group, zarr.Group):
-            raise TypeError("Published target is not a Zarr group.")
+        with telemetry.phase("renamed_authoritative_open_and_parent_prepare"):
+            root = open_zarr_root(spec.source_zarr, mode="a")
+            parents = tuple(prepare_parents(root))
+            _require_parent_paths(parents, expected=parent_paths)
+            target_parent = parents[-1]
+            run_group = target_parent[spec.run_name]
+            if not isinstance(run_group, zarr.Group):
+                raise TypeError("Published target is not a Zarr group.")
 
-        post_rename_metadata = (
-            dict(after_rename(root, run_group) or {})
-            if after_rename is not None
-            else {}
-        )
+        with telemetry.phase("post_rename_binding"):
+            post_rename_metadata = (
+                dict(after_rename(root, run_group) or {})
+                if after_rename is not None
+                else {}
+            )
         payload = {
             **dict(payload_metadata or {}),
             **post_rename_metadata,
@@ -819,63 +858,73 @@ def _atomic_publish_locked(
             "local_validation": dict(local_validation),
             "temporary_validation": temporary_validation,
         }
-        run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
+        with telemetry.phase("initial_publication_metadata_write"):
+            run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
 
-        pre_pointer_validation = _require_valid(
-            validate_run(spec.target_run_path),
-            label="Published pre-pointer",
-        )
+        with telemetry.phase("pre_pointer_validation"):
+            pre_pointer_validation = _require_valid(
+                validate_run(spec.target_run_path),
+                label="Published pre-pointer",
+            )
         payload["pre_pointer_validation"] = pre_pointer_validation
-        run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
+        with telemetry.phase("pre_pointer_metadata_write"):
+            run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
 
-        complete_run(root, target_parent, run_group)
-        final_validation = _require_valid(
-            validate_run(spec.target_run_path),
-            label="Published final run",
-        )
-        pointer_root = open_zarr_root(spec.source_zarr, mode="r")
-        verify_pointers(pointer_root)
+        with telemetry.phase("completion_and_pointer_publication"):
+            complete_run(root, target_parent, run_group)
+        with telemetry.phase("final_run_validation"):
+            final_validation = _require_valid(
+                validate_run(spec.target_run_path),
+                label="Published final run",
+            )
+        with telemetry.phase("pointer_verification"):
+            pointer_root = open_zarr_root(spec.source_zarr, mode="r")
+            verify_pointers(pointer_root)
         payload["final_validation"] = final_validation
 
-        final_root = open_zarr_root(spec.source_zarr, mode="a")
-        final_parents = tuple(prepare_parents(final_root))
-        _require_parent_paths(final_parents, expected=parent_paths)
-        payload["parent_attrs_after"] = {
-            path or "/": json_attr_safe(dict(parent.attrs))
-            for path, parent in zip(parent_paths, final_parents)
-        }
-        final_run = final_parents[-1][spec.run_name]
-        final_run.attrs["cluster_output_staging"] = json_attr_safe(payload)
+        with telemetry.phase("final_authoritative_open_and_parent_snapshot"):
+            final_root = open_zarr_root(spec.source_zarr, mode="a")
+            final_parents = tuple(prepare_parents(final_root))
+            _require_parent_paths(final_parents, expected=parent_paths)
+            payload["parent_attrs_after"] = {
+                path or "/": json_attr_safe(dict(parent.attrs))
+                for path, parent in zip(parent_paths, final_parents)
+            }
+            final_run = final_parents[-1][spec.run_name]
+        with telemetry.phase("final_publication_metadata_write"):
+            final_run.attrs["cluster_output_staging"] = json_attr_safe(payload)
         result = json_attr_safe(payload)
         if activate_run is not None:
             # Reopen after the final publisher-owned metadata write. A stale
             # handle or same-name replacement is never activation authority.
-            activation_root = open_zarr_root(spec.source_zarr, mode="a")
-            activation_parents = tuple(prepare_parents(activation_root))
-            _require_parent_paths(activation_parents, expected=parent_paths)
-            activation_run = activation_parents[-1][spec.run_name]
-            expected_run_path = _target_group_path(spec)
-            if (
-                not isinstance(activation_run, zarr.Group)
-                or _group_path(activation_run) != expected_run_path
-                or activation_run.attrs.get(publication_owner_attr)
-                != expected_publication_owner
-                or activation_run.attrs.get("palette_run_completion_status")
-                != "complete"
-                or activation_run.attrs.get("stage_selector_eligible") is not False
-            ):
-                raise RuntimeError(
-                    "Final atomic-publication activation lost its exact owned, "
-                    "selector-ineligible canonical child."
-                )
+            with telemetry.phase("activation_preflight"):
+                activation_root = open_zarr_root(spec.source_zarr, mode="a")
+                activation_parents = tuple(prepare_parents(activation_root))
+                _require_parent_paths(activation_parents, expected=parent_paths)
+                activation_run = activation_parents[-1][spec.run_name]
+                expected_run_path = _target_group_path(spec)
+                if (
+                    not isinstance(activation_run, zarr.Group)
+                    or _group_path(activation_run) != expected_run_path
+                    or activation_run.attrs.get(publication_owner_attr)
+                    != expected_publication_owner
+                    or activation_run.attrs.get("palette_run_completion_status")
+                    != "complete"
+                    or activation_run.attrs.get("stage_selector_eligible") is not False
+                ):
+                    raise RuntimeError(
+                        "Final atomic-publication activation lost its exact owned, "
+                        "selector-ineligible canonical child."
+                    )
             # This callback owns the literal selector-eligibility commit. All
             # fallible publisher validation and metadata writes are complete.
             final_activation_attempted = True
-            activate_run(
-                activation_root,
-                activation_parents[-1],
-                activation_run,
-            )
+            with telemetry.phase("selector_activation"):
+                activate_run(
+                    activation_root,
+                    activation_parents[-1],
+                    activation_run,
+                )
         return result
     except BaseException as exc:
         if final_activation_attempted:

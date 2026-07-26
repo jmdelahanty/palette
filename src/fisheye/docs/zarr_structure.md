@@ -1708,10 +1708,17 @@ Track kinematics results organized by type:
 - `parameters.coordinate_space`: a direction-explicit controlled space such as
   `source_camera_image_px` or `arena_relative_canvas_px`, never legacy
   `"camera"`/`"texture"`;
-- offline `inputs`: exactly `detection_path`, `position_source_path`,
+- manifest v1 offline `inputs`: exactly `detection_path`, `position_source_path`,
   `position_source_rowset_path`, `position_source_kind`, `crop_run`,
   `keypoint_path`, and `tracking_path`, plus only the controlled optional
   `chaser_metrics` and `swim_bout_run` inputs;
+- manifest v2 is selected only by the immutable root attr
+  `track_motion_publication_manifest_schema_version == 2` and requires an
+  explicit `position_lineage_mode`. `direct_crop_selection_v1` seals the exact
+  crop-selection record and detection rowset; `verified_collection_proxy_successor_v1`
+  seals the current successor-mapping record and digest, its historical rowset,
+  and the exact keypoint/tracking sources. Omitting the version attr always
+  selects the frozen v1 contract; v1 does not accept v2 inputs or lineage fields;
 - offline `keypoint_path` and `tracking_path`: exact two-component run paths
   (`keypoints_runs/<run>` or `refined_keypoints_runs/<run>`, and
   `tracking_runs/<run>`); variant/run-name pairs, nested tracking metadata, and

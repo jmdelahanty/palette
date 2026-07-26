@@ -32,6 +32,7 @@ import numpy as np
 from fisheye.shared.archive_identity import (
     ArchiveIdentity,
     ArchiveIdentityError,
+    archive_identity,
     require_same_archive,
 )
 from fisheye.shared.coordinate_descriptor import (
@@ -71,6 +72,7 @@ from fisheye.shared.selected_calibration import (
     parse_selected_camera_source_evidence,
     require_verified_selected_camera_source_evidence,
 )
+from fisheye.shared.proof_verification import load_verified_value
 
 
 PHYSICAL_FRAME_CALIBRATION_SCHEMA_ID = "palette.physical_frame_calibration"
@@ -678,10 +680,37 @@ def _recheck_array_snapshot(node: Any, snapshot: _ArrayPayloadSnapshot) -> None:
 
 
 def array_payload_sha256(node: Any) -> str:
-    """Hash a stable exact materialized array payload."""
+    """Hash a stable payload, reusing it only in one explicit proof scope."""
 
-    snapshot = _read_array_snapshot(node)
-    _recheck_array_snapshot(node, snapshot)
+    identity = archive_identity(node)
+    path = _node_path(node)
+    try:
+        dtype = np.dtype(getattr(node, "dtype"))
+        shape = tuple(int(value) for value in getattr(node, "shape"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        _fail(
+            "array_metadata_invalid",
+            f"/{path}",
+            f"Array payload metadata is unavailable: {exc}.",
+        )
+
+    def load_stable_snapshot() -> _ArrayPayloadSnapshot:
+        value = _read_array_snapshot(node)
+        _recheck_array_snapshot(node, value)
+        return value
+
+    snapshot = load_verified_value(
+        (
+            "coordinate_frame_array_payload_v1",
+            identity.kind,
+            identity.key,
+            path,
+            dtype.str,
+            shape,
+        ),
+        load_stable_snapshot,
+        lambda value: _recheck_array_snapshot(node, value),
+    )
     return snapshot.content_sha256
 
 

@@ -96,6 +96,43 @@ def test_copy_completed_run_to_sharded_supports_different_track_lengths(
     )
 
 
+@pytest.mark.parametrize("workers", [1, 2])
+def test_copy_completed_run_keeps_structured_lineage_single_chunk(
+    tmp_path: Path,
+    workers: int,
+) -> None:
+    source_path = tmp_path / "structured-source"
+    destination_path = tmp_path / "structured-destination"
+    source = zarr.open_group(str(source_path), mode="w", zarr_format=3)
+    source.attrs["palette_run_completion_status"] = "complete"
+    dtype = np.dtype([("valid", "?"), ("instance_key", "<u8")])
+    values = np.zeros(10, dtype=dtype)
+    values[3] = (True, 101)
+    source.create_array("source_instance_key", data=values, chunks=(2,))
+
+    report = copy_completed_run_to_sharded(
+        source_path,
+        destination_path,
+        row_count_array=None,
+        shard_rows=5,
+        workers=workers,
+    )
+
+    destination = zarr.open_group(
+        str(destination_path),
+        mode="r",
+        use_consolidated=False,
+    )
+    copied = destination["source_instance_key"]
+    np.testing.assert_array_equal(copied[:], values)
+    assert tuple(copied.chunks) == (10,)
+    assert copied.shards is None
+    plan = next(item for item in report["arrays"] if item["path"] == "source_instance_key")
+    assert plan["layout_profile"] == (
+        "structured_dtype_single_chunk_zarr_v3_sharding_codec_workaround_v1"
+    )
+
+
 def test_copy_completed_run_to_sharded_applies_two_dimensional_layout_override(
     tmp_path: Path,
 ) -> None:

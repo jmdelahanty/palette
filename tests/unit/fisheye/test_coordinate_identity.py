@@ -32,6 +32,7 @@ from fisheye.shared.coordinate_identity import (
     row_identity_key_attrs,
     require_bound_row_identity_contract,
     require_bound_source_row_temporal_authority,
+    require_bound_track_sample_time_lineage,
     load_bound_source_row_temporal_authority,
     load_bound_track_sample_time_lineage,
     resolve_source_acquisition_frame_indices,
@@ -49,6 +50,7 @@ from fisheye.shared.pixel_frame_authority import (
     stamp_acquisition_camera_frame,
     stamp_acquisition_import_ownership,
 )
+from fisheye.shared.proof_verification import proof_verification_scope
 
 
 class _Node:
@@ -66,10 +68,12 @@ class _Node:
         self.dtype = np.dtype("V0") if self._values is None else self._values.dtype
         self.path = path
         self._coordinate_archive_token = self._archive
+        self.read_count = 0
 
     def __getitem__(self, item):
         if self._values is None:
             raise TypeError("group-like node is not sliceable")
+        self.read_count += 1
         return self._values[item]
 
     def __setitem__(self, item, value) -> None:
@@ -611,6 +615,65 @@ def test_temporal_authorities_reload_fresh_from_persisted_nodes() -> None:
     with pytest.raises(RowIdentityContractError) as forged_exc:
         require_bound_source_row_temporal_authority(copy.deepcopy(fresh_source))
     assert "source_temporal_authority_unverified" in _issue_codes(forged_exc.value)
+
+
+def test_identity_authorities_reuse_one_operation_proof_and_recheck_on_close() -> None:
+    values = build_track_sample_key(
+        np.asarray([4, 4], dtype=np.int64),
+        np.asarray([1, 2], dtype=np.int64),
+    )
+    rowset, key, lineage = _track_lineage(values, total_frames=3)
+    identity = stamp_and_bind_row_identity_contract(
+        rowset,
+        key,
+        contract=build_row_identity_contract(
+            domain=TRACK_SAMPLE_DOMAIN,
+            values=values,
+            track_time_lineage=lineage,
+        ),
+        track_time_lineage=lineage,
+    )
+    source = lineage._source_temporal_authority
+    nodes = (
+        source.source_row_identity._key_array_node,
+        source._source_frame_index_node,
+        key,
+        lineage._source_row_index_node,
+        lineage._source_frame_index_node,
+        lineage._interpolation_node,
+        lineage._source_instance_key_node,
+    )
+    for node in nodes:
+        node.read_count = 0
+
+    with proof_verification_scope():
+        require_bound_source_row_temporal_authority(source)
+        require_bound_track_sample_time_lineage(lineage)
+        require_bound_row_identity_contract(identity)
+        first_counts = tuple(node.read_count for node in nodes)
+
+        require_bound_source_row_temporal_authority(source)
+        require_bound_track_sample_time_lineage(lineage)
+        require_bound_row_identity_contract(identity)
+        assert tuple(node.read_count for node in nodes) == first_counts
+
+    closing_counts = tuple(node.read_count for node in nodes)
+    assert all(after > before for before, after in zip(first_counts, closing_counts))
+
+
+def test_identity_authority_closing_proof_rejects_temporal_mutation() -> None:
+    values = build_track_sample_key(
+        np.asarray([4, 4], dtype=np.int64),
+        np.asarray([1, 2], dtype=np.int64),
+    )
+    _, _, lineage = _track_lineage(values, total_frames=3)
+    source = lineage._source_temporal_authority
+
+    with pytest.raises(RowIdentityContractError) as exc_info:
+        with proof_verification_scope():
+            require_bound_source_row_temporal_authority(source)
+            source._source_frame_index_node._values[0] += 1
+    assert "source_temporal_authority_noncanonical" in _issue_codes(exc_info.value)
 
 
 @pytest.mark.parametrize(

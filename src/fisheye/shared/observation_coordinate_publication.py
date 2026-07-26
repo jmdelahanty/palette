@@ -79,6 +79,11 @@ from fisheye.shared.immutable_yolo_storage import (
     IMMUTABLE_YOLO_STORAGE_ATTR,
     IMMUTABLE_YOLO_STORAGE_SCHEMA,
 )
+from fisheye.shared.historical_collection_proxy_v1 import (
+    BoundHistoricalMergedCollectionProxyV1,
+    load_historical_merged_collection_proxy_v1,
+    require_bound_historical_merged_collection_proxy_v1,
+)
 from fisheye.shared.instance_keys import (
     INSTANCE_KEY_ALGORITHM,
     INSTANCE_KEY_BBOX_QUANTIZATION,
@@ -176,6 +181,23 @@ CROP_GEOMETRY_SELECTION_ATTR = "crop_geometry_selection"
 CROP_GEOMETRY_SELECTION_SCHEMA_ID = "palette.crop_geometry_selection"
 CROP_GEOMETRY_SELECTION_SCHEMA_VERSION = 1
 CROP_GEOMETRY_SELECTION_OPERATION = "exact_instance_key_subset_reorder_v1"
+
+COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR = (
+    "collection_proxy_coordinate_successor_mapping"
+)
+COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID = (
+    "palette.collection_proxy_coordinate_successor_mapping"
+)
+COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION = 1
+COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION = (
+    "verified_historical_v1_rows_to_current_v2_geometry_v1"
+)
+COLLECTION_PROXY_SUCCESSOR_RUN_SCHEMA = (
+    "palette.collection_proxy_coordinate_successor_run"
+)
+COLLECTION_PROXY_SUCCESSOR_SOURCE_KIND = (
+    "historical_collection_proxy_coordinate_successor"
+)
 
 CROP_ROI_GEOMETRY_DERIVATION_ATTR = "crop_roi_geometry_derivation"
 CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID = "palette.crop_roi_geometry_derivation"
@@ -3489,6 +3511,146 @@ def _require_detection_acquisition_mapping(
         )
 
 
+def _collection_proxy_successor_mapping_record(
+    rowset: Any,
+    *,
+    historical: BoundHistoricalMergedCollectionProxyV1,
+    acquisition: BoundAcquisitionCameraFrame,
+) -> dict[str, Any]:
+    source = require_bound_historical_merged_collection_proxy_v1(historical)
+    acquisition = require_bound_acquisition_camera_frame(acquisition)
+    if (
+        source.archive_identity != archive_identity(rowset)
+        or source.camera_id != acquisition.record.camera_id
+    ):
+        _fail("Collection-proxy successor and historical source span archives or cameras.")
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Collection-proxy coordinate successor",
+    )
+    if (
+        attrs.get("schema") != COLLECTION_PROXY_SUCCESSOR_RUN_SCHEMA
+        or attrs.get("source_kind") != COLLECTION_PROXY_SUCCESSOR_SOURCE_KIND
+        or attrs.get("historical_source_rowset_path") != source.rowset_path
+    ):
+        _fail("Collection-proxy successor identity is absent or unsupported.")
+    array_names = (
+        "instance_key",
+        "frame_indices",
+        "source_frame_indices",
+        "source_acquisition_frame_index",
+        "source_proxy_crop_run_index",
+        "source_proxy_crop_row_ids",
+        "bbox_norm_coords",
+    )
+    row_nodes: dict[str, Any] = {}
+    row_values: dict[str, np.ndarray] = {}
+    for name in array_names:
+        try:
+            node = rowset[name]
+        except Exception as exc:
+            _fail(f"Collection-proxy successor array {name!r} is absent: {exc}.")
+        values = _array(node, label=f"collection-proxy successor {name}")
+        source_values = source.read_array(name)
+        if values.dtype != source_values.dtype or values.shape != source_values.shape:
+            _fail(f"Collection-proxy successor {name!r} changed dtype or shape.")
+        if not np.array_equal(values, source_values, equal_nan=values.dtype.kind in "fc"):
+            _fail(f"Collection-proxy successor {name!r} differs from historical source.")
+        row_nodes[name] = node
+        row_values[name] = values
+    if row_values["instance_key"].shape != (source.row_count,):
+        _fail("Collection-proxy successor row count differs from historical source.")
+    historical_mapping = source.acquisition_mapping.record
+    return {
+        "schema_id": COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID,
+        "schema_version": COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION,
+        "operation": COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION,
+        "direction": "historical_merged_proxy_row_to_current_observation_row",
+        "historical_source": {
+            "rowset_ref": f"/{source.rowset_path}",
+            "acquisition_mapping": {
+                "record_ref": source.acquisition_mapping.record_ref,
+                "record_sha256": source.acquisition_mapping.record_sha256,
+            },
+            "bbox_projection": {
+                "record_ref": source.bbox_projection.record_ref,
+                "record_sha256": source.bbox_projection.record_sha256,
+            },
+            "center_derivation": {
+                "record_ref": source.center_derivation.record_ref,
+                "record_sha256": source.center_derivation.record_sha256,
+            },
+        },
+        "row_arrays": {
+            name: _payload(row_nodes[name], row_values[name]) for name in array_names
+        },
+        "source_proxy_crop_runs": list(
+            historical_mapping["source_proxy_crop_runs"]
+        ),
+        "source_refined_run_paths": list(
+            historical_mapping["source_refined_run_paths"]
+        ),
+        "source_collection_id": historical_mapping["source_collection_id"],
+        "acquisition_camera_frame": {
+            "record_ref": acquisition.record_ref,
+            "record_sha256": acquisition.record_sha256,
+        },
+        "source_total_frames": int(acquisition.record.source_total_frames),
+        "proof": "exact_historical_payload_digest_and_source_row_revalidation_v1",
+    }
+
+
+@proof_verification_operation
+def publish_collection_proxy_successor_mapping(
+    rowset: Any,
+    *,
+    historical_source: BoundHistoricalMergedCollectionProxyV1,
+    acquisition_frame: BoundAcquisitionCameraFrame,
+) -> BoundCoordinateRecord:
+    """Bind copied historical rows without treating v1 geometry as current."""
+
+    record = _collection_proxy_successor_mapping_record(
+        rowset,
+        historical=historical_source,
+        acquisition=acquisition_frame,
+    )
+    return stamp_and_bind_persisted_coordinate_record(
+        rowset,
+        record,
+        attr_name=COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    )
+
+
+def _require_collection_proxy_successor_mapping(
+    rowset: Any,
+    mapping: BoundCoordinateRecord,
+    *,
+    root_node: Any,
+    acquisition: BoundAcquisitionCameraFrame,
+) -> BoundHistoricalMergedCollectionProxyV1:
+    record = mapping.record
+    historical_pointer = record.get("historical_source")
+    rowset_ref = (
+        historical_pointer.get("rowset_ref")
+        if isinstance(historical_pointer, Mapping)
+        else None
+    )
+    if not isinstance(rowset_ref, str) or not rowset_ref.startswith("/"):
+        _fail("Collection-proxy successor lacks an exact historical rowset reference.")
+    historical = load_historical_merged_collection_proxy_v1(
+        root_node,
+        rowset_ref[1:],
+    )
+    expected = _collection_proxy_successor_mapping_record(
+        rowset,
+        historical=historical,
+        acquisition=acquisition,
+    )
+    if mapping.record != expected:
+        _fail("Collection-proxy successor mapping differs from exact live lineage.")
+    return historical
+
+
 def _load_persisted_detection_observation_geometry(
     root_node: Any,
     rowset_path: str,
@@ -3667,6 +3829,180 @@ def load_persisted_detection_observation_geometry(
         rowset_path,
         require_selector_eligible=True,
     )
+
+
+def _load_persisted_collection_proxy_successor_geometry(
+    root_node: Any,
+    rowset_path: str,
+    *,
+    require_selector_eligible: bool = True,
+) -> BoundDetectionObservationGeometry:
+    rowset = _persisted_node(
+        root_node,
+        rowset_path,
+        label="collection-proxy coordinate successor",
+    )
+    _require_complete_canonical_observation_rowset(
+        rowset,
+        run_family="crop_runs",
+        label="Collection-proxy coordinate successor",
+        require_selector_eligible=require_selector_eligible,
+    )
+    attrs = require_trusted_coordinate_attrs(
+        rowset,
+        label="Collection-proxy coordinate successor",
+    )
+    if (
+        attrs.get("schema") != COLLECTION_PROXY_SUCCESSOR_RUN_SCHEMA
+        or attrs.get("source_kind") != COLLECTION_PROXY_SUCCESSOR_SOURCE_KIND
+    ):
+        _fail("Collection-proxy coordinate successor schema is unsupported.")
+    _, acquisition = load_persisted_acquisition_camera_authority(root_node)
+    camera_id = acquisition.record.camera_id
+    point_camera = load_source_camera_pixel_frame_authority(
+        _persisted_node(
+            root_node,
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_POINT_PIXEL_CONVENTION}",
+            label="successor source-camera point frame",
+        ),
+        acquisition_frame=acquisition,
+    )
+    bbox_camera = load_source_camera_pixel_frame_authority(
+        _persisted_node(
+            root_node,
+            "analysis/coordinate_frames/source_camera/"
+            f"{camera_id}/{SOURCE_CAMERA_BBOX_PIXEL_CONVENTION}",
+            label="successor source-camera bbox frame",
+        ),
+        acquisition_frame=acquisition,
+    )
+    base = canonical_node_path(rowset)
+    normalized = load_normalized_pixel_frame_authority(
+        _persisted_node(
+            root_node,
+            f"{base}/coordinate_frames/source_camera_normalized",
+            label="successor normalized frame",
+        ),
+        pixel_frame=bbox_camera,
+    )
+    matrix_node = _persisted_node(
+        root_node,
+        f"{base}/coordinate_transforms/source_camera_normalized_to_image",
+        label="successor normalized-to-camera transform",
+    )
+    transform_authority = load_bound_transform_authority(
+        _persisted_node(
+            root_node,
+            f"{base}/coordinate_transforms/source_camera_normalized_to_image_authority",
+            label="successor normalized-to-camera transform authority",
+        ),
+        payload_node=matrix_node,
+        source_frame=normalized,
+        target_frame=bbox_camera,
+    )
+    transform = load_bound_directed_transform_v2(
+        matrix_node,
+        authority=transform_authority,
+        source_frame=normalized,
+        target_frame=bbox_camera,
+    )
+    evidence = build_bound_detection_frame_evidence(
+        source_camera_frame=point_camera,
+        bbox_source_camera_frame=bbox_camera,
+        normalized_frame=normalized,
+        normalized_to_source_camera=resolve_bound_directed_transform_chain(
+            (transform,)
+        ),
+    )
+    mapping = bind_persisted_coordinate_record(
+        rowset,
+        attr_name=COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR,
+    )
+    _require_collection_proxy_successor_mapping(
+        rowset,
+        mapping,
+        root_node=root_node,
+        acquisition=acquisition,
+    )
+    geometry = load_detection_observation_geometry(
+        rowset,
+        _persisted_node(root_node, f"{base}/instance_key", label="successor instance_key"),
+        _persisted_node(
+            root_node,
+            f"{base}/source_acquisition_frame_index",
+            label="successor acquisition frame",
+        ),
+        _persisted_node(
+            root_node,
+            f"{base}/bbox_norm_coords",
+            label="successor normalized bbox",
+        ),
+        _persisted_node(
+            root_node,
+            f"{base}/bbox_img_xyxy",
+            label="successor image bbox",
+        ),
+        _persisted_node(
+            root_node,
+            f"{base}/centers_img_xy",
+            label="successor centers",
+        ),
+        frame_evidence=evidence,
+        source_lineage_records=(mapping,),
+    )
+    return geometry
+
+
+@proof_verification_operation
+def load_persisted_collection_proxy_successor_geometry(
+    root_node: Any,
+    rowset_path: str,
+) -> BoundDetectionObservationGeometry:
+    """Load only a complete, current-v2 merged-proxy coordinate successor."""
+
+    return _load_persisted_collection_proxy_successor_geometry(
+        root_node,
+        rowset_path,
+        require_selector_eligible=True,
+    )
+
+
+@proof_verification_operation
+def load_collection_proxy_successor_source_rowset(
+    root_node: Any,
+    rowset_path: str,
+) -> str:
+    """Return the exact historical rowset proven identical by one successor."""
+
+    geometry = load_persisted_collection_proxy_successor_geometry(
+        root_node,
+        rowset_path,
+    )
+    matches = [
+        record
+        for record in geometry.source_lineage_records
+        if record.record.get("schema_id")
+        == COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID
+    ]
+    if len(matches) != 1:
+        _fail(
+            "Collection-proxy successor geometry must carry exactly one verified "
+            "historical-row mapping."
+        )
+    historical = matches[0].record.get("historical_source")
+    rowset_ref = (
+        historical.get("rowset_ref")
+        if isinstance(historical, Mapping)
+        else None
+    )
+    if (
+        not isinstance(rowset_ref, str)
+        or not rowset_ref.startswith("/crop_runs/")
+        or len(rowset_ref.split("/")) != 3
+    ):
+        _fail("Collection-proxy successor historical rowset reference is invalid.")
+    return rowset_ref[1:]
 
 
 def _load_persisted_crop_observation_geometry(
@@ -3898,22 +4234,30 @@ def load_persisted_source_camera_position_surface(
     root_node: Any,
     rowset_path: str,
 ) -> BoundSourceCameraPositionSurface:
-    """Track-facing resolver for one canonical detection or crop rowset."""
+    """Track-facing resolver for one canonical observation position rowset."""
 
     rowset = _persisted_node(root_node, rowset_path, label="position rowset")
     attrs = require_trusted_coordinate_attrs(rowset, label="Position rowset")
     has_mapping = DETECTION_ACQUISITION_MAPPING_ATTR in attrs
     has_selection = CROP_GEOMETRY_SELECTION_ATTR in attrs
-    if has_mapping == has_selection:
+    has_proxy_successor = COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR in attrs
+    if sum((has_mapping, has_selection, has_proxy_successor)) != 1:
         _fail(
-            "Canonical position rowset must declare exactly one detection-mapping "
-            "or crop-selection lineage."
+            "Canonical position rowset must declare exactly one detection, crop, "
+            "or collection-proxy-successor lineage."
         )
-    geometry = (
-        load_persisted_detection_observation_geometry(root_node, rowset_path)
-        if has_mapping
-        else load_persisted_crop_observation_geometry(root_node, rowset_path)
-    )
+    if has_mapping:
+        geometry = load_persisted_detection_observation_geometry(
+            root_node,
+            rowset_path,
+        )
+    elif has_selection:
+        geometry = load_persisted_crop_observation_geometry(root_node, rowset_path)
+    else:
+        geometry = load_persisted_collection_proxy_successor_geometry(
+            root_node,
+            rowset_path,
+        )
     return require_bound_source_camera_position_surface(geometry.position_surface)
 
 
@@ -3944,6 +4288,12 @@ __all__ = [
     "CROP_GEOMETRY_SELECTION_OPERATION",
     "CROP_GEOMETRY_SELECTION_SCHEMA_ID",
     "CROP_GEOMETRY_SELECTION_SCHEMA_VERSION",
+    "COLLECTION_PROXY_SUCCESSOR_MAPPING_ATTR",
+    "COLLECTION_PROXY_SUCCESSOR_MAPPING_OPERATION",
+    "COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_ID",
+    "COLLECTION_PROXY_SUCCESSOR_MAPPING_SCHEMA_VERSION",
+    "COLLECTION_PROXY_SUCCESSOR_RUN_SCHEMA",
+    "COLLECTION_PROXY_SUCCESSOR_SOURCE_KIND",
     "CROP_ROI_GEOMETRY_DERIVATION_ATTR",
     "CROP_ROI_GEOMETRY_DERIVATION_OPERATION",
     "CROP_ROI_GEOMETRY_DERIVATION_SCHEMA_ID",
@@ -3964,13 +4314,16 @@ __all__ = [
     "derive_detection_source_camera_geometry",
     "detection_observation_geometry_values",
     "load_crop_observation_geometry",
+    "load_collection_proxy_successor_source_rowset",
     "load_crop_roi_geometry",
     "load_detection_observation_geometry",
     "load_persisted_crop_observation_geometry",
+    "load_persisted_collection_proxy_successor_geometry",
     "load_persisted_detection_observation_geometry",
     "load_persisted_ordinary_crop_observation_geometry",
     "load_persisted_source_camera_position_surface",
     "publish_crop_observation_geometry",
+    "publish_collection_proxy_successor_mapping",
     "publish_crop_roi_geometry",
     "publish_detection_observation_geometry",
     "publish_detection_observation_cardinality",

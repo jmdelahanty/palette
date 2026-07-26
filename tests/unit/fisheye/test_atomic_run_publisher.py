@@ -354,8 +354,18 @@ def test_atomic_activation_callback_is_absolute_final_metadata_commit(
 
     assert events == ["complete", "verify", "activate"]
     assert result["final_validation"]["valid"] is True
+    telemetry = result["runtime_telemetry"]
+    assert telemetry["identity_policy"] == (
+        "report_only_excluded_from_scientific_identity_and_payload_digests"
+    )
+    assert [phase["name"] for phase in telemetry["phases"]][-3:] == [
+        "activation_preflight",
+        "selector_activation",
+        "publication_lock_release",
+    ]
     published = zarr.open_group(str(target), mode="r", use_consolidated=False)
     assert published.attrs["stage_selector_eligible"] is True
+    assert "runtime_telemetry" not in published.attrs["cluster_output_staging"]
 
 
 def test_atomic_activation_accepts_persisted_then_interrupted_final_write(

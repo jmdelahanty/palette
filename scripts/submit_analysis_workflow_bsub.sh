@@ -9,7 +9,7 @@ PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/
 SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 LOG_DIR=""
 QUEUE=""
-NCORES=8
+NCORES=4
 MEM_GB=32
 WALLTIME="24:00"
 SUBMIT=0
@@ -44,7 +44,7 @@ Options:
   --submit-host HOST           SSH poller used when bsub is unavailable locally
   --log-dir PATH               Submission root; defaults beside the recording
   --queue NAME                 LSF queue; default is the cluster default
-  --ncores N                   CPU slots and Dask workers (default: 8)
+  --ncores N                   CPU slots and Dask workers (default: 4)
   --mem-gb N                   LSF memory request per slot (default: 32)
   --walltime H:MM              LSF walltime (default: 24:00)
   --submit                     Render and submit; default reserves a render-only directory
@@ -93,7 +93,7 @@ done
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be a positive integer"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be a positive integer"
 [[ -f "$ZARR_PATH/zarr.json" ]] || fail "analysis Zarr metadata not found: $ZARR_PATH"
-[[ -d "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
+[[ -e "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable"
 [[ -f "$PALETTE_REPO/src/fisheye/utils/execute_analysis_workflow.py" ]] || \
   fail "Palette checkout does not contain the analysis-workflow executor"
@@ -119,6 +119,9 @@ REPORT_PATH="${RUN_DIR}/execution_report.json"
 STATUS_FILE="${RUN_DIR}/status.txt"
 SUBMISSION_FILE="${RUN_DIR}/submission.txt"
 RUNTIME_ENVIRONMENT_FILE="${RUN_DIR}/runtime_environment.txt"
+RESOURCE_SUMMARY_FILE="${RUN_DIR}/resource_telemetry_summary.json"
+RESOURCE_SAMPLES_FILE="${RUN_DIR}/resource_telemetry_samples.jsonl"
+RESOURCE_STDOUT_FILE="${RUN_DIR}/workflow_stdout.log"
 
 q_repo="$(printf '%q' "$PALETTE_REPO")"
 q_zarr="$(printf '%q' "$ZARR_PATH")"
@@ -127,6 +130,9 @@ q_expected_commit="$(printf '%q' "$EXPECTED_COMMIT")"
 q_report="$(printf '%q' "$REPORT_PATH")"
 q_status="$(printf '%q' "$STATUS_FILE")"
 q_runtime_environment="$(printf '%q' "$RUNTIME_ENVIRONMENT_FILE")"
+q_resource_summary="$(printf '%q' "$RESOURCE_SUMMARY_FILE")"
+q_resource_samples="$(printf '%q' "$RESOURCE_SAMPLES_FILE")"
+q_resource_stdout="$(printf '%q' "$RESOURCE_STDOUT_FILE")"
 q_requested_queue="$(printf '%q' "${QUEUE:-<cluster-default>}")"
 quote_array() {
   local rendered="" value quoted
@@ -153,6 +159,9 @@ EXPECTED_COMMIT=${q_expected_commit}
 REPORT_PATH=${q_report}
 STATUS_FILE=${q_status}
 RUNTIME_ENVIRONMENT_FILE=${q_runtime_environment}
+RESOURCE_SUMMARY_FILE=${q_resource_summary}
+RESOURCE_SAMPLES_FILE=${q_resource_samples}
+RESOURCE_STDOUT_FILE=${q_resource_stdout}
 REQUESTED_QUEUE=${q_requested_queue}
 NCORES=${NCORES}
 REQUESTED_MEM_GB_PER_SLOT=${MEM_GB}
@@ -286,8 +295,20 @@ fi
 cat >>"$JOB_SCRIPT" <<'JOBSCRIPT'
 
 printf 'workflow_command='; printf '%q ' "${cmd[@]}"; printf '\n'
+telemetry_cmd=(
+  scripts/py -m fisheye.diagnostics.run_with_resource_telemetry
+  --summary-json "${RESOURCE_SUMMARY_FILE}"
+  --samples-jsonl "${RESOURCE_SAMPLES_FILE}"
+  --stdout-log "${RESOURCE_STDOUT_FILE}"
+  --requested-workers "${NCORES}"
+  --allocated-slots "${ALLOCATED_SLOTS}"
+  --sample-interval-seconds 2.0
+  --
+  "${cmd[@]}"
+)
+printf 'telemetry_command='; printf '%q ' "${telemetry_cmd[@]}"; printf '\n'
 set +e
-"${cmd[@]}"
+"${telemetry_cmd[@]}"
 payload_rc=$?
 set -e
 
@@ -308,6 +329,9 @@ status_tmp="${STATUS_FILE}.tmp.$$"
   printf 'payload_returncode=%s\n' "${payload_rc}"
   printf 'execution_report=%s\n' "${REPORT_PATH}"
   printf 'runtime_environment=%s\n' "${RUNTIME_ENVIRONMENT_FILE}"
+  printf 'resource_telemetry_summary=%s\n' "${RESOURCE_SUMMARY_FILE}"
+  printf 'resource_telemetry_samples=%s\n' "${RESOURCE_SAMPLES_FILE}"
+  printf 'workflow_stdout=%s\n' "${RESOURCE_STDOUT_FILE}"
 } >"${status_tmp}"
 mv "${status_tmp}" "${STATUS_FILE}"
 exit "${payload_rc}"
@@ -334,6 +358,9 @@ printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'execution_report=%s\n' "$REPORT_PATH"
 printf 'runtime_environment=%s\n' "$RUNTIME_ENVIRONMENT_FILE"
+printf 'resource_telemetry_summary=%s\n' "$RESOURCE_SUMMARY_FILE"
+printf 'resource_telemetry_samples=%s\n' "$RESOURCE_SAMPLES_FILE"
+printf 'workflow_stdout=%s\n' "$RESOURCE_STDOUT_FILE"
 printf 'requested_queue=%s\n' "${QUEUE:-<cluster-default>}"
 printf 'requested_resources=ncores:%s mem_gb_per_slot:%s walltime:%s\n' \
   "$NCORES" "$MEM_GB" "$WALLTIME"
@@ -368,6 +395,9 @@ if [[ "$SUBMIT" == "1" ]]; then
     printf 'status_file=%s\n' "$STATUS_FILE"
     printf 'execution_report=%s\n' "$REPORT_PATH"
     printf 'runtime_environment=%s\n' "$RUNTIME_ENVIRONMENT_FILE"
+    printf 'resource_telemetry_summary=%s\n' "$RESOURCE_SUMMARY_FILE"
+    printf 'resource_telemetry_samples=%s\n' "$RESOURCE_SAMPLES_FILE"
+    printf 'workflow_stdout=%s\n' "$RESOURCE_STDOUT_FILE"
     printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
   } >"$submission_tmp"
   mv "$submission_tmp" "$SUBMISSION_FILE"
