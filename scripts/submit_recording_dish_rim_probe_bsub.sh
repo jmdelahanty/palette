@@ -94,7 +94,7 @@ JOB_SCRIPT="${RUN_DIR}/run_probe.sh"
 mkdir -p "$RUN_DIR"
 
 EXPECTED_COMMIT="$(git -C "$PALETTE_REPO" rev-parse HEAD)"
-MEM_GB_PER_SLOT=$(( (MEM_GB + NCORES - 1) / NCORES ))
+MEM_MB_PER_SLOT=$(( (MEM_GB * 1024 + NCORES - 1) / NCORES ))
 q_repo="$(printf '%q' "$PALETTE_REPO")"
 q_video="$(printf '%q' "$VIDEO")"
 q_summary="$(printf '%q' "$SUMMARY")"
@@ -167,7 +167,7 @@ BSUB_ARGS=(
   -q "$QUEUE"
   -n "$NCORES"
   -W "$WALLTIME"
-  -R "span[hosts=1] rusage[mem=${MEM_GB_PER_SLOT}G]"
+  -R "span[hosts=1] rusage[mem=${MEM_MB_PER_SLOT}]"
   -gpu "$GPU_RESOURCE"
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"
@@ -177,6 +177,7 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 printf 'mode=%s\n' "$([[ "$SUBMIT" == "1" ]] && printf submit || printf render-only)"
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'probe_id=%s\n' "$PROBE_ID"
+printf 'memory_request_mb_per_slot=%s\n' "$MEM_MB_PER_SLOT"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'artifact_dir=%s\n' "$ARTIFACT_DIR"
 printf 'bsub_command='; printf '%q ' "${BSUB_COMMAND[@]}"; printf '\n'
