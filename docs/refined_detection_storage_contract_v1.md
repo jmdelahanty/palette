@@ -12,6 +12,7 @@ The executable definitions are:
 
 - `src/fisheye/shared/zarr/refined_detection_schema.py`
 - `src/fisheye/shared/zarr/refined_detection_storage.py`
+- `src/fisheye/shared/zarr/refined_detection_manifest.py`
 - `src/fisheye/shared/zarr/array_contracts.py`
 
 Current refined-detection writers remain transition surfaces. This checkpoint
@@ -42,6 +43,10 @@ schema nor compactor is part of v1 implementation work yet.
 - `F = n_frames`
 - `N = n_instances`
 - `S = n_source_detections`
+
+Published snapshots require `F >= 1`. A zero-frame result is not a presentable
+refined-detection snapshot and must remain an incomplete/absent artifact rather
+than publishing `[0]` offsets that Crimson cannot present.
 
 Every array is required for its active lineage profile. Canonical groups have
 an exact array set: adding a field requires a new schema version.
@@ -75,6 +80,26 @@ A manual row must have a newly minted durable `instance_key` that collides with
 neither another refined row nor any bound source-candidate key, a new non-reused
 `refined_row_id`, `source_detect_row_index=-1`, `source_kind_codes=3`,
 `manual_edit_flags=true`, `score_valid=false`, and `scores=0.0`.
+
+The run manifest makes this identity enforceable across snapshots. It records a
+stable UUID `lineage_id`, a unique UUID `snapshot_id`, the parent run and parent
+manifest digest, and `next_refined_row_id` under the exact
+`monotonic_int64_nonreuse_v1` allocator. A successor must:
+
+- retain the parent's lineage ID;
+- bind the exact parent run and manifest digest;
+- never decrease `next_refined_row_id`;
+- preserve `instance_key` for every surviving `refined_row_id`;
+- reject any ID below the parent high-water mark that was absent from the
+  parent rowset;
+- allocate new IDs at or above the parent high-water mark.
+
+Manual keys are not a second monotonic integer sequence. They use Palette's
+existing deterministic `palette.blake2b64.recording_frame_bbox_class_v1`
+algorithm, the `manual_curation_refined_row_id_v1` namespace, the immutable
+recording identity, and the newly allocated non-reused `refined_row_id`.
+Collisions with refined or source-candidate keys fail publication. Once minted,
+a surviving key is copied rather than recomputed after geometry/class edits.
 
 ## `source_detections` Arrays
 
@@ -131,6 +156,25 @@ require a nonnegative clip-local source row. Clip membership and frame mapping
 must also be bound by exact manifest identities and digests when a publisher is
 implemented.
 
+The persisted `clipped_binding` uses schema
+`palette.refined_detection.clipped_binding` v1 and requires:
+
+- one exact finalized collection ID and manifest digest;
+- exactly one camera serial per recording snapshot;
+- one video identity and manifest digest;
+- the canonical recording-frame-index digest;
+- a complete ordered clip table with contiguous global ordinals within that
+  single camera;
+- per clip: media identity/digest, parent half-open frame interval,
+  frame-map digest, and source refined run/manifest digest.
+
+The clip intervals cover `[0,F)` exactly, independently of detection rows, so
+Crimson can resolve media for empty frames. Both tables' clip ordinals and local
+frames must be in range and must map exactly to their parent frames. A
+raw-backed instance must copy clip ordinal, local frame, and clip-local source
+row from the addressed source-audit row. Its `source_refined_row_ids` value must
+equal that source row's `source_resolved_refined_row_id`.
+
 ## Excluded Transition Fields
 
 Canonical v1 groups reject:
@@ -143,6 +187,16 @@ Human notes belong in a separate review/audit artifact. Compact numeric reason
 codes remain in the hot canonical table. Current float64 refined boxes, int8
 source codes, int32 source row indices, whole-run rewrite behavior, and legacy
 offset names are compatibility surfaces, not this contract.
+
+The two numeric reason columns deliberately use separate registries:
+
+- `run_manifest.payload.reason_registries.instances`;
+- `run_manifest.payload.reason_registries.source_detections`.
+
+Each registry is `palette.refined_detection.reason_registry` v1, encodes codes
+as canonical decimal JSON-object keys and lowercase snake-case labels, requires
+exact `"0":"none"`, and carries a SHA-256 canonical-JSON digest. The fixed
+source-decision code map remains separate from source-decision reason codes.
 
 ## Storage Intent Contract
 
@@ -209,9 +263,73 @@ be visible to a selector, publication must:
 - include exact schema, dtype, code-map, reason-map, storage-profile, codec,
   source-run, dimensions, and lineage identities/digests in the run manifest.
 
+The manifest has one exact persisted location:
+
+```text
+refined_detect_runs/<run>/zarr.json.attributes.run_manifest
+```
+
+It is a `palette.refined_detection.run_manifest` v1 envelope with:
+
+- `digest_algorithm = sha256_canonical_json_v1`;
+- a strict-JSON `payload` serialized with sorted keys, no whitespace, UTF-8,
+  and no NaN/Infinity;
+- `payload_digest`, the SHA-256 of those canonical payload bytes;
+- exact completion contract/status and selector eligibility;
+- the complete logical schema and resolved physical storage/codec plan;
+- immutable raw source run, manifest digest, and logical-content digest;
+- snapshot lineage and allocation state;
+- separate reason registries and digests;
+- the clipped binding when that profile is active;
+- a normalized direct/consolidated declaration digest.
+
+The metadata-declaration digest covers normalized group/array declarations
+while excluding attributes. This avoids a circular digest through the
+`run_manifest` attribute itself. Publication separately proves direct and
+consolidated attributes/declarations are equal before visibility.
+
 Crimson should consume the exact manifest and consolidated schema rather than
 probe candidate dtypes. Direct metadata remains the fail-closed validation and
 mutable-construction path.
+
+## Refined Selection Contract
+
+Production selection uses `palette.refined_detection.selection_contract` v1.
+The request is typed by `stage`, `run`, and `raw_fallback_policy`; raw fallback
+defaults to `forbid`.
+
+Selection order is:
+
+1. an explicit refined v1 run;
+2. the approved authoritative refined v1 run;
+3. a canonical raw run only when the request explicitly permits raw fallback
+   and no refined authority was requested or selected.
+
+An explicit refined run must exist, have a valid manifest, be complete,
+selector-eligible, and have validated direct/consolidated metadata. Approval is
+not required for explicit inspection/review. Any invalid explicit refined run
+is a terminal error and never falls back to raw.
+
+Implicit refined selection uses these exact parent attributes:
+
+```text
+refined_detect_runs/zarr.json.attributes.authoritative_run
+refined_detect_runs/zarr.json.attributes.authoritative_run_provenance
+```
+
+The provenance value is a
+`palette.refined_detection.authoritative_selection` v1 envelope. It binds the
+selected run and run-manifest digest and records `review_state=approved`, review
+method, approved actor/time, and one exact intended use: `analysis`, `training`,
+or `analysis_and_training`. Crimson may present all three approved uses;
+training promotion still applies its own intended-use gate. A present but
+invalid authoritative pointer is a terminal error, not an absent authority.
+
+Current unversioned `authoritative_run_provenance` payloads and silent refined
+to raw preference chains are transition behavior. The shadow publisher and
+future Crimson adapter must use the versioned envelope. Selector-ineligible
+benchmark paths require a separate explicit benchmark-only API, not a
+production selection exception.
 
 ## Practical Physical-Profile Gate
 
@@ -247,11 +365,21 @@ Contract freeze:
       and consolidated-metadata requirements.
 - [x] Preserve the access-aware hybrid as an explicit unpromoted candidate.
 - [x] Preserve a genuine 1 MiB unsharded paired-gate control.
+- [x] Freeze the exact persisted run-manifest and parent authority envelopes.
+- [x] Freeze fail-closed refined-first selection and explicit raw fallback.
+- [x] Make cross-snapshot row/key allocation and parent binding enforceable.
+- [x] Bind clipped snapshots to one exact collection, camera, media table, and
+      complete frame map.
+- [x] Prohibit zero-frame published snapshots.
+- [x] Separate and digest instance/source reason-code registries.
 - [x] Add deterministic schema and storage-plan tests without Zarr I/O.
 
 Before production routing:
 
-- [ ] Review the exact v1 contract jointly with Palette and Crimson.
+- [x] Complete Crimson's first read-only review; incorporate all six required
+      contract changes before shadow-writer work.
+- [ ] Ask Crimson to verify the revised envelopes and clipped binding resolve
+      its required changes without reopening physical-layout tuning.
 - [ ] Add an immutable shadow writer that consumes only these declarations.
 - [ ] Validate a real current refined run against a deliberate transition
       adapter and report every lossy or unavailable field.

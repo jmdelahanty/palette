@@ -842,9 +842,13 @@ define refined-run selection or manual-addition semantics.
       full and clipped array sets, dtypes, identities, sentinels, dual `F+1`
       indexes, byte-based access rules, Zarr v3 codec chain, consolidated
       metadata gate, and an explicit unpromoted access-aware candidate.
-- [ ] Review and accept the frozen refined snapshot/storage contract, then add
-      a shadow immutable writer and transition report without changing
-      production selectors.
+- [x] Complete Crimson's first read-only refined snapshot/storage review. Record
+      `ACCEPT WITH REQUIRED CHANGES` and freeze its six blockers: persisted
+      manifest envelope, fail-closed selection, cross-snapshot identity,
+      clipped binding, zero-frame policy, and separate reason registries.
+- [ ] Ask Crimson to verify the revised executable envelopes resolve those six
+      blockers, then add a shadow immutable writer and transition report without
+      changing production selectors.
 - [ ] Run the paired regular-versus-access-aware refined snapshot canary and
       apply the pragmatic correctness/object/transfer/readiness/RSS gate before
       promoting a versioned writer profile.
@@ -861,6 +865,6 @@ decisions are the review and implementation queue; the census itself is complete
 The resulting frozen target is documented in
 [`refined_detection_storage_contract_v1.md`](refined_detection_storage_contract_v1.md).
 Executable declarations and deterministic validation live in
-`refined_detection_schema.py` and `refined_detection_storage.py`. No current
-writer, selector, registry, delta schema, compactor, or archive was changed by
-this checkpoint.
+`refined_detection_schema.py`, `refined_detection_storage.py`, and
+`refined_detection_manifest.py`. No current writer, selector, registry, delta
+schema, compactor, or archive was changed by this checkpoint.

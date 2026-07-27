@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Any, Mapping
 
 import numpy as np
@@ -84,12 +85,172 @@ NO_SOURCE_ROW = -1
 NO_RESOLVED_REFINED_ROW = -1
 NO_REASON_CODE = 0
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 class RefinedDetectionLineageProfile(str, Enum):
     """Conditional exact lineage bindings for one publication context."""
 
     FULL_ACQUISITION = "full_acquisition"
     CLIPPED_RECORDING_SNAPSHOT = "clipped_recording_snapshot"
+
+
+def _require_identifier(value: str, *, name: str) -> str:
+    normalized = str(value).strip()
+    if not normalized or "/" in normalized:
+        raise ValueError(f"{name} must be a non-empty path-safe identifier.")
+    return normalized
+
+
+def _require_sha256(value: str, *, name: str) -> str:
+    normalized = str(value).strip().lower()
+    if not _SHA256_RE.fullmatch(normalized):
+        raise ValueError(f"{name} must be a lowercase 64-character SHA-256 hex digest.")
+    return normalized
+
+
+@dataclass(frozen=True)
+class RefinedDetectionClipBinding:
+    """One ordered media/lineage unit in a clipped recording snapshot."""
+
+    clip_index: int
+    clip_id: str
+    media_identity: str
+    media_digest: str
+    parent_frame_start: int
+    parent_frame_stop: int
+    frame_map_digest: str
+    source_refined_run_id: str
+    source_refined_manifest_digest: str
+
+    def __post_init__(self) -> None:
+        if type(self.clip_index) is not int or self.clip_index < 0:
+            raise ValueError("clip_index must be a nonnegative exact integer.")
+        if type(self.parent_frame_start) is not int or type(
+            self.parent_frame_stop
+        ) is not int:
+            raise TypeError("Parent-frame bounds must be exact integers.")
+        if self.parent_frame_start < 0 or self.parent_frame_stop <= self.parent_frame_start:
+            raise ValueError("A clip must cover a nonempty parent-frame half-open interval.")
+        object.__setattr__(
+            self,
+            "clip_id",
+            _require_identifier(self.clip_id, name="clip_id"),
+        )
+        media_identity = str(self.media_identity).strip()
+        if not media_identity:
+            raise ValueError("media_identity cannot be empty.")
+        object.__setattr__(self, "media_identity", media_identity)
+        object.__setattr__(
+            self,
+            "source_refined_run_id",
+            _require_identifier(
+                self.source_refined_run_id,
+                name="source_refined_run_id",
+            ),
+        )
+        for name in (
+            "media_digest",
+            "frame_map_digest",
+            "source_refined_manifest_digest",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _require_sha256(getattr(self, name), name=name),
+            )
+
+    @property
+    def frame_count(self) -> int:
+        return self.parent_frame_stop - self.parent_frame_start
+
+    def as_manifest(self) -> dict[str, object]:
+        return {
+            "clip_index": self.clip_index,
+            "clip_id": self.clip_id,
+            "media_identity": self.media_identity,
+            "media_digest_algorithm": "sha256",
+            "media_digest": self.media_digest,
+            "parent_frame_start": self.parent_frame_start,
+            "parent_frame_stop": self.parent_frame_stop,
+            "frame_count": self.frame_count,
+            "frame_map_digest_algorithm": "sha256_canonical_rows_v1",
+            "frame_map_digest": self.frame_map_digest,
+            "source_refined_run_id": self.source_refined_run_id,
+            "source_refined_manifest_digest": self.source_refined_manifest_digest,
+        }
+
+
+@dataclass(frozen=True)
+class RefinedDetectionClippedBinding:
+    """Exact finalized collection and media mapping for a clipped snapshot."""
+
+    collection_id: str
+    collection_manifest_digest: str
+    camera_serial: str
+    video_identity: str
+    video_manifest_digest: str
+    recording_frame_index_digest: str
+    clips: tuple[RefinedDetectionClipBinding, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "collection_id",
+            _require_identifier(self.collection_id, name="collection_id"),
+        )
+        camera_serial = str(self.camera_serial).strip()
+        video_identity = str(self.video_identity).strip()
+        if not camera_serial or not video_identity:
+            raise ValueError("camera_serial and video_identity cannot be empty.")
+        object.__setattr__(self, "camera_serial", camera_serial)
+        object.__setattr__(self, "video_identity", video_identity)
+        for name in (
+            "collection_manifest_digest",
+            "video_manifest_digest",
+            "recording_frame_index_digest",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _require_sha256(getattr(self, name), name=name),
+            )
+        clips = tuple(self.clips)
+        if not clips:
+            raise ValueError("A clipped recording snapshot requires at least one clip.")
+        if tuple(clip.clip_index for clip in clips) != tuple(range(len(clips))):
+            raise ValueError("Clips must be ordered by contiguous global clip_index.")
+        if len({clip.clip_id for clip in clips}) != len(clips):
+            raise ValueError("clip_id values must be unique within the snapshot.")
+        expected_start = 0
+        for clip in clips:
+            if clip.parent_frame_start != expected_start:
+                raise ValueError(
+                    "Ordered clips must cover one complete contiguous parent timeline."
+                )
+            expected_start = clip.parent_frame_stop
+        object.__setattr__(self, "clips", clips)
+
+    @property
+    def n_frames(self) -> int:
+        return self.clips[-1].parent_frame_stop
+
+    def as_manifest(self) -> dict[str, object]:
+        return {
+            "schema_id": "palette.refined_detection.clipped_binding",
+            "schema_version": 1,
+            "collection_id": self.collection_id,
+            "collection_manifest_digest": self.collection_manifest_digest,
+            "camera_cardinality": 1,
+            "camera_serial": self.camera_serial,
+            "clip_ordinal_scope": "snapshot_global_within_single_camera",
+            "video_identity": self.video_identity,
+            "video_manifest_digest": self.video_manifest_digest,
+            "recording_frame_index_digest_algorithm": "sha256_canonical_rows_v1",
+            "recording_frame_index_digest": self.recording_frame_index_digest,
+            "empty_frame_media_resolution": "complete_frame_map_independent_of_rows",
+            "clips": [clip.as_manifest() for clip in self.clips],
+        }
 
 
 def _binding(path: str, contract: ArrayContract) -> ArrayContractBinding:
@@ -251,8 +412,10 @@ class RefinedDetectionDimensions:
         ):
             if type(getattr(self, name)) is not int:
                 raise TypeError(f"{name} must be an exact integer.")
-        if self.n_frames < 0:
-            raise ValueError("n_frames cannot be negative.")
+        if self.n_frames <= 0:
+            raise ValueError(
+                "Published refined-detection snapshots require at least one frame."
+            )
         if self.n_instances < 0 or self.n_source_detections < 0:
             raise ValueError("Refined-detection row counts cannot be negative.")
         if self.source_width <= 0 or self.source_height <= 0:
@@ -384,6 +547,7 @@ class RefinedDetectionSchema:
         arrays: Mapping[str, Any],
         *,
         dimensions: RefinedDetectionDimensions,
+        clipped_binding: RefinedDetectionClippedBinding | None = None,
     ) -> tuple[RefinedDetectionSchemaIssue, ...]:
         issues: list[RefinedDetectionSchemaIssue] = []
         bindings = self.bindings_for(dimensions)
@@ -478,7 +642,33 @@ class RefinedDetectionSchema:
             dimensions.lineage_profile
             is RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT
         ):
-            self._validate_clipped_lineage(values, issues)
+            if clipped_binding is None:
+                issues.append(
+                    _issue(
+                        "missing_clipped_binding",
+                        "run_manifest.clipped_binding",
+                        "Clipped snapshots require an exact finalized collection, "
+                        "camera, media, and frame-map binding.",
+                    )
+                )
+            else:
+                self._validate_clipped_lineage(values, issues, clipped_binding)
+                if clipped_binding.n_frames != dimensions.n_frames:
+                    issues.append(
+                        _issue(
+                            "clipped_frame_count_mismatch",
+                            "run_manifest.clipped_binding.clips",
+                            "The ordered clip frame intervals must cover n_frames exactly.",
+                        )
+                    )
+        elif clipped_binding is not None:
+            issues.append(
+                _issue(
+                    "unexpected_clipped_binding",
+                    "run_manifest.clipped_binding",
+                    "Full-acquisition snapshots must not carry a clipped binding.",
+                )
+            )
         return tuple(issues)
 
     @staticmethod
@@ -891,6 +1081,7 @@ class RefinedDetectionSchema:
     def _validate_clipped_lineage(
         values: Mapping[str, np.ndarray],
         issues: list[RefinedDetectionSchemaIssue],
+        binding: RefinedDetectionClippedBinding,
     ) -> None:
         nonnegative_paths = (
             _instance("source_clip_indices"),
@@ -945,6 +1136,61 @@ class RefinedDetectionSchema:
                         "frame indices plus one.",
                     )
                 )
+        clip_count = len(binding.clips)
+        for prefix in (
+            REFINED_DETECTION_INSTANCE_GROUP,
+            REFINED_DETECTION_SOURCE_GROUP,
+        ):
+            clip_indices = values.get(f"{prefix}/source_clip_indices")
+            local_frames = values.get(
+                f"{prefix}/source_clip_local_frame_indices"
+            )
+            parent_frames = values.get(f"{prefix}/frame_indices")
+            if clip_indices is None or local_frames is None:
+                continue
+            in_bounds = bool(
+                np.all(clip_indices >= 0) and np.all(clip_indices < clip_count)
+            )
+            if not in_bounds:
+                issues.append(
+                    _issue(
+                        "clip_ordinal_out_of_bounds",
+                        f"{prefix}/source_clip_indices",
+                        "Clip ordinals must address the ordered manifest clip table.",
+                    )
+                )
+                continue
+            expected_parent = np.empty(clip_indices.shape, dtype=np.int64)
+            local_valid = np.ones(clip_indices.shape, dtype=bool)
+            for clip in binding.clips:
+                mask = clip_indices == clip.clip_index
+                local_valid[mask] = (
+                    (local_frames[mask] >= 0)
+                    & (local_frames[mask] < clip.frame_count)
+                )
+                expected_parent[mask] = (
+                    np.int64(clip.parent_frame_start)
+                    + local_frames[mask].astype(np.int64, copy=False)
+                )
+            if not bool(np.all(local_valid)):
+                issues.append(
+                    _issue(
+                        "clip_local_frame_out_of_bounds",
+                        f"{prefix}/source_clip_local_frame_indices",
+                        "Clip-local frames must be within the referenced clip interval.",
+                    )
+                )
+            if parent_frames is not None and not np.array_equal(
+                parent_frames.astype(np.int64, copy=False),
+                expected_parent,
+            ):
+                issues.append(
+                    _issue(
+                        "clip_parent_frame_join_mismatch",
+                        f"{prefix}/frame_indices",
+                        "Parent frames must exactly equal clip start plus local frame.",
+                    )
+                )
         kind = values.get(_instance("source_kind_codes"))
         clip_rows = values.get(_instance("source_clip_detect_row_index"))
         if kind is not None and clip_rows is not None:
@@ -958,14 +1204,69 @@ class RefinedDetectionSchema:
                         "Manual rows use -1; raw-backed rows require a clip-local row.",
                     )
                 )
+        inst_source_rows = values.get(_instance("source_detect_row_index"))
+        if kind is not None and inst_source_rows is not None:
+            raw_positions = np.flatnonzero(kind == SOURCE_KIND_CODE_MAP["raw_detect"])
+            source_positions = inst_source_rows[raw_positions].astype(
+                np.int64,
+                copy=False,
+            )
+            joins = (
+                "source_clip_indices",
+                "source_clip_local_frame_indices",
+                "source_clip_detect_row_index",
+            )
+            for name in joins:
+                inst_values = values.get(_instance(name))
+                source_values = values.get(_source(name))
+                if (
+                    inst_values is not None
+                    and source_values is not None
+                    and not np.array_equal(
+                        inst_values[raw_positions],
+                        source_values[source_positions],
+                    )
+                ):
+                    issues.append(
+                        _issue(
+                            "clipped_source_lineage_join_mismatch",
+                            _instance(name),
+                            f"Raw-backed instance {name} must equal its source row.",
+                        )
+                    )
+            source_refined = values.get(_instance("source_refined_row_ids"))
+            source_resolved = values.get(
+                _source("source_resolved_refined_row_id")
+            )
+            if (
+                source_refined is not None
+                and source_resolved is not None
+                and not np.array_equal(
+                    source_refined[raw_positions],
+                    source_resolved[source_positions],
+                )
+            ):
+                issues.append(
+                    _issue(
+                        "clipped_refined_resolution_join_mismatch",
+                        _instance("source_refined_row_ids"),
+                        "Clip-local refined identities must equal the resolved "
+                        "clip-local identity on their source rows.",
+                    )
+                )
 
     def require(
         self,
         arrays: Mapping[str, Any],
         *,
         dimensions: RefinedDetectionDimensions,
+        clipped_binding: RefinedDetectionClippedBinding | None = None,
     ) -> None:
-        issues = self.validate(arrays, dimensions=dimensions)
+        issues = self.validate(
+            arrays,
+            dimensions=dimensions,
+            clipped_binding=clipped_binding,
+        )
         if issues:
             raise RefinedDetectionSchemaError(issues)
 
@@ -973,7 +1274,20 @@ class RefinedDetectionSchema:
         self,
         *,
         dimensions: RefinedDetectionDimensions,
+        clipped_binding: RefinedDetectionClippedBinding | None = None,
     ) -> dict[str, object]:
+        if (
+            dimensions.lineage_profile
+            is RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT
+            and clipped_binding is None
+        ):
+            raise ValueError("Clipped schema manifests require clipped_binding.")
+        if (
+            dimensions.lineage_profile
+            is RefinedDetectionLineageProfile.FULL_ACQUISITION
+            and clipped_binding is not None
+        ):
+            raise ValueError("Full-acquisition manifests cannot carry clipped_binding.")
         return {
             "schema_id": self.schema_id,
             "schema_version": self.schema_version,
@@ -981,6 +1295,9 @@ class RefinedDetectionSchema:
             "layout": REFINED_DETECTION_LAYOUT,
             "base_path": "refined_detect_runs/<run>",
             "dimensions": dimensions.as_manifest(),
+            "clipped_binding": (
+                clipped_binding.as_manifest() if clipped_binding is not None else None
+            ),
             "bindings": [
                 binding.as_manifest() for binding in self.bindings_for(dimensions)
             ],
@@ -989,9 +1306,18 @@ class RefinedDetectionSchema:
             "code_maps": {
                 "source_kind_codes": dict(SOURCE_KIND_CODE_MAP),
                 "source_detections/decision_codes": dict(SOURCE_DECISION_CODE_MAP),
-                "reason_codes": {
+                "instances/reason_codes": {
                     "zero": NO_REASON_CODE,
-                    "registry": "run_manifest.reason_code_map",
+                    "registry": (
+                        "run_manifest.payload.reason_registries.instances"
+                    ),
+                    "registry_requirement": "exact_map_and_digest_required",
+                },
+                "source_detections/reason_codes": {
+                    "zero": NO_REASON_CODE,
+                    "registry": (
+                        "run_manifest.payload.reason_registries.source_detections"
+                    ),
                     "registry_requirement": "exact_map_and_digest_required",
                 },
             },
@@ -1003,6 +1329,7 @@ class RefinedDetectionSchema:
                 "artifact_row_identity": "refined_row_ids",
                 "frame_lookup": "frame_row_offsets_csr",
                 "instances_per_frame": "zero_one_or_many",
+                "minimum_frame_count": 1,
                 "missing_instance_representation": "absent_row",
                 "geometry_authority": "bbox_norm_coords",
                 "geometry_projections": ["bbox_img_xyxy", "centers_img_xy"],
@@ -1055,6 +1382,8 @@ __all__ = [
     "REFINED_DETECTION_SOURCE_GROUP",
     "SOURCE_DECISION_CODE_MAP",
     "SOURCE_KIND_CODE_MAP",
+    "RefinedDetectionClipBinding",
+    "RefinedDetectionClippedBinding",
     "RefinedDetectionDimensions",
     "RefinedDetectionLineageProfile",
     "RefinedDetectionSchema",

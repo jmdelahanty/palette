@@ -165,14 +165,21 @@ production writer.
 - [x] Define `palette.stage.refined_detection` v1 as a separate extension of
       the accepted canonical raw-detection primitives.
 - [x] Make `instances/instance_key` required and require manual rows to carry a
-      newly minted durable key before they enter a compacted snapshot. The
-      minting algorithm belongs to the deferred delta/compactor contract.
+      newly minted durable key before they enter a compacted snapshot. Freeze
+      the existing BLAKE2b-64 manual namespace anchored by the monotonic,
+      non-reused refined row ID; surviving rows copy rather than remint keys.
 - [x] Choose `frame_row_offsets` as the one canonical required `F+1` array name
       in both tables; reject `frame_offsets` and count aliases from v1 groups.
 - [x] Lock exact dtypes, dimensions, fill/sentinel meanings, and the exact
       required fields for both `instances` and `source_detections`, including
       float32 continuous geometry and explicit score validity.
 - [x] Specify full-acquisition and clipped-recording-snapshot lineage profiles.
+- [x] Freeze the exact persisted run manifest, cross-snapshot lineage/allocator
+      state, separate reason registries, one-camera clipped collection/media
+      binding, and zero-frame prohibition.
+- [x] Freeze a typed refined-first selection order using the parent
+      `authoritative_run` pointer plus a versioned manifest-bound approval
+      envelope; raw fallback is explicit and fail-closed.
 - [ ] Define `palette.refined_detection.delta.v2` with complete operation-specific
       payloads. `add_instance` must include frame identity, bbox, class, score
       semantics, manual source kind, and a new durable `instance_key`; delete,
@@ -204,20 +211,20 @@ production writer.
 1. Freeze the logical schema, identity/index rules, and immutable storage
    intent. **Complete for the versioned implementation target; production
    routing and physical-profile promotion remain gated.**
-2. Extend and test the detection delta schema, including arbitrary manual
-   additions, without changing production selectors.
-3. Add a read-only base+delta resolver and deterministic materialized-state
-   validator.
-4. Implement the immutable detection compactor through the shared byte-budgeted
-   storage planner and consolidated manifest writer.
-5. Route review saves through partitions, then integrate Crimson overlay reads
-   and explicit refined-run selection.
-6. Add downstream rowset-change regeneration and training promotion gates.
-7. Run the paired regular-versus-hybrid refined-snapshot practical promotion
-   gate only after the refined logical and lifecycle contract is stable. Keep
+2. Build a transition report and shadow immutable writer, then run the paired
+   regular-versus-hybrid refined-snapshot practical promotion gate. Keep
    the reduced three-candidate optimization matrix deferred unless the paired
    check exposes a material problem or later optimization is justified;
    otherwise it benchmarks and tunes a transitional rowset.
+3. Extend and test the detection delta schema, including arbitrary manual
+   additions, without changing production selectors.
+4. Add a read-only base+delta resolver and deterministic materialized-state
+   validator.
+5. Implement the immutable detection compactor through the shared byte-budgeted
+   storage planner and consolidated manifest writer.
+6. Route review saves through partitions, then integrate Crimson overlay reads
+   and explicit refined-run selection.
+7. Add downstream rowset-change regeneration and training promotion gates.
 
 This order keeps the accepted raw-detection contract intact, makes missing
 detections a first-class refined operation, and uses large shards only where

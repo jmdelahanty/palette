@@ -10,6 +10,8 @@ from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
     SOURCE_DECISION_CODE_MAP,
     SOURCE_KIND_CODE_MAP,
+    RefinedDetectionClipBinding,
+    RefinedDetectionClippedBinding,
     RefinedDetectionDimensions,
     RefinedDetectionLineageProfile,
     RefinedDetectionSchemaError,
@@ -18,6 +20,41 @@ from fisheye.shared.zarr.refined_detection_schema import (
 
 def _p(group: str, name: str) -> str:
     return f"{group}/{name}"
+
+
+def _clipped_binding() -> RefinedDetectionClippedBinding:
+    return RefinedDetectionClippedBinding(
+        collection_id="collection_1",
+        collection_manifest_digest="1" * 64,
+        camera_serial="2010095",
+        video_identity="sleepyfish_cam2010095",
+        video_manifest_digest="2" * 64,
+        recording_frame_index_digest="3" * 64,
+        clips=(
+            RefinedDetectionClipBinding(
+                clip_index=0,
+                clip_id="clip_0",
+                media_identity="clip_0.mp4",
+                media_digest="4" * 64,
+                parent_frame_start=0,
+                parent_frame_stop=2,
+                frame_map_digest="5" * 64,
+                source_refined_run_id="refined_clip_0",
+                source_refined_manifest_digest="6" * 64,
+            ),
+            RefinedDetectionClipBinding(
+                clip_index=1,
+                clip_id="clip_1",
+                media_identity="clip_1.mp4",
+                media_digest="7" * 64,
+                parent_frame_start=2,
+                parent_frame_stop=4,
+                frame_map_digest="8" * 64,
+                source_refined_run_id="refined_clip_1",
+                source_refined_manifest_digest="9" * 64,
+            ),
+        ),
+    )
 
 
 def _payload(
@@ -187,6 +224,12 @@ def _codes(
         for issue in REFINED_DETECTION_SCHEMA_V1.validate(
             arrays,
             dimensions=dimensions,
+            clipped_binding=(
+                _clipped_binding()
+                if dimensions.lineage_profile
+                is RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT
+                else None
+            ),
         )
     }
 
@@ -206,8 +249,21 @@ def test_full_acquisition_snapshot_accepts_zero_one_or_many_instances() -> None:
 
 def test_clipped_profile_requires_and_accepts_exact_lineage_extension() -> None:
     dimensions, arrays = _payload(clipped=True)
-    assert REFINED_DETECTION_SCHEMA_V1.validate(arrays, dimensions=dimensions) == ()
+    binding = _clipped_binding()
+    assert REFINED_DETECTION_SCHEMA_V1.validate(
+        arrays,
+        dimensions=dimensions,
+        clipped_binding=binding,
+    ) == ()
     assert len(REFINED_DETECTION_SCHEMA_V1.binding_paths_for(dimensions)) == 38
+
+    assert "missing_clipped_binding" in {
+        issue.code
+        for issue in REFINED_DETECTION_SCHEMA_V1.validate(
+            arrays,
+            dimensions=dimensions,
+        )
+    }
 
     del arrays[_p("instances", "source_clip_indices")]
     assert "missing_required_array" in _codes(dimensions, arrays)
@@ -272,6 +328,27 @@ def test_recording_level_frame_identities_join_exactly() -> None:
         clipped_dimensions,
         clipped_arrays,
     )
+
+
+def test_clipped_rows_bind_to_manifest_and_source_audit_lineage() -> None:
+    dimensions, arrays = _payload(clipped=True)
+    arrays[_p("instances", "source_clip_local_frame_indices")][2] = 0
+    arrays[_p("instances", "source_clip_detect_row_index")][2] = 4
+
+    codes = _codes(dimensions, arrays)
+    assert "clip_parent_frame_join_mismatch" in codes
+    assert "clipped_source_lineage_join_mismatch" in codes
+
+
+def test_zero_frame_snapshots_are_not_presentable_contracts() -> None:
+    with pytest.raises(ValueError, match="at least one frame"):
+        RefinedDetectionDimensions(
+            n_frames=0,
+            n_instances=0,
+            n_source_detections=0,
+            source_width=640,
+            source_height=480,
+        )
 
 
 def test_source_decisions_and_offsets_fail_closed() -> None:
