@@ -12,8 +12,8 @@ OUTPUT_ROOT="/groups/johnson/johnsonlab/jeremy/diagnostics/arena_geometry_detect
 PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/palette}"
 SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 QUEUE="gpu_l4"
-NCORES=4
-MEM_GB=16
+NCORES=1
+MEM_GB=4
 WALLTIME="1:00"
 GPU_RESOURCE="num=1:mode=shared:j_exclusive=no"
 MAX_SAMPLES=8
@@ -36,8 +36,8 @@ Options:
   --palette-repo PATH      Clean cluster-visible Palette checkout
   --submit-host HOST       Citrus SSH poller when bsub is unavailable locally
   --queue NAME             LSF queue (default: gpu_l4)
-  --ncores N               CPU slots (default: 4)
-  --mem-gb N               Approximate total memory request (default: 16)
+  --ncores N               CPU slots (default: 1)
+  --mem-gb N               Approximate total memory request (default: 4)
   --walltime H:MM          Walltime (default: 1:00)
   --gpu-resource SPEC      Raw LSF -gpu specification
   --max-samples N          Review images per exclusive category (default: 8)

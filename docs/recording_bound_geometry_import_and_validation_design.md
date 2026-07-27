@@ -595,6 +595,11 @@ reordering or an unexpected seek result fails closed. It produces full-frame
 plus local review panels on an LSF GPU worker. The diagnostic never selects a
 candidate, filters detections, modifies the Zarr, or updates the registry.
 
+The Batman Cam2010093 canary decoded eight review frames from 128 total GOP
+packets in 1.72 seconds. The complete LSF job finished in 19 seconds with
+278 MB peak memory. The superseded sequential implementation was canceled
+after 681 seconds while traversing toward the same late-recording samples.
+
 Each candidate records:
 
 - `source_kind`, such as `orange_registered_observation`,
