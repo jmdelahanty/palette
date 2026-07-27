@@ -241,3 +241,19 @@ production writer.
 This order keeps the accepted raw-detection contract intact, makes missing
 detections a first-class refined operation, and uses large shards only where
 they are beneficial: immutable publication rather than interactive mutation.
+
+## 2026-07-27 Transition And Shadow Checkpoint
+
+The next read-only checkpoint is complete and recorded in
+[`refined_detection_v1_transition_shadow_checkpoint_2026-07-27.md`](refined_detection_v1_transition_shadow_checkpoint_2026-07-27.md).
+It confirms that the smaller historical full-acquisition run can be represented
+exactly after an explicit, deterministic source-key initialization. It also
+confirms that the Sleepyfish recording aggregate is a clipped-lineage source
+and is rejected by the full-acquisition adapter before payload conversion.
+
+A standalone selector-ineligible shadow publisher now exercises the exact
+28-array schema, byte-planned physical declarations, two-pass consolidated
+metadata, logical hashes, and the named publication gate. It does not make a
+current production writer contract-valid, because historical raw source runs
+still need a canonical source manifest and logical-content digest, and clipped
+recording snapshots still need their separate bound transition.

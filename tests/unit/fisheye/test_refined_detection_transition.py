@@ -187,6 +187,44 @@ def test_missing_source_keys_without_bound_fallback_fails_closed() -> None:
     assert "lacks durable keys" in captured.value.report["blockers"][0]
 
 
+def test_historical_source_keys_require_explicit_reported_initialization() -> None:
+    run = _current_run()
+    del run["instances"]["instance_key"]
+    del run["source_detections"]["instance_key"]
+
+    result = _transition(
+        run,
+        allow_initialize_missing_source_keys=True,
+    )
+
+    assert np.unique(result.arrays["source_detections/instance_key"]).size == 3
+    assert result.report["identity_initializations"] == [
+        {
+            "field": "source_detections/instance_key",
+            "operation": "mint_recording_frame_bbox_class_v1",
+            "row_count": 3,
+            "recording_identity": RECORDING_IDENTITY,
+        }
+    ]
+    assert result.report["lossy_conversions"] == []
+
+
+def test_full_transition_refuses_clipped_lineage_without_reading_it() -> None:
+    run = _current_run()
+    run["instances"]["source_clip_indices"] = np.asarray(
+        [0, 0, 1],
+        dtype=np.int64,
+    )
+
+    with pytest.raises(RefinedDetectionTransitionError) as captured:
+        _transition(run)
+
+    assert (
+        "full-acquisition transition refuses clipped lineage arrays"
+        in (captured.value.report["blockers"][0])
+    )
+
+
 def test_existing_manual_key_requires_allocator_or_parent_evidence() -> None:
     run = _current_run()
     run["instances"]["instance_key"][2] += np.uint64(1)

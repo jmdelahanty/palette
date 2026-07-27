@@ -863,9 +863,19 @@ define refined-run selection or manual-addition semantics.
       recomputed-digest plus multiple-subject tests.
 - [x] Add the read-only current refined-run transition adapter; keep it
       selector-ineligible and report blocked/lossy mappings explicitly.
-- [ ] Obtain read-only re-review of the hardened gate before accepting or
-      committing the standalone shadow writer. Do not change production
-      selectors.
+- [x] Obtain read-only re-review of the hardened gate. Crimson accepted the
+      Palette publication checks for nested tampering, root/successor identity,
+      clipped evidence, and multiple subjects; its remaining required changes
+      are in the Crimson refined-v1 consumer and identity-preserving UI path.
+- [x] Add the standalone selector-ineligible shadow writer and validate it with
+      a mixed raw/manual two-instance frame through real Zarr v3 consolidated
+      metadata. It can write only below `/tmp` or `.palette_benchmarks`, never
+      inside a recording archive, and never updates selectors or registries.
+- [x] Census representative current runs through the read-only transition. A
+      23,287-frame full-acquisition run becomes exact v1 with explicit
+      historical source-key initialization and no lossy conversion. The
+      1,188,000-frame clipped aggregate is deliberately blocked so its ten
+      lineage columns cannot be discarded by the full-acquisition adapter.
 - [ ] Run the paired regular-versus-access-aware refined snapshot canary and
       apply the pragmatic correctness/object/transfer/readiness/RSS gate before
       promoting a versioned writer profile.

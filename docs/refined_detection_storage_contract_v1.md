@@ -450,13 +450,18 @@ Before production routing:
 - [x] Complete the third adversarial read-only review. It accepted the logical
       design but found exact nested-manifest, named identity-gate, and external
       clipped-lineage evidence gaps.
-- [ ] Ask Crimson and the DAG reviewer to verify the exact reconstruction,
+- [x] Ask Crimson and the DAG reviewer to verify the exact reconstruction,
       combined identity gate, and bound per-clip evidence close those gaps
       without reopening physical-layout tuning.
-- [ ] Add an immutable shadow writer that consumes only these declarations.
+- [x] Add a standalone immutable shadow writer that consumes only these
+      declarations, writes below an explicit `/tmp` or `.palette_benchmarks`
+      namespace, and cannot update a selector or registry.
 - [x] Add a read-only current-run transition adapter that reports every lossy,
       unavailable, excluded, or blocked field without mutating its source.
-- [ ] Validate a real current refined run through that transition adapter.
+- [x] Validate representative full-acquisition and clipped current refined runs
+      through that transition adapter. The full run is contract-ready only
+      with explicit historical key initialization; the clipped aggregate fails
+      closed until the bound clipped transition is implemented.
 - [ ] Publish the paired regular/candidate refined canary and apply the
       practical gate above.
 - [ ] Promote a versioned profile only after that gate passes.

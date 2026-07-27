@@ -16,7 +16,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from fisheye.shared.detect_reason_codec import read_reason_labels
-from fisheye.shared.instance_keys import mint_manual_curation_instance_keys
+from fisheye.shared.instance_keys import (
+    mint_detection_instance_keys,
+    mint_manual_curation_instance_keys,
+)
 from fisheye.shared.zarr.detection_schema import derive_canonical_detection_geometry
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
@@ -30,6 +33,15 @@ TRANSITION_REPORT_SCHEMA_VERSION = 1
 
 _NO_REASON_LABELS = frozenset({"", "none", "clean", "present", "accepted"})
 _REASON_LABEL_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+_CLIPPED_LINEAGE_ARRAYS = (
+    "source_recording_frame_ids",
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
+    "source_clip_detect_row_index",
+    "source_refined_row_ids",
+    "source_resolved_refined_row_id",
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +75,13 @@ def _child(group: Any, name: str) -> Any:
     if value is None:
         raise ValueError(f"Current refined run is missing subgroup {name!r}.")
     return value
+
+
+def _contains(group: Any, name: str) -> bool:
+    try:
+        return group.get(name) is not None
+    except AttributeError:
+        return name in group
 
 
 def _array(group: Any, *names: str) -> tuple[np.ndarray | None, str | None]:
@@ -205,12 +224,18 @@ def build_refined_detection_transition(
     recording_identity: str,
     source_detect_group: Any | None = None,
     allow_manual_score_reset: bool = False,
+    allow_initialize_missing_source_keys: bool = False,
 ) -> RefinedDetectionTransitionResult:
     """Convert a current full-acquisition sparse run to exact v1 arrays.
 
     ``allow_manual_score_reset`` is the only lossy opt-in. Current manual rows
     with nonzero legacy confidence have no valid v1 model-score meaning; when
     explicitly allowed their score becomes exact zero with ``score_valid=false``.
+
+    ``allow_initialize_missing_source_keys`` is a separate identity-migration
+    opt-in for historical raw runs that predate durable keys. It deterministically
+    mints the frozen recording/frame/bbox/class key once and records that fact;
+    it is never enabled implicitly and is not classified as a lossy conversion.
     """
 
     dimensions_input = {
@@ -221,12 +246,30 @@ def build_refined_detection_transition(
     mappings: list[dict[str, str]] = []
     blockers: list[str] = []
     lossy: list[dict[str, object]] = []
+    identity_initializations: list[dict[str, object]] = []
     excluded: list[str] = []
     try:
         if not str(recording_identity).strip():
             raise ValueError("recording_identity cannot be empty.")
         instances = _child(refined_run, "instances")
         source = _child(refined_run, "source_detections")
+        clipped_paths = sorted(
+            {
+                f"{group_name}/{name}"
+                for group_name, group in (
+                    ("instances", instances),
+                    ("source_detections", source),
+                )
+                for name in _CLIPPED_LINEAGE_ARRAYS
+                if _contains(group, name)
+            }
+        )
+        if clipped_paths:
+            raise ValueError(
+                "The full-acquisition transition refuses clipped lineage arrays; "
+                "use the bound clipped transition so no lineage is dropped: "
+                + ", ".join(clipped_paths)
+            )
         fallback = _source_fallback_table(source_detect_group)
 
         inst_frames_raw, inst_frames_name = _required_array(instances, "frame_indices")
@@ -384,10 +427,6 @@ def build_refined_detection_transition(
             raise ValueError(
                 "Source audit table lacks class IDs and no fallback supplies them."
             )
-        if source_keys_raw is None:
-            raise ValueError(
-                "Source audit table lacks durable keys and no fallback supplies them."
-            )
         source_scores = _row_vector(
             source_scores_raw,
             row_count=n_source,
@@ -400,12 +439,35 @@ def build_refined_detection_transition(
             dtype=np.int32,
             label="source_detections/class_ids",
         )
-        source_keys = _row_vector(
-            source_keys_raw,
-            row_count=n_source,
-            dtype=np.uint64,
-            label="source_detections/instance_key",
-        )
+        if source_keys_raw is None:
+            if not allow_initialize_missing_source_keys:
+                raise ValueError(
+                    "Source audit table lacks durable keys and no fallback supplies "
+                    "them; explicit allow_initialize_missing_source_keys is required "
+                    "for a historical root-snapshot transition."
+                )
+            source_keys = mint_detection_instance_keys(
+                recording_identity=str(recording_identity),
+                frame_indices=source_frames,
+                bbox_norm_coords=source_bbox,
+                class_ids=source_classes,
+            )
+            source_keys_name = "minted_historical_source_identity"
+            identity_initializations.append(
+                {
+                    "field": "source_detections/instance_key",
+                    "operation": "mint_recording_frame_bbox_class_v1",
+                    "row_count": n_source,
+                    "recording_identity": str(recording_identity),
+                }
+            )
+        else:
+            source_keys = _row_vector(
+                source_keys_raw,
+                row_count=n_source,
+                dtype=np.uint64,
+                label="source_detections/instance_key",
+            )
 
         inst_scores_raw, inst_scores_name = _array(
             instances, "scores", "confidence_scores"
@@ -724,6 +786,7 @@ def build_refined_detection_transition(
         ),
         "mappings": mappings,
         "lossy_conversions": lossy,
+        "identity_initializations": identity_initializations,
         "excluded_compatibility_arrays": sorted(set(excluded)),
         "blockers": blockers,
     }

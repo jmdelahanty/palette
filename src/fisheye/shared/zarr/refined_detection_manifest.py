@@ -218,13 +218,22 @@ def normalize_refined_detection_metadata_declarations(
         if not isinstance(attributes, Mapping):
             raise ValueError(f"Zarr declaration {path!r} requires object attributes.")
         if path in group_paths:
-            expected_fields = {"zarr_format", "node_type", "attributes"}
-            if set(declaration) != expected_fields:
+            required_fields = {"zarr_format", "node_type", "attributes"}
+            optional_fields = {"consolidated_metadata"}
+            if not required_fields.issubset(declaration) or not set(
+                declaration
+            ).issubset(required_fields | optional_fields):
                 raise ValueError(
                     f"Zarr group declaration {path!r} has an unexpected field set."
                 )
             if declaration.get("node_type") != "group":
                 raise ValueError(f"Zarr declaration {path!r} must be a group.")
+            if declaration.get("consolidated_metadata") is not None and not isinstance(
+                declaration["consolidated_metadata"], Mapping
+            ):
+                raise ValueError(
+                    f"Zarr group declaration {path!r} has invalid consolidation."
+                )
         else:
             required_fields = {
                 "zarr_format",
