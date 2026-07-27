@@ -29,6 +29,7 @@ from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_bytes,
     canonical_json_sha256,
+    metadata_without_empty_group_consolidation,
 )
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 
@@ -275,12 +276,6 @@ def validate_legacy_detection_source_evidence(
     return tuple(dict.fromkeys(errors))
 
 
-def _metadata_without_consolidation(value: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = dict(value)
-    normalized.pop("consolidated_metadata", None)
-    return normalized
-
-
 def normalize_canonical_detection_metadata_declarations(
     direct_metadata_by_path: Mapping[str, Mapping[str, Any]],
     *,
@@ -306,8 +301,12 @@ def normalize_canonical_detection_metadata_declarations(
             raise TypeError(f"Zarr metadata declaration {path!r} must be an object.")
         canonical_json_bytes(declaration)
         canonical_json_bytes(candidate)
-        if _metadata_without_consolidation(declaration) != (
-            _metadata_without_consolidation(candidate)
+        if metadata_without_empty_group_consolidation(
+            declaration,
+            path=path,
+        ) != metadata_without_empty_group_consolidation(
+            candidate,
+            path=path,
         ):
             raise ValueError(f"Direct and consolidated metadata differ at {path!r}.")
         direct[path] = declaration

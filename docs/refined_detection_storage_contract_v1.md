@@ -300,9 +300,18 @@ relative to the refined run group. The exact path set is the run root (`""`),
 binding. The publisher extracts the same subtree from archive-root inline
 consolidated metadata and rebases it to those run-relative paths.
 `normalize_refined_detection_metadata_declarations()` first requires exact
-direct/consolidated path sets and equality for every declaration. It then
-requires exact Zarr-v3 group/array field sets and removes only top-level
-`attributes` and `consolidated_metadata`. The result is a
+direct/consolidated path sets and structural equality for every declaration.
+There is one explicit representation normalization: Zarr-Python 3.1.3 writes
+`consolidated_metadata: null` in a leaf group's direct `zarr.json`, while its
+archive-root consolidation deliberately represents that same leaf group as
+`{"kind":"inline","must_understand":false,"metadata":{}}`. Consumers must
+treat an omitted field, `null`, and that exact empty group envelope as
+equivalent. Any non-empty, wrong-kind, array-level, or otherwise different
+consolidation envelope fails validation.
+Arrays and every other group field must match exactly, including attributes.
+The normalizer then requires exact Zarr-v3 group/array field sets and removes
+only top-level `attributes` and the already-validated empty group consolidation
+envelope from the digest surface. The result is a
 `palette.refined_detection.metadata_declarations` v1 document;
 `refined_detection_metadata_declarations_digest()` hashes its canonical JSON.
 This avoids a circular digest through the `run_manifest` attribute itself.
@@ -344,7 +353,9 @@ local array consistency alone.
 
 Crimson should consume the exact manifest and consolidated schema rather than
 probe candidate dtypes. Direct metadata remains the fail-closed validation and
-mutable-construction path.
+mutable-construction path. Direct/consolidated comparison must use the exact
+empty-leaf-group normalization above rather than raw JSON-object or byte
+equality.
 
 ## Refined Selection Contract
 

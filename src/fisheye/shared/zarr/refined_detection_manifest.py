@@ -37,6 +37,7 @@ from fisheye.shared.zarr.manifest_digest import (
     CANONICAL_JSON_DIGEST_ALGORITHM,
     canonical_json_bytes,
     canonical_json_sha256,
+    metadata_without_empty_group_consolidation,
 )
 from fisheye.shared.zarr.refined_detection_storage import (
     RefinedDetectionStoragePlanSet,
@@ -136,14 +137,6 @@ def _array_values(value: Any, *, dtype: Any) -> np.ndarray:
         return np.asarray(value, dtype=dtype)
 
 
-def _metadata_without_consolidation(
-    value: Mapping[str, Any],
-) -> dict[str, Any]:
-    normalized = dict(value)
-    normalized.pop("consolidated_metadata", None)
-    return normalized
-
-
 def normalize_refined_detection_metadata_declarations(
     direct_metadata_by_path: Mapping[str, Mapping[str, Any]],
     *,
@@ -193,8 +186,12 @@ def normalize_refined_detection_metadata_declarations(
         if not isinstance(candidate, Mapping):
             raise TypeError(f"Consolidated declaration {path!r} must be an object.")
         canonical_json_bytes(candidate)
-        if _metadata_without_consolidation(candidate) != (
-            _metadata_without_consolidation(direct[path])
+        if metadata_without_empty_group_consolidation(
+            candidate,
+            path=path,
+        ) != metadata_without_empty_group_consolidation(
+            direct[path],
+            path=path,
         ):
             raise ValueError(f"Direct and consolidated metadata differ at {path!r}.")
 

@@ -201,6 +201,26 @@ real fixture alone is not evidence for manual additions or multiple subjects.
 No video was copied. The first handoff is consequently a headless consumer
 gate; any GUI/media smoke must reference a separately accessible source video.
 
+### Direct/consolidated interoperability finding
+
+Crimson's first open correctly failed closed because it initially required raw
+JSON-object equality between each direct declaration and the corresponding
+archive-root consolidated entry. The 28 array declarations are exactly equal.
+Only the three refined group nodes differ: Zarr-Python 3.1.3 writes
+`consolidated_metadata: null` directly and deliberately emits an exact empty
+inline envelope for the same leaf group in the root consolidation. The
+canonical companion has the identical difference at its two group nodes.
+
+This is a benign, library-produced representation difference, not stale
+metadata. Palette's normalizer already removed the field, but was too broad:
+it would also have ignored a non-empty nested consolidation envelope. The
+shared rule is now explicit and fail-closed: only an omitted field, `null`, and
+`{"kind":"inline","must_understand":false,"metadata":{}}` are equivalent for
+group nodes. All other fields, all attributes during equivalence checking, and
+all array declarations must match exactly. Non-empty or malformed envelopes
+are rejected. The existing artifact does not need to be rewritten; Crimson's
+cross-language comparator must implement this same narrow normalization.
+
 ## Remaining Gates
 
 - Implement the separate clipped transition with ordered per-clip refined/raw

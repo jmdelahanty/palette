@@ -437,6 +437,13 @@ def test_recomputed_digest_cannot_hide_nested_contract_tampering() -> None:
 def test_metadata_declaration_normalizer_is_exact_and_checks_consolidation() -> None:
     dimensions = _dimensions(1)
     direct, consolidated = _metadata_declarations(dimensions)
+    for path in ("", "instances", "source_detections"):
+        direct[path]["consolidated_metadata"] = None
+        consolidated[path]["consolidated_metadata"] = {
+            "kind": "inline",
+            "must_understand": False,
+            "metadata": {},
+        }
     normalized = normalize_refined_detection_metadata_declarations(
         direct,
         consolidated_metadata_by_path=consolidated,
@@ -479,6 +486,30 @@ def test_metadata_declaration_normalizer_is_exact_and_checks_consolidation() -> 
         normalize_refined_detection_metadata_declarations(
             missing,
             consolidated_metadata_by_path=consolidated,
+            dimensions=dimensions,
+        )
+
+    nonempty_group_envelope = copy.deepcopy(consolidated)
+    nonempty_group_envelope["instances"]["consolidated_metadata"]["metadata"] = {
+        "unexpected": {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {},
+        }
+    }
+    with pytest.raises(ValueError, match="exact empty inline group envelope"):
+        normalize_refined_detection_metadata_declarations(
+            direct,
+            consolidated_metadata_by_path=nonempty_group_envelope,
+            dimensions=dimensions,
+        )
+
+    array_level_envelope = copy.deepcopy(consolidated)
+    array_level_envelope["instances/frame_indices"]["consolidated_metadata"] = None
+    with pytest.raises(ValueError, match="Only Zarr groups"):
+        normalize_refined_detection_metadata_declarations(
+            direct,
+            consolidated_metadata_by_path=array_level_envelope,
             dimensions=dimensions,
         )
 

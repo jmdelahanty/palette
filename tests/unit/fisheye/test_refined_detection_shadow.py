@@ -192,6 +192,24 @@ def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
     )
     assert receipt == result.receipt
 
+    direct_run_metadata = json.loads(
+        (destination / "refined_detect_runs/refined_shadow_1/zarr.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    archive_metadata = json.loads(
+        (destination / "zarr.json").read_text(encoding="utf-8")
+    )
+    consolidated_run_metadata = archive_metadata["consolidated_metadata"]["metadata"][
+        "refined_detect_runs/refined_shadow_1"
+    ]
+    assert direct_run_metadata["consolidated_metadata"] is None
+    assert consolidated_run_metadata["consolidated_metadata"] == {
+        "kind": "inline",
+        "must_understand": False,
+        "metadata": {},
+    }
+
     root = zarr.open_group(
         str(destination),
         mode="r",
