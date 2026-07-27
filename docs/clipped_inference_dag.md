@@ -26,9 +26,11 @@ contract obsolete.
 
 ## Composable workflow modules
 
-The detection path is the first extracted domain module. The
-`fisheye.cluster.clipped_detection` builder accepts typed target, clip, model,
-quality-policy, scheduler, and upstream-gate inputs and returns two things:
+The detection path is the first extracted domain module. Its raw-detection
+fragment accepts a layout-neutral recording target and dispatches either to
+the clipped artifact publisher or the whole-video node-local atomic publisher.
+The clipped postprocessing builder additionally accepts typed quality-policy,
+scheduler, and upstream-gate inputs and returns two things:
 
 - an `LsfWorkflowFragment` containing the detect array, recording-order
   quality-source materialization, collection quality reconciliation,

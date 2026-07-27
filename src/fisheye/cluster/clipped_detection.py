@@ -1,8 +1,9 @@
-"""Composable detection fragments for clipped recording work units.
+"""Composable raw detection plus clipped detection-postprocessing fragments.
 
-The target and work-unit inputs use the layout-neutral production contract.
-The current command renderer remains clipped-specific until the whole-video
-publisher is adapted in the next migration checkpoint.
+Raw detection dispatches from the layout-neutral recording contract: clipped
+work units use artifact build/import publication, while whole videos use the
+node-local atomic run publisher.  Collection quality/refinement remains a
+clipped-only fragment until its source adapter is generalized separately.
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ from fisheye.cluster.recording_layout import (
     RecordingTarget,
     VideoWorkUnit,
 )
+from fisheye.shared.detection_candidate import (
+    DEFAULT_DETECT_FRAME_SHARD_ROWS,
+    DEFAULT_DETECT_ROW_SHARD_ROWS,
+)
 
 
 @dataclass(frozen=True)
@@ -48,39 +53,17 @@ class DetectionModelSpec:
 
 
 @dataclass(frozen=True)
-class DetectionWorkUnitSpec:
-    """Detection run identities bound to one neutral video work unit."""
+class RawDetectionWorkUnitSpec:
+    """One raw-detection run bound to a neutral video work unit."""
 
     work_unit: VideoWorkUnit
     detect_run: str
     detect_group_path: str
-    refined_detect_run: str
-    refined_detect_group_path: str
-
-    @classmethod
-    def from_mapping(
-        cls,
-        value: Mapping[str, Any],
-        *,
-        work_unit: VideoWorkUnit,
-    ) -> DetectionWorkUnitSpec:
-        return cls(
-            work_unit=work_unit,
-            detect_run=str(value["detect_run"]),
-            detect_group_path=str(value["detect_group_path"]),
-            refined_detect_run=str(value["refined_detect_run"]),
-            refined_detect_group_path=str(value["refined_detect_group_path"]),
-        )
 
     def __post_init__(self) -> None:
         if not isinstance(self.work_unit, VideoWorkUnit):
             raise TypeError("Detection work_unit must be a VideoWorkUnit.")
-        for field_name in (
-            "detect_run",
-            "detect_group_path",
-            "refined_detect_run",
-            "refined_detect_group_path",
-        ):
+        for field_name in ("detect_run", "detect_group_path"):
             value = str(getattr(self, field_name)).strip()
             if not value:
                 raise ValueError(f"Detection {field_name} cannot be empty.")
@@ -103,6 +86,116 @@ class DetectionWorkUnitSpec:
     @property
     def video_path(self) -> Path:
         return self.work_unit.video_path
+
+
+@dataclass(frozen=True)
+class DetectionWorkUnitSpec(RawDetectionWorkUnitSpec):
+    """Raw and refined run identities for clipped postprocessing."""
+
+    refined_detect_run: str
+    refined_detect_group_path: str
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        work_unit: VideoWorkUnit,
+    ) -> DetectionWorkUnitSpec:
+        return cls(
+            work_unit=work_unit,
+            detect_run=str(value["detect_run"]),
+            detect_group_path=str(value["detect_group_path"]),
+            refined_detect_run=str(value["refined_detect_run"]),
+            refined_detect_group_path=str(value["refined_detect_group_path"]),
+        )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for field_name in ("refined_detect_run", "refined_detect_group_path"):
+            value = str(getattr(self, field_name)).strip()
+            if not value:
+                raise ValueError(f"Detection {field_name} cannot be empty.")
+            object.__setattr__(self, field_name, value)
+
+
+@dataclass(frozen=True)
+class RawDetectionFragmentInputs:
+    """Layout-neutral inputs required to plan raw detection publication."""
+
+    workflow_id: str
+    family: str
+    target_label: str
+    target: RecordingTarget
+    repo: Path
+    run_root: Path
+    work_units: tuple[RawDetectionWorkUnitSpec, ...]
+    model: DetectionModelSpec
+    registry_path: Path | None = None
+    resume_existing_detections: bool = False
+    detect_array_concurrency: int = 8
+    upstream_job_keys: tuple[str, ...] = ()
+    required_artifacts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, RecordingTarget):
+            raise TypeError("Raw detection target must be a RecordingTarget.")
+        units = tuple(self.work_units)
+        object.__setattr__(self, "work_units", units)
+        if not units:
+            raise ValueError("Raw detection requires at least one work unit.")
+        if any(not isinstance(unit, RawDetectionWorkUnitSpec) for unit in units):
+            raise TypeError(
+                "Raw detection work_units must be RawDetectionWorkUnitSpec values."
+            )
+        observed_work_units = tuple(unit.work_unit for unit in units)
+        if observed_work_units != self.target.work_units:
+            raise ValueError(
+                "Raw detection work units must exactly match target work-unit order."
+            )
+        group_paths = [unit.detect_group_path for unit in units]
+        if len(set(group_paths)) != len(group_paths):
+            raise ValueError("Raw detection output group paths must be unique.")
+        if int(self.detect_array_concurrency) <= 0:
+            raise ValueError("Raw detection array concurrency must be positive.")
+        object.__setattr__(
+            self,
+            "detect_array_concurrency",
+            int(self.detect_array_concurrency),
+        )
+        if self.registry_path is not None:
+            object.__setattr__(
+                self,
+                "registry_path",
+                self.registry_path.expanduser().resolve(),
+            )
+
+        if self.target.layout is RecordingLayout.WHOLE_VIDEO:
+            if len(units) != 1:
+                raise ValueError("Whole-video raw detection requires one work unit.")
+            expected_group = f"detect_runs/{units[0].detect_run}"
+            if units[0].detect_group_path != expected_group:
+                raise ValueError(
+                    "Whole-video raw detection must publish to "
+                    f"{expected_group!r}, got {units[0].detect_group_path!r}."
+                )
+            if self.registry_path is None:
+                raise ValueError(
+                    "Whole-video atomic detection requires an explicit registry path."
+                )
+            if self.resume_existing_detections:
+                raise ValueError(
+                    "Whole-video raw-detection reuse needs a separate validation "
+                    "contract and is not enabled."
+                )
+
+    @property
+    def target_id(self) -> str:
+        return self.target.target_id
+
+    @property
+    def analysis_zarr(self) -> Path:
+        return self.target.analysis_zarr
 
 
 @dataclass(frozen=True)
@@ -231,6 +324,14 @@ class RawDetectionFragmentOutputs:
 
 
 @dataclass(frozen=True)
+class RawDetectionWorkflowModule:
+    """One independently composable raw-detection publication fragment."""
+
+    fragment: LsfWorkflowFragment
+    outputs: RawDetectionFragmentOutputs
+
+
+@dataclass(frozen=True)
 class DetectionWorkflowModule:
     """Layout-neutral raw and postprocess fragments with typed outputs."""
 
@@ -243,32 +344,18 @@ class DetectionWorkflowModule:
         return tuple(job for fragment in self.fragments for job in fragment.jobs)
 
 
-def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkflowModule:
-    """Plan detect -> quality -> refine -> finalized collection for one target."""
-
-    target_safe = safe_component(inputs.target_id, default="target", max_length=56)
+def _clipped_raw_detection_job(
+    inputs: RawDetectionFragmentInputs,
+    *,
+    target_safe: str,
+) -> LsfJob:
     config_path = inputs.repo / "configs" / "fisheye" / "yolo_detect_config.yaml"
-    refine_config = inputs.repo / "configs" / "fisheye" / "default.yaml"
     detect_gpu = LsfResources(
         queue="gpu_l4", ncores=8, mem_gb=120, gpus=1, walltime="2:00"
     )
-    detect_reuse_cpu = LsfResources(
-        queue="short", ncores=1, mem_gb=8, walltime="1:00"
-    )
-    cpu = LsfResources(queue="short", ncores=4, mem_gb=32, walltime="1:00")
-    refine_bundle_cpu = LsfResources(
-        queue="short",
-        ncores=4 * int(inputs.refine_bundle_concurrency),
-        mem_gb=32,
-        walltime="1:00",
-        span_hosts=1,
-    )
-    jobs = []
-
-    detect_array_key = f"detect_array:{target_safe}"
+    detect_reuse_cpu = LsfResources(queue="short", ncores=1, mem_gb=8, walltime="1:00")
     detect_tasks = []
-    for clip in inputs.clips:
-        detect_key = f"detect:{target_safe}:{clip.clip_id}"
+    for clip in inputs.work_units:
         report = (
             inputs.run_root
             / "targets"
@@ -299,7 +386,7 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
             "--workflow-id",
             inputs.target_label,
             "--recording-id",
-            inputs.recording_id,
+            inputs.target.recording_id,
             "--clip-id",
             clip.clip_id,
             "--clip-index",
@@ -307,7 +394,7 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
             "--camera-serial",
             clip.camera_serial,
             "--recording-frame-index",
-            str(inputs.recording_dir / "recording_frame_index.parquet"),
+            str(clip.work_unit.frame_mapping.recording_frame_index),
             "--run-name",
             clip.detect_run,
             "--report",
@@ -322,8 +409,10 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
         detect_tasks.append(
             build_execution_task(
                 run_root=inputs.run_root,
-                task_key=detect_key,
-                stage=("detect_reuse" if inputs.resume_existing_detections else "detect"),
+                task_key=f"detect:{target_safe}:{clip.clip_id}",
+                stage=(
+                    "detect_reuse" if inputs.resume_existing_detections else "detect"
+                ),
                 command=detect_command,
                 expected_outputs=(
                     inputs.analysis_zarr / clip.detect_group_path / "zarr.json",
@@ -340,21 +429,194 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
                 array_indexed=True,
             )
         )
-    jobs.append(
-        build_task_group_job(
+    return build_task_group_job(
+        workflow_id=inputs.workflow_id,
+        family=inputs.family,
+        repo=inputs.repo,
+        run_root=inputs.run_root,
+        job_key=f"detect_array:{target_safe}",
+        stage=("detect_reuse" if inputs.resume_existing_detections else "detect"),
+        tasks=detect_tasks,
+        mode=LsfExecutionMode.ARRAY,
+        max_concurrent=inputs.detect_array_concurrency,
+        resources=detect_reuse_cpu if inputs.resume_existing_detections else detect_gpu,
+        upstream=inputs.upstream_job_keys,
+    )
+
+
+def _whole_video_raw_detection_job(
+    inputs: RawDetectionFragmentInputs,
+    *,
+    target_safe: str,
+) -> LsfJob:
+    unit = inputs.work_units[0]
+    assert inputs.registry_path is not None
+    result_json = (
+        inputs.run_root
+        / "targets"
+        / target_safe
+        / "detection_reports"
+        / "whole_video.json"
+    )
+    command = (
+        "scripts/py",
+        "-m",
+        "fisheye.utils.run_detection_local_publish",
+        "--zarr",
+        str(inputs.analysis_zarr),
+        "--video",
+        str(unit.video_path),
+        "--model",
+        str(inputs.model.path),
+        "--model-sha256",
+        inputs.model.sha256,
+        "--model-run-id",
+        inputs.model.run_id,
+        "--model-set-id",
+        inputs.model.set_id,
+        "--run-name",
+        unit.detect_run,
+        "--registry",
+        str(inputs.registry_path),
+        "--config",
+        str(inputs.repo / "configs" / "fisheye" / "yolo_detect_config.yaml"),
+        "--batch-size",
+        "16",
+        "--resize-dims",
+        "640",
+        "640",
+        "--decode-backend",
+        "pynvvc_nv12_rgb",
+        "--detect-row-shard-rows",
+        str(DEFAULT_DETECT_ROW_SHARD_ROWS),
+        "--detect-frame-shard-rows",
+        str(DEFAULT_DETECT_FRAME_SHARD_ROWS),
+        "--result-json",
+        str(result_json),
+    )
+    return build_job(
+        workflow_id=inputs.workflow_id,
+        family=inputs.family,
+        repo=inputs.repo,
+        run_root=inputs.run_root,
+        job_key=f"detect:{target_safe}",
+        stage="detect",
+        command=command,
+        resources=LsfResources(
+            queue="gpu_l4",
+            ncores=8,
+            mem_gb=120,
+            gpus=1,
+            walltime="2:00",
+        ),
+        upstream=inputs.upstream_job_keys,
+        expected_outputs=(
+            inputs.analysis_zarr / unit.detect_group_path / "zarr.json",
+            result_json,
+        ),
+    )
+
+
+def build_raw_detection_fragment(
+    inputs: RawDetectionFragmentInputs,
+) -> RawDetectionWorkflowModule:
+    """Build the layout-specific raw publisher behind one artifact contract."""
+
+    target_safe = safe_component(inputs.target_id, default="target", max_length=56)
+    if inputs.target.layout is RecordingLayout.CLIPPED_COLLECTION:
+        job = _clipped_raw_detection_job(inputs, target_safe=target_safe)
+    elif inputs.target.layout is RecordingLayout.WHOLE_VIDEO:
+        job = _whole_video_raw_detection_job(inputs, target_safe=target_safe)
+    else:  # pragma: no cover - enum construction already fails closed
+        raise ValueError(f"Unsupported recording layout: {inputs.target.layout!r}")
+    artifact_key = f"raw_detection_work_units:{target_safe}"
+    outputs = RawDetectionFragmentOutputs(
+        target_id=inputs.target_id,
+        raw_detection_group_paths=tuple(
+            unit.detect_group_path for unit in inputs.work_units
+        ),
+        terminal_job_key=job.job_key,
+        artifact_key=artifact_key,
+    )
+    fragment = LsfWorkflowFragment(
+        fragment_id=f"raw_detection:{target_safe}",
+        jobs=(job,),
+        requires=inputs.required_artifacts,
+        provides=(artifact_key,),
+        metadata={
+            "module": "raw_detection",
+            "target_id": inputs.target_id,
+            "recording_layout": inputs.target.layout.value,
+            "work_unit_count": len(inputs.work_units),
+            "resume_existing_detections": inputs.resume_existing_detections,
+            "publication_policy": (
+                "node_local_complete_run_then_atomic_prfs_publication_v1"
+                if inputs.target.layout is RecordingLayout.WHOLE_VIDEO
+                else "clip_artifact_build_import_validate_v1"
+            ),
+            "outputs": outputs.to_json(),
+        },
+    )
+    return RawDetectionWorkflowModule(fragment=fragment, outputs=outputs)
+
+
+def compose_raw_detection_workflow(
+    *,
+    workflow_id: str,
+    family: str,
+    modules: tuple[RawDetectionWorkflowModule, ...],
+    external_inputs: tuple[str, ...] = (),
+) -> LsfWorkflow:
+    """Compose raw detection for one or more recording-layout targets."""
+
+    if not modules:
+        raise ValueError("A raw-detection workflow requires at least one module.")
+    return compose_lsf_workflow(
+        workflow_id=workflow_id,
+        family=family,
+        fragments=tuple(module.fragment for module in modules),
+        external_inputs=external_inputs,
+        metadata={
+            "workflow_scope": "raw_detection_only",
+            "target_count": len(modules),
+            "outputs": [module.outputs.to_json() for module in modules],
+        },
+    )
+
+
+def build_detection_fragment(
+    inputs: DetectionFragmentInputs,
+) -> DetectionWorkflowModule:
+    """Plan detect -> quality -> refine -> finalized collection for one target."""
+
+    target_safe = safe_component(inputs.target_id, default="target", max_length=56)
+    refine_config = inputs.repo / "configs" / "fisheye" / "default.yaml"
+    cpu = LsfResources(queue="short", ncores=4, mem_gb=32, walltime="1:00")
+    refine_bundle_cpu = LsfResources(
+        queue="short",
+        ncores=4 * int(inputs.refine_bundle_concurrency),
+        mem_gb=32,
+        walltime="1:00",
+        span_hosts=1,
+    )
+    raw_module = build_raw_detection_fragment(
+        RawDetectionFragmentInputs(
             workflow_id=inputs.workflow_id,
             family=inputs.family,
+            target_label=inputs.target_label,
+            target=inputs.target,
             repo=inputs.repo,
             run_root=inputs.run_root,
-            job_key=detect_array_key,
-            stage=("detect_reuse" if inputs.resume_existing_detections else "detect"),
-            tasks=detect_tasks,
-            mode=LsfExecutionMode.ARRAY,
-            max_concurrent=inputs.detect_array_concurrency,
-            resources=detect_reuse_cpu if inputs.resume_existing_detections else detect_gpu,
-            upstream=inputs.upstream_job_keys,
+            work_units=inputs.work_units,
+            model=inputs.model,
+            resume_existing_detections=inputs.resume_existing_detections,
+            detect_array_concurrency=inputs.detect_array_concurrency,
+            upstream_job_keys=inputs.upstream_job_keys,
+            required_artifacts=inputs.required_artifacts,
         )
     )
+    detect_array_key = raw_module.outputs.terminal_job_key
+    jobs = list(raw_module.fragment.jobs)
 
     quality_source_key = f"detect_quality_source:{target_safe}"
     quality_source_group_path = f"detect_collection_sources/{inputs.quality_source_run}"
@@ -543,29 +805,9 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
         )
     )
 
-    raw_artifact_key = f"raw_detection_work_units:{target_safe}"
-    raw_outputs = RawDetectionFragmentOutputs(
-        target_id=inputs.target_id,
-        raw_detection_group_paths=tuple(
-            clip.detect_group_path for clip in inputs.clips
-        ),
-        terminal_job_key=detect_array_key,
-        artifact_key=raw_artifact_key,
-    )
-    raw_fragment = LsfWorkflowFragment(
-        fragment_id=f"raw_detection:{target_safe}",
-        jobs=(jobs[0],),
-        requires=inputs.required_artifacts,
-        provides=(raw_artifact_key,),
-        metadata={
-            "module": "raw_detection",
-            "target_id": inputs.target_id,
-            "recording_layout": inputs.target.layout.value,
-            "work_unit_count": len(inputs.work_units),
-            "resume_existing_detections": inputs.resume_existing_detections,
-            "outputs": raw_outputs.to_json(),
-        },
-    )
+    raw_outputs = raw_module.outputs
+    raw_artifact_key = raw_outputs.artifact_key
+    raw_fragment = raw_module.fragment
 
     artifact_key = f"finalized_detection_collection:{target_safe}"
     outputs = DetectionFragmentOutputs(
@@ -635,7 +877,12 @@ __all__ = [
     "DetectionModelSpec",
     "DetectionWorkUnitSpec",
     "DetectionWorkflowModule",
+    "RawDetectionFragmentInputs",
     "RawDetectionFragmentOutputs",
+    "RawDetectionWorkUnitSpec",
+    "RawDetectionWorkflowModule",
     "build_detection_fragment",
+    "build_raw_detection_fragment",
     "compose_detection_workflow",
+    "compose_raw_detection_workflow",
 ]

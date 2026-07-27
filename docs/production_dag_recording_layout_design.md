@@ -1,6 +1,7 @@
 # Layout-neutral production DAG design
 
-- Status: accepted direction; first layout/parity checkpoint implemented
+- Status: accepted direction; layout/parity and whole-video raw-detection
+  checkpoints implemented
 - Last reviewed: 2026-07-27
 - Scope: production inference and refinement workflows using the structured LSF
   kernel
@@ -81,10 +82,10 @@ detect array
 ```
 
 Whole-recording keypoint and subject-mask workflows also use the shared LSF
-models. The remaining limitation is primarily module shape: the complete
-clipped planner accepts clip-specific targets, and the first extracted
-detection fragment currently combines raw detection, quality, refinement, and
-collection publication in one module.
+models. Raw detection is now a separately composable module for both supported
+recording layouts. Collection quality, refinement, and finalized-collection
+publication remain clipped-only because they still consume the clipped
+collection source and recording-frame-index contracts.
 
 The downstream `fisheye.analysis_workflows` YAML DAG is a separate system. It
 selects and orders persisted analysis products and normally executes them
@@ -109,10 +110,32 @@ The first migration checkpoint was implemented on 2026-07-27:
   resources, dependencies, task envelopes, expected outputs, and typed final
   outputs did not change during the split.
 
-Whole-video execution is deliberately not wired to the clipped work-unit
-runner in this checkpoint. The adapter and invariants exist, but the next
-checkpoint must bind the whole-video layout to its canonical node-local atomic
-detection publisher and then establish postprocessing parity.
+### Whole-video raw-detection checkpoint
+
+The second checkpoint binds a one-member whole-video target to
+`fisheye.utils.run_detection_local_publish` through the same typed
+`raw_detection_work_units:<target>` artifact exposed by clipped detection.
+The publisher:
+
+- streams the canonical acquisition video from its recording-bound PRFS path;
+- builds the complete `detect_runs/<run>` candidate on node-local storage;
+- validates completion, immutable sharding, model identity, provenance, and
+  coordinate authority before publication;
+- atomically publishes and activates the completed root detection run; and
+- writes a retained result report through the shared LSF runtime envelope.
+
+Whole-video planning fails closed unless there is exactly one identity-mapped
+work unit, the output is exactly `detect_runs/<run>`, an explicit registry is
+bound, and no unvalidated reuse mode is requested. Clipped raw detection still
+uses its artifact build/import publisher. A frozen executable-plan hash proves
+that extracting the shared raw module did not alter the existing clipped
+commands, resources, dependencies, or outputs.
+
+This checkpoint makes one whole recording independently plannable through the
+general DAG kernel. A cohort planner must still aggregate repeated whole-video
+tasks into one bounded LSF array, matching the proven Batman campaign shape,
+instead of submitting many unrelated singleton jobs. Whole-video quality and
+refinement also remain a later source-adapter checkpoint.
 
 ## Canonical target model
 
@@ -308,8 +331,9 @@ parity at every checkpoint:
 4. Dry-run the existing clipped campaign before and after the split and require
    equivalent jobs, dependencies, resources, commands, expected outputs, and
    fragment products.
-5. Compose and dry-run a whole-recording detection workflow through the same
-   fragment builders.
+5. Compose and dry-run a whole-recording raw-detection workflow through the
+   same fragment builders. The atomic publisher binding is implemented; a
+   registry-discovered cohort CLI and consolidated LSF array remain open.
 6. Add the selected-arena-geometry and keyed detection-gate fragment between
    raw detection and detection postprocessing.
 7. Extract crop/cache, keypoint, and subject-mask fragment builders behind the
