@@ -152,6 +152,9 @@ OPTIONAL_SOURCE_ROW_ARRAYS = (
     "refined_row_id",
     "detection_source",
 )
+REFINED_SOURCE_ROW_ARRAY_ALIASES = {
+    "refined_row_ids": "source_refined_row_ids",
+}
 
 
 class IncrementalCropError(RuntimeError):
@@ -582,6 +585,16 @@ def capture_crop_source_snapshot(
         raise IncrementalCropError("source_path must be non-empty.")
     keys, frame_indices, boxes = _require_source_arrays(source_group)
     optional_row_arrays: dict[str, np.ndarray] = {}
+    if source_label.startswith("refined_detect_runs/"):
+        for source_name, output_name in REFINED_SOURCE_ROW_ARRAY_ALIASES.items():
+            if source_name not in source_group:
+                continue
+            values = np.asarray(source_group[source_name][:])
+            if values.ndim < 1 or int(values.shape[0]) != int(keys.shape[0]):
+                raise IncrementalCropError(
+                    f"Refined source lineage array {source_name!r} is not row-aligned."
+                )
+            optional_row_arrays[output_name] = values
     for name in OPTIONAL_SOURCE_ROW_ARRAYS:
         if name not in source_group:
             continue
@@ -589,6 +602,11 @@ def capture_crop_source_snapshot(
         if values.ndim < 1 or int(values.shape[0]) != int(keys.shape[0]):
             raise IncrementalCropError(
                 f"Optional source lineage array {name!r} is not row-aligned."
+            )
+        existing = optional_row_arrays.get(name)
+        if existing is not None and not np.array_equal(existing, values):
+            raise IncrementalCropError(
+                f"Source lineage arrays disagree for canonical crop field {name!r}."
             )
         optional_row_arrays[name] = values
     batch_rows = int(signature_batch_rows)

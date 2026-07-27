@@ -1689,6 +1689,23 @@ def validate_refined_detection_clipped_source_evidence(
     return tuple(dict.fromkeys(errors))
 
 
+def refined_detection_dimensions_from_manifest(
+    manifest: Mapping[str, Any],
+) -> RefinedDetectionDimensions:
+    """Return exact dimensions from one deeply valid refined-v1 manifest."""
+
+    errors = validate_refined_detection_run_manifest(manifest)
+    if errors:
+        raise ValueError("Invalid refined-detection manifest: " + "; ".join(errors))
+    payload = manifest.get("payload")
+    if not isinstance(payload, Mapping):  # pragma: no cover - validator guarantees it
+        raise ValueError("Refined-detection manifest payload is missing.")
+    logical_schema = payload.get("logical_schema")
+    if not isinstance(logical_schema, Mapping):  # pragma: no cover
+        raise ValueError("Refined-detection logical schema is missing.")
+    return _dimensions_from_logical_schema(logical_schema)
+
+
 def validate_refined_detection_publication(
     manifest: Mapping[str, Any],
     *,
@@ -2184,6 +2201,7 @@ __all__ = [
     "refined_detection_metadata_declarations_digest",
     "refined_detection_logical_content_digest",
     "refined_detection_logical_content_document",
+    "refined_detection_dimensions_from_manifest",
     "refined_detection_selection_contract_manifest",
     "validate_refined_detection_run_manifest",
     "validate_refined_detection_publication",
