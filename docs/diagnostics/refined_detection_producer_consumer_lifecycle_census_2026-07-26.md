@@ -190,11 +190,13 @@ production writer.
 - [x] Freeze a typed refined-first selection order using the parent
       `authoritative_run` pointer plus a versioned manifest-bound approval
       envelope; raw fallback is explicit and fail-closed.
-- [ ] Define `palette.refined_detection.delta.v2` with complete operation-specific
-      payloads. `add_instance` must include frame identity, bbox, class, score
-      semantics, manual source kind, and a new durable `instance_key`; delete,
-      restore, and replace must define field and tombstone behavior.
-- [ ] Implement a delta-aware resolver/read overlay for Palette and Crimson.
+- [x] Define `palette.refined_detection.delta` v2 with complete
+      operation-specific payloads, exact dtypes/sentinels, manual identity,
+      deterministic event ordering, optimistic conflicts, and bounded restore
+      semantics.
+- [x] Implement and test the writer-independent in-memory base-plus-delta
+      resolver. Persisted generation readers and Palette/Crimson live overlays
+      remain separate integration work.
 - [ ] Implement a detection compactor that freezes generation `G`, opens `G+1`,
       streams whole output shards, rebuilds sorted rows and `F+1` offsets, validates
       decoded state, and publishes a new immutable snapshot without rewriting the
@@ -229,9 +231,11 @@ production writer.
    check exposes a material problem or later optimization is justified;
    otherwise it benchmarks and tunes a transitional rowset.
 3. Extend and test the detection delta schema, including arbitrary manual
-   additions, without changing production selectors.
+   additions, without changing production selectors. **Complete for the
+   executable v2 logical contract.**
 4. Add a read-only base+delta resolver and deterministic materialized-state
-   validator.
+   validator. **Complete in memory; persisted frozen-generation loading
+   remains.**
 5. Implement the immutable detection compactor through the shared byte-budgeted
    storage planner and consolidated manifest writer.
 6. Route review saves through partitions, then integrate Crimson overlay reads

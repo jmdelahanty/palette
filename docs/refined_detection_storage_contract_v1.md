@@ -524,9 +524,15 @@ Before production routing:
 
 Deferred until this contract is accepted:
 
-- [ ] Define a complete detection delta v2 payload for add, replace, delete,
-      restore, and class/geometry correction.
-- [ ] Implement base-plus-delta resolution.
+- [x] Define the complete `palette.refined_detection.delta` v2 payload for add,
+      replace, delete, restore, and class/geometry correction. Exact executable
+      declarations and semantics are in
+      `refined_detection_delta_v2_contract.md` and
+      `refined_detection_delta.py`.
+- [x] Implement deterministic in-memory base-plus-delta resolution, including
+      optimistic conflicts, manual-key validation, source-audit updates,
+      sorted rows, rebuilt offsets, and final refined-v1 validation.
+- [ ] Persist v2 partitions and add the frozen-generation reader/digest gate.
 - [ ] Implement the whole-shard immutable compactor.
 - [ ] Route manual review through delta partitions.
 - [ ] Add rowset-change invalidation/regeneration for crops, keypoints, masks,

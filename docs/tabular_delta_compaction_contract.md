@@ -1,8 +1,15 @@
 # Tabular Delta And Compaction Contract
 
-**Status:** sparse delta storage and immutable snapshot publication implemented;
-Crimson overlay reads, review-writer routing, and compaction scheduling remain
-follow-up integration work.
+**Status:** keypoint/general v1 partition prototype retained; its detection
+payload is superseded for future work by
+`refined_detection_delta_v2_contract.md`. Crimson overlay reads,
+review-writer routing, and compaction scheduling remain follow-up integration
+work.
+
+The v1 detection payload below is historical implementation context. It cannot
+represent a complete manual detection row and must not be extended into the v2
+contract. New detection work uses the exact detection-specific v2 schema and
+resolver; keypoint v1 behavior is unchanged.
 
 ## Decision
 

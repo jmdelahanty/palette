@@ -66282,7 +66282,7 @@
     "parsed_writer_candidate_module_count": 177,
     "reader_required_array_declaration_count": 95,
     "resolved_writer_leaf_name_count": 609,
-    "scanned_python_module_count": 1132,
+    "scanned_python_module_count": 1133,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
