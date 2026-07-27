@@ -20,9 +20,12 @@ import zarr
 
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
+from fisheye.shared.zarr.canonical_detection_shadow import (
+    CanonicalDetectionShadowPublication,
+    validate_canonical_detection_shadow_publication,
+)
 from fisheye.shared.zarr.refined_detection_manifest import (
     RefinedDetectionSnapshotLineage,
-    RefinedDetectionSourceIdentity,
     build_refined_detection_run_manifest,
     validate_refined_detection_publication,
 )
@@ -171,13 +174,65 @@ def _logical_hashes(arrays: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _validate_transition_source_matches_canonical(
+    transition: RefinedDetectionTransitionResult,
+    canonical_source: CanonicalDetectionShadowPublication,
+) -> tuple[str, ...]:
+    """Prove the refined source-audit projection binds one canonical rowset."""
+
+    errors: list[str] = []
+    if transition.dimensions.n_frames != canonical_source.dimensions.n_frames:
+        errors.append("refined and canonical source frame counts differ")
+    if (
+        transition.dimensions.n_source_detections
+        != canonical_source.dimensions.n_instances
+    ):
+        errors.append("refined and canonical source row counts differ")
+    comparisons = (
+        ("frame_indices", "frame_indices"),
+        ("source_acquisition_frame_index", "source_acquisition_frame_index"),
+        ("instance_key", "instance_key"),
+        ("bbox_norm_coords", "bbox_norm_coords"),
+        ("bbox_img_xyxy", "bbox_img_xyxy"),
+        ("centers_img_xy", "centers_img_xy"),
+        ("scores", "scores"),
+        ("class_ids", "class_ids"),
+        ("frame_row_offsets", "frame_row_offsets"),
+    )
+    for refined_name, canonical_name in comparisons:
+        refined_path = f"source_detections/{refined_name}"
+        canonical_path = f"instances/{canonical_name}"
+        if refined_path not in transition.arrays:
+            errors.append(f"refined source evidence lacks {refined_path!r}")
+            continue
+        if canonical_path not in canonical_source.arrays:
+            errors.append(f"canonical source evidence lacks {canonical_path!r}")
+            continue
+        refined_values = np.asarray(transition.arrays[refined_path])
+        canonical_values = np.asarray(canonical_source.arrays[canonical_path][...])
+        if not np.array_equal(refined_values, canonical_values):
+            errors.append(
+                f"refined source evidence differs from canonical {canonical_path!r}"
+            )
+    source_rows = np.asarray(
+        transition.arrays.get("source_detections/source_detect_row_index", []),
+        dtype=np.int64,
+    )
+    if not np.array_equal(
+        source_rows,
+        np.arange(canonical_source.dimensions.n_instances, dtype=np.int64),
+    ):
+        errors.append("refined source row identities are not canonical row positions")
+    return tuple(dict.fromkeys(errors))
+
+
 def publish_refined_detection_shadow(
     transition: RefinedDetectionTransitionResult,
     *,
     destination: Path,
     run_id: str,
     lineage: RefinedDetectionSnapshotLineage,
-    source: RefinedDetectionSourceIdentity,
+    canonical_source: CanonicalDetectionShadowPublication,
     shadow_root: Path = DEFAULT_REFINED_DETECTION_SHADOW_ROOT,
     profile: StorageProfile = REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
 ) -> RefinedDetectionShadowPublication:
@@ -202,6 +257,21 @@ def publish_refined_detection_shadow(
         transition.arrays,
         dimensions=transition.dimensions,
     )
+    canonical_errors = validate_canonical_detection_shadow_publication(canonical_source)
+    if canonical_errors:
+        raise ValueError(
+            "Canonical source shadow is invalid: " + "; ".join(canonical_errors)
+        )
+    source_errors = _validate_transition_source_matches_canonical(
+        transition,
+        canonical_source,
+    )
+    if source_errors:
+        raise ValueError(
+            "Refined source audit does not match canonical evidence: "
+            + "; ".join(source_errors)
+        )
+    source = canonical_source.refined_source_identity()
     plans = plan_refined_detection_storage(
         transition.dimensions,
         profile=profile,
@@ -365,6 +435,7 @@ def publish_refined_detection_shadow(
             "output_path": str(output_path),
             "run_id": str(run_id),
             "source_manifest_digest": source.run_manifest_digest,
+            "source_shadow_path": str(canonical_source.output_path),
             "refined_manifest_digest": manifest["payload_digest"],
             "storage_profile_id": profile.profile_id,
             "logical_hashes": destination_hashes,

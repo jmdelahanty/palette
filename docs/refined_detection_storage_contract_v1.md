@@ -462,6 +462,15 @@ Before production routing:
       through that transition adapter. The full run is contract-ready only
       with explicit historical key initialization; the clipped aggregate fails
       closed until the bound clipped transition is implemented.
+- [x] Define and validate an exact canonical raw-source run manifest and
+      logical-content digest rather than accepting caller-supplied hashes.
+- [x] Require the refined shadow publisher to prove all nine source-audit
+      projections match the bound canonical source artifact before writing.
+- [x] Validate each emitted array declaration against its resolved chunk,
+      shard, codec, checksum, fill, axis, dtype, and reserved-attribute plan.
+- [x] Publish and fresh-process reopen a full 23,287-frame standalone raw plus
+      refined shadow pair under `/tmp`, with no selectors or production-state
+      changes.
 - [ ] Publish the paired regular/candidate refined canary and apply the
       practical gate above.
 - [ ] Promote a versioned profile only after that gate passes.

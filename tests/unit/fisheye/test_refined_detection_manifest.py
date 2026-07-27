@@ -6,6 +6,7 @@ import json
 import numpy as np
 import pytest
 
+from fisheye.shared.zarr.array_factory import array_metadata_declaration_from_plan
 from fisheye.shared.instance_keys import mint_manual_curation_instance_keys
 from fisheye.shared.zarr.detection_schema import (
     derive_canonical_detection_geometry,
@@ -126,29 +127,26 @@ def _metadata_declarations(
             "attributes": {},
         },
     }
+    binding_by_path = {
+        binding.path: binding
+        for binding in REFINED_DETECTION_SCHEMA_V1.bindings_for(dimensions)
+    }
     for entry in plan.entries:
         physical = entry.plan
+        binding = binding_by_path[entry.rule.path]
+        contract = REFINED_DETECTION_SCHEMA_V1.contracts.resolve(
+            binding.contract_id,
+            binding.contract_version,
+        )
         declarations[entry.rule.path] = {
             "zarr_format": 3,
             "node_type": "array",
-            "shape": list(physical.logical_shape),
-            "data_type": physical.logical_dtype,
-            "chunk_grid": {
-                "name": "regular",
-                "configuration": {
-                    "chunk_shape": list(
-                        physical.shard_shape or physical.chunk_shape or ()
-                    )
-                },
-            },
-            "chunk_key_encoding": {
-                "name": "default",
-                "configuration": {"separator": "/"},
-            },
-            "fill_value": False if physical.logical_dtype == "bool" else 0,
-            "codecs": [],
-            "attributes": {"ignored_by_declaration_digest": True},
-            "storage_transformers": [],
+            **array_metadata_declaration_from_plan(
+                contract=contract,
+                plan=physical,
+                fill_value=False if physical.logical_dtype == "bool" else 0,
+                attributes={"ignored_by_declaration_digest": True},
+            ),
         }
     return declarations, copy.deepcopy(declarations)
 
@@ -605,6 +603,32 @@ def test_publication_gate_recomputes_metadata_digest_and_validates_arrays() -> N
             manifest,
             direct_metadata_declarations=physically_changed,
             consolidated_metadata_declarations=consolidated_changed,
+            arrays=arrays,
+        )
+    )
+
+    replanned_metadata = copy.deepcopy(direct)
+    replanned_metadata["instances/frame_indices"]["codecs"][1]["configuration"][
+        "level"
+    ] = 7
+    replanned_consolidated = copy.deepcopy(replanned_metadata)
+    tampered_manifest = copy.deepcopy(manifest)
+    tampered_manifest["payload"]["publication"]["metadata_declarations_digest"] = (
+        refined_detection_metadata_declarations_digest(
+            replanned_metadata,
+            consolidated_metadata_by_path=replanned_consolidated,
+            dimensions=dimensions,
+        )
+    )
+    tampered_manifest["payload_digest"] = canonical_json_sha256(
+        tampered_manifest["payload"]
+    )
+    assert any(
+        "physical metadata at instances/frame_indices" in error
+        for error in validate_refined_detection_publication(
+            tampered_manifest,
+            direct_metadata_declarations=replanned_metadata,
+            consolidated_metadata_declarations=replanned_consolidated,
             arrays=arrays,
         )
     )

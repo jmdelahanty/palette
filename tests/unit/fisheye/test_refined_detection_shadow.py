@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -7,10 +8,22 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.shared.instance_keys import mint_manual_curation_instance_keys
+from fisheye.shared.instance_keys import (
+    mint_detection_instance_keys,
+    mint_manual_curation_instance_keys,
+)
+from fisheye.shared.zarr.canonical_detection_shadow import (
+    publish_legacy_canonical_detection_shadow,
+    validate_canonical_detection_shadow_publication,
+)
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    validate_canonical_detection_run_manifest,
+)
+from fisheye.shared.zarr.manifest_digest import (
+    canonical_json_sha256,
+)
 from fisheye.shared.zarr.refined_detection_manifest import (
     RefinedDetectionSnapshotLineage,
-    RefinedDetectionSourceIdentity,
     validate_refined_detection_run_manifest,
 )
 from fisheye.shared.zarr.refined_detection_schema import (
@@ -36,6 +49,14 @@ def _transition():
         dtype=np.float64,
     )
     manual_bbox = np.asarray([[0.55, 0.5, 0.1, 0.2]], dtype=np.float32)
+    source_frames = np.asarray([1, 3], dtype=np.int32)
+    source_classes = np.asarray([1, 3], dtype=np.int32)
+    source_keys = mint_detection_instance_keys(
+        recording_identity=RECORDING_IDENTITY,
+        frame_indices=source_frames,
+        bbox_norm_coords=source_bbox.astype(np.float32),
+        class_ids=source_classes,
+    )
     manual_key = mint_manual_curation_instance_keys(
         recording_identity=RECORDING_IDENTITY,
         refined_row_ids=np.asarray([1], dtype=np.int64),
@@ -62,12 +83,15 @@ def _transition():
             "source_detect_row_index": np.asarray([0, -1], dtype=np.int32),
             "confidence_scores": np.asarray([0.9, 0.0], dtype=np.float32),
             "class_ids": np.asarray([1, 2], dtype=np.int32),
-            "instance_key": np.asarray([100, manual_key], dtype=np.uint64),
+            "instance_key": np.asarray(
+                [source_keys[0], manual_key],
+                dtype=np.uint64,
+            ),
             "reason": np.asarray(["clean", "manual_addition"], dtype=object),
         },
         "source_detections": {
             "source_detect_row_index": np.asarray([0, 1], dtype=np.int32),
-            "frame_indices": np.asarray([1, 3], dtype=np.int32),
+            "frame_indices": source_frames,
             "bbox_norm_coords": source_bbox,
             "decision_codes": np.asarray(
                 [
@@ -78,8 +102,8 @@ def _transition():
             ),
             "resolved_refined_row_id": np.asarray([0, -1], dtype=np.int64),
             "confidence_scores": np.asarray([0.9, 0.8], dtype=np.float32),
-            "class_ids": np.asarray([1, 3], dtype=np.int32),
-            "instance_key": np.asarray([100, 101], dtype=np.uint64),
+            "class_ids": source_classes,
+            "instance_key": source_keys,
             "reason": np.asarray(["clean", "filtered_blip"], dtype=object),
         },
     }
@@ -101,11 +125,46 @@ def _lineage() -> RefinedDetectionSnapshotLineage:
     )
 
 
-def _source() -> RefinedDetectionSourceIdentity:
-    return RefinedDetectionSourceIdentity(
+def _canonical_source(tmp_path: Path):
+    source_path = tmp_path / "legacy_detect.zarr"
+    source = zarr.open_group(str(source_path), mode="w", zarr_format=3)
+    source.attrs.update(
+        {
+            "source_video_width": 640,
+            "source_video_height": 480,
+        }
+    )
+    source.create_array(
+        "frame_indices",
+        data=np.asarray([1, 3], dtype=np.int32),
+    )
+    source.create_array(
+        "bbox_norm_coords",
+        data=np.asarray(
+            [[0.25, 0.5, 0.1, 0.2], [0.75, 0.5, 0.1, 0.2]],
+            dtype=np.float64,
+        ),
+    )
+    source.create_array(
+        "scores",
+        data=np.asarray([0.9, 0.8], dtype=np.float32),
+    )
+    source.create_array(
+        "class_ids",
+        data=np.asarray([1, 3], dtype=np.int32),
+    )
+    source.create_array(
+        "frame_counts",
+        data=np.asarray([0, 1, 0, 1], dtype=np.int32),
+    )
+    shadow_root = tmp_path / "canonical-shadows"
+    return publish_legacy_canonical_detection_shadow(
+        source_group_path=source_path,
+        recording_identity=RECORDING_IDENTITY,
+        source_run_id="legacy_detect_1",
+        destination=shadow_root / "canonical.zarr",
         run_id="detect_shadow_1",
-        run_manifest_digest="a" * 64,
-        logical_content_digest="b" * 64,
+        shadow_root=shadow_root,
     )
 
 
@@ -120,7 +179,7 @@ def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
         destination=destination,
         run_id="refined_shadow_1",
         lineage=_lineage(),
-        source=_source(),
+        canonical_source=_canonical_source(tmp_path),
         shadow_root=shadow_root,
     )
 
@@ -202,3 +261,55 @@ def test_shadow_root_must_be_explicitly_safe(tmp_path: Path) -> None:
             unsafe_root / "candidate.zarr",
             shadow_root=unsafe_root,
         )
+
+
+def test_canonical_source_manifest_rejects_recomputed_nested_storage_tampering(
+    tmp_path: Path,
+) -> None:
+    source = _canonical_source(tmp_path)
+    tampered = copy.deepcopy(source.manifest)
+    tampered["payload"]["storage_plan"]["arrays"][0]["plan"]["chunk_nbytes"] += 1
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+
+    assert any(
+        "storage_plan differs" in error
+        for error in validate_canonical_detection_run_manifest(tampered)
+    )
+
+
+def test_canonical_source_revalidation_detects_legacy_source_mutation(
+    tmp_path: Path,
+) -> None:
+    source = _canonical_source(tmp_path)
+    legacy_path = Path(
+        source.manifest["payload"]["source_evidence"]["source_group_path"]
+    )
+    legacy = zarr.open_group(str(legacy_path), mode="r+", use_consolidated=False)
+    legacy["scores"][0] = np.float32(0.7)
+
+    assert "canonical legacy source evidence changed on disk" in (
+        validate_canonical_detection_shadow_publication(source)
+    )
+
+
+def test_refined_shadow_rejects_source_audit_drift_before_writing(
+    tmp_path: Path,
+) -> None:
+    canonical = _canonical_source(tmp_path)
+    transition = _transition()
+    transition.arrays["instances/scores"][0] = np.float32(0.7)
+    transition.arrays["source_detections/scores"][0] = np.float32(0.7)
+    shadow_root = tmp_path / "refined-shadows"
+    destination = shadow_root / "drift.zarr"
+
+    with pytest.raises(ValueError, match="does not match canonical evidence"):
+        publish_refined_detection_shadow(
+            transition,
+            destination=destination,
+            run_id="refined_shadow_drift",
+            lineage=_lineage(),
+            canonical_source=canonical,
+            shadow_root=shadow_root,
+        )
+
+    assert not destination.exists()

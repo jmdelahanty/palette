@@ -62,10 +62,11 @@ Result:
 - eight compatibility arrays were excluded explicitly rather than carried as
   aliases.
 
-This is logical transition evidence only. A real v1 shadow from this run is
-still blocked on a canonical raw-source run manifest and logical-content
-digest. Those identities must be derived from a validated source artifact, not
-fabricated by the transition or shadow publisher.
+The initial logical transition was blocked on a canonical raw-source run
+manifest and logical-content digest. The follow-up checkpoint below closes
+that blocker by materializing a separate canonical raw shadow and binding the
+refined source-audit table to it exactly. The historical source archive itself
+remains unchanged and is never relabeled as canonical.
 
 ### Clipped Sleepyfish recording aggregate
 
@@ -100,14 +101,70 @@ The real-Zarr test uses a frame containing one raw-backed and one manual row.
 It verifies both rows survive the CSR range, keys remain unique, all exact
 arrays are visible through consolidated metadata, and no selector exists.
 
+## Canonical Source And Real Shadow Pair
+
+Palette now has an executable `palette.canonical_detection.run_manifest` v1.
+It binds:
+
+- the exact canonical nine-array logical schema and decoded array hashes;
+- the byte-planned `published_http_v1` storage declaration;
+- exact direct and consolidated Zarr-v3 metadata declarations;
+- an exact cross-check from every array's emitted chunk grid, shard codec,
+  inner codec, checksum, fill, dtype, axes, and reserved attributes back to the
+  resolved byte-based storage plan;
+- an immutable logical-content digest used by refined snapshots;
+- the source run's direct `zarr.json` digest and four legacy source-array
+  hashes; and
+- the read-only legacy-to-canonical conversion declaration.
+
+The refined shadow publisher no longer accepts caller-supplied source digests.
+It requires a validated canonical source publication and compares all nine
+canonical arrays against the refined `source_detections` projection, including
+stable keys and both `F+1` offset arrays, before creating its destination.
+
+The full 23,287-frame historical pair was published under `/tmp`:
+
+- canonical source:
+  `/tmp/palette-canonical-detection-shadows/20260128_full_v1.zarr`;
+- refined snapshot:
+  `/tmp/palette-refined-detection-shadows/20260128_full_v1.zarr`;
+- canonical rows: 22,938;
+- refined presented rows: 22,926;
+- refined source-audit rows: 22,938;
+- canonical logical-content digest:
+  `10c825c4d4605ebcc296f8b9a35da6581c5fc393a1b9232d753dd87bb3d60156`;
+- canonical manifest digest:
+  `0a8681605cacc69c91a7b8f7494de26e337df14db674a1d3bcf14fc138631211`;
+- refined manifest digest:
+  `d1e1501bae817b8c55ba9cec757daee9e4208919cd42eefa1bc3b87b5b5fb797`;
+- canonical/refined apparent local sizes: approximately 920 KiB / 2.3 MiB;
+  and
+- canonical/refined file counts: 22 / 58.
+
+A fresh-process consolidated reopen found no manifest errors, no selectors,
+canonical offsets `[0, 22938]`, refined offsets `[0, 22926]`, and refined
+source offsets `[0, 22938]`. Both strict receipts record
+`production_state_changes: []`. A second fresh-process run through the complete
+canonical and refined publication validators, including the physical-metadata
+cross-check, returned no errors.
+
+Adversarial coverage rejects a recomputed-digest nested storage mutation,
+mutation of the historical source after evidence capture, and drift between a
+refined source-audit value and its canonical source. The last failure occurs
+before the refined destination is created.
+
+These paths are ephemeral Palette-local integration evidence. They are not
+Crimson handoff paths, production authorities, or physical-profile promotion
+evidence.
+
 ## Remaining Gates
 
-- Define or migrate canonical raw-source manifests so a historical transition
-  can be bound to real source identity and content digests.
 - Implement the separate clipped transition with ordered per-clip refined/raw
   evidence and full media/frame-map validation.
-- Publish a bounded standalone refined shadow from validated real evidence.
-- Have Crimson open that shadow through its dedicated refined-v1 consumer.
+- Publish a matched pair in the shared `.palette_benchmarks` namespace only
+  after Crimson's dedicated refined-v1 consumer is ready for the handoff.
+- Have Crimson open that shared shadow through the dedicated refined-v1
+  consumer and retain observation identity through presentation.
 - Only then run the paired regular-versus-access-aware canary gate and consider
   a versioned physical-profile promotion.
 - Keep delta v2, compaction, manual additions, downstream regeneration, and

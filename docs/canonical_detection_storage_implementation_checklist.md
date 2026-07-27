@@ -876,6 +876,18 @@ define refined-run selection or manual-addition semantics.
       historical source-key initialization and no lossy conversion. The
       1,188,000-frame clipped aggregate is deliberately blocked so its ten
       lineage columns cannot be discarded by the full-acquisition adapter.
+- [x] Add the exact canonical raw-source manifest and logical-content digest,
+      including source metadata/array evidence and reconstructable logical,
+      storage, and direct/consolidated metadata declarations.
+- [x] Remove arbitrary source digests from the refined shadow boundary. Require
+      and revalidate a canonical source publication, then compare its nine hot
+      and index arrays to the complete refined source-audit projection.
+- [x] Make the shared array factory describe and validate the exact emitted
+      Zarr-v3 physical metadata, and bind both canonical and refined
+      publication gates to those resolved plans.
+- [x] Publish the 23,287-frame local canonical/refined shadow pair, reopen it in
+      a fresh process through consolidated metadata, and confirm exact offset
+      endpoints, no selectors, strict receipts, and zero production changes.
 - [ ] Run the paired regular-versus-access-aware refined snapshot canary and
       apply the pragmatic correctness/object/transfer/readiness/RSS gate before
       promoting a versioned writer profile.

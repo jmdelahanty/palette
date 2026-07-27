@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import hashlib
-import json
 import re
 from typing import Any, Mapping
 from uuid import UUID
@@ -24,6 +22,9 @@ from fisheye.shared.instance_keys import (
     INSTANCE_KEY_CONTEXT_MANUAL_CURATION_ROW_ID,
     mint_manual_curation_instance_keys,
 )
+from fisheye.shared.zarr.array_factory import (
+    validate_array_metadata_declaration_from_plan,
+)
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
     SOURCE_KIND_CODE_MAP,
@@ -31,6 +32,11 @@ from fisheye.shared.zarr.refined_detection_schema import (
     RefinedDetectionClippedBinding,
     RefinedDetectionDimensions,
     RefinedDetectionLineageProfile,
+)
+from fisheye.shared.zarr.manifest_digest import (
+    CANONICAL_JSON_DIGEST_ALGORITHM,
+    canonical_json_bytes,
+    canonical_json_sha256,
 )
 from fisheye.shared.zarr.refined_detection_storage import (
     RefinedDetectionStoragePlanSet,
@@ -53,7 +59,6 @@ REFINED_DETECTION_AUTHORITY_SCHEMA_VERSION = 1
 REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE = "authoritative_run"
 REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE = "authoritative_run_provenance"
 
-CANONICAL_JSON_DIGEST_ALGORITHM = "sha256_canonical_json_v1"
 METADATA_DECLARATIONS_DIGEST_SCOPE = (
     "normalized_group_and_array_declarations_excluding_attributes"
 )
@@ -74,22 +79,6 @@ REFINED_DETECTION_RAW_FALLBACK_POLICIES = (
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_LABEL_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-
-def canonical_json_bytes(value: object) -> bytes:
-    """Return strict deterministic UTF-8 JSON for contract digests."""
-
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def canonical_json_sha256(value: object) -> str:
-    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
 def _require_sha256(value: str, *, name: str) -> str:
@@ -1777,6 +1766,45 @@ def validate_refined_detection_publication(
         )
         if observed_metadata_digest != expected_metadata_digest:
             errors.append("metadata_declarations_digest does not match declarations")
+
+    storage = payload.get("storage_plan")
+    raw_profile = (
+        storage.get("storage_profile") if isinstance(storage, Mapping) else None
+    )
+    if isinstance(raw_profile, Mapping):
+        try:
+            profile = _storage_profile_from_manifest(raw_profile)
+            physical_plans = plan_refined_detection_storage(
+                dimensions,
+                profile=profile,
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(f"cannot reconstruct physical metadata plan: {exc}")
+        else:
+            binding_by_path = {
+                binding.path: binding
+                for binding in REFINED_DETECTION_SCHEMA_V1.bindings_for(dimensions)
+            }
+            for entry in physical_plans.entries:
+                declaration = direct_metadata_declarations.get(entry.rule.path)
+                if not isinstance(declaration, Mapping):
+                    continue
+                binding = binding_by_path[entry.rule.path]
+                contract = REFINED_DETECTION_SCHEMA_V1.contracts.resolve(
+                    binding.contract_id,
+                    binding.contract_version,
+                )
+                fill_value: object = False if entry.plan.logical_dtype == "bool" else 0
+                physical_errors = validate_array_metadata_declaration_from_plan(
+                    declaration,
+                    contract=contract,
+                    plan=entry.plan,
+                    fill_value=fill_value,
+                )
+                errors.extend(
+                    f"physical metadata at {entry.rule.path}: {error}"
+                    for error in physical_errors
+                )
 
     clipped_binding: RefinedDetectionClippedBinding | None = None
     raw_clipped = logical.get("clipped_binding")
