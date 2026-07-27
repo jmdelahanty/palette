@@ -497,8 +497,12 @@ Before production routing:
       source-to-node-local staging, accept-all canonical root initialization,
       scratch construction, exclusive atomic candidate copyback, full shared
       reopen validation, and a required 4x planned and actual object gate.
-- [ ] Publish the paired regular/candidate refined canary and apply the
-      practical gate above.
+- [x] Publish and independently reopen the full-duration paired
+      regular/candidate refined canary. Palette commit `a94abaea...`, LSF job
+      `153190577`, and canary payload digest `2c00649c...` passed exact decoded
+      equality and reduced observed payload objects from 220 to 42 (5.24x).
+- [ ] Have Crimson apply the mounted-macOS physical transfer, latency,
+      readiness, deadline, and RSS gate to the immutable pair.
 - [ ] Promote a versioned profile only after that gate passes.
 - [ ] Route no selector until decoded values, manifest, direct metadata, and
       consolidated metadata all validate.

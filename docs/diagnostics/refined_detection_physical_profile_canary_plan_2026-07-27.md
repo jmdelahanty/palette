@@ -2,8 +2,8 @@
 
 Date: 2026-07-27
 
-Status: publisher and local real-Zarr gate implemented; full-duration
-commit-pinned cluster publication pending
+Status: Palette full-duration publication gate passed; Crimson physical
+measurement pending
 
 ## Preconditions
 
@@ -91,3 +91,50 @@ one retained offset read, zero deadline misses, no meaningful readiness,
 current-frame, or RSS regression, and at least 20% lower traversal transfer.
 Until that evidence is committed and reviewed, both profiles remain benchmark
 artifacts and `profile_promoted=false`.
+
+## Palette Publication Result
+
+LSF job `153190577` completed on `h07u04` from the isolated, clean Palette
+worktree pinned to
+`a94abaea1206ae232b65185d1c98f250499af45b`. The shared `sun` checkout was not
+changed. The immutable workflow is:
+
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/profile_canary/sleepyfish_accept_all_regular_vs_access_aware_20260727_v1`
+
+The corresponding macOS path is:
+
+`/Volumes/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/profile_canary/sleepyfish_accept_all_regular_vs_access_aware_20260727_v1`
+
+The strict `canary_manifest.json` has canonical payload digest
+`2c00649c378c7a33f5621c4cd91ad787db46dcd0a512d6391ece92b383cd5609`
+and file SHA-256
+`8d9215aa29bf4b0787e50114e9fb429f959194ee3a7f1bdea6fd1d04ae1424b6`.
+
+Results:
+
+- dimensions: 1,188,000 frames, 1,187,087 instance rows, and 1,188,001
+  retained offset boundaries;
+- planned payload objects: 240 regular versus 48 access-aware, ratio 0.20;
+- observed payload objects after fill elision: 220 regular versus 42
+  access-aware, ratio 0.1909 or a 5.24x reduction;
+- apparent payload: 59,867,920 bytes regular versus 59,769,380 bytes
+  access-aware;
+- exact decoded logical hashes: equal;
+- canonical source-audit projection: equal in every array;
+- direct/consolidated declarations, codec/CRC declarations, offsets, and
+  selector-safety checks: passed;
+- production-state changes: none;
+- node-local source copy: 6.41 seconds;
+- complete workflow: 42.08 seconds inside 57.94 seconds process wall time;
+  and
+- peak RSS: 702,332,928 bytes.
+
+A separate fresh process reopened the shared canonical, regular, and
+access-aware stores and reran the complete canonical/refined validators. It
+again proved the 28-array schemas, 1,188,001-entry offsets, decoded equality,
+source-audit equality, direct/consolidated equivalence, and selector absence.
+
+Palette's publication and 4x object gate therefore pass. The access-aware
+profile remains an unpromoted candidate until Crimson completes its frozen
+mounted-macOS correctness, transfer, latency, readiness, deadline, and RSS
+gate.

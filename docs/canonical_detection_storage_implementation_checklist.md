@@ -903,9 +903,14 @@ define refined-run selection or manual-addition semantics.
       accept-all refined-v1 root snapshot on node-local scratch, publishes both
       profiles through verified atomic candidate copies, and fails unless the
       planned and actual payload-object reduction is at least 4x.
-- [ ] Run the paired regular-versus-access-aware refined snapshot canary and
-      apply the pragmatic correctness/object/transfer/readiness/RSS gate before
-      promoting a versioned writer profile.
+- [x] Run Palette's paired regular-versus-access-aware refined snapshot
+      publication gate. Commit-pinned LSF job `153190577` published 1,188,000
+      frames / 1,187,087 rows with equal decoded hashes and reduced observed
+      payload objects from 220 to 42 (5.24x). No selector or production state
+      changed.
+- [ ] Have Crimson run the mounted-macOS transfer/readiness/latency/deadline/RSS
+      gate against the immutable pair before promoting a versioned writer
+      profile.
 - [ ] Begin detection delta v2 and compactor design only after the snapshot
       contract and its production-transition findings are accepted.
 
