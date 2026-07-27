@@ -455,6 +455,59 @@ def _write_disagreements_csv(
             )
 
 
+def _decode_one_frame_from_preceding_keyframe(
+    *,
+    demuxer: Any,
+    decoder: Any,
+    target_frame_index: int,
+    materialize_frame: Any,
+    max_packets_per_seek: int = 256,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Seek to a GOP keyframe and prove the exact requested display frame."""
+
+    seek_timestamp = int(demuxer.TimestampFromFrame(int(target_frame_index)))
+    demuxer.Seek(seek_timestamp)
+    keyframe_packet_pts: int | None = None
+    for packet_count in range(1, max_packets_per_seek + 1):
+        packet = demuxer.Demux()
+        if int(packet.bsl) <= 0:
+            raise RuntimeError("PyNvVideoCodec seek reached an empty packet")
+        if packet_count == 1:
+            if int(packet.key) != 1:
+                raise RuntimeError("PyNvVideoCodec seek did not land on a keyframe")
+            keyframe_packet_pts = int(packet.pts)
+        relation = int(demuxer.isSeekDone(int(packet.pts), target_frame_index))
+        if relation not in {-1, 0, 1}:
+            raise RuntimeError(
+                f"PyNvVideoCodec returned invalid seek relation {relation}"
+            )
+        decoded = list(decoder.Decode(packet))
+        if len(decoded) != 1:
+            raise RuntimeError(
+                "Exact-frame seek requires one display frame per I/P packet; "
+                f"packet {packet_count} produced {len(decoded)} frames"
+            )
+        if relation == 0:
+            return materialize_frame(decoded[0]), {
+                "target_frame_index": int(target_frame_index),
+                "seek_timestamp": seek_timestamp,
+                "keyframe_packet_pts": keyframe_packet_pts,
+                "target_packet_pts": int(packet.pts),
+                "packets_decoded": packet_count,
+                "exact_frame_proof": (
+                    "demuxer_isSeekDone_exact_and_one_display_frame_per_ip_packet"
+                ),
+            }
+        if relation > 0:
+            raise RuntimeError(
+                f"PyNvVideoCodec seek passed target frame {target_frame_index}"
+            )
+    raise RuntimeError(
+        f"PyNvVideoCodec seek exceeded {max_packets_per_seek} packets for "
+        f"frame {target_frame_index}"
+    )
+
+
 def decode_selected_luma_pynvvc(
     video_path: Path,
     *,
@@ -462,7 +515,7 @@ def decode_selected_luma_pynvvc(
     expected_shape_hw: tuple[int, int],
     gpu_id: int,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
-    """Decode exact presentation-order frames in one sequential GPU pass."""
+    """Decode exact frames from their preceding GOP keyframes."""
 
     requested = sorted(set(int(value) for value in frame_indices))
     if not requested:
@@ -481,41 +534,48 @@ def decode_selected_luma_pynvvc(
     source_width = int(demuxer.Width())
     if (source_height, source_width) != expected_shape_hw:
         raise RuntimeError("video dimensions disagree with the candidate authority")
-    decoder = nvc.CreateDecoder(
-        gpuid=int(gpu_id), codec=demuxer.GetNvCodecId(), usedevicememory=True
-    )
-    wanted = set(requested)
     frames: dict[int, np.ndarray] = {}
-    decoded_count = 0
-    maximum = requested[-1]
+    seeks: list[dict[str, Any]] = []
     started = time.perf_counter()
-    for packet in demuxer:
-        for frame in decoder.Decode(packet):
-            if decoded_count in wanted:
-                tensor = torch.from_dlpack(frame)
-                frames[decoded_count] = (
-                    tensor[:source_height, :]
-                    .contiguous()
-                    .cpu()
-                    .numpy()
-                    .astype(np.uint8, copy=True)
-                )
-                del tensor
-            decoded_count += 1
-            if decoded_count > maximum:
-                break
-        if decoded_count > maximum:
-            break
-    if set(frames) != wanted:
-        missing = sorted(wanted.difference(frames))
-        raise RuntimeError(
-            f"decoded {len(frames)}/{len(wanted)} frames; missing {missing}"
+
+    def materialize(frame: Any) -> np.ndarray:
+        tensor = torch.from_dlpack(frame)
+        result = (
+            tensor[:source_height, :]
+            .contiguous()
+            .cpu()
+            .numpy()
+            .astype(np.uint8, copy=True)
         )
+        del tensor
+        return result
+
+    for target in requested:
+        decoder = nvc.CreateDecoder(
+            gpuid=int(gpu_id), codec=demuxer.GetNvCodecId(), usedevicememory=True
+        )
+        frame, seek = _decode_one_frame_from_preceding_keyframe(
+            demuxer=demuxer,
+            decoder=decoder,
+            target_frame_index=target,
+            materialize_frame=materialize,
+        )
+        if frame.shape != (source_height, source_width):
+            raise RuntimeError(
+                f"decoded frame {target} has unexpected shape {frame.shape}"
+            )
+        frames[target] = frame
+        seeks.append(seek)
+        del decoder
+    packet_counts = [int(item["packets_decoded"]) for item in seeks]
     return frames, {
-        "backend": "pynvvc_luma_sequential",
+        "backend": "pynvvc_luma_gop_keyframe_seek",
         "gpu_id": int(gpu_id),
         "requested_frame_count": len(requested),
-        "decoded_frame_count_through_last_request": decoded_count,
+        "decoded_packet_count_total": sum(packet_counts),
+        "decoded_packet_count_max_per_seek": max(packet_counts),
+        "seek_count": len(seeks),
+        "seeks": seeks,
         "elapsed_seconds": time.perf_counter() - started,
         "demuxer_frame_rate": float(demuxer.FrameRate()),
         "codec": str(demuxer.GetNvCodecId()),

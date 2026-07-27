@@ -5,11 +5,42 @@ import pytest
 
 from fisheye.diagnostics.audit_arena_geometry_detection_gates import (
     Circle,
+    _decode_one_frame_from_preceding_keyframe,
     classify_gate_results,
     select_boundary_sentinel_rows,
     select_review_rows,
     signed_circle_distance,
 )
+
+
+class _Packet:
+    def __init__(self, frame: int, *, key: bool = False) -> None:
+        self.bsl = 10
+        self.key = int(key)
+        self.pts = frame
+
+
+class _Demuxer:
+    def __init__(self, packets: list[_Packet]) -> None:
+        self.packets = iter(packets)
+        self.seek_target: int | None = None
+
+    def TimestampFromFrame(self, frame: int) -> int:  # noqa: N802
+        return frame
+
+    def Seek(self, timestamp: int) -> None:  # noqa: N802
+        self.seek_target = timestamp
+
+    def Demux(self) -> _Packet:  # noqa: N802
+        return next(self.packets)
+
+    def isSeekDone(self, pts: int, target: int) -> int:  # noqa: N802
+        return -1 if pts < target else 0 if pts == target else 1
+
+
+class _Decoder:
+    def Decode(self, packet: _Packet) -> list[np.ndarray]:  # noqa: N802
+        return [np.full((2, 2), packet.pts, dtype=np.int64)]
 
 
 def test_signed_circle_distance_is_positive_inside_and_inclusive_at_boundary() -> None:
@@ -93,3 +124,44 @@ def test_boundary_sentinels_choose_nearest_row_in_each_temporal_partition() -> N
     )
 
     assert selected.tolist() == [1, 3, 4]
+
+
+def test_keyframe_seek_decodes_only_through_exact_requested_frame() -> None:
+    demuxer = _Demuxer(
+        [_Packet(100, key=True), _Packet(101), _Packet(102), _Packet(103)]
+    )
+
+    frame, proof = _decode_one_frame_from_preceding_keyframe(
+        demuxer=demuxer,
+        decoder=_Decoder(),
+        target_frame_index=102,
+        materialize_frame=np.asarray,
+    )
+
+    assert demuxer.seek_target == 102
+    np.testing.assert_array_equal(frame, np.full((2, 2), 102))
+    assert proof["packets_decoded"] == 3
+    assert proof["keyframe_packet_pts"] == 100
+    assert proof["target_packet_pts"] == 102
+
+
+def test_keyframe_seek_rejects_non_keyframe_landing_or_output_reordering() -> None:
+    with pytest.raises(RuntimeError, match="did not land on a keyframe"):
+        _decode_one_frame_from_preceding_keyframe(
+            demuxer=_Demuxer([_Packet(100, key=False)]),
+            decoder=_Decoder(),
+            target_frame_index=100,
+            materialize_frame=np.asarray,
+        )
+
+    class EmptyDecoder:
+        def Decode(self, _packet: _Packet) -> list[np.ndarray]:  # noqa: N802
+            return []
+
+    with pytest.raises(RuntimeError, match="one display frame per I/P packet"):
+        _decode_one_frame_from_preceding_keyframe(
+            demuxer=_Demuxer([_Packet(100, key=True)]),
+            decoder=EmptyDecoder(),
+            target_frame_index=100,
+            materialize_frame=np.asarray,
+        )
