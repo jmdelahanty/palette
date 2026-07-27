@@ -32,6 +32,54 @@ the exact refined-detection-to-crop coordinate lineage and downstream
 completeness gates remain open
 (`docs/refined_detection_crop_handoff_contract_v1.md:73-102`).
 
+## Why Crop Geometry Remains Separate From Detection
+
+Crop geometry should not be folded into the canonical detection schema.
+Detection and crop answer different questions and change for different reasons:
+
+- detection records what observation exists, its stable `instance_key`, its
+  acquisition frame, and its authoritative image-space bbox;
+- crop records which exact source-pixel window a downstream purpose requests
+  around that observation; and
+- a cache or training artifact records how those source pixels were decoded and
+  transformed into a model-facing tensor.
+
+The dependency is:
+
+```text
+immutable detection snapshot
+  + versioned crop policy
+  + source-pixel authority
+  -> immutable geometry-only crop snapshot
+  -> optional work-package/cache/training materialization
+```
+
+One detection snapshot may legitimately have several crop snapshots: a tight
+keypoint window, a larger context window for segmentation, a variable-size
+inspection window, or a resized/padded training input. Putting crop geometry in
+the detection contract would either allow only one of those policies or require
+revising/duplicating detection identity whenever a crop policy changes.
+
+Separation must not mean weak association. A crop run manifest should bind:
+
+- the exact source detection/refined-detection run and manifest digest;
+- the source logical-content digest and recording identity;
+- the versioned crop-policy payload and digest;
+- the exact source-pixel authority and digest; and
+- complete `instance_key`/source-row coverage or an explicit subset contract.
+
+Every downstream product should cite an exact crop run ID and manifest digest.
+A single undifferentiated `crop_runs.latest` is insufficient when multiple crop
+policies are valid. A future selector may identify a default by purpose/profile,
+but it must not mutate the source detection manifest or make crop policy part of
+detection identity.
+
+Persisting geometry is still worthwhile even when a crop could be recomputed
+from bbox plus policy: the arrays cheaply freeze rounding, padding, per-row
+size, source-pixel routing, and row order against implementation drift. The
+writer should validate those persisted values against the bound detection and
+policy rather than ask every consumer to rederive them.
+
 ## Method And Scope
 
 The checked-in static writer census reports 104 crop-classified creation sites
@@ -366,6 +414,9 @@ tensor.
       shape `F+1`, first value zero, last value `N`, and exact agreement with
       rows.
 - [ ] Freeze raw/refined/acquisition/clipped source-lineage envelopes.
+- [ ] Define crop-snapshot identity from the source detection manifest digest,
+      crop-policy digest, and source-pixel authority digest; never include crop
+      policy in detection identity.
 - [ ] Decide whether `detection_indices`, `frame_counts`, and
       `source_frame_indices` are omitted or explicitly compatibility-only.
 - [ ] Require exact `roi_sizes_full [N,2] int32` and freeze
@@ -411,6 +462,8 @@ tensor.
       can produce a complete typed source binding.
 - [ ] Make explicit public-reader selection validate completion, manifest,
       selector eligibility, and logical/storage declarations.
+- [ ] Replace ambiguous single-latest assumptions with exact crop-run binding or
+      a typed purpose/profile selector when more than one crop policy is valid.
 - [ ] Inventory remaining direct `roi_images` readers into either intentional
       materialized-only consumers or `CropImageSource` migration targets.
 - [ ] Keep training exporters dense and self-contained; allow geometry-only
