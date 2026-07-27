@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -16,9 +17,9 @@ from fisheye.cluster import clipped_inference_import_recovery as import_recovery
 from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
 from fisheye.cluster import refined_subject_mask_encoded_chunk_canary as encoded_canary
 from fisheye.cluster.clipped_detection import (
-    DetectionClipSpec,
     DetectionFragmentInputs,
     DetectionModelSpec,
+    DetectionWorkUnitSpec,
     build_detection_fragment,
     compose_detection_workflow,
 )
@@ -32,6 +33,7 @@ from fisheye.cluster.clipped_inference_validate import (
     _require_exact_vector,
     _validate_run_frame_counts,
 )
+from fisheye.cluster.recording_layout import clipped_recording_target
 from fisheye.shared.flat_roi_cache import FLAT_ROI_CACHE_LAYOUT, FLAT_ROI_CACHE_SCHEMA
 
 
@@ -349,15 +351,18 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
 
     fragments = plan.lsf_workflow.to_json()["metadata"]["fragments"]
     assert [fragment["fragment_id"] for fragment in fragments] == [
-        f"detection:{target_safe}",
+        f"raw_detection:{target_safe}",
+        f"detection_postprocess:{target_safe}",
         f"analysis:{target_safe}",
         "campaign_finalize",
     ]
     detection_output = target["detection_module"]
     assert detection_output["terminal_job_key"] == f"detect_collection:{target_safe}"
-    assert fragments[0]["provides"] == [detection_output["artifact_key"]]
-    assert fragments[1]["requires"] == [detection_output["artifact_key"]]
-    assert fragments[2]["provides"] == [
+    assert fragments[0]["provides"] == [f"raw_detection_work_units:{target_safe}"]
+    assert fragments[1]["requires"] == [f"raw_detection_work_units:{target_safe}"]
+    assert fragments[1]["provides"] == [detection_output["artifact_key"]]
+    assert fragments[2]["requires"] == [detection_output["artifact_key"]]
+    assert fragments[3]["provides"] == [
         "registry_reconciled",
         "nrs_cache_cleaned",
     ]
@@ -366,12 +371,28 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
 def test_detection_module_composes_as_a_first_class_detection_only_workflow(
     tmp_path: Path,
 ) -> None:
-    clips = tuple(
-        DetectionClipSpec(
-            clip_id=f"clip_{index:06d}",
-            clip_index=index,
-            camera_serial="2010093",
-            video_path=tmp_path / "clips" / f"clip_{index:06d}.mp4",
+    rows = tuple(
+        {
+            "clip_id": f"clip_{index:06d}",
+            "clip_index": index,
+            "camera_serial": "2010093",
+            "work_unit_id": f"work_unit_{index}",
+            "source": {
+                "video_path": tmp_path / "clips" / f"clip_{index:06d}.mp4"
+            },
+        }
+        for index in range(2)
+    )
+    target = clipped_recording_target(
+        target_id="sleepyfish_cam2010093",
+        recording_id="sleepyfish_cam2010093:zfixture",
+        recording_dir=tmp_path / "recording",
+        analysis_zarr=tmp_path / "analysis.zarr",
+        work_units=rows,
+    )
+    units = tuple(
+        DetectionWorkUnitSpec(
+            work_unit=target.work_units[index],
             detect_run=f"detect_{index}",
             detect_group_path=f"clips/{index}/detect_runs/detect_{index}",
             refined_detect_run=f"refined_{index}",
@@ -385,18 +406,15 @@ def test_detection_module_composes_as_a_first_class_detection_only_workflow(
         DetectionFragmentInputs(
             workflow_id="detection_only_fixture",
             family="clipped_inference",
-            target_id="sleepyfish_cam2010093",
             target_label="fixture_target",
-            recording_id="sleepyfish_cam2010093:zfixture",
-            recording_dir=tmp_path / "recording",
-            analysis_zarr=tmp_path / "analysis.zarr",
+            target=target,
             repo=tmp_path / "repo",
             run_root=tmp_path / "run",
             detection_plan_path=tmp_path / "run" / "detection_plan.json",
             collection_id="refined_detect_collection_fixture",
             quality_source_run="detect_quality_source_fixture",
             quality_run="detect_quality_fixture",
-            clips=clips,
+            work_units=units,
             model=DetectionModelSpec(
                 set_id="detect_set",
                 run_id="detect_run",
@@ -422,9 +440,83 @@ def test_detection_module_composes_as_a_first_class_detection_only_workflow(
     ]
     assert module.outputs.collection_id == "refined_detect_collection_fixture"
     assert module.outputs.terminal_job_key == "detect_collection:sleepyfish_cam2010093"
+    assert [fragment.fragment_id for fragment in module.fragments] == [
+        "raw_detection:sleepyfish_cam2010093",
+        "detection_postprocess:sleepyfish_cam2010093",
+    ]
+    assert module.fragments[1].requires == (module.raw_outputs.artifact_key,)
     assert detection_only.metadata["workflow_scope"] == "detection_only"
     assert len(_execution_tasks(detection_only.jobs[0])) == 2
     assert len(_execution_tasks(detection_only.jobs[3])) == 2
+
+
+def test_detection_fragment_split_preserves_pre_split_job_contract() -> None:
+    """Freeze commands/resources/dependencies/outputs from the pre-split builder."""
+
+    rows = tuple(
+        {
+            "work_unit_id": f"work_{index}",
+            "clip_id": f"clip_{index:06d}",
+            "clip_index": index,
+            "camera_serial": "2010093",
+            "source": {"video_path": f"/fixture/clips/clip_{index:06d}.mp4"},
+        }
+        for index in range(2)
+    )
+    target = clipped_recording_target(
+        target_id="target",
+        recording_id="recording:z1",
+        recording_dir=Path("/fixture/recording"),
+        analysis_zarr=Path("/fixture/analysis.zarr"),
+        work_units=rows,
+    )
+    units = tuple(
+        DetectionWorkUnitSpec(
+            work_unit=target.work_units[index],
+            detect_run=f"detect_{index}",
+            detect_group_path=f"clips/{index}/detect_runs/detect_{index}",
+            refined_detect_run=f"refined_{index}",
+            refined_detect_group_path=(
+                f"clips/{index}/refined_detect_runs/refined_{index}"
+            ),
+        )
+        for index in range(2)
+    )
+    module = build_detection_fragment(
+        DetectionFragmentInputs(
+            workflow_id="detection_fixture",
+            family="clipped_inference",
+            target_label="fixture_target",
+            target=target,
+            repo=Path("/fixture/repo"),
+            run_root=Path("/fixture/run"),
+            detection_plan_path=Path("/fixture/run/detection_plan.json"),
+            collection_id="collection_fixture",
+            quality_source_run="quality_source_fixture",
+            quality_run="quality_fixture",
+            work_units=units,
+            model=DetectionModelSpec(
+                set_id="set",
+                run_id="run",
+                path=Path("/fixture/model.pt"),
+                sha256="a" * 64,
+            ),
+            detect_array_concurrency=2,
+            refine_bundle_concurrency=2,
+        )
+    )
+    payload = {
+        "jobs": [job.to_json() for job in module.jobs],
+        "outputs": module.outputs.to_json(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    # Captured from the monolithic builder immediately before the fragment
+    # split. Fragment metadata is intentionally excluded; all executable job
+    # commands, resources, dependencies, task envelopes, and outputs are in it.
+    assert hashlib.sha256(encoded.encode("utf-8")).hexdigest() == (
+        "183693e320e885eda3cf56293383797fce7b7e1411054c9b006275abbb1c9b85"
+    )
 
 
 def test_materialized_dry_run_is_immutable_and_has_no_submission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -553,9 +645,15 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
         fragment["fragment_id"]: fragment
         for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
     }
-    assert fragments[f"detection:{first_safe}"]["requires"] == []
-    assert fragments[f"detection:{second_safe}"]["requires"] == [
+    assert fragments[f"raw_detection:{first_safe}"]["requires"] == []
+    assert fragments[f"raw_detection:{second_safe}"]["requires"] == [
         f"validated_analysis:{first_safe}"
+    ]
+    assert fragments[f"detection_postprocess:{first_safe}"]["requires"] == [
+        f"raw_detection_work_units:{first_safe}"
+    ]
+    assert fragments[f"detection_postprocess:{second_safe}"]["requires"] == [
+        f"raw_detection_work_units:{second_safe}"
     ]
     assert fragments["campaign_finalize"]["requires"] == [
         f"validated_analysis:{first_safe}",

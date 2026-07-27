@@ -1,4 +1,9 @@
-"""Composable clipped detection, quality, refinement, and publication subgraph."""
+"""Composable detection fragments for clipped recording work units.
+
+The target and work-unit inputs use the layout-neutral production contract.
+The current command renderer remains clipped-specific until the whole-video
+publisher is adapted in the next migration checkpoint.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ from fisheye.cluster.clipped_lsf import (
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import (
     LsfExecutionMode,
+    LsfJob,
     LsfResources,
     LsfWorkflow,
     LsfWorkflowFragment,
@@ -23,6 +29,11 @@ from fisheye.cluster.lsf import (
 from fisheye.cluster.lsf.runtime import (
     RUNTIME_JOB_ID_TOKEN,
     RUNTIME_JOB_INDEX_TOKEN,
+)
+from fisheye.cluster.recording_layout import (
+    RecordingLayout,
+    RecordingTarget,
+    VideoWorkUnit,
 )
 
 
@@ -37,30 +48,61 @@ class DetectionModelSpec:
 
 
 @dataclass(frozen=True)
-class DetectionClipSpec:
-    """One clip-local detection and refined-detection lineage."""
+class DetectionWorkUnitSpec:
+    """Detection run identities bound to one neutral video work unit."""
 
-    clip_id: str
-    clip_index: int
-    camera_serial: str
-    video_path: Path
+    work_unit: VideoWorkUnit
     detect_run: str
     detect_group_path: str
     refined_detect_run: str
     refined_detect_group_path: str
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> DetectionClipSpec:
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        work_unit: VideoWorkUnit,
+    ) -> DetectionWorkUnitSpec:
         return cls(
-            clip_id=str(value["clip_id"]),
-            clip_index=int(value["clip_index"]),
-            camera_serial=str(value["camera_serial"]),
-            video_path=Path(str(value["video_path"])),
+            work_unit=work_unit,
             detect_run=str(value["detect_run"]),
             detect_group_path=str(value["detect_group_path"]),
             refined_detect_run=str(value["refined_detect_run"]),
             refined_detect_group_path=str(value["refined_detect_group_path"]),
         )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.work_unit, VideoWorkUnit):
+            raise TypeError("Detection work_unit must be a VideoWorkUnit.")
+        for field_name in (
+            "detect_run",
+            "detect_group_path",
+            "refined_detect_run",
+            "refined_detect_group_path",
+        ):
+            value = str(getattr(self, field_name)).strip()
+            if not value:
+                raise ValueError(f"Detection {field_name} cannot be empty.")
+            object.__setattr__(self, field_name, value)
+
+    @property
+    def clip_id(self) -> str:
+        """Compatibility label consumed by current clipped stage commands."""
+
+        return self.work_unit.source_partition_id
+
+    @property
+    def clip_index(self) -> int:
+        return self.work_unit.source_partition_index
+
+    @property
+    def camera_serial(self) -> str:
+        return self.work_unit.camera_serial
+
+    @property
+    def video_path(self) -> Path:
+        return self.work_unit.video_path
 
 
 @dataclass(frozen=True)
@@ -69,20 +111,16 @@ class DetectionFragmentInputs:
 
     workflow_id: str
     family: str
-    target_id: str
     target_label: str
-    recording_id: str
-    recording_dir: Path
-    analysis_zarr: Path
+    target: RecordingTarget
     repo: Path
     run_root: Path
     detection_plan_path: Path
     collection_id: str
     quality_source_run: str
     quality_run: str
-    clips: tuple[DetectionClipSpec, ...]
+    work_units: tuple[DetectionWorkUnitSpec, ...]
     model: DetectionModelSpec
-    expected_subject_count: int = 1
     resume_existing_detections: bool = False
     detect_array_concurrency: int = 8
     refine_bundle_concurrency: int = 4
@@ -90,21 +128,60 @@ class DetectionFragmentInputs:
     required_artifacts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.clips:
+        if not isinstance(self.target, RecordingTarget):
+            raise TypeError("Detection target must be a RecordingTarget.")
+        if self.target.layout is not RecordingLayout.CLIPPED_COLLECTION:
+            raise ValueError(
+                "The current detection command renderer requires clipped work units."
+            )
+        if not self.work_units:
             raise ValueError("A detection fragment requires at least one clip.")
-        if self.expected_subject_count <= 0:
-            raise ValueError("expected_subject_count must be positive.")
         if self.detect_array_concurrency <= 0 or self.refine_bundle_concurrency <= 0:
             raise ValueError("Detection concurrency limits must be positive.")
-        clip_ids = [clip.clip_id for clip in self.clips]
-        if len(set(clip_ids)) != len(clip_ids):
-            raise ValueError("Detection clip ids must be unique within a target.")
-        detect_groups = [clip.detect_group_path for clip in self.clips]
-        refined_groups = [clip.refined_detect_group_path for clip in self.clips]
+        clip_camera_keys = [
+            (clip.clip_id, clip.camera_serial) for clip in self.work_units
+        ]
+        if len(set(clip_camera_keys)) != len(clip_camera_keys):
+            raise ValueError(
+                "Detection clip/camera identities must be unique within a target."
+            )
+        observed_work_units = tuple(unit.work_unit for unit in self.work_units)
+        if observed_work_units != self.target.work_units:
+            raise ValueError(
+                "Detection work units must exactly match target work-unit order."
+            )
+        detect_groups = [clip.detect_group_path for clip in self.work_units]
+        refined_groups = [clip.refined_detect_group_path for clip in self.work_units]
         if len(set(detect_groups)) != len(detect_groups):
             raise ValueError("Detection output group paths must be unique.")
         if len(set(refined_groups)) != len(refined_groups):
             raise ValueError("Refined-detection output group paths must be unique.")
+
+    @property
+    def target_id(self) -> str:
+        return self.target.target_id
+
+    @property
+    def recording_id(self) -> str:
+        return self.target.recording_id
+
+    @property
+    def recording_dir(self) -> Path:
+        return self.target.recording_dir
+
+    @property
+    def analysis_zarr(self) -> Path:
+        return self.target.analysis_zarr
+
+    @property
+    def expected_subject_count(self) -> int:
+        return self.target.expected_subject_count
+
+    @property
+    def clips(self) -> tuple[DetectionWorkUnitSpec, ...]:
+        """Compatibility view while clipped commands retain clip terminology."""
+
+        return self.work_units
 
 
 @dataclass(frozen=True)
@@ -136,11 +213,34 @@ class DetectionFragmentOutputs:
 
 
 @dataclass(frozen=True)
-class DetectionWorkflowModule:
-    """A composable LSF fragment paired with its typed artifact outputs."""
+class RawDetectionFragmentOutputs:
+    """Raw detection artifacts produced before quality or refinement."""
 
-    fragment: LsfWorkflowFragment
+    target_id: str
+    raw_detection_group_paths: tuple[str, ...]
+    terminal_job_key: str
+    artifact_key: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "target_id": self.target_id,
+            "raw_detection_group_paths": list(self.raw_detection_group_paths),
+            "terminal_job_key": self.terminal_job_key,
+            "artifact_key": self.artifact_key,
+        }
+
+
+@dataclass(frozen=True)
+class DetectionWorkflowModule:
+    """Layout-neutral raw and postprocess fragments with typed outputs."""
+
+    fragments: tuple[LsfWorkflowFragment, ...]
+    raw_outputs: RawDetectionFragmentOutputs
     outputs: DetectionFragmentOutputs
+
+    @property
+    def jobs(self) -> tuple[LsfJob, ...]:
+        return tuple(job for fragment in self.fragments for job in fragment.jobs)
 
 
 def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkflowModule:
@@ -443,6 +543,30 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
         )
     )
 
+    raw_artifact_key = f"raw_detection_work_units:{target_safe}"
+    raw_outputs = RawDetectionFragmentOutputs(
+        target_id=inputs.target_id,
+        raw_detection_group_paths=tuple(
+            clip.detect_group_path for clip in inputs.clips
+        ),
+        terminal_job_key=detect_array_key,
+        artifact_key=raw_artifact_key,
+    )
+    raw_fragment = LsfWorkflowFragment(
+        fragment_id=f"raw_detection:{target_safe}",
+        jobs=(jobs[0],),
+        requires=inputs.required_artifacts,
+        provides=(raw_artifact_key,),
+        metadata={
+            "module": "raw_detection",
+            "target_id": inputs.target_id,
+            "recording_layout": inputs.target.layout.value,
+            "work_unit_count": len(inputs.work_units),
+            "resume_existing_detections": inputs.resume_existing_detections,
+            "outputs": raw_outputs.to_json(),
+        },
+    )
+
     artifact_key = f"finalized_detection_collection:{target_safe}"
     outputs = DetectionFragmentOutputs(
         target_id=inputs.target_id,
@@ -459,20 +583,24 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
         terminal_job_key=collection_key,
         artifact_key=artifact_key,
     )
-    fragment = LsfWorkflowFragment(
-        fragment_id=f"detection:{target_safe}",
-        jobs=tuple(jobs),
-        requires=inputs.required_artifacts,
+    postprocess_fragment = LsfWorkflowFragment(
+        fragment_id=f"detection_postprocess:{target_safe}",
+        jobs=tuple(jobs[1:]),
+        requires=(raw_artifact_key,),
         provides=(artifact_key,),
         metadata={
-            "module": "clipped_detection",
+            "module": "detection_postprocess",
             "target_id": inputs.target_id,
-            "clip_count": len(inputs.clips),
-            "resume_existing_detections": inputs.resume_existing_detections,
+            "work_unit_count": len(inputs.work_units),
+            "raw_detection_inputs": raw_outputs.to_json(),
             "outputs": outputs.to_json(),
         },
     )
-    return DetectionWorkflowModule(fragment=fragment, outputs=outputs)
+    return DetectionWorkflowModule(
+        fragments=(raw_fragment, postprocess_fragment),
+        raw_outputs=raw_outputs,
+        outputs=outputs,
+    )
 
 
 def compose_detection_workflow(
@@ -489,7 +617,9 @@ def compose_detection_workflow(
     return compose_lsf_workflow(
         workflow_id=workflow_id,
         family=family,
-        fragments=tuple(module.fragment for module in modules),
+        fragments=tuple(
+            fragment for module in modules for fragment in module.fragments
+        ),
         external_inputs=external_inputs,
         metadata={
             "workflow_scope": "detection_only",
@@ -500,11 +630,12 @@ def compose_detection_workflow(
 
 
 __all__ = [
-    "DetectionClipSpec",
     "DetectionFragmentInputs",
     "DetectionFragmentOutputs",
     "DetectionModelSpec",
+    "DetectionWorkUnitSpec",
     "DetectionWorkflowModule",
+    "RawDetectionFragmentOutputs",
     "build_detection_fragment",
     "compose_detection_workflow",
 ]

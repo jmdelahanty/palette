@@ -1,7 +1,7 @@
 # Layout-neutral production DAG design
 
-- Status: accepted direction; implementation not started
-- Last reviewed: 2026-07-26
+- Status: accepted direction; first layout/parity checkpoint implemented
+- Last reviewed: 2026-07-27
 - Scope: production inference and refinement workflows using the structured LSF
   kernel
 
@@ -91,6 +91,28 @@ selects and orders persisted analysis products and normally executes them
 serially inside one LSF allocation. It is appropriate for downstream derived
 analysis, but it is not the production inference scheduler and should not be
 extended to duplicate the structured LSF kernel.
+
+### First implementation checkpoint
+
+The first migration checkpoint was implemented on 2026-07-27:
+
+- `fisheye.cluster.recording_layout` defines layout-neutral
+  `RecordingTarget`, `VideoWorkUnit`, and frame-mapping contracts;
+- adapters construct either a clipped collection with one shared canonical
+  recording-frame index or a one-member whole-video identity collection;
+- `fisheye.cluster.clipped_inference` now adapts its existing clip plan through
+  that neutral contract before constructing detection work;
+- the detection module exposes separate `raw_detection:<target>` and
+  `detection_postprocess:<target>` fragments with a typed
+  `raw_detection_work_units:<target>` artifact between them; and
+- a frozen pre-split contract test proves that executable job commands,
+  resources, dependencies, task envelopes, expected outputs, and typed final
+  outputs did not change during the split.
+
+Whole-video execution is deliberately not wired to the clipped work-unit
+runner in this checkpoint. The adapter and invariants exist, but the next
+checkpoint must bind the whole-video layout to its canonical node-local atomic
+detection publisher and then establish postprocessing parity.
 
 ## Canonical target model
 

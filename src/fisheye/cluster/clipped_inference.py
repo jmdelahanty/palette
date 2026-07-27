@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from fisheye.cluster.clipped_detection import (
-    DetectionClipSpec,
     DetectionFragmentInputs,
     DetectionModelSpec,
+    DetectionWorkUnitSpec,
     build_detection_fragment,
 )
 from fisheye.cluster.clipped_lsf import (
@@ -41,9 +41,7 @@ from fisheye.cluster.lsf import (
     submit_lsf_workflow,
     write_json_snapshot,
 )
-from fisheye.cluster.lsf.runtime import (
-    RUNTIME_JOB_ID_TOKEN,
-)
+from fisheye.cluster.recording_layout import clipped_recording_target
 from fisheye.registry.db import Registry
 from fisheye.registry.model_resolution import (
     load_candidates,
@@ -601,7 +599,6 @@ def build_plan(
             output_dir=run_root / "targets" / target_safe / "detection_artifacts",
         )
         work_units = list(detection_plan["work_units"])
-        clip_ids = [str(unit["clip_id"]) for unit in work_units]
         if len(work_units) != 22:
             raise ValueError(
                 f"Target {target.target_id!r} must have exactly 22 clip-camera work units; "
@@ -641,6 +638,17 @@ def build_plan(
                     "package_path": str(package_dir / f"{clip}.tar.gz"),
                 }
             )
+        recording_target = clipped_recording_target(
+            target_id=target.target_id,
+            recording_id=target.recording_id,
+            recording_dir=target.recording_dir,
+            analysis_zarr=target.analysis_zarr,
+            work_units=work_units,
+            expected_subject_count=target.expected_subject_count,
+        )
+        layout_work_units = {
+            unit.work_unit_id: unit for unit in recording_target.work_units
+        }
         target_payload: dict[str, Any] = {
             **target.to_json(),
             "target_label": target_label,
@@ -692,25 +700,27 @@ def build_plan(
             DetectionFragmentInputs(
                 workflow_id=workflow_id,
                 family=FAMILY,
-                target_id=target.target_id,
                 target_label=target_label,
-                recording_id=target.recording_id,
-                recording_dir=target.recording_dir,
-                analysis_zarr=target.analysis_zarr,
+                target=recording_target,
                 repo=repo,
                 run_root=run_root,
                 detection_plan_path=detection_plan_path,
                 collection_id=collection_id,
                 quality_source_run=detect_quality_source_run,
                 quality_run=detect_quality_run,
-                clips=tuple(DetectionClipSpec.from_mapping(clip) for clip in clips),
+                work_units=tuple(
+                    DetectionWorkUnitSpec.from_mapping(
+                        clip,
+                        work_unit=layout_work_units[str(clip["work_unit_id"])],
+                    )
+                    for clip in clips
+                ),
                 model=DetectionModelSpec(
                     set_id=detection_binding.set_id,
                     run_id=detection_binding.run_id,
                     path=detection_binding.path,
                     sha256=detection_binding.sha256,
                 ),
-                expected_subject_count=target.expected_subject_count,
                 resume_existing_detections=resume_existing_detections,
                 detect_array_concurrency=detect_array_concurrency,
                 refine_bundle_concurrency=detect_refine_bundle_concurrency,
@@ -718,8 +728,8 @@ def build_plan(
                 required_artifacts=gate_artifacts,
             )
         )
-        jobs.extend(detection_module.fragment.jobs)
-        fragments.append(detection_module.fragment)
+        jobs.extend(detection_module.jobs)
+        fragments.extend(detection_module.fragments)
         detection_outputs = detection_module.outputs
         target_payload["detection_module"] = detection_outputs.to_json()
         downstream_job_start = len(jobs)
