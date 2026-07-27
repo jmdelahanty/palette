@@ -52,28 +52,30 @@ def test_representative_chunks_derive_row_depth_from_bytes() -> None:
     plan_set = plan_canonical_detection_storage(_representative_dimensions())
     by_path = {entry.rule.path: entry.plan for entry in plan_set.entries}
 
-    assert by_path["instances/frame_indices"].chunk_shape == (262_144,)
-    assert by_path["instances/source_acquisition_frame_index"].chunk_shape == (131_072,)
-    assert by_path["instances/bbox_norm_coords"].chunk_shape == (65_536, 4)
-    assert by_path["instances/centers_img_xy"].chunk_shape == (131_072, 2)
+    assert by_path["instances/frame_indices"].chunk_shape == (32_768,)
+    assert by_path["instances/source_acquisition_frame_index"].chunk_shape == (16_384,)
+    assert by_path["instances/bbox_norm_coords"].chunk_shape == (8_192, 4)
+    assert by_path["instances/centers_img_xy"].chunk_shape == (16_384, 2)
     assert by_path["instances/frame_row_offsets"].chunk_shape == (131_072,)
-    assert {entry.plan.chunk_nbytes for entry in plan_set.entries} == {MIB}
+    assert {entry.plan.chunk_nbytes for entry in plan_set.entries[:-1]} == {
+        128 * 1024
+    }
+    assert plan_set.entries[-1].plan.chunk_nbytes == MIB
 
 
 def test_representative_outer_shards_and_object_estimate() -> None:
     plan_set = plan_canonical_detection_storage(_representative_dimensions())
     by_path = {entry.rule.path: entry.plan for entry in plan_set.entries}
 
-    assert by_path["instances/frame_indices"].shard_shape == (1_310_720,)
-    assert by_path["instances/bbox_norm_coords"].shard_shape == (1_245_184, 4)
-    assert by_path["instances/frame_row_offsets"].shard_shape == (1_310_720,)
+    assert by_path["instances/frame_indices"].shard_shape == (1_212_416,)
+    assert by_path["instances/bbox_norm_coords"].shard_shape == (524_288, 4)
+    assert by_path["instances/frame_row_offsets"].shard_shape == (1_048_576,)
     assert all(entry.plan.is_sharded for entry in plan_set.entries)
-    assert all(entry.plan.estimated_shard_count == 1 for entry in plan_set.entries)
     assert plan_set.estimated_logical_nbytes == 90_225_924
-    assert plan_set.estimated_inner_chunk_count == 93
-    assert plan_set.estimated_payload_objects == 9
+    assert plan_set.estimated_inner_chunk_count == 630
+    assert plan_set.estimated_payload_objects == 17
     assert plan_set.estimated_array_metadata_objects == 9
-    assert plan_set.estimated_stage_objects == 20
+    assert plan_set.estimated_stage_objects == 28
 
 
 def test_shards_preserve_whole_chunks_rows_and_single_writer_ownership() -> None:
@@ -123,9 +125,14 @@ def test_plan_set_manifest_is_json_safe_and_schema_linked() -> None:
         "id": "palette.stage.canonical_detection",
         "version": 1,
     }
-    assert manifest["storage_profile"]["profile_id"] == "published_http_v1"
-    assert manifest["storage_profile"]["target_chunk_bytes"] == MIB
-    assert manifest["object_estimate"]["stage_objects"] == 20
+    assert manifest["storage_profile"]["profile_id"] == (
+        "detection_published_access_aware_v1"
+    )
+    assert manifest["storage_profile"]["target_chunk_bytes"] == 128 * 1024
+    assert manifest["storage_profile"]["target_chunk_bytes_by_access"] == {
+        "eager": MIB
+    }
+    assert manifest["object_estimate"]["stage_objects"] == 28
     assert manifest["write_partition_contract"]["partial_physical_unit_writes"] == (
         "forbidden"
     )

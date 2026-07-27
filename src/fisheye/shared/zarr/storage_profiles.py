@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Mapping
+from typing import Any, Mapping
 
 from fisheye.shared.zarr.storage_intent import AccessPattern
 
@@ -180,6 +180,43 @@ PUBLISHED_HTTP_V1 = StorageProfile(
     codec_profile_id="zstd_fast_v1",
 )
 
+# Promoted from the full-duration canonical and refined-detection gates.  The
+# narrow random/windowed payload uses 128 KiB inner chunks, while the retained
+# eager frame index keeps 1 MiB inner chunks.  Both live in 8 MiB indexed
+# shards when the concrete array is large enough to benefit from sharding.
+DETECTION_PUBLISHED_ACCESS_AWARE_V1 = StorageProfile(
+    profile_id="detection_published_access_aware_v1",
+    target_chunk_bytes=128 * KIB,
+    min_chunk_bytes=128 * KIB,
+    max_chunk_bytes=128 * KIB,
+    eager_max_bytes=8 * MIB,
+    target_shard_bytes=8 * MIB,
+    per_row_target_shard_bytes=8 * MIB,
+    max_shard_bytes=8 * MIB,
+    max_payload_objects=4_096,
+    codec_profile_id="zstd_fast_v1",
+    shard_immutable=True,
+    shard_owned_appends=True,
+    target_chunk_bytes_by_access=((AccessPattern.EAGER, 1 * MIB),),
+)
+
+# Explicit rollback for immutable detection snapshots.  This is the genuine
+# 1 MiB unsharded benchmark control, not the generic sharded HTTP profile.
+DETECTION_REGULAR_ROLLBACK_V1 = StorageProfile(
+    profile_id="detection_regular_rollback_v1",
+    target_chunk_bytes=1 * MIB,
+    min_chunk_bytes=1 * MIB,
+    max_chunk_bytes=1 * MIB,
+    eager_max_bytes=8 * MIB,
+    target_shard_bytes=32 * MIB,
+    per_row_target_shard_bytes=32 * MIB,
+    max_shard_bytes=32 * MIB,
+    max_payload_objects=4_096,
+    codec_profile_id="zstd_fast_v1",
+    shard_immutable=False,
+    shard_owned_appends=True,
+)
+
 TRAINING_IMMUTABLE_V1 = StorageProfile(
     profile_id="training_immutable_v1",
     target_chunk_bytes=1 * MIB,
@@ -200,6 +237,8 @@ STORAGE_PROFILES = {
         SCRATCH_COMPUTE_V1,
         EDITABLE_LOCAL_V1,
         PUBLISHED_HTTP_V1,
+        DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+        DETECTION_REGULAR_ROLLBACK_V1,
         TRAINING_IMMUTABLE_V1,
     )
 }
@@ -215,6 +254,92 @@ def get_storage_profile(profile_id: str) -> StorageProfile:
         raise ValueError(
             f"Unknown storage profile {profile_id!r}; expected one of: {choices}."
         ) from exc
+
+
+def storage_profile_from_manifest(value: Mapping[str, Any]) -> StorageProfile:
+    """Parse one exact v2 profile and enforce registered-profile identity."""
+
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "profile_id",
+        "target_chunk_bytes",
+        "min_chunk_bytes",
+        "max_chunk_bytes",
+        "eager_max_bytes",
+        "target_shard_bytes",
+        "per_row_target_shard_bytes",
+        "max_shard_bytes",
+        "max_payload_objects",
+        "codec_profile_id",
+        "shard_immutable",
+        "shard_owned_appends",
+        "target_chunk_bytes_by_access",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("storage_profile has an unexpected field set")
+    if (
+        value.get("schema_id") != "palette.storage_profile"
+        or value.get("schema_version") != 2
+    ):
+        raise ValueError("storage_profile schema identity mismatch")
+    integer_fields = (
+        "target_chunk_bytes",
+        "min_chunk_bytes",
+        "max_chunk_bytes",
+        "eager_max_bytes",
+        "target_shard_bytes",
+        "per_row_target_shard_bytes",
+        "max_shard_bytes",
+        "max_payload_objects",
+    )
+    if any(type(value.get(name)) is not int for name in integer_fields):
+        raise TypeError("storage_profile byte/object budgets must be exact integers")
+    if (
+        type(value.get("shard_immutable")) is not bool
+        or type(value.get("shard_owned_appends")) is not bool
+    ):
+        raise TypeError("storage_profile shard flags must be exact booleans")
+    profile_id = value.get("profile_id")
+    codec_profile_id = value.get("codec_profile_id")
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise ValueError("storage profile_id cannot be empty")
+    if not isinstance(codec_profile_id, str) or not codec_profile_id.strip():
+        raise ValueError("codec_profile_id cannot be empty")
+    overrides = value.get("target_chunk_bytes_by_access")
+    if not isinstance(overrides, Mapping):
+        raise TypeError("target_chunk_bytes_by_access must be an object")
+    if any(
+        type(key) is not str or type(target) is not int
+        for key, target in overrides.items()
+    ):
+        raise TypeError(
+            "target_chunk_bytes_by_access requires string keys and integer values"
+        )
+    profile = StorageProfile(
+        profile_id=profile_id.strip(),
+        target_chunk_bytes=value["target_chunk_bytes"],
+        min_chunk_bytes=value["min_chunk_bytes"],
+        max_chunk_bytes=value["max_chunk_bytes"],
+        eager_max_bytes=value["eager_max_bytes"],
+        target_shard_bytes=value["target_shard_bytes"],
+        per_row_target_shard_bytes=value["per_row_target_shard_bytes"],
+        max_shard_bytes=value["max_shard_bytes"],
+        max_payload_objects=value["max_payload_objects"],
+        codec_profile_id=codec_profile_id.strip(),
+        shard_immutable=value["shard_immutable"],
+        shard_owned_appends=value["shard_owned_appends"],
+        target_chunk_bytes_by_access=tuple(overrides.items()),
+    )
+    if profile.as_manifest() != dict(value):
+        raise ValueError("storage_profile is not in canonical persisted form")
+    registered = STORAGE_PROFILES.get(profile.profile_id)
+    if registered is not None and profile != registered:
+        raise ValueError(
+            f"registered storage profile {profile.profile_id!r} differs from "
+            "its frozen definition"
+        )
+    return profile
 
 
 def make_benchmark_storage_profile(

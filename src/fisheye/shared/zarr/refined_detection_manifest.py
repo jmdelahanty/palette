@@ -43,7 +43,7 @@ from fisheye.shared.zarr.refined_detection_storage import (
     RefinedDetectionStoragePlanSet,
     plan_refined_detection_storage,
 )
-from fisheye.shared.zarr.storage_profiles import StorageProfile
+from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 
 
 REFINED_DETECTION_RUN_MANIFEST_SCHEMA_ID = "palette.refined_detection.run_manifest"
@@ -838,84 +838,6 @@ def _dimensions_from_logical_schema(
     return dimensions
 
 
-def _storage_profile_from_manifest(value: Mapping[str, Any]) -> StorageProfile:
-    expected_fields = {
-        "schema_id",
-        "schema_version",
-        "profile_id",
-        "target_chunk_bytes",
-        "min_chunk_bytes",
-        "max_chunk_bytes",
-        "eager_max_bytes",
-        "target_shard_bytes",
-        "per_row_target_shard_bytes",
-        "max_shard_bytes",
-        "max_payload_objects",
-        "codec_profile_id",
-        "shard_immutable",
-        "shard_owned_appends",
-        "target_chunk_bytes_by_access",
-    }
-    if set(value) != expected_fields:
-        raise ValueError("storage_profile has an unexpected field set")
-    if (
-        value.get("schema_id") != "palette.storage_profile"
-        or value.get("schema_version") != 2
-    ):
-        raise ValueError("storage_profile schema identity mismatch")
-    integer_fields = (
-        "target_chunk_bytes",
-        "min_chunk_bytes",
-        "max_chunk_bytes",
-        "eager_max_bytes",
-        "target_shard_bytes",
-        "per_row_target_shard_bytes",
-        "max_shard_bytes",
-        "max_payload_objects",
-    )
-    if any(type(value.get(name)) is not int for name in integer_fields):
-        raise TypeError("storage_profile byte/object budgets must be exact integers")
-    if (
-        type(value.get("shard_immutable")) is not bool
-        or type(value.get("shard_owned_appends")) is not bool
-    ):
-        raise TypeError("storage_profile shard flags must be exact booleans")
-    overrides = value.get("target_chunk_bytes_by_access")
-    if not isinstance(overrides, Mapping):
-        raise TypeError("target_chunk_bytes_by_access must be an object")
-    if any(
-        type(key) is not str or type(target) is not int
-        for key, target in overrides.items()
-    ):
-        raise TypeError(
-            "target_chunk_bytes_by_access requires string keys and integer values"
-        )
-    profile = StorageProfile(
-        profile_id=_require_text(
-            str(value.get("profile_id") or ""),
-            name="storage profile_id",
-        ),
-        target_chunk_bytes=value["target_chunk_bytes"],
-        min_chunk_bytes=value["min_chunk_bytes"],
-        max_chunk_bytes=value["max_chunk_bytes"],
-        eager_max_bytes=value["eager_max_bytes"],
-        target_shard_bytes=value["target_shard_bytes"],
-        per_row_target_shard_bytes=value["per_row_target_shard_bytes"],
-        max_shard_bytes=value["max_shard_bytes"],
-        max_payload_objects=value["max_payload_objects"],
-        codec_profile_id=_require_text(
-            str(value.get("codec_profile_id") or ""),
-            name="codec_profile_id",
-        ),
-        shard_immutable=value["shard_immutable"],
-        shard_owned_appends=value["shard_owned_appends"],
-        target_chunk_bytes_by_access=tuple(overrides.items()),
-    )
-    if profile.as_manifest() != dict(value):
-        raise ValueError("storage_profile is not in canonical persisted form")
-    return profile
-
-
 def _snapshot_lineage_from_manifest(
     value: Mapping[str, Any],
 ) -> RefinedDetectionSnapshotLineage:
@@ -1273,16 +1195,12 @@ def validate_refined_detection_run_manifest(
         )
         if storage_paths != binding_paths:
             errors.append("storage_plan array paths differ from logical bindings")
-        if storage.get("profile_status") != (
-            "resolved_plan_evidence_not_a_production_default_promotion"
-        ):
-            errors.append("storage_plan profile_status mismatch")
         raw_profile = storage.get("storage_profile")
         if not isinstance(raw_profile, Mapping):
             errors.append("storage_plan storage_profile must be an object")
         elif resolved_dimensions is not None:
             try:
-                profile = _storage_profile_from_manifest(raw_profile)
+                profile = storage_profile_from_manifest(raw_profile)
                 expected_storage = plan_refined_detection_storage(
                     resolved_dimensions,
                     profile=profile,
@@ -1770,7 +1688,7 @@ def validate_refined_detection_publication(
     )
     if isinstance(raw_profile, Mapping):
         try:
-            profile = _storage_profile_from_manifest(raw_profile)
+            profile = storage_profile_from_manifest(raw_profile)
             physical_plans = plan_refined_detection_storage(
                 dimensions,
                 profile=profile,

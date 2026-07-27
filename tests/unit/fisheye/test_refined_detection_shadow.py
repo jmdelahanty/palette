@@ -39,6 +39,7 @@ from fisheye.shared.zarr.refined_detection_shadow import (
 from fisheye.shared.zarr.refined_detection_transition import (
     build_refined_detection_transition,
 )
+from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 
 
 RECORDING_IDENTITY = "shadow_multi_subject_recording"
@@ -194,6 +195,9 @@ def test_canonical_shadow_can_read_an_exact_local_stage_bound_to_shared_evidence
     assert result.manifest["payload"]["source_evidence"]["source_group_path"] == str(
         evidence_path.resolve()
     )
+    assert result.receipt["storage_profile_id"] == (
+        "detection_published_access_aware_v1"
+    )
     assert validate_canonical_detection_shadow_publication(result) == ()
 
 
@@ -239,6 +243,9 @@ def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
     assert result.output_path == destination.resolve()
     assert result.receipt["status"] == "complete"
     assert result.receipt["production_state_changes"] == []
+    assert result.receipt["storage_profile_id"] == (
+        "detection_published_access_aware_v1"
+    )
     assert validate_refined_detection_run_manifest(result.manifest) == ()
     receipt = json.loads(
         (destination / "shadow_publication_receipt.json").read_text(encoding="utf-8")
@@ -291,6 +298,26 @@ def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
         2,
     ]
     assert np.unique(np.asarray(run["instances/instance_key"][:])).size == 2
+
+
+def test_pre_promotion_canonical_profile_remains_manifest_compatible(
+    tmp_path: Path,
+) -> None:
+    source_path = _legacy_source(tmp_path / "legacy_detect.zarr")
+    shadow_root = tmp_path / "canonical-shadows"
+    result = publish_legacy_canonical_detection_shadow(
+        source_group_path=source_path,
+        recording_identity=RECORDING_IDENTITY,
+        source_run_id="legacy_detect_1",
+        destination=shadow_root / "canonical.zarr",
+        run_id="detect_shadow_legacy_profile",
+        shadow_root=shadow_root,
+        profile=PUBLISHED_HTTP_V1,
+    )
+
+    assert result.plans.profile is PUBLISHED_HTTP_V1
+    assert validate_canonical_detection_run_manifest(result.manifest) == ()
+    assert validate_canonical_detection_shadow_publication(result) == ()
 
 
 def test_shadow_destination_rejects_unsafe_existing_or_canonical_paths(

@@ -21,7 +21,7 @@ from fisheye.shared.zarr.storage_intent import (
 )
 from fisheye.shared.zarr.storage_planner import plan_storage
 from fisheye.shared.zarr.storage_profiles import (
-    PUBLISHED_HTTP_V1,
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
     StorageProfile,
 )
 
@@ -269,7 +269,7 @@ def _concrete_shape(
 def plan_canonical_detection_storage(
     dimensions: CanonicalDetectionDimensions,
     *,
-    profile: StorageProfile = PUBLISHED_HTTP_V1,
+    profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
 ) -> CanonicalDetectionStoragePlanSet:
     """Resolve every canonical detection path from byte-based policy."""
 

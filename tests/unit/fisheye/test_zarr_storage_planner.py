@@ -13,10 +13,14 @@ from fisheye.shared.zarr.storage_intent import (
 )
 from fisheye.shared.zarr.storage_planner import plan_storage
 from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    DETECTION_REGULAR_ROLLBACK_V1,
     EDITABLE_LOCAL_V1,
     PUBLISHED_HTTP_V1,
     TRAINING_IMMUTABLE_V1,
+    get_storage_profile,
     make_benchmark_storage_profile,
+    storage_profile_from_manifest,
 )
 from fisheye.shared.zarr.storage_report import (
     compare_array_storage,
@@ -25,6 +29,26 @@ from fisheye.shared.zarr.storage_report import (
 
 
 MIB = 1024 * 1024
+
+
+def test_promoted_detection_profiles_are_named_exact_and_tamper_evident() -> None:
+    promoted = DETECTION_PUBLISHED_ACCESS_AWARE_V1
+    rollback = DETECTION_REGULAR_ROLLBACK_V1
+
+    assert get_storage_profile(promoted.profile_id) is promoted
+    assert get_storage_profile(rollback.profile_id) is rollback
+    assert promoted.target_chunk_bytes == 128 * 1024
+    assert promoted.chunk_byte_budget(AccessPattern.EAGER) == (MIB, MIB, MIB)
+    assert promoted.target_shard_bytes == 8 * MIB
+    assert promoted.shard_immutable is True
+    assert rollback.target_chunk_bytes == MIB
+    assert rollback.shard_immutable is False
+    assert storage_profile_from_manifest(promoted.as_manifest()) == promoted
+
+    tampered = promoted.as_manifest()
+    tampered["target_shard_bytes"] = 4 * MIB
+    with pytest.raises(ValueError, match="frozen definition"):
+        storage_profile_from_manifest(tampered)
 
 
 def test_benchmark_profile_sweeps_bytes_not_rows() -> None:

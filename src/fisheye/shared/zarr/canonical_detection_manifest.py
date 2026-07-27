@@ -31,7 +31,7 @@ from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
     metadata_without_empty_group_consolidation,
 )
-from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
+from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 
 
 CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID = "palette.canonical_detection.run_manifest"
@@ -399,8 +399,6 @@ def build_canonical_detection_run_manifest(
     resolved_run_id = _require_run_id(run_id)
     if storage_plan.dimensions != dimensions:
         raise ValueError("Canonical storage plan dimensions do not match.")
-    if storage_plan.profile != PUBLISHED_HTTP_V1:
-        raise ValueError("The v1 canonical shadow manifest requires published_http_v1.")
     source_errors = validate_legacy_detection_source_evidence(source_evidence)
     if source_errors:
         raise ValueError("Invalid source evidence: " + "; ".join(source_errors))
@@ -573,12 +571,23 @@ def validate_canonical_detection_run_manifest(
     if not isinstance(storage, Mapping):
         errors.append("canonical storage_plan must be an object")
     elif dimensions is not None:
-        expected_storage = plan_canonical_detection_storage(
-            dimensions,
-            profile=PUBLISHED_HTTP_V1,
-        ).as_manifest()
-        if dict(storage) != expected_storage:
-            errors.append("canonical storage_plan differs from byte planner output")
+        raw_profile = storage.get("storage_profile")
+        if not isinstance(raw_profile, Mapping):
+            errors.append("canonical storage_plan storage_profile must be an object")
+        else:
+            try:
+                profile = storage_profile_from_manifest(raw_profile)
+                expected_storage = plan_canonical_detection_storage(
+                    dimensions,
+                    profile=profile,
+                ).as_manifest()
+            except (TypeError, ValueError) as exc:
+                errors.append(f"cannot reconstruct canonical storage_plan: {exc}")
+            else:
+                if dict(storage) != expected_storage:
+                    errors.append(
+                        "canonical storage_plan differs from byte planner output"
+                    )
 
     content = payload.get("logical_content")
     if not isinstance(content, Mapping) or set(content) != {
@@ -735,10 +744,18 @@ def validate_canonical_detection_publication(
         )
         if observed_metadata != expected_metadata:
             errors.append("canonical metadata declaration digest mismatch")
-    plans = plan_canonical_detection_storage(
-        dimensions,
-        profile=PUBLISHED_HTTP_V1,
+    storage = payload.get("storage_plan")
+    raw_profile = (
+        storage.get("storage_profile") if isinstance(storage, Mapping) else None
     )
+    try:
+        if not isinstance(raw_profile, Mapping):
+            raise ValueError("canonical storage profile is missing")
+        profile = storage_profile_from_manifest(raw_profile)
+        plans = plan_canonical_detection_storage(dimensions, profile=profile)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"cannot reconstruct canonical physical plan: {exc}")
+        return tuple(dict.fromkeys(errors))
     binding_by_path = {
         binding.path: binding for binding in CANONICAL_DETECTION_SCHEMA_V1.bindings
     }

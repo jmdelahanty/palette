@@ -227,7 +227,7 @@ The general shared baseline remains `published_http_v1`: approximately 1 MiB
 uncompressed inner chunks and 32 MiB target shards. It is useful as a control,
 not evidence that every access class should use the same physical chunk bytes.
 
-The frozen access-aware candidate is
+The evidence candidate is frozen as
 `REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1`:
 
 - `WINDOWED` and `INDEXED`: exact 128 KiB uncompressed inner chunks;
@@ -239,8 +239,10 @@ The frozen access-aware candidate is
 - small arrays remain a single/few objects when sharding adds no value.
 
 The candidate reproduces the layout family supported by the existing canonical
-detection evidence. It is deliberately not the planner default and is not yet
-a promoted Palette writer profile.
+detection evidence. Following the full-duration Palette and mounted-macOS
+Crimson gates, those exact physical values are promoted under the new stable
+profile ID `detection_published_access_aware_v1`. The candidate ID remains
+frozen historical evidence; it is not rewritten in place.
 
 The paired gate's anchor is separately frozen as
 `REFINED_DETECTION_REGULAR_CONTROL_V1`: exact 1 MiB uncompressed inner chunks,
@@ -501,9 +503,17 @@ Before production routing:
       regular/candidate refined canary. Palette commit `a94abaea...`, LSF job
       `153190577`, and canary payload digest `2c00649c...` passed exact decoded
       equality and reduced observed payload objects from 220 to 42 (5.24x).
-- [ ] Have Crimson apply the mounted-macOS physical transfer, latency,
-      readiness, deadline, and RSS gate to the immutable pair.
-- [ ] Promote a versioned profile only after that gate passes.
+- [x] Have Crimson apply the mounted-macOS physical transfer, latency,
+      readiness, deadline, and RSS gate to the immutable pair. Crimson reported
+      equal decoded/traversal digests, 86.8% less traversal transfer, 68.5%
+      less whole-process transfer, zero deadline misses, and current-frame p95
+      improving from 144.2 ms to 48.0 ms.
+- [x] Promote the unchanged physical values as the versioned
+      `detection_published_access_aware_v1` default for new canonical/refined
+      v1 snapshots. Preserve `detection_regular_rollback_v1` as explicit
+      rollback and do not change selectors in this step.
+- [ ] Publish and cross-consumer validate one fresh selector-ineligible pair
+      whose manifests carry the promoted profile ID.
 - [ ] Route no selector until decoded values, manifest, direct metadata, and
       consolidated metadata all validate.
 

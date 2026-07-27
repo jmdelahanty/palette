@@ -34,14 +34,16 @@ from fisheye.shared.zarr.refined_detection_schema import (
     RefinedDetectionLineageProfile,
 )
 from fisheye.shared.zarr.refined_detection_storage import (
-    REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
     RefinedDetectionStoragePlanSet,
     plan_refined_detection_storage,
 )
 from fisheye.shared.zarr.refined_detection_transition import (
     RefinedDetectionTransitionResult,
 )
-from fisheye.shared.zarr.storage_profiles import StorageProfile
+from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    StorageProfile,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -234,7 +236,7 @@ def publish_refined_detection_shadow(
     lineage: RefinedDetectionSnapshotLineage,
     canonical_source: CanonicalDetectionShadowPublication,
     shadow_root: Path = DEFAULT_REFINED_DETECTION_SHADOW_ROOT,
-    profile: StorageProfile = REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+    profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
 ) -> RefinedDetectionShadowPublication:
     """Write and fully validate one standalone full-acquisition shadow."""
 

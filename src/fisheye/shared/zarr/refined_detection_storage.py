@@ -24,6 +24,8 @@ from fisheye.shared.zarr.storage_intent import (
 )
 from fisheye.shared.zarr.storage_planner import plan_storage
 from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    DETECTION_REGULAR_ROLLBACK_V1,
     KIB,
     MIB,
     PUBLISHED_HTTP_V1,
@@ -60,6 +62,10 @@ REFINED_DETECTION_REGULAR_CONTROL_V1 = make_benchmark_storage_profile(
 
 
 def _profile_role(profile: StorageProfile) -> str:
+    if profile == DETECTION_PUBLISHED_ACCESS_AWARE_V1:
+        return "promoted_detection_snapshot_default"
+    if profile == DETECTION_REGULAR_ROLLBACK_V1:
+        return "explicit_detection_snapshot_rollback"
     if profile == REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1:
         return "unpromoted_access_aware_candidate"
     if profile == REFINED_DETECTION_REGULAR_CONTROL_V1:
@@ -228,6 +234,16 @@ class RefinedDetectionStoragePlanSet:
 
     def as_manifest(self) -> dict[str, object]:
         codec = get_codec_profile(self.profile.codec_profile_id)
+        profile_role = _profile_role(self.profile)
+        profile_status = (
+            "promoted_production_default"
+            if profile_role == "promoted_detection_snapshot_default"
+            else (
+                "available_only_by_explicit_rollback"
+                if profile_role == "explicit_detection_snapshot_rollback"
+                else "resolved_plan_evidence_not_a_production_default_promotion"
+            )
+        )
         return {
             "schema_id": REFINED_DETECTION_STORAGE_SCHEMA_ID,
             "schema_version": REFINED_DETECTION_STORAGE_SCHEMA_VERSION,
@@ -237,11 +253,9 @@ class RefinedDetectionStoragePlanSet:
             },
             "dimensions": self.dimensions.as_manifest(),
             "storage_profile": self.profile.as_manifest(),
-            "storage_profile_role": _profile_role(self.profile),
+            "storage_profile_role": profile_role,
             "codec_profile": codec.as_manifest(),
-            "profile_status": (
-                "resolved_plan_evidence_not_a_production_default_promotion"
-            ),
+            "profile_status": profile_status,
             "object_estimate": {
                 "logical_nbytes": self.estimated_logical_nbytes,
                 "inner_chunk_count": self.estimated_inner_chunk_count,
@@ -292,7 +306,7 @@ def _concrete_shape(
 def plan_refined_detection_storage(
     dimensions: RefinedDetectionDimensions,
     *,
-    profile: StorageProfile = PUBLISHED_HTTP_V1,
+    profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
 ) -> RefinedDetectionStoragePlanSet:
     """Resolve every exact logical binding through byte-based policy."""
 

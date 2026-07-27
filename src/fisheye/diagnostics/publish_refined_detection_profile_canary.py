@@ -10,6 +10,9 @@ from typing import Sequence
 from fisheye.shared.zarr.refined_detection_profile_canary import (
     publish_refined_detection_profile_canary,
 )
+from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crimson-implementation-commit", required=True)
     parser.add_argument("--crimson-evidence-commit", required=True)
     parser.add_argument("--crimson-evidence-sha256", required=True)
+    parser.add_argument(
+        "--promoted-default",
+        action="store_true",
+        help=(
+            "Write the named promoted detection profile instead of its frozen "
+            "physically identical benchmark candidate."
+        ),
+    )
     return parser
 
 
@@ -40,6 +51,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         crimson_implementation_commit=args.crimson_implementation_commit,
         crimson_evidence_commit=args.crimson_evidence_commit,
         crimson_evidence_sha256=args.crimson_evidence_sha256,
+        **(
+            {"access_aware_profile": DETECTION_PUBLISHED_ACCESS_AWARE_V1}
+            if args.promoted_default
+            else {}
+        ),
     )
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0

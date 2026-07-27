@@ -908,9 +908,16 @@ define refined-run selection or manual-addition semantics.
       frames / 1,187,087 rows with equal decoded hashes and reduced observed
       payload objects from 220 to 42 (5.24x). No selector or production state
       changed.
-- [ ] Have Crimson run the mounted-macOS transfer/readiness/latency/deadline/RSS
-      gate against the immutable pair before promoting a versioned writer
-      profile.
+- [x] Have Crimson run the mounted-macOS transfer/readiness/latency/deadline/RSS
+      gate. It reported equal decoded/traversal digests, 86.8% less traversal
+      transfer, 68.5% less whole-process transfer, zero deadline misses, and
+      current-frame p95 improving from 144.2 ms to 48.0 ms.
+- [x] Promote the unchanged access-aware physical values under the stable
+      `detection_published_access_aware_v1` ID for new canonical and refined
+      v1 snapshots. Keep the 1 MiB unsharded
+      `detection_regular_rollback_v1` explicit and leave selectors unchanged.
+- [ ] Publish and cross-consumer validate a new selector-ineligible pair whose
+      manifests carry the promoted profile ID.
 - [ ] Begin detection delta v2 and compactor design only after the snapshot
       contract and its production-transition findings are accepted.
 

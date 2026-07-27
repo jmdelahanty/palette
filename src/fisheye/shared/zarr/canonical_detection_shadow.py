@@ -29,7 +29,10 @@ from fisheye.shared.zarr.detection_storage import (
     CanonicalDetectionStoragePlanSet,
     plan_canonical_detection_storage,
 )
-from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
+from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    StorageProfile,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -210,6 +213,7 @@ def publish_legacy_canonical_detection_shadow(
     destination: Path,
     run_id: str,
     shadow_root: Path = DEFAULT_CANONICAL_DETECTION_SHADOW_ROOT,
+    profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
 ) -> CanonicalDetectionShadowPublication:
     """Convert one complete legacy run into a validated canonical shadow."""
 
@@ -267,7 +271,7 @@ def publish_legacy_canonical_detection_shadow(
                 )
     plans = plan_canonical_detection_storage(
         benchmark_input.dimensions,
-        profile=PUBLISHED_HTTP_V1,
+        profile=profile,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
@@ -407,6 +411,7 @@ def publish_legacy_canonical_detection_shadow(
             "registry_registered": False,
             "output_path": str(output_path),
             "run_id": str(run_id),
+            "storage_profile_id": plans.profile.profile_id,
             "run_manifest_digest": manifest["payload_digest"],
             "logical_content_digest": manifest["payload"]["logical_content"]["digest"],
             "logical_hashes": destination_hashes,

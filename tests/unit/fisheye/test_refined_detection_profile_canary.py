@@ -13,6 +13,9 @@ from fisheye.shared.zarr.benchmark_fixture import (
 from fisheye.shared.zarr.refined_detection_profile_canary import (
     publish_refined_detection_profile_canary,
 )
+from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+)
 
 
 def _source_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -145,4 +148,39 @@ def test_profile_canary_is_paired_immutable_and_selector_ineligible(
         "unpromoted_access_aware_candidate"
     )
 
+    thaw_tree_for_cleanup(destination)
+
+
+def test_profile_canary_can_verify_the_promoted_default(tmp_path: Path) -> None:
+    source_path, fixture_manifest_path = _source_fixture(tmp_path)
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+    destination = (
+        tmp_path
+        / "shared/.palette_benchmarks/refined_detection_storage/profile_canary/"
+        "promoted_v1"
+    )
+
+    result = publish_refined_detection_profile_canary(
+        source_group_path=source_path,
+        source_fixture_manifest_path=fixture_manifest_path,
+        source_run_id="legacy_detect_1",
+        recording_identity="multi_subject_recording",
+        destination=destination,
+        scratch_root=scratch_root,
+        canary_id="promoted_v1",
+        crimson_implementation_commit="a" * 40,
+        crimson_evidence_commit="b" * 40,
+        crimson_evidence_sha256="c" * 64,
+        access_aware_profile=DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+        require_object_gate=False,
+    )
+
+    assert result["payload"]["profile_promoted"] is True
+    assert result["payload"]["artifacts"]["access_aware"][
+        "storage_profile_id"
+    ] == "detection_published_access_aware_v1"
+    assert result["payload"]["gate"]["promotion_decision"] == (
+        "promoted_profile_verification"
+    )
     thaw_tree_for_cleanup(destination)

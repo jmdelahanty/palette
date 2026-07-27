@@ -19,6 +19,7 @@ QUEUE="local"
 MEM_GB=8
 WALLTIME="02:00"
 SUBMIT=0
+PROMOTED_DEFAULT=0
 
 usage() {
   cat <<'USAGE'
@@ -48,6 +49,7 @@ Options:
   --queue NAME          LSF queue (default: local)
   --mem-gb N            Total requested memory (default: 8)
   --walltime H:MM       Walltime (default: 02:00)
+  --promoted-default    Write the named promoted profile ID
   --submit              Submit; otherwise render only
   -h, --help
 USAGE
@@ -76,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --queue) QUEUE="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
+    --promoted-default) PROMOTED_DEFAULT=1; shift;;
     --submit) SUBMIT=1; shift;;
     -h|--help) usage; exit 0;;
     *) fail "unknown argument: $1";;
@@ -156,6 +159,7 @@ EXPECTED_COMMIT=${q_expected}
 STATUS_FILE=${q_status}
 RESOURCE_FILE=${q_resource}
 CONFIGURED_SCRATCH_BASE=${q_scratch}
+PROMOTED_DEFAULT=${PROMOTED_DEFAULT}
 
 [[ -n "\${LSB_JOBID:-}" ]] || { printf 'Refusing execution outside LSF.\n' >&2; exit 2; }
 cd "\${PALETTE_REPO}"
@@ -198,6 +202,7 @@ cmd=(
   --crimson-evidence-commit "\${CRIMSON_EVIDENCE_COMMIT}"
   --crimson-evidence-sha256 "\${CRIMSON_EVIDENCE_SHA256}"
 )
+if [[ "\${PROMOTED_DEFAULT}" == "1" ]]; then cmd+=(--promoted-default); fi
 set +e
 /usr/bin/time -v -o "\${RESOURCE_FILE}" "\${cmd[@]}"
 payload_rc=\$?

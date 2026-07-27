@@ -12,6 +12,10 @@ from fisheye.shared.zarr.refined_detection_storage import (
     REFINED_DETECTION_STORAGE_SCHEMA_ID,
     plan_refined_detection_storage,
 )
+from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    DETECTION_REGULAR_ROLLBACK_V1,
+)
 
 
 MIB = 1024 * 1024
@@ -53,17 +57,17 @@ def test_chunk_rows_derive_from_uncompressed_bytes_and_complete_rows() -> None:
     plans = plan_refined_detection_storage(_dimensions())
     by_path = {entry.rule.path: entry.plan for entry in plans.entries}
 
-    assert by_path["instances/frame_indices"].chunk_shape == (262_144,)
-    assert by_path["instances/refined_row_ids"].chunk_shape == (131_072,)
-    assert by_path["instances/bbox_norm_coords"].chunk_shape == (65_536, 4)
-    assert by_path["instances/score_valid"].chunk_shape == (1_048_576,)
-    assert by_path["instances/reason_codes"].chunk_shape == (524_288,)
+    assert by_path["instances/frame_indices"].chunk_shape == (32_768,)
+    assert by_path["instances/refined_row_ids"].chunk_shape == (16_384,)
+    assert by_path["instances/bbox_norm_coords"].chunk_shape == (8_192, 4)
+    assert by_path["instances/score_valid"].chunk_shape == (131_072,)
+    assert by_path["instances/reason_codes"].chunk_shape == (65_536,)
     assert by_path["instances/frame_row_offsets"].chunk_shape == (131_072,)
-    assert by_path["source_detections/bbox_norm_coords"].chunk_shape == (
-        65_536,
-        4,
-    )
-    assert {entry.plan.chunk_nbytes for entry in plans.entries} == {MIB}
+    assert by_path["source_detections/bbox_norm_coords"].chunk_shape == (8_192, 4)
+    assert {entry.plan.chunk_nbytes for entry in plans.entries} == {
+        128 * 1024,
+        MIB,
+    }
     for entry in plans.entries:
         assert entry.plan.chunk_shape is not None
         assert entry.plan.chunk_shape[1:] == entry.plan.logical_shape[1:]
@@ -78,7 +82,7 @@ def test_large_snapshot_is_sharded_with_whole_shard_writer_ownership() -> None:
         entry.plan.write_ownership == "whole_shard_single_writer"
         for entry in plans.entries
     )
-    assert all(entry.plan.estimated_payload_objects == 1 for entry in plans.entries)
+    assert plans.estimated_payload_objects == 48
     for entry in plans.entries:
         assert entry.plan.shard_shape is not None
         assert entry.plan.chunk_shape is not None
@@ -124,8 +128,12 @@ def test_storage_manifest_freezes_codec_metadata_and_consolidation_gate() -> Non
         "id": "palette.stage.refined_detection",
         "version": 1,
     }
-    assert manifest["storage_profile"]["profile_id"] == "published_http_v1"
-    assert manifest["storage_profile_role"] == "generic_shared_sharded_baseline"
+    assert manifest["storage_profile"]["profile_id"] == (
+        "detection_published_access_aware_v1"
+    )
+    assert manifest["storage_profile_role"] == (
+        "promoted_detection_snapshot_default"
+    )
     assert manifest["codec_profile"]["zarr_format"] == 3
     assert manifest["codec_profile"]["codec_chain"] == [
         {"name": "bytes", "configuration": {"endian": "little"}},
@@ -138,9 +146,7 @@ def test_storage_manifest_freezes_codec_metadata_and_consolidation_gate() -> Non
     assert manifest["metadata_open_contract"][
         "direct_consolidated_equivalence"
     ] == "required_before_visibility"
-    assert manifest["profile_status"] == (
-        "resolved_plan_evidence_not_a_production_default_promotion"
-    )
+    assert manifest["profile_status"] == "promoted_production_default"
 
 
 def test_access_aware_candidate_is_exact_and_requires_explicit_selection() -> None:
@@ -151,7 +157,7 @@ def test_access_aware_candidate_is_exact_and_requires_explicit_selection() -> No
     )
     by_path = {entry.rule.path: entry.plan for entry in candidate.entries}
 
-    assert baseline.profile.profile_id == "published_http_v1"
+    assert baseline.profile == DETECTION_PUBLISHED_ACCESS_AWARE_V1
     assert candidate.profile.profile_id != baseline.profile.profile_id
     assert candidate.profile.target_chunk_bytes == 128 * 1024
     assert candidate.profile.target_shard_bytes == 8 * MIB
@@ -172,6 +178,49 @@ def test_access_aware_candidate_is_exact_and_requires_explicit_selection() -> No
     )
     assert candidate.as_manifest()["storage_profile_role"] == (
         "unpromoted_access_aware_candidate"
+    )
+
+
+def test_promoted_profile_is_physically_unchanged_from_evidence_candidate() -> None:
+    promoted = plan_refined_detection_storage(_dimensions())
+    candidate = plan_refined_detection_storage(
+        _dimensions(),
+        profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+    )
+
+    assert [
+        (entry.plan.chunk_shape, entry.plan.shard_shape, entry.plan.codec_profile_id)
+        for entry in promoted.entries
+    ] == [
+        (entry.plan.chunk_shape, entry.plan.shard_shape, entry.plan.codec_profile_id)
+        for entry in candidate.entries
+    ]
+    assert promoted.profile.profile_id == "detection_published_access_aware_v1"
+    assert candidate.profile.profile_id != promoted.profile.profile_id
+
+
+def test_regular_rollback_is_explicit_and_matches_the_control_layout() -> None:
+    rollback = plan_refined_detection_storage(
+        _dimensions(),
+        profile=DETECTION_REGULAR_ROLLBACK_V1,
+    )
+    control = plan_refined_detection_storage(
+        _dimensions(),
+        profile=REFINED_DETECTION_REGULAR_CONTROL_V1,
+    )
+
+    assert [
+        (entry.plan.chunk_shape, entry.plan.shard_shape, entry.plan.codec_profile_id)
+        for entry in rollback.entries
+    ] == [
+        (entry.plan.chunk_shape, entry.plan.shard_shape, entry.plan.codec_profile_id)
+        for entry in control.entries
+    ]
+    assert rollback.as_manifest()["storage_profile_role"] == (
+        "explicit_detection_snapshot_rollback"
+    )
+    assert rollback.as_manifest()["profile_status"] == (
+        "available_only_by_explicit_rollback"
     )
 
 

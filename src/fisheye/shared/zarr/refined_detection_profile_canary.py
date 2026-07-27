@@ -48,6 +48,10 @@ from fisheye.shared.zarr.refined_detection_storage import (
 from fisheye.shared.zarr.refined_detection_transition import (
     build_accept_all_refined_detection_root,
 )
+from fisheye.shared.zarr.storage_profiles import (
+    DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    StorageProfile,
+)
 
 
 REFINED_DETECTION_PROFILE_CANARY_SCHEMA_ID = (
@@ -236,6 +240,9 @@ def publish_refined_detection_profile_canary(
     crimson_implementation_commit: str,
     crimson_evidence_commit: str,
     crimson_evidence_sha256: str,
+    access_aware_profile: StorageProfile = (
+        REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1
+    ),
     require_object_gate: bool = True,
 ) -> dict[str, object]:
     """Build on local scratch, copy back, and validate one physical pair."""
@@ -249,6 +256,17 @@ def publish_refined_detection_profile_canary(
         raise ValueError("crimson_evidence_commit must be a full SHA-1.")
     if not _SHA256_RE.fullmatch(str(crimson_evidence_sha256)):
         raise ValueError("crimson_evidence_sha256 must be a lowercase SHA-256.")
+    if access_aware_profile not in {
+        REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+        DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    }:
+        raise ValueError(
+            "Canary access_aware_profile must be the frozen evidence candidate "
+            "or the physically identical promoted detection profile."
+        )
+    promoted_profile_canary = (
+        access_aware_profile == DETECTION_PUBLISHED_ACCESS_AWARE_V1
+    )
     final_root = _require_safe_destination(destination)
     scratch = _require_safe_scratch_root(scratch_root)
     source_path = source_group_path.expanduser().resolve()
@@ -341,7 +359,7 @@ def publish_refined_detection_profile_canary(
         lineage=lineage,
         canonical_source=canonical,
         shadow_root=local_root,
-        profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+        profile=access_aware_profile,
     )
     if regular.receipt["logical_hashes"] != candidate.receipt["logical_hashes"]:
         raise RuntimeError("Local regular/candidate decoded hashes differ.")
@@ -390,7 +408,7 @@ def publish_refined_detection_profile_canary(
         final_paths["access_aware"],
         run_id=candidate_run_id,
         transition=transition,
-        profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+        profile=access_aware_profile,
     )
     if regular_receipt["logical_hashes"] != candidate_receipt["logical_hashes"]:
         raise RuntimeError("Published regular/candidate decoded hashes differ.")
@@ -428,7 +446,7 @@ def publish_refined_detection_profile_canary(
     )
     candidate_plans = plan_refined_detection_storage(
         transition.dimensions,
-        profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+        profile=access_aware_profile,
     )
     planned_object_ratio = (
         candidate_plans.estimated_payload_objects
@@ -452,7 +470,7 @@ def publish_refined_detection_profile_canary(
         "benchmark_only": True,
         "selector_eligible": False,
         "registry_registered": False,
-        "profile_promoted": False,
+        "profile_promoted": promoted_profile_canary,
         "palette": _current_git_identity(),
         "crimson_prerequisite": {
             "implementation_commit": str(crimson_implementation_commit),
@@ -540,7 +558,11 @@ def publish_refined_detection_profile_canary(
         "gate": {
             "palette_publication_gate": "pass",
             "crimson_physical_measurement_required": True,
-            "promotion_decision": "deferred",
+            "promotion_decision": (
+                "promoted_profile_verification"
+                if promoted_profile_canary
+                else "deferred"
+            ),
         },
     }
     envelope: dict[str, object] = {
