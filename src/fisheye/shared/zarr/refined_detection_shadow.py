@@ -123,7 +123,7 @@ def _read_strict_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _metadata_declaration_maps(
+def refined_detection_metadata_declaration_maps(
     output_path: Path,
     *,
     run_id: str,
@@ -391,7 +391,7 @@ def publish_refined_detection_shadow(
         first_consolidation = consolidate_metadata_capture_expected_warnings(
             output_path
         )
-        direct, consolidated = _metadata_declaration_maps(
+        direct, consolidated = refined_detection_metadata_declaration_maps(
             output_path,
             run_id=str(run_id),
             plans=plans,
@@ -412,7 +412,7 @@ def publish_refined_detection_shadow(
         second_consolidation = consolidate_metadata_capture_expected_warnings(
             output_path
         )
-        direct, consolidated = _metadata_declaration_maps(
+        direct, consolidated = refined_detection_metadata_declaration_maps(
             output_path,
             run_id=str(run_id),
             plans=plans,
@@ -481,5 +481,6 @@ __all__ = [
     "SHADOW_RECEIPT_SCHEMA_VERSION",
     "RefinedDetectionShadowPublication",
     "publish_refined_detection_shadow",
+    "refined_detection_metadata_declaration_maps",
     "require_safe_refined_detection_shadow_destination",
 ]

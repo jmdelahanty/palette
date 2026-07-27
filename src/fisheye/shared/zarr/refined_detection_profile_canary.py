@@ -36,9 +36,9 @@ from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
 )
 from fisheye.shared.zarr.refined_detection_shadow import (
-    _metadata_declaration_maps,
     _validate_transition_source_matches_canonical,
     publish_refined_detection_shadow,
+    refined_detection_metadata_declaration_maps,
 )
 from fisheye.shared.zarr.refined_detection_storage import (
     REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
@@ -209,7 +209,7 @@ def _validate_published_refined(
             transition.dimensions
         )
     }
-    direct, consolidated = _metadata_declaration_maps(
+    direct, consolidated = refined_detection_metadata_declaration_maps(
         path,
         run_id=run_id,
         plans=plans,
