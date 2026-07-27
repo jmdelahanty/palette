@@ -1,5 +1,10 @@
 # Registry-pinned clipped inference DAG
 
+> **Architecture boundary:** this is the clipped-recording recipe built on the
+> general structured LSF production engine. It is not intended to make the
+> engine exclusive to clipped recordings. The accepted generalization plan is
+> `docs/production_dag_recording_layout_design.md`.
+
 `fisheye.cluster.clipped_inference` composes one immutable LSF workflow for a
 clipped recording cohort. It covers detection, detection refinement, finalized
 collection creation, flat ROI cache construction, proxy crop binding,
