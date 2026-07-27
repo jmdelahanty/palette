@@ -40,6 +40,7 @@ SCHEMA_ID = "palette.diagnostics.arena_geometry_detection_gate_audit"
 SCHEMA_VERSION = 1
 AUDIT_METHOD = "exact_native_centroid_dual_circle_inclusive_v1"
 REVIEW_SELECTION_METHOD = "temporal_quantiles_per_exclusive_category_v1"
+BOUNDARY_SENTINEL_SELECTION_METHOD = "temporal_bins_boundary_nearest_sentinels_v1"
 PALETTE_COLOR_BGR = (255, 255, 0)
 ACQUISITION_COLOR_BGR = (0, 165, 255)
 DETECTION_COLOR_BGR = (255, 0, 255)
@@ -156,6 +157,42 @@ def select_review_rows(
     return np.asarray(
         sorted(set(selected), key=lambda row: (int(frames[row]), row)),
         dtype=np.int64,
+    )
+
+
+def select_boundary_sentinel_rows(
+    *,
+    frame_indices: np.ndarray,
+    palette_signed_distance_px: np.ndarray,
+    acquisition_signed_distance_px: np.ndarray,
+    max_rows: int,
+) -> np.ndarray:
+    """Select the boundary-nearest row within each temporal partition."""
+
+    frames = np.asarray(frame_indices, dtype=np.int64)
+    palette = np.asarray(palette_signed_distance_px, dtype=np.float64)
+    acquisition = np.asarray(acquisition_signed_distance_px, dtype=np.float64)
+    if (
+        frames.ndim != 1
+        or palette.shape != frames.shape
+        or acquisition.shape != frames.shape
+    ):
+        raise ValueError("frames and signed-distance inputs must be equal vectors")
+    if max_rows <= 0:
+        raise ValueError("max_rows must be positive")
+    if not np.all(np.isfinite(palette)) or not np.all(np.isfinite(acquisition)):
+        raise ValueError("signed-distance inputs must be finite")
+    if len(frames) == 0:
+        return np.empty(0, dtype=np.int64)
+    ordered = np.lexsort((np.arange(len(frames)), frames))
+    selected: list[int] = []
+    for partition in np.array_split(ordered, min(max_rows, len(ordered))):
+        proximity = np.minimum(
+            np.abs(palette[partition]), np.abs(acquisition[partition])
+        )
+        selected.append(int(partition[int(np.argmin(proximity))]))
+    return np.asarray(
+        sorted(selected, key=lambda row: (int(frames[row]), row)), dtype=np.int64
     )
 
 
@@ -681,6 +718,20 @@ def run_audit(args: argparse.Namespace) -> Path:
         frame_indices=detections["frame_indices"],
         max_per_category=args.max_review_samples_per_category,
     )
+    if len(review_indices):
+        review_selection_method = REVIEW_SELECTION_METHOD
+        review_selection_reason = "exclusive_gate_disagreements_present"
+    else:
+        review_indices = select_boundary_sentinel_rows(
+            frame_indices=detections["frame_indices"],
+            palette_signed_distance_px=palette_distance,
+            acquisition_signed_distance_px=acquisition_distance,
+            max_rows=args.max_review_samples_per_category,
+        )
+        review_selection_method = BOUNDARY_SENTINEL_SELECTION_METHOD
+        review_selection_reason = (
+            "no_exclusive_disagreements_boundary_nearest_sentinels"
+        )
     review_rows = [
         _row_payload(
             int(row),
@@ -708,7 +759,8 @@ def run_audit(args: argparse.Namespace) -> Path:
         review_plan = {
             "schema_id": f"{SCHEMA_ID}.review_plan",
             "schema_version": SCHEMA_VERSION,
-            "selection_method": REVIEW_SELECTION_METHOD,
+            "selection_method": review_selection_method,
+            "selection_reason": review_selection_reason,
             "max_per_category": int(args.max_review_samples_per_category),
             "rows": review_rows,
         }
@@ -830,7 +882,11 @@ def run_audit(args: argparse.Namespace) -> Path:
                 "operational_candidate_selected": False,
                 "detections_filtered_or_mutated": False,
                 "registry_updated": False,
-                "next_gate": "human_review_of_detection_disagreement_montage",
+                "next_gate": (
+                    "human_review_of_detection_disagreement_montage"
+                    if len(exclusive_rows)
+                    else "human_review_of_boundary_sentinel_montage"
+                ),
             },
         }
         _atomic_json(temporary / "audit_report.json", report)

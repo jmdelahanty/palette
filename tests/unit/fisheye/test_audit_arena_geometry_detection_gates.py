@@ -6,6 +6,7 @@ import pytest
 from fisheye.diagnostics.audit_arena_geometry_detection_gates import (
     Circle,
     classify_gate_results,
+    select_boundary_sentinel_rows,
     select_review_rows,
     signed_circle_distance,
 )
@@ -81,3 +82,14 @@ def test_gate_helpers_fail_closed_on_invalid_shapes_or_nonfinite_values() -> Non
             frame_indices=np.asarray([0]),
             max_per_category=0,
         )
+
+
+def test_boundary_sentinels_choose_nearest_row_in_each_temporal_partition() -> None:
+    selected = select_boundary_sentinel_rows(
+        frame_indices=np.asarray([0, 10, 20, 30, 40, 50]),
+        palette_signed_distance_px=np.asarray([9.0, 2.0, 8.0, 4.0, 1.0, 3.0]),
+        acquisition_signed_distance_px=np.asarray([8.0, 3.0, 7.0, 5.0, 2.0, 4.0]),
+        max_rows=3,
+    )
+
+    assert selected.tolist() == [1, 3, 4]

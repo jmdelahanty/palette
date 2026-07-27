@@ -583,9 +583,12 @@ requires their native-camera coordinate authorities to agree; verifies every
 stored center against its source box; preserves `instance_key`; calculates
 both unrounded signed distances; writes every asymmetric decision to CSV; and
 selects deterministic temporal samples from both `palette_only` and
-`acquisition_only`. Optional PyNvVC rendering produces full-frame plus local
-review panels on an LSF GPU worker. The diagnostic never selects a candidate,
-filters detections, modifies the Zarr, or updates the registry.
+`acquisition_only`. When there are no exclusive disagreements, it instead
+selects the boundary-nearest detection from each of several temporal
+partitions, so the visual review cannot silently collapse to an empty montage.
+Optional PyNvVC rendering produces full-frame plus local review panels on an
+LSF GPU worker. The diagnostic never selects a candidate, filters detections,
+modifies the Zarr, or updates the registry.
 
 Each candidate records:
 
