@@ -443,6 +443,344 @@ DETECTION_CLASS_IDS_V1 = ArrayContract(
     units="class_index",
 )
 
+REFINED_DETECTION_REFINED_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.refined_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Stable non-reused logical row identity within one refined-detection "
+        "lineage."
+    ),
+    units="refined_row_identity",
+)
+
+REFINED_DETECTION_SCORES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.scores",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Canonical model confidence value paired with score_valid; invalid "
+        "manual scores use the exact physical value zero."
+    ),
+    units="probability",
+)
+
+REFINED_DETECTION_SCORE_VALID_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.score_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Whether scores contains a semantically valid model confidence.",
+)
+
+REFINED_DETECTION_SOURCE_KIND_CODES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source_kind_codes",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Versioned refined-instance origin code: raw-backed or manual.",
+)
+
+REFINED_DETECTION_MANUAL_EDIT_FLAGS_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.manual_edit_flags",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Whether a human changed or created the persisted refined instance."
+    ),
+)
+
+REFINED_DETECTION_SOURCE_DETECT_ROW_INDEX_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source_detect_row_index",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Row in the bound source_detections audit table, or exact sentinel -1 "
+        "for a manual instance without a raw candidate."
+    ),
+    units="source_detection_row_index",
+)
+
+REFINED_DETECTION_REASON_CODES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.reason_codes",
+    schema_version=1,
+    dtype=UINT16,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Versioned compact reason code; code zero means no additional reason."
+    ),
+)
+
+REFINED_SOURCE_DETECT_ROW_INDEX_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.source_detect_row_index",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Contiguous row identity in the bound source-candidate audit table.",
+    units="source_detection_row_index",
+)
+
+REFINED_SOURCE_FRAME_INDICES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.frame_indices",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Run-local camera frame index for each source candidate.",
+    units="camera_frame_index",
+)
+
+REFINED_SOURCE_ACQUISITION_FRAME_INDEX_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.source.source_acquisition_frame_index"
+    ),
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Sealed acquisition-camera frame index for each source candidate.",
+    units="acquisition_frame_index",
+)
+
+REFINED_SOURCE_INSTANCE_KEY_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.instance_key",
+    schema_version=1,
+    dtype=UINT64,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Stable identity copied from the bound canonical raw candidate.",
+    units="identity_key",
+)
+
+REFINED_SOURCE_BBOX_NORM_COORDS_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.bbox_norm_coords",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_source_detections", 4),
+    axis_names=("source_detection", "cxcywh"),
+    description="Authoritative normalized source-candidate bbox in cx,cy,w,h order.",
+    units="normalized",
+    coordinate_space="source_camera_normalized",
+)
+
+REFINED_SOURCE_BBOX_IMG_XYXY_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.bbox_img_xyxy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_source_detections", 4),
+    axis_names=("source_detection", "xyxy"),
+    description="Exact pixel-edge projection of the source candidate bbox.",
+    units="pixels",
+    coordinate_space="source_camera_pixel_edges",
+)
+
+REFINED_SOURCE_CENTERS_IMG_XY_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.centers_img_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_source_detections", 2),
+    axis_names=("source_detection", "xy"),
+    description="Exact continuous-pixel midpoint of the source candidate bbox.",
+    units="pixels",
+    coordinate_space="source_camera_continuous_pixel",
+)
+
+REFINED_SOURCE_SCORES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.scores",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Finite model confidence copied from the bound raw candidate.",
+    units="probability",
+)
+
+REFINED_SOURCE_CLASS_IDS_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.class_ids",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Nonnegative taxonomy index copied from the bound raw candidate.",
+    units="class_index",
+)
+
+REFINED_SOURCE_DECISION_CODES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.decision_codes",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Versioned accepted, filtered, duplicate, or cleared decision.",
+)
+
+REFINED_SOURCE_RESOLVED_REFINED_ROW_ID_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.source.resolved_refined_row_id"
+    ),
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description=(
+        "Resolved refined row identity for an accepted source candidate, or "
+        "exact sentinel -1 for an unaccepted candidate."
+    ),
+    units="refined_row_identity",
+)
+
+REFINED_SOURCE_REASON_CODES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.reason_codes",
+    schema_version=1,
+    dtype=UINT16,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Versioned compact source-candidate decision reason code.",
+)
+
+REFINED_SOURCE_FRAME_ROW_OFFSETS_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.frame_row_offsets",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_frame_boundaries",),
+    axis_names=("camera_frame_boundary",),
+    description=(
+        "Exclusive offsets into the frame-contiguous source-candidate audit table."
+    ),
+    units="source_detection_rows",
+)
+
+REFINED_INSTANCE_SOURCE_RECORDING_FRAME_IDS_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.lineage.source_recording_frame_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="One-based acquisition recording-frame ID for a clipped snapshot row.",
+    units="recording_frame_id",
+)
+
+REFINED_INSTANCE_SOURCE_CLIP_INDICES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.lineage.source_clip_indices",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Zero-based selected clip ordinal for a clipped snapshot row.",
+    units="clip_index",
+)
+
+REFINED_INSTANCE_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.lineage.source_clip_local_frame_indices"
+    ),
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Zero-based decoded frame within the selected source clip.",
+    units="clip_local_frame_index",
+)
+
+REFINED_INSTANCE_SOURCE_CLIP_DETECT_ROW_INDEX_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.lineage.source_clip_detect_row_index"
+    ),
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Clip-local raw detection row, or -1 for a manual row without raw lineage."
+    ),
+    units="clip_detection_row_index",
+)
+
+REFINED_INSTANCE_SOURCE_REFINED_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.lineage.source_refined_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Original clip-local refined row identity.",
+    units="clip_refined_row_identity",
+)
+
+REFINED_SOURCE_RECORDING_FRAME_IDS_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.source.lineage.source_recording_frame_ids"
+    ),
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="One-based acquisition recording-frame ID for a source candidate.",
+    units="recording_frame_id",
+)
+
+REFINED_SOURCE_CLIP_INDICES_V1 = ArrayContract(
+    schema_id="palette.array.refined_detection.source.lineage.source_clip_indices",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Zero-based selected clip ordinal for a source candidate.",
+    units="clip_index",
+)
+
+REFINED_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.source.lineage."
+        "source_clip_local_frame_indices"
+    ),
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Zero-based decoded frame within the selected source clip.",
+    units="clip_local_frame_index",
+)
+
+REFINED_SOURCE_CLIP_DETECT_ROW_INDEX_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.source.lineage."
+        "source_clip_detect_row_index"
+    ),
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description="Original clip-local raw candidate row index.",
+    units="clip_detection_row_index",
+)
+
+REFINED_SOURCE_RESOLVED_SOURCE_REFINED_ROW_ID_V1 = ArrayContract(
+    schema_id=(
+        "palette.array.refined_detection.source.lineage."
+        "source_resolved_refined_row_id"
+    ),
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_source_detections",),
+    axis_names=("source_detection",),
+    description=(
+        "Original clip-local resolved refined row ID, or -1 when unaccepted."
+    ),
+    units="clip_refined_row_identity",
+)
+
 KEYPOINTS_ROI_V1 = ArrayContract(
     schema_id="palette.array.keypoints_roi",
     schema_version=1,
@@ -514,6 +852,50 @@ DETECTION_ARRAY_CONTRACTS = ArrayContractCatalog(
 )
 
 
+REFINED_DETECTION_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        DETECTION_FRAME_INDICES_V1,
+        DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        DETECTION_INSTANCE_KEY_V1,
+        DETECTION_BBOX_NORM_COORDS_V1,
+        DETECTION_BBOX_IMG_XYXY_V1,
+        DETECTION_CENTERS_IMG_XY_V1,
+        DETECTION_CLASS_IDS_V1,
+        FRAME_ROW_OFFSETS_V1,
+        REFINED_DETECTION_REFINED_ROW_IDS_V1,
+        REFINED_DETECTION_SCORES_V1,
+        REFINED_DETECTION_SCORE_VALID_V1,
+        REFINED_DETECTION_SOURCE_KIND_CODES_V1,
+        REFINED_DETECTION_MANUAL_EDIT_FLAGS_V1,
+        REFINED_DETECTION_SOURCE_DETECT_ROW_INDEX_V1,
+        REFINED_DETECTION_REASON_CODES_V1,
+        REFINED_SOURCE_DETECT_ROW_INDEX_V1,
+        REFINED_SOURCE_FRAME_INDICES_V1,
+        REFINED_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        REFINED_SOURCE_INSTANCE_KEY_V1,
+        REFINED_SOURCE_BBOX_NORM_COORDS_V1,
+        REFINED_SOURCE_BBOX_IMG_XYXY_V1,
+        REFINED_SOURCE_CENTERS_IMG_XY_V1,
+        REFINED_SOURCE_SCORES_V1,
+        REFINED_SOURCE_CLASS_IDS_V1,
+        REFINED_SOURCE_DECISION_CODES_V1,
+        REFINED_SOURCE_RESOLVED_REFINED_ROW_ID_V1,
+        REFINED_SOURCE_REASON_CODES_V1,
+        REFINED_SOURCE_FRAME_ROW_OFFSETS_V1,
+        REFINED_INSTANCE_SOURCE_RECORDING_FRAME_IDS_V1,
+        REFINED_INSTANCE_SOURCE_CLIP_INDICES_V1,
+        REFINED_INSTANCE_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1,
+        REFINED_INSTANCE_SOURCE_CLIP_DETECT_ROW_INDEX_V1,
+        REFINED_INSTANCE_SOURCE_REFINED_ROW_IDS_V1,
+        REFINED_SOURCE_RECORDING_FRAME_IDS_V1,
+        REFINED_SOURCE_CLIP_INDICES_V1,
+        REFINED_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1,
+        REFINED_SOURCE_CLIP_DETECT_ROW_INDEX_V1,
+        REFINED_SOURCE_RESOLVED_SOURCE_REFINED_ROW_ID_V1,
+    )
+)
+
+
 CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
         FRAME_COUNTS_V1,
@@ -527,6 +909,36 @@ CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
         DETECTION_CENTERS_IMG_XY_V1,
         DETECTION_SCORES_V1,
         DETECTION_CLASS_IDS_V1,
+        REFINED_DETECTION_REFINED_ROW_IDS_V1,
+        REFINED_DETECTION_SCORES_V1,
+        REFINED_DETECTION_SCORE_VALID_V1,
+        REFINED_DETECTION_SOURCE_KIND_CODES_V1,
+        REFINED_DETECTION_MANUAL_EDIT_FLAGS_V1,
+        REFINED_DETECTION_SOURCE_DETECT_ROW_INDEX_V1,
+        REFINED_DETECTION_REASON_CODES_V1,
+        REFINED_SOURCE_DETECT_ROW_INDEX_V1,
+        REFINED_SOURCE_FRAME_INDICES_V1,
+        REFINED_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        REFINED_SOURCE_INSTANCE_KEY_V1,
+        REFINED_SOURCE_BBOX_NORM_COORDS_V1,
+        REFINED_SOURCE_BBOX_IMG_XYXY_V1,
+        REFINED_SOURCE_CENTERS_IMG_XY_V1,
+        REFINED_SOURCE_SCORES_V1,
+        REFINED_SOURCE_CLASS_IDS_V1,
+        REFINED_SOURCE_DECISION_CODES_V1,
+        REFINED_SOURCE_RESOLVED_REFINED_ROW_ID_V1,
+        REFINED_SOURCE_REASON_CODES_V1,
+        REFINED_SOURCE_FRAME_ROW_OFFSETS_V1,
+        REFINED_INSTANCE_SOURCE_RECORDING_FRAME_IDS_V1,
+        REFINED_INSTANCE_SOURCE_CLIP_INDICES_V1,
+        REFINED_INSTANCE_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1,
+        REFINED_INSTANCE_SOURCE_CLIP_DETECT_ROW_INDEX_V1,
+        REFINED_INSTANCE_SOURCE_REFINED_ROW_IDS_V1,
+        REFINED_SOURCE_RECORDING_FRAME_IDS_V1,
+        REFINED_SOURCE_CLIP_INDICES_V1,
+        REFINED_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1,
+        REFINED_SOURCE_CLIP_DETECT_ROW_INDEX_V1,
+        REFINED_SOURCE_RESOLVED_SOURCE_REFINED_ROW_ID_V1,
         KEYPOINTS_ROI_V1,
         KEYPOINTS_IMG_V1,
         KEYPOINTS_NORM_V1,

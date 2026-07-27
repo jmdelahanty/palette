@@ -1,7 +1,8 @@
 # Canonical Detection Storage Implementation Checklist
 
-Status: active; production adoption blocked on the paired Crimson full-archive
-gate
+Status: active; logical canonical detection accepted by Crimson, consumer
+residency gates passed, physical-profile promotion deferred, and production
+writer adoption still blocked
 
 Date established: 2026-07-23
 
@@ -516,23 +517,73 @@ Pair validation and manifest:
 
 Publication exit gate:
 
-- [ ] Publish immutable `regular.zarr` and `hybrid.zarr` with complete manifests
+- [x] Publish immutable `regular.zarr` and `hybrid.zarr` with complete manifests
       and provide their mounted paths to Crimson.
+
+Palette LSF job `153174149` completed at commit
+`fcdc67e764a8ddbe318cab7be19f2c3ab7f5fdb5` in 8,010 seconds and atomically
+published the read-only pair at
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/canonical_detection_storage/full_analysis/sleepyfish_cam2010095_v1`.
+The publication receipt records exact direct/consolidated opens, decoded
+detection equality, deterministic nondetection samples, complete frame/count
+and CSR relationships, unchanged source evidence, and zero registry, selector,
+training-artifact, or profile changes. The pair-manifest SHA-256 is
+`25e49003d63f74e5c7f1aa940aa77acee8df0153476847afeb99b98238574432`; the
+publication-receipt SHA-256 is
+`22763ffce084446cfa797b567ebd7bb66d682e7e1f1f031e7af781c575fdcd1d`.
 
 ### Checkpoint B — Crimson Full-Archive Gate
 
 Stage 1, storage layout only:
 
-- [ ] Run regular and hybrid with the unchanged 64 MiB cache in five fresh,
+- [x] Run regular and hybrid with the unchanged 64 MiB cache in five fresh,
       balanced processes.
-- [ ] Require exact explicit-run selection, zero dtype/fallback probes, one
+- [x] Require exact explicit-run selection, zero dtype/fallback probes, one
       retained offsets read, and identical required-product/frame identity.
-- [ ] Measure all required simultaneous products, Ready time, first overlay,
+- [x] Measure all required simultaneous products, Ready time, first overlay,
       offset initialization, deterministic seeks, rapid-seek cancellation,
       3,500-frame forward/reverse traversal, shutdown, physical reads, and RSS.
-- [ ] Apply the frozen correctness, latency, transfer, cancellation, deadline,
+- [x] Apply the frozen correctness, latency, transfer, cancellation, deadline,
       and 2 GiB RSS gates without changing thresholds after observation.
 - [ ] Run one native-30-FPS GUI correctness smoke for each accepted fixture.
+
+Stage 1 accepted the logical canonical-detection contract and the persisted
+offset access model. It did not promote the 128 KiB hybrid physical profile:
+nondetection initialization and scheduling dominated the full-application
+result, and a separate consumer-strategy question remained for the small
+decoded detection hot set.
+
+Residency strategy gate:
+
+- [x] Freeze the strategy contract at Crimson parent commit
+      `81433985a6be17ae490e674db2b0043360db6b02`.
+- [x] Run the 20-process isolated paged/resident comparison against the existing
+      regular and hybrid fixtures.
+- [x] Run the ten-process hybrid full-archive interference comparison.
+- [x] Require one retained offset read, exact paged/resident values, atomic
+      resident visibility, zero stale publications, bounded cancellation,
+      bounded RSS, zero post-warmup deadline misses, and no maintained-product
+      initialization regression above the frozen limit.
+- [x] Accept byte-budgeted UI-column residency for separate production-policy
+      review while leaving production residency disabled.
+- [x] Cancel the original 25-store physical matrix and defer a reduced matrix
+      containing only the 128 KiB hybrid, one 8,192-row-aligned candidate, and
+      the genuine 1 MiB unsharded control.
+
+The immutable Crimson evidence handoff is commit
+`b7a241e853ce08cb2c3d58a48ecd4f0b497afa61` on branch
+`codex/phase5o5-residency-verdict-20260726`. Its handoff-manifest SHA-256 is
+`5ede0755c86351d7db20b22d5da86d76d9e44a111facea20abfb0901786fa982`, the
+full-archive aggregate SHA-256 is
+`e42fce1de8346f321fec71512055ab2f1b9971372bb19267ae817c39bc7ed8ae`, and the
+gate-document SHA-256 is
+`83ce7870443a11346dfed10bea084ad58827ebac4acea4fd93e9b6dbc71405aa`.
+
+This evidence is immutable but was executed from a dirty Crimson development
+worktree at `34ff3c3`, not from a clean reproducible source revision. The handoff
+records exact source and binary hashes for the executed surfaces. Palette must
+preserve that limitation in every citation and must not describe the benchmark
+as a clean-commit reproduction.
 
 Stage 2, cache policy only:
 
@@ -549,7 +600,32 @@ Consumer exit gate:
 - [ ] Crimson accepts the hybrid physical layout and one bounded cache policy
       through the frozen full-archive workload.
 
+The residency gate does not close this physical-layout exit gate. It validates
+a consumer policy over pageable storage; no Palette profile has been selected.
+
 ### Checkpoint C — Versioned Physical-Profile Promotion
+
+Deferred until the refined-detection semantic-selection work is complete. Do
+not infer profile promotion from the passing residency gate or rewrite the
+failed historical Stage 1 decision.
+
+Practical candidate disposition (2026-07-26): the access-aware 128 KiB/1 MiB
+inner, 8 MiB outer hybrid is the leading production candidate. The Palette
+five-repetition comparison reduced payload objects from 88 to 16, median
+publication time from 1.192 to 0.514 seconds, complete PRFS reader time from
+66.035 to 58.501 seconds, random-frame p95 from 25.24 to 19.81 milliseconds,
+and raised sequential throughput from 41,933 to 47,792 FPS
+(`docs/diagnostics/canonical_detection_storage_access_aware_result_2026-07-24.md:18-31,84-102`).
+Crimson's later full-application and residency work found no correctness or
+deadline reason to reject it, but the original frozen full-application gate did
+not pass and no profile was promoted. Treat the hybrid as a candidate, not a
+default.
+
+The reduced three-candidate optimization matrix remains deferred and is no
+longer a prerequisite to a practical promotion decision. First run a paired
+regular-versus-hybrid check on the frozen immutable refined-detection schema.
+Resume the 8,192-row candidate matrix only if that check exposes a material
+problem or later optimization evidence is needed.
 
 - [ ] Review the complete Palette cluster and Crimson full-archive evidence.
 - [ ] Add one exact versioned canonical-detection physical profile; do not
@@ -563,6 +639,16 @@ Consumer exit gate:
 - [ ] Preserve the regular control and rejected candidates as benchmark
       evidence rather than supported aliases of the promoted profile.
 - [ ] Add manifest round-trip and resolved-plan tests for the promoted identity.
+- [ ] Validate one logically identical regular/hybrid immutable refined snapshot
+      for exact decoded equality, direct/consolidated metadata equivalence,
+      codec support, and the required `F+1` frame-row offset index.
+- [ ] Apply a new prospective practical gate: zero correctness differences,
+      zero deadline misses, no meaningful readiness/current-frame regression,
+      at least 4x fewer payload objects, at least 20% less traversal transfer,
+      and no material RSS regression.
+- [ ] Publish one selector-ineligible refined canary, validate it in Palette and
+      Crimson, and retain the regular profile as rollback evidence before making
+      the versioned hybrid profile a writer default.
 
 Profile exit gate:
 
@@ -617,8 +703,10 @@ Canonical completion gate:
 - [ ] Inventory old archives only after new production publication is stable.
 - [ ] Decide separately whether important old runs need migration or may remain
       adapter-readable.
-- [ ] Begin `detect_quality_runs`, refinement, and training storage contracts
-      only after the canonical raw-detection completion gate passes.
+- [ ] Begin implementation of `detect_quality_runs`, refinement, and training
+      storage contracts only after the canonical raw-detection completion gate
+      passes. A read-only producer/consumer/lifecycle census may proceed now so
+      the later contracts do not inherit raw-detection assumptions blindly.
 - [ ] Treat refined-subject-mask storage as its own next-family project: retain
       dense editable authority and design explicit immutable compact display and
       training publications rather than silently changing it in this work.
@@ -707,6 +795,12 @@ Do not copy canonical-detection array assumptions blindly. Each surface must
 declare its own authority, edit model, access pattern, and dimensions while
 reusing shared logical contracts where the semantics are genuinely identical.
 
+The passing Crimson residency gate exposed the first semantic priority for this
+expansion: production selection should prefer an explicitly selected,
+validated refined/corrected detection authority when available. The raw
+`detect_runs` benchmark proves canonical storage and access only; it does not
+define refined-run selection or manual-addition semantics.
+
 ## Working Agreement
 
 - [x] Keep each phase or independently reviewable subphase in its own commit.
@@ -736,5 +830,37 @@ reusing shared logical contracts where the semantics are genuinely identical.
       UI workloads through Crimson on the actual Mac/SMB mount.
 - [x] Complete the controlled Crimson cache/read-ahead checkpoint; retain the
       production 64 MiB policy until full-archive validation.
-- [ ] Implement the fail-closed paired fixture builder beginning at Checkpoint A;
-      do not promote a profile or modify `detect_yolo` before Checkpoint B passes.
+- [x] Publish and validate the fail-closed full-duration paired fixture without
+      promoting a profile or modifying `detect_yolo`.
+- [x] Record Crimson's immutable residency handoff, passing isolated and
+      full-archive gates, cancelled 25-store matrix, deferred three-candidate
+      matrix, and dirty-execution limitation.
+- [x] Complete the refined-detection producer/consumer/lifecycle census before
+      designing its logical schema, edit-delta contract, selection policy, or
+      physical profiles.
+- [x] Freeze refined-detection snapshot v1 before delta/compactor work: exact
+      full and clipped array sets, dtypes, identities, sentinels, dual `F+1`
+      indexes, byte-based access rules, Zarr v3 codec chain, consolidated
+      metadata gate, and an explicit unpromoted access-aware candidate.
+- [ ] Review and accept the frozen refined snapshot/storage contract, then add
+      a shadow immutable writer and transition report without changing
+      production selectors.
+- [ ] Run the paired regular-versus-access-aware refined snapshot canary and
+      apply the pragmatic correctness/object/transfer/readiness/RSS gate before
+      promoting a versioned writer profile.
+- [ ] Begin detection delta v2 and compactor design only after the snapshot
+      contract and its production-transition findings are accepted.
+
+The census is now recorded in
+[`diagnostics/refined_detection_producer_consumer_lifecycle_census_2026-07-26.md`](diagnostics/refined_detection_producer_consumer_lifecycle_census_2026-07-26.md).
+It finds that the sparse logical authority is sound, but current review remains
+single-slot/whole-rewrite compatibility code and the existing detection delta
+primitive is insufficient for a general manual addition. Its unchecked contract
+decisions are the review and implementation queue; the census itself is complete.
+
+The resulting frozen target is documented in
+[`refined_detection_storage_contract_v1.md`](refined_detection_storage_contract_v1.md).
+Executable declarations and deterministic validation live in
+`refined_detection_schema.py` and `refined_detection_storage.py`. No current
+writer, selector, registry, delta schema, compactor, or archive was changed by
+this checkpoint.
