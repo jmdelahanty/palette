@@ -177,6 +177,9 @@ production writer.
 - [x] Freeze the exact persisted run manifest, cross-snapshot lineage/allocator
       state, separate reason registries, one-camera clipped collection/media
       binding, and zero-frame prohibition.
+- [x] Make publication validity executable: derive the declaration digest from
+      the exact direct/consolidated Zarr-v3 tree, deep-parse clipped bindings
+      and reason registries, and require persisted reason-code coverage.
 - [x] Freeze a typed refined-first selection order using the parent
       `authoritative_run` pointer plus a versioned manifest-bound approval
       envelope; raw fallback is explicit and fail-closed.

@@ -16,12 +16,17 @@ from fisheye.shared.zarr.refined_detection_manifest import (
     build_refined_detection_authority_provenance,
     build_refined_detection_run_manifest,
     canonical_json_sha256,
+    normalize_refined_detection_metadata_declarations,
+    refined_detection_metadata_declarations_digest,
     refined_detection_selection_contract_manifest,
     validate_refined_detection_authority_provenance,
+    validate_refined_detection_publication,
+    validate_refined_detection_reason_code_coverage,
     validate_refined_detection_run_manifest,
     validate_refined_detection_snapshot_identity,
 )
 from fisheye.shared.zarr.refined_detection_schema import (
+    REFINED_DETECTION_SCHEMA_V1,
     SOURCE_KIND_CODE_MAP,
     RefinedDetectionClipBinding,
     RefinedDetectionClippedBinding,
@@ -72,13 +77,15 @@ def _build_manifest(
     dimensions: RefinedDetectionDimensions,
     lineage: RefinedDetectionSnapshotLineage,
 ) -> dict[str, object]:
+    storage_plan = plan_refined_detection_storage(
+        dimensions,
+        profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+    )
+    direct, consolidated = _metadata_declarations(dimensions, storage_plan)
     return build_refined_detection_run_manifest(
         run_id=run_id,
         dimensions=dimensions,
-        storage_plan=plan_refined_detection_storage(
-            dimensions,
-            profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
-        ),
+        storage_plan=storage_plan,
         lineage=lineage,
         source=RefinedDetectionSourceIdentity(
             run_id="detect_1",
@@ -87,9 +94,74 @@ def _build_manifest(
         ),
         instance_reason_codes={0: "none", 1: "manual_addition"},
         source_reason_codes={0: "none", 1: "filtered_low_score"},
-        metadata_declarations_digest="c" * 64,
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
         selector_eligible=True,
     )
+
+
+def _metadata_declarations(
+    dimensions: RefinedDetectionDimensions,
+    storage_plan=None,
+) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    plan = storage_plan or plan_refined_detection_storage(dimensions)
+    declarations: dict[str, dict[str, object]] = {
+        "": {"zarr_format": 3, "node_type": "group", "attributes": {}},
+        "instances": {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {},
+        },
+        "source_detections": {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {},
+        },
+    }
+    for entry in plan.entries:
+        physical = entry.plan
+        declarations[entry.rule.path] = {
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": list(physical.logical_shape),
+            "data_type": physical.logical_dtype,
+            "chunk_grid": {
+                "name": "regular",
+                "configuration": {
+                    "chunk_shape": list(
+                        physical.shard_shape or physical.chunk_shape or ()
+                    )
+                },
+            },
+            "chunk_key_encoding": {
+                "name": "default",
+                "configuration": {"separator": "/"},
+            },
+            "fill_value": False if physical.logical_dtype == "bool" else 0,
+            "codecs": [],
+            "attributes": {"ignored_by_declaration_digest": True},
+            "storage_transformers": [],
+        }
+    return declarations, copy.deepcopy(declarations)
+
+
+def _empty_arrays(
+    dimensions: RefinedDetectionDimensions,
+) -> dict[str, np.ndarray]:
+    arrays: dict[str, np.ndarray] = {}
+    for binding in REFINED_DETECTION_SCHEMA_V1.bindings_for(dimensions):
+        contract = REFINED_DETECTION_SCHEMA_V1.contracts.resolve(
+            binding.contract_id,
+            binding.contract_version,
+        )
+        shape = tuple(
+            value
+            if isinstance(value, int)
+            else dimensions.contract_dimensions[value]
+            for value in contract.shape_template
+        )
+        arrays[binding.path] = np.zeros(shape, dtype=contract.dtype.numpy_dtype)
+    return arrays
 
 
 def _manual_arrays(
@@ -137,6 +209,11 @@ def _manual_arrays(
 
 def test_run_manifest_freezes_path_digest_publication_and_separate_reasons() -> None:
     dimensions = _dimensions(1)
+    storage_plan = plan_refined_detection_storage(
+        dimensions,
+        profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+    )
+    direct, consolidated = _metadata_declarations(dimensions, storage_plan)
     manifest = _build_manifest(
         run_id="refined_1",
         dimensions=dimensions,
@@ -151,6 +228,13 @@ def test_run_manifest_freezes_path_digest_publication_and_separate_reasons() -> 
     payload = manifest["payload"]
     assert payload["publication"]["completion_status"] == "complete"
     assert payload["publication"]["stage_selector_eligible"] is True
+    assert payload["publication"]["metadata_declarations_digest"] == (
+        refined_detection_metadata_declarations_digest(
+            direct,
+            consolidated_metadata_by_path=consolidated,
+            dimensions=dimensions,
+        )
+    )
     assert payload["logical_schema"]["schema_id"] == (
         "palette.stage.refined_detection"
     )
@@ -180,18 +264,71 @@ def test_run_manifest_freezes_path_digest_publication_and_separate_reasons() -> 
     semantically_tampered["payload_digest"] = canonical_json_sha256(
         semantically_tampered["payload"]
     )
-    assert "instances reason registry digest mismatch" in (
+    assert "instances reason registry is not in canonical persisted form" in (
         validate_refined_detection_run_manifest(semantically_tampered)
     )
 
 
+def test_metadata_declaration_normalizer_is_exact_and_checks_consolidation() -> None:
+    dimensions = _dimensions(1)
+    direct, consolidated = _metadata_declarations(dimensions)
+    normalized = normalize_refined_detection_metadata_declarations(
+        direct,
+        consolidated_metadata_by_path=consolidated,
+        dimensions=dimensions,
+    )
+
+    assert set(normalized["declarations"]) == set(direct)
+    assert all(
+        "attributes" not in declaration
+        for declaration in normalized["declarations"].values()
+    )
+    direct_attributes_changed = copy.deepcopy(direct)
+    consolidated_attributes_changed = copy.deepcopy(consolidated)
+    direct_attributes_changed["instances/frame_indices"]["attributes"][
+        "another"
+    ] = 1
+    consolidated_attributes_changed["instances/frame_indices"]["attributes"][
+        "another"
+    ] = 1
+    assert refined_detection_metadata_declarations_digest(
+        direct_attributes_changed,
+        consolidated_metadata_by_path=consolidated_attributes_changed,
+        dimensions=dimensions,
+    ) == refined_detection_metadata_declarations_digest(
+        direct,
+        consolidated_metadata_by_path=consolidated,
+        dimensions=dimensions,
+    )
+
+    mismatched = copy.deepcopy(direct)
+    mismatched["instances/frame_indices"]["shape"] = [999]
+    with pytest.raises(ValueError, match="Direct and consolidated metadata differ"):
+        normalize_refined_detection_metadata_declarations(
+            mismatched,
+            consolidated_metadata_by_path=consolidated,
+            dimensions=dimensions,
+        )
+
+    missing = copy.deepcopy(direct)
+    del missing["instances/frame_indices"]
+    with pytest.raises(ValueError, match="paths must be exact"):
+        normalize_refined_detection_metadata_declarations(
+            missing,
+            consolidated_metadata_by_path=consolidated,
+            dimensions=dimensions,
+        )
+
+
 def test_manifest_rejects_ambiguous_reason_registry_and_zero_frame_dimension() -> None:
     dimensions = _dimensions(1)
+    storage_plan = plan_refined_detection_storage(dimensions)
+    direct, consolidated = _metadata_declarations(dimensions, storage_plan)
     with pytest.raises(ValueError, match="code 0"):
         build_refined_detection_run_manifest(
             run_id="refined_1",
             dimensions=dimensions,
-            storage_plan=plan_refined_detection_storage(dimensions),
+            storage_plan=storage_plan,
             lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
             source=RefinedDetectionSourceIdentity(
                 run_id="detect_1",
@@ -200,9 +337,111 @@ def test_manifest_rejects_ambiguous_reason_registry_and_zero_frame_dimension() -
             ),
             instance_reason_codes={1: "manual_addition"},
             source_reason_codes={0: "none"},
-            metadata_declarations_digest="c" * 64,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
             selector_eligible=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("bad_code", "bad_label"),
+    (("01", "manual_addition"), ("1", "ManualAddition"), ("65536", "too_large")),
+)
+def test_parsed_reason_registries_reject_noncanonical_codes_and_labels(
+    bad_code: str,
+    bad_label: str,
+) -> None:
+    dimensions = _dimensions(1)
+    manifest = _build_manifest(
+        run_id="refined_1",
+        dimensions=dimensions,
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
+    )
+    tampered = copy.deepcopy(manifest)
+    registry = tampered["payload"]["reason_registries"]["instances"]
+    registry["codes"] = {"0": "none", bad_code: bad_label}
+    registry_payload = {
+        "schema_id": registry["schema_id"],
+        "schema_version": registry["schema_version"],
+        "registry_id": registry["registry_id"],
+        "codes": registry["codes"],
+    }
+    registry["digest"] = canonical_json_sha256(registry_payload)
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+
+    assert any(
+        "instances reason registry is invalid" in error
+        for error in validate_refined_detection_run_manifest(tampered)
+    )
+
+
+def test_reason_registry_coverage_rejects_unregistered_persisted_codes() -> None:
+    dimensions = _dimensions(1)
+    manifest = _build_manifest(
+        run_id="refined_1",
+        dimensions=dimensions,
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
+    )
+    arrays = {
+        "instances/reason_codes": np.asarray([0, 2], dtype=np.uint16),
+        "source_detections/reason_codes": np.asarray([0, 1], dtype=np.uint16),
+    }
+
+    assert validate_refined_detection_reason_code_coverage(
+        manifest,
+        arrays,
+    ) == (
+        "reason-code array 'instances/reason_codes' contains unregistered codes [2]",
+    )
+
+
+def test_publication_gate_recomputes_metadata_digest_and_validates_arrays() -> None:
+    dimensions = RefinedDetectionDimensions(
+        n_frames=4,
+        n_instances=0,
+        n_source_detections=0,
+        source_width=640,
+        source_height=480,
+    )
+    storage_plan = plan_refined_detection_storage(dimensions)
+    direct, consolidated = _metadata_declarations(dimensions, storage_plan)
+    manifest = build_refined_detection_run_manifest(
+        run_id="refined_empty_1",
+        dimensions=dimensions,
+        storage_plan=storage_plan,
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=0),
+        source=RefinedDetectionSourceIdentity(
+            run_id="detect_1",
+            run_manifest_digest="a" * 64,
+            logical_content_digest="b" * 64,
+        ),
+        instance_reason_codes={0: "none"},
+        source_reason_codes={0: "none"},
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+    )
+    arrays = _empty_arrays(dimensions)
+
+    assert validate_refined_detection_publication(
+        manifest,
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        arrays=arrays,
+    ) == ()
+
+    physically_changed = copy.deepcopy(direct)
+    physically_changed["instances/frame_indices"]["shape"] = [1]
+    consolidated_changed = copy.deepcopy(consolidated)
+    consolidated_changed["instances/frame_indices"]["shape"] = [1]
+    assert "metadata_declarations_digest does not match declarations" in (
+        validate_refined_detection_publication(
+            manifest,
+            direct_metadata_declarations=physically_changed,
+            consolidated_metadata_declarations=consolidated_changed,
+            arrays=arrays,
+        )
+    )
 
 
 def test_clipped_run_manifest_binds_one_camera_and_complete_media_timeline() -> None:
@@ -235,10 +474,12 @@ def test_clipped_run_manifest_binds_one_camera_and_complete_media_timeline() -> 
             ),
         ),
     )
+    storage_plan = plan_refined_detection_storage(dimensions)
+    direct, consolidated = _metadata_declarations(dimensions, storage_plan)
     manifest = build_refined_detection_run_manifest(
         run_id="refined_clipped_1",
         dimensions=dimensions,
-        storage_plan=plan_refined_detection_storage(dimensions),
+        storage_plan=storage_plan,
         lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
         source=RefinedDetectionSourceIdentity(
             run_id="detect_1",
@@ -247,7 +488,8 @@ def test_clipped_run_manifest_binds_one_camera_and_complete_media_timeline() -> 
         ),
         instance_reason_codes={0: "none"},
         source_reason_codes={0: "none"},
-        metadata_declarations_digest="c" * 64,
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
         selector_eligible=True,
         clipped_binding=clipped,
     )
@@ -260,6 +502,25 @@ def test_clipped_run_manifest_binds_one_camera_and_complete_media_timeline() -> 
     )
     assert binding["empty_frame_media_resolution"] == (
         "complete_frame_map_independent_of_rows"
+    )
+
+    tampered = copy.deepcopy(manifest)
+    clip = tampered["payload"]["logical_schema"]["clipped_binding"]["clips"][0]
+    clip["parent_frame_stop"] = 5
+    clip["frame_count"] = 5
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+    assert "clipped_binding intervals must cover logical n_frames" in (
+        validate_refined_detection_run_manifest(tampered)
+    )
+
+    malformed = copy.deepcopy(manifest)
+    malformed["payload"]["logical_schema"]["clipped_binding"]["clips"][0][
+        "media_digest"
+    ] = "invalid"
+    malformed["payload_digest"] = canonical_json_sha256(malformed["payload"])
+    assert any(
+        "media_digest" in error
+        for error in validate_refined_detection_run_manifest(malformed)
     )
 
 
@@ -353,6 +614,38 @@ def test_successor_enforces_parent_digest_nonreuse_and_surviving_key() -> None:
         parent_arrays=parent_arrays,
     )
     assert "surviving refined_row_id 0 changed instance_key" in errors
+
+    reused_snapshot = copy.deepcopy(current_manifest)
+    reused_snapshot["payload"]["snapshot_lineage"]["snapshot_id"] = (
+        ROOT_SNAPSHOT_ID
+    )
+    reused_snapshot["payload_digest"] = canonical_json_sha256(
+        reused_snapshot["payload"]
+    )
+    assert "successor snapshot_id must differ from parent" in (
+        validate_refined_detection_snapshot_identity(
+            manifest=reused_snapshot,
+            arrays=current_arrays,
+            parent_manifest=parent_manifest,
+            parent_arrays=parent_arrays,
+        )
+    )
+
+    changed_recording = copy.deepcopy(current_manifest)
+    changed_recording["payload"]["snapshot_lineage"][
+        "manual_instance_key_allocator"
+    ]["recording_identity"] = "another_recording"
+    changed_recording["payload_digest"] = canonical_json_sha256(
+        changed_recording["payload"]
+    )
+    assert "successor recording_identity differs from parent" in (
+        validate_refined_detection_snapshot_identity(
+            manifest=changed_recording,
+            arrays=current_arrays,
+            parent_manifest=parent_manifest,
+            parent_arrays=parent_arrays,
+        )
+    )
 
 
 def test_authority_envelope_and_selection_are_typed_and_fail_closed() -> None:

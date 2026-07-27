@@ -27,6 +27,7 @@ from fisheye.shared.instance_keys import (
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
     SOURCE_KIND_CODE_MAP,
+    RefinedDetectionClipBinding,
     RefinedDetectionClippedBinding,
     RefinedDetectionDimensions,
     RefinedDetectionLineageProfile,
@@ -58,6 +59,10 @@ CANONICAL_JSON_DIGEST_ALGORITHM = "sha256_canonical_json_v1"
 METADATA_DECLARATIONS_DIGEST_SCOPE = (
     "normalized_group_and_array_declarations_excluding_attributes"
 )
+METADATA_DECLARATIONS_SCHEMA_ID = (
+    "palette.refined_detection.metadata_declarations"
+)
+METADATA_DECLARATIONS_SCHEMA_VERSION = 1
 REFINED_ROW_ID_ALLOCATOR_SCHEME = "monotonic_int64_nonreuse_v1"
 MANUAL_INSTANCE_KEY_ALLOCATOR_SCHEME = (
     "blake2b64_manual_namespace_by_refined_row_id_v1"
@@ -148,6 +153,160 @@ def _array_values(value: Any, *, dtype: Any) -> np.ndarray:
         return np.asarray(value[...], dtype=dtype)
     except (IndexError, KeyError, TypeError):
         return np.asarray(value, dtype=dtype)
+
+
+def _metadata_without_consolidation(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(value)
+    normalized.pop("consolidated_metadata", None)
+    return normalized
+
+
+def normalize_refined_detection_metadata_declarations(
+    direct_metadata_by_path: Mapping[str, Mapping[str, Any]],
+    *,
+    consolidated_metadata_by_path: Mapping[str, Mapping[str, Any]],
+    dimensions: RefinedDetectionDimensions,
+) -> dict[str, object]:
+    """Normalize the exact direct Zarr-v3 declaration tree for one run.
+
+    Paths are relative to ``refined_detect_runs/<run>`` and use ``""`` for
+    that run-group root. ``consolidated_metadata_by_path`` is the matching
+    subtree extracted from the archive root's inline consolidated metadata and
+    rebased to the same path basis. Every direct/consolidated declaration is
+    compared before attributes and consolidation envelopes are removed from
+    the digest surface.
+    """
+
+    if not isinstance(direct_metadata_by_path, Mapping):
+        raise TypeError("direct_metadata_by_path must be a declaration mapping.")
+    if not isinstance(consolidated_metadata_by_path, Mapping):
+        raise TypeError(
+            "consolidated_metadata_by_path must be a declaration mapping."
+        )
+    array_paths = REFINED_DETECTION_SCHEMA_V1.binding_paths_for(dimensions)
+    group_paths = ("", "instances", "source_detections")
+    expected_paths = {*group_paths, *array_paths}
+    direct_paths = set(direct_metadata_by_path)
+    if direct_paths != expected_paths:
+        raise ValueError(
+            "Refined direct metadata declaration paths must be exact; "
+            f"missing={sorted(expected_paths - direct_paths)!r}, "
+            f"unexpected={sorted(direct_paths - expected_paths)!r}."
+        )
+    consolidated_paths = set(consolidated_metadata_by_path)
+    if consolidated_paths != expected_paths:
+        raise ValueError(
+            "Refined consolidated metadata declaration paths must be exact; "
+            f"missing={sorted(expected_paths - consolidated_paths)!r}, "
+            f"unexpected={sorted(consolidated_paths - expected_paths)!r}."
+        )
+    direct: dict[str, Mapping[str, Any]] = {}
+    for path in sorted(expected_paths):
+        declaration = direct_metadata_by_path[path]
+        if not isinstance(declaration, Mapping):
+            raise TypeError(f"Zarr metadata declaration {path!r} must be an object.")
+        canonical_json_bytes(declaration)
+        direct[path] = declaration
+    for path in sorted(expected_paths):
+        candidate = consolidated_metadata_by_path[path]
+        if not isinstance(candidate, Mapping):
+            raise TypeError(f"Consolidated declaration {path!r} must be an object.")
+        canonical_json_bytes(candidate)
+        if _metadata_without_consolidation(candidate) != (
+            _metadata_without_consolidation(direct[path])
+        ):
+            raise ValueError(
+                f"Direct and consolidated metadata differ at {path!r}."
+            )
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for path in sorted(expected_paths):
+        declaration = dict(direct[path])
+        if declaration.get("zarr_format") != 3:
+            raise ValueError(f"Zarr declaration {path!r} must use zarr_format 3.")
+        attributes = declaration.get("attributes")
+        if not isinstance(attributes, Mapping):
+            raise ValueError(f"Zarr declaration {path!r} requires object attributes.")
+        if path in group_paths:
+            expected_fields = {"zarr_format", "node_type", "attributes"}
+            if set(declaration) != expected_fields:
+                raise ValueError(
+                    f"Zarr group declaration {path!r} has an unexpected field set."
+                )
+            if declaration.get("node_type") != "group":
+                raise ValueError(f"Zarr declaration {path!r} must be a group.")
+        else:
+            required_fields = {
+                "zarr_format",
+                "node_type",
+                "shape",
+                "data_type",
+                "chunk_grid",
+                "chunk_key_encoding",
+                "fill_value",
+                "codecs",
+                "attributes",
+                "storage_transformers",
+            }
+            optional_fields = {"dimension_names"}
+            if not required_fields.issubset(declaration) or not set(
+                declaration
+            ).issubset(required_fields | optional_fields):
+                raise ValueError(
+                    f"Zarr array declaration {path!r} has an unexpected field set."
+                )
+            if declaration.get("node_type") != "array":
+                raise ValueError(f"Zarr declaration {path!r} must be an array.")
+            if not isinstance(declaration.get("shape"), list) or not all(
+                type(value) is int and value >= 0
+                for value in declaration["shape"]
+            ):
+                raise ValueError(f"Zarr array declaration {path!r} has invalid shape.")
+            if not isinstance(declaration.get("chunk_grid"), Mapping):
+                raise ValueError(f"Zarr array declaration {path!r} lacks chunk_grid.")
+            if not isinstance(declaration.get("chunk_key_encoding"), Mapping):
+                raise ValueError(
+                    f"Zarr array declaration {path!r} lacks chunk_key_encoding."
+                )
+            if not isinstance(declaration.get("codecs"), list):
+                raise ValueError(f"Zarr array declaration {path!r} lacks codec list.")
+            if not isinstance(declaration.get("storage_transformers"), list):
+                raise ValueError(
+                    f"Zarr array declaration {path!r} lacks storage_transformers list."
+                )
+        declaration.pop("attributes")
+        declaration.pop("consolidated_metadata", None)
+        normalized[path] = declaration
+
+    document: dict[str, object] = {
+        "schema_id": METADATA_DECLARATIONS_SCHEMA_ID,
+        "schema_version": METADATA_DECLARATIONS_SCHEMA_VERSION,
+        "path_basis": "relative_to_refined_detect_run_group_empty_string_is_root",
+        "included_nodes": "exact_run_root_groups_and_schema_arrays",
+        "excluded_fields": ["attributes", "consolidated_metadata"],
+        "declarations": normalized,
+    }
+    canonical_json_bytes(document)
+    return document
+
+
+def refined_detection_metadata_declarations_digest(
+    direct_metadata_by_path: Mapping[str, Mapping[str, Any]],
+    *,
+    consolidated_metadata_by_path: Mapping[str, Mapping[str, Any]],
+    dimensions: RefinedDetectionDimensions,
+) -> str:
+    """Digest the executable normalized direct/consolidated declaration tree."""
+
+    return canonical_json_sha256(
+        normalize_refined_detection_metadata_declarations(
+            direct_metadata_by_path,
+            consolidated_metadata_by_path=consolidated_metadata_by_path,
+            dimensions=dimensions,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -283,7 +442,7 @@ def _reason_registry(
             code = int(raw_code)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid reason code {raw_code!r}.") from exc
-        if str(raw_code).strip() not in {str(code), f"+{code}"}:
+        if str(raw_code).strip() != str(code):
             raise ValueError(f"Reason code {raw_code!r} is not canonical decimal.")
         if not 0 <= code <= int(np.iinfo(np.uint16).max):
             raise ValueError("Reason codes must fit the canonical uint16 dtype.")
@@ -315,6 +474,39 @@ def _reason_registry(
     }
 
 
+def _validate_reason_registry_document(
+    registry: Mapping[str, Any],
+    *,
+    name: str,
+    expected_id: str,
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    if set(registry) != {
+        "schema_id",
+        "schema_version",
+        "registry_id",
+        "codes",
+        "digest_algorithm",
+        "digest",
+    }:
+        errors.append(f"{name} reason registry has an unexpected field set")
+    codes = registry.get("codes")
+    if not isinstance(codes, Mapping):
+        return (*errors, f"{name} reason registry codes must be an object")
+    if any(type(key) is not str for key in codes) or any(
+        type(label) is not str for label in codes.values()
+    ):
+        errors.append(f"{name} reason registry codes and labels must be JSON strings")
+    try:
+        expected = _reason_registry(codes, registry_id=expected_id)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"{name} reason registry is invalid: {exc}")
+        return tuple(errors)
+    if dict(registry) != expected:
+        errors.append(f"{name} reason registry is not in canonical persisted form")
+    return tuple(errors)
+
+
 def build_refined_detection_run_manifest(
     *,
     run_id: str,
@@ -324,7 +516,8 @@ def build_refined_detection_run_manifest(
     source: RefinedDetectionSourceIdentity,
     instance_reason_codes: Mapping[int | str, str],
     source_reason_codes: Mapping[int | str, str],
-    metadata_declarations_digest: str,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
     selector_eligible: bool,
     clipped_binding: RefinedDetectionClippedBinding | None = None,
 ) -> dict[str, object]:
@@ -340,9 +533,10 @@ def build_refined_detection_run_manifest(
         is RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT
     ) != (clipped_binding is not None):
         raise ValueError("clipped_binding must match the logical lineage profile.")
-    metadata_digest = _require_sha256(
-        metadata_declarations_digest,
-        name="metadata_declarations_digest",
+    metadata_digest = refined_detection_metadata_declarations_digest(
+        direct_metadata_declarations,
+        consolidated_metadata_by_path=consolidated_metadata_declarations,
+        dimensions=dimensions,
     )
     logical_schema = REFINED_DETECTION_SCHEMA_V1.as_manifest(
         dimensions=dimensions,
@@ -391,10 +585,129 @@ def build_refined_detection_run_manifest(
     return envelope
 
 
+def parse_refined_detection_clipped_binding(
+    value: Mapping[str, Any],
+) -> RefinedDetectionClippedBinding:
+    """Parse and deeply validate the exact persisted clipped-binding document."""
+
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "collection_id",
+        "collection_manifest_digest",
+        "camera_cardinality",
+        "camera_serial",
+        "clip_ordinal_scope",
+        "video_identity",
+        "video_manifest_digest",
+        "recording_frame_index_digest_algorithm",
+        "recording_frame_index_digest",
+        "empty_frame_media_resolution",
+        "clips",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("clipped_binding has an unexpected field set")
+    if (
+        value.get("schema_id") != "palette.refined_detection.clipped_binding"
+        or value.get("schema_version") != 1
+        or value.get("camera_cardinality") != 1
+        or value.get("clip_ordinal_scope")
+        != "snapshot_global_within_single_camera"
+        or value.get("recording_frame_index_digest_algorithm")
+        != "sha256_canonical_rows_v1"
+        or value.get("empty_frame_media_resolution")
+        != "complete_frame_map_independent_of_rows"
+    ):
+        raise ValueError("clipped_binding schema, scope, or algorithm mismatch")
+    raw_clips = value.get("clips")
+    if not isinstance(raw_clips, list):
+        raise ValueError("clipped_binding clips must be an ordered JSON array")
+    clip_fields = {
+        "clip_index",
+        "clip_id",
+        "media_identity",
+        "media_digest_algorithm",
+        "media_digest",
+        "parent_frame_start",
+        "parent_frame_stop",
+        "frame_count",
+        "frame_map_digest_algorithm",
+        "frame_map_digest",
+        "source_refined_run_id",
+        "source_refined_manifest_digest",
+    }
+    clips: list[RefinedDetectionClipBinding] = []
+    for index, raw_clip in enumerate(raw_clips):
+        if not isinstance(raw_clip, Mapping) or set(raw_clip) != clip_fields:
+            raise ValueError(f"clipped_binding clip {index} has an unexpected field set")
+        if (
+            raw_clip.get("media_digest_algorithm") != "sha256"
+            or raw_clip.get("frame_map_digest_algorithm")
+            != "sha256_canonical_rows_v1"
+        ):
+            raise ValueError(f"clipped_binding clip {index} digest algorithm mismatch")
+        clip = RefinedDetectionClipBinding(
+            clip_index=raw_clip.get("clip_index"),
+            clip_id=raw_clip.get("clip_id"),
+            media_identity=raw_clip.get("media_identity"),
+            media_digest=raw_clip.get("media_digest"),
+            parent_frame_start=raw_clip.get("parent_frame_start"),
+            parent_frame_stop=raw_clip.get("parent_frame_stop"),
+            frame_map_digest=raw_clip.get("frame_map_digest"),
+            source_refined_run_id=raw_clip.get("source_refined_run_id"),
+            source_refined_manifest_digest=raw_clip.get(
+                "source_refined_manifest_digest"
+            ),
+        )
+        if raw_clip.get("frame_count") != clip.frame_count:
+            raise ValueError(f"clipped_binding clip {index} frame_count mismatch")
+        clips.append(clip)
+    parsed = RefinedDetectionClippedBinding(
+        collection_id=value.get("collection_id"),
+        collection_manifest_digest=value.get("collection_manifest_digest"),
+        camera_serial=value.get("camera_serial"),
+        video_identity=value.get("video_identity"),
+        video_manifest_digest=value.get("video_manifest_digest"),
+        recording_frame_index_digest=value.get("recording_frame_index_digest"),
+        clips=tuple(clips),
+    )
+    if parsed.as_manifest() != dict(value):
+        raise ValueError("clipped_binding is not in canonical persisted form")
+    return parsed
+
+
+def _dimensions_from_logical_schema(
+    logical: Mapping[str, Any],
+) -> RefinedDetectionDimensions:
+    raw = logical.get("dimensions")
+    expected_fields = {
+        "n_frames",
+        "n_instances",
+        "n_source_detections",
+        "n_frame_boundaries",
+        "source_width",
+        "source_height",
+        "lineage_profile",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != expected_fields:
+        raise ValueError("logical_schema dimensions have an unexpected field set")
+    dimensions = RefinedDetectionDimensions(
+        n_frames=raw.get("n_frames"),
+        n_instances=raw.get("n_instances"),
+        n_source_detections=raw.get("n_source_detections"),
+        source_width=raw.get("source_width"),
+        source_height=raw.get("source_height"),
+        lineage_profile=raw.get("lineage_profile"),
+    )
+    if raw.get("n_frame_boundaries") != dimensions.n_frames + 1:
+        raise ValueError("logical_schema n_frame_boundaries must equal n_frames + 1")
+    return dimensions
+
+
 def validate_refined_detection_run_manifest(
     manifest: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    """Validate the immutable envelope without opening any array payload."""
+    """Validate the immutable document without opening external declarations."""
 
     errors: list[str] = []
     if set(manifest) != {
@@ -476,17 +789,20 @@ def validate_refined_detection_run_manifest(
             errors.append("logical_schema schema_id mismatch")
         if logical.get("schema_version") != REFINED_DETECTION_SCHEMA_V1.schema_version:
             errors.append("logical_schema schema_version mismatch")
+        resolved_dimensions: RefinedDetectionDimensions | None = None
+        try:
+            resolved_dimensions = _dimensions_from_logical_schema(logical)
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
         dimensions = logical.get("dimensions")
-        if (
-            not isinstance(dimensions, Mapping)
-            or type(dimensions.get("n_frames")) is not int
-            or int(dimensions.get("n_frames", 0)) <= 0
-        ):
-            errors.append("logical_schema requires a positive n_frames")
         profile = (
-            dimensions.get("lineage_profile")
-            if isinstance(dimensions, Mapping)
-            else None
+            resolved_dimensions.lineage_profile.value
+            if resolved_dimensions is not None
+            else (
+                dimensions.get("lineage_profile")
+                if isinstance(dimensions, Mapping)
+                else None
+            )
         )
         clipped = logical.get("clipped_binding")
         expected_bindings = (
@@ -509,15 +825,19 @@ def validate_refined_detection_run_manifest(
         if profile == RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT.value:
             if not isinstance(clipped, Mapping):
                 errors.append("clipped lineage profile requires clipped_binding")
-            elif (
-                clipped.get("schema_id")
-                != "palette.refined_detection.clipped_binding"
-                or clipped.get("schema_version") != 1
-                or clipped.get("camera_cardinality") != 1
-                or clipped.get("clip_ordinal_scope")
-                != "snapshot_global_within_single_camera"
-            ):
-                errors.append("clipped_binding schema or scope mismatch")
+            else:
+                try:
+                    parsed_clipped = parse_refined_detection_clipped_binding(clipped)
+                    if (
+                        resolved_dimensions is not None
+                        and parsed_clipped.n_frames
+                        != resolved_dimensions.n_frames
+                    ):
+                        errors.append(
+                            "clipped_binding intervals must cover logical n_frames"
+                        )
+                except (TypeError, ValueError) as exc:
+                    errors.append(str(exc))
         elif clipped is not None:
             errors.append("full-acquisition logical schema cannot carry clipped_binding")
 
@@ -653,25 +973,126 @@ def validate_refined_detection_run_manifest(
             if not isinstance(registry, Mapping):
                 errors.append(f"{name} reason registry must be an object")
                 continue
-            registry_payload = {
-                "schema_id": registry.get("schema_id"),
-                "schema_version": registry.get("schema_version"),
-                "registry_id": registry.get("registry_id"),
-                "codes": registry.get("codes"),
-            }
-            if registry_payload["schema_id"] != (
-                "palette.refined_detection.reason_registry"
-            ) or registry_payload["schema_version"] != 1:
-                errors.append(f"{name} reason registry schema mismatch")
-            if registry_payload["registry_id"] != expected_id:
-                errors.append(f"{name} reason registry_id mismatch")
-            codes = registry_payload["codes"]
-            if not isinstance(codes, Mapping) or codes.get("0") != "none":
-                errors.append(f"{name} reason registry must define code 0 as none")
-            if registry.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM:
-                errors.append(f"{name} reason registry digest algorithm mismatch")
-            if registry.get("digest") != canonical_json_sha256(registry_payload):
-                errors.append(f"{name} reason registry digest mismatch")
+            errors.extend(
+                _validate_reason_registry_document(
+                    registry,
+                    name=name,
+                    expected_id=expected_id,
+                )
+            )
+    return tuple(errors)
+
+
+def validate_refined_detection_reason_code_coverage(
+    manifest: Mapping[str, Any],
+    arrays: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Require every persisted uint16 reason code to exist in its registry."""
+
+    errors: list[str] = []
+    payload = manifest.get("payload")
+    registries = (
+        payload.get("reason_registries")
+        if isinstance(payload, Mapping)
+        else None
+    )
+    if not isinstance(registries, Mapping):
+        return ("reason registry coverage requires valid manifest registries",)
+    for registry_name, path in (
+        ("instances", "instances/reason_codes"),
+        ("source_detections", "source_detections/reason_codes"),
+    ):
+        registry = registries.get(registry_name)
+        codes = registry.get("codes") if isinstance(registry, Mapping) else None
+        if not isinstance(codes, Mapping):
+            errors.append(f"{registry_name} reason registry codes are unavailable")
+            continue
+        if path not in arrays:
+            errors.append(f"reason registry coverage is missing array {path!r}")
+            continue
+        value = arrays[path]
+        try:
+            observed = np.asarray(value if isinstance(value, np.ndarray) else value[...])
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            errors.append(f"cannot read reason-code array {path!r}: {exc}")
+            continue
+        if observed.dtype != np.dtype("uint16") or observed.ndim != 1:
+            errors.append(f"reason-code array {path!r} must be rank-1 uint16")
+            continue
+        unknown = sorted(
+            int(code)
+            for code in np.unique(observed).tolist()
+            if str(int(code)) not in codes
+        )
+        if unknown:
+            errors.append(
+                f"reason-code array {path!r} contains unregistered codes {unknown!r}"
+            )
+    return tuple(errors)
+
+
+def validate_refined_detection_publication(
+    manifest: Mapping[str, Any],
+    *,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    arrays: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Run the fail-closed gate required before a snapshot is contract-valid.
+
+    This combines intrinsic manifest parsing with recomputation of the exact
+    direct/consolidated metadata digest, complete logical-array validation, and
+    persisted reason-code coverage.  A manifest-only parse is insufficient for
+    publication or promotion.
+    """
+
+    errors = list(validate_refined_detection_run_manifest(manifest))
+    payload = manifest.get("payload")
+    logical = payload.get("logical_schema") if isinstance(payload, Mapping) else None
+    if not isinstance(logical, Mapping):
+        return (*errors, "publication validation requires logical_schema")
+    try:
+        dimensions = _dimensions_from_logical_schema(logical)
+    except (TypeError, ValueError) as exc:
+        return (*errors, f"publication dimensions are invalid: {exc}")
+    try:
+        observed_metadata_digest = refined_detection_metadata_declarations_digest(
+            direct_metadata_declarations,
+            consolidated_metadata_by_path=consolidated_metadata_declarations,
+            dimensions=dimensions,
+        )
+    except (TypeError, ValueError) as exc:
+        errors.append(f"metadata declaration validation failed: {exc}")
+    else:
+        publication = payload.get("publication")
+        expected_metadata_digest = (
+            publication.get("metadata_declarations_digest")
+            if isinstance(publication, Mapping)
+            else None
+        )
+        if observed_metadata_digest != expected_metadata_digest:
+            errors.append("metadata_declarations_digest does not match declarations")
+
+    clipped_binding: RefinedDetectionClippedBinding | None = None
+    raw_clipped = logical.get("clipped_binding")
+    if raw_clipped is not None:
+        if not isinstance(raw_clipped, Mapping):
+            errors.append("clipped_binding must be an object")
+        else:
+            try:
+                clipped_binding = parse_refined_detection_clipped_binding(raw_clipped)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"clipped_binding validation failed: {exc}")
+    schema_issues = REFINED_DETECTION_SCHEMA_V1.validate(
+        arrays,
+        dimensions=dimensions,
+        clipped_binding=clipped_binding,
+    )
+    errors.extend(
+        f"array schema {issue.code} at {issue.path}: {issue.message}"
+        for issue in schema_issues
+    )
+    errors.extend(validate_refined_detection_reason_code_coverage(manifest, arrays))
     return tuple(errors)
 
 
@@ -829,6 +1250,15 @@ def validate_refined_detection_snapshot_identity(
         errors.append("parent_snapshot does not bind the supplied parent manifest")
     if lineage.get("lineage_id") != parent_lineage.get("lineage_id"):
         errors.append("successor lineage_id differs from parent")
+    if lineage.get("snapshot_id") == parent_lineage.get("snapshot_id"):
+        errors.append("successor snapshot_id must differ from parent")
+    parent_key_allocator = parent_lineage.get("manual_instance_key_allocator")
+    if not isinstance(parent_key_allocator, Mapping):
+        errors.append("parent manual_instance_key_allocator must be an object")
+    elif not isinstance(manual_allocator, Mapping) or manual_allocator.get(
+        "recording_identity"
+    ) != parent_key_allocator.get("recording_identity"):
+        errors.append("successor recording_identity differs from parent")
     parent_allocator = parent_lineage.get("refined_row_id_allocator")
     if not isinstance(parent_allocator, Mapping):
         return (*errors, "parent refined_row_id_allocator must be an object")
@@ -994,6 +1424,8 @@ __all__ = [
     "CANONICAL_JSON_DIGEST_ALGORITHM",
     "MANUAL_INSTANCE_KEY_ALLOCATOR_SCHEME",
     "METADATA_DECLARATIONS_DIGEST_SCOPE",
+    "METADATA_DECLARATIONS_SCHEMA_ID",
+    "METADATA_DECLARATIONS_SCHEMA_VERSION",
     "REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE",
     "REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE",
     "REFINED_DETECTION_AUTHORITY_SCHEMA_ID",
@@ -1011,8 +1443,13 @@ __all__ = [
     "build_refined_detection_run_manifest",
     "canonical_json_bytes",
     "canonical_json_sha256",
+    "normalize_refined_detection_metadata_declarations",
+    "parse_refined_detection_clipped_binding",
+    "refined_detection_metadata_declarations_digest",
     "refined_detection_selection_contract_manifest",
     "validate_refined_detection_run_manifest",
+    "validate_refined_detection_publication",
+    "validate_refined_detection_reason_code_coverage",
     "validate_refined_detection_snapshot_identity",
     "validate_refined_detection_authority_provenance",
 ]

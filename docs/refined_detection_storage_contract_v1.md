@@ -87,6 +87,7 @@ manifest digest, and `next_refined_row_id` under the exact
 `monotonic_int64_nonreuse_v1` allocator. A successor must:
 
 - retain the parent's lineage ID;
+- retain the parent's recording identity and use a new snapshot ID;
 - bind the exact parent run and manifest digest;
 - never decrease `next_refined_row_id`;
 - preserve `instance_key` for every surviving `refined_row_id`;
@@ -284,9 +285,31 @@ It is a `palette.refined_detection.run_manifest` v1 envelope with:
 - a normalized direct/consolidated declaration digest.
 
 The metadata-declaration digest covers normalized group/array declarations
-while excluding attributes. This avoids a circular digest through the
-`run_manifest` attribute itself. Publication separately proves direct and
-consolidated attributes/declarations are equal before visibility.
+relative to the refined run group. The exact path set is the run root (`""`),
+`instances`, `source_detections`, and every active 28- or 38-array schema
+binding. The publisher extracts the same subtree from archive-root inline
+consolidated metadata and rebases it to those run-relative paths.
+`normalize_refined_detection_metadata_declarations()` first requires exact
+direct/consolidated path sets and equality for every declaration. It then
+requires exact Zarr-v3 group/array field sets and removes only top-level
+`attributes` and `consolidated_metadata`. The result is a
+`palette.refined_detection.metadata_declarations` v1 document;
+`refined_detection_metadata_declarations_digest()` hashes its canonical JSON.
+This avoids a circular digest through the `run_manifest` attribute itself.
+The manifest builder accepts both declaration maps and computes the digest;
+callers cannot inject an arbitrary digest. A second nested consolidation at the
+refined run group is neither required nor implied.
+
+`validate_refined_detection_run_manifest()` deeply validates the persisted
+document, including complete clipped bindings and canonical reason registries.
+A successful document parse alone does not make a snapshot contract-valid.
+Before visibility, `validate_refined_detection_publication()` must also:
+
+- recompute the metadata-declaration digest from the exact direct/consolidated
+  tree;
+- validate all logical arrays and cross-array invariants;
+- read both `uint16` reason-code arrays and prove every persisted code exists in
+  its corresponding registry.
 
 Crimson should consume the exact manifest and consolidated schema rather than
 probe candidate dtypes. Direct metadata remains the fail-closed validation and
@@ -372,14 +395,21 @@ Contract freeze:
       complete frame map.
 - [x] Prohibit zero-frame published snapshots.
 - [x] Separate and digest instance/source reason-code registries.
+- [x] Normalize and digest the exact direct/consolidated Zarr-v3 declaration
+      tree with executable code rather than accepting a caller digest.
+- [x] Deep-parse clipped manifests and require complete interval coverage.
+- [x] Deep-parse reason registries and validate persisted array-code coverage.
 - [x] Add deterministic schema and storage-plan tests without Zarr I/O.
 
 Before production routing:
 
 - [x] Complete Crimson's first read-only review; incorporate all six required
       contract changes before shadow-writer work.
-- [ ] Ask Crimson to verify the revised envelopes and clipped binding resolve
-      its required changes without reopening physical-layout tuning.
+- [x] Complete Crimson's second read-only review; retain three narrow
+      fail-closed validation gaps as blockers to contract-valid publication.
+- [ ] Ask Crimson to verify the executable metadata normalizer, deep clipped
+      parser, and reason-registry array coverage close the remaining gaps
+      without reopening physical-layout tuning.
 - [ ] Add an immutable shadow writer that consumes only these declarations.
 - [ ] Validate a real current refined run against a deliberate transition
       adapter and report every lossy or unavailable field.

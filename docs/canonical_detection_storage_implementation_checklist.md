@@ -846,9 +846,16 @@ define refined-run selection or manual-addition semantics.
       `ACCEPT WITH REQUIRED CHANGES` and freeze its six blockers: persisted
       manifest envelope, fail-closed selection, cross-snapshot identity,
       clipped binding, zero-frame policy, and separate reason registries.
-- [ ] Ask Crimson to verify the revised executable envelopes resolve those six
-      blockers, then add a shadow immutable writer and transition report without
-      changing production selectors.
+- [x] Complete Crimson's second read-only review. Three original blockers are
+      resolved; narrow executable-validation gaps remain for the metadata
+      declaration digest, parsed clipped binding, and reason-code coverage.
+- [x] Add an exact direct/consolidated metadata normalizer and derived digest,
+      deep clipped-binding parser, canonical reason-registry parser, persisted
+      array-code coverage, and one fail-closed publication validator. Also
+      reject parent/child recording changes and snapshot-ID reuse.
+- [ ] Ask Crimson to verify the third contract checkpoint closes the remaining
+      three gaps, then add a shadow immutable writer and transition report
+      without changing production selectors.
 - [ ] Run the paired regular-versus-access-aware refined snapshot canary and
       apply the pragmatic correctness/object/transfer/readiness/RSS gate before
       promoting a versioned writer profile.
@@ -866,5 +873,8 @@ The resulting frozen target is documented in
 [`refined_detection_storage_contract_v1.md`](refined_detection_storage_contract_v1.md).
 Executable declarations and deterministic validation live in
 `refined_detection_schema.py`, `refined_detection_storage.py`, and
-`refined_detection_manifest.py`. No current writer, selector, registry, delta
+`refined_detection_manifest.py`. The manifest-only parser is not a publication
+gate: contract-valid snapshots must pass
+`validate_refined_detection_publication()` with their exact direct/consolidated
+metadata map and decoded arrays. No current writer, selector, registry, delta
 schema, compactor, or archive was changed by this checkpoint.
