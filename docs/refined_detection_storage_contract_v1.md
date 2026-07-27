@@ -471,6 +471,15 @@ Before production routing:
 - [x] Publish and fresh-process reopen a full 23,287-frame standalone raw plus
       refined shadow pair under `/tmp`, with no selectors or production-state
       changes.
+- [x] After Crimson reported its refined-v1 consumer ready, publish the same
+      full snapshot as a fresh canonical/refined pair under the shared
+      `.palette_benchmarks` namespace. Record exact server/macOS paths, run and
+      manifest identities, direct/consolidated equality, strict receipts, and
+      zero production-state changes in an immutable handoff manifest.
+- [ ] Have Crimson open the shared refined run through its dedicated
+      selector-ineligible benchmark option, retain `instance_key` and
+      `refined_row_id`, and publish a result bound to both the Palette handoff
+      digest and the exact Crimson commit.
 - [ ] Publish the paired regular/candidate refined canary and apply the
       practical gate above.
 - [ ] Promote a versioned profile only after that gate passes.

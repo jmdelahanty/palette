@@ -6,7 +6,7 @@ writer adoption still blocked
 
 Date established: 2026-07-23
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 ## Goal
 
@@ -888,6 +888,14 @@ define refined-run selection or manual-addition semantics.
 - [x] Publish the 23,287-frame local canonical/refined shadow pair, reopen it in
       a fresh process through consolidated metadata, and confirm exact offset
       endpoints, no selectors, strict receipts, and zero production changes.
+- [x] Publish the corresponding fresh shared canonical/refined handoff under
+      `.palette_benchmarks` after Crimson reported its backend-independent
+      refined-v1 consumer ready. Fresh-process validation proved complete
+      canonical/refined publication validity, exact source-audit equality,
+      direct/consolidated equivalence, and selector absence.
+- [ ] Complete Crimson's headless open/presentation/cancellation gate against
+      `refined_detect_shadow_crimson_20260727_v1`, binding its result to the
+      Palette handoff payload digest and exact Crimson commit.
 - [ ] Run the paired regular-versus-access-aware refined snapshot canary and
       apply the pragmatic correctness/object/transfer/readiness/RSS gate before
       promoting a versioned writer profile.

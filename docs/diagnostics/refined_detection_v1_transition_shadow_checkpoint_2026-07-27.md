@@ -157,14 +157,57 @@ These paths are ephemeral Palette-local integration evidence. They are not
 Crimson handoff paths, production authorities, or physical-profile promotion
 evidence.
 
+## Shared Crimson Handoff
+
+Crimson reported that its backend-independent refined-v1 consumer is ready for
+a real selector-ineligible artifact. Palette therefore published a new,
+immutable integration pair at:
+
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/integration/20260128_refined_v1_crimson_20260727_v1`
+
+The exact artifacts are:
+
+- canonical source:
+  `canonical_source.zarr`, run
+  `detect_canonical_shadow_crimson_20260727_v1`;
+- refined snapshot:
+  `refined.zarr`, run
+  `refined_detect_shadow_crimson_20260727_v1`; and
+- strict pair handoff:
+  `handoff_manifest.json`, payload digest
+  `1fce7956f7f24bf6588900263366ca1c15d060bfdf3bddd4ac1f6c609bdaaf82`.
+
+The corresponding macOS mount prefix is:
+
+`/Volumes/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/integration/20260128_refined_v1_crimson_20260727_v1`
+
+The pair was produced from Palette commit
+`2ecb7271f9f9d439b99c44e25141f1abfc11c16c` and re-opened in a separate
+process. The complete canonical and refined publication validators returned no
+errors; every one of the nine canonical arrays exactly equals its refined
+`source_detections` projection; direct and consolidated declarations agree;
+and neither store has a selector or production-state change. The canonical
+manifest digest is
+`70566e8d375cb1485ee4125ce09e3ac387832a912c1a24b6bb4748f8c68edf1d`.
+The refined manifest digest is
+`acdcf8209b1f329246c09d8aa2826682d3109963f864a2d87d50a92b2105de7b`.
+
+This real historical snapshot has 361 empty frames, but no manual rows and no
+frame with more than one refined row. It therefore tests complete real-store
+metadata, offsets, filtering, stable identity, paging, and cancellation, while
+the existing deterministic `[2,0,1,3]` raw/manual tests remain the evidence for
+multi-instance frame behavior. Crimson must run both coverage classes; this
+real fixture alone is not evidence for manual additions or multiple subjects.
+No video was copied. The first handoff is consequently a headless consumer
+gate; any GUI/media smoke must reference a separately accessible source video.
+
 ## Remaining Gates
 
 - Implement the separate clipped transition with ordered per-clip refined/raw
   evidence and full media/frame-map validation.
-- Publish a matched pair in the shared `.palette_benchmarks` namespace only
-  after Crimson's dedicated refined-v1 consumer is ready for the handoff.
-- Have Crimson open that shared shadow through the dedicated refined-v1
-  consumer and retain observation identity through presentation.
+- Have Crimson open the shared shadow through the dedicated refined-v1
+  consumer, retain observation identity through presentation, and publish the
+  exact consumer commit and results alongside the handoff digest.
 - Only then run the paired regular-versus-access-aware canary gate and consider
   a versioned physical-profile promotion.
 - Keep delta v2, compaction, manual additions, downstream regeneration, and
