@@ -3,8 +3,9 @@
 Date: 2026-07-27
 
 Status: frozen Palette logical and persisted-partition contract with executable
-validation, resolution, immutable writes, and frozen-generation reads;
-compactor, consumer overlay, and production routing pending
+validation, resolution, immutable writes, frozen-generation reads, and a
+selector-ineligible local compactor; consumer overlay and production routing
+pending
 
 ## Decision
 
@@ -23,8 +24,10 @@ immutable refined-v1 base
 
 The executable logical contract is
 `src/fisheye/shared/zarr/refined_detection_delta.py`. The isolated persistence
-boundary is `refined_detection_delta_storage.py`. Neither changes selectors or
-registries.
+boundary is `refined_detection_delta_storage.py`. Immutable local compaction is
+implemented by `refined_detection_compaction.py` through the shared snapshot
+publisher in `refined_detection_snapshot.py`. None of these modules can change
+selectors or registries.
 
 ## Scope
 
@@ -50,6 +53,7 @@ Each partition binds:
 | `delta_lineage_id` | Canonical UUID shared by every generation over one exact base. |
 | `base_snapshot_id` | Canonical UUID from the bound refined-v1 manifest. |
 | `base_manifest_digest` | Exact lowercase SHA-256 of the bound manifest payload. |
+| `base_logical_content_digest` | Canonical aggregate digest of all exact decoded refined-v1 base arrays; recomputed before compaction. |
 | `generation_ordinal` | Nonnegative integer; event order cannot move backward across generations. |
 | `partition_id` | Path-safe immutable single-writer partition identity. |
 | `actor_id` | Nonempty author/service identity. |
@@ -103,7 +107,11 @@ refined_detection_delta_runs/<delta_lineage_uuid>/
     partitions/<partition_id>/
 ```
 
-The lineage, generation, and partition groups contain exactly one manifest
+The lineage uses manifest schema v2; its base binding includes both manifest
+and decoded logical-content digests. Generation and partition schemas remain
+v1, while the generation content digest document is v2 so every frozen
+generation also binds that base content digest. The lineage, generation, and
+partition groups contain exactly one manifest
 attribute each. Every manifest is a strict `payload` plus
 `payload_digest` envelope using canonical JSON with non-finite values
 forbidden. The partition payload binds the complete logical batch manifest,
@@ -140,7 +148,7 @@ The exact registry is:
 | 1 | `add_instance` | Key absent from all base/source/history identities; row ID at or above the allocator high-water mark; predecessor zero. | Creates one active manual row from a complete payload. |
 | 2 | `replace_instance` | Target active; expected predecessor equals its latest event. | Replaces geometry/class/reason while preserving frame, acquisition identity, key, row ID, source lineage, and model-score semantics. |
 | 3 | `delete_instance` | Target active; expected predecessor matches. | Tombstones the row; a raw-backed source audit row becomes `manual_clear` with no resolved refined row. |
-| 4 | `restore_instance` | Target's latest event in this uncompacted lineage is delete; expected predecessor identifies that delete. | Reactivates the retained pre-delete payload and restores the raw source-audit join when present. |
+| 4 | `restore_instance` | Target's latest event is a delete in the same still-open generation; expected predecessor identifies that delete. | Reactivates the retained pre-delete payload and restores the raw source-audit join when present. |
 
 Add and replace carry a complete post-operation payload. This avoids nullable
 field masks and makes each event independently auditable. A replace sets
@@ -161,6 +169,10 @@ Delete and restore carry no positive-row payload and must use all exact
 sentinels. Restore is intentionally bounded: once a compacted successor omits
 a row, refined-v1 considers that identity retired. Recreating it later is a new
 add with a new row ID and key, not reuse of the retired identity.
+
+Generation freeze is the retirement boundary. A restore is valid only when its
+delete occurred in the same still-open generation. Freezing that generation
+seals the deletion even if heavy materialization has not finished yet.
 
 ## Deterministic Resolution
 
@@ -197,6 +209,60 @@ changed. It never creates a selector or claims a partial result is publishable.
 - Compaction freezes generation `G` and opens `G+1` before materialization so
   edits arriving during the job are not lost.
 
+`rollover_refined_detection_delta_generation()` implements the short writer
+pause. It freezes `G`, opens exactly `G+1`, and is retry-safe if the process
+stops between those operations. Heavy compaction starts only after the helper
+returns; the GUI can then append to `G+1` while `G` is read as immutable input.
+
+## Local Compaction Checkpoint
+
+`compact_frozen_refined_detection_delta_generation()` currently performs the
+safe first implementation:
+
+1. decode and validate the exact lineage-bound immutable base;
+2. recompute the complete frozen generation-prefix evidence;
+3. resolve events, sort rows, and rebuild both `F+1` offset arrays;
+4. plan all 28 arrays by uncompressed byte size through the promoted
+   `detection_published_access_aware_v1` profile;
+5. write whole outer shards (or complete ordinary chunks) to a fresh standalone
+   Zarr v3 store;
+6. consolidate metadata, build the refined-v1 run manifest, and validate exact
+   direct/consolidated declarations, decoded values, reason registries, and
+   successor identity against the immediate parent; and
+7. emit strict-JSON snapshot and compaction receipts.
+
+The destination must be a fresh `.zarr` child under `/tmp`, a
+`.palette_scratch` namespace, or `.palette_benchmarks`. It cannot be nested in
+`<recording>_analysis.zarr`. The output is always benchmark-only,
+registry-unregistered, and selector-ineligible. The compactor has no API for
+mutating the base, delta lineage, production archive, registry, or selectors.
+
+The compaction receipt binds the base manifest and recomputed logical-content
+digest, immediate parent manifest and logical-content digest, frozen delta
+generation and every prefix partition manifest, output manifest, logical array
+hashes, profile, dimensions, storage-object counts, and zero production-state
+changes. Timing is split into base read/validation, frozen-prefix verification,
+resolution/sort/offset rebuild, per-array write/compression, both consolidation
+passes, publication validation, and total duration. It also records process
+peak RSS with its process-lifetime-high-water semantics.
+
+The first checkpoint intentionally excludes network copy time. It measures the
+copy/compute/publish core against disposable local stores on this workstation.
+A later harness may time explicit source-to-local and local-to-benchmark copies
+as separate phases without folding VPN/PRFS variance into compactor CPU/write
+measurements.
+
+Later prefix compactions may resolve from the original lineage-bound base while
+declaring the last compacted snapshot as their immediate identity parent. That
+newer parent must be supplied as a manifest, exact decoded arrays, and its
+previously recorded logical-content digest; all three are required and the
+digest is recomputed before successor identity validation.
+
+Compaction provenance is presently a digest-protected sidecar bound to the
+output manifest. Production promotion remains blocked until a future manifest
+revision binds the compaction derivation from inside the authoritative run
+manifest; this avoids weakening Crimson's exact refined-v1 manifest parser.
+
 ## Downstream Boundary
 
 Any net rowset change requires a complete replacement artifact before
@@ -221,10 +287,18 @@ keyed coverage before publication.
       digest; do not extend the legacy v1 detection payload in place.
 - [x] Add a frozen-generation reader and recompute every partition/generation
       digest before resolution.
-- [ ] Add the immutable compactor using the shared detection storage planner,
+- [x] Add the immutable local compactor using the shared detection storage planner,
       consolidated metadata, and complete publication validator.
-- [ ] Add crash/retry tests around generation freeze, successor opening,
-      scratch construction, and atomic publication.
+- [x] Add a retry-safe generation freeze/successor-open rollover and prove that
+      new partitions can append to the successor before heavy compaction.
+- [x] Add local real-Zarr tests for fresh scratch construction, multi-instance
+      rows, manual additions, rebuilt offsets, exact manifest bindings, strict
+      timing receipts, and unsafe destination rejection.
+- [ ] Run the instrumented compactor first on a copied 2,048-frame integration
+      fixture, then on one copied full-duration refined snapshot; retain phase
+      receipts and keep network copy-in/copy-back timings separate.
+- [ ] Add crash-injection tests and an exclusive atomic candidate copy-back
+      step before any shared benchmark publication.
 - [ ] Define and implement downstream copy-forward/invalidation planning for
       crop, keypoints, subject masks, tracking, and training.
 - [ ] Add Palette/Crimson base-plus-delta overlays only if pre-compaction reads
@@ -240,4 +314,5 @@ keyed coverage before publication.
 - No current refined run is mutated.
 - No selector, registry, or training artifact changes.
 - No recording-level clipped aggregate is edited directly.
-- No compactor or cluster job is authorized yet.
+- No cluster job, shared copy-back, or production compactor routing is
+  authorized by this local checkpoint.

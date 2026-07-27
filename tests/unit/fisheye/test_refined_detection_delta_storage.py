@@ -25,6 +25,7 @@ from fisheye.shared.zarr.refined_detection_delta_storage import (
     read_frozen_refined_detection_delta_generation,
     read_refined_detection_delta_partition,
     refined_detection_delta_array_digest,
+    rollover_refined_detection_delta_generation,
     write_refined_detection_delta_partition,
 )
 from fisheye.shared.zarr.refined_detection_schema import (
@@ -37,6 +38,7 @@ from fisheye.shared.zarr.refined_detection_schema import (
 LINEAGE_ID = "22222222-2222-4222-8222-222222222222"
 BASE_SNAPSHOT_ID = "11111111-1111-4111-8111-111111111111"
 BASE_MANIFEST_DIGEST = "a" * 64
+BASE_LOGICAL_CONTENT_DIGEST = "b" * 64
 RECORDING_IDENTITY = "delta_storage_recording"
 CREATED_AT = "2026-07-27T12:00:00+00:00"
 
@@ -51,6 +53,7 @@ def _binding() -> RefinedDetectionDeltaLineageBinding:
         base_run_path="refined_detect_runs/base_snapshot",
         base_snapshot_id=BASE_SNAPSHOT_ID,
         base_manifest_digest=BASE_MANIFEST_DIGEST,
+        base_logical_content_digest=BASE_LOGICAL_CONTENT_DIGEST,
         recording_identity=RECORDING_IDENTITY,
         base_next_refined_row_id=0,
     )
@@ -80,9 +83,7 @@ def _add_batch(
     event = {
         "event_sequence": sequence,
         "expected_previous_event_sequence": 0,
-        "operation_codes": REFINED_DETECTION_DELTA_OPERATION_CODE_MAP[
-            "add_instance"
-        ],
+        "operation_codes": REFINED_DETECTION_DELTA_OPERATION_CODE_MAP["add_instance"],
         "instance_key": _manual_key(
             row_id=row_id,
             frame=2,
@@ -402,7 +403,53 @@ def test_generation_chain_requires_frozen_predecessor_and_advancing_sequences(
     assert result.report["generation_ordinals"] == [0, 1]
 
 
-def test_frozen_generation_rejects_membership_added_after_freeze(tmp_path: Path) -> None:
+def test_generation_rollover_is_retry_safe_and_opens_before_compaction(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    _create(root)
+    write_refined_detection_delta_partition(
+        root,
+        batch=_add_batch(sequence=10),
+        created_at_utc=CREATED_AT,
+    )
+
+    first = rollover_refined_detection_delta_generation(
+        root,
+        delta_lineage_id=LINEAGE_ID,
+        generation_ordinal=0,
+        next_generation_ordinal=1,
+        actor_id="compactor",
+        frozen_at_utc="2026-07-27T14:00:00+00:00",
+        next_created_at_utc="2026-07-27T14:00:01+00:00",
+    )
+    retry = rollover_refined_detection_delta_generation(
+        root,
+        delta_lineage_id=LINEAGE_ID,
+        generation_ordinal=0,
+        next_generation_ordinal=1,
+        actor_id="compactor",
+        frozen_at_utc="2026-07-27T14:00:00+00:00",
+        next_created_at_utc="2026-07-27T14:00:01+00:00",
+    )
+
+    assert retry == first
+    assert first["heavy_compaction_may_begin"] is True
+    write_refined_detection_delta_partition(
+        root,
+        batch=_add_batch(
+            partition_id="partition_next",
+            sequence=11,
+            generation_ordinal=1,
+            row_id=1,
+        ),
+        created_at_utc="2026-07-27T15:00:00+00:00",
+    )
+
+
+def test_frozen_generation_rejects_membership_added_after_freeze(
+    tmp_path: Path,
+) -> None:
     root = _root(tmp_path)
     _create(root)
     write_refined_detection_delta_partition(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import re
 from typing import Any, Mapping
 from uuid import UUID
@@ -67,6 +68,11 @@ METADATA_DECLARATIONS_SCHEMA_ID = "palette.refined_detection.metadata_declaratio
 METADATA_DECLARATIONS_SCHEMA_VERSION = 1
 REFINED_ROW_ID_ALLOCATOR_SCHEME = "monotonic_int64_nonreuse_v1"
 MANUAL_INSTANCE_KEY_ALLOCATOR_SCHEME = "blake2b64_manual_namespace_by_refined_row_id_v1"
+REFINED_DETECTION_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_exact_dtype_v1"
+REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_ID = (
+    "palette.refined_detection.logical_content"
+)
+REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_VERSION = 1
 
 REFINED_DETECTION_INTENDED_USES = (
     "analysis",
@@ -286,6 +292,55 @@ def refined_detection_metadata_declarations_digest(
         normalize_refined_detection_metadata_declarations(
             direct_metadata_by_path,
             consolidated_metadata_by_path=consolidated_metadata_by_path,
+            dimensions=dimensions,
+        )
+    )
+
+
+def refined_detection_logical_content_document(
+    arrays: Mapping[str, Any],
+    *,
+    dimensions: RefinedDetectionDimensions,
+) -> dict[str, object]:
+    """Describe every decoded refined-v1 array with an exact content digest."""
+
+    REFINED_DETECTION_SCHEMA_V1.require(arrays, dimensions=dimensions)
+    expected = REFINED_DETECTION_SCHEMA_V1.binding_paths_for(dimensions)
+    if set(arrays) != set(expected):
+        raise ValueError("Refined logical content requires the exact array set.")
+    declarations: dict[str, object] = {}
+    for path in expected:
+        values = np.ascontiguousarray(_array_values(arrays[path], dtype=None))
+        declarations[path] = {
+            "shape": list(values.shape),
+            "dtype": str(values.dtype),
+            "digest_algorithm": REFINED_DETECTION_ARRAY_DIGEST_ALGORITHM,
+            "sha256": hashlib.sha256(values.view(np.uint8)).hexdigest(),
+        }
+    document: dict[str, object] = {
+        "schema_id": REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_ID,
+        "schema_version": REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_VERSION,
+        "logical_schema": {
+            "id": REFINED_DETECTION_SCHEMA_V1.schema_id,
+            "version": REFINED_DETECTION_SCHEMA_V1.schema_version,
+        },
+        "dimensions": dimensions.as_manifest(),
+        "arrays": declarations,
+    }
+    canonical_json_bytes(document)
+    return document
+
+
+def refined_detection_logical_content_digest(
+    arrays: Mapping[str, Any],
+    *,
+    dimensions: RefinedDetectionDimensions,
+) -> str:
+    """Return the aggregate digest for one exact decoded refined-v1 rowset."""
+
+    return canonical_json_sha256(
+        refined_detection_logical_content_document(
+            arrays,
             dimensions=dimensions,
         )
     )
@@ -2106,6 +2161,9 @@ __all__ = [
     "REFINED_DETECTION_AUTHORITY_SCHEMA_ID",
     "REFINED_DETECTION_AUTHORITY_SCHEMA_VERSION",
     "REFINED_DETECTION_INTENDED_USES",
+    "REFINED_DETECTION_ARRAY_DIGEST_ALGORITHM",
+    "REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_ID",
+    "REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_VERSION",
     "REFINED_DETECTION_RAW_FALLBACK_POLICIES",
     "REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE",
     "REFINED_DETECTION_RUN_MANIFEST_PERSISTED_PATH",
@@ -2124,6 +2182,8 @@ __all__ = [
     "normalize_refined_detection_metadata_declarations",
     "parse_refined_detection_clipped_binding",
     "refined_detection_metadata_declarations_digest",
+    "refined_detection_logical_content_digest",
+    "refined_detection_logical_content_document",
     "refined_detection_selection_contract_manifest",
     "validate_refined_detection_run_manifest",
     "validate_refined_detection_publication",

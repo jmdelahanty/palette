@@ -6,7 +6,8 @@ this contract yet.
 This contract defines the future-facing immutable refined-detection snapshot.
 It freezes logical arrays, dtypes, identities, frame lookup, source-audit
 semantics, storage access classes, codecs, metadata, and publication gates
-before Palette designs the next detection delta schema or compactor.
+and is now the immutable output contract used by the isolated delta-v2
+compactor.
 
 The executable definitions are:
 
@@ -34,9 +35,10 @@ detection is represented by no row. An eventual manual addition becomes an
 ordinary `instances` row in the next compacted snapshot; it never mutates the
 raw detect run.
 
-Interactive edits must eventually use external sparse delta generations.
-Compaction must create and validate a new immutable snapshot. Neither the delta
-schema nor compactor is part of v1 implementation work yet.
+Interactive edits use external sparse delta generations. Compaction creates and
+validates a new immutable snapshot through the shared storage planner. The
+implemented compactor remains local and selector-ineligible; no current review
+writer or production selector is routed through it yet.
 
 ## Dimensions
 
@@ -536,7 +538,11 @@ Deferred until this contract is accepted:
       frozen-generation reader that reconstructs manifests, physical plans,
       array digests, partition digests, and the lineage-global generation
       chain before resolution.
-- [ ] Implement the whole-shard immutable compactor.
+- [x] Implement the selector-ineligible local whole-shard immutable compactor
+      with complete refined-v1 validation and phase-aware benchmark receipts.
+- [ ] Bind delta-compaction provenance inside a future authoritative manifest
+      revision before production promotion; the current exact v1 manifest is
+      intentionally unchanged for Crimson compatibility.
 - [ ] Route manual review through delta partitions.
 - [ ] Add rowset-change invalidation/regeneration for crops, keypoints, masks,
       and training exports.

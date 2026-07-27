@@ -348,12 +348,8 @@ def test_add_replace_delete_restore_resolves_complete_multisubject_snapshot() ->
 
     assert result.dimensions.n_instances == 3
     assert result.next_refined_row_id == 9
-    np.testing.assert_array_equal(
-        result.arrays["instances/frame_indices"], [0, 0, 2]
-    )
-    np.testing.assert_array_equal(
-        result.arrays["instances/refined_row_ids"], [5, 8, 7]
-    )
+    np.testing.assert_array_equal(result.arrays["instances/frame_indices"], [0, 0, 2])
+    np.testing.assert_array_equal(result.arrays["instances/refined_row_ids"], [5, 8, 7])
     np.testing.assert_array_equal(
         result.arrays["instances/instance_key"], [10, added_key, 30]
     )
@@ -376,10 +372,13 @@ def test_add_replace_delete_restore_resolves_complete_multisubject_snapshot() ->
     }
     assert result.report["added_instance_keys"] == [added_key]
     assert result.report["rowset_changed"] is True
-    assert REFINED_DETECTION_SCHEMA_V1.validate(
-        result.arrays,
-        dimensions=result.dimensions,
-    ) == ()
+    assert (
+        REFINED_DETECTION_SCHEMA_V1.validate(
+            result.arrays,
+            dimensions=result.dimensions,
+        )
+        == ()
+    )
 
 
 def test_delete_updates_source_audit_and_rebuilds_offsets() -> None:
@@ -550,8 +549,40 @@ def test_restore_is_limited_to_latest_uncompacted_tombstone() -> None:
             )
         ]
     )
-    with pytest.raises(RefinedDetectionDeltaError, match="uncompacted delete"):
+    with pytest.raises(RefinedDetectionDeltaError, match="same open generation"):
         _resolve(restore_without_delete)
+
+
+def test_restore_cannot_cross_a_frozen_generation_boundary() -> None:
+    deleted = _batch(
+        [
+            _event(
+                sequence=1,
+                operation="delete_instance",
+                instance_key=30,
+                refined_row_id=7,
+                hint=1,
+            )
+        ],
+        generation_ordinal=1,
+    )
+    restored = _batch(
+        [
+            _event(
+                sequence=2,
+                operation="restore_instance",
+                instance_key=30,
+                refined_row_id=7,
+                predecessor=1,
+                hint=1,
+            )
+        ],
+        partition_id="partition_0002",
+        generation_ordinal=2,
+    )
+
+    with pytest.raises(RefinedDetectionDeltaError, match="same open generation"):
+        _resolve(deleted, restored)
 
 
 def test_global_event_sequence_is_unique_across_partitions() -> None:
@@ -584,7 +615,9 @@ def test_global_event_sequence_is_unique_across_partitions() -> None:
         _resolve(first, second)
 
 
-def test_partition_event_sequence_must_be_strictly_increasing_without_uint64_wrap() -> None:
+def test_partition_event_sequence_must_be_strictly_increasing_without_uint64_wrap() -> (
+    None
+):
     events = [
         _event(
             sequence=2,

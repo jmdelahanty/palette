@@ -922,8 +922,12 @@ define refined-run selection or manual-addition semantics.
       physical equivalence to the frozen candidate.
 - [ ] Have Crimson perform an exact-schema open-only smoke against the named
       profile canary; do not repeat the performance matrix.
-- [ ] Begin detection delta v2 and compactor design only after the snapshot
-      contract and its production-transition findings are accepted.
+- [x] Freeze detection delta v2, persist digest-verified generations, and add a
+      selector-ineligible local immutable compactor after acceptance of the
+      snapshot contract. The compactor records phase timings and cannot mutate
+      production selectors, registries, or recording archives.
+- [ ] Add crash-injected copy-back validation and manifest-bound compaction
+      derivation before routing a reviewer or production selector.
 
 The census is now recorded in
 [`diagnostics/refined_detection_producer_consumer_lifecycle_census_2026-07-26.md`](diagnostics/refined_detection_producer_consumer_lifecycle_census_2026-07-26.md).

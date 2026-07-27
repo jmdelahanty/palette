@@ -190,7 +190,9 @@ REFINED_DETECTION_DELTA_ARRAYS = (
     ),
 )
 
-_ARRAY_BY_NAME = {declaration.name: declaration for declaration in REFINED_DETECTION_DELTA_ARRAYS}
+_ARRAY_BY_NAME = {
+    declaration.name: declaration for declaration in REFINED_DETECTION_DELTA_ARRAYS
+}
 _PAYLOAD_FIELD_NAMES = (
     "frame_indices",
     "source_acquisition_frame_index",
@@ -216,7 +218,9 @@ def _require_uuid(value: str, *, name: str) -> str:
         raise RefinedDetectionDeltaError(f"{name} must be a canonical UUID.") from exc
     canonical = str(parsed)
     if text != canonical:
-        raise RefinedDetectionDeltaError(f"{name} must use canonical lowercase UUID text.")
+        raise RefinedDetectionDeltaError(
+            f"{name} must use canonical lowercase UUID text."
+        )
     return canonical
 
 
@@ -241,7 +245,9 @@ def _require_component(value: str, *, name: str) -> str:
 def _normalize_reason_registry(value: Mapping[int, str]) -> Mapping[int, str]:
     normalized: dict[int, str] = {}
     for raw_code, raw_label in value.items():
-        if type(raw_code) is not int or not 0 <= raw_code <= int(np.iinfo(np.uint16).max):
+        if type(raw_code) is not int or not 0 <= raw_code <= int(
+            np.iinfo(np.uint16).max
+        ):
             raise RefinedDetectionDeltaError(
                 "Reason registry codes must be exact uint16-domain integers."
             )
@@ -324,7 +330,10 @@ class RefinedDetectionDeltaBatch:
                     f"got {values.dtype}."
                 )
             expected_rank = 1 + len(declaration.trailing_shape)
-            if values.ndim != expected_rank or values.shape[1:] != declaration.trailing_shape:
+            if (
+                values.ndim != expected_rank
+                or values.shape[1:] != declaration.trailing_shape
+            ):
                 raise RefinedDetectionDeltaError(
                     f"{declaration.name} shape must be "
                     f"(n_events, {declaration.trailing_shape}); got {values.shape}."
@@ -405,7 +414,9 @@ class RefinedDetectionDeltaBatch:
             )
         payload = ~no_payload
         if np.any(payload & (arrays["frame_indices"] < 0)):
-            raise RefinedDetectionDeltaError("Payload frame_indices must be nonnegative.")
+            raise RefinedDetectionDeltaError(
+                "Payload frame_indices must be nonnegative."
+            )
         if np.any(
             payload
             & (
@@ -505,6 +516,7 @@ class _RowState:
     base_row_index: int | None
     active: bool
     last_event_sequence: int
+    last_generation_ordinal: int | None
     last_operation: str | None
     reason_label: str
     payload: dict[str, Any]
@@ -524,8 +536,8 @@ def refined_detection_delta_schema_manifest() -> dict[str, object]:
         "event_identity": "(delta_lineage_id,event_sequence)",
         "optimistic_concurrency": "expected_previous_event_sequence",
         "restore_boundary": (
-            "only_an_uncompacted_tombstone_in_the_same_delta_lineage;_a_"
-            "compacted_retirement_requires_a_new_add_identity"
+            "only_a_tombstone_created_in_the_same_open_generation;_freezing_"
+            "the_generation_retires_the_identity_and_requires_a_new_add"
         ),
         "lineage_profiles": [RefinedDetectionLineageProfile.FULL_ACQUISITION.value],
         "array_declarations": [
@@ -555,7 +567,9 @@ def _decode_reason_labels(
     return [normalized[int(code)] for code in codes.tolist()]
 
 
-def _encode_reason_labels(labels: Sequence[str]) -> tuple[np.ndarray, Mapping[int, str]]:
+def _encode_reason_labels(
+    labels: Sequence[str],
+) -> tuple[np.ndarray, Mapping[int, str]]:
     nonzero = sorted({label for label in labels if label != "none"})
     if len(nonzero) >= int(np.iinfo(np.uint16).max):
         raise RefinedDetectionDeltaError("Resolved reason registry exceeds uint16.")
@@ -605,7 +619,9 @@ def _validate_payload_geometry(payload: Mapping[str, Any], *, n_frames: int) -> 
     frame = int(payload["frame_indices"])
     bbox = np.asarray(payload["bbox_norm_coords"], dtype=np.float32).reshape(1, 4)
     if frame < 0 or frame >= n_frames:
-        raise RefinedDetectionDeltaError("Delta payload frame is outside the base domain.")
+        raise RefinedDetectionDeltaError(
+            "Delta payload frame is outside the base domain."
+        )
     half = np.float32(0.5)
     valid = bool(
         np.isfinite(bbox).all()
@@ -746,6 +762,7 @@ def resolve_refined_detection_deltas(
             base_row_index=row,
             active=True,
             last_event_sequence=0,
+            last_generation_ordinal=None,
             last_operation=None,
             reason_label=instance_reason_labels[row],
             payload=_payload_from_base(base_arrays, row),
@@ -768,14 +785,11 @@ def resolve_refined_detection_deltas(
         copy=True,
     )
     high_water = next_refined_row_id
-    operation_counts = {
-        name: 0 for name in REFINED_DETECTION_DELTA_OPERATION_CODE_MAP
-    }
+    operation_counts = {name: 0 for name in REFINED_DETECTION_DELTA_OPERATION_CODE_MAP}
     touched_keys: set[int] = set()
 
     name_by_code = {
-        code: name
-        for name, code in REFINED_DETECTION_DELTA_OPERATION_CODE_MAP.items()
+        code: name for name, code in REFINED_DETECTION_DELTA_OPERATION_CODE_MAP.items()
     }
     for sequence, batch, row in events:
         operation_code = int(batch.arrays["operation_codes"][row])
@@ -783,12 +797,8 @@ def resolve_refined_detection_deltas(
         key = int(batch.arrays["instance_key"][row])
         row_id = int(batch.arrays["refined_row_ids"][row])
         hint = int(batch.arrays["row_index_hint"][row])
-        expected_previous = int(
-            batch.arrays["expected_previous_event_sequence"][row]
-        )
-        reason_label = batch.reason_code_map[
-            int(batch.arrays["reason_codes"][row])
-        ]
+        expected_previous = int(batch.arrays["expected_previous_event_sequence"][row])
+        reason_label = batch.reason_code_map[int(batch.arrays["reason_codes"][row])]
         state = states.get(key)
 
         if operation == "add_instance":
@@ -807,8 +817,7 @@ def resolve_refined_detection_deltas(
             payload = _payload_from_event(batch, row)
             _validate_payload_geometry(payload, n_frames=base_dimensions.n_frames)
             if (
-                int(payload["source_kind_codes"])
-                != SOURCE_KIND_CODE_MAP["manual"]
+                int(payload["source_kind_codes"]) != SOURCE_KIND_CODE_MAP["manual"]
                 or int(payload["source_detect_row_index"]) != -1
                 or bool(payload["score_valid"])
                 or float(payload["scores"]) != 0.0
@@ -839,6 +848,7 @@ def resolve_refined_detection_deltas(
                 base_row_index=None,
                 active=True,
                 last_event_sequence=sequence,
+                last_generation_ordinal=batch.generation_ordinal,
                 last_operation=operation,
                 reason_label=reason_label,
                 payload=payload,
@@ -903,10 +913,14 @@ def resolve_refined_detection_deltas(
                     source_resolved[source_row] = np.int64(-1)
                     source_reason_labels[source_row] = reason_label
             elif operation == "restore_instance":
-                if state.active or state.last_operation != "delete_instance":
+                if (
+                    state.active
+                    or state.last_operation != "delete_instance"
+                    or state.last_generation_ordinal != batch.generation_ordinal
+                ):
                     raise RefinedDetectionDeltaError(
                         "restore_instance requires the target's latest event to be "
-                        "an uncompacted delete in this delta lineage."
+                        "a delete in the same open generation."
                     )
                 state.active = True
                 state.reason_label = reason_label
@@ -918,6 +932,7 @@ def resolve_refined_detection_deltas(
                     source_resolved[source_row] = np.int64(state.refined_row_id)
                     source_reason_labels[source_row] = reason_label
             state.last_event_sequence = sequence
+            state.last_generation_ordinal = batch.generation_ordinal
             state.last_operation = operation
         operation_counts[operation] += 1
         touched_keys.add(key)
@@ -951,14 +966,15 @@ def resolve_refined_detection_deltas(
     instance_reason_values, instance_registry = _encode_reason_labels(
         resolved_instance_labels
     )
-    source_reason_values, source_registry = _encode_reason_labels(
-        source_reason_labels
-    )
+    source_reason_values, source_registry = _encode_reason_labels(source_reason_labels)
 
     arrays: dict[str, np.ndarray] = {
         "instances/frame_indices": instance_frames,
         "instances/source_acquisition_frame_index": np.asarray(
-            [state.payload["source_acquisition_frame_index"] for state in active_states],
+            [
+                state.payload["source_acquisition_frame_index"]
+                for state in active_states
+            ],
             dtype=np.int64,
         ),
         "instances/instance_key": np.asarray(

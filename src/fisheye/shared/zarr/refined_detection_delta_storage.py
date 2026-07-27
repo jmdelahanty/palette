@@ -55,10 +55,8 @@ from fisheye.shared.zarr.storage_profiles import EDITABLE_LOCAL_V1
 
 
 REFINED_DETECTION_DELTA_PARENT = "refined_detection_delta_runs"
-REFINED_DETECTION_DELTA_LINEAGE_SCHEMA_ID = (
-    "palette.refined_detection.delta_lineage"
-)
-REFINED_DETECTION_DELTA_LINEAGE_SCHEMA_VERSION = 1
+REFINED_DETECTION_DELTA_LINEAGE_SCHEMA_ID = "palette.refined_detection.delta_lineage"
+REFINED_DETECTION_DELTA_LINEAGE_SCHEMA_VERSION = 2
 REFINED_DETECTION_DELTA_GENERATION_SCHEMA_ID = (
     "palette.refined_detection.delta_generation"
 )
@@ -138,7 +136,9 @@ def _require_uuid(value: str, *, name: str) -> str:
 
 def _require_sha256(value: str, *, name: str) -> str:
     text = str(value).strip()
-    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+    if len(text) != 64 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
         raise RefinedDetectionDeltaStorageError(
             f"{name} must be a lowercase 64-character SHA-256 digest."
         )
@@ -151,7 +151,11 @@ def _normalize_group_path(value: str, *, name: str) -> str:
     if not parts or any(
         not part
         or part in {".", ".."}
-        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-" for character in part)
+        or any(
+            character
+            not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+            for character in part
+        )
         for part in parts
     ):
         raise RefinedDetectionDeltaStorageError(
@@ -231,6 +235,7 @@ class RefinedDetectionDeltaLineageBinding:
     base_run_path: str
     base_snapshot_id: str
     base_manifest_digest: str
+    base_logical_content_digest: str
     recording_identity: str
     base_next_refined_row_id: int
 
@@ -260,6 +265,14 @@ class RefinedDetectionDeltaLineageBinding:
         )
         object.__setattr__(
             self,
+            "base_logical_content_digest",
+            _require_sha256(
+                self.base_logical_content_digest,
+                name="base_logical_content_digest",
+            ),
+        )
+        object.__setattr__(
+            self,
             "recording_identity",
             _require_text(self.recording_identity, name="recording_identity"),
         )
@@ -277,6 +290,7 @@ class RefinedDetectionDeltaLineageBinding:
             "base_run_path": self.base_run_path,
             "base_snapshot_id": self.base_snapshot_id,
             "base_manifest_digest": self.base_manifest_digest,
+            "base_logical_content_digest": self.base_logical_content_digest,
             "recording_identity": self.recording_identity,
             "base_next_refined_row_id": self.base_next_refined_row_id,
         }
@@ -315,7 +329,9 @@ class FrozenRefinedDetectionDeltaGeneration:
         )
 
 
-def _array_contract(name: str, dtype: str, trailing_shape: tuple[int, ...]) -> ArrayContract:
+def _array_contract(
+    name: str, dtype: str, trailing_shape: tuple[int, ...]
+) -> ArrayContract:
     try:
         dtype_contract = _DTYPE_CONTRACTS[dtype]
     except KeyError as exc:
@@ -571,12 +587,11 @@ def _generation_payload(
         "delta_lineage_id": binding.delta_lineage_id,
         "base_snapshot_id": binding.base_snapshot_id,
         "base_manifest_digest": binding.base_manifest_digest,
+        "base_logical_content_digest": binding.base_logical_content_digest,
         "generation_ordinal": ordinal,
         "generation_name": _generation_name(ordinal),
         "previous_generation_ordinal": previous_generation_ordinal,
-        "previous_generation_manifest_digest": (
-            previous_generation_manifest_digest
-        ),
+        "previous_generation_manifest_digest": (previous_generation_manifest_digest),
         "minimum_event_sequence_exclusive": sequence_floor,
         "created_at_utc": _require_utc_timestamp(
             created_at_utc,
@@ -653,7 +668,9 @@ def _lineage_group(root: Any, delta_lineage_id: str) -> Any:
         ) from exc
 
 
-def _read_lineage_binding(root: Any, delta_lineage_id: str) -> tuple[Any, RefinedDetectionDeltaLineageBinding, Mapping[str, Any]]:
+def _read_lineage_binding(
+    root: Any, delta_lineage_id: str
+) -> tuple[Any, RefinedDetectionDeltaLineageBinding, Mapping[str, Any]]:
     lineage = _lineage_group(root, delta_lineage_id)
     manifest = _require_only_attribute(
         lineage,
@@ -682,6 +699,7 @@ def _read_lineage_binding(root: Any, delta_lineage_id: str) -> tuple[Any, Refine
             "base_run_path",
             "base_snapshot_id",
             "base_manifest_digest",
+            "base_logical_content_digest",
             "recording_identity",
             "base_next_refined_row_id",
         },
@@ -695,7 +713,7 @@ def _read_lineage_binding(root: Any, delta_lineage_id: str) -> tuple[Any, Refine
     )
     if _json_tree(payload) != expected:
         raise RefinedDetectionDeltaStorageError(
-            "Lineage manifest does not match the frozen v1 contract."
+            "Lineage manifest does not match the frozen v2 contract."
         )
     if binding.delta_lineage_id != delta_lineage_id:
         raise RefinedDetectionDeltaStorageError(
@@ -814,7 +832,9 @@ def create_refined_detection_delta_generation(
     return dict(generation.attrs[_GENERATION_MANIFEST_ATTRIBUTE])
 
 
-def _generation_group(root: Any, *, delta_lineage_id: str, generation_ordinal: int) -> tuple[Any, RefinedDetectionDeltaLineageBinding]:
+def _generation_group(
+    root: Any, *, delta_lineage_id: str, generation_ordinal: int
+) -> tuple[Any, RefinedDetectionDeltaLineageBinding]:
     lineage, binding, _lineage_manifest = _read_lineage_binding(
         root,
         delta_lineage_id,
@@ -853,6 +873,7 @@ def _read_generation_manifest(
             "delta_lineage_id",
             "base_snapshot_id",
             "base_manifest_digest",
+            "base_logical_content_digest",
             "generation_ordinal",
             "generation_name",
             "previous_generation_ordinal",
@@ -879,9 +900,7 @@ def _read_generation_manifest(
         previous_generation_manifest_digest=payload[
             "previous_generation_manifest_digest"
         ],
-        minimum_event_sequence_exclusive=payload[
-            "minimum_event_sequence_exclusive"
-        ],
+        minimum_event_sequence_exclusive=payload["minimum_event_sequence_exclusive"],
         frozen_at_utc=payload["frozen_at_utc"],
         frozen_by=payload["frozen_by"],
         partition_receipts=payload["partition_receipts"],
@@ -1158,10 +1177,11 @@ def _generation_content_document(
 ) -> dict[str, object]:
     return {
         "schema_id": "palette.refined_detection.delta_generation_content",
-        "schema_version": 1,
+        "schema_version": 2,
         "delta_lineage_id": binding.delta_lineage_id,
         "base_snapshot_id": binding.base_snapshot_id,
         "base_manifest_digest": binding.base_manifest_digest,
+        "base_logical_content_digest": binding.base_logical_content_digest,
         "generation_ordinal": generation_ordinal,
         "partitions": _json_tree(partition_receipts),
     }
@@ -1225,8 +1245,7 @@ def freeze_refined_detection_delta_generation(
     batches = tuple(batch for batch, _manifest_value in loaded)
     _require_unique_generation_sequences(batches)
     receipts = [
-        _partition_generation_receipt(batch, manifest)
-        for batch, manifest in loaded
+        _partition_generation_receipt(batch, manifest) for batch, manifest in loaded
     ]
     content_document = _generation_content_document(
         binding=binding,
@@ -1239,9 +1258,7 @@ def freeze_refined_detection_delta_generation(
         created_at_utc=str(current_payload["created_at_utc"]),
         created_by=str(current_payload["created_by"]),
         status="frozen",
-        previous_generation_ordinal=current_payload[
-            "previous_generation_ordinal"
-        ],
+        previous_generation_ordinal=current_payload["previous_generation_ordinal"],
         previous_generation_manifest_digest=current_payload[
             "previous_generation_manifest_digest"
         ],
@@ -1260,6 +1277,91 @@ def freeze_refined_detection_delta_generation(
         generation_ordinal=generation_ordinal,
     )
     return frozen.generation_manifest
+
+
+def rollover_refined_detection_delta_generation(
+    root: Any,
+    *,
+    delta_lineage_id: str,
+    generation_ordinal: int,
+    next_generation_ordinal: int,
+    actor_id: str,
+    frozen_at_utc: str | None = None,
+    next_created_at_utc: str | None = None,
+) -> Mapping[str, object]:
+    """Freeze ``G`` and make ``G+1`` available before heavy compaction.
+
+    The operation is retry-safe across the only unavoidable boundary: if the
+    process stops after freezing but before opening the successor, a retry
+    validates the frozen generation and creates the missing successor.  If the
+    successor already exists, it is accepted only when its exact predecessor
+    binding and open status match this rollover.
+    """
+
+    current = _require_ordinal(generation_ordinal, name="generation_ordinal")
+    successor = _require_ordinal(
+        next_generation_ordinal,
+        name="next_generation_ordinal",
+    )
+    if successor != current + 1:
+        raise RefinedDetectionDeltaStorageError(
+            "Generation rollover must open the immediate next ordinal."
+        )
+    frozen = freeze_refined_detection_delta_generation(
+        root,
+        delta_lineage_id=delta_lineage_id,
+        generation_ordinal=current,
+        frozen_by=actor_id,
+        frozen_at_utc=frozen_at_utc,
+    )
+    lineage, binding, _lineage_manifest = _read_lineage_binding(
+        root,
+        delta_lineage_id,
+    )
+    successor_name = _generation_name(successor)
+    generations = lineage["generations"]
+    if successor_name not in generations:
+        opened = create_refined_detection_delta_generation(
+            root,
+            delta_lineage_id=delta_lineage_id,
+            generation_ordinal=successor,
+            created_by=actor_id,
+            created_at_utc=next_created_at_utc,
+        )
+    else:
+        successor_group, observed_binding = _generation_group(
+            root,
+            delta_lineage_id=delta_lineage_id,
+            generation_ordinal=successor,
+        )
+        if observed_binding != binding:
+            raise RefinedDetectionDeltaStorageError(
+                "Existing successor generation lineage binding mismatch."
+            )
+        opened, opened_payload = _read_generation_manifest(
+            successor_group,
+            binding=binding,
+            generation_ordinal=successor,
+        )
+        if (
+            opened_payload["status"] != "open"
+            or opened_payload["previous_generation_ordinal"] != current
+            or opened_payload["previous_generation_manifest_digest"]
+            != frozen["payload_digest"]
+        ):
+            raise RefinedDetectionDeltaStorageError(
+                "Existing successor generation does not match rollover."
+            )
+    return {
+        "schema_id": "palette.refined_detection.delta_generation_rollover",
+        "schema_version": 1,
+        "delta_lineage_id": binding.delta_lineage_id,
+        "frozen_generation_ordinal": current,
+        "frozen_generation_manifest_digest": frozen["payload_digest"],
+        "open_generation_ordinal": successor,
+        "open_generation_manifest_digest": opened["payload_digest"],
+        "heavy_compaction_may_begin": True,
+    }
 
 
 def read_frozen_refined_detection_delta_generation(
@@ -1420,5 +1522,6 @@ __all__ = [
     "read_frozen_refined_detection_delta_generation",
     "read_refined_detection_delta_partition",
     "refined_detection_delta_array_digest",
+    "rollover_refined_detection_delta_generation",
     "write_refined_detection_delta_partition",
 ]
