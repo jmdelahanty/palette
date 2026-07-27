@@ -5,7 +5,14 @@ import copy
 import numpy as np
 import pytest
 
-from fisheye.shared.instance_keys import mint_manual_curation_instance_keys
+from fisheye.shared.instance_keys import (
+    mint_detection_instance_keys,
+    mint_manual_curation_instance_keys,
+)
+from fisheye.shared.zarr.detection_schema import (
+    CanonicalDetectionDimensions,
+    derive_canonical_detection_geometry,
+)
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
     SOURCE_DECISION_CODE_MAP,
@@ -13,6 +20,7 @@ from fisheye.shared.zarr.refined_detection_schema import (
 )
 from fisheye.shared.zarr.refined_detection_transition import (
     RefinedDetectionTransitionError,
+    build_accept_all_refined_detection_root,
     build_refined_detection_transition,
 )
 
@@ -127,6 +135,82 @@ def test_current_sparse_run_transitions_to_exact_full_v1() -> None:
     assert result.arrays["instances/score_valid"].tolist() == [True, False, True]
     assert result.instance_reason_codes == {0: "none", 1: "manual_addition"}
     assert result.source_reason_codes == {0: "none", 1: "filtered_blip"}
+
+
+def test_accept_all_root_preserves_multi_instance_canonical_rows() -> None:
+    frames = np.asarray([0, 0, 2, 3, 3, 3], dtype=np.int32)
+    bbox_norm = np.asarray(
+        [
+            [0.20, 0.20, 0.10, 0.10],
+            [0.80, 0.20, 0.10, 0.10],
+            [0.50, 0.50, 0.20, 0.20],
+            [0.20, 0.80, 0.10, 0.10],
+            [0.50, 0.80, 0.10, 0.10],
+            [0.80, 0.80, 0.10, 0.10],
+        ],
+        dtype=np.float32,
+    )
+    class_ids = np.asarray([1, 1, 2, 1, 2, 3], dtype=np.int32)
+    bbox_img, centers = derive_canonical_detection_geometry(
+        bbox_norm,
+        source_width=640,
+        source_height=480,
+    )
+    keys = mint_detection_instance_keys(
+        recording_identity=RECORDING_IDENTITY,
+        frame_indices=frames,
+        bbox_norm_coords=bbox_norm,
+        class_ids=class_ids,
+    )
+    offsets = np.asarray([0, 2, 2, 3, 6], dtype=np.int64)
+    canonical = {
+        "instances/frame_indices": frames,
+        "instances/source_acquisition_frame_index": frames.astype(np.int64),
+        "instances/instance_key": keys,
+        "instances/bbox_norm_coords": bbox_norm,
+        "instances/bbox_img_xyxy": bbox_img,
+        "instances/centers_img_xy": centers,
+        "instances/scores": np.linspace(0.5, 1.0, 6, dtype=np.float32),
+        "instances/class_ids": class_ids,
+        "instances/frame_row_offsets": offsets,
+    }
+    result = build_accept_all_refined_detection_root(
+        canonical,
+        dimensions=CanonicalDetectionDimensions(
+            n_frames=4,
+            n_instances=6,
+            source_width=640,
+            source_height=480,
+        ),
+        recording_identity=RECORDING_IDENTITY,
+    )
+
+    assert result.report["source_profile"] == ("canonical_detection_v1_accept_all_root")
+    assert result.arrays["instances/frame_row_offsets"].tolist() == [0, 2, 2, 3, 6]
+    assert result.arrays["source_detections/frame_row_offsets"].tolist() == [
+        0,
+        2,
+        2,
+        3,
+        6,
+    ]
+    assert np.array_equal(
+        result.arrays["instances/instance_key"],
+        result.arrays["source_detections/instance_key"],
+    )
+    assert result.arrays["instances/refined_row_ids"].tolist() == list(range(6))
+    assert result.arrays["instances/score_valid"].all()
+    assert not result.arrays["instances/manual_edit_flags"].any()
+    assert set(result.arrays["source_detections/decision_codes"].tolist()) == {
+        SOURCE_DECISION_CODE_MAP["accepted"]
+    }
+    assert (
+        REFINED_DETECTION_SCHEMA_V1.validate(
+            result.arrays,
+            dimensions=result.dimensions,
+        )
+        == ()
+    )
 
 
 def test_missing_keys_use_bound_raw_source_and_manual_allocator() -> None:

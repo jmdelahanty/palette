@@ -893,9 +893,16 @@ define refined-run selection or manual-addition semantics.
       refined-v1 consumer ready. Fresh-process validation proved complete
       canonical/refined publication validity, exact source-audit equality,
       direct/consolidated equivalence, and selector absence.
-- [ ] Complete Crimson's headless open/presentation/cancellation gate against
+- [x] Complete Crimson's headless open/presentation/cancellation gate against
       `refined_detect_shadow_crimson_20260727_v1`, binding its result to the
-      Palette handoff payload digest and exact Crimson commit.
+      Palette handoff payload digest and exact Crimson commits. The immutable
+      consumer evidence passed at implementation `28537f64b...`, evidence
+      `57693f8cf...`, and result SHA-256 `b0221cfb...`.
+- [x] Implement a full-duration paired profile-canary publisher. It uses the
+      immutable 1,188,000-frame canonical benchmark fixture, creates an exact
+      accept-all refined-v1 root snapshot on node-local scratch, publishes both
+      profiles through verified atomic candidate copies, and fails unless the
+      planned and actual payload-object reduction is at least 4x.
 - [ ] Run the paired regular-versus-access-aware refined snapshot canary and
       apply the pragmatic correctness/object/transfer/readiness/RSS gate before
       promoting a versioned writer profile.

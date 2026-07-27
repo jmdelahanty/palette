@@ -487,10 +487,16 @@ Before production routing:
       `.palette_benchmarks` namespace. Record exact server/macOS paths, run and
       manifest identities, direct/consolidated equality, strict receipts, and
       zero production-state changes in an immutable handoff manifest.
-- [ ] Have Crimson open the shared refined run through its dedicated
+- [x] Have Crimson open the shared refined run through its dedicated
       selector-ineligible benchmark option, retain `instance_key` and
       `refined_row_id`, and publish a result bound to both the Palette handoff
-      digest and the exact Crimson commit.
+      digest and exact Crimson commits. The immutable result passed at
+      implementation `28537f64b...`, evidence `57693f8cf...`, with evidence
+      SHA-256 `b0221cfb...`.
+- [x] Implement the paired full-duration canary publisher with verified
+      source-to-node-local staging, accept-all canonical root initialization,
+      scratch construction, exclusive atomic candidate copyback, full shared
+      reopen validation, and a required 4x planned and actual object gate.
 - [ ] Publish the paired regular/candidate refined canary and apply the
       practical gate above.
 - [ ] Promote a versioned profile only after that gate passes.

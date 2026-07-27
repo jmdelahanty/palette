@@ -204,6 +204,7 @@ def _metadata_maps(
 def publish_legacy_canonical_detection_shadow(
     *,
     source_group_path: Path,
+    source_evidence_group_path: Path | None = None,
     recording_identity: str,
     source_run_id: str,
     destination: Path,
@@ -227,12 +228,43 @@ def publish_legacy_canonical_detection_shadow(
         recording_identity=str(recording_identity),
         frame_limit=None,
     )
+    evidence_path = (
+        source_path
+        if source_evidence_group_path is None
+        else source_evidence_group_path.expanduser().resolve()
+    )
+    evidence_group = (
+        source_group
+        if evidence_path == source_path
+        else zarr.open_group(
+            str(evidence_path),
+            mode="r",
+            use_consolidated=False,
+        )
+    )
     source_evidence = build_legacy_detection_source_evidence(
-        source_group,
-        source_group_path=source_path,
+        evidence_group,
+        source_group_path=evidence_path,
         source_run_id=str(source_run_id),
         recording_identity=str(recording_identity),
     )
+    if evidence_path != source_path:
+        staged_evidence = build_legacy_detection_source_evidence(
+            source_group,
+            source_group_path=source_path,
+            source_run_id=str(source_run_id),
+            recording_identity=str(recording_identity),
+        )
+        for field in (
+            "source_group_metadata_sha256",
+            "source_arrays_digest",
+            "source_arrays",
+        ):
+            if staged_evidence[field] != source_evidence[field]:
+                raise ValueError(
+                    "Staged canonical source differs from its authoritative "
+                    f"evidence at {field!r}."
+                )
     plans = plan_canonical_detection_storage(
         benchmark_input.dimensions,
         profile=PUBLISHED_HTTP_V1,

@@ -225,9 +225,10 @@ cross-language comparator must implement this same narrow normalization.
 
 - Implement the separate clipped transition with ordered per-clip refined/raw
   evidence and full media/frame-map validation.
-- Have Crimson open the shared shadow through the dedicated refined-v1
-  consumer, retain observation identity through presentation, and publish the
-  exact consumer commit and results alongside the handoff digest.
+- Crimson's shared-shadow gate passed at implementation commit
+  `28537f64bcae765b062374b17dd879c0a9614ade` and evidence commit
+  `57693f8cf0ebb18072bf031f1306ad84cc6bbf0c`; its result SHA-256 is
+  `b0221cfbce74824e31e8b557a4dde6b0357bab5ece004437b65b100c4a7fd643`.
 - Only then run the paired regular-versus-access-aware canary gate and consider
   a versioned physical-profile promotion.
 - Keep delta v2, compaction, manual additions, downstream regeneration, and

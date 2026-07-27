@@ -20,9 +20,14 @@ from fisheye.shared.instance_keys import (
     mint_detection_instance_keys,
     mint_manual_curation_instance_keys,
 )
-from fisheye.shared.zarr.detection_schema import derive_canonical_detection_geometry
+from fisheye.shared.zarr.detection_schema import (
+    CANONICAL_DETECTION_SCHEMA_V1,
+    CanonicalDetectionDimensions,
+    derive_canonical_detection_geometry,
+)
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
+    SOURCE_DECISION_CODE_MAP,
     SOURCE_KIND_CODE_MAP,
     RefinedDetectionDimensions,
 )
@@ -801,10 +806,170 @@ def build_refined_detection_transition(
     )
 
 
+def build_accept_all_refined_detection_root(
+    canonical_arrays: Mapping[str, Any],
+    *,
+    dimensions: CanonicalDetectionDimensions,
+    recording_identity: str,
+) -> RefinedDetectionTransitionResult:
+    """Initialize one exact refined-v1 root snapshot from canonical detections.
+
+    Every canonical source row is accepted without changing its identity,
+    geometry, score, class, or frame.  This is a genuine root-snapshot state,
+    not a legacy refined-run conversion and not a clipped-lineage adapter.
+    """
+
+    normalized_recording_identity = str(recording_identity).strip()
+    if not normalized_recording_identity:
+        raise ValueError("recording_identity cannot be empty.")
+    CANONICAL_DETECTION_SCHEMA_V1.require(
+        canonical_arrays,
+        dimensions=dimensions,
+    )
+
+    canonical = {
+        path: np.asarray(value if isinstance(value, np.ndarray) else value[...])
+        for path, value in canonical_arrays.items()
+    }
+    n_rows = dimensions.n_instances
+    row_ids = np.arange(n_rows, dtype=np.int64)
+    frame_indices = np.asarray(
+        canonical["instances/frame_indices"],
+        dtype=np.int32,
+    )
+    source_frames = np.asarray(
+        canonical["instances/source_acquisition_frame_index"],
+        dtype=np.int64,
+    )
+    instance_keys = np.asarray(
+        canonical["instances/instance_key"],
+        dtype=np.uint64,
+    )
+    bbox_norm = np.asarray(
+        canonical["instances/bbox_norm_coords"],
+        dtype=np.float32,
+    )
+    bbox_img = np.asarray(
+        canonical["instances/bbox_img_xyxy"],
+        dtype=np.float32,
+    )
+    centers = np.asarray(
+        canonical["instances/centers_img_xy"],
+        dtype=np.float32,
+    )
+    scores = np.asarray(canonical["instances/scores"], dtype=np.float32)
+    class_ids = np.asarray(canonical["instances/class_ids"], dtype=np.int32)
+    offsets = np.asarray(
+        canonical["instances/frame_row_offsets"],
+        dtype=np.int64,
+    )
+    arrays: dict[str, np.ndarray] = {
+        "instances/frame_indices": frame_indices,
+        "instances/source_acquisition_frame_index": source_frames,
+        "instances/instance_key": instance_keys,
+        "instances/refined_row_ids": row_ids,
+        "instances/bbox_norm_coords": bbox_norm,
+        "instances/bbox_img_xyxy": bbox_img,
+        "instances/centers_img_xy": centers,
+        "instances/scores": scores,
+        "instances/score_valid": np.ones(n_rows, dtype=np.bool_),
+        "instances/class_ids": class_ids,
+        "instances/source_kind_codes": np.full(
+            n_rows,
+            SOURCE_KIND_CODE_MAP["raw_detect"],
+            dtype=np.uint8,
+        ),
+        "instances/manual_edit_flags": np.zeros(n_rows, dtype=np.bool_),
+        "instances/source_detect_row_index": row_ids,
+        "instances/reason_codes": np.zeros(n_rows, dtype=np.uint16),
+        "instances/frame_row_offsets": offsets,
+        "source_detections/source_detect_row_index": row_ids,
+        "source_detections/frame_indices": frame_indices,
+        "source_detections/source_acquisition_frame_index": source_frames,
+        "source_detections/instance_key": instance_keys,
+        "source_detections/bbox_norm_coords": bbox_norm,
+        "source_detections/bbox_img_xyxy": bbox_img,
+        "source_detections/centers_img_xy": centers,
+        "source_detections/scores": scores,
+        "source_detections/class_ids": class_ids,
+        "source_detections/decision_codes": np.full(
+            n_rows,
+            SOURCE_DECISION_CODE_MAP["accepted"],
+            dtype=np.uint8,
+        ),
+        "source_detections/resolved_refined_row_id": row_ids,
+        "source_detections/reason_codes": np.zeros(n_rows, dtype=np.uint16),
+        "source_detections/frame_row_offsets": offsets,
+    }
+    refined_dimensions = RefinedDetectionDimensions(
+        n_frames=dimensions.n_frames,
+        n_instances=n_rows,
+        n_source_detections=n_rows,
+        source_width=dimensions.source_width,
+        source_height=dimensions.source_height,
+    )
+    REFINED_DETECTION_SCHEMA_V1.require(
+        arrays,
+        dimensions=refined_dimensions,
+    )
+    report: dict[str, object] = {
+        "schema_id": TRANSITION_REPORT_SCHEMA_ID,
+        "schema_version": TRANSITION_REPORT_SCHEMA_VERSION,
+        "source_profile": "canonical_detection_v1_accept_all_root",
+        "target_schema": {
+            "id": REFINED_DETECTION_SCHEMA_V1.schema_id,
+            "version": REFINED_DETECTION_SCHEMA_V1.schema_version,
+            "lineage_profile": "full_acquisition",
+        },
+        "status": "contract_ready",
+        "selector_eligible": False,
+        "recording_identity": normalized_recording_identity,
+        "dimensions_input": {
+            "n_frames": dimensions.n_frames,
+            "source_width": dimensions.source_width,
+            "source_height": dimensions.source_height,
+        },
+        "row_counts": {
+            "instances": n_rows,
+            "source_detections": n_rows,
+        },
+        "mappings": [
+            {
+                "source": "canonical_detection_v1/instances",
+                "target": "refined_detection_v1/instances",
+                "operation": "accept_all_preserve_canonical_identity_and_payload",
+            },
+            {
+                "source": "canonical_detection_v1/instances",
+                "target": "refined_detection_v1/source_detections",
+                "operation": "exact_source_audit_projection",
+            },
+        ],
+        "lossy_conversions": [],
+        "identity_initializations": [
+            {
+                "field": "instances/refined_row_ids",
+                "operation": "contiguous_root_snapshot_allocator_v1",
+                "row_count": n_rows,
+            }
+        ],
+        "excluded_compatibility_arrays": [],
+        "blockers": [],
+    }
+    return RefinedDetectionTransitionResult(
+        dimensions=refined_dimensions,
+        arrays=arrays,
+        instance_reason_codes={0: "none"},
+        source_reason_codes={0: "none"},
+        report=report,
+    )
+
+
 __all__ = [
     "TRANSITION_REPORT_SCHEMA_ID",
     "TRANSITION_REPORT_SCHEMA_VERSION",
     "RefinedDetectionTransitionError",
     "RefinedDetectionTransitionResult",
+    "build_accept_all_refined_detection_root",
     "build_refined_detection_transition",
 ]

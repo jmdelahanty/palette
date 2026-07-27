@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
@@ -125,8 +126,7 @@ def _lineage() -> RefinedDetectionSnapshotLineage:
     )
 
 
-def _canonical_source(tmp_path: Path):
-    source_path = tmp_path / "legacy_detect.zarr"
+def _legacy_source(source_path: Path) -> Path:
     source = zarr.open_group(str(source_path), mode="w", zarr_format=3)
     source.attrs.update(
         {
@@ -157,6 +157,11 @@ def _canonical_source(tmp_path: Path):
         "frame_counts",
         data=np.asarray([0, 1, 0, 1], dtype=np.int32),
     )
+    return source_path
+
+
+def _canonical_source(tmp_path: Path):
+    source_path = _legacy_source(tmp_path / "legacy_detect.zarr")
     shadow_root = tmp_path / "canonical-shadows"
     return publish_legacy_canonical_detection_shadow(
         source_group_path=source_path,
@@ -166,6 +171,54 @@ def _canonical_source(tmp_path: Path):
         run_id="detect_shadow_1",
         shadow_root=shadow_root,
     )
+
+
+def test_canonical_shadow_can_read_an_exact_local_stage_bound_to_shared_evidence(
+    tmp_path: Path,
+) -> None:
+    evidence_path = _legacy_source(tmp_path / "evidence.zarr")
+    staged_path = tmp_path / "staged.zarr"
+    shutil.copytree(evidence_path, staged_path)
+    shadow_root = tmp_path / "canonical-shadows"
+
+    result = publish_legacy_canonical_detection_shadow(
+        source_group_path=staged_path,
+        source_evidence_group_path=evidence_path,
+        recording_identity=RECORDING_IDENTITY,
+        source_run_id="legacy_detect_1",
+        destination=shadow_root / "canonical.zarr",
+        run_id="detect_shadow_1",
+        shadow_root=shadow_root,
+    )
+
+    assert result.manifest["payload"]["source_evidence"]["source_group_path"] == str(
+        evidence_path.resolve()
+    )
+    assert validate_canonical_detection_shadow_publication(result) == ()
+
+
+def test_canonical_shadow_rejects_a_staged_source_that_differs_from_evidence(
+    tmp_path: Path,
+) -> None:
+    evidence_path = _legacy_source(tmp_path / "evidence.zarr")
+    staged_path = tmp_path / "staged.zarr"
+    shutil.copytree(evidence_path, staged_path)
+    staged = zarr.open_group(str(staged_path), mode="r+", use_consolidated=False)
+    staged["class_ids"][0] = np.int32(99)
+    destination = tmp_path / "canonical-shadows/canonical.zarr"
+
+    with pytest.raises(ValueError, match="Staged canonical source differs"):
+        publish_legacy_canonical_detection_shadow(
+            source_group_path=staged_path,
+            source_evidence_group_path=evidence_path,
+            recording_identity=RECORDING_IDENTITY,
+            source_run_id="legacy_detect_1",
+            destination=destination,
+            run_id="detect_shadow_1",
+            shadow_root=destination.parent,
+        )
+
+    assert not destination.exists()
 
 
 def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
