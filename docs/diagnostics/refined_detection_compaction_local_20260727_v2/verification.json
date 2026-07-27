@@ -1,0 +1,9 @@
+{
+  "benchmark_receipt_sha256": "6580bc88484ee69cd3cd8b68b6727f2ee85aa7a571de0b7586b0fa1d1cc5d800",
+  "errors": [],
+  "palette_revision": "a0a9056d2e563b52af8859b5556259928b19714b",
+  "schema_id": "palette.refined_detection.local_compaction_verification",
+  "schema_version": 1,
+  "status": "pass",
+  "verified_at_utc": "2026-07-27T22:15:34Z"
+}

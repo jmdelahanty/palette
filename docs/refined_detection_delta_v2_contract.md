@@ -246,11 +246,11 @@ resolution/sort/offset rebuild, per-array write/compression, both consolidation
 passes, publication validation, and total duration. It also records process
 peak RSS with its process-lifetime-high-water semantics.
 
-The first checkpoint intentionally excludes network copy time. It measures the
-copy/compute/publish core against disposable local stores on this workstation.
-A later harness may time explicit source-to-local and local-to-benchmark copies
-as separate phases without folding VPN/PRFS variance into compactor CPU/write
-measurements.
+The benchmark driver reports source hashing, source-to-local copy,
+copy validation, source immutability recheck, delta authoring, rollover, and
+compaction as separate phases. Copy time is never folded into compactor
+CPU/write time. The first retained checkpoint copied a small exact refined-v1
+integration fixture to local scratch and deliberately performed no copy-back.
 
 Later prefix compactions may resolve from the original lineage-bound base while
 declaring the last compacted snapshot as their immediate identity parent. That
@@ -294,9 +294,15 @@ keyed coverage before publication.
 - [x] Add local real-Zarr tests for fresh scratch construction, multi-instance
       rows, manual additions, rebuilt offsets, exact manifest bindings, strict
       timing receipts, and unsafe destination rejection.
-- [ ] Run the instrumented compactor first on a copied 2,048-frame integration
-      fixture, then on one copied full-duration refined snapshot; retain phase
-      receipts and keep network copy-in/copy-back timings separate.
+- [x] Run the instrumented compactor on the existing exact 23,287-frame,
+      selector-ineligible refined-v1 integration fixture. It was used whole
+      rather than sliced to 2,048 frames so its source authority and lineage
+      remained intact. Retain phase receipts, verify them in a fresh process,
+      and keep copy-in/copy-back timings separate. See
+      `docs/diagnostics/refined_detection_compaction_local_20260727_v2/README.md`.
+- [ ] Run the same driver on one copied full-duration refined snapshot and
+      measure concurrent GUI-edit responsiveness; do not copy back or alter a
+      selector during this checkpoint.
 - [ ] Add crash-injection tests and an exclusive atomic candidate copy-back
       step before any shared benchmark publication.
 - [ ] Define and implement downstream copy-forward/invalidation planning for
