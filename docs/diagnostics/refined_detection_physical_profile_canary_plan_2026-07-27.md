@@ -2,8 +2,8 @@
 
 Date: 2026-07-27
 
-Status: Palette full-duration publication gate passed; Crimson physical
-measurement pending
+Status: Palette full-duration publication gate, Crimson physical measurement,
+and Palette named-profile verification passed
 
 ## Preconditions
 
@@ -134,7 +134,26 @@ access-aware stores and reran the complete canonical/refined validators. It
 again proved the 28-array schemas, 1,188,001-entry offsets, decoded equality,
 source-audit equality, direct/consolidated equivalence, and selector absence.
 
-Palette's publication and 4x object gate therefore pass. The access-aware
-profile remains an unpromoted candidate until Crimson completes its frozen
-mounted-macOS correctness, transfer, latency, readiness, deadline, and RSS
-gate.
+Palette's publication and 4x object gate therefore passed.
+
+## Crimson Physical Result
+
+Crimson's immutable handoff binds benchmark implementation
+`9cf04acee9682a6f4f5fae005c0af6077ec5cc4b`, evidence commit
+`258f25811c76dd48e206183d73f9807e140e7264`, and aggregate SHA-256
+`0be6f191b0d684914cdd48bc938267cd8bb2fb6e066e158ba65cf2339d466d32`.
+Its mounted-macOS gate reported exact decoded/traversal equality, 86.8% less
+traversal transfer, 68.5% less whole-process transfer, zero post-warmup
+deadline misses, and median current-frame p95 improving from 144.2 ms to
+48.0 ms. That evidence supports the unchanged access-aware physical values.
+
+## Named-Profile Verification
+
+Palette promoted those values under
+`detection_published_access_aware_v1` at commit
+`d7436b083af0f6bc4b8004952a4ff8542b98f156`. Commit-pinned LSF job
+`153192513` published a fresh selector-ineligible pair, and a separate process
+reopened it from shared storage. All 9 canonical and 28 refined declarations
+validated, logical hashes matched the prior canary, and every refined physical
+declaration exactly matched the frozen candidate. The result is recorded in
+`docs/diagnostics/detection_promoted_profile_canary_2026-07-27.md`.

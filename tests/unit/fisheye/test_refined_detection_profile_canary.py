@@ -183,4 +183,5 @@ def test_profile_canary_can_verify_the_promoted_default(tmp_path: Path) -> None:
     assert result["payload"]["gate"]["promotion_decision"] == (
         "promoted_profile_verification"
     )
+    assert result["payload"]["gate"]["crimson_physical_measurement_required"] is False
     thaw_tree_for_cleanup(destination)

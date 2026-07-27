@@ -512,8 +512,13 @@ Before production routing:
       `detection_published_access_aware_v1` default for new canonical/refined
       v1 snapshots. Preserve `detection_regular_rollback_v1` as explicit
       rollback and do not change selectors in this step.
-- [ ] Publish and cross-consumer validate one fresh selector-ineligible pair
-      whose manifests carry the promoted profile ID.
+- [x] Publish and independently reopen one fresh selector-ineligible pair whose
+      manifests carry the promoted profile ID. LSF job `153192513` validated
+      every canonical/refined declaration, exact hashes, codecs, offsets,
+      direct/consolidated equality, and physical equivalence to the frozen
+      candidate.
+- [ ] Have Crimson perform an exact-schema open-only smoke against the named
+      profile canary; no new performance matrix is required.
 - [ ] Route no selector until decoded values, manifest, direct metadata, and
       consolidated metadata all validate.
 

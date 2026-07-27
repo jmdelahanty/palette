@@ -916,8 +916,12 @@ define refined-run selection or manual-addition semantics.
       `detection_published_access_aware_v1` ID for new canonical and refined
       v1 snapshots. Keep the 1 MiB unsharded
       `detection_regular_rollback_v1` explicit and leave selectors unchanged.
-- [ ] Publish and cross-consumer validate a new selector-ineligible pair whose
-      manifests carry the promoted profile ID.
+- [x] Publish and independently reopen a new selector-ineligible pair whose
+      manifests carry the promoted profile ID. LSF job `153192513` and a fresh
+      process validated all 9 canonical and 28 refined arrays and exact
+      physical equivalence to the frozen candidate.
+- [ ] Have Crimson perform an exact-schema open-only smoke against the named
+      profile canary; do not repeat the performance matrix.
 - [ ] Begin detection delta v2 and compactor design only after the snapshot
       contract and its production-transition findings are accepted.
 

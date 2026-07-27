@@ -2,8 +2,8 @@
 
 Date: 2026-07-27
 
-Status: profile contract promoted in code; selector-ineligible writer canary
-pending
+Status: profile contract promoted in code; selector-ineligible promoted-ID
+canary passed; production selectors unchanged
 
 ## Decision
 
@@ -49,7 +49,9 @@ direct/consolidated equivalence, and no production-state changes. Observed
 payload objects fell from 220 to 42, a 5.24x reduction.
 
 Crimson then reported its mounted-macOS full-duration detection-isolated gate
-passed at benchmark implementation `9cf04ac` and evidence verdict `258f258`:
+passed at benchmark implementation
+`9cf04acee9682a6f4f5fae005c0af6077ec5cc4b` and evidence verdict
+`258f25811c76dd48e206183d73f9807e140e7264`:
 
 - exact decoded detections and traversal digests matched;
 - traversal transfer fell from 4.65 MiB to 0.61 MiB, an 86.8% reduction;
@@ -62,11 +64,18 @@ passed at benchmark implementation `9cf04ac` and evidence verdict `258f258`:
 The Crimson files are
 `docs/diagnostics/refined_detection_physical_profile_canary_2026-07-27/README.md`,
 `aggregate.json`, and
-`refined_detection_physical_profile_comparison.png` in its worktree. The
-reported commits are not present in Palette's local Crimson object database;
-their full commit IDs and an evidence-file digest must be added here when the
-immutable Crimson handoff is pushed. That provenance gap blocks selector
-activation, not this code-level profile promotion.
+`refined_detection_physical_profile_comparison.png`. The immutable handoff
+binds `aggregate.json` to SHA-256
+`0be6f191b0d684914cdd48bc938267cd8bb2fb6e066e158ba65cf2339d466d32`.
+
+Palette then published the named-profile verification canary documented in
+`docs/diagnostics/detection_promoted_profile_canary_2026-07-27.md`. LSF job
+`153192513`, pinned to Palette
+`d7436b083af0f6bc4b8004952a4ff8542b98f156`, passed. A separate fresh process
+validated all 9 canonical and 28 refined arrays, proved the logical hashes
+equal to the previously measured full-duration pair, and proved every refined
+physical declaration equal to the frozen access-aware candidate while the
+persisted profile ID was `detection_published_access_aware_v1`.
 
 ## Activation Boundary
 
@@ -97,10 +106,12 @@ boundary; workers must own complete non-overlapping physical units.
 
 ## Remaining Checklist
 
-- [ ] Publish one fresh selector-ineligible canonical/refined pair using only
+- [x] Publish one fresh selector-ineligible canonical/refined pair using only
       the promoted defaults and validate it in a separate process.
-- [ ] Obtain the full immutable Crimson commit IDs and evidence digest.
-- [ ] Review the promoted-default canary in Crimson without dtype probing.
+- [x] Obtain and bind the full immutable Crimson commit IDs and evidence
+      digest.
+- [ ] Have Crimson perform an exact-schema open-only smoke against the named
+      profile canary. No new performance matrix is required.
 - [ ] Enable a selector only through a separately reviewed publication change.
 - [ ] Design detection delta v2 and the immutable compactor before routing
       manual additions through this snapshot writer.

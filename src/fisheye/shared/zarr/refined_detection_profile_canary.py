@@ -557,7 +557,7 @@ def publish_refined_detection_profile_canary(
         },
         "gate": {
             "palette_publication_gate": "pass",
-            "crimson_physical_measurement_required": True,
+            "crimson_physical_measurement_required": not promoted_profile_canary,
             "promotion_decision": (
                 "promoted_profile_verification"
                 if promoted_profile_canary
