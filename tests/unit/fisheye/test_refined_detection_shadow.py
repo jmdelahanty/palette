@@ -14,11 +14,17 @@ from fisheye.shared.instance_keys import (
     mint_manual_curation_instance_keys,
 )
 from fisheye.shared.zarr.canonical_detection_shadow import (
+    canonical_detection_metadata_declaration_maps,
     publish_legacy_canonical_detection_shadow,
     validate_canonical_detection_shadow_publication,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
+    build_canonical_detection_run_manifest,
+    build_native_canonical_detection_run_manifest,
+    build_native_detection_source_evidence,
     validate_canonical_detection_run_manifest,
+    validate_native_detection_source_evidence,
 )
 from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
@@ -171,6 +177,95 @@ def _canonical_source(tmp_path: Path):
         destination=shadow_root / "canonical.zarr",
         run_id="detect_shadow_1",
         shadow_root=shadow_root,
+    )
+
+
+def _native_source_evidence(canonical) -> dict[str, object]:
+    return build_native_detection_source_evidence(
+        dimensions=canonical.dimensions,
+        recording_identity=RECORDING_IDENTITY,
+        producer_id="fisheye.detection.detect_yolo",
+        producer_version="0123456789abcdef",
+        source_frame_authority={
+            "record_ref": "analysis/acquisition_camera_frames/frame_axis@record",
+            "record_sha256": "1" * 64,
+        },
+        source_pixel_authority={
+            "record_ref": "raw_video@source_pixel_authority",
+            "record_sha256": "2" * 64,
+        },
+        model_artifact_sha256="3" * 64,
+        run_provenance={
+            "schema": "palette.run_provenance.v1",
+            "git_sha": "4" * 40,
+            "config_hash": "5" * 64,
+            "params": {"conf_threshold": 0.5},
+            "input_run_ids": {},
+            "input_artifacts": [{"role": "detect_model", "sha256": "3" * 64}],
+            "command": "fisheye.detection.detect_yolo",
+            "fisheye_version": None,
+        },
+    )
+
+
+def test_native_canonical_manifest_v2_preserves_legacy_v1_boundary(
+    tmp_path: Path,
+) -> None:
+    canonical = _canonical_source(tmp_path)
+    native_evidence = _native_source_evidence(canonical)
+    direct, consolidated = canonical_detection_metadata_declaration_maps(
+        canonical.output_path,
+        run_id=canonical.run_id,
+        plans=canonical.plans,
+    )
+
+    manifest = build_native_canonical_detection_run_manifest(
+        run_id="detect_native_1",
+        dimensions=canonical.dimensions,
+        storage_plan=canonical.plans,
+        arrays=canonical.arrays,
+        source_evidence=native_evidence,
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+    )
+
+    assert manifest["schema_version"] == (
+        CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert validate_native_detection_source_evidence(
+        native_evidence,
+        dimensions=canonical.dimensions,
+    ) == ()
+    assert validate_canonical_detection_run_manifest(manifest) == ()
+    with pytest.raises(ValueError, match="legacy source evidence"):
+        build_canonical_detection_run_manifest(
+            run_id="detect_native_wrong_builder",
+            dimensions=canonical.dimensions,
+            storage_plan=canonical.plans,
+            arrays=canonical.arrays,
+            source_evidence=native_evidence,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+        )
+    with pytest.raises(ValueError, match="native source evidence"):
+        build_native_canonical_detection_run_manifest(
+            run_id="detect_legacy_wrong_builder",
+            dimensions=canonical.dimensions,
+            storage_plan=canonical.plans,
+            arrays=canonical.arrays,
+            source_evidence=canonical.manifest["payload"]["source_evidence"],
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+        )
+
+    tampered = copy.deepcopy(manifest)
+    tampered["payload"]["source_evidence"]["run_provenance"]["document"][
+        "command"
+    ] = "tampered"
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+    assert "native run provenance digest mismatch" in (
+        validate_canonical_detection_run_manifest(tampered)
     )
 
 

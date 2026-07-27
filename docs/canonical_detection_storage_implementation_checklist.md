@@ -1,8 +1,8 @@
 # Canonical Detection Storage Implementation Checklist
 
-Status: active; logical canonical detection accepted by Crimson, consumer
-residency gates passed, physical-profile promotion deferred, and production
-writer adoption still blocked
+Status: active; logical canonical detection and the access-aware physical
+profile are accepted, while native-writer adoption remains blocked on the
+native provenance envelope, exact writer integration, and activation gates
 
 Date established: 2026-07-23
 
@@ -59,6 +59,9 @@ Deferred:
 - [x] Defer Pydantic manifest models until at least one additional stage reveals
       the genuinely shared envelope; keep exact array validation independent of
       serialization-framework coercion.
+- [x] Preserve canonical logical schema v1 across source kinds. Use exact
+      run-manifest v1 for legacy conversion and exact run-manifest v2 for native
+      detector provenance instead of mislabeling native output as a conversion.
 
 ## Phase 0 — Foundation And Checkpoint
 

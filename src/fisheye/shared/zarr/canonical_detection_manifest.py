@@ -1,8 +1,8 @@
 """Exact persisted manifest and source evidence for canonical detections.
 
-The first consumer of this contract is the selector-ineligible shadow path.
-The implementation is intentionally strict enough that a legacy detection run
-cannot be described as canonical merely by supplying two plausible digests.
+Run-manifest v1 binds a legacy-to-canonical conversion; run-manifest v2 binds a
+native detector publication.  Both carry the same canonical logical array
+schema v1 and remain selector-ineligible until a separate activation gate.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 
 CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID = "palette.canonical_detection.run_manifest"
 CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION = 1
+CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION = 2
 CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 CANONICAL_DETECTION_RUN_MANIFEST_PERSISTED_PATH = (
     "detect_runs/<run>/zarr.json.attributes.run_manifest"
@@ -48,6 +49,10 @@ CANONICAL_DETECTION_LEGACY_SOURCE_SCHEMA_ID = (
     "palette.canonical_detection.legacy_source_evidence"
 )
 CANONICAL_DETECTION_LEGACY_SOURCE_SCHEMA_VERSION = 1
+CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_ID = (
+    "palette.canonical_detection.native_source_evidence"
+)
+CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_VERSION = 1
 CANONICAL_DETECTION_METADATA_DECLARATIONS_SCHEMA_ID = (
     "palette.canonical_detection.metadata_declarations"
 )
@@ -276,6 +281,196 @@ def validate_legacy_detection_source_evidence(
     return tuple(dict.fromkeys(errors))
 
 
+def _native_authority_record(
+    value: Mapping[str, Any],
+    *,
+    name: str,
+) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != {"record_ref", "record_sha256"}:
+        raise ValueError(f"{name} must contain exact record_ref and record_sha256 fields.")
+    return {
+        "record_ref": _require_text(value.get("record_ref"), name=f"{name}.record_ref"),
+        "record_sha256": _require_sha256(
+            value.get("record_sha256"),
+            name=f"{name}.record_sha256",
+        ),
+    }
+
+
+def build_native_detection_source_evidence(
+    *,
+    dimensions: CanonicalDetectionDimensions,
+    recording_identity: str,
+    producer_id: str,
+    producer_version: str,
+    source_frame_authority: Mapping[str, Any],
+    source_pixel_authority: Mapping[str, Any],
+    model_artifact_sha256: str,
+    run_provenance: Mapping[str, Any],
+) -> dict[str, object]:
+    """Build exact source evidence for a native canonical detector publication."""
+
+    canonical_json_bytes(run_provenance)
+    source_dimensions = {
+        "n_frames": dimensions.n_frames,
+        "source_width": dimensions.source_width,
+        "source_height": dimensions.source_height,
+    }
+    evidence: dict[str, object] = {
+        "schema_id": CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_ID,
+        "schema_version": CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_VERSION,
+        "source_kind": "native_detector",
+        "recording_identity": _require_text(
+            recording_identity,
+            name="recording_identity",
+        ),
+        "source_dimensions": source_dimensions,
+        "source_frame_authority": _native_authority_record(
+            source_frame_authority,
+            name="source_frame_authority",
+        ),
+        "source_pixel_authority": _native_authority_record(
+            source_pixel_authority,
+            name="source_pixel_authority",
+        ),
+        "model_artifact": {
+            "role": "detect_model",
+            "sha256": _require_sha256(
+                model_artifact_sha256,
+                name="model_artifact_sha256",
+            ),
+        },
+        "producer": {
+            "id": _require_text(producer_id, name="producer_id"),
+            "version": _require_text(producer_version, name="producer_version"),
+        },
+        "run_provenance": {
+            "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
+            "digest": canonical_json_sha256(run_provenance),
+            "document": dict(run_provenance),
+        },
+    }
+    errors = validate_native_detection_source_evidence(
+        evidence,
+        dimensions=dimensions,
+    )
+    if errors:
+        raise ValueError("Invalid native detection source evidence: " + "; ".join(errors))
+    return evidence
+
+
+def validate_native_detection_source_evidence(
+    evidence: Mapping[str, Any],
+    *,
+    dimensions: CanonicalDetectionDimensions | None = None,
+) -> tuple[str, ...]:
+    """Validate native detector evidence independently of writer implementation."""
+
+    errors: list[str] = []
+    expected_fields = {
+        "schema_id",
+        "schema_version",
+        "source_kind",
+        "recording_identity",
+        "source_dimensions",
+        "source_frame_authority",
+        "source_pixel_authority",
+        "model_artifact",
+        "producer",
+        "run_provenance",
+    }
+    if set(evidence) != expected_fields:
+        errors.append("native source evidence has an unexpected field set")
+    if evidence.get("schema_id") != CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_ID:
+        errors.append("native source evidence schema_id mismatch")
+    if evidence.get("schema_version") != (
+        CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_VERSION
+    ):
+        errors.append("native source evidence schema_version mismatch")
+    if evidence.get("source_kind") != "native_detector":
+        errors.append("native source evidence source_kind mismatch")
+    try:
+        _require_text(evidence.get("recording_identity"), name="recording_identity")
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    source_dimensions = evidence.get("source_dimensions")
+    expected_dimension_fields = {"n_frames", "source_width", "source_height"}
+    if not isinstance(source_dimensions, Mapping) or set(source_dimensions) != (
+        expected_dimension_fields
+    ):
+        errors.append("native source dimensions are not exact")
+    else:
+        for name in sorted(expected_dimension_fields):
+            value = source_dimensions.get(name)
+            if type(value) is not int or value <= 0:
+                errors.append(f"native source dimension {name} must be positive")
+        if dimensions is not None and dict(source_dimensions) != {
+            "n_frames": dimensions.n_frames,
+            "source_width": dimensions.source_width,
+            "source_height": dimensions.source_height,
+        }:
+            errors.append("native source dimensions differ from the logical schema")
+
+    for name in ("source_frame_authority", "source_pixel_authority"):
+        value = evidence.get(name)
+        try:
+            normalized = _native_authority_record(value, name=name)
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
+        else:
+            if dict(value) != normalized:
+                errors.append(f"{name} is not in canonical form")
+
+    model = evidence.get("model_artifact")
+    if not isinstance(model, Mapping) or set(model) != {"role", "sha256"}:
+        errors.append("native model artifact is not exact")
+    else:
+        if model.get("role") != "detect_model":
+            errors.append("native model artifact role mismatch")
+        try:
+            _require_sha256(model.get("sha256"), name="model_artifact.sha256")
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    producer = evidence.get("producer")
+    if not isinstance(producer, Mapping) or set(producer) != {"id", "version"}:
+        errors.append("native producer identity is not exact")
+    else:
+        for name in ("id", "version"):
+            try:
+                _require_text(producer.get(name), name=f"producer.{name}")
+            except ValueError as exc:
+                errors.append(str(exc))
+
+    provenance = evidence.get("run_provenance")
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "digest_algorithm",
+        "digest",
+        "document",
+    }:
+        errors.append("native run provenance envelope is not exact")
+    else:
+        document = provenance.get("document")
+        if provenance.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM:
+            errors.append("native run provenance digest algorithm mismatch")
+        if not isinstance(document, Mapping):
+            errors.append("native run provenance document must be an object")
+        else:
+            try:
+                expected_digest = canonical_json_sha256(document)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"native run provenance is not strict JSON: {exc}")
+            else:
+                if provenance.get("digest") != expected_digest:
+                    errors.append("native run provenance digest mismatch")
+    try:
+        canonical_json_bytes(evidence)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"native source evidence is not strict JSON: {exc}")
+    return tuple(dict.fromkeys(errors))
+
+
 def normalize_canonical_detection_metadata_declarations(
     direct_metadata_by_path: Mapping[str, Mapping[str, Any]],
     *,
@@ -383,7 +578,7 @@ def canonical_detection_metadata_declarations_digest(
     )
 
 
-def build_canonical_detection_run_manifest(
+def _build_canonical_detection_run_manifest(
     *,
     run_id: str,
     dimensions: CanonicalDetectionDimensions,
@@ -392,16 +587,14 @@ def build_canonical_detection_run_manifest(
     source_evidence: Mapping[str, Any],
     direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
     consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    manifest_schema_version: int,
     selector_eligible: bool = False,
 ) -> dict[str, object]:
-    """Build the exact persisted canonical detection run manifest."""
+    """Build one exact persisted canonical detection run-manifest version."""
 
     resolved_run_id = _require_run_id(run_id)
     if storage_plan.dimensions != dimensions:
         raise ValueError("Canonical storage plan dimensions do not match.")
-    source_errors = validate_legacy_detection_source_evidence(source_evidence)
-    if source_errors:
-        raise ValueError("Invalid source evidence: " + "; ".join(source_errors))
     logical_content = canonical_detection_logical_content_document(
         arrays,
         dimensions=dimensions,
@@ -438,7 +631,7 @@ def build_canonical_detection_run_manifest(
     }
     envelope: dict[str, object] = {
         "schema_id": CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID,
-        "schema_version": CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": manifest_schema_version,
         "persisted_attribute": CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
         "payload_digest": canonical_json_sha256(payload),
@@ -446,6 +639,69 @@ def build_canonical_detection_run_manifest(
     }
     canonical_json_bytes(envelope)
     return envelope
+
+
+def build_canonical_detection_run_manifest(
+    *,
+    run_id: str,
+    dimensions: CanonicalDetectionDimensions,
+    storage_plan: CanonicalDetectionStoragePlanSet,
+    arrays: Mapping[str, Any],
+    source_evidence: Mapping[str, Any],
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    selector_eligible: bool = False,
+) -> dict[str, object]:
+    """Build the frozen v1 manifest for a legacy-to-canonical conversion."""
+
+    source_errors = validate_legacy_detection_source_evidence(source_evidence)
+    if source_errors:
+        raise ValueError("Invalid legacy source evidence: " + "; ".join(source_errors))
+    return _build_canonical_detection_run_manifest(
+        run_id=run_id,
+        dimensions=dimensions,
+        storage_plan=storage_plan,
+        arrays=arrays,
+        source_evidence=source_evidence,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        manifest_schema_version=CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION,
+        selector_eligible=selector_eligible,
+    )
+
+
+def build_native_canonical_detection_run_manifest(
+    *,
+    run_id: str,
+    dimensions: CanonicalDetectionDimensions,
+    storage_plan: CanonicalDetectionStoragePlanSet,
+    arrays: Mapping[str, Any],
+    source_evidence: Mapping[str, Any],
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    selector_eligible: bool = False,
+) -> dict[str, object]:
+    """Build the v2 manifest for a native canonical detector publication."""
+
+    source_errors = validate_native_detection_source_evidence(
+        source_evidence,
+        dimensions=dimensions,
+    )
+    if source_errors:
+        raise ValueError("Invalid native source evidence: " + "; ".join(source_errors))
+    return _build_canonical_detection_run_manifest(
+        run_id=run_id,
+        dimensions=dimensions,
+        storage_plan=storage_plan,
+        arrays=arrays,
+        source_evidence=source_evidence,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        manifest_schema_version=(
+            CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+        ),
+        selector_eligible=selector_eligible,
+    )
 
 
 def _dimensions_from_manifest(
@@ -488,9 +744,11 @@ def validate_canonical_detection_run_manifest(
         errors.append("canonical run manifest envelope has unexpected fields")
     if manifest.get("schema_id") != CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID:
         errors.append("canonical run manifest schema_id mismatch")
-    if manifest.get("schema_version") != (
-        CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION
-    ):
+    manifest_schema_version = manifest.get("schema_version")
+    if manifest_schema_version not in {
+        CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION,
+        CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         errors.append("canonical run manifest schema_version mismatch")
     if manifest.get("persisted_attribute") != (
         CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE
@@ -690,8 +948,17 @@ def validate_canonical_detection_run_manifest(
     source = payload.get("source_evidence")
     if not isinstance(source, Mapping):
         errors.append("canonical source_evidence must be an object")
-    else:
+    elif manifest_schema_version == CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION:
         errors.extend(validate_legacy_detection_source_evidence(source))
+    elif manifest_schema_version == (
+        CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        errors.extend(
+            validate_native_detection_source_evidence(
+                source,
+                dimensions=dimensions,
+            )
+        )
     return tuple(dict.fromkeys(errors))
 
 
@@ -803,6 +1070,9 @@ def refined_source_identity_from_canonical_manifest(manifest: Mapping[str, Any])
 __all__ = [
     "CANONICAL_DETECTION_ARRAY_DIGEST_ALGORITHM",
     "CANONICAL_DETECTION_LEGACY_SOURCE_SCHEMA_ID",
+    "CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION",
+    "CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_ID",
+    "CANONICAL_DETECTION_NATIVE_SOURCE_SCHEMA_VERSION",
     "CANONICAL_DETECTION_LOGICAL_CONTENT_SCHEMA_ID",
     "CANONICAL_DETECTION_METADATA_DIGEST_SCOPE",
     "CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE",
@@ -810,6 +1080,8 @@ __all__ = [
     "CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID",
     "build_canonical_detection_run_manifest",
     "build_legacy_detection_source_evidence",
+    "build_native_canonical_detection_run_manifest",
+    "build_native_detection_source_evidence",
     "canonical_detection_logical_content_digest",
     "canonical_detection_logical_content_document",
     "canonical_detection_metadata_declarations_digest",
@@ -818,4 +1090,5 @@ __all__ = [
     "validate_canonical_detection_publication",
     "validate_canonical_detection_run_manifest",
     "validate_legacy_detection_source_evidence",
+    "validate_native_detection_source_evidence",
 ]

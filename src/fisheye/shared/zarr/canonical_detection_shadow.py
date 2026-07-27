@@ -204,6 +204,17 @@ def _metadata_maps(
     return direct, consolidated
 
 
+def canonical_detection_metadata_declaration_maps(
+    output_path: Path,
+    *,
+    run_id: str,
+    plans: CanonicalDetectionStoragePlanSet,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Return exact direct/consolidated declarations for one canonical v1 run."""
+
+    return _metadata_maps(output_path, run_id=run_id, plans=plans)
+
+
 def publish_legacy_canonical_detection_shadow(
     *,
     source_group_path: Path,
@@ -456,6 +467,7 @@ __all__ = [
     "CANONICAL_DETECTION_SHADOW_RECEIPT_SCHEMA_ID",
     "DEFAULT_CANONICAL_DETECTION_SHADOW_ROOT",
     "CanonicalDetectionShadowPublication",
+    "canonical_detection_metadata_declaration_maps",
     "publish_legacy_canonical_detection_shadow",
     "require_safe_canonical_detection_shadow_destination",
     "validate_canonical_detection_shadow_publication",
