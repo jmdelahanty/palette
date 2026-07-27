@@ -180,6 +180,13 @@ production writer.
 - [x] Make publication validity executable: derive the declaration digest from
       the exact direct/consolidated Zarr-v3 tree, deep-parse clipped bindings
       and reason registries, and require persisted reason-code coverage.
+- [x] Make the persisted manifest fail closed under recomputed-digest attacks by
+      reconstructing and exactly comparing the frozen logical schema and full
+      byte-planned storage/codec/write-ownership declaration.
+- [x] Make the named publication gate validate snapshot identity and require
+      exact bound per-clip artifacts for clipped source-row and refined-row
+      membership. A clipped snapshot now binds an ordered refined/raw source
+      collection rather than pretending 22 clips share one raw run.
 - [x] Freeze a typed refined-first selection order using the parent
       `authoritative_run` pointer plus a versioned manifest-bound approval
       envelope; raw fallback is explicit and fail-closed.
@@ -214,7 +221,9 @@ production writer.
 1. Freeze the logical schema, identity/index rules, and immutable storage
    intent. **Complete for the versioned implementation target; production
    routing and physical-profile promotion remain gated.**
-2. Build a transition report and shadow immutable writer, then run the paired
+2. Run the read-only transition report against a real current refined run,
+   obtain adversarial re-review of the hardened publication gate, then build a
+   shadow immutable writer and run the paired
    regular-versus-hybrid refined-snapshot practical promotion gate. Keep
    the reduced three-candidate optimization matrix deferred unless the paired
    check exposes a material problem or later optimization is justified;

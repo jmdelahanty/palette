@@ -169,6 +169,15 @@ The persisted `clipped_binding` uses schema
 - per clip: media identity/digest, parent half-open frame interval,
   frame-map digest, and source refined run/manifest digest.
 
+Source authority is discriminated by lineage profile. A `full_acquisition`
+snapshot binds one `authority_kind=canonical_run` raw detection run. A
+`clipped_recording_snapshot` binds
+`authority_kind=clipped_collection`: the same finalized collection identity
+and digest as `clipped_binding`, plus one ordered member per clip. Each member
+binds the exact per-clip refined run/manifest and the canonical raw detection
+run recorded by that refined manifest. A single raw-run identity is invalid
+for a multi-clip recording snapshot.
+
 The clip intervals cover `[0,F)` exactly, independently of detection rows, so
 Crimson can resolve media for empty frames. Both tables' clip ordinals and local
 frames must be in range and must map exactly to their parent frames. A
@@ -224,7 +233,8 @@ The frozen access-aware candidate is
 - `WINDOWED` and `INDEXED`: exact 128 KiB uncompressed inner chunks;
 - `EAGER`: exact 1 MiB uncompressed inner chunks;
 - outer shard target and cap: 8 MiB uncompressed;
-- maximum estimated payload-object budget: 4,096;
+- maximum estimated payload-object budget: 4,096 per array (the resolved
+  manifest also records the summed whole-stage estimate);
 - sharding only for immutable publication;
 - small arrays remain a single/few objects when sharding adds no value.
 
@@ -296,12 +306,22 @@ requires exact Zarr-v3 group/array field sets and removes only top-level
 `palette.refined_detection.metadata_declarations` v1 document;
 `refined_detection_metadata_declarations_digest()` hashes its canonical JSON.
 This avoids a circular digest through the `run_manifest` attribute itself.
+All excluded ordinary node attributes are non-authoritative under v1. The
+`run_manifest` is authoritative through its own canonical payload digest, and
+the parent selection envelope is validated by its separate versioned digest.
+Any future authoritative attribute must receive its own versioned digest or a
+new metadata-declaration schema; consumers must not infer authority from an
+attribute merely because it is present.
 The manifest builder accepts both declaration maps and computes the digest;
 callers cannot inject an arbitrary digest. A second nested consolidation at the
 refined run group is neither required nor implied.
 
-`validate_refined_detection_run_manifest()` deeply validates the persisted
-document, including complete clipped bindings and canonical reason registries.
+`validate_refined_detection_run_manifest()` reconstructs and exactly compares
+the frozen logical schema and the complete byte-planned storage manifest,
+including codec profile, per-array chunk/shard plans, object estimates, and
+write ownership. It also deeply validates the persisted lineage, source
+authority, complete clipped bindings, and canonical reason registries. Adding
+or changing a nested field and recomputing the outer digest is insufficient.
 A successful document parse alone does not make a snapshot contract-valid.
 Before visibility, `validate_refined_detection_publication()` must also:
 
@@ -310,6 +330,17 @@ Before visibility, `validate_refined_detection_publication()` must also:
 - validate all logical arrays and cross-array invariants;
 - read both `uint16` reason-code arrays and prove every persisted code exists in
   its corresponding registry.
+- validate root or successor snapshot identity, including deterministic manual
+  keys, allocator high-water marks, nonreuse, and surviving-key preservation;
+- for clipped snapshots, consume the exact bound per-clip manifests and arrays,
+  prove every source-audit row is present exactly once, and prove exact
+  membership and payload identity for every `(clip_index,
+  source_refined_row_id)` pair.
+
+Successor publication must supply its parent manifest and identity arrays to
+the named gate. Clipped publication must supply the per-clip evidence. Missing
+external evidence fails closed; callers cannot obtain a promotable result from
+local array consistency alone.
 
 Crimson should consume the exact manifest and consolidated schema rather than
 probe candidate dtypes. Direct metadata remains the fail-closed validation and
@@ -399,6 +430,15 @@ Contract freeze:
       tree with executable code rather than accepting a caller digest.
 - [x] Deep-parse clipped manifests and require complete interval coverage.
 - [x] Deep-parse reason registries and validate persisted array-code coverage.
+- [x] Reconstruct and exactly compare the frozen logical schema and complete
+      byte-planned storage/codec/write-ownership manifest.
+- [x] Make the named publication gate enforce root/successor snapshot identity.
+- [x] Replace the ambiguous single raw authority for clipped snapshots with an
+      ordered per-clip refined/raw source collection.
+- [x] Require bound per-clip evidence for exact source-row coverage and
+      `(clip_index, source_refined_row_id)` membership.
+- [x] Add recomputed-digest tampering and multiple-subject-per-frame identity
+      tests.
 - [x] Add deterministic schema and storage-plan tests without Zarr I/O.
 
 Before production routing:
@@ -407,12 +447,16 @@ Before production routing:
       contract changes before shadow-writer work.
 - [x] Complete Crimson's second read-only review; retain three narrow
       fail-closed validation gaps as blockers to contract-valid publication.
-- [ ] Ask Crimson to verify the executable metadata normalizer, deep clipped
-      parser, and reason-registry array coverage close the remaining gaps
+- [x] Complete the third adversarial read-only review. It accepted the logical
+      design but found exact nested-manifest, named identity-gate, and external
+      clipped-lineage evidence gaps.
+- [ ] Ask Crimson and the DAG reviewer to verify the exact reconstruction,
+      combined identity gate, and bound per-clip evidence close those gaps
       without reopening physical-layout tuning.
 - [ ] Add an immutable shadow writer that consumes only these declarations.
-- [ ] Validate a real current refined run against a deliberate transition
-      adapter and report every lossy or unavailable field.
+- [x] Add a read-only current-run transition adapter that reports every lossy,
+      unavailable, excluded, or blocked field without mutating its source.
+- [ ] Validate a real current refined run through that transition adapter.
 - [ ] Publish the paired regular/candidate refined canary and apply the
       practical gate above.
 - [ ] Promote a versioned profile only after that gate passes.

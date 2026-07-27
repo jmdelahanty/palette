@@ -853,9 +853,19 @@ define refined-run selection or manual-addition semantics.
       deep clipped-binding parser, canonical reason-registry parser, persisted
       array-code coverage, and one fail-closed publication validator. Also
       reject parent/child recording changes and snapshot-ID reuse.
-- [ ] Ask Crimson to verify the third contract checkpoint closes the remaining
-      three gaps, then add a shadow immutable writer and transition report
-      without changing production selectors.
+- [x] Complete a third adversarial read-only review. It found that a recomputed
+      payload digest could still hide nested logical/storage mutations, that
+      the named publication gate omitted identity validation, and that clipped
+      rows were not proven against the bound per-clip artifacts.
+- [x] Reconstruct and exactly compare the frozen logical and physical plans,
+      make identity validation part of publication, define ordered clipped
+      source authorities, require bound per-clip row evidence, and add
+      recomputed-digest plus multiple-subject tests.
+- [x] Add the read-only current refined-run transition adapter; keep it
+      selector-ineligible and report blocked/lossy mappings explicitly.
+- [ ] Obtain read-only re-review of the hardened gate before accepting or
+      committing the standalone shadow writer. Do not change production
+      selectors.
 - [ ] Run the paired regular-versus-access-aware refined snapshot canary and
       apply the pragmatic correctness/object/transfer/readiness/RSS gate before
       promoting a versioned writer profile.

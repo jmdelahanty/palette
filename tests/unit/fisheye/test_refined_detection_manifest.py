@@ -7,11 +7,17 @@ import numpy as np
 import pytest
 
 from fisheye.shared.instance_keys import mint_manual_curation_instance_keys
+from fisheye.shared.zarr.detection_schema import (
+    derive_canonical_detection_geometry,
+)
 from fisheye.shared.zarr.refined_detection_manifest import (
     REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE,
     REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE,
     REFINED_DETECTION_RUN_MANIFEST_PERSISTED_PATH,
+    RefinedDetectionBoundClipEvidence,
+    RefinedDetectionClipSourceIdentity,
     RefinedDetectionSnapshotLineage,
+    RefinedDetectionSourceCollectionIdentity,
     RefinedDetectionSourceIdentity,
     build_refined_detection_authority_provenance,
     build_refined_detection_run_manifest,
@@ -20,6 +26,7 @@ from fisheye.shared.zarr.refined_detection_manifest import (
     refined_detection_metadata_declarations_digest,
     refined_detection_selection_contract_manifest,
     validate_refined_detection_authority_provenance,
+    validate_refined_detection_clipped_source_evidence,
     validate_refined_detection_publication,
     validate_refined_detection_reason_code_coverage,
     validate_refined_detection_run_manifest,
@@ -27,6 +34,7 @@ from fisheye.shared.zarr.refined_detection_manifest import (
 )
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
+    SOURCE_DECISION_CODE_MAP,
     SOURCE_KIND_CODE_MAP,
     RefinedDetectionClipBinding,
     RefinedDetectionClippedBinding,
@@ -155,12 +163,126 @@ def _empty_arrays(
             binding.contract_version,
         )
         shape = tuple(
-            value
-            if isinstance(value, int)
-            else dimensions.contract_dimensions[value]
+            value if isinstance(value, int) else dimensions.contract_dimensions[value]
             for value in contract.shape_template
         )
         arrays[binding.path] = np.zeros(shape, dtype=contract.dtype.numpy_dtype)
+    return arrays
+
+
+def _complete_manual_arrays_same_frame(
+    dimensions: RefinedDetectionDimensions,
+) -> dict[str, np.ndarray]:
+    arrays = _empty_arrays(dimensions)
+    rows = dimensions.n_instances
+    assert rows == 2
+    frames = np.asarray([1, 1], dtype=np.int32)
+    row_ids = np.asarray([0, 1], dtype=np.int64)
+    bboxes = np.asarray(
+        [[0.25, 0.5, 0.1, 0.2], [0.75, 0.5, 0.1, 0.2]],
+        dtype=np.float32,
+    )
+    bbox_img, centers = derive_canonical_detection_geometry(
+        bboxes,
+        source_width=dimensions.source_width,
+        source_height=dimensions.source_height,
+    )
+    classes = np.asarray([1, 1], dtype=np.int32)
+    arrays.update(
+        {
+            "instances/frame_indices": frames,
+            "instances/source_acquisition_frame_index": frames.astype(np.int64),
+            "instances/instance_key": mint_manual_curation_instance_keys(
+                recording_identity="sleepyfish_cam2010095",
+                refined_row_ids=row_ids,
+                frame_indices=frames,
+                bbox_norm_coords=bboxes,
+                class_ids=classes,
+            ),
+            "instances/refined_row_ids": row_ids,
+            "instances/bbox_norm_coords": bboxes,
+            "instances/bbox_img_xyxy": bbox_img,
+            "instances/centers_img_xy": centers,
+            "instances/scores": np.zeros(rows, dtype=np.float32),
+            "instances/score_valid": np.zeros(rows, dtype=np.bool_),
+            "instances/class_ids": classes,
+            "instances/source_kind_codes": np.full(
+                rows,
+                SOURCE_KIND_CODE_MAP["manual"],
+                dtype=np.uint8,
+            ),
+            "instances/manual_edit_flags": np.ones(rows, dtype=np.bool_),
+            "instances/source_detect_row_index": np.full(
+                rows,
+                -1,
+                dtype=np.int64,
+            ),
+            "instances/reason_codes": np.zeros(rows, dtype=np.uint16),
+            "instances/frame_row_offsets": np.asarray(
+                [0, 0, 2, 2, 2],
+                dtype=np.int64,
+            ),
+        }
+    )
+    return arrays
+
+
+def _one_raw_clip_arrays(
+    dimensions: RefinedDetectionDimensions,
+) -> dict[str, np.ndarray]:
+    arrays = _empty_arrays(dimensions)
+    bbox = np.asarray([[0.5, 0.5, 0.2, 0.2]], dtype=np.float32)
+    bbox_img, centers = derive_canonical_detection_geometry(
+        bbox,
+        source_width=dimensions.source_width,
+        source_height=dimensions.source_height,
+    )
+    shared = {
+        "frame_indices": np.asarray([0], dtype=np.int32),
+        "source_acquisition_frame_index": np.asarray([0], dtype=np.int64),
+        "instance_key": np.asarray([123], dtype=np.uint64),
+        "bbox_norm_coords": bbox,
+        "bbox_img_xyxy": bbox_img,
+        "centers_img_xy": centers,
+        "scores": np.asarray([0.8], dtype=np.float32),
+        "class_ids": np.asarray([1], dtype=np.int32),
+    }
+    arrays.update(
+        {
+            **{f"instances/{name}": value.copy() for name, value in shared.items()},
+            "instances/refined_row_ids": np.asarray([7], dtype=np.int64),
+            "instances/score_valid": np.asarray([True], dtype=np.bool_),
+            "instances/source_kind_codes": np.asarray(
+                [SOURCE_KIND_CODE_MAP["raw_detect"]],
+                dtype=np.uint8,
+            ),
+            "instances/manual_edit_flags": np.asarray([False], dtype=np.bool_),
+            "instances/source_detect_row_index": np.asarray([0], dtype=np.int64),
+            "instances/reason_codes": np.asarray([0], dtype=np.uint16),
+            "instances/frame_row_offsets": np.asarray([0, 1, 1], dtype=np.int64),
+            **{
+                f"source_detections/{name}": value.copy()
+                for name, value in shared.items()
+            },
+            "source_detections/source_detect_row_index": np.asarray(
+                [0],
+                dtype=np.int64,
+            ),
+            "source_detections/decision_codes": np.asarray(
+                [SOURCE_DECISION_CODE_MAP["accepted"]],
+                dtype=np.uint8,
+            ),
+            "source_detections/resolved_refined_row_id": np.asarray(
+                [7],
+                dtype=np.int64,
+            ),
+            "source_detections/reason_codes": np.asarray([0], dtype=np.uint16),
+            "source_detections/frame_row_offsets": np.asarray(
+                [0, 1, 1],
+                dtype=np.int64,
+            ),
+        }
+    )
     return arrays
 
 
@@ -235,9 +357,7 @@ def test_run_manifest_freezes_path_digest_publication_and_separate_reasons() -> 
             dimensions=dimensions,
         )
     )
-    assert payload["logical_schema"]["schema_id"] == (
-        "palette.stage.refined_detection"
-    )
+    assert payload["logical_schema"]["schema_id"] == ("palette.stage.refined_detection")
     assert payload["reason_registries"]["instances"]["codes"] == {
         "0": "none",
         "1": "manual_addition",
@@ -258,15 +378,62 @@ def test_run_manifest_freezes_path_digest_publication_and_separate_reasons() -> 
     )
 
     semantically_tampered = copy.deepcopy(manifest)
-    semantically_tampered["payload"]["reason_registries"]["instances"][
-        "codes"
-    ]["1"] = "changed"
+    semantically_tampered["payload"]["reason_registries"]["instances"]["codes"]["1"] = (
+        "changed"
+    )
     semantically_tampered["payload_digest"] = canonical_json_sha256(
         semantically_tampered["payload"]
     )
     assert "instances reason registry is not in canonical persisted form" in (
         validate_refined_detection_run_manifest(semantically_tampered)
     )
+
+
+def test_recomputed_digest_cannot_hide_nested_contract_tampering() -> None:
+    dimensions = _dimensions(1)
+    manifest = _build_manifest(
+        run_id="refined_1",
+        dimensions=dimensions,
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
+    )
+
+    variants: list[tuple[dict[str, object], str]] = []
+    logical = copy.deepcopy(manifest)
+    logical["payload"]["logical_schema"]["array_contracts"]["contracts"][0]["dtype"][
+        "dtype_id"
+    ] = "float64"
+    variants.append((logical, "logical_schema"))
+
+    codec = copy.deepcopy(manifest)
+    codec["payload"]["storage_plan"]["codec_profile"]["codec_chain"][1][
+        "configuration"
+    ]["level"] = 9
+    variants.append((codec, "storage_plan"))
+
+    chunks = copy.deepcopy(manifest)
+    chunks["payload"]["storage_plan"]["arrays"][0]["plan"]["chunk_shape"][0] = 999
+    variants.append((chunks, "storage_plan"))
+
+    ownership = copy.deepcopy(manifest)
+    ownership["payload"]["storage_plan"]["arrays"][0]["plan"]["write_ownership"] = (
+        "partial_chunk_writes"
+    )
+    variants.append((ownership, "storage_plan"))
+
+    estimates = copy.deepcopy(manifest)
+    estimates["payload"]["storage_plan"]["object_estimate"]["stage_objects"] += 1
+    variants.append((estimates, "storage_plan"))
+
+    unexpected = copy.deepcopy(manifest)
+    unexpected["payload"]["publication"]["unexpected"] = True
+    variants.append((unexpected, "publication"))
+
+    for tampered, expected_error in variants:
+        tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+        assert any(
+            expected_error in error
+            for error in validate_refined_detection_run_manifest(tampered)
+        )
 
 
 def test_metadata_declaration_normalizer_is_exact_and_checks_consolidation() -> None:
@@ -285,9 +452,7 @@ def test_metadata_declaration_normalizer_is_exact_and_checks_consolidation() -> 
     )
     direct_attributes_changed = copy.deepcopy(direct)
     consolidated_attributes_changed = copy.deepcopy(consolidated)
-    direct_attributes_changed["instances/frame_indices"]["attributes"][
-        "another"
-    ] = 1
+    direct_attributes_changed["instances/frame_indices"]["attributes"]["another"] = 1
     consolidated_attributes_changed["instances/frame_indices"]["attributes"][
         "another"
     ] = 1
@@ -390,9 +555,7 @@ def test_reason_registry_coverage_rejects_unregistered_persisted_codes() -> None
     assert validate_refined_detection_reason_code_coverage(
         manifest,
         arrays,
-    ) == (
-        "reason-code array 'instances/reason_codes' contains unregistered codes [2]",
-    )
+    ) == ("reason-code array 'instances/reason_codes' contains unregistered codes [2]",)
 
 
 def test_publication_gate_recomputes_metadata_digest_and_validates_arrays() -> None:
@@ -423,12 +586,15 @@ def test_publication_gate_recomputes_metadata_digest_and_validates_arrays() -> N
     )
     arrays = _empty_arrays(dimensions)
 
-    assert validate_refined_detection_publication(
-        manifest,
-        direct_metadata_declarations=direct,
-        consolidated_metadata_declarations=consolidated,
-        arrays=arrays,
-    ) == ()
+    assert (
+        validate_refined_detection_publication(
+            manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+        )
+        == ()
+    )
 
     physically_changed = copy.deepcopy(direct)
     physically_changed["instances/frame_indices"]["shape"] = [1]
@@ -440,6 +606,60 @@ def test_publication_gate_recomputes_metadata_digest_and_validates_arrays() -> N
             direct_metadata_declarations=physically_changed,
             consolidated_metadata_declarations=consolidated_changed,
             arrays=arrays,
+        )
+    )
+
+
+def test_publication_gate_enforces_manual_keys_with_multiple_subjects_per_frame() -> (
+    None
+):
+    dimensions = RefinedDetectionDimensions(
+        n_frames=4,
+        n_instances=2,
+        n_source_detections=0,
+        source_width=640,
+        source_height=480,
+    )
+    storage_plan = plan_refined_detection_storage(dimensions)
+    direct, consolidated = _metadata_declarations(dimensions, storage_plan)
+    manifest = build_refined_detection_run_manifest(
+        run_id="refined_manual_1",
+        dimensions=dimensions,
+        storage_plan=storage_plan,
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=2),
+        source=RefinedDetectionSourceIdentity(
+            run_id="detect_1",
+            run_manifest_digest="a" * 64,
+            logical_content_digest="b" * 64,
+        ),
+        instance_reason_codes={0: "none"},
+        source_reason_codes={0: "none"},
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+    )
+    arrays = _complete_manual_arrays_same_frame(dimensions)
+
+    assert arrays["instances/frame_row_offsets"].tolist() == [0, 0, 2, 2, 2]
+    assert np.unique(arrays["instances/instance_key"]).size == 2
+    assert (
+        validate_refined_detection_publication(
+            manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+        )
+        == ()
+    )
+
+    invalid = copy.deepcopy(arrays)
+    invalid["instances/instance_key"][1] += np.uint64(1)
+    assert "manual instance_key values do not match the frozen allocator" in (
+        validate_refined_detection_publication(
+            manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=invalid,
         )
     )
 
@@ -481,10 +701,21 @@ def test_clipped_run_manifest_binds_one_camera_and_complete_media_timeline() -> 
         dimensions=dimensions,
         storage_plan=storage_plan,
         lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
-        source=RefinedDetectionSourceIdentity(
-            run_id="detect_1",
-            run_manifest_digest="a" * 64,
-            logical_content_digest="b" * 64,
+        source=RefinedDetectionSourceCollectionIdentity(
+            collection_id="collection_1",
+            collection_manifest_digest="1" * 64,
+            members=(
+                RefinedDetectionClipSourceIdentity(
+                    clip_index=0,
+                    source_refined_run_id="refined_clip_0",
+                    source_refined_manifest_digest="6" * 64,
+                    source_detection=RefinedDetectionSourceIdentity(
+                        run_id="detect_clip_0",
+                        run_manifest_digest="a" * 64,
+                        logical_content_digest="b" * 64,
+                    ),
+                ),
+            ),
         ),
         instance_reason_codes={0: "none"},
         source_reason_codes={0: "none"},
@@ -497,9 +728,7 @@ def test_clipped_run_manifest_binds_one_camera_and_complete_media_timeline() -> 
     assert validate_refined_detection_run_manifest(manifest) == ()
     binding = manifest["payload"]["logical_schema"]["clipped_binding"]
     assert binding["camera_cardinality"] == 1
-    assert binding["clip_ordinal_scope"] == (
-        "snapshot_global_within_single_camera"
-    )
+    assert binding["clip_ordinal_scope"] == ("snapshot_global_within_single_camera")
     assert binding["empty_frame_media_resolution"] == (
         "complete_frame_map_independent_of_rows"
     )
@@ -524,6 +753,171 @@ def test_clipped_run_manifest_binds_one_camera_and_complete_media_timeline() -> 
     )
 
 
+def test_clipped_publication_requires_and_checks_bound_clip_artifacts() -> None:
+    source_dimensions = RefinedDetectionDimensions(
+        n_frames=2,
+        n_instances=1,
+        n_source_detections=1,
+        source_width=640,
+        source_height=480,
+    )
+    source_arrays = _one_raw_clip_arrays(source_dimensions)
+    source_plan = plan_refined_detection_storage(source_dimensions)
+    source_direct, source_consolidated = _metadata_declarations(
+        source_dimensions,
+        source_plan,
+    )
+    raw_source = RefinedDetectionSourceIdentity(
+        run_id="detect_clip_0",
+        run_manifest_digest="a" * 64,
+        logical_content_digest="b" * 64,
+    )
+    source_manifest = build_refined_detection_run_manifest(
+        run_id="refined_clip_0",
+        dimensions=source_dimensions,
+        storage_plan=source_plan,
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=8),
+        source=raw_source,
+        instance_reason_codes={0: "none"},
+        source_reason_codes={0: "none"},
+        direct_metadata_declarations=source_direct,
+        consolidated_metadata_declarations=source_consolidated,
+        selector_eligible=False,
+    )
+    source_digest = str(source_manifest["payload_digest"])
+    clipped = RefinedDetectionClippedBinding(
+        collection_id="collection_1",
+        collection_manifest_digest="1" * 64,
+        camera_serial="2010095",
+        video_identity="sleepyfish_cam2010095",
+        video_manifest_digest="2" * 64,
+        recording_frame_index_digest="3" * 64,
+        clips=(
+            RefinedDetectionClipBinding(
+                clip_index=0,
+                clip_id="clip_0",
+                media_identity="clip_0.mp4",
+                media_digest="4" * 64,
+                parent_frame_start=0,
+                parent_frame_stop=2,
+                frame_map_digest="5" * 64,
+                source_refined_run_id="refined_clip_0",
+                source_refined_manifest_digest=source_digest,
+            ),
+        ),
+    )
+    dimensions = RefinedDetectionDimensions(
+        n_frames=2,
+        n_instances=1,
+        n_source_detections=1,
+        source_width=640,
+        source_height=480,
+        lineage_profile=RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT,
+    )
+    arrays = _empty_arrays(dimensions)
+    arrays.update({path: value.copy() for path, value in source_arrays.items()})
+    arrays.update(
+        {
+            "instances/source_recording_frame_ids": np.asarray([1], dtype=np.int64),
+            "instances/source_clip_indices": np.asarray([0], dtype=np.int32),
+            "instances/source_clip_local_frame_indices": np.asarray(
+                [0], dtype=np.int32
+            ),
+            "instances/source_clip_detect_row_index": np.asarray([0], dtype=np.int64),
+            "instances/source_refined_row_ids": np.asarray([7], dtype=np.int64),
+            "source_detections/source_recording_frame_ids": np.asarray(
+                [1], dtype=np.int64
+            ),
+            "source_detections/source_clip_indices": np.asarray([0], dtype=np.int32),
+            "source_detections/source_clip_local_frame_indices": np.asarray(
+                [0], dtype=np.int32
+            ),
+            "source_detections/source_clip_detect_row_index": np.asarray(
+                [0], dtype=np.int64
+            ),
+            "source_detections/source_resolved_refined_row_id": np.asarray(
+                [7], dtype=np.int64
+            ),
+        }
+    )
+    plan = plan_refined_detection_storage(dimensions)
+    direct, consolidated = _metadata_declarations(dimensions, plan)
+    manifest = build_refined_detection_run_manifest(
+        run_id="refined_recording_1",
+        dimensions=dimensions,
+        storage_plan=plan,
+        lineage=_lineage(snapshot_id=NEXT_SNAPSHOT_ID, next_id=9),
+        source=RefinedDetectionSourceCollectionIdentity(
+            collection_id="collection_1",
+            collection_manifest_digest="1" * 64,
+            members=(
+                RefinedDetectionClipSourceIdentity(
+                    clip_index=0,
+                    source_refined_run_id="refined_clip_0",
+                    source_refined_manifest_digest=source_digest,
+                    source_detection=raw_source,
+                ),
+            ),
+        ),
+        instance_reason_codes={0: "none"},
+        source_reason_codes={0: "none"},
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+        clipped_binding=clipped,
+    )
+    evidence = (
+        RefinedDetectionBoundClipEvidence(
+            clip_index=0,
+            manifest=source_manifest,
+            arrays=source_arrays,
+        ),
+    )
+
+    assert "clipped publication requires bound per-clip source evidence" in (
+        validate_refined_detection_publication(
+            manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+        )
+    )
+    assert (
+        validate_refined_detection_publication(
+            manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+            clipped_source_evidence=evidence,
+        )
+        == ()
+    )
+
+    invented_identity = copy.deepcopy(arrays)
+    invented_identity["instances/refined_row_ids"][0] = 8
+    invented_identity["instances/source_refined_row_ids"][0] = 8
+    invented_identity["source_detections/resolved_refined_row_id"][0] = 8
+    invented_identity["source_detections/source_resolved_refined_row_id"][0] = 8
+    assert "clip 0 refined-row membership is incomplete" in (
+        validate_refined_detection_clipped_source_evidence(
+            manifest,
+            invented_identity,
+            evidence,
+        )
+    )
+
+    invented_source_row = copy.deepcopy(arrays)
+    invented_source_row["instances/source_clip_detect_row_index"][0] = 5
+    invented_source_row["source_detections/source_clip_detect_row_index"][0] = 5
+    assert "clip 0 source-audit rows are not complete and ordered" in (
+        validate_refined_detection_clipped_source_evidence(
+            manifest,
+            invented_source_row,
+            evidence,
+        )
+    )
+
+
 def test_root_snapshot_validates_manual_key_allocator() -> None:
     dimensions = _dimensions(1)
     manifest = _build_manifest(
@@ -533,10 +927,13 @@ def test_root_snapshot_validates_manual_key_allocator() -> None:
     )
     arrays = _manual_arrays([0])
 
-    assert validate_refined_detection_snapshot_identity(
-        manifest=manifest,
-        arrays=arrays,
-    ) == ()
+    assert (
+        validate_refined_detection_snapshot_identity(
+            manifest=manifest,
+            arrays=arrays,
+        )
+        == ()
+    )
 
     arrays["instances/instance_key"][0] += np.uint64(1)
     assert "manual instance_key values do not match the frozen allocator" in (
@@ -589,12 +986,15 @@ def test_successor_enforces_parent_digest_nonreuse_and_surviving_key() -> None:
         ),
     )
 
-    assert validate_refined_detection_snapshot_identity(
-        manifest=current_manifest,
-        arrays=current_arrays,
-        parent_manifest=parent_manifest,
-        parent_arrays=parent_arrays,
-    ) == ()
+    assert (
+        validate_refined_detection_snapshot_identity(
+            manifest=current_manifest,
+            arrays=current_arrays,
+            parent_manifest=parent_manifest,
+            parent_arrays=parent_arrays,
+        )
+        == ()
+    )
 
     reused = _manual_arrays([0, 1], bboxes=edited_bbox)
     errors = validate_refined_detection_snapshot_identity(
@@ -616,9 +1016,7 @@ def test_successor_enforces_parent_digest_nonreuse_and_surviving_key() -> None:
     assert "surviving refined_row_id 0 changed instance_key" in errors
 
     reused_snapshot = copy.deepcopy(current_manifest)
-    reused_snapshot["payload"]["snapshot_lineage"]["snapshot_id"] = (
-        ROOT_SNAPSHOT_ID
-    )
+    reused_snapshot["payload"]["snapshot_lineage"]["snapshot_id"] = ROOT_SNAPSHOT_ID
     reused_snapshot["payload_digest"] = canonical_json_sha256(
         reused_snapshot["payload"]
     )
@@ -632,9 +1030,9 @@ def test_successor_enforces_parent_digest_nonreuse_and_surviving_key() -> None:
     )
 
     changed_recording = copy.deepcopy(current_manifest)
-    changed_recording["payload"]["snapshot_lineage"][
-        "manual_instance_key_allocator"
-    ]["recording_identity"] = "another_recording"
+    changed_recording["payload"]["snapshot_lineage"]["manual_instance_key_allocator"][
+        "recording_identity"
+    ] = "another_recording"
     changed_recording["payload_digest"] = canonical_json_sha256(
         changed_recording["payload"]
     )
