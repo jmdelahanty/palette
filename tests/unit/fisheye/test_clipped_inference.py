@@ -389,7 +389,11 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert [fragment["fragment_id"] for fragment in fragments] == [
         f"raw_detection:{target_safe}",
         f"detection_postprocess:{target_safe}",
-        f"analysis:{target_safe}",
+        f"crop_roi_cache:{target_safe}",
+        f"keypoints:{target_safe}",
+        f"subject_mask_inference:{target_safe}",
+        f"subject_mask_refinement:{target_safe}",
+        f"analysis_validation:{target_safe}",
         "campaign_finalize",
     ]
     detection_output = target["detection_module"]
@@ -398,7 +402,17 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert fragments[1]["requires"] == [f"raw_detection_work_units:{target_safe}"]
     assert fragments[1]["provides"] == [detection_output["artifact_key"]]
     assert fragments[2]["requires"] == [detection_output["artifact_key"]]
-    assert fragments[3]["provides"] == [
+    assert fragments[3]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[4]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[5]["requires"] == [
+        f"raw_subject_masks:{target_safe}",
+        f"refined_keypoints:{target_safe}",
+    ]
+    assert fragments[6]["requires"] == [
+        f"refined_keypoints:{target_safe}",
+        f"refined_subject_masks:{target_safe}",
+    ]
+    assert fragments[7]["provides"] == [
         "registry_reconciled",
         "nrs_cache_cleaned",
     ]

@@ -46,19 +46,41 @@ module by itself for a detection-only workflow. This keeps workflow scope
 (detection-only versus full analysis) separate from scheduler packaging
 (ordinary job, array, or bounded bundle).
 
-For each target, the full campaign now composes a `detection:<target>` fragment
-with an `analysis:<target>` fragment. The analysis fragment explicitly requires
-the detection module's finalized-collection artifact and provides a validated
-analysis artifact. Cross-recording concurrency gates are also expressed as
-fragment requirements: a later detection fragment may require the earlier
-target's validated-analysis artifact. The campaign finalizer requires every
-target validation artifact before registry reconciliation and cleanup.
+For each target, the full campaign composes raw detection and detection
+postprocessing with five downstream capability fragments:
+
+```text
+detection_postprocess:<target>
+  -> crop_roi_cache:<target>
+       ├─ keypoints:<target>
+       └─ subject_mask_inference:<target>
+              \       /
+       subject_mask_refinement:<target>
+                 -> analysis_validation:<target>
+```
+
+These are logical artifact boundaries over the existing commands, not extra
+scheduler submissions. `crop_roi_cache` provides the stable proxy crop and
+cache binding. Keypoints provides both raw and refined artifacts. Subject-mask
+inference does not require keypoints; its refinement fragment joins raw masks
+with the exact refined-keypoint output. Cross-recording concurrency gates
+remain fragment requirements: a later raw-detection fragment may require the
+earlier target's validated-analysis artifact. The campaign finalizer requires
+every target validation artifact before registry reconciliation and cleanup.
 
 These logical artifact keys validate composition; concrete LSF dependencies
 still enforce execution order. All fragments are resolved into one immutable
 workflow before any `bsub` call, so compute jobs never create more scheduler
-jobs dynamically. Cache, keypoint, and subject-mask extraction can follow the
-same pattern without changing their existing stage-only operator interfaces.
+jobs dynamically. The existing cache, keypoint, and subject-mask stage-only
+operator interfaces remain unchanged and are now visible as separate
+composition capabilities.
+
+Selected arena geometry and registered gating are available as independent
+layout-neutral fragments in `fisheye.cluster.arena_geometry`. They are not yet
+silently inserted into this default recipe. A future required-gating policy
+must wire the exact `analysis/detection_gate_runs/<run>` output into detection
+postprocessing and validate ordered `instance_key` equality before refinement;
+optional or absent geometry must remain an explicit workflow policy.
 
 The target manifest schema is `palette.clipped_inference_targets.v1`. Every
 target must pin its registry `recording_id`, recording directory, and canonical

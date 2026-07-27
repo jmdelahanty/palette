@@ -1,7 +1,8 @@
 # Layout-neutral production DAG design
 
-- Status: accepted direction; layout/parity and whole-video raw-detection
-  checkpoints implemented
+- Status: accepted direction; layout/parity, whole-video raw detection,
+  selected geometry, keyed gating, and clipped capability-boundary checkpoints
+  implemented
 - Last reviewed: 2026-07-27
 - Scope: production inference and refinement workflows using the structured LSF
   kernel
@@ -86,6 +87,14 @@ models. Raw detection is now a separately composable module for both supported
 recording layouts. Collection quality, refinement, and finalized-collection
 publication remain clipped-only because they still consume the clipped
 collection source and recording-frame-index contracts.
+
+The clipped recipe no longer presents all downstream processing as one
+`analysis:<target>` fragment. Its unchanged jobs are grouped behind explicit
+`crop_roi_cache`, `keypoints`, `subject_mask_inference`,
+`subject_mask_refinement`, and `analysis_validation` capability artifacts.
+This exposes the existing fork/join behavior without duplicating a command:
+keypoint and subject-mask inference both depend on crop/cache, while mask
+refinement joins raw masks with the exact refined-keypoint artifact.
 
 The downstream `fisheye.analysis_workflows` YAML DAG is a separate system. It
 selects and orders persisted analysis products and normally executes them
@@ -295,6 +304,56 @@ update should distinguish selected arena geometry from detection-gate
 materialization, using names such as `arena_geometry` and
 `detection_arena_gate` after the artifact contracts are finalized.
 
+### Implemented selection and gate surface
+
+The first operational implementation is intentionally two separate immutable
+publications:
+
+```text
+analysis/arena_geometry_runs/<candidate>
+  -> analysis/arena_geometry_selection/<selection>
+  -> analysis/detection_gate_runs/<gate>
+```
+
+`publish_arena_geometry_selection` requires one exact complete candidate,
+copies its candidate digest, arena binding, native coordinate authority,
+physical rim, and valid gate into an immutable review record, and records the
+reviewer, decision source, and reason. It never mutates the candidate and does
+not yet write the legacy `analysis_metadata.attrs["dish_mask"]` projection.
+The selection parent advances `latest` and `latest_complete` through the shared
+owner/generation/lease activation contract only after atomic publication and
+fresh source revalidation.
+
+`materialize_registered_detection_gate` accepts either a canonical
+whole-video `detect_runs/<run>` or a recording-ordered clipped
+`detect_collection_sources/<run>`. Both adapters expose normalized
+center-X/center-Y/width/height boxes, native dimensions, canonical frame rows,
+and modern `instance_key`. The materializer streams one physical output shard
+at a time and writes only:
+
+- `instance_key` and dense `source_row_index`;
+- canonical `frame_indices`;
+- `detection_centroid_native_px`;
+- `signed_distance_to_gate_px`;
+- `inside_registered_dish_mask`;
+- a versioned `gate_decision` enum; and
+- canonical null-padded UTF-8 `reason_bytes`.
+
+The table uses 16,384-row inner chunks and 131,072-row indexed shards by
+default. Constant geometry and selection provenance live once at run level.
+Validation requires unique keys, dense exact source-row identity, consistent
+decision/reason fields, decoded output digests, exact current source-array
+digests, and an unchanged selection record before selector activation. Raw
+detections remain untouched.
+
+The corresponding `fisheye.cluster.arena_geometry` builders are layout-neutral
+fragments. They can be composed with raw detection, or satisfied from exact
+previously published candidate/selection artifacts. Integration into the
+default clipped and whole-video postprocessing recipes remains an explicit
+next checkpoint: when gating policy is required, detection refinement must
+consume the exact gate artifact and require identical ordered
+`instance_key` values rather than following a mutable pointer.
+
 ## Workflow recipes and standalone stages
 
 A complete default workflow is a recipe over reusable fragments, not a special
@@ -358,9 +417,13 @@ parity at every checkpoint:
    same fragment builders. The atomic publisher, registry-discovered cohort
    CLI, and consolidated bounded LSF array are implemented.
 6. Add the selected-arena-geometry and keyed detection-gate fragment between
-   raw detection and detection postprocessing.
+   raw detection and detection postprocessing. The immutable publications and
+   layout-neutral fragment builders are implemented; default-recipe insertion
+   is pending.
 7. Extract crop/cache, keypoint, and subject-mask fragment builders behind the
-   same typed capability boundary.
+   same typed capability boundary. The clipped recipe's existing jobs now
+   expose these separate logical boundaries; consolidating the remaining
+   whole/clipped command renderers is pending.
 8. Add named workflow recipes and registry-backed reuse of exact validated
    products.
 9. Update the stage catalog only after the new artifact families and

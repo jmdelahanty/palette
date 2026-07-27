@@ -910,14 +910,25 @@ The recommended slices are:
      agreement threshold or operational selection policy.
 
 5. **Selection and compatibility projection**
-   - Add explicit selection/review state.
-   - Materialize the selected compatibility `dish_mask` without losing the
-     candidate reference.
+   - Immutable explicit selection/review state is implemented under
+     `analysis/arena_geometry_selection/<selection>`.
+   - The selection binds an exact candidate digest and advances a guarded
+     selector without modifying the candidate.
+   - Materializing the compatibility `dish_mask` projection remains deferred;
+     the canonical selection record is already sufficient for modern readers.
 
 6. **Detection quality/refinement integration**
-   - Bind by camera, arena, geometry candidate, and coordinate contract.
-   - Preserve raw detections and keyed per-row decisions.
-   - Bypass the legacy 0.5 mm expansion for registered valid gates.
+   - A compact immutable keyed gate table is implemented under
+     `analysis/detection_gate_runs/<run>` for canonical whole-video detections
+     and recording-ordered clipped detection sources.
+   - It binds camera, arena, exact selection/candidate digests, native
+     coordinate authority, and full-precision gate geometry.
+   - It preserves raw detections, copies `instance_key`, and stores native
+     centroids, signed distance, inclusive decisions, and rejection reasons.
+   - It applies no extra 0.5 mm expansion and validates current source payload
+     digests before activation.
+   - Making refined detection require the exact gate table under a configured
+     policy remains the next recipe-integration step.
 
 7. **Registry and cleanup**
    - Expose normalized geometry/comparison/selection status.
