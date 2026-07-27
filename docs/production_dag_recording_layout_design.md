@@ -132,10 +132,33 @@ that extracting the shared raw module did not alter the existing clipped
 commands, resources, dependencies, or outputs.
 
 This checkpoint makes one whole recording independently plannable through the
-general DAG kernel. A cohort planner must still aggregate repeated whole-video
-tasks into one bounded LSF array, matching the proven Batman campaign shape,
-instead of submitting many unrelated singleton jobs. Whole-video quality and
-refinement also remain a later source-adapter checkpoint.
+general DAG kernel. `fisheye.cluster.whole_video_detection` now supplies the
+cohort adapter: it discovers exact active analysis datasets and authoritative
+full-frame acquisition streams from the registry, requires one content-pinned
+detection model across the selected cohort, and aggregates one atomic publisher
+per recording into one bounded LSF array. Whole-video quality and refinement
+remain a later source-adapter checkpoint.
+
+The cohort planner fails closed on duplicate active analysis datasets, missing
+or ambiguous authoritative full-frame streams, stale video/Zarr paths, model
+identity disagreement, and pre-existing output run paths. Dry runs persist the
+same immutable `plan.json` and `lsf_plan.json` consumed by array elements;
+`--apply` submits only the rendered `bsub` command through
+`login1-citrus-poller`.
+
+Example registry-backed dry run:
+
+```bash
+scripts/py -m fisheye.cluster.whole_video_detection \
+  --run-label batman_detection \
+  --run-root /groups/johnson/johnsonlab/jeremy/staging/batman_detection \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --path-contains Batman \
+  --detection-set-id <set-id> \
+  --detection-run-id <run-id> \
+  --max-concurrent 8 \
+  --dry-run --json
+```
 
 ## Canonical target model
 
@@ -332,8 +355,8 @@ parity at every checkpoint:
    equivalent jobs, dependencies, resources, commands, expected outputs, and
    fragment products.
 5. Compose and dry-run a whole-recording raw-detection workflow through the
-   same fragment builders. The atomic publisher binding is implemented; a
-   registry-discovered cohort CLI and consolidated LSF array remain open.
+   same fragment builders. The atomic publisher, registry-discovered cohort
+   CLI, and consolidated bounded LSF array are implemented.
 6. Add the selected-arena-geometry and keyed detection-gate fragment between
    raw detection and detection postprocessing.
 7. Extract crop/cache, keypoint, and subject-mask fragment builders behind the

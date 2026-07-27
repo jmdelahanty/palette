@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from fisheye.cluster.clipped_lsf import (
     build_execution_task,
@@ -332,6 +332,14 @@ class RawDetectionWorkflowModule:
 
 
 @dataclass(frozen=True)
+class RawDetectionCohortWorkflowModule:
+    """One bounded scheduler array publishing several whole-video runs."""
+
+    fragment: LsfWorkflowFragment
+    outputs: tuple[RawDetectionFragmentOutputs, ...]
+
+
+@dataclass(frozen=True)
 class DetectionWorkflowModule:
     """Layout-neutral raw and postprocess fragments with typed outputs."""
 
@@ -444,11 +452,11 @@ def _clipped_raw_detection_job(
     )
 
 
-def _whole_video_raw_detection_job(
+def _whole_video_raw_detection_command(
     inputs: RawDetectionFragmentInputs,
     *,
     target_safe: str,
-) -> LsfJob:
+) -> tuple[tuple[str, ...], tuple[Path, ...]]:
     unit = inputs.work_units[0]
     assert inputs.registry_path is not None
     result_json = (
@@ -458,7 +466,7 @@ def _whole_video_raw_detection_job(
         / "detection_reports"
         / "whole_video.json"
     )
-    command = (
+    command: tuple[str, ...] = (
         "scripts/py",
         "-m",
         "fisheye.utils.run_detection_local_publish",
@@ -494,6 +502,21 @@ def _whole_video_raw_detection_job(
         "--result-json",
         str(result_json),
     )
+    return command, (
+        inputs.analysis_zarr / unit.detect_group_path / "zarr.json",
+        result_json,
+    )
+
+
+def _whole_video_raw_detection_job(
+    inputs: RawDetectionFragmentInputs,
+    *,
+    target_safe: str,
+) -> LsfJob:
+    command, expected_outputs = _whole_video_raw_detection_command(
+        inputs,
+        target_safe=target_safe,
+    )
     return build_job(
         workflow_id=inputs.workflow_id,
         family=inputs.family,
@@ -510,10 +533,7 @@ def _whole_video_raw_detection_job(
             walltime="2:00",
         ),
         upstream=inputs.upstream_job_keys,
-        expected_outputs=(
-            inputs.analysis_zarr / unit.detect_group_path / "zarr.json",
-            result_json,
-        ),
+        expected_outputs=expected_outputs,
     )
 
 
@@ -558,6 +578,133 @@ def build_raw_detection_fragment(
         },
     )
     return RawDetectionWorkflowModule(fragment=fragment, outputs=outputs)
+
+
+def build_whole_video_raw_detection_cohort_fragment(
+    inputs: Sequence[RawDetectionFragmentInputs],
+    *,
+    max_concurrent: int,
+) -> RawDetectionCohortWorkflowModule:
+    """Pack whole-video atomic publishers into one bounded LSF array.
+
+    The scheduler array is an orchestration optimization only.  Every element
+    retains one recording-bound source video, one analysis Zarr, one complete
+    node-local candidate, and one atomic publication boundary.
+    """
+
+    cohort = tuple(inputs)
+    if not cohort:
+        raise ValueError("A whole-video detection cohort requires at least one target.")
+    if int(max_concurrent) <= 0:
+        raise ValueError("Whole-video detection cohort concurrency must be positive.")
+    if any(item.target.layout is not RecordingLayout.WHOLE_VIDEO for item in cohort):
+        raise ValueError(
+            "Whole-video detection cohorts cannot contain clipped targets."
+        )
+
+    first = cohort[0]
+    invariant_fields = (
+        "workflow_id",
+        "family",
+        "repo",
+        "run_root",
+        "model",
+        "registry_path",
+        "upstream_job_keys",
+        "required_artifacts",
+    )
+    for item in cohort[1:]:
+        mismatched = [
+            name
+            for name in invariant_fields
+            if getattr(item, name) != getattr(first, name)
+        ]
+        if mismatched:
+            raise ValueError(
+                "Whole-video cohort members must share scheduler/publication "
+                f"bindings; mismatched fields: {mismatched!r}."
+            )
+
+    target_ids = [item.target_id for item in cohort]
+    if len(set(target_ids)) != len(target_ids):
+        raise ValueError("Whole-video detection cohort target ids must be unique.")
+    analysis_zarrs = [item.analysis_zarr for item in cohort]
+    if len(set(analysis_zarrs)) != len(analysis_zarrs):
+        raise ValueError("Whole-video detection cohort analysis Zarrs must be unique.")
+
+    tasks = []
+    target_safe_values: list[str] = []
+    for item in cohort:
+        target_safe = safe_component(item.target_id, default="target", max_length=56)
+        target_safe_values.append(target_safe)
+        command, expected_outputs = _whole_video_raw_detection_command(
+            item,
+            target_safe=target_safe,
+        )
+        tasks.append(
+            build_execution_task(
+                run_root=item.run_root,
+                task_key=f"detect:{target_safe}",
+                stage="detect",
+                command=command,
+                expected_outputs=expected_outputs,
+                array_indexed=True,
+            )
+        )
+
+    workflow_safe = safe_component(
+        first.workflow_id,
+        default="whole_video_detect",
+        max_length=56,
+    )
+    job = build_task_group_job(
+        workflow_id=first.workflow_id,
+        family=first.family,
+        repo=first.repo,
+        run_root=first.run_root,
+        job_key=f"detect_array:{workflow_safe}",
+        stage="detect",
+        tasks=tasks,
+        mode=LsfExecutionMode.ARRAY,
+        max_concurrent=int(max_concurrent),
+        resources=LsfResources(
+            queue="gpu_l4",
+            ncores=8,
+            mem_gb=120,
+            gpus=1,
+            walltime="2:00",
+        ),
+        upstream=first.upstream_job_keys,
+    )
+    outputs = tuple(
+        RawDetectionFragmentOutputs(
+            target_id=item.target_id,
+            raw_detection_group_paths=tuple(
+                unit.detect_group_path for unit in item.work_units
+            ),
+            terminal_job_key=job.job_key,
+            artifact_key=f"raw_detection_work_units:{target_safe}",
+        )
+        for item, target_safe in zip(cohort, target_safe_values, strict=True)
+    )
+    fragment = LsfWorkflowFragment(
+        fragment_id=f"raw_detection_cohort:{workflow_safe}",
+        jobs=(job,),
+        requires=first.required_artifacts,
+        provides=tuple(output.artifact_key for output in outputs),
+        metadata={
+            "module": "raw_detection_cohort",
+            "recording_layout": RecordingLayout.WHOLE_VIDEO.value,
+            "target_count": len(cohort),
+            "scheduler_execution": "bounded_lsf_array",
+            "max_concurrent": min(int(max_concurrent), len(cohort)),
+            "publication_policy": (
+                "one_complete_node_local_run_then_atomic_prfs_publication_per_element_v1"
+            ),
+            "outputs": [output.to_json() for output in outputs],
+        },
+    )
+    return RawDetectionCohortWorkflowModule(fragment=fragment, outputs=outputs)
 
 
 def compose_raw_detection_workflow(
@@ -880,9 +1027,11 @@ __all__ = [
     "RawDetectionFragmentInputs",
     "RawDetectionFragmentOutputs",
     "RawDetectionWorkUnitSpec",
+    "RawDetectionCohortWorkflowModule",
     "RawDetectionWorkflowModule",
     "build_detection_fragment",
     "build_raw_detection_fragment",
+    "build_whole_video_raw_detection_cohort_fragment",
     "compose_detection_workflow",
     "compose_raw_detection_workflow",
 ]

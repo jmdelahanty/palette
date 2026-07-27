@@ -8889,6 +8889,43 @@ class Registry(RegistryMigrationMixin):
         query = " ".join(sql)
         return list(self.conn.execute(query, params).fetchall())
 
+    def query_acquisition_video_streams_current(
+        self,
+        *,
+        dataset_id: Optional[str] = None,
+        recording_id: Optional[str] = None,
+        output_kind: Optional[str] = None,
+        role: Optional[str] = None,
+        availability_status: Optional[str] = None,
+        require_video: Optional[bool] = None,
+    ) -> List[sqlite3.Row]:
+        """Return current recording-bound acquisition video stream rows.
+
+        This is the registry-facing discovery surface for planners.  It avoids
+        reopening every analysis Zarr merely to recover the source video path
+        and keeps selection explicit by dataset, recording, stream kind, and
+        availability contract.
+        """
+
+        sql = ["SELECT * FROM recording_acquisition_video_streams_current WHERE 1=1"]
+        params: List[Any] = []
+
+        def add_clause(clause: str, value: Any) -> None:
+            if value is None:
+                return
+            sql.append(clause)
+            params.append(value)
+
+        add_clause("AND dataset_id = ?", dataset_id)
+        add_clause("AND recording_id = ?", recording_id)
+        add_clause("AND output_kind = ?", output_kind)
+        add_clause("AND role = ?", role)
+        add_clause("AND availability_status = ?", availability_status)
+        if require_video is not None:
+            add_clause("AND COALESCE(video_exists, 0) = ?", int(bool(require_video)))
+        sql.append("ORDER BY recording_id, stream_key, COALESCE(camera_id, '')")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
 
 def scan_paths(
     registry: Registry,
