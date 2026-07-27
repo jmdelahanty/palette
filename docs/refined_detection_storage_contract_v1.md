@@ -513,7 +513,7 @@ Before production routing:
       v1 snapshots. Preserve `detection_regular_rollback_v1` as explicit
       rollback and do not change selectors in this step.
 - [x] Publish and independently reopen one fresh selector-ineligible pair whose
-      manifests carry the promoted profile ID. LSF job `153192513` validated
+      manifests carry the promoted profile ID. LSF job `153192642` validated
       every canonical/refined declaration, exact hashes, codecs, offsets,
       direct/consolidated equality, and physical equivalence to the frozen
       candidate.

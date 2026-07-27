@@ -2,8 +2,7 @@
 
 Date: 2026-07-27
 
-Status: final version pending after correction of the inherited physical-gate
-flag; selector-ineligible; no production-state changes
+Status: passed; selector-ineligible; no production-state changes
 
 ## Scope
 
@@ -15,7 +14,7 @@ already measured by Crimson and accepted by Palette.
 ## Immutable Provenance
 
 - Palette commit:
-  `d7436b083af0f6bc4b8004952a4ff8542b98f156`;
+  `1d96158393c735f01d6fbaec64d585f2a9a4b5b3`;
 - Crimson benchmark implementation:
   `9cf04acee9682a6f4f5fae005c0af6077ec5cc4b`;
 - Crimson evidence commit:
@@ -25,7 +24,7 @@ already measured by Crimson and accepted by Palette.
 
 The cluster ran from the clean detached worktree:
 
-`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/shared-zarr-storage-policy-20260723-d7436b08`
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette-worktrees/shared-zarr-storage-policy-20260723-1d961583`
 
 The shared `sun` checkout remained unchanged.
 
@@ -40,22 +39,23 @@ selector-ineligible; a new versioned run supersedes its envelope.
 
 ## Published Evidence
 
-LSF job `153192513` completed successfully on `h07u11`. The immutable workflow
+LSF job `153192642` completed successfully on `h07u28`. The immutable workflow
 is:
 
-`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/profile_canary/sleepyfish_promoted_default_verification_20260727_v1`
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/profile_canary/sleepyfish_promoted_default_verification_20260727_v2`
 
 The corresponding macOS path is:
 
-`/Volumes/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/profile_canary/sleepyfish_promoted_default_verification_20260727_v1`
+`/Volumes/johnsonlab/jeremy/recordings/.palette_benchmarks/refined_detection_storage/profile_canary/sleepyfish_promoted_default_verification_20260727_v2`
 
 The strict `canary_manifest.json` has:
 
 - canonical payload digest:
-  `18640d8ce45995bfa68bb90fe5f5dbeca2e44711a22a9f3e05f010b10e79aab2`;
+  `7fb7e28d99bc36bf8cfa1b7cfa1a4a2c01b28e59208a964ee8479d56e798b9f0`;
 - file SHA-256:
-  `cb2316fe5b9fa1d987866d45df36169d71436544139662ab6e723ac6a6e7c8d3`;
+  `2b302d40875d02c787d6511205d0f46c3aab793292d76917f52b4fa85af5d441`;
 - `profile_promoted=true`;
+- `crimson_physical_measurement_required=false`;
 - `selector_eligible=false`;
 - `registry_registered=false`; and
 - no production-state changes.
@@ -79,8 +79,8 @@ The publication gate passed:
 - codec and CRC declarations validate;
 - planned payload objects are 240 regular versus 48 promoted, ratio 0.20;
 - observed payload objects are 220 regular versus 42 promoted, ratio 0.1909;
-- source copy took 6.12 seconds and the core workflow took 48.67 seconds; and
-- process peak RSS was 688,848,896 bytes.
+- source copy took 5.15 seconds and the core workflow took 48.38 seconds; and
+- process peak RSS was 690,626,560 bytes.
 
 A separate fresh process then reopened the shared stores and validated all 9
 canonical and 28 refined arrays. It proved:

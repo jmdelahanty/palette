@@ -917,7 +917,7 @@ define refined-run selection or manual-addition semantics.
       v1 snapshots. Keep the 1 MiB unsharded
       `detection_regular_rollback_v1` explicit and leave selectors unchanged.
 - [x] Publish and independently reopen a new selector-ineligible pair whose
-      manifests carry the promoted profile ID. LSF job `153192513` and a fresh
+      manifests carry the promoted profile ID. LSF job `153192642` and a fresh
       process validated all 9 canonical and 28 refined arrays and exact
       physical equivalence to the frozen candidate.
 - [ ] Have Crimson perform an exact-schema open-only smoke against the named

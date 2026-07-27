@@ -151,8 +151,8 @@ deadline misses, and median current-frame p95 improving from 144.2 ms to
 
 Palette promoted those values under
 `detection_published_access_aware_v1` at commit
-`d7436b083af0f6bc4b8004952a4ff8542b98f156`. Commit-pinned LSF job
-`153192513` published a fresh selector-ineligible pair, and a separate process
+`1d96158393c735f01d6fbaec64d585f2a9a4b5b3`. Commit-pinned LSF job
+`153192642` published a fresh selector-ineligible pair, and a separate process
 reopened it from shared storage. All 9 canonical and 28 refined declarations
 validated, logical hashes matched the prior canary, and every refined physical
 declaration exactly matched the frozen candidate. The result is recorded in

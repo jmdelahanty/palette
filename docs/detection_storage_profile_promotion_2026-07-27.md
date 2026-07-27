@@ -70,8 +70,8 @@ binds `aggregate.json` to SHA-256
 
 Palette then published the named-profile verification canary documented in
 `docs/diagnostics/detection_promoted_profile_canary_2026-07-27.md`. LSF job
-`153192513`, pinned to Palette
-`d7436b083af0f6bc4b8004952a4ff8542b98f156`, passed. A separate fresh process
+`153192642`, pinned to Palette
+`1d96158393c735f01d6fbaec64d585f2a9a4b5b3`, passed. A separate fresh process
 validated all 9 canonical and 28 refined arrays, proved the logical hashes
 equal to the previously measured full-duration pair, and proved every refined
 physical declaration equal to the frozen access-aware candidate while the
