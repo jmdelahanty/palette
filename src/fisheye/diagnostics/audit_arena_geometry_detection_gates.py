@@ -19,6 +19,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -468,40 +469,61 @@ def _decode_one_frame_from_preceding_keyframe(
     seek_timestamp = int(demuxer.TimestampFromFrame(int(target_frame_index)))
     demuxer.Seek(seek_timestamp)
     keyframe_packet_pts: int | None = None
+    previous_packet_pts: int | None = None
+    target_packet_number: int | None = None
+    pending: deque[tuple[int, int]] = deque()
     for packet_count in range(1, max_packets_per_seek + 1):
         packet = demuxer.Demux()
         if int(packet.bsl) <= 0:
             raise RuntimeError("PyNvVideoCodec seek reached an empty packet")
+        packet_pts = int(packet.pts)
+        if previous_packet_pts is not None and packet_pts <= previous_packet_pts:
+            raise RuntimeError(
+                "Exact-frame seek does not support reordered/nonmonotonic packet PTS"
+            )
+        previous_packet_pts = packet_pts
         if packet_count == 1:
             if int(packet.key) != 1:
                 raise RuntimeError("PyNvVideoCodec seek did not land on a keyframe")
-            keyframe_packet_pts = int(packet.pts)
-        relation = int(demuxer.isSeekDone(int(packet.pts), target_frame_index))
+            keyframe_packet_pts = packet_pts
+        relation = int(demuxer.isSeekDone(packet_pts, target_frame_index))
         if relation not in {-1, 0, 1}:
             raise RuntimeError(
                 f"PyNvVideoCodec returned invalid seek relation {relation}"
             )
-        decoded = list(decoder.Decode(packet))
-        if len(decoded) != 1:
-            raise RuntimeError(
-                "Exact-frame seek requires one display frame per I/P packet; "
-                f"packet {packet_count} produced {len(decoded)} frames"
-            )
         if relation == 0:
-            return materialize_frame(decoded[0]), {
-                "target_frame_index": int(target_frame_index),
-                "seek_timestamp": seek_timestamp,
-                "keyframe_packet_pts": keyframe_packet_pts,
-                "target_packet_pts": int(packet.pts),
-                "packets_decoded": packet_count,
-                "exact_frame_proof": (
-                    "demuxer_isSeekDone_exact_and_one_display_frame_per_ip_packet"
-                ),
-            }
-        if relation > 0:
+            if target_packet_number is not None:
+                raise RuntimeError("PyNvVideoCodec reported the target packet twice")
+            target_packet_number = packet_count
+        elif relation > 0 and target_packet_number is None:
             raise RuntimeError(
                 f"PyNvVideoCodec seek passed target frame {target_frame_index}"
             )
+        pending.append((relation, packet_pts))
+        decoded = list(decoder.Decode(packet))
+        if len(decoded) > len(pending):
+            raise RuntimeError(
+                "PyNvVideoCodec produced more display frames than submitted packets"
+            )
+        for frame in decoded:
+            output_relation, output_pts = pending.popleft()
+            if output_relation == 0:
+                if target_packet_number is None:
+                    raise RuntimeError("target display frame preceded its packet")
+                return materialize_frame(frame), {
+                    "target_frame_index": int(target_frame_index),
+                    "seek_timestamp": seek_timestamp,
+                    "keyframe_packet_pts": keyframe_packet_pts,
+                    "target_packet_pts": output_pts,
+                    "target_packet_number": target_packet_number,
+                    "packets_submitted_through_target_output": packet_count,
+                    "packets_after_target_for_decoder_latency": (
+                        packet_count - target_packet_number
+                    ),
+                    "exact_frame_proof": (
+                        "demuxer_isSeekDone_exact_monotonic_pts_ordered_display_queue"
+                    ),
+                }
     raise RuntimeError(
         f"PyNvVideoCodec seek exceeded {max_packets_per_seek} packets for "
         f"frame {target_frame_index}"
@@ -567,7 +589,9 @@ def decode_selected_luma_pynvvc(
         frames[target] = frame
         seeks.append(seek)
         del decoder
-    packet_counts = [int(item["packets_decoded"]) for item in seeks]
+    packet_counts = [
+        int(item["packets_submitted_through_target_output"]) for item in seeks
+    ]
     return frames, {
         "backend": "pynvvc_luma_gop_keyframe_seek",
         "gpu_id": int(gpu_id),

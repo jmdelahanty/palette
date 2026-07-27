@@ -140,12 +140,44 @@ def test_keyframe_seek_decodes_only_through_exact_requested_frame() -> None:
 
     assert demuxer.seek_target == 102
     np.testing.assert_array_equal(frame, np.full((2, 2), 102))
-    assert proof["packets_decoded"] == 3
+    assert proof["packets_submitted_through_target_output"] == 3
     assert proof["keyframe_packet_pts"] == 100
     assert proof["target_packet_pts"] == 102
 
 
-def test_keyframe_seek_rejects_non_keyframe_landing_or_output_reordering() -> None:
+def test_keyframe_seek_maps_decoder_latency_through_ordered_packet_queue() -> None:
+    class OnePacketLatencyDecoder:
+        def __init__(self) -> None:
+            self.previous: _Packet | None = None
+
+        def Decode(self, packet: _Packet) -> list[np.ndarray]:  # noqa: N802
+            previous = self.previous
+            self.previous = packet
+            if previous is None:
+                return []
+            return [np.full((2, 2), previous.pts, dtype=np.int64)]
+
+    frame, proof = _decode_one_frame_from_preceding_keyframe(
+        demuxer=_Demuxer(
+            [
+                _Packet(100, key=True),
+                _Packet(101),
+                _Packet(102),
+                _Packet(103),
+            ]
+        ),
+        decoder=OnePacketLatencyDecoder(),
+        target_frame_index=102,
+        materialize_frame=np.asarray,
+    )
+
+    np.testing.assert_array_equal(frame, np.full((2, 2), 102))
+    assert proof["target_packet_number"] == 3
+    assert proof["packets_submitted_through_target_output"] == 4
+    assert proof["packets_after_target_for_decoder_latency"] == 1
+
+
+def test_keyframe_seek_rejects_non_keyframe_or_reordered_packet_pts() -> None:
     with pytest.raises(RuntimeError, match="did not land on a keyframe"):
         _decode_one_frame_from_preceding_keyframe(
             demuxer=_Demuxer([_Packet(100, key=False)]),
@@ -154,14 +186,10 @@ def test_keyframe_seek_rejects_non_keyframe_landing_or_output_reordering() -> No
             materialize_frame=np.asarray,
         )
 
-    class EmptyDecoder:
-        def Decode(self, _packet: _Packet) -> list[np.ndarray]:  # noqa: N802
-            return []
-
-    with pytest.raises(RuntimeError, match="one display frame per I/P packet"):
+    with pytest.raises(RuntimeError, match="nonmonotonic packet PTS"):
         _decode_one_frame_from_preceding_keyframe(
-            demuxer=_Demuxer([_Packet(100, key=True)]),
-            decoder=EmptyDecoder(),
-            target_frame_index=100,
+            demuxer=_Demuxer([_Packet(100, key=True), _Packet(102), _Packet(101)]),
+            decoder=_Decoder(),
+            target_frame_index=103,
             materialize_frame=np.asarray,
         )

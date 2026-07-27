@@ -589,10 +589,11 @@ partitions, so the visual review cannot silently collapse to an empty montage.
 Optional PyNvVC rendering seeks to the preceding GOP keyframe for each selected
 acquisition frame and decodes only through that target. For the current Orange
 I/P-only 25-frame GOP contract, exactness is proven by the demuxer's target
-relation plus one decoded display frame per packet; reordering or an unexpected
-seek result fails closed. It produces full-frame plus local review panels on an
-LSF GPU worker. The diagnostic never selects a candidate, filters detections,
-modifies the Zarr, or updates the registry.
+relation, strictly increasing packet presentation timestamps, and an ordered
+pending-packet/display-frame queue that accounts for NVDEC startup latency;
+reordering or an unexpected seek result fails closed. It produces full-frame
+plus local review panels on an LSF GPU worker. The diagnostic never selects a
+candidate, filters detections, modifies the Zarr, or updates the registry.
 
 Each candidate records:
 
