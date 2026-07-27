@@ -177,6 +177,9 @@ complete for the candidate refined snapshot or is explicitly absent by contract.
 ## Gate E — Fail-Closed Activation
 
 - [ ] Freeze the exact activation receipt and proof token.
+- [x] Freeze the pure activation-intent manifest transformation so the final
+      manifest and consolidated metadata are staged while the run remains
+      selector-ineligible.
 - [ ] Require the promoted physical profile or the named rollback profile.
 - [ ] Require complete run state, manifest validity, source binding, decoded
       logical digest, and direct/consolidated equivalence.

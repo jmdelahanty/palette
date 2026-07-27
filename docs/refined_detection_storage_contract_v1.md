@@ -400,6 +400,19 @@ future Crimson adapter must use the versioned envelope. Selector-ineligible
 benchmark paths require a separate explicit benchmark-only API, not a
 production selection exception.
 
+Activation uses two distinct declarations deliberately. The run manifest
+records the candidate's final eligibility intent, while the run-group
+`stage_selector_eligible` attribute is the visibility commit bit. A completed
+selector-ineligible candidate begins with both values false. Before acquiring
+or committing selectors, the publisher calls
+`build_refined_detection_activation_candidate_manifest()`, installs the
+returned manifest with intent `true`, regenerates consolidated metadata, and
+revalidates the complete candidate while the run attribute remains false. The
+owner- and generation-guarded activation transaction changes the run attribute
+to true as its literal final write. A selected run is valid only when both
+values are true; the temporary mismatch is permitted only inside the owned,
+still-invisible activation staging state.
+
 ## Practical Physical-Profile Gate
 
 Before the candidate becomes a production default, publish one immutable

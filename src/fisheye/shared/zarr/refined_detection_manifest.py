@@ -8,6 +8,7 @@ making a snapshot visible.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -1902,6 +1903,39 @@ def validate_refined_detection_authority_provenance(
     return tuple(errors)
 
 
+def build_refined_detection_activation_candidate_manifest(
+    manifest: Mapping[str, Any],
+) -> dict[str, object]:
+    """Return the exact final manifest to stage before selector activation.
+
+    This is a pure document transformation.  It neither mutates the supplied
+    manifest nor writes Zarr metadata or selectors.  A publisher must install
+    and consolidate the returned manifest while the run-level eligibility
+    attribute remains false; the generic activation transaction may then make
+    that run attribute true as its literal final visibility write.
+    """
+
+    errors = validate_refined_detection_run_manifest(manifest)
+    if errors:
+        raise ValueError(
+            "Cannot prepare an invalid refined detection manifest for activation: "
+            + "; ".join(errors)
+        )
+    candidate = copy.deepcopy(dict(manifest))
+    payload = candidate["payload"]
+    publication = payload["publication"]
+    publication["stage_selector_eligible"] = True
+    candidate["payload_digest"] = canonical_json_sha256(payload)
+    canonical_json_bytes(candidate)
+    candidate_errors = validate_refined_detection_run_manifest(candidate)
+    if candidate_errors:
+        raise ValueError(
+            "Prepared refined detection activation manifest is invalid: "
+            + "; ".join(candidate_errors)
+        )
+    return candidate
+
+
 def validate_refined_detection_snapshot_identity(
     *,
     manifest: Mapping[str, Any],
@@ -2193,6 +2227,7 @@ __all__ = [
     "RefinedDetectionSourceCollectionIdentity",
     "RefinedDetectionSourceIdentity",
     "build_refined_detection_authority_provenance",
+    "build_refined_detection_activation_candidate_manifest",
     "build_refined_detection_run_manifest",
     "canonical_json_bytes",
     "canonical_json_sha256",

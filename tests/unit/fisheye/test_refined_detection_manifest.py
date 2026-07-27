@@ -20,6 +20,7 @@ from fisheye.shared.zarr.refined_detection_manifest import (
     RefinedDetectionSnapshotLineage,
     RefinedDetectionSourceCollectionIdentity,
     RefinedDetectionSourceIdentity,
+    build_refined_detection_activation_candidate_manifest,
     build_refined_detection_authority_provenance,
     build_refined_detection_run_manifest,
     canonical_json_sha256,
@@ -85,6 +86,7 @@ def _build_manifest(
     run_id: str,
     dimensions: RefinedDetectionDimensions,
     lineage: RefinedDetectionSnapshotLineage,
+    selector_eligible: bool = True,
 ) -> dict[str, object]:
     storage_plan = plan_refined_detection_storage(
         dimensions,
@@ -105,7 +107,7 @@ def _build_manifest(
         source_reason_codes={0: "none", 1: "filtered_low_score"},
         direct_metadata_declarations=direct,
         consolidated_metadata_declarations=consolidated,
-        selector_eligible=True,
+        selector_eligible=selector_eligible,
     )
 
 
@@ -1149,3 +1151,26 @@ def test_authority_envelope_and_selection_are_typed_and_fail_closed() -> None:
             review_method="manual",
             intended_use="anything",
         )
+
+
+def test_activation_candidate_manifest_stages_final_intent_without_visibility() -> None:
+    manifest = _build_manifest(
+        run_id="refined_candidate",
+        dimensions=_dimensions(1),
+        lineage=_lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
+        selector_eligible=False,
+    )
+
+    candidate = build_refined_detection_activation_candidate_manifest(manifest)
+
+    assert manifest["payload"]["publication"]["stage_selector_eligible"] is False
+    assert candidate["payload"]["publication"]["stage_selector_eligible"] is True
+    assert candidate["payload_digest"] != manifest["payload_digest"]
+    assert validate_refined_detection_run_manifest(candidate) == ()
+    assert build_refined_detection_activation_candidate_manifest(candidate) == candidate
+
+    invalid = copy.deepcopy(manifest)
+    invalid["payload"]["publication"]["completion_status"] = "running"
+    invalid["payload_digest"] = canonical_json_sha256(invalid["payload"])
+    with pytest.raises(ValueError, match="Cannot prepare an invalid"):
+        build_refined_detection_activation_candidate_manifest(invalid)
