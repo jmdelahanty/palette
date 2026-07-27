@@ -8481,7 +8481,7 @@
     },
     "schema_evidence_count": 286,
     "unresolved_conflict_count": 13,
-    "writer_evidence_count": 203
+    "writer_evidence_count": 204
   },
   "writer_evidence": [
     {
@@ -13407,6 +13407,31 @@
       "shards_expression": null,
       "status": "current",
       "writer_symbol": "fisheye.shared.refined_detect_curation:_write_string_array",
+      "zarr_format_expression": null
+    },
+    {
+      "affiliation_basis": "declaring stage is refined_detect",
+      "affiliation_role": "refined_detect",
+      "array_name": null,
+      "array_name_expression": "declaration.name",
+      "call_kind": "writer_wrapper_call",
+      "chunks_expression": null,
+      "compressor_expression": null,
+      "compressors_expression": null,
+      "declaring_stage": "refined_detect",
+      "dtype": null,
+      "dtype_expression": null,
+      "evidence_id": "writer-dd10e22b8ed059c1",
+      "evidence_kind": "writer_site",
+      "file": "src/fisheye/shared/zarr/refined_detection_delta_storage.py",
+      "line": 981,
+      "path_pattern": "<generation>/partitions/<batch.partition_id>/<declaration.name>",
+      "serializer_expression": null,
+      "shape_expression": null,
+      "shape_template": null,
+      "shards_expression": null,
+      "status": "current",
+      "writer_symbol": "fisheye.shared.zarr.array_factory:create_array_from_plan",
       "zarr_format_expression": null
     },
     {

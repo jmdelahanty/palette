@@ -2,9 +2,9 @@
 
 Date: 2026-07-27
 
-Status: frozen Palette implementation target with executable in-memory
-validation and resolution; persisted writer, compactor, consumer overlay, and
-production routing pending
+Status: frozen Palette logical and persisted-partition contract with executable
+validation, resolution, immutable writes, and frozen-generation reads;
+compactor, consumer overlay, and production routing pending
 
 ## Decision
 
@@ -21,9 +21,10 @@ immutable refined-v1 base
   -> validated immutable refined-v1 successor
 ```
 
-The executable contract is
-`src/fisheye/shared/zarr/refined_detection_delta.py`. It performs no Zarr
-writes and changes no selectors or registries.
+The executable logical contract is
+`src/fisheye/shared/zarr/refined_detection_delta.py`. The isolated persistence
+boundary is `refined_detection_delta_storage.py`. Neither changes selectors or
+registries.
 
 ## Scope
 
@@ -40,7 +41,7 @@ Zero, one, or many active instances may resolve in any frame.
 
 ## Persisted Envelope
 
-Each future partition must bind:
+Each partition binds:
 
 | Field | Contract |
 | --- | --- |
@@ -91,6 +92,44 @@ Sparse partitions use one complete ordinary chunk per array and no shards.
 They remain unconsolidated while the generation is open because each partition
 is small and independently owned. Consolidation belongs to the immutable
 compacted snapshot, not live authoring.
+
+## Physical Persistence
+
+Persisted v2 state lives only under:
+
+```text
+refined_detection_delta_runs/<delta_lineage_uuid>/
+  generations/generation_<20-digit-uint64>/
+    partitions/<partition_id>/
+```
+
+The lineage, generation, and partition groups contain exactly one manifest
+attribute each. Every manifest is a strict `payload` plus
+`payload_digest` envelope using canonical JSON with non-finite values
+forbidden. The partition payload binds the complete logical batch manifest,
+storage profile, codec profile, per-array physical plan, per-array logical
+digest, and aggregate content digest. Recomputing only the outer digest after
+nested tampering does not make the partition valid: the reader reconstructs
+the complete expected payload from the arrays and registered policies.
+
+Each partition is limited to 65,536 events. The complete 18-column logical row
+is 99 uncompressed bytes, so the bound is about 6.19 MiB across all arrays and
+the largest single array chunk (`bbox_norm_coords`) is exactly 1 MiB. Every
+array therefore uses one ordinary unsharded chunk through
+`editable_local_v1`; its Zarr v3 codec chain is little-endian `bytes` followed
+by `zstd_fast_v1` (level 0, no codec checksum). The partition is immutable once
+its manifest is installed. An incomplete group has no valid manifest and fails
+closed.
+
+Frozen generation manifests contain sorted partition receipts and an aggregate
+generation digest. Successive generations also bind the immediately preceding
+frozen generation's manifest digest and maximum event sequence. A new
+generation cannot open until its predecessor validates as frozen, and every
+new event sequence must advance beyond the preceding generation. This makes
+the total-order rule executable across generation boundaries. Loading frozen
+generation `G` recursively verifies the digest-linked prefix and returns base
+resolution inputs for every generation through `G`; it never resolves only the
+tip while dropping predecessor edits.
 
 ## Operation Semantics
 
@@ -150,9 +189,10 @@ changed. It never creates a selector or claims a partial result is publishable.
 - `event_sequence` is the sole merge order and must never be duplicated.
 - `expected_previous_event_sequence` is per-instance optimistic concurrency.
 - An edit based on stale state fails rather than winning by timestamp.
-- A future persisted writer must make retry of an already committed
-  `(delta_lineage_id,event_sequence)` idempotent only when the complete event
-  bytes and partition digest are identical; a different payload is a conflict.
+- The persisted writer makes retry of an already committed partition ID
+  idempotent only when its complete batch manifest and event arrays are
+  identical. Reusing an event sequence in another partition, relocating an
+  event during retry, or changing any payload is a conflict.
 - Generation freeze must bind sorted partition identities and content digests.
 - Compaction freezes generation `G` and opens `G+1` before materialization so
   edits arriving during the job are not lost.
@@ -177,9 +217,9 @@ keyed coverage before publication.
 - [x] Cover multi-instance frames, manual additions, corrections, tombstones,
       restore, stale conflicts, duplicate sequences, wrong dtypes, and invalid
       allocator/key use with in-memory tests.
-- [ ] Add the persisted partition writer with strict JSON manifest and content
+- [x] Add the persisted partition writer with strict JSON manifest and content
       digest; do not extend the legacy v1 detection payload in place.
-- [ ] Add a frozen-generation reader and recompute every partition/generation
+- [x] Add a frozen-generation reader and recompute every partition/generation
       digest before resolution.
 - [ ] Add the immutable compactor using the shared detection storage planner,
       consolidated metadata, and complete publication validator.
@@ -194,7 +234,8 @@ keyed coverage before publication.
 
 ## Explicit Non-Goals Of This Checkpoint
 
-- No Zarr partition is written.
+- No production archive or canonical dataset is written; persistence is
+  exercised only in isolated test stores.
 - No production reviewer is rerouted.
 - No current refined run is mutated.
 - No selector, registry, or training artifact changes.

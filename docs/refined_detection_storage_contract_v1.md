@@ -532,7 +532,10 @@ Deferred until this contract is accepted:
 - [x] Implement deterministic in-memory base-plus-delta resolution, including
       optimistic conflicts, manual-key validation, source-audit updates,
       sorted rows, rebuilt offsets, and final refined-v1 validation.
-- [ ] Persist v2 partitions and add the frozen-generation reader/digest gate.
+- [x] Persist bounded v2 partitions through the shared array factory and add a
+      frozen-generation reader that reconstructs manifests, physical plans,
+      array digests, partition digests, and the lineage-global generation
+      chain before resolution.
 - [ ] Implement the whole-shard immutable compactor.
 - [ ] Route manual review through delta partitions.
 - [ ] Add rowset-change invalidation/regeneration for crops, keypoints, masks,

@@ -195,8 +195,12 @@ production writer.
       deterministic event ordering, optimistic conflicts, and bounded restore
       semantics.
 - [x] Implement and test the writer-independent in-memory base-plus-delta
-      resolver. Persisted generation readers and Palette/Crimson live overlays
-      remain separate integration work.
+      resolver.
+- [x] Add the isolated persisted v2 partition writer and frozen-generation
+      reader with exact physical plans, strict manifest reconstruction,
+      per-array/partition/generation digests, and a cross-generation event
+      sequence chain. Palette/Crimson live overlays remain separate integration
+      work.
 - [ ] Implement a detection compactor that freezes generation `G`, opens `G+1`,
       streams whole output shards, rebuilds sorted rows and `F+1` offsets, validates
       decoded state, and publishes a new immutable snapshot without rewriting the
@@ -234,8 +238,7 @@ production writer.
    additions, without changing production selectors. **Complete for the
    executable v2 logical contract.**
 4. Add a read-only base+delta resolver and deterministic materialized-state
-   validator. **Complete in memory; persisted frozen-generation loading
-   remains.**
+   validator. **Complete in memory and for persisted frozen generations.**
 5. Implement the immutable detection compactor through the shared byte-budgeted
    storage planner and consolidated manifest writer.
 6. Route review saves through partitions, then integrate Crimson overlay reads
