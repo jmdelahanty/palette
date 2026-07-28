@@ -133,6 +133,69 @@ class CropGeometryPolicy:
         }
 
 
+def crop_geometry_policy_from_manifest(
+    value: Mapping[str, Any],
+) -> CropGeometryPolicy:
+    """Parse and require the exact canonical crop-policy envelope."""
+
+    if set(value) != {
+        "payload",
+        "payload_digest_algorithm",
+        "payload_digest",
+    }:
+        raise ValueError("Crop policy envelope has an unexpected field set.")
+    if value.get("payload_digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM:
+        raise ValueError("Crop policy digest algorithm mismatch.")
+    payload = value.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TypeError("Crop policy payload must be an object.")
+    if value.get("payload_digest") != canonical_json_sha256(payload):
+        raise ValueError("Crop policy payload digest mismatch.")
+    if set(payload) != {"schema_id", "schema_version", "purpose", "placement"}:
+        raise ValueError("Crop policy payload has an unexpected field set.")
+    if (
+        payload.get("schema_id") != CROP_GEOMETRY_POLICY_SCHEMA_ID
+        or payload.get("schema_version") != CROP_GEOMETRY_POLICY_SCHEMA_VERSION
+    ):
+        raise ValueError("Crop policy schema identity mismatch.")
+    placement = payload.get("placement")
+    if not isinstance(placement, Mapping) or set(placement) != {
+        "center_source",
+        "center_rounding",
+        "top_left_rule",
+        "size_mode",
+        "fixed_size_wh",
+        "padding_mode",
+    }:
+        raise ValueError("Crop policy placement has an unexpected field set.")
+    if placement.get("center_source") != "persisted_centers_img_xy":
+        raise ValueError("Crop policy center source mismatch.")
+    if placement.get("center_rounding") != "numpy_round_ties_to_even_v1":
+        raise ValueError("Crop policy center rounding mismatch.")
+    if (
+        placement.get("top_left_rule")
+        != "rounded_center_minus_floor_size_over_two"
+    ):
+        raise ValueError("Crop policy top-left rule mismatch.")
+    raw_size = placement.get("fixed_size_wh")
+    fixed_size = None
+    if raw_size is not None:
+        if not isinstance(raw_size, list) or len(raw_size) != 2:
+            raise ValueError("Crop policy fixed_size_wh must be null or [width,height].")
+        if any(type(item) is not int for item in raw_size):
+            raise TypeError("Crop policy fixed_size_wh values must be exact integers.")
+        fixed_size = (raw_size[0], raw_size[1])
+    policy = CropGeometryPolicy(
+        purpose=payload.get("purpose"),
+        size_mode=placement.get("size_mode"),
+        fixed_size_wh=fixed_size,
+        padding_mode=placement.get("padding_mode"),
+    )
+    if dict(value) != policy.as_manifest():
+        raise ValueError("Crop policy is not in canonical persisted form.")
+    return policy
+
+
 _CONTRACT_BY_PATH: tuple[tuple[str, ArrayContract], ...] = (
     ("instance_key", DETECTION_INSTANCE_KEY_V1),
     ("source_refined_row_ids", CROP_SOURCE_REFINED_ROW_IDS_V1),
@@ -734,6 +797,7 @@ __all__ = [
     "CropPaddingMode",
     "CropSchemaIssue",
     "CropSizeMode",
+    "crop_geometry_policy_from_manifest",
     "derive_crop_placement_geometry",
     "derive_frame_row_offsets",
 ]

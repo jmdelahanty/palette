@@ -33,6 +33,40 @@ consolidated metadata receipts, a shadow writer, or any selector behavior.
 `source_row_signature` is exact `uint8[N,32]` at this layer; its semantic spec
 and recomputation evidence belong in the next manifest/publication slice.
 
+### Manifest and shadow checkpoint (2026-07-28)
+
+The second selector-ineligible slice now implements those previously deferred
+contract surfaces:
+
+- `fisheye.shared.zarr.crop_manifest` persists an exact manifest at
+  `crop_runs/<run>/zarr.json.attributes.run_manifest`; its payload binds the
+  frozen logical schema, byte-derived storage plan, refined lineage/snapshot,
+  refined manifest and logical-content digests, crop policy, pixel authority,
+  row-signature specification, decoded array digests, and normalized metadata
+  declarations;
+- metadata normalization requires exact direct/consolidated equivalence and
+  retains every group/array attribute in the digest except the circular root
+  `run_manifest` field;
+- `source_row_signature` is now recomputed from `instance_key`, refined row
+  identity, frame, authoritative bbox, integer crop origin/size, source
+  refined lineage/snapshot/digests, crop-policy digest, and source-pixel
+  authority digest;
+- `fisheye.shared.zarr.crop_shadow` consumes only a fully validated
+  `BoundRefinedDetectionCropSource`, creates a fresh standalone Zarr v3 store
+  under `/tmp`, `.palette_scratch`, or `.palette_benchmarks`, writes complete
+  chunks/shards through the shared array factory, consolidates before and
+  after manifest insertion, and reruns the complete publication gate; and
+- the shadow root, `crop_runs` family, run, arrays, receipt, and returned
+  publication all remain selector-ineligible, registry-unregistered, and
+  incapable of updating a production pointer.
+
+The source-video geometry profile now freezes a recording identity, camera
+identity, frame/dimension domain, decoded `uint8` grayscale contract, and an
+exact source-pixel authority manifest digest. The first publisher accepts that
+typed authority as already proven evidence. Reopening and validating the
+external Orange/video authority that produced the digest remains an adapter
+checkpoint before production activation.
+
 ## Outcome
 
 Palette does not currently have one exact crop storage contract. `crop_runs`
@@ -434,13 +468,13 @@ tensor.
 
 - [x] Name/version the crop observation schema independently of physical
       profiles and run-manifest versions.
-- [ ] Freeze exact dtypes, shapes, axis names, fill values, and row ordering.
+- [x] Freeze exact dtypes, shapes, axis names, fill values, and row ordering.
 - [x] Require unique `instance_key`; state again that it is not subject identity.
 - [x] Require sorted `frame_indices` and exact int64 `frame_row_offsets` with
       shape `F+1`, first value zero, last value `N`, and exact agreement with
       rows.
 - [ ] Freeze raw/refined/acquisition/clipped source-lineage envelopes.
-- [ ] Define crop-snapshot identity from the source detection manifest digest,
+- [x] Define crop-snapshot identity from the source detection manifest digest,
       crop-policy digest, and source-pixel authority digest; never include crop
       policy in detection identity.
 - [x] Decide whether `detection_indices`, `frame_counts`, and
@@ -455,16 +489,16 @@ tensor.
       `fisheye.shared.zarr`.
 - [x] Add strict decoded-array validation, unexpected-array rejection, derived
       geometry validation, offsets validation, and signature validation.
-- [ ] Add a strict run-manifest envelope with source snapshot digest, recording
+- [x] Add a strict run-manifest envelope with source snapshot digest, recording
       identity, pixel representation, logical-content digest, storage plans,
       writer ownership, and publication state.
-- [ ] Add exact direct/consolidated metadata normalization and digest validation.
+- [x] Add exact direct/consolidated metadata normalization and digest validation.
 - [ ] Keep `CROP_SPEC` as a named legacy/compatibility validator or replace it
       only after all callers are migrated.
 
 ### Physical planning
 
-- [ ] Route every new crop array through `ArrayContract -> ArrayIntent ->
+- [x] Route every new crop array through `ArrayContract -> ArrayIntent ->
       StoragePlan -> create_array_from_plan`.
 - [x] Plan from uncompressed bytes and access units, never processing-frame or
       arbitrary row constants.
@@ -474,12 +508,12 @@ tensor.
       artifact's actual dtype and `H,W`. The 512×512 one-row/four-row cases are
       illustrative inputs, not fixed policy.
 - [x] Require whole non-overlapping chunk/shard ownership for parallel writes.
-- [ ] Record resolved chunk/shard shapes, logical bytes, object estimates, codec
+- [x] Record resolved chunk/shard shapes, logical bytes, object estimates, codec
       chain, and effective worker ownership in the run manifest.
 
 ### Writer and reader integration
 
-- [ ] First implement a selector-ineligible geometry-only analysis writer from
+- [x] First implement a selector-ineligible geometry-only analysis writer from
       the exact refined-v1 binder; do not create `roi_images` in the analysis
       archive.
 - [ ] Preserve exact `instance_key` and `source_refined_row_ids`; compute new or
@@ -520,9 +554,9 @@ The smallest safe code slice is:
 3. [x] derive `frame_row_offsets` and validate multi-instance, empty-frame, and
    all-empty fixtures;
 4. [x] add a crop storage-plan function using the existing byte-budget planner;
-5. [ ] add strict manifest builders/validators for only the geometry-only analysis
+5. [x] add strict manifest builders/validators for only the geometry-only analysis
    provider profile; and
-6. [ ] build a selector-ineligible in-memory/shadow writer test from the already
+6. [x] build a selector-ineligible in-memory/shadow writer test from the already
    validated refined-v1 handoff, without a dense pixel array.
 
 Acquisition, clipped, composite, training, selector, and production-writer
