@@ -18,6 +18,7 @@ from fisheye.cluster.lsf import (
     LsfWorkflow,
     LsfWorkflowFragment,
     build_bsub_command,
+    build_ssh_bsub_runner,
     compose_lsf_workflow,
     parse_bsub_job_id,
     render_dependency,
@@ -243,6 +244,37 @@ def test_run_command_retains_diagnostics_and_raises_on_failure(tmp_path: Path) -
 
     with pytest.raises(RuntimeError, match="exit code 2"):
         run_command(["bsub", "job.sh"], cwd=tmp_path, runner=failure_runner)
+
+
+def test_ssh_bsub_runner_quotes_remote_command_and_rejects_other_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="submitted", stderr="")
+
+    monkeypatch.setattr("fisheye.cluster.lsf.backend.subprocess.run", fake_run)
+    runner = build_ssh_bsub_runner("login1-citrus-poller")
+
+    result = runner(["bsub", "-J", "job name", "/bin/true"], cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert calls == [
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "login1-citrus-poller",
+            f"cd {tmp_path} && bsub -J 'job name' /bin/true",
+        ]
+    ]
+    with pytest.raises(ValueError, match="only bsub"):
+        runner(["ls"], cwd=tmp_path)
+    with pytest.raises(ValueError, match="Unsafe"):
+        build_ssh_bsub_runner("login1; false")
 
 
 def test_write_json_snapshot_is_normalized_and_atomic(tmp_path: Path) -> None:

@@ -11,7 +11,6 @@ from fisheye.shared.json_safety import write_json_atomic as _write_json
 from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
-import os
 import re
 import shlex
 from datetime import datetime, timezone
@@ -200,6 +199,12 @@ def build_plan(
             fallback=f"refined_detect_{clip_component}_cam{camera_component}",
         )
         video_path = _resolve_recording_path(recording_path, row.get("video_path"))
+        artifact_family_path = (
+            f"clips/{clip_id}/cameras/{camera_component}/detection_artifact_runs"
+        )
+        artifact_target_group_path = (
+            f"{artifact_family_path}/{detect_run_name}"
+        )
         detect_family_path = f"clips/{clip_id}/cameras/{camera_component}/detect_runs"
         refined_family_path = f"clips/{clip_id}/cameras/{camera_component}/refined_detect_runs"
         target_group_path = f"{detect_family_path}/{detect_run_name}"
@@ -316,6 +321,8 @@ def build_plan(
                     "refined_detect": refined_run_name,
                 },
                 "zarr_paths": {
+                    "detection_artifact_family_path": artifact_family_path,
+                    "detection_artifact_target_group_path": artifact_target_group_path,
                     "detect_family_path": detect_family_path,
                     "detect_target_group_path": target_group_path,
                     "refined_family_path": refined_family_path,

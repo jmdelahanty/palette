@@ -198,12 +198,42 @@ def run_command(
     return payload
 
 
+def build_ssh_bsub_runner(submit_host: str) -> CommandRunner:
+    """Return a runner that sends only quoted bsub commands through SSH."""
+
+    host = str(submit_host).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+", host):
+        raise ValueError(f"Unsafe LSF submit host: {submit_host!r}")
+
+    def runner(
+        command: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
+        text: bool = True,
+        capture_output: bool = True,
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [str(value) for value in command]
+        if not argv or argv[0] != "bsub":
+            raise ValueError("The Citrus submission runner accepts only bsub commands.")
+        remote_cwd = Path(cwd or ".").expanduser()
+        remote_command = f"cd {shell_join((remote_cwd,))} && {shell_join(argv)}"
+        return subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", host, remote_command],
+            text=text,
+            capture_output=capture_output,
+        )
+
+    return runner
+
+
 __all__ = [
     "CommandRunner",
     "CommandExecutionError",
     "CompletedProcessLike",
     "build_bsub_command",
     "build_bsub_prefix",
+    "build_ssh_bsub_runner",
     "parse_bsub_job_id",
     "render_dependency",
     "resolve_job_id_placeholders",

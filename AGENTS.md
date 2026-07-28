@@ -12,8 +12,22 @@
 ## Git Push Rule
 
 - Pushes from this repository require the Palette workstation SSH key and should run outside the Codex sandbox because sandbox DNS/network access can fail.
-- Preferred push path: use the tracked helper, which pushes the current branch and then fast-forwards the shared `/groups` checkout:
+- When a workflow intentionally uses the single shared `/groups` checkout,
+  prefer the tracked helper, which pushes the current branch and then
+  fast-forwards that checkout:
   `scripts/push_and_update_groups_checkout.sh`
+- When concurrent agents or cluster jobs need different Palette commits, do
+  not switch or fast-forward the shared checkout. Use
+  `scripts/deploy_palette_cluster_worktree.sh` from the clean source worktree.
+  It pushes only that branch, creates a detached commit-pinned worktree below
+  the shared deployment root, leaves the shared checkout unchanged, and prints
+  the exact `PALETTE_GROUPS_REPO` value for submission.
+- `scripts/py` prepends the `src` tree beside that exact script. The deployment
+  helper verifies the imported `fisheye` path through Citrus before reporting
+  success, so another checkout's editable install cannot supply job code.
+- Cluster submissions from a dedicated deployment must record and pass its
+  absolute `--palette-repo` path and full commit. Never point an already-planned
+  job at a mutable shared checkout or move a deployment path to a newer commit.
 - If you intentionally need to push without updating `/groups`, use:
   `GIT_SSH_COMMAND='ssh -i /home/delahantyj@hhmi.org/.ssh/delahantyj-ws1-git-id_ed25519 -o IdentitiesOnly=yes' git -C /home/delahantyj@hhmi.org/gitrepos/palette push`
 - Do not rely on plain `git push` for Palette; it may fail with `Permission denied (publickey)` or sandbox DNS errors.
@@ -23,6 +37,26 @@
 
 - If sync `zarr.open_group(...)` hangs in Codex sandbox, use metadata-file checks from `docs/sandbox_zarr_fallback.md`.
 - For keypoint review status checks, prefer `zarr.json` + `jq` fallback over Python `zarr` reads when sandbox hangs are observed.
+
+## Consolidated Metadata Read Policy
+
+- Treat metadata mode as a lifecycle decision, not a universal reader option.
+- Writers, edit tools, and readers inspecting an actively mutable or incomplete
+  Palette Zarr must use `use_consolidated=False` so newly created groups are
+  visible during mutation.
+- For a selector-visible immutable publication, finish and validate all payload,
+  attrs, and provenance writes; update the direct `latest`/manifest selection
+  metadata; then consolidate the root as the final published visibility step.
+  Validate that the consolidated generation contains the intended selector
+  state before declaring publication complete.
+- New readers of published immutable artifacts should use consolidated metadata
+  by default and validate the published metadata generation/schema contract.
+- Missing or stale consolidated metadata on a published immutable artifact is a
+  publication defect. Do not silently normalize that state by making
+  unconsolidated traversal the permanent reader default.
+- Diagnostics and benchmarks that compare metadata paths must select
+  consolidated or unconsolidated mode explicitly and record the selected mode
+  in their result.
 
 ## Sandbox Zarr Test Policy
 
@@ -75,7 +109,9 @@
   `scripts/py -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'`
 - Real-zarr training/export/inference smokes should run outside the sandbox with escalation, especially when they use CUDA or touch `/nvme1`.
 - For U-Net subject-mask smoke validation, prefer the CUDA-capable outside-sandbox path over CPU sandbox execution. If the sandbox prints the startup banner but does not reach the artifact summary promptly, stop it and rerun outside the sandbox.
-- When newly written zarr groups are hidden by stale consolidated metadata, open mutable Palette zarrs with `use_consolidated=False`.
+- When newly written Zarr groups are hidden during an active mutation, follow
+  the Consolidated Metadata Read Policy above; do not use a stale consolidated
+  view of a mutable archive.
 
 ## Examples
 

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+palette_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+palette_repo_root="$(cd "$palette_script_dir/.." && pwd)"
+case ":${PYTHONPATH:-}:" in
+  *":$palette_repo_root/src:"*) ;;
+  *) export PYTHONPATH="$palette_repo_root/src${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
+
 run_python() {
   local python_bin="$1"
   shift

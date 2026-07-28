@@ -133,6 +133,8 @@ whole, non-overlapping physical chunks and, when applicable, whole shards.
 | `scratch_compute_v1` | node-local intermediate output | align with compute/write ownership; publication layout is not required |
 | `editable_local_v1` | mutable authoritative analysis or review surface | optimize edit unit; regular chunks by default |
 | `published_http_v1` | immutable Crimson-facing snapshot | indexed shards, consolidated metadata, transport manifest, selector eligibility |
+| `detection_published_access_aware_v1` | promoted immutable canonical/refined detection snapshot | 128 KiB windowed/indexed chunks, 1 MiB eager chunks, 8 MiB indexed shards |
+| `detection_regular_rollback_v1` | explicit immutable detection rollback | exact 1 MiB chunks, no outer sharding; never selected by default |
 | `training_immutable_v1` | immutable trainer-facing dataset | indexed shards; inner chunks tuned for random minibatch/sample access |
 
 The logical schema may be identical across profiles. The resolved physical
