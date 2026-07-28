@@ -7,6 +7,32 @@ Date: 2026-07-27
 
 Palette baseline: `e3936b9a`
 
+## Implementation Checkpoint (2026-07-28)
+
+The first code-only contract slice now exists without changing a Zarr writer,
+reader, selector, or production profile:
+
+- `fisheye.shared.zarr.crop_schema` defines the exact 13-array,
+  geometry-only refined-source schema, strict decoded-array validation, the
+  `F+1` frame index, fixed/variable per-row size modes, explicit padding
+  behavior, and versioned crop-policy identity;
+- `fisheye.shared.zarr.crop_storage` classifies the retained frame index as
+  `EAGER`, all row tables as `WINDOWED`, and derives immutable chunks and
+  shards from uncompressed bytes through `published_http_v1`;
+- the shared array catalog now contains exact crop dtypes, shapes, axes,
+  units, and coordinate spaces; and
+- focused in-memory tests cover `[2,0,1,3]` rows per frame, an all-empty
+  positive-duration snapshot, multiple observations per frame, variable crop
+  sizes, edge padding, derived geometry drift, forbidden pixel/count arrays,
+  and whole-shard writer ownership.
+
+This checkpoint intentionally does **not** authorize publication. It does not
+yet define the persisted run-manifest envelope, source-refined manifest/content
+binding, source-pixel authority binding, signature-spec binding, direct versus
+consolidated metadata receipts, a shadow writer, or any selector behavior.
+`source_row_signature` is exact `uint8[N,32]` at this layer; its semantic spec
+and recomputation evidence belong in the next manifest/publication slice.
+
 ## Outcome
 
 Palette does not currently have one exact crop storage contract. `crop_runs`
@@ -406,28 +432,28 @@ tensor.
 
 ### Contract freeze
 
-- [ ] Name/version the crop observation schema independently of physical
+- [x] Name/version the crop observation schema independently of physical
       profiles and run-manifest versions.
 - [ ] Freeze exact dtypes, shapes, axis names, fill values, and row ordering.
-- [ ] Require unique `instance_key`; state again that it is not subject identity.
-- [ ] Require sorted `frame_indices` and exact int64 `frame_row_offsets` with
+- [x] Require unique `instance_key`; state again that it is not subject identity.
+- [x] Require sorted `frame_indices` and exact int64 `frame_row_offsets` with
       shape `F+1`, first value zero, last value `N`, and exact agreement with
       rows.
 - [ ] Freeze raw/refined/acquisition/clipped source-lineage envelopes.
 - [ ] Define crop-snapshot identity from the source detection manifest digest,
       crop-policy digest, and source-pixel authority digest; never include crop
       policy in detection identity.
-- [ ] Decide whether `detection_indices`, `frame_counts`, and
+- [x] Decide whether `detection_indices`, `frame_counts`, and
       `source_frame_indices` are omitted or explicitly compatibility-only.
-- [ ] Require exact `roi_sizes_full [N,2] int32` and freeze
+- [x] Require exact `roi_sizes_full [N,2] int32` and freeze
       `fixed_per_run | variable_per_row` semantics; do not assume 512×512.
 - [ ] Freeze the authoritative pixel/decode contract for every representation.
 
 ### Executable shared schema
 
-- [ ] Add crop `ArrayContract` declarations and one exact schema binding under
+- [x] Add crop `ArrayContract` declarations and one exact schema binding under
       `fisheye.shared.zarr`.
-- [ ] Add strict decoded-array validation, unexpected-array rejection, derived
+- [x] Add strict decoded-array validation, unexpected-array rejection, derived
       geometry validation, offsets validation, and signature validation.
 - [ ] Add a strict run-manifest envelope with source snapshot digest, recording
       identity, pixel representation, logical-content digest, storage plans,
@@ -440,14 +466,14 @@ tensor.
 
 - [ ] Route every new crop array through `ArrayContract -> ArrayIntent ->
       StoragePlan -> create_array_from_plan`.
-- [ ] Plan from uncompressed bytes and access units, never processing-frame or
+- [x] Plan from uncompressed bytes and access units, never processing-frame or
       arbitrary row constants.
-- [ ] Start tabular arrays with the general published profile and benchmark any
+- [x] Start tabular arrays with the general published profile and benchmark any
       crop-specific override.
 - [ ] For training and cache materializers, benchmark `roi_images` using each
       artifact's actual dtype and `H,W`. The 512×512 one-row/four-row cases are
       illustrative inputs, not fixed policy.
-- [ ] Require whole non-overlapping chunk/shard ownership for parallel writes.
+- [x] Require whole non-overlapping chunk/shard ownership for parallel writes.
 - [ ] Record resolved chunk/shard shapes, logical bytes, object estimates, codec
       chain, and effective worker ownership in the run manifest.
 
@@ -488,14 +514,15 @@ tensor.
 
 The smallest safe code slice is:
 
-1. add exact crop array contracts for the proposed common observation table,
+1. [x] add exact crop array contracts for the proposed common observation table,
    including per-row `roi_sizes_full`;
-2. add `CropDimensions` and `CropSchema` logical validation with no Zarr writes;
-3. derive `frame_row_offsets` and validate a multi-instance/empty-frame fixture;
-4. add a crop storage-plan function using the existing byte-budget planner;
-5. add strict manifest builders/validators for only the geometry-only analysis
+2. [x] add `CropDimensions` and `CropSchema` logical validation with no Zarr writes;
+3. [x] derive `frame_row_offsets` and validate multi-instance, empty-frame, and
+   all-empty fixtures;
+4. [x] add a crop storage-plan function using the existing byte-budget planner;
+5. [ ] add strict manifest builders/validators for only the geometry-only analysis
    provider profile; and
-6. build a selector-ineligible in-memory/shadow writer test from the already
+6. [ ] build a selector-ineligible in-memory/shadow writer test from the already
    validated refined-v1 handoff, without a dense pixel array.
 
 Acquisition, clipped, composite, training, selector, and production-writer

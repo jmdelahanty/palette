@@ -29,7 +29,11 @@ def test_core_contract_catalog_is_versioned_and_json_safe() -> None:
     manifest = CORE_ARRAY_CONTRACTS.as_manifest()
     assert json.loads(json.dumps(manifest)) == manifest
     assert manifest["schema_id"] == "palette.array_contract_catalog"
-    assert len(manifest["contracts"]) == 46
+    assert len(manifest["contracts"]) == 53
+    assert CORE_ARRAY_CONTRACTS.resolve(
+        "palette.array.crop.roi_sizes_full",
+        1,
+    ).dtype.dtype_id == "int32"
     assert CORE_ARRAY_CONTRACTS.resolve(
         "palette.array.refined_detection.refined_row_ids",
         1,
