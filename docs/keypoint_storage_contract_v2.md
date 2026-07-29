@@ -1,7 +1,7 @@
 # Keypoint, Body-Frame, And QC Storage Contract v2
 
 <!-- contract-meta
-status: decision-frozen-implementation-pending
+status: logical-contract-foundation-implemented
 schema: palette.stage.keypoint_observations v2
 date: 2026-07-29
 owner: jeremy
@@ -13,13 +13,14 @@ depends_on: docs/shared_coordinate_storage_contract_v1.md,
 
 ## Decision
 
-Palette separates landmark authority from reusable derived orientation while
-keeping intrinsic and review QC with the snapshot it qualifies:
+Palette separates landmark authority, source-bound diagnostic results, accepted
+review state, and reusable derived orientation:
 
 ```text
-keypoints_runs/<run>            immutable model observations + source QC
-refined_keypoints_runs/<run>    reviewed landmark authority + review QC
-analysis/body_frame_runs/<run>  derived orientation geometry
+keypoints_runs/<run>             immutable model observations + source facts
+keypoint_quality_runs/<run>      immutable diagnostic metrics + policy proposals
+refined_keypoints_runs/<run>     reviewed landmark authority + accepted review QC
+analysis/body_frame_runs/<run>   derived orientation geometry including heading
 ```
 
 The keypoint families do not persist heading arrays in v2. The skeleton retains
@@ -28,16 +29,17 @@ labeled landmarks determine anatomical orientation. A body-frame producer uses
 that exact recipe and one exact raw or refined keypoint snapshot to materialize
 orientation.
 
-This boundary prevents a threshold change from rewriting scientific landmark
-coordinates, prevents an accepted keypoint edit from leaving an embedded
-heading cache silently stale, and keeps every acceptance flag beside the
-coordinate snapshot whose fitness it describes.
+This boundary prevents a metric or threshold change from rewriting scientific
+landmark coordinates, prevents an accepted keypoint edit from leaving an
+embedded heading cache silently stale, and distinguishes an automated quality
+proposal from the accepted review decision persisted by a refined snapshot.
 
-Palette does not introduce a required catch-all `keypoint_quality_runs` family
-in this contract. Longitudinal diagnostics may be computed on demand or later
-published under an explicitly scoped `analysis/pose_qc_runs/<run>` contract
-when a real consumer and retention policy justify it. Such a future run is not
-landmark authority and cannot silently replace snapshot-local review state.
+`keypoint_quality_runs` is deliberately narrow rather than a catch-all. Version
+1 permits only observation-local metrics that can be evaluated independently
+for each raw keypoint row. Heading, frame-adjacent temporal metrics, trajectory
+metrics, and track/subject continuity metrics are excluded because
+`instance_key` identifies an observation, not a longitudinal animal. A later
+temporal-quality schema must bind an explicit predecessor or track lineage.
 
 ## Current Compatibility Surface
 
@@ -102,15 +104,62 @@ coordinate catalog, crop manifest, pixel contract/package when used, model and
 preprocessing identities, exact logical schema, physical storage plan, and
 consolidated/direct metadata equivalence.
 
-### Refined keypoint snapshots
+## Keypoint Quality v1
 
-A compact `refined_keypoints_runs/<run>` v2 snapshot reuses the shared identity,
-lineage, coordinate, confidence, validity, bbox, and signature fields. It
-replaces raw-only `pose_success` with the unambiguous pair `source_success` and
-`refined_success`, then adds authoring provenance including exact parent
-snapshot identity, per-landmark edit flags, review state, acceptance reasons,
-and accepted edit/delta digests. It does not add heading. It does retain the
-exact QC facts used to validate or approve that snapshot.
+`keypoint_quality_runs/<run>` is an immutable, selector-independent diagnostic
+snapshot bound to exactly one raw keypoint-v2 run. It contains every source row
+exactly once and in the source row order. It neither copies nor replaces
+coordinates. A new quality algorithm, metric definition, or threshold policy
+creates a new quality run; it never mutates keypoints or an older quality run.
+
+### Core arrays
+
+| Path | Exact dtype and shape | Role |
+| --- | --- | --- |
+| `instance_key` | `uint64[N]` | Exact source observation identity |
+| `source_keypoint_row_ids` | `int64[N]` | Exact source row IDs; v1 is precisely `arange(N)` |
+| `source_keypoint_row_signature` | `uint8[N,32]` | Exact source landmark-row signatures |
+| `frame_indices` | `int64[N]` | Exact source recording-frame index |
+| `frame_row_offsets` | `int64[F+1]` | Exact CSR frame-to-quality-row index |
+| `keypoint_metric_values` | `float32[N,K,Q]` | Ordered observation-local per-landmark metrics |
+| `keypoint_metric_valid` | `bool[N,K,Q]` | Exact finite-value mask; invalid values are NaN |
+| `pose_metric_values` | `float32[N,P]` | Ordered observation-local row metrics |
+| `pose_metric_valid` | `bool[N,P]` | Exact finite-value mask; invalid values are NaN |
+| `keypoint_quality_flags` | `uint16[N,K]` | Bitwise findings from the keypoint flag registry |
+| `pose_quality_flags` | `uint16[N]` | Bitwise findings from the pose flag registry |
+| `proposed_keypoint_valid` | `bool[N,K]` | Automated policy proposal; cannot resurrect an invalid source landmark |
+| `proposed_pose_usable` | `bool[N]` | Automated policy proposal; cannot resurrect a failed source pose |
+
+The digest-bound profile declares the exact ordered keypoint and pose metric
+catalogs, each metric's version, units, directionality, and description, both
+single-bit flag registries, and the policy digest. The profile document has its
+own canonical SHA-256 digest. Zero flags mean no finding; undeclared bits are
+invalid. Metric IDs containing heading, temporal, trajectory, or track terms
+are rejected by v1 rather than being computed using adjacent sparse rows.
+
+The first profile may include observation-local confidence-margin,
+single-view pose-plausibility, ensemble-disagreement, geometry, or valid-point
+coverage metrics. Lightning Pose-style temporal norm is intentionally deferred
+until a source provides stable longitudinal lineage. Pixel error against
+labeled ground truth remains a model/training evaluation artifact rather than
+a recording-level observation-quality field.
+
+The quality manifest must bind the exact source keypoint run and manifest
+digest, source skeleton and row signatures, complete metric/policy profile,
+logical schema, physical storage plan, array digests, and direct/consolidated
+metadata equivalence. A quality run is not landmark authority and cannot be a
+training label source by itself.
+
+## Refined Keypoint v2
+
+A compact `refined_keypoints_runs/<run>` v2 snapshot binds the exact raw
+keypoint run and the quality run whose proposals were reviewed. It reuses the
+shared identity, lineage, coordinate, confidence, validity, bbox, and signature
+fields. It replaces raw-only `pose_success` with the unambiguous pair
+`source_success` and `refined_success`, then adds authoring provenance including
+exact parent snapshot identity, per-landmark edit flags, review state,
+acceptance reasons, and accepted edit/delta digests. It does not add heading.
+It does retain the exact QC facts used to validate or approve that snapshot.
 
 The initial refined QC surface is:
 
@@ -184,24 +233,27 @@ generic stage:
 
 1. **Source observations** live with the raw keypoint row: per-keypoint
    confidence and validity, pose confidence, and producer success.
-2. **Review and promotion decisions** live with the refined snapshot they
+2. **Automated diagnostic measurements and proposals** live in the immutable
+   quality run. They remain source-bound evidence and do not become accepted
+   review state merely because a threshold passed.
+3. **Review and promotion decisions** live with the refined snapshot they
    qualify: edit flags, source/refined success, review state and reason,
    confidence validity, geometry validity, and combined usability.
-3. **Orientation geometry** lives in the body-frame run: axis validity and the
+4. **Orientation geometry** lives in the body-frame run: axis validity and the
    mechanically derived heading cache. `axis_valid` says that the estimator
    resolved geometry; it is not a substitute for refined-pose acceptance.
-4. **Longitudinal diagnostics** are recomputable analysis: coordinate or
+5. **Longitudinal diagnostics** are recomputable analysis: coordinate or
    heading jumps, speed/acceleration/jerk, skeleton-length or angle drift,
    dropout streaks, deviations from a temporally smoothed trajectory, and
    identity/track discontinuities. They may be computed on demand. If later
    persisted, they require a narrowly named, versioned analysis contract with
    exact source snapshot/body-frame/track bindings and policy digests.
 
-Snapshot-local QC must be available without locating a second run. A changed
-acceptance policy creates a new refined snapshot or an explicit review
-artifact; it does not mutate an immutable snapshot. A changed exploratory
-temporal threshold can produce a new diagnostic result without changing the
-refined landmark authority.
+Accepted snapshot-local QC must be available without locating the quality run.
+The quality run explains and reproduces the automated proposal; the refined
+snapshot freezes what was accepted. A changed quality policy creates a new
+quality run and, if accepted decisions change, a new refined snapshot. It does
+not mutate either older artifact.
 
 The current embedded `heading_delta_prev_deg`, `heading_delta_next_deg`, and
 `heading_temporal_outlier` arrays remain v1 compatibility fields. Before v2
@@ -218,8 +270,8 @@ evaluation artifacts, not per-observation authority fields.
 ## Consumer Contract
 
 - Ordinary Crimson rendering opens keypoints and the selected body-frame run.
-- Review UI reads intrinsic/review QC from the selected raw or refined
-  keypoint snapshot. Optional longitudinal diagnostic products remain lazy.
+- Review UI may lazily read the quality run for diagnostic detail, while the
+  selected refined snapshot supplies the final accepted review state.
 - A body-frame selection must be explicitly bound to the selected keypoint
   snapshot. An invalid explicit selection fails; it never falls back silently.
 - Track kinematics may consume the observation body frame, then persist its own
@@ -230,8 +282,8 @@ evaluation artifacts, not per-observation authority fields.
 
 ## Storage And Publication
 
-- Raw keypoint runs, compact refined snapshots, and body frames are immutable
-  and use byte-planned indexed shards.
+- Raw keypoint runs, quality runs, compact refined snapshots, and body frames
+  are immutable and use byte-planned indexed shards.
 - Edit deltas are small append/write-optimized artifacts; compaction produces a
   new immutable sharded snapshot.
 - Inner chunks are selected by uncompressed bytes and access class, not one
@@ -239,20 +291,25 @@ evaluation artifacts, not per-observation authority fields.
 - Row-aligned hot columns should share chunk boundaries when consumers read
   them together; the exact row size remains benchmark-gated.
 - `frame_row_offsets` is classified eager and retained once by Crimson.
-- Snapshot QC columns share the row grid used by the keypoint payload they
-  qualify. Body-frame hot columns are eligible for byte-budgeted background
-  residency.
+- Quality columns use the exact raw-keypoint row grid. Refined accepted-QC
+  columns use the refined row grid. Body-frame hot columns are eligible for
+  byte-budgeted background residency.
 - Every current publication is Zarr v3 with the approved codec/checksum profile,
   exact consolidated metadata, a versioned run manifest, and no dtype probing.
 - Whole-shard writer ownership is required for parallel publication.
 
 ## Edit And Invalidation Lifecycle
 
+Initial production order is raw keypoints, one bound quality snapshot, one
+reviewed refined snapshot, then body-frame materialization from the selected
+refined authority. Quality runs are not authority selectors themselves.
+
 1. Write a keyed keypoint edit delta; never edit heading directly.
 2. Validate source snapshot, `instance_key`, landmark label, and row signature.
 3. Compact into a new immutable refined-keypoint snapshot.
-4. Recompute and validate the refined snapshot's intrinsic/review QC.
-5. Mark body-frame and optional diagnostic products bound to the old snapshot
+4. Recompute and validate the refined snapshot's accepted intrinsic/review QC;
+   do not rewrite the source-bound raw quality run.
+5. Mark body-frame and optional longitudinal products bound to the old snapshot
    stale.
 6. Publish a new body-frame run from the new snapshot.
 7. Publish any explicitly required longitudinal diagnostic artifact.
@@ -269,16 +326,22 @@ It must not be encoded by silently changing `heading_deg`.
 
 - [x] Add exact float32 keypoint-v2 array contracts and coordinate bindings.
 - [x] Implement the raw/refined shared stage schema and cross-array invariants.
-- [ ] Freeze exact snapshot-local raw/refined QC arrays, code maps, and policy
-      digests.
+- [x] Freeze and implement exact source-bound keypoint-quality arrays, ordered
+      metric catalogs, bit registries, policy digest, and cross-array checks.
+- [x] Register the keypoint-quality artifact family and dependency/invalidation
+      edges without activating production status or selection.
+- [ ] Freeze exact refined accepted-QC code maps and manifest bindings to the
+      quality run used during review.
 - [x] Implement body-frame-v1 logical contracts and derivation validation.
 - [ ] Require exact manifest field sets and canonical digests.
 
 ### Writer and lifecycle
 
 - [ ] Add selector-ineligible shadow writers; do not change current defaults.
+- [ ] Add a keypoint-quality producer and immutable publication gate.
 - [ ] Add keyed refined-keypoint deltas and immutable compaction.
-- [ ] Recompute snapshot-local QC during compaction and body frame after it.
+- [ ] Recompute accepted snapshot-local QC during compaction and body frame
+      after it.
 - [ ] Preserve source crop, pixel-package, skeleton, model, and coordinate
       provenance through every publication.
 - [ ] Keep production selectors unchanged until all gates pass.

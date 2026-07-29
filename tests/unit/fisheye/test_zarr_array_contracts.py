@@ -9,6 +9,7 @@ from fisheye.shared.zarr.array_contracts import (
     CORE_ARRAY_CONTRACTS,
     DENSE_SUBJECT_MASKS_ROI_V1,
     FRAME_COUNTS_V1,
+    KEYPOINT_QUALITY_ARRAY_CONTRACTS,
     KEYPOINTS_IMG_V1,
     REFINED_DETECTION_REFINED_ROW_IDS_V1,
     REFINED_SOURCE_FRAME_ROW_OFFSETS_V1,
@@ -29,7 +30,7 @@ def test_core_contract_catalog_is_versioned_and_json_safe() -> None:
     manifest = CORE_ARRAY_CONTRACTS.as_manifest()
     assert json.loads(json.dumps(manifest)) == manifest
     assert manifest["schema_id"] == "palette.array_contract_catalog"
-    assert len(manifest["contracts"]) == 83
+    assert len(manifest["contracts"]) == 93
     assert CORE_ARRAY_CONTRACTS.resolve(
         "palette.array.crop.roi_sizes_full",
         1,
@@ -42,6 +43,11 @@ def test_core_contract_catalog_is_versioned_and_json_safe() -> None:
         "palette.array.refined_detection.source.frame_row_offsets",
         1,
     ) is REFINED_SOURCE_FRAME_ROW_OFFSETS_V1
+    assert len(KEYPOINT_QUALITY_ARRAY_CONTRACTS.contracts) == 13
+    assert CORE_ARRAY_CONTRACTS.resolve(
+        "palette.array.keypoint_quality.pose_quality_flags",
+        1,
+    ).dtype.dtype_id == "uint16"
 
 
 def test_keypoint_contract_requires_exact_dtype_and_fixed_xy_axis() -> None:

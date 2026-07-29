@@ -100,14 +100,23 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(
         id="keypoints",
         depends_on=("crop",),
-        invalidates=("refined_keypoints",),
+        invalidates=("keypoint_quality",),
         artifact_families=("keypoints_runs",),
         description="Raw anatomical keypoint predictions.",
     ),
     StageSpec(
+        id="keypoint_quality",
+        depends_on=("keypoints",),
+        invalidates=("refined_keypoints",),
+        artifact_families=("keypoint_quality_runs",),
+        description=(
+            "Immutable source-bound keypoint diagnostics and usability proposals."
+        ),
+    ),
+    StageSpec(
         id="refined_keypoints",
         aliases=("keypoints_refine",),
-        depends_on=("keypoints",),
+        depends_on=("keypoint_quality",),
         invalidates=("arena_assignment", "track_kinematics"),
         artifact_families=("refined_keypoints_runs",),
         description="Curated keypoint instances used downstream.",

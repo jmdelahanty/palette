@@ -1132,6 +1132,114 @@ REFINED_KEYPOINT_REASON_CODES_V1 = ArrayContract(
     description="Controlled acceptance or rejection reason; zero means no reason.",
 )
 
+KEYPOINT_QUALITY_SOURCE_KEYPOINT_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.source_keypoint_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Exact row index in the bound raw keypoint snapshot.",
+    units="keypoint_row_index",
+)
+
+KEYPOINT_QUALITY_SOURCE_KEYPOINT_ROW_SIGNATURE_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.source_keypoint_row_signature",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_instances", 32),
+    axis_names=("instance", "sha256_byte"),
+    description="Exact keypoint-row signature copied from the bound raw snapshot.",
+    units="sha256_digest_byte",
+)
+
+KEYPOINT_QUALITY_KEYPOINT_METRIC_VALUES_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.keypoint_metric_values",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", "n_keypoints", "n_keypoint_metrics"),
+    axis_names=("instance", "keypoint", "metric"),
+    description=(
+        "Observation-local diagnostic values in the manifest's ordered "
+        "keypoint-metric catalog."
+    ),
+)
+
+KEYPOINT_QUALITY_KEYPOINT_METRIC_VALID_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.keypoint_metric_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances", "n_keypoints", "n_keypoint_metrics"),
+    axis_names=("instance", "keypoint", "metric"),
+    description="Exact validity mask for keypoint_metric_values.",
+)
+
+KEYPOINT_QUALITY_POSE_METRIC_VALUES_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.pose_metric_values",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", "n_pose_metrics"),
+    axis_names=("instance", "metric"),
+    description=(
+        "Observation-local diagnostic values in the manifest's ordered "
+        "pose-metric catalog."
+    ),
+)
+
+KEYPOINT_QUALITY_POSE_METRIC_VALID_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.pose_metric_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances", "n_pose_metrics"),
+    axis_names=("instance", "metric"),
+    description="Exact validity mask for pose_metric_values.",
+)
+
+KEYPOINT_QUALITY_KEYPOINT_FLAGS_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.keypoint_quality_flags",
+    schema_version=1,
+    dtype=UINT16,
+    shape_template=("n_instances", "n_keypoints"),
+    axis_names=("instance", "keypoint"),
+    description=(
+        "Bitwise observation-local findings from the manifest's keypoint flag registry."
+    ),
+)
+
+KEYPOINT_QUALITY_POSE_FLAGS_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.pose_quality_flags",
+    schema_version=1,
+    dtype=UINT16,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Bitwise row-level findings from the manifest's pose flag registry."
+    ),
+)
+
+KEYPOINT_QUALITY_PROPOSED_KEYPOINT_VALID_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.proposed_keypoint_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances", "n_keypoints"),
+    axis_names=("instance", "keypoint"),
+    description=(
+        "Policy proposal for landmark usability; cannot make an invalid source "
+        "landmark valid."
+    ),
+)
+
+KEYPOINT_QUALITY_PROPOSED_POSE_USABLE_V1 = ArrayContract(
+    schema_id="palette.array.keypoint_quality.proposed_pose_usable",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Policy proposal for row usability; final acceptance belongs to a "
+        "refined-keypoint snapshot."
+    ),
+)
+
 BODY_FRAME_SOURCE_KEYPOINT_ROW_IDS_V1 = ArrayContract(
     schema_id="palette.array.body_frame.source_keypoint_row_ids",
     schema_version=1,
@@ -1342,6 +1450,25 @@ REFINED_KEYPOINT_ARRAY_CONTRACTS = ArrayContractCatalog(
 )
 
 
+KEYPOINT_QUALITY_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        KEYPOINT_INSTANCE_KEY_V1,
+        KEYPOINT_QUALITY_SOURCE_KEYPOINT_ROW_IDS_V1,
+        KEYPOINT_QUALITY_SOURCE_KEYPOINT_ROW_SIGNATURE_V1,
+        KEYPOINT_FRAME_INDICES_V1,
+        FRAME_ROW_OFFSETS_V1,
+        KEYPOINT_QUALITY_KEYPOINT_METRIC_VALUES_V1,
+        KEYPOINT_QUALITY_KEYPOINT_METRIC_VALID_V1,
+        KEYPOINT_QUALITY_POSE_METRIC_VALUES_V1,
+        KEYPOINT_QUALITY_POSE_METRIC_VALID_V1,
+        KEYPOINT_QUALITY_KEYPOINT_FLAGS_V1,
+        KEYPOINT_QUALITY_POSE_FLAGS_V1,
+        KEYPOINT_QUALITY_PROPOSED_KEYPOINT_VALID_V1,
+        KEYPOINT_QUALITY_PROPOSED_POSE_USABLE_V1,
+    )
+)
+
+
 BODY_FRAME_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
         KEYPOINT_INSTANCE_KEY_V1,
@@ -1434,6 +1561,16 @@ CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
         REFINED_KEYPOINT_USABLE_V1,
         REFINED_KEYPOINT_REVIEW_STATE_CODES_V1,
         REFINED_KEYPOINT_REASON_CODES_V1,
+        KEYPOINT_QUALITY_SOURCE_KEYPOINT_ROW_IDS_V1,
+        KEYPOINT_QUALITY_SOURCE_KEYPOINT_ROW_SIGNATURE_V1,
+        KEYPOINT_QUALITY_KEYPOINT_METRIC_VALUES_V1,
+        KEYPOINT_QUALITY_KEYPOINT_METRIC_VALID_V1,
+        KEYPOINT_QUALITY_POSE_METRIC_VALUES_V1,
+        KEYPOINT_QUALITY_POSE_METRIC_VALID_V1,
+        KEYPOINT_QUALITY_KEYPOINT_FLAGS_V1,
+        KEYPOINT_QUALITY_POSE_FLAGS_V1,
+        KEYPOINT_QUALITY_PROPOSED_KEYPOINT_VALID_V1,
+        KEYPOINT_QUALITY_PROPOSED_POSE_USABLE_V1,
         BODY_FRAME_SOURCE_KEYPOINT_ROW_IDS_V1,
         BODY_FRAME_SOURCE_KEYPOINT_ROW_SIGNATURE_V1,
         BODY_FRAME_ORIGIN_XY_V1,

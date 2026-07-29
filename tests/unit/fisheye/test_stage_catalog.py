@@ -97,6 +97,8 @@ def test_stage_catalog_covers_registry_recording_step_names() -> None:
     assert RECORDING_STEP_NAMES == recording_status_stage_ids()
     assert set(RECORDING_STEP_NAMES).issubset(STAGE_BY_ID)
     assert "detect_quality" in RECORDING_STEP_NAMES
+    assert "keypoint_quality" in STAGE_BY_ID
+    assert "keypoint_quality" not in RECORDING_STEP_NAMES
 
 
 def test_stage_catalog_tuning_stage_projection() -> None:
@@ -117,6 +119,10 @@ def test_stage_catalog_dependency_and_invalidation_maps_are_canonical() -> None:
 
     assert deps["refined_detect"] == ("detect_quality",)
     assert invalidates["detect_quality"] == ("refined_detect",)
+    assert deps["keypoint_quality"] == ("keypoints",)
+    assert invalidates["keypoints"] == ("keypoint_quality",)
+    assert deps["refined_keypoints"] == ("keypoint_quality",)
+    assert invalidates["keypoint_quality"] == ("refined_keypoints",)
     assert deps["arena_assignment"] == ("refined_detect",)
     assert deps["tracks"] == ("arena_assignment",)
     assert invalidates["arena_assignment"] == ("tracks",)

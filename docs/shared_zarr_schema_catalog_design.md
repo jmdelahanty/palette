@@ -203,17 +203,25 @@ authority; consolidated metadata alone does not decide which dtype is intended.
 
 ## Initial Foundation
 
-`fisheye.shared.zarr.array_contracts` initially defines exact contracts for:
+`fisheye.shared.zarr.array_contracts` now defines exact contracts for:
 
 - `frame_counts`;
 - `frame_offsets`;
-- keypoints in ROI, image, and normalized spaces;
+- canonical/refined detections and their lineage;
+- geometry-only crops;
+- legacy keypoint coordinate surfaces plus exact raw/refined keypoint-v2
+  snapshots;
+- immutable source-bound `keypoint_quality_runs` metric, flag, and proposal
+  arrays;
+- body-frame origin, axes, validity, and derived heading kept outside keypoint
+  snapshots;
 - dense subject masks in ROI space;
 - flat contour `points_xy`.
 
-These contracts are deliberately narrow. They demonstrate reusable identity,
-exact dtype validation, axis constraints, JSON manifest export, and direct
-creation of storage-planner intents without changing production writers.
+The catalogs provide reusable identity, exact dtype validation, axis
+constraints, JSON manifest export, and direct creation of storage-planner
+intents. Logical contract coverage does not by itself activate a production
+writer or selector.
 
 ## Implementation Priority
 
@@ -267,7 +275,9 @@ schema, storage-policy, or benchmark target.
 - [x] Classify `detection_artifact_runs` as deferred, quarantined evidence rather
       than a canonical detection stage.
 - [ ] Add contract references to `ArraySpec` or replace it with stage bindings.
-- [ ] Migrate canonical detection and common frame/lineage arrays first.
+- [x] Define logical canonical-detection and common frame/lineage contracts.
+- [x] Define logical keypoint-v2, keypoint-quality-v1, and body-frame-v1 stage
+      contracts with heading excluded from keypoint snapshots.
 - [ ] Migrate keypoint contracts through their current authoring, publication,
       and training surfaces.
 - [ ] Separate compatibility unions from current canonical declarations.
