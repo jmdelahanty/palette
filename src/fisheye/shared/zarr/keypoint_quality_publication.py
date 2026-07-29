@@ -1,0 +1,388 @@
+"""Selector-ineligible immutable publication for keypoint-quality v1."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import time
+from typing import Any, Mapping
+
+import numpy as np
+import zarr
+
+from fisheye.shared.zarr.array_factory import create_array_from_plan
+from fisheye.shared.zarr.benchmark_runtime import utc_now
+from fisheye.shared.zarr.keypoint_quality_manifest import (
+    KEYPOINT_QUALITY_RUN_MANIFEST_ATTRIBUTE,
+    build_keypoint_quality_run_manifest,
+    validate_keypoint_quality_publication,
+)
+from fisheye.shared.zarr.keypoint_quality_producer import (
+    PreparedKeypointQualitySnapshot,
+)
+from fisheye.shared.zarr.keypoint_quality_schema import (
+    KEYPOINT_QUALITY_SCHEMA_V1,
+)
+from fisheye.shared.zarr.keypoint_quality_storage import (
+    KeypointQualityStoragePlanSet,
+    plan_keypoint_quality_storage,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.storage_intent import StoragePlan
+from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+)
+
+
+KEYPOINT_QUALITY_SHADOW_SCHEMA_ID = "palette.keypoint_quality.shadow_publication"
+KEYPOINT_QUALITY_SHADOW_SCHEMA_VERSION = 1
+DEFAULT_KEYPOINT_QUALITY_SHADOW_ROOT = Path(
+    "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/"
+    "keypoint_quality"
+)
+_SELECTOR_ATTRIBUTES = (
+    "latest",
+    "latest_complete",
+    "latest_pending",
+    "authoritative_run",
+)
+
+
+@dataclass(frozen=True)
+class KeypointQualityShadowPublication:
+    output_path: Path
+    run_id: str
+    prepared: PreparedKeypointQualitySnapshot
+    source_manifest: Mapping[str, Any]
+    plans: KeypointQualityStoragePlanSet
+    manifest: Mapping[str, Any]
+    phase_seconds: Mapping[str, float]
+    elapsed_seconds: float
+
+
+def require_safe_keypoint_quality_shadow_destination(
+    destination: Path,
+    *,
+    shadow_root: Path = DEFAULT_KEYPOINT_QUALITY_SHADOW_ROOT,
+) -> Path:
+    root = shadow_root.expanduser().resolve()
+    output = destination.expanduser().resolve()
+    if output == root:
+        raise ValueError("Quality shadow destination cannot equal its root.")
+    try:
+        output.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Quality shadow destination must be below shadow_root.") from exc
+    if output.exists():
+        raise FileExistsError(f"Quality shadow destination already exists: {output}")
+    return output
+
+
+def _write_by_physical_units(
+    destination: Any,
+    values: np.ndarray,
+    *,
+    plan: StoragePlan,
+) -> None:
+    unit_shape = plan.shard_shape or plan.chunk_shape
+    if unit_shape is None:
+        raise ValueError("Quality publication does not support scalar arrays.")
+    unit_rows = max(1, int(unit_shape[0]))
+    trailing = (slice(None),) * (values.ndim - 1)
+    for start in range(0, int(values.shape[0]), unit_rows):
+        stop = min(start + unit_rows, int(values.shape[0]))
+        selection = (slice(start, stop), *trailing)
+        destination[selection] = values[selection]
+
+
+def _read_strict_json(path: Path) -> dict[str, Any]:
+    def reject(value: str) -> None:
+        raise ValueError(f"Non-finite JSON token is forbidden: {value}")
+
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle, parse_constant=reject)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object at {path}.")
+    return value
+
+
+def keypoint_quality_metadata_declaration_maps(
+    output_path: Path,
+    *,
+    run_id: str,
+    plans: KeypointQualityStoragePlanSet,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    relative_paths = ("", *(entry.rule.path for entry in plans.entries))
+    run_prefix = f"keypoint_quality_runs/{run_id}"
+    direct: dict[str, dict[str, Any]] = {}
+    for relative in relative_paths:
+        metadata_path = output_path / run_prefix
+        if relative:
+            metadata_path = metadata_path / relative
+        direct[relative] = _read_strict_json(metadata_path / "zarr.json")
+
+    archive_root = _read_strict_json(output_path / "zarr.json")
+    envelope = archive_root.get("consolidated_metadata")
+    if not isinstance(envelope, Mapping):
+        raise ValueError("Quality shadow lacks root consolidated metadata.")
+    if envelope.get("kind") != "inline" or envelope.get("must_understand") is not False:
+        raise ValueError("Quality consolidated metadata envelope is invalid.")
+    flattened = envelope.get("metadata")
+    if not isinstance(flattened, Mapping):
+        raise ValueError("Quality consolidated metadata map is missing.")
+    consolidated: dict[str, dict[str, Any]] = {}
+    for relative in relative_paths:
+        full_path = run_prefix if not relative else f"{run_prefix}/{relative}"
+        declaration = flattened.get(full_path)
+        if not isinstance(declaration, Mapping):
+            raise ValueError(f"Quality consolidated metadata lacks {full_path!r}.")
+        consolidated[relative] = dict(declaration)
+    return direct, consolidated
+
+
+def validate_keypoint_quality_shadow_publication(
+    publication: KeypointQualityShadowPublication,
+) -> tuple[str, ...]:
+    try:
+        direct, consolidated = keypoint_quality_metadata_declaration_maps(
+            publication.output_path,
+            run_id=publication.run_id,
+            plans=publication.plans,
+        )
+        run = zarr.open_group(
+            str(
+                publication.output_path
+                / "keypoint_quality_runs"
+                / publication.run_id
+            ),
+            mode="r",
+            use_consolidated=False,
+        )
+        arrays = {
+            path: run[path] for path in KEYPOINT_QUALITY_SCHEMA_V1.binding_paths
+        }
+    except (OSError, TypeError, ValueError) as exc:
+        return (f"quality shadow reopen failed: {exc}",)
+    errors = list(
+        validate_keypoint_quality_publication(
+            publication.manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+            source_arrays=publication.prepared.source_arrays,
+            source_manifest=publication.source_manifest,
+        )
+    )
+    if run.attrs.get("status") != "complete":
+        errors.append("quality shadow status is not complete")
+    if run.attrs.get("stage_selector_eligible") is not False:
+        errors.append("quality shadow is not selector-ineligible")
+    family = zarr.open_group(
+        str(publication.output_path / "keypoint_quality_runs"),
+        mode="r",
+        use_consolidated=False,
+    )
+    selected = [
+        name
+        for name in _SELECTOR_ATTRIBUTES
+        if family.attrs.get(name) == publication.run_id
+    ]
+    if selected:
+        errors.append(f"quality shadow is selected by {selected!r}")
+    return tuple(errors)
+
+
+def publish_selector_ineligible_keypoint_quality_snapshot(
+    prepared: PreparedKeypointQualitySnapshot,
+    *,
+    source_manifest: Mapping[str, Any],
+    destination: Path,
+    run_id: str,
+    shadow_root: Path = DEFAULT_KEYPOINT_QUALITY_SHADOW_ROOT,
+    storage_profile: StorageProfile = PUBLISHED_HTTP_V1,
+    created_by: str = "keypoint_quality_shadow",
+) -> KeypointQualityShadowPublication:
+    """Write, consolidate, and validate one standalone quality snapshot."""
+
+    output_path = require_safe_keypoint_quality_shadow_destination(
+        destination, shadow_root=shadow_root
+    )
+    if not str(created_by).strip():
+        raise ValueError("created_by cannot be empty.")
+    if "/" in str(run_id) or not str(run_id).strip():
+        raise ValueError("run_id must be one nonempty archive group name.")
+    if canonical_json_sha256(source_manifest) != prepared.source.manifest_digest:
+        raise ValueError("Source manifest differs from the prepared source binding.")
+    KEYPOINT_QUALITY_SCHEMA_V1.require(
+        prepared.arrays,
+        dimensions=prepared.dimensions,
+        profile=prepared.profile,
+        source_keypoint_arrays=prepared.source_arrays,
+    )
+    plans = plan_keypoint_quality_storage(
+        prepared.dimensions, profile=storage_profile
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    phase_seconds: dict[str, float] = {}
+
+    root = zarr.open_group(str(output_path), mode="w-", zarr_format=3)
+    root.attrs.update(
+        {
+            "benchmark_only": True,
+            "canonical": False,
+            "registry_registered": False,
+            "selector_eligible": False,
+            "schema_id": KEYPOINT_QUALITY_SHADOW_SCHEMA_ID,
+            "schema_version": KEYPOINT_QUALITY_SHADOW_SCHEMA_VERSION,
+            "created_at_utc": utc_now(),
+            "created_by": str(created_by),
+        }
+    )
+    family = root.create_group("keypoint_quality_runs")
+    family.attrs.update(
+        {
+            "benchmark_only": True,
+            "selector_eligible": False,
+            "selection_contract": "none_shadow_direct_path_only",
+        }
+    )
+    run = family.create_group(str(run_id))
+    run.attrs.update(
+        {
+            "status": "running",
+            "stage_selector_eligible": False,
+            "shadow_only": True,
+            "artifact_class": "observation_local_quality_diagnostics",
+            "logical_schema": KEYPOINT_QUALITY_SCHEMA_V1.as_manifest(
+                dimensions=prepared.dimensions,
+                profile=prepared.profile,
+                source=prepared.source,
+            ),
+            "storage_plan": plans.as_manifest(),
+            "source_keypoint_snapshot": prepared.source.as_manifest(),
+            "policy": prepared.policy.as_manifest(),
+        }
+    )
+
+    destination_arrays: dict[str, Any] = {}
+    bindings = {
+        binding.path: binding for binding in KEYPOINT_QUALITY_SCHEMA_V1.bindings
+    }
+    phase_started = time.perf_counter()
+    for entry in plans.entries:
+        path = entry.rule.path
+        values = np.asarray(prepared.arrays[path])
+        binding = bindings[path]
+        contract = KEYPOINT_QUALITY_SCHEMA_V1.contracts.resolve(
+            binding.contract_id, binding.contract_version
+        )
+        array = create_array_from_plan(
+            run,
+            name=path,
+            contract=contract,
+            plan=entry.plan,
+            fill_value=0,
+            attributes={
+                "benchmark_only": True,
+                "selector_eligible": False,
+                "artifact_class": "observation_local_quality_diagnostics",
+            },
+        )
+        _write_by_physical_units(array, values, plan=entry.plan)
+        destination_arrays[path] = array
+    phase_seconds["create_and_write_arrays"] = time.perf_counter() - phase_started
+
+    KEYPOINT_QUALITY_SCHEMA_V1.require(
+        destination_arrays,
+        dimensions=prepared.dimensions,
+        profile=prepared.profile,
+        source_keypoint_arrays=prepared.source_arrays,
+    )
+    run.attrs["status"] = "complete"
+
+    phase_started = time.perf_counter()
+    consolidate_metadata_capture_expected_warnings(output_path)
+    direct, consolidated = keypoint_quality_metadata_declaration_maps(
+        output_path,
+        run_id=str(run_id),
+        plans=plans,
+    )
+    phase_seconds["first_consolidation"] = time.perf_counter() - phase_started
+
+    phase_started = time.perf_counter()
+    manifest = build_keypoint_quality_run_manifest(
+        run_id=str(run_id),
+        dimensions=prepared.dimensions,
+        profile=prepared.profile,
+        policy=prepared.policy,
+        source=prepared.source,
+        source_manifest=source_manifest,
+        storage_plan=plans,
+        arrays=destination_arrays,
+        source_arrays=prepared.source_arrays,
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+    )
+    run.attrs[KEYPOINT_QUALITY_RUN_MANIFEST_ATTRIBUTE] = manifest
+    phase_seconds["build_manifest"] = time.perf_counter() - phase_started
+
+    phase_started = time.perf_counter()
+    consolidate_metadata_capture_expected_warnings(output_path)
+    direct, consolidated = keypoint_quality_metadata_declaration_maps(
+        output_path,
+        run_id=str(run_id),
+        plans=plans,
+    )
+    errors = validate_keypoint_quality_publication(
+        manifest,
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        arrays=destination_arrays,
+        source_arrays=prepared.source_arrays,
+        source_manifest=source_manifest,
+    )
+    phase_seconds["final_consolidation_and_gate"] = (
+        time.perf_counter() - phase_started
+    )
+    if errors:
+        run.attrs.update(
+            {
+                "status": "failed",
+                "stage_selector_eligible": False,
+                "publication_errors": list(errors),
+            }
+        )
+        raise RuntimeError("Quality publication gate failed: " + "; ".join(errors))
+
+    publication = KeypointQualityShadowPublication(
+        output_path=output_path,
+        run_id=str(run_id),
+        prepared=prepared,
+        source_manifest=dict(source_manifest),
+        plans=plans,
+        manifest=manifest,
+        phase_seconds=phase_seconds,
+        elapsed_seconds=time.perf_counter() - started,
+    )
+    reopen_errors = validate_keypoint_quality_shadow_publication(publication)
+    if reopen_errors:
+        raise RuntimeError(
+            "Reopened quality publication gate failed: "
+            + "; ".join(reopen_errors)
+        )
+    return publication
+
+
+__all__ = [
+    "DEFAULT_KEYPOINT_QUALITY_SHADOW_ROOT",
+    "KEYPOINT_QUALITY_SHADOW_SCHEMA_ID",
+    "KEYPOINT_QUALITY_SHADOW_SCHEMA_VERSION",
+    "KeypointQualityShadowPublication",
+    "keypoint_quality_metadata_declaration_maps",
+    "publish_selector_ineligible_keypoint_quality_snapshot",
+    "require_safe_keypoint_quality_shadow_destination",
+    "validate_keypoint_quality_shadow_publication",
+]

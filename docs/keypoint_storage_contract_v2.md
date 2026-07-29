@@ -150,6 +150,31 @@ logical schema, physical storage plan, array digests, and direct/consolidated
 metadata equivalence. A quality run is not landmark authority and cannot be a
 training label source by itself.
 
+### Initial implemented producer
+
+The selector-ineligible v1 producer implements one deliberately small
+`observation_local_baseline` profile:
+
+- `confidence_margin` per keypoint is source confidence minus the exact policy
+  threshold;
+- `valid_landmark_fraction` per pose is the fraction retained by that policy;
+- keypoint flags distinguish low confidence from source invalidity;
+- pose flags distinguish source failure from insufficient retained landmarks;
+- proposed validity can only remove source validity, never create it.
+
+The policy document and complete profile are independently digest-bound. The
+publisher creates arrays only through the shared byte planner and array
+factory, writes whole physical units, validates decoded values and source
+signatures, consolidates metadata, persists the manifest at
+`keypoint_quality_runs/<run>/zarr.json.attributes.run_manifest`, reconsolidates,
+and reopens the result through the complete publication gate.
+
+This first publisher writes only standalone selector-ineligible shadows. It
+does not create a registry status row, selector, production authority, or
+training artifact. It initially uses `published_http_v1`; a representative
+benchmark must decide whether keypoint-quality deserves a distinct promoted
+profile.
+
 ## Refined Keypoint v2
 
 A compact `refined_keypoints_runs/<run>` v2 snapshot binds the exact raw
@@ -333,12 +358,17 @@ It must not be encoded by silently changing `heading_deg`.
 - [ ] Freeze exact refined accepted-QC code maps and manifest bindings to the
       quality run used during review.
 - [x] Implement body-frame-v1 logical contracts and derivation validation.
-- [ ] Require exact manifest field sets and canonical digests.
+- [x] Require exact quality manifest field sets, reconstruct the logical and
+      storage builders, and enforce canonical digests.
+- [ ] Add equivalent exact run manifests for raw/refined keypoints and body
+      frames.
 
 ### Writer and lifecycle
 
-- [ ] Add selector-ineligible shadow writers; do not change current defaults.
-- [ ] Add a keypoint-quality producer and immutable publication gate.
+- [x] Add the selector-ineligible keypoint-quality shadow writer without
+      changing current defaults.
+- [x] Add the observation-local keypoint-quality producer and immutable
+      publication gate.
 - [ ] Add keyed refined-keypoint deltas and immutable compaction.
 - [ ] Recompute accepted snapshot-local QC during compaction and body frame
       after it.
