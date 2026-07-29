@@ -517,6 +517,33 @@ registry, training artifact, or production-state write. The cache is a durable
 derived accelerator bound to the exact crop manifest and source-video
 identity; it is not pixel authority and is not added to the analysis Zarr.
 
+### Deferred flat-cache RSS optimization
+
+The observed 7.99 GiB peak RSS does not block the logical contracts,
+selector-ineligible publication, or Crimson interoperability checkpoint. The
+flat cache is read through a read-only NumPy memory map, so RSS may include
+reclaimable file-backed pages from the complete 5.60 GiB sequential scan in
+addition to anonymous Python, NumPy, PyTorch, and pinned-transfer memory. It
+does not establish an 8 GiB heap requirement.
+
+Defer this optimization until the raw-keypoint, keypoint-quality, body-frame,
+and refined-keypoint contracts have exact persisted envelopes and Crimson has
+typed readers for their selector-ineligible canaries. Before enabling broad
+concurrent production, Palette must then:
+
+- sample `/proc/<pid>/smaps_rollup` by workflow phase and distinguish
+  anonymous, file-backed, shared, and pinned-host resident memory;
+- reconcile process `ru_maxrss`, `/usr/bin/time`, and LSF accounting;
+- compare the current memory map with bounded range reads and/or explicit
+  release of already-consumed file-backed pages;
+- repeat cold and warm NRS-to-scratch staging and inference measurements; and
+- freeze a concurrency-aware memory gate for multi-camera execution.
+
+The optimization target is a working set proportional to the active inference
+window rather than total cache size while preserving the existing sequential
+throughput. It is a production scaling and resource-efficiency gate, not a
+reason to weaken or delay the storage schemas.
+
 ### Numerical and storage gates
 
 - [ ] Compare v1 float64 and v2 float32 landmark/source-camera projections,
@@ -532,12 +559,16 @@ identity; it is not pixel authority and is not added to the analysis Zarr.
 
 ### Consumer and migration
 
+- [ ] Publish selector-ineligible raw-keypoint-v2, keypoint-quality-v1,
+      and body-frame-v1 fixtures for Crimson; add refined-keypoint-v2 after
+      its exact manifest gate is complete.
 - [ ] Add Crimson exact-schema adapters for keypoint v2, body-frame v1, and
       the snapshot-local QC surface.
 - [ ] Census consumers of current embedded temporal-heading diagnostics and
       decide which are acceptance inputs versus optional analysis.
 - [ ] Prove ordinary playback performs zero optional diagnostic reads.
-- [ ] Publish a selector-ineligible cross-language canary.
+- [ ] Run Crimson correctness, retained-offset, lazy-optional-read, and bounded
+      window benchmarks against the selector-ineligible fixtures.
 - [ ] Add a migration tool that recomputes legacy embedded heading into a new
       body-frame run and proves value equivalence within the declared dtype
       tolerance.
