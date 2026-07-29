@@ -38,7 +38,6 @@ from fisheye.shared.canonical_coordinate_publication import (
 )
 from fisheye.shared.coordinate_descriptor import (
     CANONICAL_OVERLAY_DIRECT,
-    CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
 )
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
 from fisheye.shared.coordinate_identity import (
@@ -58,6 +57,18 @@ from fisheye.shared.coordinate_record import (
     bind_persisted_coordinate_record,
     stamp_and_bind_persisted_coordinate_record,
     verify_bound_coordinate_record,
+)
+from fisheye.shared.coordinate_surface_contract import (
+    ROI_BBOX_XYXY,
+    SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+    SOURCE_CAMERA_BBOX_XYXY,
+    SOURCE_CAMERA_CROP_XYWH,
+    SOURCE_CAMERA_EXTRACTION_ORIGIN_XY,
+    SOURCE_CAMERA_NORMALIZED_BBOX_CXCYWH,
+    SOURCE_CAMERA_NORMALIZED_PROFILE_ID,
+    SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+    SOURCE_CAMERA_POINT_XY,
+    SOURCE_CAMERA_PROFILE_ID,
 )
 from fisheye.shared.coordinate_reference import (
     BoundReferenceExtent,
@@ -219,11 +230,6 @@ CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_ID = (
     "palette.crop_roi_bbox_edge_reference_extent"
 )
 CROP_ROI_BBOX_EDGE_EXTENT_SCHEMA_VERSION = 1
-
-SOURCE_CAMERA_PROFILE_ID = "source_camera_image_px.top_left_y_down.v1"
-SOURCE_CAMERA_NORMALIZED_PROFILE_ID = "source_camera_normalized_xy.top_left_y_down.v1"
-SOURCE_CAMERA_POINT_PIXEL_CONVENTION = "continuous"
-SOURCE_CAMERA_BBOX_PIXEL_CONVENTION = "pixel_edge_half_open"
 
 _BOUND_DETECTION_FRAME_EVIDENCE_SEAL = object()
 _BOUND_DETECTION_GEOMETRY_SEAL = object()
@@ -1288,44 +1294,24 @@ def publish_detection_observation_geometry(
         )
         bbox_normalized = build_bound_canonical_coordinate_descriptor(
             bbox_norm_node,
-            profile_id=SOURCE_CAMERA_NORMALIZED_PROFILE_ID,
-            geometry_type="bbox_cxcywh",
-            components=("center_x", "center_y", "width", "height"),
-            component_units=(
-                "normalized",
-                "normalized",
-                "normalized",
-                "normalized",
-            ),
-            pixel_convention="continuous",
+            **SOURCE_CAMERA_NORMALIZED_BBOX_CXCYWH.descriptor_kwargs(),
             row_identity=identity,
             reference_frame_authority=evidence.normalized_frame,
-            source_camera_overlay_status=CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
             transform_chain=evidence.normalized_to_source_camera,
             lineage_records=(*source_lineage, projection),
         )
         bbox_image = build_bound_canonical_coordinate_descriptor(
             bbox_img_node,
-            profile_id=SOURCE_CAMERA_PROFILE_ID,
-            geometry_type="bbox_xyxy",
-            components=("x_min", "y_min", "x_max", "y_max"),
-            component_units=("px", "px", "px", "px"),
-            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+            **SOURCE_CAMERA_BBOX_XYXY.descriptor_kwargs(),
             row_identity=identity,
             reference_frame_authority=evidence.bbox_source_camera_frame,
-            source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
             lineage_records=(*source_lineage, projection),
         )
         centers_image = build_bound_canonical_coordinate_descriptor(
             centers_img_node,
-            profile_id=SOURCE_CAMERA_PROFILE_ID,
-            geometry_type="point_xy",
-            components=("x", "y"),
-            component_units=("px", "px"),
-            pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+            **SOURCE_CAMERA_POINT_XY.descriptor_kwargs(),
             row_identity=identity,
             reference_frame_authority=evidence.source_camera_frame,
-            source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
             lineage_records=(*source_lineage, projection, center),
         )
         stamp_bound_canonical_coordinate_descriptors(
@@ -2485,26 +2471,16 @@ def publish_crop_roi_geometry(
             )
         source_crop = build_bound_canonical_coordinate_descriptor(
             source_crop_xywh_node,
-            profile_id=SOURCE_CAMERA_PROFILE_ID,
-            geometry_type="bbox_xywh",
-            components=("x", "y", "width", "height"),
-            component_units=("px", "px", "px", "px"),
-            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+            **SOURCE_CAMERA_CROP_XYWH.descriptor_kwargs(),
             row_identity=crop.row_identity,
             reference_frame_authority=ownership.source_camera_frame,
-            source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
             lineage_records=(crop.selection_derivation, derivation),
         )
         bbox_roi_binding = build_bound_canonical_coordinate_descriptor(
             bbox_roi_xyxy_node,
-            profile_id="roi_local_px.top_left_y_down.v1",
-            geometry_type="bbox_xyxy",
-            components=("x_min", "y_min", "x_max", "y_max"),
-            component_units=("px", "px", "px", "px"),
-            pixel_convention=SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+            **ROI_BBOX_XYXY.descriptor_kwargs(),
             row_identity=crop.row_identity,
             reference_frame_authority=roi,
-            source_camera_overlay_status=CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
             transform_chain=chain,
             lineage_records=(crop.selection_derivation, derivation),
         )
@@ -2512,14 +2488,9 @@ def publish_crop_roi_geometry(
         if roi_top_left_node is not None and top_left_derivation is not None:
             top_left_binding = build_bound_canonical_coordinate_descriptor(
                 roi_top_left_node,
-                profile_id=SOURCE_CAMERA_PROFILE_ID,
-                geometry_type="point_xy",
-                components=("x", "y"),
-                component_units=("px", "px"),
-                pixel_convention=SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+                **SOURCE_CAMERA_EXTRACTION_ORIGIN_XY.descriptor_kwargs(),
                 row_identity=crop.row_identity,
                 reference_frame_authority=point_ownership.source_camera_frame,
-                source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
                 lineage_records=(
                     crop.selection_derivation,
                     top_left_derivation,

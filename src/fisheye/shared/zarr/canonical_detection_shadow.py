@@ -18,6 +18,7 @@ from fisheye.shared.zarr.canonical_detection_benchmark_input import (
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
     build_canonical_detection_run_manifest,
+    build_coordinate_canonical_detection_run_manifest,
     build_legacy_detection_source_evidence,
     refined_source_identity_from_canonical_manifest,
     validate_canonical_detection_publication,
@@ -249,8 +250,12 @@ def publish_legacy_canonical_detection_shadow(
     run_id: str,
     shadow_root: Path = DEFAULT_CANONICAL_DETECTION_SHADOW_ROOT,
     profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    coordinate_catalog: bool = False,
 ) -> CanonicalDetectionShadowPublication:
     """Convert one complete legacy run into a validated canonical shadow."""
+
+    if type(coordinate_catalog) is not bool:
+        raise TypeError("coordinate_catalog must be an exact bool.")
 
     output_path = require_safe_canonical_detection_shadow_destination(
         destination,
@@ -408,7 +413,15 @@ def publish_legacy_canonical_detection_shadow(
             run_id=str(run_id),
             plans=plans,
         )
-        manifest = build_canonical_detection_run_manifest(
+        manifest_builder = (
+            build_coordinate_canonical_detection_run_manifest
+            if coordinate_catalog
+            else build_canonical_detection_run_manifest
+        )
+        manifest_kwargs: dict[str, Any] = {}
+        if coordinate_catalog:
+            manifest_kwargs["source_evidence_kind"] = "legacy_conversion"
+        manifest = manifest_builder(
             run_id=str(run_id),
             dimensions=benchmark_input.dimensions,
             storage_plan=plans,
@@ -417,6 +430,7 @@ def publish_legacy_canonical_detection_shadow(
             direct_metadata_declarations=direct,
             consolidated_metadata_declarations=consolidated,
             selector_eligible=False,
+            **manifest_kwargs,
         )
         run.attrs["run_manifest"] = manifest
         second_consolidation = consolidate_metadata_capture_expected_warnings(

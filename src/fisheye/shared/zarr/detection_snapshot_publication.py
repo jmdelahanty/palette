@@ -1,4 +1,4 @@
-"""Publish selector-ineligible canonical/refined detection v1 snapshots.
+"""Publish selector-ineligible canonical/refined detection snapshots.
 
 This is the production placement boundary for the frozen detection snapshot
 contracts.  It converts complete full-acquisition compatibility runs on
@@ -260,9 +260,12 @@ def publish_detection_snapshot_pair(
     allow_manual_score_reset: bool = False,
     copy_backend: str = "python",
     keep_scratch: bool = False,
+    coordinate_catalog: bool = False,
 ) -> dict[str, object]:
     """Publish one full-acquisition immutable pair without selecting it."""
 
+    if type(coordinate_catalog) is not bool:
+        raise TypeError("coordinate_catalog must be an exact bool.")
     started = time.perf_counter()
     archive = analysis_zarr.expanduser().resolve()
     if not archive.is_dir():
@@ -325,6 +328,7 @@ def publish_detection_snapshot_pair(
             destination=local_root / "canonical.zarr",
             run_id=canonical_id,
             shadow_root=local_root,
+            coordinate_catalog=coordinate_catalog,
         )
         source_refined_group = zarr.open_group(
             str(source_refined), mode="r", use_consolidated=False
@@ -371,6 +375,7 @@ def publish_detection_snapshot_pair(
             lineage=lineage,
             canonical_source=canonical,
             shadow_root=local_root,
+            coordinate_catalog=coordinate_catalog,
         )
         refined_plans = plan_refined_detection_storage(transition.dimensions)
         if refined_plans.profile.profile_id != canonical.plans.profile.profile_id:
@@ -538,12 +543,14 @@ def publish_detection_snapshot_pair(
                     "run_id": canonical_id,
                     "group_path": f"detect_runs/{canonical_id}",
                     "manifest_digest": canonical.manifest["payload_digest"],
+                    "manifest_schema_version": canonical.manifest["schema_version"],
                     "publication": canonical_publication,
                 },
                 "refined": {
                     "run_id": refined_id,
                     "group_path": f"refined_detect_runs/{refined_id}",
                     "manifest_digest": refined.manifest["payload_digest"],
+                    "manifest_schema_version": refined.manifest["schema_version"],
                     "publication": refined_publication,
                 },
             },

@@ -40,8 +40,6 @@ from fisheye.shared.canonical_coordinate_publication import (
     stamp_bound_canonical_coordinate_descriptors,
 )
 from fisheye.shared.coordinate_descriptor import (
-    CANONICAL_OVERLAY_DIRECT,
-    CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
     CanonicalCollectionAxis,
     DigestBoundCoordinateRecordRef,
 )
@@ -59,6 +57,17 @@ from fisheye.shared.coordinate_record import (
     BoundCoordinateRecord,
     bind_persisted_coordinate_record,
     stamp_and_bind_persisted_coordinate_record,
+)
+from fisheye.shared.coordinate_surface_contract import (
+    ROI_BBOX_XYXY,
+    ROI_POINT_XY,
+    SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
+    SOURCE_CAMERA_BBOX_XYXY,
+    SOURCE_CAMERA_CROP_XYWH,
+    SOURCE_CAMERA_NORMALIZED_BBOX_XYXY,
+    SOURCE_CAMERA_NORMALIZED_POINT_XY,
+    SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
+    SOURCE_CAMERA_POINT_XY,
 )
 from fisheye.shared.coordinate_reference import (
     bind_array_reference_extent,
@@ -82,8 +91,6 @@ from fisheye.shared.observation_coordinate_publication import (
     BoundCropObservationGeometry,
     CROP_ROI_BBOX_EDGE_FRAME_RELATIVE_PATH,
     CropRoiGeometryPublicationResult,
-    SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
-    SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
     load_crop_roi_bbox_edge_reference_extent,
     load_crop_roi_geometry,
     load_persisted_crop_observation_geometry,
@@ -2714,78 +2721,38 @@ def _bindings(
     )
     specs: dict[str, dict[str, Any]] = {
         "source_crop_xywh": {
-            "profile_id": "source_camera_image_px.top_left_y_down.v1",
-            "geometry_type": "bbox_xywh",
-            "components": ("x", "y", "width", "height"),
-            "component_units": ("px", "px", "px", "px"),
+            **SOURCE_CAMERA_CROP_XYWH.descriptor_kwargs(),
             "reference_frame_authority": bbox_camera,
-            "pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
-            "source_camera_overlay_status": CANONICAL_OVERLAY_DIRECT,
         },
         "keypoints_roi": {
-            "profile_id": "roi_local_px.top_left_y_down.v1",
-            "geometry_type": "point_xy",
-            "components": ("x", "y"),
-            "component_units": ("px", "px"),
+            **ROI_POINT_XY.descriptor_kwargs(),
             "reference_frame_authority": context.roi_frame,
-            "pixel_convention": SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
-            "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
             "transform_chain": context.roi_to_source_camera,
             "collection_axis": True,
         },
         "keypoints_img": {
-            "profile_id": "source_camera_image_px.top_left_y_down.v1",
-            "geometry_type": "point_xy",
-            "components": ("x", "y"),
-            "component_units": ("px", "px"),
+            **SOURCE_CAMERA_POINT_XY.descriptor_kwargs(),
             "reference_frame_authority": point_camera,
-            "pixel_convention": SOURCE_CAMERA_POINT_PIXEL_CONVENTION,
-            "source_camera_overlay_status": CANONICAL_OVERLAY_DIRECT,
             "collection_axis": True,
         },
         "keypoints_norm": {
-            "profile_id": "source_camera_normalized_xy.top_left_y_down.v1",
-            "geometry_type": "point_xy",
-            "components": ("x", "y"),
-            "component_units": ("normalized", "normalized"),
+            **SOURCE_CAMERA_NORMALIZED_POINT_XY.descriptor_kwargs(),
             "reference_frame_authority": context.point_normalized_frame,
-            "pixel_convention": "continuous",
-            "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
             "transform_chain": context.point_normalized_to_source_camera,
             "collection_axis": True,
         },
         "pose_bbox_xyxy_roi": {
-            "profile_id": "roi_local_px.top_left_y_down.v1",
-            "geometry_type": "bbox_xyxy",
-            "components": ("x_min", "y_min", "x_max", "y_max"),
-            "component_units": ("px", "px", "px", "px"),
+            **ROI_BBOX_XYXY.descriptor_kwargs(),
             "reference_frame_authority": context.bbox_roi_frame,
-            "pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
-            "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
             "transform_chain": context.bbox_roi_to_source_camera,
         },
         "pose_bbox_xyxy_img": {
-            "profile_id": "source_camera_image_px.top_left_y_down.v1",
-            "geometry_type": "bbox_xyxy",
-            "components": ("x_min", "y_min", "x_max", "y_max"),
-            "component_units": ("px", "px", "px", "px"),
+            **SOURCE_CAMERA_BBOX_XYXY.descriptor_kwargs(),
             "reference_frame_authority": bbox_camera,
-            "pixel_convention": SOURCE_CAMERA_BBOX_PIXEL_CONVENTION,
-            "source_camera_overlay_status": CANONICAL_OVERLAY_DIRECT,
         },
         "pose_bbox_xyxy_norm": {
-            "profile_id": "source_camera_normalized_xy.top_left_y_down.v1",
-            "geometry_type": "bbox_xyxy",
-            "components": ("x_min", "y_min", "x_max", "y_max"),
-            "component_units": (
-                "normalized",
-                "normalized",
-                "normalized",
-                "normalized",
-            ),
+            **SOURCE_CAMERA_NORMALIZED_BBOX_XYXY.descriptor_kwargs(),
             "reference_frame_authority": bbox_normalized,
-            "pixel_convention": "continuous",
-            "source_camera_overlay_status": CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
             "transform_chain": bbox_normalized_chain,
         },
     }
@@ -2811,9 +2778,8 @@ def _bindings(
                 **{
                     key: value
                     for key, value in spec.items()
-                    if key not in {"collection_axis", "pixel_convention"}
+                    if key not in {"collection_axis"}
                 },
-                pixel_convention=spec["pixel_convention"],
                 row_identity=context.row_identity,
                 lineage_records=lineage,
                 collection_axis=(

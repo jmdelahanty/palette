@@ -32,6 +32,7 @@ from fisheye.shared.zarr.refined_detection_delta_storage import (
     read_frozen_refined_detection_delta_generation,
 )
 from fisheye.shared.zarr.refined_detection_manifest import (
+    REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     RefinedDetectionSnapshotLineage,
     RefinedDetectionSourceIdentity,
     refined_detection_logical_content_digest,
@@ -451,6 +452,10 @@ def compact_frozen_refined_detection_delta_generation(
             "delta_lineage_id": binding.delta_lineage_id,
             "delta_generation_ordinal": frozen.generation_ordinal,
         },
+        coordinate_catalog=(
+            immediate_parent_manifest.get("schema_version")
+            == REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        ),
     )
     phase_seconds["publish_validate_immutable_snapshot"] = (
         time.perf_counter() - phase_started
@@ -505,6 +510,7 @@ def compact_frozen_refined_detection_delta_generation(
             "run_id": publication.run_id,
             "snapshot_id": snapshot_id,
             "run_manifest_digest": publication.manifest["payload_digest"],
+            "run_manifest_schema_version": publication.manifest["schema_version"],
             "storage_profile_id": profile.profile_id,
             "n_frames": resolution.dimensions.n_frames,
             "n_instances": resolution.dimensions.n_instances,

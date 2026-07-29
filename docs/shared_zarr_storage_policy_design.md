@@ -14,6 +14,7 @@ This design complements:
 - [`zarr_storage_lifecycle_policy.md`](zarr_storage_lifecycle_policy.md)
 - [`dask_zarr_write_safety.md`](dask_zarr_write_safety.md)
 - [`tabular_delta_compaction_contract.md`](tabular_delta_compaction_contract.md)
+- [`shared_coordinate_storage_contract_v1.md`](shared_coordinate_storage_contract_v1.md)
 
 ## Decision Summary
 
@@ -61,6 +62,14 @@ Not in scope:
 - replacing Zarr with a different canonical recording format
 - treating rechunking as the primary fix for Crimson initialization latency
 - forcing unlike arrays into one physical representation
+
+Coordinate semantics are nevertheless a required input boundary. The shared
+storage layer consumes exact logical array contracts and the versioned
+coordinate-surface catalog; it does not infer coordinate meaning from an array
+name or choose a scientific representation. Detection normalized boxes,
+source-camera pixel keypoints, ROI-local masks, and integer crop extents may all
+use different natural representations while sharing one explicit semantic
+catalog and source-camera presentation mapping.
 
 ## Organizing Principle
 
@@ -255,6 +264,8 @@ Proposed package structure:
 
 ```text
 src/fisheye/shared/zarr/
+  array_contracts.py
+  coordinate_contracts.py
   storage_intent.py
   storage_profiles.py
   storage_planner.py

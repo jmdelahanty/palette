@@ -17,6 +17,10 @@ from fisheye.shared.zarr.array_factory import (
     validate_array_metadata_declaration_from_plan,
 )
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, sha256_file
+from fisheye.shared.zarr.coordinate_manifest import (
+    build_coordinate_catalog_envelope,
+    validate_coordinate_catalog_envelope,
+)
 from fisheye.shared.zarr.detection_schema import (
     CANONICAL_DETECTION_SCHEMA_V1,
     CanonicalDetectionDimensions,
@@ -37,6 +41,7 @@ from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID = "palette.canonical_detection.run_manifest"
 CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION = 1
 CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION = 2
+CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 3
 CANONICAL_DETECTION_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 CANONICAL_DETECTION_RUN_MANIFEST_PERSISTED_PATH = (
     "detect_runs/<run>/zarr.json.attributes.run_manifest"
@@ -588,6 +593,8 @@ def _build_canonical_detection_run_manifest(
     direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
     consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
     manifest_schema_version: int,
+    source_evidence_kind: str | None = None,
+    include_coordinate_catalog: bool = False,
     selector_eligible: bool = False,
 ) -> dict[str, object]:
     """Build one exact persisted canonical detection run-manifest version."""
@@ -629,6 +636,25 @@ def _build_canonical_detection_run_manifest(
         },
         "source_evidence": dict(source_evidence),
     }
+    if include_coordinate_catalog:
+        if manifest_schema_version != (
+            CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Canonical coordinate catalogs require run-manifest v3."
+            )
+        if source_evidence_kind not in {"legacy_conversion", "native_detection"}:
+            raise ValueError(
+                "Canonical run-manifest v3 requires an exact source_evidence_kind."
+            )
+        payload["source_evidence_kind"] = source_evidence_kind
+        payload["coordinate_contract"] = build_coordinate_catalog_envelope(
+            CANONICAL_DETECTION_SCHEMA_V1.coordinate_contract_manifest()
+        )
+    elif source_evidence_kind is not None:
+        raise ValueError(
+            "source_evidence_kind is reserved for coordinate-catalog manifests."
+        )
     envelope: dict[str, object] = {
         "schema_id": CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID,
         "schema_version": manifest_schema_version,
@@ -704,6 +730,50 @@ def build_native_canonical_detection_run_manifest(
     )
 
 
+def build_coordinate_canonical_detection_run_manifest(
+    *,
+    run_id: str,
+    dimensions: CanonicalDetectionDimensions,
+    storage_plan: CanonicalDetectionStoragePlanSet,
+    arrays: Mapping[str, Any],
+    source_evidence: Mapping[str, Any],
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    source_evidence_kind: str,
+    selector_eligible: bool = False,
+) -> dict[str, object]:
+    """Build opt-in v3 with an exact persisted coordinate catalog."""
+
+    if source_evidence_kind == "legacy_conversion":
+        source_errors = validate_legacy_detection_source_evidence(source_evidence)
+    elif source_evidence_kind == "native_detection":
+        source_errors = validate_native_detection_source_evidence(
+            source_evidence,
+            dimensions=dimensions,
+        )
+    else:
+        raise ValueError(
+            "source_evidence_kind must be legacy_conversion or native_detection."
+        )
+    if source_errors:
+        raise ValueError("Invalid canonical source evidence: " + "; ".join(source_errors))
+    return _build_canonical_detection_run_manifest(
+        run_id=run_id,
+        dimensions=dimensions,
+        storage_plan=storage_plan,
+        arrays=arrays,
+        source_evidence=source_evidence,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        manifest_schema_version=(
+            CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        ),
+        source_evidence_kind=source_evidence_kind,
+        include_coordinate_catalog=True,
+        selector_eligible=selector_eligible,
+    )
+
+
 def _dimensions_from_manifest(
     logical: Mapping[str, Any],
 ) -> CanonicalDetectionDimensions:
@@ -748,6 +818,7 @@ def validate_canonical_detection_run_manifest(
     if manifest_schema_version not in {
         CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_VERSION,
         CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     }:
         errors.append("canonical run manifest schema_version mismatch")
     if manifest.get("persisted_attribute") != (
@@ -765,7 +836,7 @@ def validate_canonical_detection_run_manifest(
         return (*errors, f"canonical run manifest is not strict JSON: {exc}")
     if manifest.get("payload_digest") != expected_digest:
         errors.append("canonical run manifest payload_digest mismatch")
-    if set(payload) != {
+    expected_payload_fields = {
         "run_id",
         "stage",
         "publication",
@@ -773,7 +844,14 @@ def validate_canonical_detection_run_manifest(
         "storage_plan",
         "logical_content",
         "source_evidence",
-    }:
+    }
+    if manifest_schema_version == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        expected_payload_fields.update(
+            {"source_evidence_kind", "coordinate_contract"}
+        )
+    if set(payload) != expected_payload_fields:
         errors.append("canonical run manifest payload has unexpected fields")
     if payload.get("stage") != "detect":
         errors.append("canonical run manifest stage mismatch")
@@ -824,6 +902,18 @@ def validate_canonical_detection_run_manifest(
             CANONICAL_DETECTION_SCHEMA_V1.as_manifest(dimensions=dimensions)
         ):
             errors.append("canonical logical_schema differs from frozen builder")
+
+    if manifest_schema_version == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        errors.extend(
+            validate_coordinate_catalog_envelope(
+                payload.get("coordinate_contract"),
+                expected_document=(
+                    CANONICAL_DETECTION_SCHEMA_V1.coordinate_contract_manifest()
+                ),
+            )
+        )
 
     storage = payload.get("storage_plan")
     if not isinstance(storage, Mapping):
@@ -959,6 +1049,21 @@ def validate_canonical_detection_run_manifest(
                 dimensions=dimensions,
             )
         )
+    elif manifest_schema_version == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        source_kind = payload.get("source_evidence_kind")
+        if source_kind == "legacy_conversion":
+            errors.extend(validate_legacy_detection_source_evidence(source))
+        elif source_kind == "native_detection":
+            errors.extend(
+                validate_native_detection_source_evidence(
+                    source,
+                    dimensions=dimensions,
+                )
+            )
+        else:
+            errors.append("canonical v3 source_evidence_kind mismatch")
     return tuple(dict.fromkeys(errors))
 
 
@@ -1068,6 +1173,7 @@ def refined_source_identity_from_canonical_manifest(manifest: Mapping[str, Any])
 
 
 __all__ = [
+    "CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION",
     "CANONICAL_DETECTION_ARRAY_DIGEST_ALGORITHM",
     "CANONICAL_DETECTION_LEGACY_SOURCE_SCHEMA_ID",
     "CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION",
@@ -1079,6 +1185,7 @@ __all__ = [
     "CANONICAL_DETECTION_RUN_MANIFEST_PERSISTED_PATH",
     "CANONICAL_DETECTION_RUN_MANIFEST_SCHEMA_ID",
     "build_canonical_detection_run_manifest",
+    "build_coordinate_canonical_detection_run_manifest",
     "build_legacy_detection_source_evidence",
     "build_native_canonical_detection_run_manifest",
     "build_native_detection_source_evidence",

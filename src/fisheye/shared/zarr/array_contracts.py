@@ -781,6 +781,95 @@ REFINED_SOURCE_RESOLVED_SOURCE_REFINED_ROW_ID_V1 = ArrayContract(
     units="clip_refined_row_identity",
 )
 
+CROP_FRAME_INDICES_V1 = ArrayContract(
+    schema_id="palette.array.crop.frame_indices",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Acquisition-camera frame index for each crop observation row.",
+    units="camera_frame_index",
+)
+
+CROP_SOURCE_REFINED_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.crop.source_refined_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Stable refined-row identity copied from the exact bound refined "
+        "detection snapshot."
+    ),
+    units="refined_row_identity",
+)
+
+CROP_ROI_COORDINATES_FULL_V1 = ArrayContract(
+    schema_id="palette.array.crop.roi_coordinates_full",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_instances", 2),
+    axis_names=("instance", "xy"),
+    description=(
+        "Exact integer source-camera top-left of each crop extraction window."
+    ),
+    units="pixels",
+    coordinate_space="source_camera_pixel_index",
+)
+
+CROP_ROI_SIZES_FULL_V1 = ArrayContract(
+    schema_id="palette.array.crop.roi_sizes_full",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_instances", 2),
+    axis_names=("instance", "width_height"),
+    description=(
+        "Exact positive integer width and height of each source extraction window."
+    ),
+    units="pixels",
+    coordinate_space="source_camera_pixel_extent",
+)
+
+CROP_SOURCE_CROP_XYWH_V1 = ArrayContract(
+    schema_id="palette.array.crop.source_crop_xywh",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 4),
+    axis_names=("instance", "xywh"),
+    description=(
+        "Exact float32 projection of integer crop top-left and size in source "
+        "camera pixels."
+    ),
+    units="pixels",
+    coordinate_space="source_camera_pixel_edges",
+)
+
+CROP_BBOX_ROI_XYXY_V1 = ArrayContract(
+    schema_id="palette.array.crop.bbox_roi_xyxy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 4),
+    axis_names=("instance", "xyxy"),
+    description=(
+        "Exact float32 detection box translated into the crop-local pixel frame."
+    ),
+    units="pixels",
+    coordinate_space="crop_pixel_edges",
+)
+
+CROP_SOURCE_ROW_SIGNATURE_V1 = ArrayContract(
+    schema_id="palette.array.crop.source_row_signature",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_instances", 32),
+    axis_names=("instance", "sha256_byte"),
+    description=(
+        "Per-row source compatibility signature for incremental crop "
+        "materialization."
+    ),
+    units="sha256_digest_byte",
+)
+
 KEYPOINTS_ROI_V1 = ArrayContract(
     schema_id="palette.array.keypoints_roi",
     schema_version=1,
@@ -896,6 +985,25 @@ REFINED_DETECTION_ARRAY_CONTRACTS = ArrayContractCatalog(
 )
 
 
+CROP_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        DETECTION_INSTANCE_KEY_V1,
+        CROP_SOURCE_REFINED_ROW_IDS_V1,
+        CROP_FRAME_INDICES_V1,
+        DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        FRAME_ROW_OFFSETS_V1,
+        DETECTION_BBOX_NORM_COORDS_V1,
+        DETECTION_BBOX_IMG_XYXY_V1,
+        DETECTION_CENTERS_IMG_XY_V1,
+        CROP_ROI_COORDINATES_FULL_V1,
+        CROP_ROI_SIZES_FULL_V1,
+        CROP_SOURCE_CROP_XYWH_V1,
+        CROP_BBOX_ROI_XYXY_V1,
+        CROP_SOURCE_ROW_SIGNATURE_V1,
+    )
+)
+
+
 CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
         FRAME_COUNTS_V1,
@@ -939,6 +1047,13 @@ CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
         REFINED_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1,
         REFINED_SOURCE_CLIP_DETECT_ROW_INDEX_V1,
         REFINED_SOURCE_RESOLVED_SOURCE_REFINED_ROW_ID_V1,
+        CROP_FRAME_INDICES_V1,
+        CROP_SOURCE_REFINED_ROW_IDS_V1,
+        CROP_ROI_COORDINATES_FULL_V1,
+        CROP_ROI_SIZES_FULL_V1,
+        CROP_SOURCE_CROP_XYWH_V1,
+        CROP_BBOX_ROI_XYXY_V1,
+        CROP_SOURCE_ROW_SIGNATURE_V1,
         KEYPOINTS_ROI_V1,
         KEYPOINTS_IMG_V1,
         KEYPOINTS_NORM_V1,

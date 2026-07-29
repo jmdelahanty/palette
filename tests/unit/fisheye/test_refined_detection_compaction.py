@@ -34,6 +34,7 @@ from fisheye.shared.zarr.refined_detection_delta_storage import (
     write_refined_detection_delta_partition,
 )
 from fisheye.shared.zarr.refined_detection_manifest import (
+    REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     RefinedDetectionSnapshotLineage,
     RefinedDetectionSourceIdentity,
 )
@@ -101,7 +102,7 @@ def _canonical_transition():
     )
 
 
-def _base_publication(tmp_path: Path):
+def _base_publication(tmp_path: Path, *, coordinate_catalog: bool = False):
     transition = _canonical_transition()
     root = tmp_path / "snapshots"
     return publish_selector_ineligible_refined_detection_snapshot(
@@ -125,6 +126,7 @@ def _base_publication(tmp_path: Path):
         created_by="test",
         publication_kind="test_root",
         safe_root=root,
+        coordinate_catalog=coordinate_catalog,
     )
 
 
@@ -284,6 +286,33 @@ def test_local_compaction_writes_valid_multisubject_successor_and_receipt(
     assert not (
         base.output_path / "refined_detect_runs" / "refined_base" / "instances"
     ).is_symlink()
+
+
+def test_compaction_preserves_coordinate_catalog_manifest_version(
+    tmp_path: Path,
+) -> None:
+    base = _base_publication(tmp_path, coordinate_catalog=True)
+    destination_root = tmp_path / "compactions"
+    result = compact_frozen_refined_detection_delta_generation(
+        delta_root=_frozen_delta(tmp_path, base),
+        delta_lineage_id=DELTA_LINEAGE_ID,
+        generation_ordinal=0,
+        base_manifest=base.manifest,
+        base_arrays=base.arrays,
+        destination=destination_root / "successor.zarr",
+        run_id="refined_successor",
+        snapshot_id=SUCCESSOR_SNAPSHOT_ID,
+        created_by="test_compactor",
+        safe_root=destination_root,
+    )
+
+    assert result.publication.manifest["schema_version"] == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert "coordinate_contract" in result.publication.manifest["payload"]
+    assert result.receipt["payload"]["output"]["run_manifest_schema_version"] == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
 
 
 def test_compaction_receipt_tampering_and_unsafe_destinations_fail_closed(
