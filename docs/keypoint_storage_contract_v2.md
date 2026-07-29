@@ -413,9 +413,9 @@ It must not be encoded by silently changing `heading_deg`.
 - [x] Freeze the representative 23,287-frame / 22,926-row crop-v2 canary
       inputs, durable-cache namespace, node-scratch relocation semantics, and
       atomic selector-ineligible publication driver.
-- [ ] Materialize and validate the reusable `uint8[22926,512,512]`
+- [x] Materialize and validate the reusable `uint8[22926,512,512]`
       `flat_bin_v1` cache under NRS, including a complete payload SHA-256.
-- [ ] Publish and measure one representative selector-ineligible YOLO canary
+- [x] Publish and measure one representative selector-ineligible YOLO canary
       from a real completed run before inserting the quality DAG node.
 - [ ] Make clipped finalization and later delta compaction publish the same
       raw/refined v2 contracts rather than parallel layouts.
@@ -455,6 +455,65 @@ builds raw keypoints, observation-local quality, and body frame on node-local
 scratch, validates every exact schema and manifest there, copies the complete
 workflow to a hidden shared temporary directory, then reveals it with one
 same-filesystem rename. It never writes a production selector or registry row.
+
+### Representative crop-v2/keypoint-v2 canary evidence
+
+The real 22,926-row checkpoint completed on LSF job `153230652` at Palette
+commit `79e8108f4705e9627888d21b1e4192b345b47722`. The reusable NRS cache is
+complete and has this exact identity:
+
+| Field | Result |
+| --- | --- |
+| Shape and dtype | `uint8[22926,512,512]` |
+| Payload bytes | `6,009,913,344` (5.60 GiB) |
+| Payload SHA-256 | `f635aab60e840f29f286be786fd103271b2270fa510e045cd8501a0736cb44e0` |
+| Manifest SHA-256 | `2fcdd4c7f3bb25fa5517b3e654b8b72a4e2c62a5b87913cc288034d6c38911e6` |
+| First materialization | 205.66 s; 111.48 ROI rows/s; 27.87 MiB/s |
+| Decoded acquisition frames | 23,287, including 361 frames with no crop row |
+
+The successful cache-reuse workflow is published at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/
+  keypoint_storage/integration/20260128_cropv2_keypoint_v2_20260729_v4/
+```
+
+It contains exact raw-keypoint-v2, keypoint-quality-v1, and body-frame-v1
+snapshots with manifest digests
+`227f0c80065a38d77604b0638bb16a22cd513b383609d364b4481a4fb0cf8db6`,
+`3d0af6dab6ca0ddc478c80755c040c2af2381e00166ee8a4cab7f8d9cb920e81`,
+and `a8b12539669174bf20ebaf181b0c341148903588fc5ae27af46f94e24a2ab1af`,
+respectively. All three reopened publication gates passed. The exact direct
+metadata census found 15 raw, 13 quality, and 10 body-frame arrays with the
+documented dtypes. At this bounded size every array is one unsharded chunk and
+uses the `bytes -> zstd(level=0)` chain; this is the intentional
+single/few-object case, not evidence against sharding longer recordings.
+
+Cache reuse and compute/publication timing was:
+
+| Phase | Seconds |
+| --- | ---: |
+| Stage crop archive to node scratch | 0.21 |
+| Stage existing 5.60 GiB cache to node scratch | 1.82 |
+| YOLO inference for 22,926 rows | 79.18 |
+| Convert legacy producer boundary to raw v2 | 0.34 |
+| Validate and publish raw keypoint v2 | 1.14 |
+| Validate and publish keypoint quality v1 | 0.51 |
+| Validate and publish body frame v1 | 0.54 |
+
+Inference resolved 22,858 poses and retained 68 explicit failed rows. The
+float32 conversion introduced zero ROI-coordinate error for this result; the
+largest source-camera reprojection difference was 0.000244140625 pixels, below
+the frozen 0.001-pixel tolerance. `/usr/bin/time` measured a 7,989,207,040-byte
+peak process RSS, which remains an optimization target: reading the durable
+flat cache can make mapped cache pages resident even though the model works in
+bounded batches.
+
+The source crop archive's metadata fingerprint was identical before and after
+the run. The handoff explicitly records no source mutation, selector,
+registry, training artifact, or production-state write. The cache is a durable
+derived accelerator bound to the exact crop manifest and source-video
+identity; it is not pixel authority and is not added to the analysis Zarr.
 
 ### Numerical and storage gates
 
