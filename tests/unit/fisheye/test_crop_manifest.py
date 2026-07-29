@@ -8,11 +8,13 @@ import pytest
 
 from fisheye.shared.zarr.array_factory import array_metadata_declaration_from_plan
 from fisheye.shared.zarr.crop_manifest import (
+    CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CROP_RUN_MANIFEST_PERSISTED_PATH,
     CropPixelAuthority,
     CropRefinedSourceIdentity,
     build_crop_row_source_signatures,
     build_crop_run_manifest,
+    build_coordinate_crop_run_manifest,
     crop_metadata_declarations_digest,
     normalize_crop_metadata_declarations,
     validate_crop_run_manifest,
@@ -179,6 +181,8 @@ def test_manifest_binds_exact_schema_source_pixels_policy_and_signatures() -> No
     assert json.loads(json.dumps(manifest)) == manifest
     assert manifest["persisted_path"] == CROP_RUN_MANIFEST_PERSISTED_PATH
     payload = manifest["payload"]
+    assert manifest["schema_version"] == 1
+    assert "coordinate_contract" not in payload
     assert payload["publication"]["stage_selector_eligible"] is False
     assert payload["publication"]["artifact_class"] == "geometry_only_analysis"
     assert payload["source_refined_snapshot"]["snapshot_id"] == (
@@ -193,6 +197,41 @@ def test_manifest_binds_exact_schema_source_pixels_policy_and_signatures() -> No
     assert payload["row_signature"]["array_path"] == "source_row_signature"
     assert payload["logical_content"]["document"]["arrays"].keys() == set(
         CROP_GEOMETRY_SCHEMA_V1.binding_paths
+    )
+
+
+def test_opt_in_crop_manifest_persists_exact_coordinate_catalog() -> None:
+    plan, direct, consolidated = _metadata()
+    kwargs = {
+        "run_id": "crop_coordinate_shadow",
+        "dimensions": _dimensions(),
+        "policy": _policy(),
+        "storage_plan": plan,
+        "arrays": _arrays(),
+        "source": _source(),
+        "pixel_authority": _pixel(),
+        "direct_metadata_declarations": direct,
+        "consolidated_metadata_declarations": consolidated,
+        "selector_eligible": False,
+    }
+    legacy = build_crop_run_manifest(**kwargs)
+    manifest = build_coordinate_crop_run_manifest(**kwargs)
+
+    assert legacy["schema_version"] == 1
+    assert "coordinate_contract" not in legacy["payload"]
+    assert manifest["schema_version"] == CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    assert manifest["payload"]["coordinate_contract"]["document"] == (
+        CROP_GEOMETRY_SCHEMA_V1.coordinate_contract_manifest()
+    )
+    assert validate_crop_run_manifest(manifest) == ()
+
+    tampered = copy.deepcopy(manifest)
+    catalog = tampered["payload"]["coordinate_contract"]
+    catalog["document"]["surfaces"][0]["pixel_convention"] = "wrong"
+    catalog["digest"] = canonical_json_sha256(catalog["document"])
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+    assert "coordinate catalog differs from the frozen stage catalog" in (
+        validate_crop_run_manifest(tampered)
     )
 
 

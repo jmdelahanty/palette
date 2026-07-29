@@ -19,8 +19,10 @@ from fisheye.shared.zarr.canonical_detection_shadow import (
     validate_canonical_detection_shadow_publication,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
     build_canonical_detection_run_manifest,
+    build_coordinate_canonical_detection_run_manifest,
     build_native_canonical_detection_run_manifest,
     build_native_detection_source_evidence,
     validate_canonical_detection_run_manifest,
@@ -30,6 +32,7 @@ from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
 )
 from fisheye.shared.zarr.refined_detection_manifest import (
+    REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     RefinedDetectionSnapshotLineage,
     validate_refined_detection_run_manifest,
 )
@@ -269,6 +272,59 @@ def test_native_canonical_manifest_v2_preserves_legacy_v1_boundary(
     )
 
 
+def test_opt_in_canonical_v3_binds_catalog_and_explicit_source_kind(
+    tmp_path: Path,
+) -> None:
+    canonical = _canonical_source(tmp_path)
+    direct, consolidated = canonical_detection_metadata_declaration_maps(
+        canonical.output_path,
+        run_id=canonical.run_id,
+        plans=canonical.plans,
+    )
+    manifest = build_coordinate_canonical_detection_run_manifest(
+        run_id="detect_coordinate_1",
+        dimensions=canonical.dimensions,
+        storage_plan=canonical.plans,
+        arrays=canonical.arrays,
+        source_evidence=canonical.manifest["payload"]["source_evidence"],
+        source_evidence_kind="legacy_conversion",
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+    )
+
+    assert manifest["schema_version"] == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert manifest["payload"]["source_evidence_kind"] == "legacy_conversion"
+    assert validate_canonical_detection_run_manifest(manifest) == ()
+
+    tampered = copy.deepcopy(manifest)
+    catalog = tampered["payload"]["coordinate_contract"]
+    catalog["document"]["bindings"][0]["semantic_role"] = (
+        "sampled_spatial_surface"
+    )
+    catalog["digest"] = canonical_json_sha256(catalog["document"])
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+    assert "coordinate catalog differs from the frozen stage catalog" in (
+        validate_canonical_detection_run_manifest(tampered)
+    )
+
+    native = build_coordinate_canonical_detection_run_manifest(
+        run_id="detect_coordinate_native_1",
+        dimensions=canonical.dimensions,
+        storage_plan=canonical.plans,
+        arrays=canonical.arrays,
+        source_evidence=_native_source_evidence(canonical),
+        source_evidence_kind="native_detection",
+        direct_metadata_declarations=direct,
+        consolidated_metadata_declarations=consolidated,
+        selector_eligible=False,
+    )
+    assert native["payload"]["source_evidence_kind"] == "native_detection"
+    assert validate_canonical_detection_run_manifest(native) == ()
+
+
 def test_canonical_shadow_can_read_an_exact_local_stage_bound_to_shared_evidence(
     tmp_path: Path,
 ) -> None:
@@ -285,8 +341,13 @@ def test_canonical_shadow_can_read_an_exact_local_stage_bound_to_shared_evidence
         destination=shadow_root / "canonical.zarr",
         run_id="detect_shadow_1",
         shadow_root=shadow_root,
+        coordinate_catalog=True,
     )
 
+    assert result.manifest["schema_version"] == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert "coordinate_contract" in result.manifest["payload"]
     assert result.manifest["payload"]["source_evidence"]["source_group_path"] == str(
         evidence_path.resolve()
     )
@@ -333,6 +394,7 @@ def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
         lineage=_lineage(),
         canonical_source=_canonical_source(tmp_path),
         shadow_root=shadow_root,
+        coordinate_catalog=True,
     )
 
     assert result.output_path == destination.resolve()
@@ -341,6 +403,10 @@ def test_shadow_publisher_is_standalone_consolidated_and_selector_ineligible(
     assert result.receipt["storage_profile_id"] == (
         "detection_published_access_aware_v1"
     )
+    assert result.manifest["schema_version"] == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert "coordinate_contract" in result.manifest["payload"]
     assert validate_refined_detection_run_manifest(result.manifest) == ()
     receipt = json.loads(
         (destination / "shadow_publication_receipt.json").read_text(encoding="utf-8")
@@ -411,6 +477,8 @@ def test_pre_promotion_canonical_profile_remains_manifest_compatible(
     )
 
     assert result.plans.profile is PUBLISHED_HTTP_V1
+    assert result.manifest["schema_version"] == 1
+    assert "coordinate_contract" not in result.manifest["payload"]
     assert validate_canonical_detection_run_manifest(result.manifest) == ()
     assert validate_canonical_detection_shadow_publication(result) == ()
 

@@ -11,8 +11,6 @@ from uuid import UUID
 import numpy as np
 
 from fisheye.shared.row_source_signature import (
-    ROW_SOURCE_SIGNATURE_ALGORITHM,
-    ROW_SOURCE_SIGNATURE_WIDTH_BYTES,
     RowSourceSignatureBatch,
     RowSourceSignatureSpec,
     build_row_source_signatures,
@@ -22,6 +20,10 @@ from fisheye.shared.zarr.array_factory import (
     validate_array_metadata_declaration_from_plan,
 )
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
+from fisheye.shared.zarr.coordinate_manifest import (
+    build_coordinate_catalog_envelope,
+    validate_coordinate_catalog_envelope,
+)
 from fisheye.shared.zarr.crop_schema import (
     CROP_GEOMETRY_SCHEMA_V1,
     CropDimensions,
@@ -48,6 +50,7 @@ from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 
 CROP_RUN_MANIFEST_SCHEMA_ID = "palette.crop_geometry.run_manifest"
 CROP_RUN_MANIFEST_SCHEMA_VERSION = 1
+CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 2
 CROP_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 CROP_RUN_MANIFEST_PERSISTED_PATH = (
     "crop_runs/<run>/zarr.json.attributes.run_manifest"
@@ -633,7 +636,7 @@ def _require_bound_dimensions(
         raise ValueError("Pixel authority dimensions differ from crop dimensions.")
 
 
-def build_crop_run_manifest(
+def _build_crop_run_manifest(
     *,
     run_id: str,
     dimensions: CropDimensions,
@@ -645,6 +648,7 @@ def build_crop_run_manifest(
     direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
     consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
     selector_eligible: bool,
+    manifest_schema_version: int,
 ) -> dict[str, object]:
     """Build the exact persisted crop run-manifest envelope."""
 
@@ -705,9 +709,15 @@ def build_crop_run_manifest(
             "document": content,
         },
     }
+    if manifest_schema_version == CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+        payload["coordinate_contract"] = build_coordinate_catalog_envelope(
+            CROP_GEOMETRY_SCHEMA_V1.coordinate_contract_manifest()
+        )
+    elif manifest_schema_version != CROP_RUN_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("Unsupported crop run-manifest version.")
     envelope: dict[str, object] = {
         "schema_id": CROP_RUN_MANIFEST_SCHEMA_ID,
-        "schema_version": CROP_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": manifest_schema_version,
         "persisted_attribute": CROP_RUN_MANIFEST_ATTRIBUTE,
         "persisted_path": CROP_RUN_MANIFEST_PERSISTED_PATH,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
@@ -716,6 +726,66 @@ def build_crop_run_manifest(
     }
     canonical_json_bytes(envelope)
     return envelope
+
+
+def build_crop_run_manifest(
+    *,
+    run_id: str,
+    dimensions: CropDimensions,
+    policy: CropGeometryPolicy,
+    storage_plan: CropGeometryStoragePlanSet,
+    arrays: Mapping[str, Any],
+    source: CropRefinedSourceIdentity,
+    pixel_authority: CropPixelAuthority,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    selector_eligible: bool,
+) -> dict[str, object]:
+    """Build the unchanged crop run-manifest v1 envelope."""
+
+    return _build_crop_run_manifest(
+        run_id=run_id,
+        dimensions=dimensions,
+        policy=policy,
+        storage_plan=storage_plan,
+        arrays=arrays,
+        source=source,
+        pixel_authority=pixel_authority,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        selector_eligible=selector_eligible,
+        manifest_schema_version=CROP_RUN_MANIFEST_SCHEMA_VERSION,
+    )
+
+
+def build_coordinate_crop_run_manifest(
+    *,
+    run_id: str,
+    dimensions: CropDimensions,
+    policy: CropGeometryPolicy,
+    storage_plan: CropGeometryStoragePlanSet,
+    arrays: Mapping[str, Any],
+    source: CropRefinedSourceIdentity,
+    pixel_authority: CropPixelAuthority,
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    selector_eligible: bool,
+) -> dict[str, object]:
+    """Build opt-in v2 with an exact persisted coordinate catalog."""
+
+    return _build_crop_run_manifest(
+        run_id=run_id,
+        dimensions=dimensions,
+        policy=policy,
+        storage_plan=storage_plan,
+        arrays=arrays,
+        source=source,
+        pixel_authority=pixel_authority,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        selector_eligible=selector_eligible,
+        manifest_schema_version=CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    )
 
 
 def _dimensions_and_policy_from_logical(
@@ -848,9 +918,13 @@ def validate_crop_run_manifest(manifest: Mapping[str, Any]) -> tuple[str, ...]:
     }
     if set(manifest) != expected_envelope:
         errors.append("crop run manifest envelope has unexpected fields")
+    manifest_schema_version = manifest.get("schema_version")
     if (
         manifest.get("schema_id") != CROP_RUN_MANIFEST_SCHEMA_ID
-        or manifest.get("schema_version") != CROP_RUN_MANIFEST_SCHEMA_VERSION
+        or manifest_schema_version not in {
+            CROP_RUN_MANIFEST_SCHEMA_VERSION,
+            CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+        }
         or manifest.get("persisted_attribute") != CROP_RUN_MANIFEST_ATTRIBUTE
         or manifest.get("persisted_path") != CROP_RUN_MANIFEST_PERSISTED_PATH
         or manifest.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
@@ -865,7 +939,7 @@ def validate_crop_run_manifest(manifest: Mapping[str, Any]) -> tuple[str, ...]:
         return (*errors, f"crop run manifest is not strict JSON: {exc}")
     if manifest.get("payload_digest") != expected_digest:
         errors.append("crop run manifest payload_digest mismatch")
-    if set(payload) != {
+    expected_payload_fields = {
         "run_id",
         "stage",
         "publication",
@@ -875,7 +949,10 @@ def validate_crop_run_manifest(manifest: Mapping[str, Any]) -> tuple[str, ...]:
         "source_pixel_authority",
         "row_signature",
         "logical_content",
-    }:
+    }
+    if manifest_schema_version == CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+        expected_payload_fields.add("coordinate_contract")
+    if set(payload) != expected_payload_fields:
         errors.append("crop run manifest payload has unexpected fields")
     try:
         _require_run_id(payload.get("run_id"))
@@ -930,6 +1007,14 @@ def validate_crop_run_manifest(manifest: Mapping[str, Any]) -> tuple[str, ...]:
                 policy=policy,
             ):
                 errors.append("crop logical_schema differs from frozen builder")
+
+    if manifest_schema_version == CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION:
+        errors.extend(
+            validate_coordinate_catalog_envelope(
+                payload.get("coordinate_contract"),
+                expected_document=CROP_GEOMETRY_SCHEMA_V1.coordinate_contract_manifest(),
+            )
+        )
 
     storage = payload.get("storage_plan")
     if not isinstance(storage, Mapping):
@@ -1193,6 +1278,7 @@ def validate_crop_publication(
 
 
 __all__ = [
+    "CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION",
     "CROP_ARRAY_DIGEST_ALGORITHM",
     "CROP_METADATA_DIGEST_SCOPE",
     "CROP_RUN_MANIFEST_ATTRIBUTE",
@@ -1203,6 +1289,7 @@ __all__ = [
     "CropRefinedSourceIdentity",
     "build_crop_row_source_signatures",
     "build_crop_run_manifest",
+    "build_coordinate_crop_run_manifest",
     "crop_logical_content_digest",
     "crop_logical_content_document",
     "crop_metadata_declarations_digest",

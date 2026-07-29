@@ -1,4 +1,4 @@
-"""Publish selector-ineligible canonical/refined detection v1 snapshots."""
+"""Publish selector-ineligible canonical/refined detection snapshots."""
 
 from __future__ import annotations
 
@@ -43,6 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="python",
     )
     parser.add_argument("--keep-scratch", action="store_true")
+    parser.add_argument(
+        "--coordinate-catalog",
+        action="store_true",
+        help=(
+            "Opt in to the versioned manifests that persist the exact shared "
+            "coordinate catalog. Existing manifest versions remain the default."
+        ),
+    )
     return parser
 
 
@@ -63,6 +71,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             allow_manual_score_reset=args.allow_manual_score_reset,
             copy_backend=args.copy_backend,
             keep_scratch=args.keep_scratch,
+            coordinate_catalog=args.coordinate_catalog,
         )
     except Exception as exc:
         result = {

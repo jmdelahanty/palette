@@ -27,6 +27,10 @@ from fisheye.shared.instance_keys import (
 from fisheye.shared.zarr.array_factory import (
     validate_array_metadata_declaration_from_plan,
 )
+from fisheye.shared.zarr.coordinate_manifest import (
+    build_coordinate_catalog_envelope,
+    validate_coordinate_catalog_envelope,
+)
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
     SOURCE_KIND_CODE_MAP,
@@ -50,6 +54,7 @@ from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 
 REFINED_DETECTION_RUN_MANIFEST_SCHEMA_ID = "palette.refined_detection.run_manifest"
 REFINED_DETECTION_RUN_MANIFEST_SCHEMA_VERSION = 1
+REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 2
 REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 REFINED_DETECTION_RUN_MANIFEST_PERSISTED_PATH = (
     "refined_detect_runs/<run>/zarr.json.attributes.run_manifest"
@@ -664,7 +669,7 @@ def _validate_reason_registry_document(
     return tuple(errors)
 
 
-def build_refined_detection_run_manifest(
+def _build_refined_detection_run_manifest(
     *,
     run_id: str,
     dimensions: RefinedDetectionDimensions,
@@ -677,6 +682,7 @@ def build_refined_detection_run_manifest(
     consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
     selector_eligible: bool,
     clipped_binding: RefinedDetectionClippedBinding | None = None,
+    manifest_schema_version: int,
 ) -> dict[str, object]:
     """Build the exact run-group ``run_manifest`` attribute envelope."""
 
@@ -763,9 +769,17 @@ def build_refined_detection_run_manifest(
             ),
         },
     }
+    if manifest_schema_version == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        payload["coordinate_contract"] = build_coordinate_catalog_envelope(
+            REFINED_DETECTION_SCHEMA_V1.coordinate_contract_manifest()
+        )
+    elif manifest_schema_version != REFINED_DETECTION_RUN_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("Unsupported refined detection run-manifest version.")
     envelope = {
         "schema_id": REFINED_DETECTION_RUN_MANIFEST_SCHEMA_ID,
-        "schema_version": REFINED_DETECTION_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": manifest_schema_version,
         "persisted_attribute": REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE,
         "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
         "payload_digest": canonical_json_sha256(payload),
@@ -773,6 +787,72 @@ def build_refined_detection_run_manifest(
     }
     canonical_json_bytes(envelope)
     return envelope
+
+
+def build_refined_detection_run_manifest(
+    *,
+    run_id: str,
+    dimensions: RefinedDetectionDimensions,
+    storage_plan: RefinedDetectionStoragePlanSet,
+    lineage: RefinedDetectionSnapshotLineage,
+    source: RefinedDetectionSourceIdentity | RefinedDetectionSourceCollectionIdentity,
+    instance_reason_codes: Mapping[int | str, str],
+    source_reason_codes: Mapping[int | str, str],
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    selector_eligible: bool,
+    clipped_binding: RefinedDetectionClippedBinding | None = None,
+) -> dict[str, object]:
+    """Build the unchanged refined-detection run-manifest v1 envelope."""
+
+    return _build_refined_detection_run_manifest(
+        run_id=run_id,
+        dimensions=dimensions,
+        storage_plan=storage_plan,
+        lineage=lineage,
+        source=source,
+        instance_reason_codes=instance_reason_codes,
+        source_reason_codes=source_reason_codes,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        selector_eligible=selector_eligible,
+        clipped_binding=clipped_binding,
+        manifest_schema_version=REFINED_DETECTION_RUN_MANIFEST_SCHEMA_VERSION,
+    )
+
+
+def build_coordinate_refined_detection_run_manifest(
+    *,
+    run_id: str,
+    dimensions: RefinedDetectionDimensions,
+    storage_plan: RefinedDetectionStoragePlanSet,
+    lineage: RefinedDetectionSnapshotLineage,
+    source: RefinedDetectionSourceIdentity | RefinedDetectionSourceCollectionIdentity,
+    instance_reason_codes: Mapping[int | str, str],
+    source_reason_codes: Mapping[int | str, str],
+    direct_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    consolidated_metadata_declarations: Mapping[str, Mapping[str, Any]],
+    selector_eligible: bool,
+    clipped_binding: RefinedDetectionClippedBinding | None = None,
+) -> dict[str, object]:
+    """Build opt-in v2 with an exact persisted coordinate catalog."""
+
+    return _build_refined_detection_run_manifest(
+        run_id=run_id,
+        dimensions=dimensions,
+        storage_plan=storage_plan,
+        lineage=lineage,
+        source=source,
+        instance_reason_codes=instance_reason_codes,
+        source_reason_codes=source_reason_codes,
+        direct_metadata_declarations=direct_metadata_declarations,
+        consolidated_metadata_declarations=consolidated_metadata_declarations,
+        selector_eligible=selector_eligible,
+        clipped_binding=clipped_binding,
+        manifest_schema_version=(
+            REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+        ),
+    )
 
 
 def parse_refined_detection_clipped_binding(
@@ -1066,7 +1146,11 @@ def validate_refined_detection_run_manifest(
         errors.append("run manifest envelope has an unexpected field set")
     if manifest.get("schema_id") != REFINED_DETECTION_RUN_MANIFEST_SCHEMA_ID:
         errors.append("run manifest schema_id mismatch")
-    if manifest.get("schema_version") != REFINED_DETECTION_RUN_MANIFEST_SCHEMA_VERSION:
+    manifest_schema_version = manifest.get("schema_version")
+    if manifest_schema_version not in {
+        REFINED_DETECTION_RUN_MANIFEST_SCHEMA_VERSION,
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         errors.append("run manifest schema_version mismatch")
     if manifest.get("persisted_attribute") != REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE:
         errors.append("run manifest persisted_attribute mismatch")
@@ -1083,7 +1167,7 @@ def validate_refined_detection_run_manifest(
         errors.append("run manifest payload_digest mismatch")
     if payload.get("stage") != "refined_detect":
         errors.append("run manifest stage mismatch")
-    if set(payload) != {
+    expected_payload_fields = {
         "run_id",
         "stage",
         "publication",
@@ -1092,7 +1176,12 @@ def validate_refined_detection_run_manifest(
         "snapshot_lineage",
         "source_detection",
         "reason_registries",
-    }:
+    }
+    if manifest_schema_version == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        expected_payload_fields.add("coordinate_contract")
+    if set(payload) != expected_payload_fields:
         errors.append("run manifest payload has an unexpected field set")
     try:
         _require_run_id(str(payload.get("run_id") or ""))
@@ -1217,6 +1306,18 @@ def validate_refined_detection_run_manifest(
                     errors.append(
                         "logical_schema differs from the frozen schema builder"
                     )
+
+    if manifest_schema_version == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    ):
+        errors.extend(
+            validate_coordinate_catalog_envelope(
+                payload.get("coordinate_contract"),
+                expected_document=(
+                    REFINED_DETECTION_SCHEMA_V1.coordinate_contract_manifest()
+                ),
+            )
+        )
 
     storage = payload.get("storage_plan")
     if not isinstance(storage, Mapping):
@@ -2213,6 +2314,7 @@ __all__ = [
     "REFINED_DETECTION_AUTHORITY_SCHEMA_VERSION",
     "REFINED_DETECTION_INTENDED_USES",
     "REFINED_DETECTION_ARRAY_DIGEST_ALGORITHM",
+    "REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION",
     "REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_ID",
     "REFINED_DETECTION_LOGICAL_CONTENT_SCHEMA_VERSION",
     "REFINED_DETECTION_RAW_FALLBACK_POLICIES",
@@ -2228,6 +2330,7 @@ __all__ = [
     "RefinedDetectionSourceIdentity",
     "build_refined_detection_authority_provenance",
     "build_refined_detection_activation_candidate_manifest",
+    "build_coordinate_refined_detection_run_manifest",
     "build_refined_detection_run_manifest",
     "canonical_json_bytes",
     "canonical_json_sha256",

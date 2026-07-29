@@ -19,6 +19,7 @@ from fisheye.shared.zarr.crop_manifest import (
     CropRefinedSourceIdentity,
     build_crop_row_source_signatures,
     build_crop_run_manifest,
+    build_coordinate_crop_run_manifest,
     crop_logical_content_digest,
     crop_refined_source_identity_from_refined_manifest,
     crop_row_signature_manifest,
@@ -341,8 +342,12 @@ def publish_selector_ineligible_crop_geometry_snapshot(
     shadow_root: Path = DEFAULT_CROP_GEOMETRY_SHADOW_ROOT,
     profile: StorageProfile = PUBLISHED_HTTP_V1,
     created_by: str = "crop_geometry_shadow",
+    coordinate_catalog: bool = False,
 ) -> CropGeometryShadowPublication:
     """Write, consolidate, and fully validate one standalone crop shadow."""
+
+    if type(coordinate_catalog) is not bool:
+        raise TypeError("coordinate_catalog must be an exact bool.")
 
     output_path = require_safe_crop_geometry_shadow_destination(
         destination,
@@ -490,7 +495,12 @@ def publish_selector_ineligible_crop_geometry_snapshot(
             plans=plans,
         )
         phase_started = time.perf_counter()
-        manifest = build_crop_run_manifest(
+        manifest_builder = (
+            build_coordinate_crop_run_manifest
+            if coordinate_catalog
+            else build_crop_run_manifest
+        )
+        manifest = manifest_builder(
             run_id=str(run_id),
             dimensions=prepared.dimensions,
             policy=prepared.policy,
@@ -602,6 +612,7 @@ def publish_refined_crop_geometry_shadow(
     roi_sizes_full: np.ndarray | None = None,
     shadow_root: Path = DEFAULT_CROP_GEOMETRY_SHADOW_ROOT,
     profile: StorageProfile = PUBLISHED_HTTP_V1,
+    coordinate_catalog: bool = False,
 ) -> CropGeometryShadowPublication:
     """Prepare and publish a fresh geometry-only shadow from one bound source."""
 
@@ -617,6 +628,7 @@ def publish_refined_crop_geometry_shadow(
         run_id=run_id,
         shadow_root=shadow_root,
         profile=profile,
+        coordinate_catalog=coordinate_catalog,
     )
 
 

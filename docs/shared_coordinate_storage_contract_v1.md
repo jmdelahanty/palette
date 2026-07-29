@@ -1,7 +1,7 @@
 # Shared Coordinate Storage Contract v1
 
-Status: implemented schema-level vocabulary; persisted run-envelope adoption is
-deferred to explicit schema-version changes
+Status: schema vocabulary implemented; versioned persisted run envelopes and
+selector-ineligible publication paths implemented; consumer adoption pending
 
 Date: 2026-07-28
 
@@ -71,11 +71,33 @@ The catalog covers every coordinate-bearing contract currently in
 - flat ROI contour points.
 
 Detection, refined-detection, and crop schemas expose a deterministic
-`coordinate_contract_manifest()` accessor. Their existing v1 persisted schema
-manifests are intentionally unchanged by this checkpoint. Runtime detection,
-crop, and keypoint coordinate publication now uses these shared templates to
-construct its canonical descriptors rather than repeating literal profile and
-component definitions.
+`coordinate_contract_manifest()` accessor. Runtime detection, crop, and
+keypoint coordinate publication uses these shared templates to construct its
+canonical descriptors rather than repeating literal profile and component
+definitions.
+
+The catalogs are now available in new, opt-in persisted run-manifest versions:
+
+| Stage | Existing manifest | Coordinate-catalog manifest |
+| --- | --- | --- |
+| canonical detection | v1 legacy conversion; v2 native producer | v3 with explicit `source_evidence_kind` |
+| refined detection | v1 | v2 |
+| geometry-only crop | v1 | v2 |
+
+The old builders and publisher defaults still emit their original versions.
+The new versions add exactly one `payload.coordinate_contract` envelope. The
+canonical v3 payload also adds `source_evidence_kind` so source validation is
+not inferred from document shape. The envelope binds the complete catalog with
+`sha256_canonical_json_v1`, and the containing run manifest binds that envelope
+again through its payload digest. Validators compare the complete document to
+the frozen stage builder; recomputing both digests after a semantic edit does
+not make a changed catalog valid.
+
+Selector-ineligible canonical/refined snapshot publication and geometry-only
+crop shadow publication expose `coordinate_catalog=True`. The paired detection
+snapshot CLI exposes `--coordinate-catalog`. Refined-detection compaction
+preserves the immediate parent's manifest generation automatically, preventing
+a v2 snapshot from being silently downgraded to v1.
 
 ## Dtype Boundary
 
@@ -104,8 +126,10 @@ manifest, and apply the bound transform without dtype probing.
       shared templates.
 - [x] Keep existing array IDs, schema versions, dtypes, shapes, and persisted
       v1 manifest bytes unchanged.
-- [ ] Add the coordinate catalog to a new version of each persisted stage
-      manifest; do not rewrite v1 envelopes in place.
+- [x] Add the coordinate catalog to new versions of canonical-detection,
+      refined-detection, and crop manifests without rewriting old envelopes.
+- [x] Add selector-ineligible real-Zarr publication paths and preserve the
+      coordinate-aware manifest version through refined compaction.
 - [ ] Have Crimson consume and validate the catalog before removing any
       remaining coordinate-name inference.
 - [ ] Extend the catalog with exact pose-bbox `ArrayContract` entries when the
@@ -123,3 +147,7 @@ activation, Palette must validate that every coordinate array's live canonical
 descriptor matches its catalog template, consolidated and direct metadata are
 equivalent, and Crimson opens the exact declarations without heuristic path,
 space, or dtype discovery.
+
+Palette's current selector-ineligible writers meet the manifest, digest,
+direct/consolidated metadata, and exact-schema portions of this gate. Production
+selection remains a separate reviewed action.

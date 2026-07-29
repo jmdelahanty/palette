@@ -22,6 +22,7 @@ from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.refined_detection_manifest import (
     RefinedDetectionSnapshotLineage,
     RefinedDetectionSourceIdentity,
+    build_coordinate_refined_detection_run_manifest,
     build_refined_detection_run_manifest,
     refined_detection_logical_content_digest,
     validate_refined_detection_publication,
@@ -199,8 +200,12 @@ def publish_selector_ineligible_refined_detection_snapshot(
     parent_arrays: Mapping[str, Any] | None = None,
     run_attributes: Mapping[str, Any] | None = None,
     selection_contract: str = "none_direct_path_only",
+    coordinate_catalog: bool = False,
 ) -> RefinedDetectionSnapshotPublication:
     """Create, consolidate, and validate a fresh immutable full snapshot."""
+
+    if type(coordinate_catalog) is not bool:
+        raise TypeError("coordinate_catalog must be an exact bool.")
 
     output_path = require_safe_refined_detection_snapshot_destination(
         destination,
@@ -368,7 +373,12 @@ def publish_selector_ineligible_refined_detection_snapshot(
             run_id=str(run_id),
             plans=plans,
         )
-        manifest = build_refined_detection_run_manifest(
+        manifest_builder = (
+            build_coordinate_refined_detection_run_manifest
+            if coordinate_catalog
+            else build_refined_detection_run_manifest
+        )
+        manifest = manifest_builder(
             run_id=str(run_id),
             dimensions=dimensions,
             storage_plan=plans,

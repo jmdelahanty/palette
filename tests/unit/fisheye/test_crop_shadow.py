@@ -8,6 +8,9 @@ import zarr
 
 from fisheye.shared.instance_keys import mint_detection_instance_keys
 from fisheye.shared.zarr.crop_manifest import CropPixelAuthority
+from fisheye.shared.zarr.crop_manifest import (
+    CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+)
 from fisheye.shared.zarr.crop_schema import (
     CropGeometryPolicy,
     CropPaddingMode,
@@ -152,9 +155,14 @@ def test_real_shadow_is_geometry_only_consolidated_and_selector_ineligible(
         destination=shadow_root / "crop.zarr",
         run_id="crop_geometry_shadow",
         shadow_root=shadow_root,
+        coordinate_catalog=True,
     )
 
     assert validate_crop_geometry_shadow_publication(publication) == ()
+    assert publication.manifest["schema_version"] == (
+        CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert "coordinate_contract" in publication.manifest["payload"]
     assert publication.receipt["production_state_changes"] == []
     assert publication.receipt["selector_eligible"] is False
     assert len(publication.arrays) == 13

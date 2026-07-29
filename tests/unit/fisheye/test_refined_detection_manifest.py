@@ -12,6 +12,7 @@ from fisheye.shared.zarr.detection_schema import (
     derive_canonical_detection_geometry,
 )
 from fisheye.shared.zarr.refined_detection_manifest import (
+    REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE,
     REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE,
     REFINED_DETECTION_RUN_MANIFEST_PERSISTED_PATH,
@@ -22,6 +23,7 @@ from fisheye.shared.zarr.refined_detection_manifest import (
     RefinedDetectionSourceIdentity,
     build_refined_detection_activation_candidate_manifest,
     build_refined_detection_authority_provenance,
+    build_coordinate_refined_detection_run_manifest,
     build_refined_detection_run_manifest,
     canonical_json_sha256,
     normalize_refined_detection_metadata_declarations,
@@ -348,6 +350,8 @@ def test_run_manifest_freezes_path_digest_publication_and_separate_reasons() -> 
     assert json.loads(json.dumps(manifest)) == manifest
     assert validate_refined_detection_run_manifest(manifest) == ()
     payload = manifest["payload"]
+    assert manifest["schema_version"] == 1
+    assert "coordinate_contract" not in payload
     assert payload["publication"]["completion_status"] == "complete"
     assert payload["publication"]["stage_selector_eligible"] is True
     assert payload["publication"]["metadata_declarations_digest"] == (
@@ -386,6 +390,52 @@ def test_run_manifest_freezes_path_digest_publication_and_separate_reasons() -> 
     )
     assert "instances reason registry is not in canonical persisted form" in (
         validate_refined_detection_run_manifest(semantically_tampered)
+    )
+
+
+def test_opt_in_refined_manifest_persists_exact_coordinate_catalog() -> None:
+    dimensions = _dimensions(1)
+    storage_plan = plan_refined_detection_storage(
+        dimensions,
+        profile=REFINED_DETECTION_ACCESS_AWARE_CANDIDATE_V1,
+    )
+    direct, consolidated = _metadata_declarations(dimensions, storage_plan)
+    kwargs = {
+        "run_id": "refined_coordinate_1",
+        "dimensions": dimensions,
+        "storage_plan": storage_plan,
+        "lineage": _lineage(snapshot_id=ROOT_SNAPSHOT_ID, next_id=1),
+        "source": RefinedDetectionSourceIdentity(
+            run_id="detect_1",
+            run_manifest_digest="a" * 64,
+            logical_content_digest="b" * 64,
+        ),
+        "instance_reason_codes": {0: "none", 1: "manual_addition"},
+        "source_reason_codes": {0: "none", 1: "filtered_low_score"},
+        "direct_metadata_declarations": direct,
+        "consolidated_metadata_declarations": consolidated,
+        "selector_eligible": False,
+    }
+    legacy = build_refined_detection_run_manifest(**kwargs)
+    manifest = build_coordinate_refined_detection_run_manifest(**kwargs)
+
+    assert legacy["schema_version"] == 1
+    assert "coordinate_contract" not in legacy["payload"]
+    assert manifest["schema_version"] == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert manifest["payload"]["coordinate_contract"]["document"] == (
+        REFINED_DETECTION_SCHEMA_V1.coordinate_contract_manifest()
+    )
+    assert validate_refined_detection_run_manifest(manifest) == ()
+
+    tampered = copy.deepcopy(manifest)
+    catalog = tampered["payload"]["coordinate_contract"]
+    catalog["document"]["bindings"][0]["surface_id"] = "wrong_surface"
+    catalog["digest"] = canonical_json_sha256(catalog["document"])
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+    assert "coordinate catalog differs from the frozen stage catalog" in (
+        validate_refined_detection_run_manifest(tampered)
     )
 
 

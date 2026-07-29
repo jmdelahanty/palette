@@ -11,6 +11,12 @@ from fisheye.shared.instance_keys import mint_detection_instance_keys
 from fisheye.shared.zarr.detection_snapshot_publication import (
     publish_detection_snapshot_pair,
 )
+from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+)
+from fisheye.shared.zarr.refined_detection_manifest import (
+    REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+)
 from fisheye.shared.zarr.refined_detection_schema import (
     SOURCE_DECISION_CODE_MAP,
     SOURCE_KIND_CODE_MAP,
@@ -111,6 +117,7 @@ def test_pair_is_atomically_placed_but_not_selected(tmp_path: Path) -> None:
         canonical_run_id="detect_snapshot_v1",
         refined_run_id="refined_snapshot_v1",
         scratch_root=scratch,
+        coordinate_catalog=True,
     )
 
     assert result["status"] == "complete"
@@ -136,6 +143,14 @@ def test_pair_is_atomically_placed_but_not_selected(tmp_path: Path) -> None:
 
     canonical = raw_family["detect_snapshot_v1"]
     refined = refined_family["refined_snapshot_v1"]
+    assert canonical.attrs["run_manifest"]["schema_version"] == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert refined.attrs["run_manifest"]["schema_version"] == (
+        REFINED_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert "coordinate_contract" in canonical.attrs["run_manifest"]["payload"]
+    assert "coordinate_contract" in refined.attrs["run_manifest"]["payload"]
     assert canonical.attrs["stage_selector_eligible"] is False
     assert canonical.attrs["immutable_snapshot"] is True
     assert canonical.attrs["production_selector_activation"] == "deferred"

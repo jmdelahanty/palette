@@ -143,6 +143,7 @@ def publish_refined_detection_shadow(
     canonical_source: CanonicalDetectionShadowPublication,
     shadow_root: Path = DEFAULT_REFINED_DETECTION_SHADOW_ROOT,
     profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    coordinate_catalog: bool = False,
 ) -> RefinedDetectionShadowPublication:
     """Write and fully validate one standalone full-acquisition shadow."""
 
@@ -198,6 +199,7 @@ def publish_refined_detection_shadow(
             "transition_report": dict(transition.report),
         },
         selection_contract="none_shadow_direct_path_only",
+        coordinate_catalog=coordinate_catalog,
     )
     receipt = {
         **publication.receipt,
