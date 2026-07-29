@@ -15,7 +15,9 @@ import json
 import math
 import os
 import platform
+import shutil
 import socket
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,10 +27,14 @@ from typing import Any, Mapping, Sequence
 import cv2
 import numpy as np
 
+from fisheye.shared.pynvvc_exact_seek import (
+    decode_one_frame_from_preceding_keyframe,
+)
+
 
 SCHEMA_ID = "palette.diagnostics.recording_dish_rim_probe"
 SCHEMA_VERSION = 1
-FIT_METHOD = "temporal_median_multicandidate_radial_edge_circle_v1"
+FIT_METHOD = "temporal_median_keyframe_only_multicandidate_radial_edge_circle_v2"
 TARGET_FEATURE = "dish_inner_rim_water_side_edge"
 TARGET_PLANE = "dish_top_rim"
 WINDOW_NAMES = ("early", "middle", "late")
@@ -92,26 +98,70 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def build_window_specs(
+def load_declared_keyframes(
+    path: Path,
+    *,
+    expected_frame_count: int,
+    expected_fps: float,
+) -> tuple[int, ...]:
+    """Load and validate the encoder-declared keyframe frame numbers."""
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("keyframe summary must contain a JSON object")
+    if int(payload.get("total_frames", 0)) != int(expected_frame_count):
+        raise ValueError("keyframe summary frame count disagrees with source summary")
+    declared_fps = float(payload.get("fps", 0.0))
+    if not math.isclose(declared_fps, float(expected_fps), rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("keyframe summary fps disagrees with source summary")
+    raw = payload.get("keyframe_frames")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("keyframe summary has no keyframe_frames")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in raw):
+        raise ValueError("keyframe frame numbers must be exact integers")
+    frames = tuple(int(value) for value in raw)
+    if tuple(sorted(set(frames))) != frames:
+        raise ValueError(
+            "keyframe frame numbers must be strictly increasing and unique"
+        )
+    if frames[0] < 0 or frames[-1] >= int(expected_frame_count):
+        raise ValueError("keyframe frame numbers escape the source frame domain")
+    return frames
+
+
+def build_keyframe_window_specs(
     *,
     frame_count: int,
     fps: float,
-    sample_count: int = 61,
+    keyframe_frames: Sequence[int],
+    max_keyframes_per_window: int = 21,
     span_seconds: float = 5.0,
     fractions: Sequence[float] = WINDOW_FRACTIONS,
 ) -> tuple[WindowSpec, ...]:
-    """Return exact, bounded frame indices for early/middle/late windows."""
+    """Select only declared keyframes in early, middle, and late windows."""
 
     if frame_count <= 0:
         raise ValueError("frame_count must be positive")
     if not math.isfinite(fps) or fps <= 0:
         raise ValueError("fps must be finite and positive")
-    if sample_count < 3 or sample_count % 2 != 1:
-        raise ValueError("sample_count must be an odd integer >= 3")
+    if max_keyframes_per_window < 3:
+        raise ValueError("max_keyframes_per_window must be at least three")
     if not math.isfinite(span_seconds) or span_seconds <= 0:
         raise ValueError("span_seconds must be finite and positive")
     if len(fractions) != len(WINDOW_NAMES):
         raise ValueError(f"exactly {len(WINDOW_NAMES)} window fractions are required")
+
+    available = np.asarray(
+        tuple(int(value) for value in keyframe_frames), dtype=np.int64
+    )
+    if available.ndim != 1 or len(available) == 0:
+        raise ValueError("keyframe_frames must be a nonempty vector")
+    if (
+        np.any(available[1:] <= available[:-1])
+        or int(available[0]) < 0
+        or int(available[-1]) >= frame_count
+    ):
+        raise ValueError("keyframe_frames must be ordered, unique, and in bounds")
 
     half_span = 0.5 * span_seconds * fps
     specs: list[WindowSpec] = []
@@ -120,19 +170,26 @@ def build_window_specs(
         if not math.isfinite(float(fraction)) or not 0.0 < float(fraction) < 1.0:
             raise ValueError("window fractions must lie strictly between zero and one")
         center = int(round(float(fraction) * (frame_count - 1)))
-        raw = np.linspace(center - half_span, center + half_span, sample_count)
-        indices = np.rint(raw).astype(np.int64)
-        indices = np.clip(indices, 0, frame_count - 1)
-        unique = tuple(int(value) for value in np.unique(indices))
-        if len(unique) != sample_count:
-            raise ValueError(
-                f"recording is too short for {sample_count} unique samples in {name} window"
-            )
-        overlap = occupied.intersection(unique)
+        within = available[
+            (available >= math.ceil(center - half_span))
+            & (available <= math.floor(center + half_span))
+        ]
+        if len(within) < 3:
+            raise ValueError(f"{name} window contains fewer than three keyframes")
+        count = min(int(max_keyframes_per_window), len(within))
+        if count % 2 == 0:
+            count -= 1
+        positions = np.rint(np.linspace(0, len(within) - 1, count)).astype(np.int64)
+        selected = tuple(int(value) for value in within[positions])
+        if len(set(selected)) != len(selected):
+            raise RuntimeError(f"{name} keyframe sampling produced duplicates")
+        overlap = occupied.intersection(selected)
         if overlap:
-            raise ValueError(f"temporal windows overlap at frame {min(overlap)}")
-        occupied.update(unique)
-        specs.append(WindowSpec(name, float(fraction), center, unique))
+            raise ValueError(
+                f"temporal keyframe windows overlap at frame {min(overlap)}"
+            )
+        occupied.update(selected)
+        specs.append(WindowSpec(name, float(fraction), center, selected))
     return tuple(specs)
 
 
@@ -404,14 +461,14 @@ def _load_summary(path: Path) -> tuple[int, float, int, int, str]:
     return frame_count, fps, width, height, serial
 
 
-def decode_window_medians_pynvvc(
+def decode_keyframe_window_medians_pynvvc(
     video_path: Path,
     specs: Sequence[WindowSpec],
     *,
     expected_shape_hw: tuple[int, int],
     gpu_id: int,
 ) -> tuple[dict[str, np.ndarray], dict[str, str], dict[str, Any]]:
-    """Decode all windows in one presentation-order PyNvVC pass."""
+    """Decode only the exact declared keyframes selected for each window."""
 
     try:
         import PyNvVideoCodec as nvc  # type: ignore
@@ -429,71 +486,66 @@ def decode_window_medians_pynvvc(
             "video dimensions disagree with the external summary: "
             f"video={(source_height, source_width)} summary={expected_shape_hw}"
         )
-    decoder = nvc.CreateDecoder(
-        gpuid=int(gpu_id), codec=demuxer.GetNvCodecId(), usedevicememory=True
-    )
-
-    frame_to_target: dict[int, tuple[str, int]] = {}
-    buffers: dict[str, np.ndarray] = {}
-    hashers: dict[str, Any] = {}
-    specs_by_name = {spec.name: spec for spec in specs}
-    for spec in specs:
-        hashers[spec.name] = hashlib.sha256()
-        for row, frame_idx in enumerate(spec.frame_indices):
-            frame_to_target[frame_idx] = (spec.name, row)
-
-    max_requested = max(frame_to_target)
-    copied = 0
-    decoded_count = 0
     medians: dict[str, np.ndarray] = {}
-    started = time.perf_counter()
-    for packet in demuxer:
-        for frame in decoder.Decode(packet):
-            target = frame_to_target.get(decoded_count)
-            if target is not None:
-                name, row = target
-                if name not in buffers:
-                    buffers[name] = np.empty(
-                        (
-                            len(specs_by_name[name].frame_indices),
-                            source_height,
-                            source_width,
-                        ),
-                        dtype=np.uint8,
-                    )
-                tensor = torch.from_dlpack(frame)
-                luma = (
-                    tensor[:source_height, :]
-                    .contiguous()
-                    .cpu()
-                    .numpy()
-                    .astype(np.uint8, copy=False)
-                )
-                buffers[name][row] = luma
-                hashers[name].update(luma.tobytes(order="C"))
-                copied += 1
-                del luma, tensor
-                if row == len(specs_by_name[name].frame_indices) - 1:
-                    medians[name] = temporal_median(buffers.pop(name))
-            decoded_count += 1
-            if decoded_count > max_requested:
-                break
-        if decoded_count > max_requested:
-            break
-    expected = sum(len(spec.frame_indices) for spec in specs)
-    if copied != expected:
-        raise RuntimeError(f"decoded {copied}/{expected} requested frames")
-
     frame_hashes: dict[str, str] = {}
+    seeks: list[dict[str, Any]] = []
+    started = time.perf_counter()
+
+    def materialize(frame: Any) -> np.ndarray:
+        tensor = torch.from_dlpack(frame)
+        result = (
+            tensor[:source_height, :]
+            .contiguous()
+            .cpu()
+            .numpy()
+            .astype(np.uint8, copy=True)
+        )
+        del tensor
+        return result
+
     for spec in specs:
-        if spec.name not in medians:
-            raise RuntimeError(f"window {spec.name!r} did not complete")
-        frame_hashes[spec.name] = hashers[spec.name].hexdigest()
+        stack = np.empty(
+            (len(spec.frame_indices), source_height, source_width), dtype=np.uint8
+        )
+        hasher = hashlib.sha256()
+        for row, target in enumerate(spec.frame_indices):
+            decoder = nvc.CreateDecoder(
+                gpuid=int(gpu_id),
+                codec=demuxer.GetNvCodecId(),
+                usedevicememory=True,
+            )
+            frame, proof = decode_one_frame_from_preceding_keyframe(
+                demuxer=demuxer,
+                decoder=decoder,
+                target_frame_index=target,
+                materialize_frame=materialize,
+            )
+            if proof["target_packet_number"] != 1:
+                raise RuntimeError(
+                    f"declared keyframe {target} did not resolve as the first seek packet"
+                )
+            if frame.shape != (source_height, source_width):
+                raise RuntimeError(
+                    f"decoded keyframe {target} has unexpected shape {frame.shape}"
+                )
+            stack[row] = frame
+            hasher.update(frame.tobytes(order="C"))
+            seeks.append({"window": spec.name, **proof})
+            del decoder, frame
+        medians[spec.name] = temporal_median(stack)
+        frame_hashes[spec.name] = hasher.hexdigest()
+
+    packet_counts = [
+        int(item["packets_submitted_through_target_output"]) for item in seeks
+    ]
     metadata = {
-        "backend": "pynvvc_luma_sequential",
+        "backend": "pynvvc_luma_declared_keyframes_only",
         "gpu_id": int(gpu_id),
-        "decoded_frame_count_through_last_window": decoded_count,
-        "requested_frame_count": expected,
+        "requested_frame_count": len(seeks),
+        "seek_count": len(seeks),
+        "decoded_packet_count_total": sum(packet_counts),
+        "decoded_packet_count_max_per_seek": max(packet_counts),
+        "seeks": seeks,
         "elapsed_seconds": time.perf_counter() - started,
         "demuxer_frame_rate": float(demuxer.FrameRate()),
         "codec": str(demuxer.GetNvCodecId()),
@@ -597,130 +649,229 @@ def render_acquisition_reveal(
     return path
 
 
+def write_review_package(output_dir: Path, *, acquisition_revealed: bool) -> Path:
+    """Create one bounded montage and receipt for the mandatory review barrier."""
+
+    source_suffix = "acquisition_reveal" if acquisition_revealed else "palette_fit"
+    source_paths = [output_dir / f"{name}_{source_suffix}.png" for name in WINDOW_NAMES]
+    images = [cv2.imread(str(path), cv2.IMREAD_COLOR) for path in source_paths]
+    if any(image is None for image in images):
+        missing = [
+            str(path) for path, image in zip(source_paths, images) if image is None
+        ]
+        raise RuntimeError(f"review montage inputs are unreadable: {missing}")
+    typed_images = [np.asarray(image) for image in images]
+    max_height = 1200
+    resized: list[np.ndarray] = []
+    for image in typed_images:
+        scale = min(1.0, max_height / float(image.shape[0]))
+        width = max(1, int(round(image.shape[1] * scale)))
+        height = max(1, int(round(image.shape[0] * scale)))
+        resized.append(
+            cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+            if scale < 1.0
+            else image
+        )
+    target_height = min(image.shape[0] for image in resized)
+    normalized = [
+        image[:target_height]
+        if image.shape[0] == target_height
+        else cv2.resize(
+            image,
+            (round(image.shape[1] * target_height / image.shape[0]), target_height),
+            interpolation=cv2.INTER_AREA,
+        )
+        for image in resized
+    ]
+    montage = np.hstack(normalized)
+    montage_path = output_dir / "dish_rim_review_montage.png"
+    montage_sha256 = _write_png(montage_path, montage)
+    fit_report = output_dir / "fit_report.json"
+    receipt = {
+        "schema_id": f"{SCHEMA_ID}.review_package",
+        "schema_version": SCHEMA_VERSION,
+        "status": "awaiting_explicit_human_review",
+        "created_at_utc": _utc_now(),
+        "fit_report": {
+            "path": fit_report.name,
+            "sha256": _sha256_file(fit_report),
+        },
+        "montage": {
+            "path": montage_path.name,
+            "sha256": montage_sha256,
+            "shape": [int(value) for value in montage.shape],
+            "source": source_suffix,
+        },
+        "source_panels": [
+            {"path": path.name, "sha256": _sha256_file(path)} for path in source_paths
+        ],
+        "human_review_required_before": [
+            "palette_candidate_publication",
+            "candidate_comparison",
+            "operational_geometry_selection",
+            "detection_gating",
+        ],
+    }
+    receipt_path = output_dir / "review_package.json"
+    _atomic_json(receipt_path, receipt)
+    return receipt_path
+
+
 def run_probe(args: argparse.Namespace) -> Path:
     video_path = Path(args.video).expanduser().resolve()
     summary_path = Path(args.summary).expanduser().resolve()
+    keyframe_path = Path(args.keyframes).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     if not video_path.is_file():
         raise FileNotFoundError(video_path)
     if not summary_path.is_file():
         raise FileNotFoundError(summary_path)
+    if not keyframe_path.is_file():
+        raise FileNotFoundError(keyframe_path)
     if output_dir.exists():
         raise FileExistsError(f"refusing existing output directory: {output_dir}")
-    output_dir.mkdir(parents=True)
-
-    frame_count, fps, width, height, camera_serial = _load_summary(summary_path)
-    specs = build_window_specs(
-        frame_count=frame_count,
-        fps=fps,
-        sample_count=args.sample_count,
-        span_seconds=args.span_seconds,
-    )
-    composites, frame_hashes, decode = decode_window_medians_pynvvc(
-        video_path,
-        specs,
-        expected_shape_hw=(height, width),
-        gpu_id=args.gpu_id,
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}.tmp.", dir=output_dir.parent)
     )
 
-    windows: dict[str, Any] = {}
-    fits: list[CircleFit] = []
-    for spec in specs:
-        composite = composites[spec.name]
-        fit, edge = fit_dish_circle(
-            composite, coarse_max_dimension_px=args.coarse_max_dimension_px
+    try:
+        frame_count, fps, width, height, camera_serial = _load_summary(summary_path)
+        declared_keyframes = load_declared_keyframes(
+            keyframe_path,
+            expected_frame_count=frame_count,
+            expected_fps=fps,
         )
-        fits.append(fit)
-        composite_path = output_dir / f"{spec.name}_temporal_median.png"
-        overlay_path = output_dir / f"{spec.name}_palette_fit.png"
-        edge_path = output_dir / f"{spec.name}_edge_evidence.png"
-        files = {
-            "temporal_median": {
-                "path": composite_path.name,
-                "sha256": _write_png(composite_path, composite),
-            },
-            "palette_fit": {
-                "path": overlay_path.name,
-                "sha256": _write_png(
-                    overlay_path,
-                    _draw_circle(
-                        composite,
-                        (fit.center_x_px, fit.center_y_px, fit.radius_px),
-                        color=(255, 255, 0),
-                        label=f"Palette blind fit: {spec.name}",
+        specs = build_keyframe_window_specs(
+            frame_count=frame_count,
+            fps=fps,
+            keyframe_frames=declared_keyframes,
+            max_keyframes_per_window=args.max_keyframes_per_window,
+            span_seconds=args.span_seconds,
+        )
+        composites, frame_hashes, decode = decode_keyframe_window_medians_pynvvc(
+            video_path,
+            specs,
+            expected_shape_hw=(height, width),
+            gpu_id=args.gpu_id,
+        )
+
+        windows: dict[str, Any] = {}
+        fits: list[CircleFit] = []
+        for spec in specs:
+            composite = composites[spec.name]
+            fit, edge = fit_dish_circle(
+                composite, coarse_max_dimension_px=args.coarse_max_dimension_px
+            )
+            fits.append(fit)
+            composite_path = temporary / f"{spec.name}_temporal_median.png"
+            overlay_path = temporary / f"{spec.name}_palette_fit.png"
+            edge_path = temporary / f"{spec.name}_edge_evidence.png"
+            files = {
+                "temporal_median": {
+                    "path": composite_path.name,
+                    "sha256": _write_png(composite_path, composite),
+                },
+                "palette_fit": {
+                    "path": overlay_path.name,
+                    "sha256": _write_png(
+                        overlay_path,
+                        _draw_circle(
+                            composite,
+                            (fit.center_x_px, fit.center_y_px, fit.radius_px),
+                            color=(255, 255, 0),
+                            label=f"Palette blind fit: {spec.name}",
+                        ),
                     ),
-                ),
-            },
-            "edge_evidence": {
-                "path": edge_path.name,
-                "sha256": _write_png(edge_path, edge),
-            },
-        }
-        windows[spec.name] = {
-            "fraction": spec.fraction,
-            "center_frame": spec.center_frame,
-            "frame_indices": list(spec.frame_indices),
-            "decoded_luma_sequence_sha256": frame_hashes[spec.name],
-            "composite_pixel_sha256": _sha256_bytes(composite.tobytes(order="C")),
-            "fit": fit.to_json(),
-            "files": files,
-        }
+                },
+                "edge_evidence": {
+                    "path": edge_path.name,
+                    "sha256": _write_png(edge_path, edge),
+                },
+            }
+            windows[spec.name] = {
+                "fraction": spec.fraction,
+                "center_frame": spec.center_frame,
+                "frame_indices": list(spec.frame_indices),
+                "decoded_luma_sequence_sha256": frame_hashes[spec.name],
+                "composite_pixel_sha256": _sha256_bytes(composite.tobytes(order="C")),
+                "fit": fit.to_json(),
+                "files": files,
+            }
 
-    consensus = consensus_circle(fits)
-    report = {
-        "schema_id": SCHEMA_ID,
-        "schema_version": SCHEMA_VERSION,
-        "status": "provisional_visual_review_required",
-        "created_at_utc": _utc_now(),
-        "fit_frozen_before_acquisition_reveal": True,
-        "fit_method": FIT_METHOD,
-        "target_feature": TARGET_FEATURE,
-        "target_plane": TARGET_PLANE,
-        "source": {
-            "video_path": str(video_path),
-            "video_size_bytes": video_path.stat().st_size,
-            "video_mtime_ns": video_path.stat().st_mtime_ns,
-            "summary_path": str(summary_path),
-            "summary_sha256": _sha256_file(summary_path),
-            "camera_serial": camera_serial,
-            "frame_count": frame_count,
-            "fps": fps,
-            "image_shape_px": {"height": height, "width": width},
-            "pixel_contract": "orange.camera.mono8.full_frame.v1",
-        },
-        "parameters": {
-            "sample_count_per_window": args.sample_count,
-            "span_seconds_per_window": args.span_seconds,
-            "window_fractions": list(WINDOW_FRACTIONS),
-            "coarse_max_dimension_px": args.coarse_max_dimension_px,
-            "acquisition_geometry_available_to_fitter": False,
-        },
-        "decode": decode,
-        "windows": windows,
-        "consensus_fit": consensus.to_json(),
-        "environment": {
-            "hostname": socket.gethostname(),
-            "platform": platform.platform(),
-            "lsf_job_id": os.environ.get("LSB_JOBID"),
-        },
-        "prohibitions": [
-            "not_a_mask_selection",
-            "not_a_detection_gate",
-            "not_a_zarr_or_registry_publication",
-            "do_not_advance_without_visual_review",
-        ],
-    }
-    fit_report_path = output_dir / "fit_report.json"
-    _atomic_json(fit_report_path, report)
+        consensus = consensus_circle(fits)
+        report = {
+            "schema_id": SCHEMA_ID,
+            "schema_version": SCHEMA_VERSION,
+            "status": "provisional_visual_review_required",
+            "created_at_utc": _utc_now(),
+            "fit_frozen_before_acquisition_reveal": True,
+            "fit_method": FIT_METHOD,
+            "target_feature": TARGET_FEATURE,
+            "target_plane": TARGET_PLANE,
+            "source": {
+                "video_path": str(video_path),
+                "video_size_bytes": video_path.stat().st_size,
+                "video_mtime_ns": video_path.stat().st_mtime_ns,
+                "summary_path": str(summary_path),
+                "summary_sha256": _sha256_file(summary_path),
+                "keyframe_summary_path": str(keyframe_path),
+                "keyframe_summary_sha256": _sha256_file(keyframe_path),
+                "declared_keyframe_count": len(declared_keyframes),
+                "camera_serial": camera_serial,
+                "frame_count": frame_count,
+                "fps": fps,
+                "image_shape_px": {"height": height, "width": width},
+                "pixel_contract": "orange.camera.mono8.full_frame.v1",
+            },
+            "parameters": {
+                "sampling_policy": "declared_keyframes_only",
+                "max_keyframes_per_window": args.max_keyframes_per_window,
+                "actual_keyframes_per_window": {
+                    spec.name: len(spec.frame_indices) for spec in specs
+                },
+                "span_seconds_per_window": args.span_seconds,
+                "window_fractions": list(WINDOW_FRACTIONS),
+                "coarse_max_dimension_px": args.coarse_max_dimension_px,
+                "acquisition_geometry_available_to_fitter": False,
+            },
+            "decode": decode,
+            "windows": windows,
+            "consensus_fit": consensus.to_json(),
+            "environment": {
+                "hostname": socket.gethostname(),
+                "platform": platform.platform(),
+                "lsf_job_id": os.environ.get("LSB_JOBID"),
+            },
+            "prohibitions": [
+                "not_a_mask_selection",
+                "not_a_detection_gate",
+                "not_a_zarr_or_registry_publication",
+                "do_not_advance_without_visual_review",
+            ],
+        }
+        fit_report_path = temporary / "fit_report.json"
+        _atomic_json(fit_report_path, report)
 
-    if args.acquisition_observation:
-        render_acquisition_reveal(
-            output_dir=output_dir,
-            observation_path=Path(args.acquisition_observation).expanduser().resolve(),
-            fit_report_path=fit_report_path,
-            composites=composites,
+        acquisition_revealed = args.acquisition_observation is not None
+        if acquisition_revealed:
+            render_acquisition_reveal(
+                output_dir=temporary,
+                observation_path=Path(args.acquisition_observation)
+                .expanduser()
+                .resolve(),
+                fit_report_path=fit_report_path,
+                composites=composites,
+            )
+        write_review_package(
+            temporary,
+            acquisition_revealed=acquisition_revealed,
         )
-    return fit_report_path
+        os.replace(temporary, output_dir)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return output_dir / "fit_report.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -729,6 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--video", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
+    parser.add_argument("--keyframes", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--acquisition-observation",
@@ -736,7 +888,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional reveal-only observation; opened after fit_report.json is frozen.",
     )
     parser.add_argument("--gpu-id", type=int, default=0)
-    parser.add_argument("--sample-count", type=int, default=61)
+    parser.add_argument(
+        "--max-keyframes-per-window",
+        "--sample-count",
+        dest="max_keyframes_per_window",
+        type=int,
+        default=21,
+        help="Maximum odd number of declared keyframes used in each window.",
+    )
     parser.add_argument("--span-seconds", type=float, default=5.0)
     parser.add_argument("--coarse-max-dimension-px", type=int, default=2048)
     return parser

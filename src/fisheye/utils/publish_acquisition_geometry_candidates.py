@@ -16,6 +16,7 @@ from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
 )
 from fisheye.shared.recording_geometry import RecordingGeometryError
 from fisheye.shared.recording_geometry_recovery import RECOVERY_RECEIPT_NAME
+from fisheye.shared.json_safety import write_json_atomic
 
 
 def _analysis_zarr(recording: Path) -> Path:
@@ -40,9 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scratch-root",
         type=Path,
-        default=Path(
-            os.environ.get("TMPDIR", "/tmp")
-        )
+        default=Path(os.environ.get("TMPDIR", "/tmp"))
         / "palette-arena-geometry-candidates",
         help="Node/workstation-local temporary publication root.",
     )
@@ -55,6 +54,11 @@ def _parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Publish candidates. Default is a read-only dry-run.",
+    )
+    parser.add_argument(
+        "--result-json",
+        type=Path,
+        help="Optional immutable summary receipt for DAG orchestration.",
     )
     return parser
 
@@ -108,17 +112,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "operationally_selected": False,
             }
         )
-    print(
-        json.dumps(
-            {
-                "mode": "apply" if args.apply else "dry_run",
-                "target_count": len(rows),
-                "targets": rows,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    payload = {
+        "schema_id": "palette.arena_geometry_acquisition_candidate_batch",
+        "schema_version": 1,
+        "mode": "apply" if args.apply else "dry_run",
+        "target_count": len(rows),
+        "targets": rows,
+        "operational_selection_performed": False,
+        "registry_updated": False,
+    }
+    if args.result_json is not None:
+        write_json_atomic(args.result_json.expanduser().resolve(), payload)
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
