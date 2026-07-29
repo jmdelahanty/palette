@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import time
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -95,6 +96,35 @@ def _artifact_stats(path: Path) -> dict[str, int]:
     return {
         "file_count": len(files),
         "apparent_bytes": sum(item.stat().st_size for item in files),
+    }
+
+
+def _palette_revision(*, allow_dirty: bool) -> dict[str, object]:
+    repository = Path(__file__).resolve().parents[3]
+
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    status = git("status", "--short")
+    clean = not status
+    if not clean and not allow_dirty:
+        raise RuntimeError(
+            "Palette worktree is dirty; commit the canary implementation or pass "
+            "--allow-dirty for explicitly non-reproducible development evidence."
+        )
+    return {
+        "repository": str(repository),
+        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "commit": git("rev-parse", "HEAD"),
+        "worktree_clean": clean,
+        "dirty_status": [] if clean else status.splitlines(),
+        "driver": "src/fisheye/diagnostics/publish_refined_keypoint_v2_canary.py",
     }
 
 
@@ -188,6 +218,7 @@ def _decision_receipt(
 
 
 def publish(args: argparse.Namespace) -> dict[str, object]:
+    palette_revision = _palette_revision(allow_dirty=args.allow_dirty)
     destination = args.destination.expanduser().resolve()
     if destination.exists():
         raise FileExistsError(f"Destination already exists: {destination}")
@@ -378,6 +409,7 @@ def publish(args: argparse.Namespace) -> dict[str, object]:
             "selector_eligible": False,
             "registry_registered": False,
             "synthetic_review_decisions": True,
+            "palette": palette_revision,
             "source": {
                 "raw_zarr": str(source_paths[0]),
                 "raw_run": args.raw_run,
@@ -449,6 +481,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--refined-run", required=True)
     parser.add_argument("--body-frame-run", required=True)
     parser.add_argument("--remove-failed-partial", action="store_true")
+    parser.add_argument("--allow-dirty", action="store_true")
     return parser
 
 
