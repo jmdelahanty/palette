@@ -18,6 +18,8 @@ from typing import Any, Mapping
 import zarr
 
 from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+    ATOMIC_PUBLICATION_OWNER_ATTR,
+    ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
     AtomicRunPublishSpec,
     atomic_publish_run_group,
 )
@@ -297,6 +299,67 @@ def _require_unselected(root: Any, *, run_id: str) -> None:
         raise RuntimeError(f"Native run {run_id!r} became selector eligible.")
 
 
+def tombstone_native_canonical_detection_postcopy_failure(
+    *,
+    analysis_zarr: Path,
+    run_id: str,
+    expected_publication_owner: str,
+    failure: BaseException | str,
+) -> dict[str, object]:
+    """Fail-close one exact owned run after a terminal post-copy failure."""
+
+    archive = analysis_zarr.expanduser().resolve()
+    normalized_run_id = _require_run_id(run_id)
+    owner = str(expected_publication_owner).strip()
+    if not owner:
+        raise ValueError("expected_publication_owner cannot be empty.")
+    root = open_zarr_root(archive, mode="a")
+    _require_unselected(root, run_id=normalized_run_id)
+    run = root[f"detect_runs/{normalized_run_id}"]
+    observed_owner = run.attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR)
+    if observed_owner != owner:
+        raise RuntimeError(
+            "Refusing to tombstone a native run with a different publication owner."
+        )
+    tombstone: dict[str, object] = {
+        "schema_id": "palette.native_canonical_detection.postcopy_failure",
+        "schema_version": 1,
+        "failed_at_utc": utc_now(),
+        "run_id": normalized_run_id,
+        "publication_owner_attr": ATOMIC_PUBLICATION_OWNER_ATTR,
+        "publication_owner_uuid": owner,
+        "failure": str(failure),
+        "selector_eligible": False,
+        "registry_updated": False,
+    }
+    attrs = dict(run.attrs)
+    attrs.pop("palette_run_completed_at_utc", None)
+    attrs.update(
+        {
+            "status": "failed",
+            "palette_run_completion_status": "failed",
+            "stage_selector_eligible": False,
+            "native_canonical_detection_postcopy_failure": str(failure),
+            ATOMIC_PUBLICATION_TOMBSTONE_ATTR: json_attr_safe(tombstone),
+        }
+    )
+    run.attrs.put(attrs)
+
+    check_root = open_zarr_root(archive, mode="r")
+    _require_unselected(check_root, run_id=normalized_run_id)
+    check = check_root[f"detect_runs/{normalized_run_id}"]
+    if (
+        check.attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR) != owner
+        or check.attrs.get("status") != "failed"
+        or check.attrs.get("palette_run_completion_status") != "failed"
+        or check.attrs.get("stage_selector_eligible") is not False
+        or check.attrs.get(ATOMIC_PUBLICATION_TOMBSTONE_ATTR)
+        != json_attr_safe(tombstone)
+    ):
+        raise RuntimeError("Native post-copy failure tombstone did not persist.")
+    return json_attr_safe(tombstone)
+
+
 def publish_native_canonical_detection_candidate(
     *,
     analysis_zarr: Path,
@@ -376,34 +439,51 @@ def publish_native_canonical_detection_candidate(
         },
     )
 
-    consolidation = consolidate_metadata_capture_expected_warnings(archive)
-    root = open_zarr_root(archive, mode="r")
-    _verify_native_source_authorities(
-        root,
-        manifest=candidate.manifest,
-        recording_identity=identity,
-    )
-    run = root[f"detect_runs/{candidate.run_id}"]
-    direct, consolidated = canonical_detection_metadata_declaration_maps(
-        archive,
-        run_id=candidate.run_id,
-        plans=candidate.plans,
-    )
-    arrays = {
-        path: run[path] for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths
-    }
-    errors = validate_canonical_detection_publication(
-        candidate.manifest,
-        direct_metadata_declarations=direct,
-        consolidated_metadata_declarations=consolidated,
-        arrays=arrays,
-    )
-    _require_unselected(root, run_id=candidate.run_id)
-    if errors:
-        raise RuntimeError(
-            "Published native canonical detection validation failed: "
-            + "; ".join(errors)
+    try:
+        consolidation = consolidate_metadata_capture_expected_warnings(archive)
+        root = open_zarr_root(archive, mode="r")
+        _verify_native_source_authorities(
+            root,
+            manifest=candidate.manifest,
+            recording_identity=identity,
         )
+        run = root[f"detect_runs/{candidate.run_id}"]
+        direct, consolidated = canonical_detection_metadata_declaration_maps(
+            archive,
+            run_id=candidate.run_id,
+            plans=candidate.plans,
+        )
+        arrays = {
+            path: run[path] for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths
+        }
+        errors = validate_canonical_detection_publication(
+            candidate.manifest,
+            direct_metadata_declarations=direct,
+            consolidated_metadata_declarations=consolidated,
+            arrays=arrays,
+        )
+        _require_unselected(root, run_id=candidate.run_id)
+        if errors:
+            raise RuntimeError(
+                "Published native canonical detection validation failed: "
+                + "; ".join(errors)
+            )
+    except BaseException as exc:
+        try:
+            tombstone_native_canonical_detection_postcopy_failure(
+                analysis_zarr=archive,
+                run_id=candidate.run_id,
+                expected_publication_owner=str(
+                    publication.get("publication_owner_uuid") or ""
+                ),
+                failure=exc,
+            )
+        except BaseException as tombstone_exc:
+            raise RuntimeError(
+                "Native post-copy validation failed and its owned child could "
+                f"not be tombstoned: {tombstone_exc}"
+            ) from exc
+        raise
 
     result: dict[str, object] = {
         "schema_id": NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID,
@@ -439,4 +519,5 @@ __all__ = [
     "NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_VERSION",
     "load_native_canonical_detection_candidate",
     "publish_native_canonical_detection_candidate",
+    "tombstone_native_canonical_detection_postcopy_failure",
 ]

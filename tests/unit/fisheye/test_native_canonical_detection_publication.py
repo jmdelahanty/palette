@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.native_canonical_detection_publication import (
     publish_native_canonical_detection_candidate,
 )
+from fisheye.shared.zarr import native_canonical_detection_publication as publication_mod
 
 
 RECORDING_IDENTITY = "recording:native-publication-fixture"
@@ -157,6 +159,65 @@ def test_native_candidate_is_atomically_published_but_not_selected(
     assert run.attrs["stage_selector_eligible"] is False
     assert run.attrs["run_manifest"]["schema_version"] == 2
     assert np.asarray(run["instances/frame_row_offsets"][:]).tolist() == [0, 1, 1, 2]
+
+
+def test_native_publication_tolerates_unrelated_legacy_root_infinity(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    frame, pixel = _archive(archive)
+    candidate = _candidate(tmp_path, frame, pixel)
+    root_metadata = archive / "zarr.json"
+    payload = json.loads(root_metadata.read_text(encoding="utf-8"))
+    payload["attributes"]["legacy_unrelated_limit"] = float("inf")
+    root_metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = publish_native_canonical_detection_candidate(
+        analysis_zarr=archive,
+        candidate_zarr=candidate.output_path,
+        run_id=RUN_ID,
+        recording_identity=RECORDING_IDENTITY,
+    )
+
+    assert result["status"] == "complete"
+    assert result["selector_eligible"] is False
+
+
+def test_native_postcopy_failure_tombstones_exact_owned_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    frame, pixel = _archive(archive)
+    candidate = _candidate(tmp_path, frame, pixel)
+
+    monkeypatch.setattr(
+        publication_mod,
+        "canonical_detection_metadata_declaration_maps",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("post-copy metadata failure")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="post-copy metadata failure"):
+        publish_native_canonical_detection_candidate(
+            analysis_zarr=archive,
+            candidate_zarr=candidate.output_path,
+            run_id=RUN_ID,
+            recording_identity=RECORDING_IDENTITY,
+        )
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    family = root["detect_runs"]
+    run = family[RUN_ID]
+    assert run.attrs["status"] == "failed"
+    assert run.attrs["palette_run_completion_status"] == "failed"
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs["atomic_publication_tombstone"]["schema_id"] == (
+        "palette.native_canonical_detection.postcopy_failure"
+    )
+    assert family.attrs.get("latest") is None
+    assert family.attrs.get("latest_complete") is None
 
 
 def test_native_publication_fails_before_copy_when_authority_drifted(

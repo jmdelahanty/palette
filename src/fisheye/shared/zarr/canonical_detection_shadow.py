@@ -29,6 +29,7 @@ from fisheye.shared.zarr.detection_storage import (
     CanonicalDetectionStoragePlanSet,
     plan_canonical_detection_storage,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
 from fisheye.shared.zarr.storage_profiles import (
     DETECTION_PUBLISHED_ACCESS_AWARE_V1,
     StorageProfile,
@@ -171,6 +172,22 @@ def _read_strict_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _read_historical_zarr_envelope(path: Path) -> dict[str, Any]:
+    """Read an enclosing legacy archive declaration permissively.
+
+    Historical root attributes can contain unrelated bare ``NaN`` or
+    ``Infinity`` values.  The enclosing root is therefore discovery-only; the
+    exact selected canonical run declarations are independently required to be
+    strict finite JSON below.
+    """
+
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object at {path}.")
+    return value
+
+
 def _metadata_maps(
     output_path: Path,
     *,
@@ -185,7 +202,7 @@ def _metadata_maps(
         if relative:
             metadata_path = metadata_path / relative
         direct[relative] = _read_strict_json(metadata_path / "zarr.json")
-    archive_root = _read_strict_json(output_path / "zarr.json")
+    archive_root = _read_historical_zarr_envelope(output_path / "zarr.json")
     envelope = archive_root.get("consolidated_metadata")
     if not isinstance(envelope, Mapping):
         raise ValueError("Canonical shadow lacks root consolidated metadata.")
@@ -200,6 +217,13 @@ def _metadata_maps(
         declaration = flattened.get(full_path)
         if not isinstance(declaration, Mapping):
             raise ValueError(f"Canonical consolidated metadata lacks {full_path!r}.")
+        try:
+            canonical_json_bytes(declaration)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Canonical consolidated metadata at {full_path!r} is not "
+                f"strict finite JSON: {exc}"
+            ) from exc
         consolidated[relative] = dict(declaration)
     return direct, consolidated
 
