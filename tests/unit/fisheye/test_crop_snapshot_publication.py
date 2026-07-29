@@ -112,6 +112,11 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
         }
         run = family["crop_candidate_v2"]
         assert run.attrs["status"] == "complete"
+        assert run.attrs["palette_run_completion_contract"] == (
+            "palette.zarr_run_completion.v1"
+        )
+        assert run.attrs["palette_run_completion_status"] == "complete"
+        assert run.attrs["palette_run_name"] == "crop_candidate_v2"
         assert run.attrs["stage_selector_eligible"] is False
         assert run.attrs["production_candidate"] is True
         assert run.attrs["immutable_snapshot"] is True
@@ -241,6 +246,7 @@ def test_post_import_failure_retains_unselected_failed_tombstone(
     assert observed_family.attrs["latest"] == "existing_crop"
     failed = observed_family["failed_candidate"]
     assert failed.attrs["status"] == "failed"
+    assert failed.attrs["palette_run_completion_status"] == "failed"
     assert failed.attrs["stage_selector_eligible"] is False
     assert failed.attrs["production_candidate"] is False
     assert failed.attrs["production_selector_activation"] == (

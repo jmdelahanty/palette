@@ -38,6 +38,11 @@ from fisheye.shared.source_video_metadata import (
     resolve_source_video,
 )
 from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.zarr.crop_consumer import (
+    build_crop_run_reference,
+    strict_crop_fixed_roi_shape,
+    strict_crop_source_frame_shape,
+)
 from fisheye.shared.zarr_run_completion import (
     is_run_complete_in_parent,
     is_run_selector_eligible,
@@ -257,7 +262,17 @@ def _is_acquisition_crop_video_source(crop_group: zarr.Group) -> bool:
     )
 
 
-def _resolve_roi_shape(crop_group: zarr.Group) -> tuple[int, int]:
+def _resolve_roi_shape(
+    crop_group: zarr.Group,
+    *,
+    crop_run_name: str,
+) -> tuple[int, int]:
+    strict_shape = strict_crop_fixed_roi_shape(
+        crop_group,
+        run_id=crop_run_name,
+    )
+    if strict_shape is not None:
+        return strict_shape
     roi_size = crop_group.attrs.get("roi_size")
     if isinstance(roi_size, (list, tuple)) and len(roi_size) == 2:
         return int(roi_size[0]), int(roi_size[1])
@@ -319,7 +334,15 @@ def _resolve_frame_shape(
     root: zarr.Group,
     crop_group: zarr.Group,
     images_full: object | None,
+    *,
+    crop_run_name: str,
 ) -> tuple[int, int] | None:
+    strict_shape = strict_crop_source_frame_shape(
+        crop_group,
+        run_id=crop_run_name,
+    )
+    if strict_shape is not None:
+        return strict_shape
     if images_full is not None:
         shape = getattr(images_full, "shape", ())
         if len(shape) >= 3:
@@ -762,7 +785,10 @@ class CropImageSource:
             zarr_path=zarr_path,
         )
         storage_mode = _resolve_storage_mode(crop_group)
-        roi_shape = _resolve_roi_shape(crop_group)
+        roi_shape = _resolve_roi_shape(
+            crop_group,
+            crop_run_name=crop_run_name,
+        )
 
         if "roi_coordinates_full" not in crop_group:
             raise ValueError("Crop run missing 'roi_coordinates_full'.")
@@ -892,7 +918,12 @@ class CropImageSource:
                 live_acceleration_effective = "pynvvc_luma"
                 live_acceleration_fallback_reason = None
             elif manifest_path is not None:
-                frame_shape = _resolve_frame_shape(root, crop_group, images_full)
+                frame_shape = _resolve_frame_shape(
+                    root,
+                    crop_group,
+                    images_full,
+                    crop_run_name=crop_run_name,
+                )
                 frame_source_kind = "flat_roi_cache_manifest"
                 frame_source_path = str(manifest_path)
                 images_full = None
@@ -900,7 +931,12 @@ class CropImageSource:
                 live_acceleration_effective = None
                 live_acceleration_fallback_reason = None
             else:
-                frame_shape = _resolve_frame_shape(root, crop_group, images_full)
+                frame_shape = _resolve_frame_shape(
+                    root,
+                    crop_group,
+                    images_full,
+                    crop_run_name=crop_run_name,
+                )
                 if images_full is not None:
                     if normalized_live_acceleration == "gpu":
                         raise ValueError(
@@ -1365,6 +1401,11 @@ class CropImageSource:
                     "roi_shape": [int(self.roi_shape[0]), int(self.roi_shape[1])],
                     "total_rois": int(self.total_rois),
                     "crop_signature": self.crop_group.attrs.get("crop_signature"),
+                    "crop_run_reference": build_crop_run_reference(
+                        self.crop_group,
+                        run_id=self.crop_run_name,
+                        allow_unversioned_legacy=True,
+                    ),
                     "roi_image_representation": self.roi_image_representation,
                     "roi_pixel_contract": self.roi_pixel_contract,
                 }
@@ -1483,7 +1524,11 @@ class CropImageSource:
             "schema": "palette_roi_cache_v1",
             "archive_path": str(archive_path),
             "crop_run_name": self.crop_run_name,
-            "crop_signature": self.crop_group.attrs.get("crop_signature"),
+            "crop_run_reference": build_crop_run_reference(
+                self.crop_group,
+                run_id=self.crop_run_name,
+                allow_unversioned_legacy=True,
+            ),
             "frame_source_kind": self.frame_source_kind,
             "frame_source_identity": self._build_frame_source_identity(),
             "roi_shape": [int(self.roi_shape[0]), int(self.roi_shape[1])],

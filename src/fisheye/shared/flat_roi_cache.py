@@ -20,6 +20,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.roi_pixel_contract import flat_cache_pixel_contract_for_backend
+from fisheye.shared.zarr.crop_consumer import build_crop_run_reference
 
 FLAT_ROI_CACHE_SCHEMA = "palette_roi_cache_flat_bin_v1"
 FLAT_ROI_CACHE_LAYOUT = "flat_bin_v1"
@@ -301,6 +302,10 @@ def _build_manifest(
             "archive_path": str(archive_path),
             "crop_run_name": source.crop_run_name,
             "source_crop_storage_mode": source.storage_mode,
+            "crop_run_reference": build_crop_run_reference(
+                source.crop_group,
+                run_id=source.crop_run_name,
+            ),
             "crop_signature": source.crop_group.attrs.get("crop_signature"),
             "crop_revision": source.crop_group.attrs.get("crop_revision"),
             "frame_source_kind": source.frame_source_kind,

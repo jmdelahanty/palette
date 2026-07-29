@@ -1,9 +1,33 @@
 # Crop Geometry Storage Contract v1
 
-Status: implemented for selector-ineligible refined-source shadows; not a
-production selector or writer default
+Status: implemented for selector-ineligible refined-source production
+candidates and DAG consumption; not a production selector or writer default
 
 Date: 2026-07-29
+
+## DAG Consumer Checkpoint
+
+The storage checkpoint was reviewed against current `sun` and integrated on a
+separate branch. The shared production entry point is exposed through one
+partition-independent workflow fragment and CLI. Both clipped and whole-video
+workflows must call this same recording-level publisher after they have
+produced and approved one full-acquisition refined-detection snapshot. Clip
+boundaries remain compute provenance; they do not define a second crop schema
+or namespace.
+
+Downstream flat-cache and keypoint planning bind strict crop runs through a
+validated `palette.crop_geometry.run_reference` containing the immutable run
+manifest and logical-content digests. They do not synthesize legacy
+`crop_signature` or `crop_revision` values. Historical signed runs remain
+available through an explicitly labelled compatibility profile; unversioned
+historical runs are accepted only by the local temporary-cache reader's
+explicit compatibility path.
+
+Production candidates stamp `palette.zarr_run_completion.v1` complete/failed
+markers in addition to their crop-specific state. They remain selector-
+ineligible, registry-unregistered, and unselected. Guarded selector activation
+and collection-wide refined-detection activation remain separate blockers; the
+workflow fragment cannot bypass either authority gate.
 
 ## Purpose
 
@@ -159,13 +183,18 @@ Before production integration:
       binder;
 - [x] implement node-local materialization and atomic selector-ineligible
       production-candidate import;
-- [ ] obtain parallel Palette producer/DAG review of this exact contract;
+- [x] obtain parallel Palette producer/DAG review of this exact contract;
 - [x] publish a small immutable canary outside production selectors;
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
 - [ ] test Palette pixel materialization and downstream keypoint/mask readers;
 - [ ] benchmark publication and representative row/window reads;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.
+
+The DAG review closed on the integration branch after identifying and fixing
+the standard completion-marker gap and replacing the cache planner's legacy-
+only identity requirement with the manifest-bound run reference. Pixel decode
+and mask-reader validation remain open and are not implied by that review.
 
 The Crimson coordinate canary passed at implementation commit
 `ce478c7d13d2f870e6c711308090e28364872602` and evidence commit `4100719`.

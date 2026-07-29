@@ -26,6 +26,14 @@ from fisheye.shared.flat_roi_cache import (
     load_flat_roi_cache_manifest,
 )
 from fisheye.shared.run_provenance import json_ready
+from fisheye.shared.zarr.crop_consumer import (
+    CROP_RUN_REFERENCE_LEGACY_PROFILE,
+    CROP_RUN_REFERENCE_SCHEMA_ID,
+    CROP_RUN_REFERENCE_SCHEMA_VERSION,
+    build_crop_run_reference,
+    strict_crop_fixed_roi_shape,
+    validate_crop_run_reference,
+)
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
 
@@ -110,6 +118,7 @@ class FlatRoiCacheBinding:
     shape: tuple[int, int, int]
     total_bytes: int
     payload_sha256: str | None
+    crop_run_reference: Mapping[str, Any] | None = None
     availability: str = "existing"
     producer_job_key: str | None = None
     source_kind: str | None = None
@@ -125,6 +134,30 @@ class FlatRoiCacheBinding:
             raise ValueError("An existing flat ROI cache requires a manifest digest.")
         if self.availability == "planned" and not self.producer_job_key:
             raise ValueError("A planned flat ROI cache requires a producer job key.")
+        reference = self.crop_run_reference
+        if reference is None:
+            if (
+                self.crop_signature is None
+                or self.crop_signature == ""
+                or self.crop_revision is None
+                or self.crop_revision == ""
+            ):
+                raise ValueError(
+                    "Flat ROI cache binding requires crop_run_reference or the "
+                    "historical crop_signature/crop_revision pair."
+                )
+            reference = {
+                "schema_id": CROP_RUN_REFERENCE_SCHEMA_ID,
+                "schema_version": CROP_RUN_REFERENCE_SCHEMA_VERSION,
+                "profile": CROP_RUN_REFERENCE_LEGACY_PROFILE,
+                "run_id": self.crop_run,
+                "crop_signature": self.crop_signature,
+                "crop_revision": self.crop_revision,
+            }
+        validated_reference = validate_crop_run_reference(reference)
+        if validated_reference["run_id"] != self.crop_run:
+            raise ValueError("Flat ROI cache reference binds a different crop run.")
+        object.__setattr__(self, "crop_run_reference", validated_reference)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -374,16 +407,39 @@ def validate_flat_roi_cache_binding(
     crop_revision = source.get("crop_revision")
     if not cache_key:
         raise ValueError("Flat ROI cache manifest is missing cache_key.")
-    if (
-        crop_signature is None
-        or crop_signature == ""
-        or crop_revision is None
-        or crop_revision == ""
-    ):
+    raw_reference = source.get("crop_run_reference")
+    if raw_reference is None:
+        if (
+            crop_signature is None
+            or crop_signature == ""
+            or crop_revision is None
+            or crop_revision == ""
+        ):
+            raise ValueError(
+                "Flat ROI cache manifest must pin source.crop_run_reference or "
+                "the historical source.crop_signature/crop_revision pair."
+            )
+        raw_reference = {
+            "schema_id": CROP_RUN_REFERENCE_SCHEMA_ID,
+            "schema_version": CROP_RUN_REFERENCE_SCHEMA_VERSION,
+            "profile": CROP_RUN_REFERENCE_LEGACY_PROFILE,
+            "run_id": requested_crop_run,
+            "crop_signature": crop_signature,
+            "crop_revision": crop_revision,
+        }
+    crop_run_reference = validate_crop_run_reference(raw_reference)
+    if crop_run_reference["run_id"] != requested_crop_run:
         raise ValueError(
-            "Flat ROI cache manifest must pin source.crop_signature and "
-            "source.crop_revision."
+            "Flat ROI cache crop_run_reference does not bind the requested run."
         )
+    if crop_run_reference["profile"] == CROP_RUN_REFERENCE_LEGACY_PROFILE:
+        if (
+            crop_run_reference["crop_signature"] != crop_signature
+            or crop_run_reference["crop_revision"] != crop_revision
+        ):
+            raise ValueError(
+                "Flat ROI cache legacy crop reference disagrees with its source fields."
+            )
     if int(shape[1]) < int(min_roi_size) or int(shape[2]) < int(min_roi_size):
         raise ValueError(
             f"Flat ROI cache is {shape[2]}x{shape[1]}, but zebrafish keypoint "
@@ -406,6 +462,7 @@ def validate_flat_roi_cache_binding(
         shape=(int(shape[0]), int(shape[1]), int(shape[2])),
         total_bytes=total_bytes,
         payload_sha256=(str(array.get("sha256")) if array.get("sha256") else None),
+        crop_run_reference=crop_run_reference,
         availability="existing",
         producer_job_key=None,
         source_kind=(
@@ -429,7 +486,10 @@ def _crop_storage_mode(crop_group: Any) -> str:
     return "materialized" if "roi_images" in crop_group else "geometry_only"
 
 
-def _crop_roi_shape(crop_group: Any) -> tuple[int, int]:
+def _crop_roi_shape(crop_group: Any, *, crop_run: str) -> tuple[int, int]:
+    strict_shape = strict_crop_fixed_roi_shape(crop_group, run_id=crop_run)
+    if strict_shape is not None:
+        return strict_shape
     roi_size = crop_group.attrs.get("roi_size")
     if isinstance(roi_size, (list, tuple)) and len(roi_size) == 2:
         return int(roi_size[0]), int(roi_size[1])
@@ -492,20 +552,17 @@ def validate_keypoint_input_dag(
     if not is_run_complete_in_parent(crop_parent, crop_group):
         raise ValueError(f"Live crop DAG node crop_runs/{cache.crop_run} is not complete.")
 
-    live_signature = crop_group.attrs.get("crop_signature")
-    live_revision = crop_group.attrs.get("crop_revision")
-    if live_signature is None or live_revision is None:
+    if cache.crop_run_reference is None:
+        raise ValueError("Flat cache binding lacks its crop_run_reference.")
+    live_reference = build_crop_run_reference(
+        crop_group,
+        run_id=cache.crop_run,
+    )
+    if _canonical_identity(live_reference) != _canonical_identity(
+        cache.crop_run_reference
+    ):
         raise ValueError(
-            f"Live crop DAG node crop_runs/{cache.crop_run} must declare "
-            "crop_signature and crop_revision."
-        )
-    if _canonical_identity(live_signature) != _canonical_identity(cache.crop_signature):
-        raise ValueError(
-            f"Flat cache crop_signature does not match crop_runs/{cache.crop_run}."
-        )
-    if _canonical_identity(live_revision) != _canonical_identity(cache.crop_revision):
-        raise ValueError(
-            f"Flat cache crop_revision does not match crop_runs/{cache.crop_run}."
+            f"Flat cache crop_run_reference does not match crop_runs/{cache.crop_run}."
         )
 
     if "roi_coordinates_full" not in crop_group:
@@ -514,7 +571,10 @@ def validate_keypoint_input_dag(
         raise ValueError(f"crop_runs/{cache.crop_run} is missing frame_indices lineage.")
     total_rows = int(crop_group["roi_coordinates_full"].shape[0])
     frame_rows = int(crop_group["frame_indices"].shape[0])
-    roi_height, roi_width = _crop_roi_shape(crop_group)
+    roi_height, roi_width = _crop_roi_shape(
+        crop_group,
+        crop_run=cache.crop_run,
+    )
     live_shape = (total_rows, roi_height, roi_width)
     if frame_rows != total_rows:
         raise ValueError(

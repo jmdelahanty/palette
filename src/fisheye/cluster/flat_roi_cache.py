@@ -34,6 +34,11 @@ from fisheye.cluster.lsf.runtime import (
 from fisheye.shared.flat_roi_cache import build_flat_roi_cache
 from fisheye.shared.metadata import get_video_source_path
 from fisheye.shared.run_provenance import json_ready
+from fisheye.shared.zarr.crop_consumer import (
+    build_crop_run_reference,
+    strict_crop_fixed_roi_shape,
+    strict_crop_source_frame_shape,
+)
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
 
@@ -94,6 +99,7 @@ def cache_contract_snapshot_path(*, run_root: Path, target_id: str) -> Path:
 
 def _cache_contract(cache: FlatRoiCacheBinding) -> dict[str, Any]:
     return {
+        "crop_run_reference": json_ready(cache.crop_run_reference),
         "crop_signature": json_ready(cache.crop_signature),
         "crop_revision": json_ready(cache.crop_revision),
         "shape": list(cache.shape),
@@ -109,6 +115,16 @@ def _validate_binding_contract(
         raise ValueError("Published cache shape does not match the planned contract.")
     if binding.total_bytes != int(expected.get("total_bytes") or -1):
         raise ValueError("Published cache size does not match the planned contract.")
+    if json.dumps(
+        json_ready(binding.crop_run_reference),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) != json.dumps(
+        expected.get("crop_run_reference"),
+        sort_keys=True,
+        separators=(",", ":"),
+    ):
+        raise ValueError("Published cache crop_run_reference drifted from the plan.")
     for field in ("crop_signature", "crop_revision"):
         actual = json_ready(getattr(binding, field))
         if json.dumps(actual, sort_keys=True, separators=(",", ":")) != json.dumps(
@@ -121,7 +137,7 @@ def _crop_shape_and_identity(
     analysis_zarr: Path,
     *,
     crop_run: str,
-) -> tuple[tuple[int, int, int], Any, Any, str, bool, str]:
+) -> tuple[tuple[int, int, int], dict[str, object], Any, Any, str, bool, str]:
     root = open_zarr_group_direct(analysis_zarr, mode="r")
     crop_parent = root.get("crop_runs")
     if crop_parent is None or crop_run not in crop_parent:
@@ -129,12 +145,9 @@ def _crop_shape_and_identity(
     crop_group = crop_parent[crop_run]
     if not is_run_complete_in_parent(crop_parent, crop_group):
         raise ValueError(f"crop_runs/{crop_run} is not complete.")
+    crop_run_reference = build_crop_run_reference(crop_group, run_id=crop_run)
     signature = crop_group.attrs.get("crop_signature")
     revision = crop_group.attrs.get("crop_revision")
-    if signature is None or revision is None:
-        raise ValueError(
-            f"crop_runs/{crop_run} must declare crop_signature and crop_revision."
-        )
     coordinates = crop_group.get("roi_coordinates_full")
     frame_indices = crop_group.get("frame_indices")
     if coordinates is None or frame_indices is None:
@@ -144,15 +157,24 @@ def _crop_shape_and_identity(
     rows = int(coordinates.shape[0])
     if int(frame_indices.shape[0]) != rows:
         raise ValueError(f"crop_runs/{crop_run} has inconsistent row lineage.")
-    roi_size = crop_group.attrs.get("roi_size")
-    if isinstance(roi_size, (list, tuple)) and len(roi_size) == 2:
-        roi_height, roi_width = int(roi_size[0]), int(roi_size[1])
+    strict_roi_shape = strict_crop_fixed_roi_shape(
+        crop_group,
+        run_id=crop_run,
+    )
+    if strict_roi_shape is not None:
+        roi_height, roi_width = strict_roi_shape
     else:
-        roi_images = crop_group.get("roi_images")
-        roi_shape = getattr(roi_images, "shape", ())
-        if len(roi_shape) < 3:
-            raise ValueError(f"crop_runs/{crop_run} does not declare a fixed ROI size.")
-        roi_height, roi_width = int(roi_shape[1]), int(roi_shape[2])
+        roi_size = crop_group.attrs.get("roi_size")
+        if isinstance(roi_size, (list, tuple)) and len(roi_size) == 2:
+            roi_height, roi_width = int(roi_size[0]), int(roi_size[1])
+        else:
+            roi_images = crop_group.get("roi_images")
+            roi_shape = getattr(roi_images, "shape", ())
+            if len(roi_shape) < 3:
+                raise ValueError(
+                    f"crop_runs/{crop_run} does not declare a fixed ROI size."
+                )
+            roi_height, roi_width = int(roi_shape[1]), int(roi_shape[2])
     storage_mode = str(crop_group.attrs.get("crop_storage_mode") or "").strip()
     if storage_mode not in {"geometry_only", "materialized"}:
         storage_mode = "materialized" if "roi_images" in crop_group else "geometry_only"
@@ -185,6 +207,12 @@ def _crop_shape_and_identity(
         or root.attrs.get("source_video_height")
         or crop_group.attrs.get("height")
     )
+    strict_frame_shape = strict_crop_source_frame_shape(
+        crop_group,
+        run_id=crop_run,
+    )
+    if strict_frame_shape is not None:
+        height_px, frame_width = strict_frame_shape
     if storage_mode == "materialized":
         source_kind = "roi_images"
         eligible = False
@@ -211,6 +239,7 @@ def _crop_shape_and_identity(
         reason = "geometry_only_external_video_with_known_dimensions"
     return (
         (rows, roi_height, roi_width),
+        crop_run_reference,
         signature,
         revision,
         source_kind,
@@ -236,7 +265,15 @@ def plan_flat_roi_cache_binding(
             "Planned cache output already exists; select the existing-cache policy or "
             f"choose a new path: {resolved_manifest}"
         )
-    shape, signature, revision, source_kind, nvdec_eligible, nvdec_reason = (
+    (
+        shape,
+        crop_run_reference,
+        signature,
+        revision,
+        source_kind,
+        nvdec_eligible,
+        nvdec_reason,
+    ) = (
         _crop_shape_and_identity(resolved_zarr, crop_run=str(crop_run))
     )
     if shape[1] < int(min_roi_size) or shape[2] < int(min_roi_size):
@@ -255,6 +292,7 @@ def plan_flat_roi_cache_binding(
         shape=shape,
         total_bytes=int(shape[0]) * int(shape[1]) * int(shape[2]),
         payload_sha256=None,
+        crop_run_reference=crop_run_reference,
         availability="planned",
         producer_job_key=str(producer_job_key),
         source_kind=source_kind,

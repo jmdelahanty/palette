@@ -57,6 +57,7 @@ from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed
 
 
 CROP_SNAPSHOT_PUBLICATION_SCHEMA_ID = "palette.crop_geometry.production_publication"
@@ -261,6 +262,11 @@ def _mark_failed_import(path: Path, *, error: BaseException) -> None:
             }
         )
         run.attrs.put(attrs)
+        mark_run_failed(
+            run,
+            run_name=path.name,
+            error=f"{type(error).__name__}: {error}",
+        )
     except Exception:
         return
 
@@ -388,6 +394,7 @@ def publish_crop_geometry_production_candidate(
                 raise RuntimeError(
                     "Imported crop candidate is not complete and staged."
                 )
+            mark_run_complete(run, run_name=candidate_id)
 
         atomic_receipt = atomic_publish_run_group(
             AtomicRunPublishSpec(
