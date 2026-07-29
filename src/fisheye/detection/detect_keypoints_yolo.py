@@ -1684,6 +1684,7 @@ def detect_keypoints_yolo(
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
     roi_cache_manifest: Optional[Path] = None,
+    roi_cache_expected_archive_path: Optional[Path] = None,
     roi_work_package_manifest: Optional[Path] = None,
     roi_cache_source_tier: Optional[str] = None,
     roi_cache_staged_to_node_scratch: bool = False,
@@ -1743,6 +1744,13 @@ def detect_keypoints_yolo(
     if roi_cache_manifest is not None and roi_work_package_manifest is not None:
         raise ValueError(
             "roi_cache_manifest and roi_work_package_manifest are mutually exclusive."
+        )
+    if (
+        roi_cache_expected_archive_path is not None
+        and roi_cache_manifest is None
+    ):
+        raise ValueError(
+            "roi_cache_expected_archive_path requires roi_cache_manifest."
         )
     if (
         roi_work_package_manifest is not None
@@ -1861,6 +1869,7 @@ def detect_keypoints_yolo(
             roi_live_gpu_chunk_frames=roi_live_gpu_chunk_frames,
             roi_cache_dir=roi_cache_dir,
             roi_cache_manifest=roi_cache_manifest,
+            roi_cache_expected_archive_path=roi_cache_expected_archive_path,
             console=console,
         )
     boundary = _ACTIVE_KEYPOINT_ATTEMPT.get()
@@ -3194,6 +3203,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
     )
+    parser.add_argument(
+        "--roi-cache-expected-archive-path",
+        type=Path,
+        default=None,
+        help=(
+            "Authority archive bound by --roi-cache-manifest when inference runs "
+            "against a byte-identical node-scratch archive copy."
+        ),
+    )
     roi_manifest_group.add_argument(
         "--roi-work-package-manifest",
         type=Path,
@@ -3287,6 +3305,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
+        roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
         roi_work_package_manifest=args.roi_work_package_manifest,
         roi_cache_source_tier=args.roi_cache_source_tier,
         roi_cache_staged_to_node_scratch=bool(args.roi_cache_staged_to_node_scratch),

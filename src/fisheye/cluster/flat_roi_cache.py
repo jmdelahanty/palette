@@ -649,6 +649,8 @@ def publish_flat_roi_cache(
     decode_backend: str,
     roi_live_acceleration: str,
     roi_live_gpu_chunk_frames: int,
+    source_video_path_override: Path | None = None,
+    compute_sha256: bool = False,
     progress_jsonl: Path | None = None,
     expected_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -685,9 +687,10 @@ def publish_flat_roi_cache(
             manifest_path=local_manifest,
             batch_size=int(batch_size),
             overwrite=False,
-            compute_sha256=False,
+            compute_sha256=bool(compute_sha256),
             roi_live_acceleration=roi_live_acceleration,
             roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
+            source_video_path_override=source_video_path_override,
             roi_decode_backend=decode_backend,
             progress_callback=emit_progress if progress_handle is not None else None,
             progress_interval_seconds=30.0,
@@ -775,6 +778,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--roi-live-acceleration", choices=("auto", "cpu", "gpu"), default="cpu"
     )
     parser.add_argument("--roi-live-gpu-chunk-frames", type=int, default=32)
+    parser.add_argument(
+        "--source-video-path-override",
+        type=Path,
+        help=(
+            "Byte-identical relocated source video used only for cache "
+            "materialization; the cache remains bound to --analysis-zarr."
+        ),
+    )
+    parser.add_argument(
+        "--sha256",
+        action="store_true",
+        help="Compute and persist the complete flat-cache payload SHA-256.",
+    )
     expected_contract = parser.add_mutually_exclusive_group()
     expected_contract.add_argument("--expected-contract-json")
     expected_contract.add_argument("--expected-contract-json-file", type=Path)
@@ -801,6 +817,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         decode_backend=args.decode_backend,
         roi_live_acceleration=args.roi_live_acceleration,
         roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
+        source_video_path_override=args.source_video_path_override,
+        compute_sha256=bool(args.sha256),
         progress_jsonl=args.progress_jsonl,
         expected_contract=expected_contract,
     )

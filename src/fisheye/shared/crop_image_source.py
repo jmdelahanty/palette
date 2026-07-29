@@ -744,6 +744,8 @@ class CropImageSource:
     frame_indices: np.ndarray
     frame_source_kind: str
     frame_source_path: str | None
+    frame_source_declared_path: str | None = None
+    frame_source_path_override_used: bool = False
     frame_shape: tuple[int, int] | None = None
     roi_read_mode: str = "materialized_crop_run"
     roi_cache_policy: str = "never"
@@ -784,12 +786,22 @@ class CropImageSource:
         roi_cache_dir: str | Path | None = None,
         roi_cache_manifest: str | Path | None = None,
         roi_cache_expected_archive_path: str | Path | None = None,
+        source_video_path_override: str | Path | None = None,
         console: Any | None = None,
     ) -> "CropImageSource":
         normalized_cache_policy = _normalize_roi_cache_policy(roi_cache_policy)
         normalized_live_acceleration = _normalize_roi_live_acceleration(roi_live_acceleration)
         live_gpu_chunk_frames = max(1, int(roi_live_gpu_chunk_frames))
         manifest_path = Path(roi_cache_manifest).expanduser() if roi_cache_manifest is not None else None
+        video_override = (
+            Path(source_video_path_override).expanduser().resolve()
+            if source_video_path_override is not None
+            else None
+        )
+        if video_override is not None and not video_override.is_file():
+            raise FileNotFoundError(
+                f"Source-video path override does not exist: {video_override}"
+            )
         if crop_run is None and manifest_path is not None:
             crop_run = crop_run_name_from_manifest(manifest_path)
         crop_parent, crop_group, crop_run_name = resolve_crop_run(
@@ -830,6 +842,11 @@ class CropImageSource:
         supplemental_flat_cache = None
         acquisition_crop_reader = None
         if storage_mode == "materialized":
+            if video_override is not None:
+                raise ValueError(
+                    "source_video_path_override is valid only for geometry-only "
+                    "raw-camera-video crop runs."
+                )
             if roi_images is None:
                 raise ValueError("Materialized crop run is missing 'roi_images'.")
             frame_source_kind = "roi_images"
@@ -841,6 +858,11 @@ class CropImageSource:
             live_acceleration_effective = None
             live_acceleration_fallback_reason = None
         elif storage_mode == COMPOSITE_CROP_STORAGE_MODE:
+            if video_override is not None:
+                raise ValueError(
+                    "source_video_path_override is valid only for geometry-only "
+                    "raw-camera-video crop runs."
+                )
             roi_images = CompositeCropArray.open(
                 crop_parent,
                 crop_group,
@@ -860,6 +882,11 @@ class CropImageSource:
             images_full = raw_video.get("images_full") if raw_video is not None else None
             acquisition_crop_video = _is_acquisition_crop_video_source(crop_group)
             if acquisition_crop_video:
+                if video_override is not None:
+                    raise ValueError(
+                        "source_video_path_override cannot replace an acquisition "
+                        "crop-video authority."
+                    )
                 crop_video_path = (
                     crop_group.attrs.get("source_crop_video_path")
                     or crop_group.attrs.get("source_video_path")
@@ -968,6 +995,11 @@ class CropImageSource:
                 live_acceleration_effective = "pynvvc_luma"
                 live_acceleration_fallback_reason = None
             elif manifest_path is not None:
+                if video_override is not None:
+                    raise ValueError(
+                        "source_video_path_override and roi_cache_manifest are "
+                        "mutually exclusive."
+                    )
                 frame_shape = _resolve_frame_shape(
                     root,
                     crop_group,
@@ -1020,8 +1052,33 @@ class CropImageSource:
                         raise ValueError(
                             "Geometry-only crop run requires raw_video/images_full or source_video_path provenance."
                         )
+                    declared_source_video_path = str(source_video_path)
                     frame_source_kind = "source_video_path"
-                    frame_source_path = str(source_video_path)
+                    frame_source_path = str(
+                        video_override
+                        if video_override is not None
+                        else declared_source_video_path
+                    )
+                    if video_override is not None:
+                        metadata = root.attrs.get("source_video_metadata")
+                        fingerprint = (
+                            metadata.get("file_fingerprint")
+                            if isinstance(metadata, Mapping)
+                            else None
+                        )
+                        expected_size = (
+                            fingerprint.get("size_bytes")
+                            if isinstance(fingerprint, Mapping)
+                            else None
+                        )
+                        if (
+                            expected_size is not None
+                            and int(video_override.stat().st_size) != int(expected_size)
+                        ):
+                            raise ValueError(
+                                "Source-video path override size differs from the "
+                                "declared source-video fingerprint."
+                            )
                     external_reader = _ExternalFrameReader(Path(frame_source_path))
                     if normalized_live_acceleration == "cpu":
                         live_acceleration_effective = "cpu"
@@ -1074,6 +1131,17 @@ class CropImageSource:
             frame_indices=frame_indices,
             frame_source_kind=frame_source_kind,
             frame_source_path=frame_source_path,
+            frame_source_declared_path=(
+                declared_source_video_path
+                if storage_mode == "geometry_only"
+                and frame_source_kind == "source_video_path"
+                else None
+            ),
+            frame_source_path_override_used=bool(
+                video_override is not None
+                and storage_mode == "geometry_only"
+                and frame_source_kind == "source_video_path"
+            ),
             frame_shape=frame_shape,
             roi_read_mode=roi_read_mode,
             roi_cache_policy=normalized_cache_policy,
@@ -1626,6 +1694,16 @@ class CropImageSource:
             "frame_source_path": self.frame_source_path,
             "frame_shape": list(self.frame_shape) if self.frame_shape is not None else None,
         }
+        if self.frame_source_path_override_used:
+            identity.update(
+                {
+                    "frame_source_declared_path": self.frame_source_declared_path,
+                    "frame_source_path_override_used": True,
+                    "override_semantics": (
+                        "byte-identical_relocation_for_cache_materialization"
+                    ),
+                }
+            )
 
         if self.frame_source_kind in {"source_video_path", "acquisition_crop_video"} and self.frame_source_path:
             source_path = Path(self.frame_source_path)

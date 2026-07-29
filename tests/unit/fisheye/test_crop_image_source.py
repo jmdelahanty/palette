@@ -205,6 +205,67 @@ def test_crop_image_source_uses_v2_root_locator_when_crop_has_no_video_path(
     source.close()
 
 
+def test_crop_image_source_uses_validated_source_video_relocation_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    declared = tmp_path / "recording" / "cams" / "source.mp4"
+    relocated = tmp_path / "scratch" / "source.mp4"
+    relocated.parent.mkdir(parents=True)
+    relocated.write_bytes(b"relocated-video")
+    root = _make_external_geometry_only_root(str(declared))
+    root.attrs["source_video_metadata"] = {
+        "file_fingerprint": {"size_bytes": relocated.stat().st_size}
+    }
+    captured: dict[str, Path] = {}
+
+    class _FakeExternalReader:
+        def __init__(self, path: Path) -> None:
+            captured["path"] = path
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(crop_mod, "_ExternalFrameReader", _FakeExternalReader)
+
+    source = CropImageSource.open(
+        root,
+        roi_cache_policy="never",
+        roi_live_acceleration="cpu",
+        source_video_path_override=relocated,
+    )
+
+    assert source.frame_source_path == str(relocated.resolve())
+    assert source.frame_source_declared_path == str(declared)
+    assert source.frame_source_path_override_used is True
+    assert captured["path"] == relocated.resolve()
+    identity = source._build_frame_source_identity()
+    assert identity["frame_source_declared_path"] == str(declared)
+    assert identity["frame_source_path_override_used"] is True
+    source.close()
+
+
+def test_crop_image_source_rejects_wrong_sized_source_video_override(
+    tmp_path: Path,
+) -> None:
+    declared = tmp_path / "recording" / "cams" / "source.mp4"
+    relocated = tmp_path / "scratch" / "source.mp4"
+    relocated.parent.mkdir(parents=True)
+    relocated.write_bytes(b"wrong-size")
+    root = _make_external_geometry_only_root(str(declared))
+    root.attrs["source_video_metadata"] = {
+        "file_fingerprint": {"size_bytes": relocated.stat().st_size + 1}
+    }
+
+    with pytest.raises(ValueError, match="override size differs"):
+        CropImageSource.open(
+            root,
+            roi_cache_policy="never",
+            roi_live_acceleration="cpu",
+            source_video_path_override=relocated,
+        )
+
+
 def _make_acquisition_crop_video_root(crop_video_path: str) -> _FakeGroup:
     root = _make_root()
 

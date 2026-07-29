@@ -128,6 +128,7 @@ def build_flat_roi_cache(
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
     roi_decode_backend: str = "auto",
+    source_video_path_override: str | Path | None = None,
     console: Any | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     progress_interval_seconds: float = 30.0,
@@ -162,6 +163,7 @@ def build_flat_roi_cache(
         roi_cache_policy="never",
         roi_live_acceleration=source_open_live_acceleration,
         roi_live_gpu_chunk_frames=roi_live_gpu_chunk_frames,
+        source_video_path_override=source_video_path_override,
         console=console,
     )
     try:
