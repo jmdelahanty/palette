@@ -487,6 +487,16 @@ def publish_crop_geometry_production_candidate(
             "node_local_materialization": {
                 "session_path": str(session),
                 "retained_after_success": bool(keep_scratch),
+                "writer_receipt": {
+                    "publication_seconds": publication.receipt["publication_seconds"],
+                    "phase_seconds": publication.receipt["phase_seconds"],
+                    "per_array_write_seconds": publication.receipt[
+                        "per_array_write_seconds"
+                    ],
+                    "writes": publication.receipt["writes"],
+                    "logical_hashes": publication.receipt["logical_hashes"],
+                    "consolidation": publication.receipt["consolidation"],
+                },
             },
             "atomic_publication": atomic_receipt,
             "validation": {
