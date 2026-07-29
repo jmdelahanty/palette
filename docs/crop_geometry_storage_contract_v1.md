@@ -29,6 +29,31 @@ ineligible, registry-unregistered, and unselected. Guarded selector activation
 and collection-wide refined-detection activation remain separate blockers; the
 workflow fragment cannot bypass either authority gate.
 
+## Selector-Ineligible Read Benchmark
+
+The retained `crop_geometry_coordinate_catalog_crimson_20260728_v2` canary was
+read directly from PRFS on both the Palette workstation and LSF compute host
+`h07u26`. It contains 22,926 rows, 13 arrays, and 3,671,056 logical bytes. Each
+of three passes reopened the run, resolved its immutable manifest-bound run
+reference, streamed every array, and verified all 13 decoded SHA-256 values.
+The first pass also requested page-cache eviction with
+`POSIX_FADV_DONTNEED` for all 30 physical files.
+
+| Client | Median direct open | Median consolidated open | Median full scan | Median full-scan rate |
+| --- | ---: | ---: | ---: | ---: |
+| Workstation | 25.8 ms | 9.2 ms | 86.1 ms | 40.7 MiB/s |
+| LSF `h07u26` | 4.5 ms | 4.2 ms | 28.7 ms | 122.0 MiB/s |
+
+The compute run was LSF job `153227338` and completed without stderr. Its
+1,024-row, four-array windows took approximately 5.2--5.9 ms after the first
+cold window; workstation windows took approximately 23--28 ms after the first
+cold window. Evidence is retained under
+`recordings/.palette_benchmarks/crop_snapshot_reads/20260729_crop_v2_dag_integration_0d31e0b9/`.
+
+This closes the representative read gate for the small coordinate canary. It
+does not substitute for a million-row publication/read benchmark against the
+first approved production-shaped refined authority.
+
 ## Purpose
 
 This contract freezes the immutable geometry and lineage needed to extract
@@ -187,7 +212,8 @@ Before production integration:
 - [x] publish a small immutable canary outside production selectors;
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
 - [ ] test Palette pixel materialization and downstream keypoint/mask readers;
-- [ ] benchmark publication and representative row/window reads;
+- [x] benchmark representative row/window/full reads on workstation and LSF;
+- [ ] benchmark production-candidate publication and reads at recording scale;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.
 
