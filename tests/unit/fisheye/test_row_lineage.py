@@ -63,6 +63,12 @@ class _FakeGroup:
 
 def _seed_lineage(group: _FakeGroup, *, detection_indices: np.ndarray | None = None) -> None:
     group.create_array("frame_indices", data=np.array([0, 1, 1], dtype=np.int32), chunks=(2,), overwrite=True)
+    group.create_array(
+        "source_acquisition_frame_index",
+        data=np.array([0, 1, 1], dtype=np.int64),
+        chunks=(2,),
+        overwrite=True,
+    )
     group.create_array("source_frame_indices", data=np.array([0, 5000, 5000], dtype=np.int64), chunks=(2,), overwrite=True)
     group.create_array("source_clip_indices", data=np.array([0, 1, 1], dtype=np.int32), chunks=(2,), overwrite=True)
     group.create_array(
@@ -93,6 +99,7 @@ def test_copy_row_lineage_arrays_copies_canonical_identity() -> None:
 
     assert result.copied == ROW_LINEAGE_ARRAYS
     assert result.missing == ()
+    assert target["source_acquisition_frame_index"][:].tolist() == [0, 1, 1]
     assert target["source_frame_indices"][:].tolist() == [0, 5000, 5000]
     assert target["source_clip_indices"][:].tolist() == [0, 1, 1]
     assert target["source_clip_local_frame_indices"][:].tolist() == [0, 12, 12]
@@ -141,6 +148,9 @@ def test_copy_row_lineage_arrays_from_sources_accepts_resolved_arrays() -> None:
         target,
         {
             "frame_indices": source["frame_indices"],
+            "source_acquisition_frame_index": source[
+                "source_acquisition_frame_index"
+            ],
             "source_frame_indices": source["source_frame_indices"],
             "source_clip_indices": source["source_clip_indices"],
             "source_clip_local_frame_indices": source["source_clip_local_frame_indices"],
@@ -213,6 +223,9 @@ def test_assert_row_lineage_sources_equal_uses_resolved_arrays() -> None:
     assert_row_lineage_sources_equal(
         {
             "frame_indices": reference["frame_indices"],
+            "source_acquisition_frame_index": reference[
+                "source_acquisition_frame_index"
+            ],
             "source_frame_indices": reference["source_frame_indices"],
             "source_clip_indices": reference["source_clip_indices"],
             "source_clip_local_frame_indices": reference["source_clip_local_frame_indices"],
@@ -225,6 +238,9 @@ def test_assert_row_lineage_sources_equal_uses_resolved_arrays() -> None:
         },
         {
             "frame_indices": other["frame_indices"],
+            "source_acquisition_frame_index": other[
+                "source_acquisition_frame_index"
+            ],
             "source_frame_indices": other["source_frame_indices"],
             "source_clip_indices": other["source_clip_indices"],
             "source_clip_local_frame_indices": other["source_clip_local_frame_indices"],

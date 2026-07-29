@@ -22,6 +22,7 @@ ROW_ALIGNMENT_ARRAYS: Tuple[str, ...] = (
 )
 ROW_IDENTITY_ARRAYS: Tuple[str, ...] = (
     INSTANCE_KEY_ARRAY,
+    "source_acquisition_frame_index",
     "source_frame_indices",
     "source_clip_indices",
     "source_clip_local_frame_indices",
@@ -33,6 +34,7 @@ ROW_LINEAGE_ARRAYS: Tuple[str, ...] = ROW_ALIGNMENT_ARRAYS + ROW_IDENTITY_ARRAYS
 PER_ROI_ROW_LINEAGE_ARRAYS = {
     INSTANCE_KEY_ARRAY,
     "frame_indices",
+    "source_acquisition_frame_index",
     "source_frame_indices",
     "source_clip_indices",
     "source_clip_local_frame_indices",
