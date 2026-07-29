@@ -37,6 +37,13 @@ The run lives at `crop_runs/<run>` and contains exactly these arrays:
 `detection_indices`, and `source_frame_indices` are forbidden. Dense pixels
 belong to keyed work packages, caches, or immutable training artifacts.
 
+Coordinate meanings are assigned by the shared v1 coordinate-surface catalog:
+normalized authority, source-camera continuous pixels/half-open edges, integer
+extraction origin and extent, and ROI-local half-open edges remain distinct.
+The crop schema exposes this catalog separately without changing the already
+frozen v1 run-manifest bytes. Persisting it in the run envelope requires a new
+manifest version rather than silently revising v1.
+
 ## Crop Policy
 
 Every run binds a canonical-JSON/SHA-256 crop policy containing:

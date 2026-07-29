@@ -402,6 +402,15 @@ class CropGeometrySchema:
     def binding_paths(self) -> tuple[str, ...]:
         return tuple(binding.path for binding in self.bindings)
 
+    def coordinate_contract_manifest(self) -> dict[str, object]:
+        """Return exact coordinate semantics without changing schema-v1 bytes."""
+
+        from fisheye.shared.zarr.coordinate_contracts import (
+            array_coordinate_catalog_manifest,
+        )
+
+        return array_coordinate_catalog_manifest(self.contracts)
+
     def validate(
         self,
         arrays: Mapping[str, Any],
