@@ -410,6 +410,11 @@ It must not be encoded by silently changing `heading_deg`.
       selector-ineligible publisher, and legacy-YOLO preparation adapter.
 - [x] Validate a deterministic selector-ineligible YOLO-shaped raw-v2 canary,
       including a mask-free keypoint-to-body-frame chain.
+- [x] Freeze the representative 23,287-frame / 22,926-row crop-v2 canary
+      inputs, durable-cache namespace, node-scratch relocation semantics, and
+      atomic selector-ineligible publication driver.
+- [ ] Materialize and validate the reusable `uint8[22926,512,512]`
+      `flat_bin_v1` cache under NRS, including a complete payload SHA-256.
 - [ ] Publish and measure one representative selector-ineligible YOLO canary
       from a real completed run before inserting the quality DAG node.
 - [ ] Make clipped finalization and later delta compaction publish the same
@@ -428,6 +433,28 @@ It must not be encoded by silently changing `heading_deg`.
 - [ ] Preserve source crop, pixel-package, skeleton, model, and coordinate
       provenance through every publication.
 - [ ] Keep production selectors unchanged until all gates pass.
+
+The representative canary uses the geometry-only crop snapshot at
+`crop_runs/crop_geometry_publication_read_crimson_20260729_v2` in the
+2026-01-28 coordinate-catalog fixture. That snapshot intentionally forbids
+`roi_images`; its exact pixel authority is the 23,287-frame Cam2010093 source
+video and the Orange PyNvVideoCodec luma `uint8` contract. The reusable cache
+target is:
+
+```text
+/nrs/johnson/palette_staging/flat_roi_cache/
+  keypoint_v2_cropv2_20260729_v2/roi_cache/
+  20260128_arena1_cam2010093_cropv2.flat_roi_cache.{json,bin}
+```
+
+Cache construction accepts an explicitly relocated byte-identical video while
+retaining the original crop archive as the cache authority. YOLO may consume
+that cache from a byte-identical node-scratch archive copy only when it passes
+the original authority archive as the expected cache binding. The canary
+builds raw keypoints, observation-local quality, and body frame on node-local
+scratch, validates every exact schema and manifest there, copies the complete
+workflow to a hidden shared temporary directory, then reveals it with one
+same-filesystem rename. It never writes a production selector or registry row.
 
 ### Numerical and storage gates
 
