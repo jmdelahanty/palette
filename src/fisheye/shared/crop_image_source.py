@@ -29,9 +29,13 @@ from fisheye.shared.flat_roi_cache import crop_run_name_from_manifest, open_flat
 from fisheye.shared.grayscale import rgb_to_gray_bt601_cv2_uint8
 from fisheye.shared.roi_pixel_contract import (
     ROI_IMAGE_REPRESENTATION,
+    SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+    SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME,
+    SOURCE_PIXELS_RAW_CAMERA_VIDEO,
     crop_image_source_live_pixel_contract,
     crop_run_pixel_contract,
     normalize_pixel_contract,
+    orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.source_video_metadata import (
     SourceVideoMetadataMissingError,
@@ -39,6 +43,7 @@ from fisheye.shared.source_video_metadata import (
 )
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr.crop_consumer import (
+    authoritative_crop_roi_pixel_contract,
     build_crop_run_reference,
     strict_crop_fixed_roi_shape,
     strict_crop_source_frame_shape,
@@ -255,8 +260,13 @@ def _resolve_storage_mode(crop_group: zarr.Group) -> str:
 
 def _is_acquisition_crop_video_source(crop_group: zarr.Group) -> bool:
     for attr_name in ("source_pixels", "roi_pixel_provider", "source_type"):
-        if _normalize_run_name(crop_group.attrs.get(attr_name)) == "acquisition_crop_video":
+        if _normalize_run_name(crop_group.attrs.get(attr_name)) in {
+            SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+            SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME,
+        }:
             return True
+    # Compatibility only: old acquisition-crop manifests predate the explicit
+    # source profiles. New writers must declare one of the profiles above.
     return "source_crop_video_frame_indices" in crop_group and bool(
         crop_group.attrs.get("source_crop_video_path")
     )
@@ -436,7 +446,10 @@ def _resolve_crop_group_pixel_contract(
         or normalize_pixel_contract(crop_group.attrs.get("crop_pixel_contract"))
     )
     pixel_stored_modes = {"materialized", COMPOSITE_CROP_STORAGE_MODE}
-    if stored is not None and crop_storage_mode in pixel_stored_modes:
+    if stored is not None and (
+        crop_storage_mode in pixel_stored_modes
+        or frame_source_kind == "acquisition_crop_video"
+    ):
         return stored
     if crop_storage_mode in pixel_stored_modes:
         return crop_run_pixel_contract(
@@ -878,6 +891,21 @@ class CropImageSource:
                             "source_pixel_kind_codes length "
                             f"{source_pixel_kind_codes.shape[0]} does not match roi count {total_rois}"
                         )
+                    declared_pixel_source = str(
+                        crop_group.attrs.get("source_pixels")
+                        or crop_group.attrs.get("roi_pixel_provider")
+                        or ""
+                    ).strip()
+                    if (
+                        declared_pixel_source
+                        == SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME
+                        and np.any(~np.isin(source_pixel_kind_codes, (0, 1)))
+                    ):
+                        raise ValueError(
+                            "Hybrid acquisition crop run source_pixel_kind_codes "
+                            "must contain only 0 (acquisition crop video) or 1 "
+                            "(full-frame supplemental cache)."
+                        )
                     if np.any(source_pixel_kind_codes != 0):
                         supplemental_cache_rows_arr = crop_group.get(
                             "supplemental_cache_row_indices"
@@ -909,6 +937,28 @@ class CropImageSource:
                             Path(str(supplemental_manifest)).expanduser(),
                             expected_crop_run=crop_run_name,
                         )
+                        if (
+                            declared_pixel_source
+                            == SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME
+                        ):
+                            builder = supplemental_flat_cache.manifest.get("builder")
+                            supplemental_contract = (
+                                normalize_pixel_contract(builder.get("pixel_contract"))
+                                if isinstance(builder, Mapping)
+                                else None
+                            )
+                            expected_supplemental_contract = (
+                                orange_mono_pynvvc_luma_pixel_contract(
+                                    source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+                                )
+                            )
+                            if supplemental_contract != expected_supplemental_contract:
+                                supplemental_flat_cache.close()
+                                raise ValueError(
+                                    "Hybrid acquisition crop run supplemental cache "
+                                    "does not carry the authoritative raw-camera "
+                                    "PyNvVC luma pixel contract."
+                                )
                 frame_source_kind = "acquisition_crop_video"
                 frame_source_path = str(crop_video_path)
                 frame_shape = roi_shape
@@ -1184,6 +1234,7 @@ class CropImageSource:
         if self._roi_images is not None:
             assert self._roi_images is not None
             return _normalize_roi_batch(np.asarray(self._roi_images[start:end]))
+        self._require_authoritative_live_pixel_contract()
         return self._read_live_indices(np.arange(start, end, dtype=np.int64))
 
     def read_indices(self, indices: Sequence[int] | np.ndarray) -> np.ndarray:
@@ -1197,7 +1248,24 @@ class CropImageSource:
             assert self._roi_images is not None
             return _normalize_roi_batch(np.asarray(self._roi_images[roi_indices]))
 
+        self._require_authoritative_live_pixel_contract()
         return self._read_live_indices(roi_indices)
+
+    def _require_authoritative_live_pixel_contract(self) -> None:
+        required = authoritative_crop_roi_pixel_contract(
+            self.crop_group,
+            run_id=self.crop_run_name,
+        )
+        if required is None:
+            return
+        observed = normalize_pixel_contract(self.roi_pixel_contract)
+        if observed != required:
+            raise ValueError(
+                "Authoritative crop pixels require the "
+                f"{required['name']!r} materialization contract; live reader "
+                f"{None if observed is None else observed.get('name')!r} is not "
+                "an allowed substitute. Build or open the bound flat ROI cache."
+            )
 
     def _read_live_indices(self, roi_indices: np.ndarray) -> np.ndarray:
         if self.frame_source_kind == "acquisition_crop_video":
@@ -1307,6 +1375,23 @@ class CropImageSource:
             expected_crop_run=self.crop_run_name,
             expected_shape=expected_shape,
         )
+        builder = cache_arr.manifest.get("builder")
+        stored_contract = (
+            normalize_pixel_contract(builder.get("pixel_contract"))
+            if isinstance(builder, dict)
+            else None
+        )
+        required_contract = authoritative_crop_roi_pixel_contract(
+            self.crop_group,
+            run_id=self.crop_run_name,
+        )
+        if required_contract is not None and stored_contract != required_contract:
+            cache_arr.close()
+            raise ValueError(
+                "Flat ROI cache pixel contract does not match the authoritative "
+                f"crop source: expected {required_contract['name']!r}, observed "
+                f"{None if stored_contract is None else stored_contract.get('name')!r}."
+            )
         self._roi_images = cache_arr
         self.roi_cache_used = True
         self.roi_cache_created = False
@@ -1320,9 +1405,8 @@ class CropImageSource:
             self.roi_cache_canonical_path = str(cache_arr.manifest_path)
         self.roi_cache_backend = "flat_bin_v1"
         self.roi_read_mode = "flat_bin_roi_cache"
-        builder = cache_arr.manifest.get("builder")
         if isinstance(builder, dict):
-            contract = normalize_pixel_contract(builder.get("pixel_contract"))
+            contract = stored_contract
             if contract is not None:
                 self.roi_pixel_contract = contract
                 self.roi_image_representation = _image_representation_from_contract(contract)

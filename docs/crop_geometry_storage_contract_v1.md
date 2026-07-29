@@ -17,11 +17,12 @@ or namespace.
 
 Downstream flat-cache and keypoint planning bind strict crop runs through a
 validated `palette.crop_geometry.run_reference` containing the immutable run
-manifest and logical-content digests. They do not synthesize legacy
-`crop_signature` or `crop_revision` values. Historical signed runs remain
-available through an explicitly labelled compatibility profile; unversioned
-historical runs are accepted only by the local temporary-cache reader's
-explicit compatibility path.
+manifest and logical-content digests. Maintained acquisition crop-video runs
+use a separate `signed_current_source_v1` reference until their typed manifest
+envelope is complete. Historical signature/revision pairs remain available
+through an explicitly labelled compatibility profile; unversioned historical
+runs are accepted only by the local temporary-cache reader's explicit
+compatibility path.
 
 Production candidates stamp `palette.zarr_run_completion.v1` complete/failed
 markers in addition to their crop-specific state. They remain selector-
@@ -123,6 +124,23 @@ acquisition frame domain, dimensions, decoded `uint8` grayscale semantics, and
 the digest of the external authority manifest. The shadow publisher accepts a
 typed, already-proven authority.
 
+There are two maintained base pixel-source families plus an explicit hybrid;
+none is a fallback for another:
+
+| Source family | Pixel domain | Required lineage |
+| --- | --- | --- |
+| Full-frame camera video | Decode the full camera frame, then apply each persisted integer crop window and padding rule. | Camera-frame identity, full-frame video authority, crop policy, and `roi_coordinates_full`/`roi_sizes_full`. |
+| Acquisition crop video | Decode the already-cropped Orange video frame directly. | Crop-video frame index, recording-frame mapping, crop-meta row, full-frame `source_crop_xywh`, and any explicit supplemental-row routing. |
+| Hybrid acquisition/full-frame | Route each row explicitly to acquisition crop video or a full-frame-derived supplemental cache. | Both authority bindings plus `source_pixel_kind_codes` and the corresponding source-row index. |
+
+Both use the accepted Orange monochrome PyNvVC luma semantics today. Their
+pixel-contract `source_pixels` values remain distinct (`raw_camera_video`
+versus `acquisition_crop_video`) because their frame lookup and geometry are
+not interchangeable. Hybrid artifacts declare
+`hybrid_acquisition_crop_video_offline_supplement` and bind the per-row routing
+array. A cache or work package must bind the exact source family that produced
+its bytes.
+
 `bind_refined_crop_source_pixel_authority()` is the future-facing strict
 authority binder for a single external full-frame source video. It reopens the
 direct archive metadata, requires the mirrored acquisition publication state to be
@@ -133,7 +151,9 @@ locator, and recomputes the live `stat_v1` fingerprint. It then binds the
 authority digest. Recording identity, camera identity, `F`, width, and height
 must exactly match the refined handoff. Materialized source arrays, acquisition
 crop videos, and clipped collections intentionally require separate typed
-authority binders. These are contract boundaries, not compatibility adapters:
+authority binders. Acquisition crop video is a maintained current source; its
+separate binder reflects different lineage, not legacy status. These are
+contract boundaries, not compatibility adapters:
 they do not probe dtypes, translate aliases, infer identities, or fall back to
 another source.
 
@@ -213,7 +233,10 @@ Before production integration:
 - [x] obtain parallel Palette producer/DAG review of this exact contract;
 - [x] publish a small immutable canary outside production selectors;
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
-- [ ] test Palette pixel materialization and downstream keypoint/mask readers;
+- [x] bind full-frame and acquisition crop-video materializations to distinct
+      exact pixel contracts and reject cross-source cache substitution;
+- [ ] run the real Palette pixel materialization and downstream keypoint/mask
+      compute canary;
 - [x] benchmark representative row/window/full reads on workstation and LSF;
 - [x] benchmark selector-ineligible publication and record object counts;
 - [x] benchmark representative row/window reads in Crimson;

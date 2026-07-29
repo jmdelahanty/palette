@@ -35,6 +35,7 @@ from fisheye.shared.flat_roi_cache import build_flat_roi_cache
 from fisheye.shared.metadata import get_video_source_path
 from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.zarr.crop_consumer import (
+    authoritative_crop_roi_pixel_contract,
     build_crop_run_reference,
     strict_crop_fixed_roi_shape,
     strict_crop_source_frame_shape,
@@ -104,6 +105,7 @@ def _cache_contract(cache: FlatRoiCacheBinding) -> dict[str, Any]:
         "crop_revision": json_ready(cache.crop_revision),
         "shape": list(cache.shape),
         "total_bytes": cache.total_bytes,
+        "pixel_contract": json_ready(cache.pixel_contract),
     }
 
 
@@ -115,7 +117,7 @@ def _validate_binding_contract(
         raise ValueError("Published cache shape does not match the planned contract.")
     if binding.total_bytes != int(expected.get("total_bytes") or -1):
         raise ValueError("Published cache size does not match the planned contract.")
-    if json.dumps(
+    if "crop_run_reference" in expected and json.dumps(
         json_ready(binding.crop_run_reference),
         sort_keys=True,
         separators=(",", ":"),
@@ -131,13 +133,35 @@ def _validate_binding_contract(
             expected.get(field), sort_keys=True, separators=(",", ":")
         ):
             raise ValueError(f"Published cache {field} drifted from the planned contract.")
+    expected_pixel_contract = expected.get("pixel_contract")
+    if expected_pixel_contract is not None and json.dumps(
+        json_ready(binding.pixel_contract),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) != json.dumps(
+        expected_pixel_contract,
+        sort_keys=True,
+        separators=(",", ":"),
+    ):
+        raise ValueError(
+            "Published cache pixel_contract drifted from the planned contract."
+        )
 
 
 def _crop_shape_and_identity(
     analysis_zarr: Path,
     *,
     crop_run: str,
-) -> tuple[tuple[int, int, int], dict[str, object], Any, Any, str, bool, str]:
+) -> tuple[
+    tuple[int, int, int],
+    dict[str, object],
+    Any,
+    Any,
+    dict[str, Any] | None,
+    str,
+    bool,
+    str,
+]:
     root = open_zarr_group_direct(analysis_zarr, mode="r")
     crop_parent = root.get("crop_runs")
     if crop_parent is None or crop_run not in crop_parent:
@@ -146,6 +170,10 @@ def _crop_shape_and_identity(
     if not is_run_complete_in_parent(crop_parent, crop_group):
         raise ValueError(f"crop_runs/{crop_run} is not complete.")
     crop_run_reference = build_crop_run_reference(crop_group, run_id=crop_run)
+    pixel_contract = authoritative_crop_roi_pixel_contract(
+        crop_group,
+        run_id=crop_run,
+    )
     signature = crop_group.attrs.get("crop_signature")
     revision = crop_group.attrs.get("crop_revision")
     coordinates = crop_group.get("roi_coordinates_full")
@@ -242,6 +270,7 @@ def _crop_shape_and_identity(
         crop_run_reference,
         signature,
         revision,
+        pixel_contract,
         source_kind,
         eligible,
         reason,
@@ -270,6 +299,7 @@ def plan_flat_roi_cache_binding(
         crop_run_reference,
         signature,
         revision,
+        pixel_contract,
         source_kind,
         nvdec_eligible,
         nvdec_reason,
@@ -293,6 +323,7 @@ def plan_flat_roi_cache_binding(
         total_bytes=int(shape[0]) * int(shape[1]) * int(shape[2]),
         payload_sha256=None,
         crop_run_reference=crop_run_reference,
+        pixel_contract=pixel_contract,
         availability="planned",
         producer_job_key=str(producer_job_key),
         source_kind=source_kind,

@@ -185,7 +185,7 @@ are not candidates for the analysis-archive crop schema.
 | Ordinary crop | `tracking/crop.py` | top-level dense `uint8 roi_images` | creates an ineligible candidate, validates coordinates, then updates crop selectors | Current production; only canonical raw `detect_runs/<run>` is admitted by the hardened publication preflight (`src/fisheye/tracking/crop.py:617-633`, `src/fisheye/tracking/crop.py:826-842`) |
 | Incremental standalone | `tracking/incremental_crop.py` | top-level dense `uint8 roi_images`; matching rows may be copied from a prior complete run | creates a fresh immutable run and selects it only after source revalidation and readback | Implemented reference materializer; still raw-detection-bound (`src/fisheye/tracking/incremental_crop.py:1265-1317`, `src/fisheye/tracking/incremental_crop.py:1639-1674`) |
 | Refined handoff | `shared/zarr/refined_detection_crop_source.py` plus `tracking/refined_detection_crop_handoff.py` | none | validates and plans only; receipt says `crop_publication_authorized=false` | Future-facing input boundary, not a writer (`src/fisheye/shared/zarr/refined_detection_crop_source.py:278-308`, `src/fisheye/tracking/refined_detection_crop_handoff.py:77-93`) |
-| Acquisition crop video | `utils/build_analysis_acquisition_crop_run.py` | geometry plus an external acquisition crop video | keeps legacy `latest` materialized-compatible and advances `latest_any` | Current specialized geometry-only producer (`src/fisheye/utils/build_analysis_acquisition_crop_run.py:368-385`, `src/fisheye/utils/build_analysis_acquisition_crop_run.py:452-520`) |
+| Acquisition crop video | `utils/build_analysis_acquisition_crop_run.py` | geometry plus an external acquisition crop video | preserves the older materialized-reader `latest` behavior and advances `latest_any` | Current first-class geometry-only producer and pixel source (`src/fisheye/utils/build_analysis_acquisition_crop_run.py:368-385`, `src/fisheye/utils/build_analysis_acquisition_crop_run.py:452-520`) |
 | Hybrid acquisition/offline | `utils/build_hybrid_acquisition_offline_crop_run.py` | acquisition crop video for online rows; flat ROI cache for recovered rows | optional specialized `latest_any` publication | Current specialized geometry-only producer (`src/fisheye/utils/build_hybrid_acquisition_offline_crop_run.py:688-741`, `src/fisheye/utils/build_hybrid_acquisition_offline_crop_run.py:847-918`) |
 | Clipped proxy | `utils/create_clipped_collection_proxy_crop_run.py`; `utils/merge_clipped_proxy_crop_runs.py` | geometry plus external clipped-collection ROI cache | `stage_selector_eligible=false`, completion status `auxiliary` | Compatibility/collection adapter, not a general crop authority (`src/fisheye/utils/create_clipped_collection_proxy_crop_run.py:345-379`, `src/fisheye/utils/merge_clipped_proxy_crop_runs.py:275-304`) |
 | Historical composite | `tracking/incremental_crop.py` | exact base-row or dense delta-row mapping | remains unselected; promotion is forbidden by the CLI | Implemented historical migration canary, not the future default (`src/fisheye/tracking/incremental_crop.py:1760-1825`, `src/fisheye/utils/materialize_incremental_crop.py:80-103`) |
@@ -211,7 +211,7 @@ decision in this census.
 | `detection_indices` | `[N] int32` or `int64` | current writers generally store a physical ordinal (`src/fisheye/tracking/crop.py:3641-3648`, `src/fisheye/tracking/crop.py:799-804`) | Compatibility candidate, not stable identity. Likely omit from the new core once exact source lineage and `instance_key` are required. |
 | `frame_indices` | `[N] int32` or `int64` | ordinary canonical output equates it to acquisition-frame index; acquisition output uses int32; proxy/incremental use int64 (`src/fisheye/tracking/crop.py:805-815`, `src/fisheye/utils/build_analysis_acquisition_crop_run.py:322-348`) | Required core candidate, exact `int64`, sorted nondecreasing. Define as the row lookup frame domain, not a generic source-frame alias. |
 | `source_acquisition_frame_index` | `[N] int64` | required by hardened ordinary coordinate publication, missing from specialized geometry-only profiles (`src/fisheye/tracking/crop.py:805-815`) | Required core candidate for full-acquisition crops. Clipped/alternate frame domains need an explicit binding profile. |
-| `source_frame_indices` | `[N] int64` | acquisition/proxy compatibility alias of `frame_indices` | Compatibility-only unless a distinct source domain is defined. |
+| `source_frame_indices` | `[N] int64` | field-level alias of `frame_indices` in acquisition/proxy runs | Alias compatibility only unless a distinct source domain is defined; this says nothing about the current status of acquisition crop-video pixels. |
 | `frame_counts` | `[F] int32` or `int64` | ordinary `np.bincount` writes platform integer, acquisition writes int32, incremental writes int64 (`src/fisheye/tracking/crop.py:3632-3639`, `src/fisheye/tracking/incremental_crop.py:1054-1057`) | Derived compatibility array. Do not make it the future lookup authority. |
 | `frame_row_offsets` | absent from maintained crop writers | no current crop consumer can rely on it | Required future core candidate: exact `[F+1] int64` CSR offsets, with `[offsets[f], offsets[f+1])` covering zero, one, or many crop rows. |
 | `source_row_signature` | `[N,32] uint8` | persisted only by modern incremental materialization; proxies use a tightly scoped bootstrap (`src/fisheye/shared/crop_snapshot_identity.py:162-238`) | Required future core candidate. It binds pixel source, frame, bbox, ROI settings, and reuse compatibility. |
@@ -227,15 +227,15 @@ decision in this census.
 | `roi_coordinates_full` | `[N,2] int32` | exact integer source-pixel top-left; equal to `source_crop_xywh[:,:2]` under the ordinary contract | Required core candidate and extraction-window authority. Retain the existing name for compatibility, but freeze axis order as `[x,y]`. |
 | `bbox_roi_xyxy` | `[N,4] source float` | ROI-local bbox derived from image bbox and crop placement | Required core candidate, exact float32 with explicit ROI-to-camera transform. |
 | `roi_sizes_full` | `[N,2] int32`, ordered `[width,height]` in the current acquisition writer | exact integer extraction-window size | Required core candidate. Repeating a fixed run size is modest redundancy, but it gives fixed-size and per-row-variable crops one exact row schema and removes dependence on a scalar attr for pixel reconstruction. |
-| `bbox_crop_norm_coords` | `[N,4] float32/float64` | acquisition-video compatibility projection | Derived profile field, not common core. |
+| `bbox_crop_norm_coords` | `[N,4] float32/float64` | acquisition-video local projection | Derived acquisition-source profile field, not common core. |
 | `roi_coordinates_ds` | `[N,2] int32` | historical downsampled placement | Legacy-only; the current documentation already warns that its frame is ambiguous (`src/fisheye/docs/zarr_structure.md:348-357`). |
-| `selected_live_detection_bbox_*`, `realtime_detection_bbox_roi_xyxy` | aliases of acquisition geometry | duplicated by acquisition and hybrid writers (`src/fisheye/utils/build_analysis_acquisition_crop_run.py:417-425`) | Acquisition compatibility aliases. Do not admit them to the new common schema. |
+| `selected_live_detection_bbox_*`, `realtime_detection_bbox_roi_xyxy` | aliases of acquisition geometry | duplicated by acquisition and hybrid writers (`src/fisheye/utils/build_analysis_acquisition_crop_run.py:417-425`) | Redundant field aliases in an otherwise current acquisition source profile. Do not admit them to the new common schema. |
 
 ### Pixel Representations And Source Bindings
 
 | Array/group | Shape/dtype | Meaning | Census disposition |
 | --- | --- | --- | --- |
-| `roi_images` | `[N,H,W] uint8` | complete materialized grayscale crop tensor | Excluded from the future analysis-Zarr contract. It remains an immutable derived payload in training Zarrs, compatibility runs, or caches/work packages. The pixel contract already fixes uint8, C order, row order, coordinates, and zero padding (`src/fisheye/shared/roi_pixel_contract.py:23-65`). |
+| `roi_images` | `[N,H,W] uint8` | complete materialized grayscale crop tensor | Excluded from the future analysis-Zarr contract. It remains an immutable derived payload in training Zarrs, explicitly materialized runs, or caches/work packages. The pixel contract already fixes uint8, C order, row order, coordinates, and zero padding (`src/fisheye/shared/roi_pixel_contract.py:23-65`). |
 | `composite_payload/source_codes` | `[N] uint8` | row selects base or delta | Historical composite only. |
 | `composite_payload/source_row_indices` | `[N] int64` | physical row in selected base/delta source | Historical composite only. |
 | `composite_payload/delta_target_row_indices` | `[D] int64` | target rows materialized in delta | Historical composite only. |
@@ -248,7 +248,7 @@ decision in this census.
 | `source_clip_indices`, `source_clip_local_frame_indices` | `[N] int64` | clipped-collection lineage | Clipped profile only. |
 | `source_crop_row_ids` | `[N] int64` | proxy-local/direct crop row mapping | Compatibility/profile lineage. A new canonical run already has an unambiguous physical row index; do not treat this as stable identity. |
 | `source_proxy_crop_run_index`, `source_proxy_crop_row_ids` | `[N] int32`, `[N] int64` | merge provenance for per-clip proxies | Merged-proxy-only. |
-| `detection_success`, `detection_source`, `crop_state_codes` | `[N] bool/int8/int8` | acquisition or historical status labels | Profile/compatibility fields. Refined-v1 reason/source registries should not be weakened into these older integer labels. |
+| `detection_success`, `detection_source`, `crop_state_codes` | `[N] bool/int8/int8` | acquisition or historical status labels | Source-profile status fields. Refined-v1 reason/source registries should not be weakened into these narrower integer labels. |
 
 ### Materialization Plan
 
@@ -267,7 +267,7 @@ actions and processes dense pixels a complete output chunk at a time
 | Ordinary `roi_coordinates_full` | `min(chunk_size,N)` rows, unsharded (`src/fisheye/tracking/crop.py:4382-4387`) | Layout inherits a processing constant rather than access bytes. |
 | Geometry-preload helper | 16,384 rows, all trailing axes, no outer shard (`src/fisheye/shared/zarr/chunk_profiles.py:15-48`, `src/fisheye/shared/zarr/chunk_profiles.py:94-128`) | A scalar int32 chunk is 64 KiB, int64 is 128 KiB, float32 `[N,4]` is 256 KiB. One row count produces inconsistent byte sizes. |
 | Incremental compact arrays | `columnar.store_array`: 4,096 rows for 1-D, 1,024 for wider arrays; outer shard requested at 131,072 rows (`src/fisheye/shared/zarr/columnar.py:39-94`, `src/fisheye/tracking/incremental_crop.py:1037-1089`) | Object count is improved, but inner chunks range from about 8 KiB to 32 KiB for common crop metadata. Both inner and outer sizes vary with bytes per row. |
-| Materialized `roi_images` | default 32 rows, full `H,W`, Blosc LZ4 level 1 bitshuffle, normally unsharded (`src/fisheye/shared/crop_roi_layout.py:8-54`, `src/fisheye/shared/crop_roi_layout.py:85-104`) | At the illustrative 512×512 uint8 size, one inner chunk is 8 MiB and 1.188M rows create about 37,125 unsharded payload objects. This is a current compatibility/training/cache concern, not the target analysis-Zarr layout. Other ROI sizes produce proportionally different bytes, which is exactly why future materializers must plan from bytes and access units. |
+| Materialized `roi_images` | default 32 rows, full `H,W`, Blosc LZ4 level 1 bitshuffle, normally unsharded (`src/fisheye/shared/crop_roi_layout.py:8-54`, `src/fisheye/shared/crop_roi_layout.py:85-104`) | At the illustrative 512×512 uint8 size, one inner chunk is 8 MiB and 1.188M rows create about 37,125 unsharded payload objects. This is a current training/cache/materialization concern, not the target analysis-Zarr layout. Other ROI sizes produce proportionally different bytes, which is exactly why future materializers must plan from bytes and access units. |
 | External ordinary `roi_images` | caller-controlled row chunks and optional row shards; defaults are still row-count based (`src/fisheye/tracking/crop.py:4039-4055`) | Layout can range widely across invocations and is not a stable schema declaration. |
 | Scratch ROI cache | 128-row uncompressed, unsharded default (`src/fisheye/shared/crop_roi_layout.py:8-11`, `src/fisheye/shared/crop_roi_layout.py:57-71`) | Deliberately a local throughput cache; it must not define published storage. |
 
@@ -284,7 +284,7 @@ uses that boundary today.
 ### Shared mixed-mode readers
 
 `CropImageSource` is the maintained mixed-mode boundary. Automatic selection is
-`latest_any`, then legacy `latest`, then `latest_materialized`; the traditional
+`latest_any`, then the older `latest`, then `latest_materialized`; the traditional
 resolver separately requires literal materialized `roi_images`
 (`src/fisheye/shared/crop_image_source.py:118-156`,
 `src/fisheye/shared/crop_image_source.py:159-231`).
@@ -542,9 +542,10 @@ tensor.
       package visibility for Crimson reads.
 - [ ] Preserve exact `instance_key` and `source_refined_row_ids`; compute new or
       changed rows and copy only signature-equal predecessor rows.
-- [ ] Keep acquisition and clipped compatibility adapters outside the common
-      writer; add future-facing providers only when each can produce a complete
-      typed authority binding.
+- [ ] Keep the current acquisition crop-video provider and clipped-collection
+      adapter outside the full-frame-only common writer. Add each to the shared
+      schema through its own complete typed authority binding; do not classify
+      acquisition crop-video pixels as legacy or infer them from availability.
 - [ ] Make explicit public-reader selection validate completion, manifest,
       selector eligibility, and logical/storage declarations.
 - [ ] Replace ambiguous single-latest assumptions with exact crop-run binding or
@@ -586,8 +587,10 @@ The smallest safe code slice is:
 6. [x] build a selector-ineligible in-memory/shadow writer test from the already
    validated refined-v1 handoff, without a dense pixel array.
 
-Acquisition, clipped, composite, training, selector, and production-writer
-migrations should follow as explicit typed providers after that core passes.
-Legacy adapters remain only at the compatibility boundary. This keeps current
-processing safe while giving the parallel producer/DAG work one stable
-contract API to target.
+Acquisition crop-video schema integration, clipped, composite, training,
+selector, and production-writer migrations should follow as explicit typed
+providers after that core passes. The acquisition crop-video producer remains
+a maintained current pixel source during that migration. Legacy adapters remain
+only at the genuinely ambiguous or unversioned compatibility boundary. This
+keeps current processing safe while giving the parallel producer/DAG work one
+stable contract API to target.

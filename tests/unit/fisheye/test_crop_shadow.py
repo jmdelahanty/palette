@@ -124,7 +124,10 @@ def _refined_source(tmp_path: Path):
 
 def _pixel() -> CropPixelAuthority:
     return CropPixelAuthority(
-        authority_id="sleepyfish_camera_video_v1",
+        authority_id=(
+            "sleepyfish_camera_video_v1"
+            "#decode=orange_mono_pynvvc_luma_uint8_v1"
+        ),
         authority_manifest_digest="c" * 64,
         recording_identity=RECORDING_IDENTITY,
         camera_identity="cam2010095",

@@ -11,13 +11,21 @@ import zarr
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.crop_pixel_work_package import (
     CropPixelWorkPackageError,
+    LEGACY_SOURCE_BINDING_PROFILE,
+    SIGNED_SOURCE_BINDING_PROFILE,
+    STRICT_SOURCE_BINDING_PROFILE,
     build_crop_pixel_work_package_from_source,
     cleanup_unreferenced_crop_pixel_work_package_generations,
     open_crop_pixel_work_package,
 )
-from fisheye.shared.roi_pixel_contract import crop_run_pixel_contract
+from fisheye.shared.roi_pixel_contract import (
+    SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+    crop_run_pixel_contract,
+    orange_mono_pynvvc_luma_pixel_contract,
+)
 from fisheye.shared.row_lineage import copy_selected_crop_row_lineage_arrays
 from fisheye.shared.row_source_signature import build_row_source_signatures
+from tests.unit.fisheye.test_crop_consumer import _strict_crop
 
 
 def _crop_root() -> tuple[Any, Any]:
@@ -101,6 +109,9 @@ def test_subset_package_roundtrip_and_crop_source_binding(tmp_path: Path) -> Non
 
     assert manifest["selection"]["row_count"] == 2
     assert manifest["array"]["total_bytes"] == 2 * 3 * 4
+    assert manifest["source"]["source_binding_profile"] == (
+        LEGACY_SOURCE_BINDING_PROFILE
+    )
     package = open_crop_pixel_work_package(
         manifest_path,
         expected_archive_path=tmp_path / "recording.analysis.zarr",
@@ -132,6 +143,115 @@ def test_subset_package_roundtrip_and_crop_source_binding(tmp_path: Path) -> Non
         )
     finally:
         source.close()
+
+
+def test_acquisition_crop_video_pixels_are_a_current_package_source(
+    tmp_path: Path,
+) -> None:
+    root, crop = _crop_root()
+    crop.attrs["source_pixels"] = "acquisition_crop_video"
+    crop.attrs["roi_pixel_provider"] = "acquisition_crop_video"
+    crop.attrs["roi_pixel_contract"] = orange_mono_pynvvc_luma_pixel_contract()
+
+    manifest, manifest_path = _build(root, tmp_path)
+
+    assert manifest["pixel_contract"]["source_pixels"] == (
+        "acquisition_crop_video"
+    )
+    assert manifest["source"]["source_binding_profile"] == (
+        SIGNED_SOURCE_BINDING_PROFILE
+    )
+    package = open_crop_pixel_work_package(manifest_path, root=root)
+    try:
+        assert package.pixel_contract["source_pixels"] == (
+            "acquisition_crop_video"
+        )
+    finally:
+        package.close()
+
+
+def test_strict_full_frame_crop_package_binds_manifest_and_decoder(
+    tmp_path: Path,
+) -> None:
+    crop = _strict_crop(tmp_path)
+    archive = Path(str(crop.store.root)).parent.parent
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    pixels = np.arange(4 * 8 * 8, dtype=np.uint8).reshape(4, 8, 8)
+
+    class _StrictSource:
+        crop_group = crop
+        crop_run_name = "strict_crop"
+        total_rois = 4
+        roi_shape = (8, 8)
+        roi_pixel_contract = orange_mono_pynvvc_luma_pixel_contract(
+            source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+        )
+        frame_indices = np.asarray(crop["frame_indices"][:], dtype=np.int64)
+        roi_coordinates_full = np.asarray(
+            crop["roi_coordinates_full"][:],
+            dtype=np.int32,
+        )
+        storage_mode = "geometry_only"
+        roi_read_mode = "flat_bin_roi_cache"
+        frame_source_kind = "source_video_path"
+
+        def __init__(self) -> None:
+            self.root = root
+
+        def read_indices(self, rows):
+            return pixels[np.asarray(rows, dtype=np.int64)]
+
+        def _build_frame_source_identity(self) -> dict[str, str]:
+            return {"profile": "strict-test-full-frame-video"}
+
+    manifest_path = tmp_path / "strict-work-package.json"
+    manifest = build_crop_pixel_work_package_from_source(
+        _StrictSource(),
+        target_crop_rows=[0, 1, 2],
+        manifest_path=manifest_path,
+        archive_path=archive,
+    )
+
+    assert manifest["source"]["source_binding_profile"] == (
+        STRICT_SOURCE_BINDING_PROFILE
+    )
+    assert manifest["source"]["crop_run_reference"]["profile"] == (
+        "immutable_run_manifest_v1"
+    )
+    assert manifest["pixel_contract"]["source_pixels"] == "raw_camera_video"
+    package = open_crop_pixel_work_package(manifest_path, root=root)
+    try:
+        np.testing.assert_array_equal(package.frame_indices, [0, 0, 2])
+    finally:
+        package.close()
+
+
+def test_strict_full_frame_crop_package_rejects_acquisition_video_contract(
+    tmp_path: Path,
+) -> None:
+    crop = _strict_crop(tmp_path)
+
+    class _WrongSource:
+        crop_group = crop
+        crop_run_name = "strict_crop"
+        total_rois = 4
+        roi_shape = (8, 8)
+        roi_pixel_contract = orange_mono_pynvvc_luma_pixel_contract()
+        frame_indices = np.asarray(crop["frame_indices"][:], dtype=np.int64)
+        roi_coordinates_full = np.asarray(
+            crop["roi_coordinates_full"][:],
+            dtype=np.int32,
+        )
+        storage_mode = "geometry_only"
+        root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+
+    with pytest.raises(CropPixelWorkPackageError, match="authoritative"):
+        build_crop_pixel_work_package_from_source(
+            _WrongSource(),
+            target_crop_rows=[0],
+            manifest_path=tmp_path / "wrong.json",
+            archive_path=tmp_path / "strict_crop.zarr",
+        )
 
 
 def test_package_id_is_stable_across_retry_generations(tmp_path: Path) -> None:

@@ -15,6 +15,11 @@ from fisheye.shared.crop_roi_layout import (
     DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
     SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
 )
+from fisheye.shared.roi_pixel_contract import (
+    SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+    orange_mono_pynvvc_luma_hybrid_pixel_contract,
+    orange_mono_pynvvc_luma_pixel_contract,
+)
 
 
 class _FakeArray:
@@ -394,6 +399,59 @@ def test_crop_image_source_reads_acquisition_crop_video_with_pynvvc(
     source.close()
 
 
+def test_acquisition_crop_video_rejects_mismatched_flat_cache_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    crop_video_path = tmp_path / "crop.mp4"
+    crop_video_path.touch()
+    root = _make_acquisition_crop_video_root(str(crop_video_path))
+    crop = root["crop_runs/crop_acquisition"]
+
+    class _FakeFlatCache:
+        manifest = {
+            "cache_key": "wrong-contract",
+            "builder": {
+                "pixel_contract": {
+                    "name": "decoder_default",
+                }
+            },
+        }
+        manifest_path = tmp_path / "wrong.flat_roi_cache.json"
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    cache = _FakeFlatCache()
+    monkeypatch.setattr(
+        crop_mod,
+        "open_flat_roi_cache",
+        lambda *_args, **_kwargs: cache,
+    )
+    source = CropImageSource(
+        root=root,
+        crop_group=crop,
+        crop_run_name="crop_acquisition",
+        storage_mode="geometry_only",
+        roi_shape=(3, 5),
+        roi_coordinates_full=np.asarray(
+            crop["roi_coordinates_full"][:],
+            dtype=np.int32,
+        ),
+        frame_indices=np.asarray(crop["frame_indices"][:], dtype=np.int64),
+        frame_source_kind="acquisition_crop_video",
+        frame_source_path=str(crop_video_path),
+    )
+
+    with pytest.raises(ValueError, match="pixel contract"):
+        source._activate_flat_bin_cache(
+            manifest_path=cache.manifest_path,
+            zarr_path=None,
+        )
+    assert cache.closed is True
+
+
 def test_crop_image_source_reads_hybrid_acquisition_video_and_supplemental_cache(
     tmp_path: Path,
     monkeypatch,
@@ -425,6 +483,15 @@ def test_crop_image_source_reads_hybrid_acquisition_video_and_supplemental_cache
         data=np.array([-1, 0, -1], dtype=np.int64),
     )
     crop.attrs["supplemental_roi_cache_manifest"] = str(manifest_path)
+    crop.attrs.update(
+        {
+            "source_pixels": "hybrid_acquisition_crop_video_offline_supplement",
+            "roi_pixel_provider": (
+                "hybrid_acquisition_crop_video_offline_supplement"
+            ),
+            "roi_pixel_contract": orange_mono_pynvvc_luma_hybrid_pixel_contract(),
+        }
+    )
 
     class _FakePynvvcReader:
         source_height = 3
@@ -443,7 +510,14 @@ def test_crop_image_source_reads_hybrid_acquisition_video_and_supplemental_cache
             return None
 
     class _FakeFlatCache:
-        manifest = {"cache_key": "supplemental", "builder": {"pixel_contract": {"name": "nv12_luma_plane_uint8"}}}
+        manifest = {
+            "cache_key": "supplemental",
+            "builder": {
+                "pixel_contract": orange_mono_pynvvc_luma_pixel_contract(
+                    source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+                )
+            },
+        }
         shape = (1, 3, 5)
         dtype = np.dtype(np.uint8)
 
@@ -464,6 +538,7 @@ def test_crop_image_source_reads_hybrid_acquisition_video_and_supplemental_cache
 
     assert source.frame_source_kind == "acquisition_crop_video"
     assert source.roi_read_mode == "acquisition_crop_video"
+    assert source.roi_pixel_contract == orange_mono_pynvvc_luma_hybrid_pixel_contract()
     np.testing.assert_array_equal(batch[0], np.full((3, 5), 2, dtype=np.uint8))
     np.testing.assert_array_equal(batch[1], np.full((3, 5), 99, dtype=np.uint8))
     np.testing.assert_array_equal(batch[2], np.full((3, 5), 4, dtype=np.uint8))

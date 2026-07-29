@@ -25,11 +25,14 @@ from fisheye.shared.flat_roi_cache import (
     crop_run_name_from_manifest,
     load_flat_roi_cache_manifest,
 )
+from fisheye.shared.roi_pixel_contract import normalize_pixel_contract
 from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.zarr.crop_consumer import (
     CROP_RUN_REFERENCE_LEGACY_PROFILE,
     CROP_RUN_REFERENCE_SCHEMA_ID,
     CROP_RUN_REFERENCE_SCHEMA_VERSION,
+    CROP_RUN_REFERENCE_SIGNED_PROFILE,
+    authoritative_crop_roi_pixel_contract,
     build_crop_run_reference,
     strict_crop_fixed_roi_shape,
     validate_crop_run_reference,
@@ -119,6 +122,7 @@ class FlatRoiCacheBinding:
     total_bytes: int
     payload_sha256: str | None
     crop_run_reference: Mapping[str, Any] | None = None
+    pixel_contract: Mapping[str, Any] | None = None
     availability: str = "existing"
     producer_job_key: str | None = None
     source_kind: str | None = None
@@ -158,6 +162,10 @@ class FlatRoiCacheBinding:
         if validated_reference["run_id"] != self.crop_run:
             raise ValueError("Flat ROI cache reference binds a different crop run.")
         object.__setattr__(self, "crop_run_reference", validated_reference)
+        normalized_pixel_contract = normalize_pixel_contract(self.pixel_contract)
+        if self.pixel_contract is not None and normalized_pixel_contract is None:
+            raise ValueError("Flat ROI cache pixel_contract is malformed.")
+        object.__setattr__(self, "pixel_contract", normalized_pixel_contract)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -432,13 +440,16 @@ def validate_flat_roi_cache_binding(
         raise ValueError(
             "Flat ROI cache crop_run_reference does not bind the requested run."
         )
-    if crop_run_reference["profile"] == CROP_RUN_REFERENCE_LEGACY_PROFILE:
+    if crop_run_reference["profile"] in {
+        CROP_RUN_REFERENCE_SIGNED_PROFILE,
+        CROP_RUN_REFERENCE_LEGACY_PROFILE,
+    }:
         if (
             crop_run_reference["crop_signature"] != crop_signature
             or crop_run_reference["crop_revision"] != crop_revision
         ):
             raise ValueError(
-                "Flat ROI cache legacy crop reference disagrees with its source fields."
+                "Flat ROI cache signed crop reference disagrees with its source fields."
             )
     if int(shape[1]) < int(min_roi_size) or int(shape[2]) < int(min_roi_size):
         raise ValueError(
@@ -451,6 +462,18 @@ def validate_flat_roi_cache_binding(
             f"Flat ROI cache total_bytes mismatch: manifest has {total_bytes}, "
             f"payload has {actual_bytes}."
         )
+    builder = manifest.get("builder")
+    pixel_contract = (
+        normalize_pixel_contract(builder.get("pixel_contract"))
+        if isinstance(builder, Mapping)
+        else None
+    )
+    if (
+        isinstance(builder, Mapping)
+        and builder.get("pixel_contract") is not None
+        and pixel_contract is None
+    ):
+        raise ValueError("Flat ROI cache builder.pixel_contract is malformed.")
     return FlatRoiCacheBinding(
         manifest_path=resolved_manifest,
         manifest_sha256=manifest_sha256,
@@ -463,6 +486,7 @@ def validate_flat_roi_cache_binding(
         total_bytes=total_bytes,
         payload_sha256=(str(array.get("sha256")) if array.get("sha256") else None),
         crop_run_reference=crop_run_reference,
+        pixel_contract=pixel_contract,
         availability="existing",
         producer_job_key=None,
         source_kind=(
@@ -477,6 +501,25 @@ def validate_flat_roi_cache_binding(
 
 def _canonical_identity(value: object) -> str:
     return json.dumps(json_ready(value), sort_keys=True, separators=(",", ":"))
+
+
+def _crop_run_references_match(
+    live: Mapping[str, Any],
+    cached: Mapping[str, Any],
+) -> bool:
+    if _canonical_identity(live) == _canonical_identity(cached):
+        return True
+    # Existing cache manifests serialized maintained acquisition sources with
+    # the old legacy-named profile. Preserve those immutable caches when the
+    # signed fields and exact pixel contract still match; new caches write the
+    # signed-current profile.
+    if (
+        live.get("profile") == CROP_RUN_REFERENCE_SIGNED_PROFILE
+        and cached.get("profile") == CROP_RUN_REFERENCE_LEGACY_PROFILE
+    ):
+        fields = ("run_id", "crop_signature", "crop_revision")
+        return all(live.get(field) == cached.get(field) for field in fields)
+    return False
 
 
 def _crop_storage_mode(crop_group: Any) -> str:
@@ -558,11 +601,21 @@ def validate_keypoint_input_dag(
         crop_group,
         run_id=cache.crop_run,
     )
-    if _canonical_identity(live_reference) != _canonical_identity(
-        cache.crop_run_reference
-    ):
+    if not _crop_run_references_match(live_reference, cache.crop_run_reference):
         raise ValueError(
             f"Flat cache crop_run_reference does not match crop_runs/{cache.crop_run}."
+        )
+    required_pixel_contract = authoritative_crop_roi_pixel_contract(
+        crop_group,
+        run_id=cache.crop_run,
+    )
+    if (
+        required_pixel_contract is not None
+        and cache.pixel_contract != required_pixel_contract
+    ):
+        raise ValueError(
+            "Flat cache pixel_contract does not match the authoritative crop pixel "
+            f"authority for crop_runs/{cache.crop_run}."
         )
 
     if "roi_coordinates_full" not in crop_group:

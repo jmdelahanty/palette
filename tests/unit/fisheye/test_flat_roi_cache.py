@@ -9,6 +9,7 @@ import pytest
 import zarr
 
 from fisheye.shared import flat_roi_cache as flat_cache_mod
+import fisheye.shared.crop_image_source as crop_source_mod
 from fisheye.diagnostics.check_flat_roi_cache_pixel_parity import check_flat_roi_cache_pixel_parity
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.flat_roi_cache import (
@@ -75,6 +76,56 @@ def _make_geometry_only_crop_archive(tmp_path: Path) -> tuple[Path, np.ndarray]:
         axis=0,
     )
     return zarr_path, expected
+
+
+def _make_acquisition_crop_video_archive(
+    tmp_path: Path,
+) -> tuple[Path, Path, np.ndarray]:
+    zarr_path = tmp_path / "recording_acquisition_crop_analysis.zarr"
+    crop_video = tmp_path / "acquisition_crop.mp4"
+    crop_video.touch()
+    root = zarr.open_group(str(zarr_path), mode="w")
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_acquisition"
+    crop = crop_parent.create_group("crop_acquisition")
+    crop.attrs.update(
+        {
+            "crop_storage_mode": "geometry_only",
+            "roi_size": [3, 5],
+            "source_pixels": "acquisition_crop_video",
+            "roi_pixel_provider": "acquisition_crop_video",
+            "source_crop_video_path": str(crop_video),
+            "crop_signature": "sig-acquisition-crop-video",
+            "crop_revision": "rev-acquisition-crop-video-001",
+        }
+    )
+    crop.create_array(
+        "frame_indices",
+        data=np.asarray([10, 11], dtype=np.int64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "source_crop_video_frame_indices",
+        data=np.asarray([0, 1], dtype=np.int64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.asarray([[100, 200], [110, 210]], dtype=np.int32),
+        overwrite=True,
+    )
+    crop.create_array(
+        "roi_sizes_full",
+        data=np.asarray([[5, 3], [5, 3]], dtype=np.int32),
+        overwrite=True,
+    )
+    expected = np.stack(
+        [
+            np.arange(15, dtype=np.uint8).reshape(3, 5),
+            np.arange(15, dtype=np.uint8).reshape(3, 5) + np.uint8(40),
+        ]
+    )
+    return zarr_path, crop_video, expected
 
 
 def _manifest_payload_path(manifest: dict) -> Path:
@@ -487,6 +538,63 @@ def test_build_flat_roi_cache_pynvvc_luma_streams_rows_in_source_order(
         for event in progress_events
     )
     cache = open_flat_roi_cache(manifest["manifest_path"], expected_shape=expected.shape)
+    try:
+        np.testing.assert_array_equal(cache[:], expected)
+    finally:
+        cache.close()
+
+
+def test_build_flat_roi_cache_accepts_current_acquisition_crop_video(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path, crop_video, expected = _make_acquisition_crop_video_archive(tmp_path)
+
+    class _FakeAcquisitionReader:
+        source_height = 3
+        source_width = 5
+
+        def __init__(
+            self,
+            video_path: Path,
+            *,
+            start_frame: int = 0,
+            gpu_id: int = 0,
+        ) -> None:
+            assert Path(video_path) == crop_video
+            assert start_frame == 0
+            assert gpu_id == 0
+
+        def iter_frames(self):
+            yield from expected
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        crop_source_mod,
+        "PynvvcLumaRgbReader",
+        _FakeAcquisitionReader,
+    )
+
+    manifest = build_flat_roi_cache(
+        zarr_path=zarr_path,
+        output_dir=tmp_path / "cache-acquisition",
+        batch_size=1,
+        roi_decode_backend="pynvvc_luma",
+    )
+
+    assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
+    assert manifest["builder"]["pixel_contract"]["name"] == (
+        "orange_mono_pynvvc_luma_uint8_v1"
+    )
+    assert manifest["builder"]["pixel_contract"]["source_pixels"] == (
+        "acquisition_crop_video"
+    )
+    cache = open_flat_roi_cache(
+        manifest["manifest_path"],
+        expected_shape=expected.shape,
+    )
     try:
         np.testing.assert_array_equal(cache[:], expected)
     finally:

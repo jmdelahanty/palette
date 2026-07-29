@@ -49,6 +49,26 @@ stable SHA-256 identity over the crop binding, selected crop rows, keys, source
 signatures, per-row pixel digests, and pixel contract. It remains stable across
 equivalent retries; generation filenames may differ.
 
+The source binding and the pixel source are independent fields. New packages
+use `immutable_crop_run_manifest_v1` for strict crop-v2 runs or
+`signed_crop_run_v1` for maintained signed acquisition sources that have not
+yet migrated to the strict manifest envelope.
+`legacy_crop_signature_revision_v1` remains the explicit compatibility binding
+for packages made from older crop runs. In particular, a current acquisition
+crop video is bound by `signed_crop_run_v1`; this does not make its pixels
+legacy.
+
+Current exact pixel-source profiles include:
+
+- `source_pixels=raw_camera_video`: decode a full-frame camera video and apply
+  the bound crop geometry;
+- `source_pixels=acquisition_crop_video`: decode the already-cropped Orange
+  frame and retain crop-video/crop-meta lineage.
+- `source_pixels=hybrid_acquisition_crop_video_offline_supplement`: route each
+  row through `source_pixel_kind_codes` to one of those two current sources.
+
+They may share PyNvVC luma value semantics, but they are not substitutable.
+
 The manifest is published last with atomic replacement. Payload objects are
 generation-specific, so a failed overwrite cannot make the previous complete
 manifest refer to partially replaced data. Failed generations may leave
@@ -67,8 +87,8 @@ Opening a package fails closed unless:
 - crop rows and `instance_key` values are unique;
 - `package_id` recomputes exactly; and
 - when the source archive is available, keys, row signatures, frame indices,
-  geometry, crop signature/revision, signature-spec digest, and source pixel
-  fingerprint still match the bound crop run.
+  geometry, immutable run reference or signed-run identity, and the exact
+  authoritative pixel-source contract still match the bound crop run.
 
 Package creation requires modern `instance_key` and either persisted
 `source_row_signature` arrays or the verified auxiliary-proxy bootstrap defined

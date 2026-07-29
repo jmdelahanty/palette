@@ -20,7 +20,11 @@ import numpy as np
 import zarr
 
 from fisheye.shared.roi_pixel_contract import flat_cache_pixel_contract_for_backend
-from fisheye.shared.zarr.crop_consumer import build_crop_run_reference
+from fisheye.shared.zarr.crop_consumer import (
+    authoritative_crop_roi_pixel_contract,
+    build_crop_run_reference,
+    strict_crop_required_roi_pixel_contract,
+)
 
 FLAT_ROI_CACHE_SCHEMA = "palette_roi_cache_flat_bin_v1"
 FLAT_ROI_CACHE_LAYOUT = "flat_bin_v1"
@@ -161,6 +165,15 @@ def build_flat_roi_cache(
         console=console,
     )
     try:
+        strict_contract = strict_crop_required_roi_pixel_contract(
+            source.crop_group,
+            run_id=source.crop_run_name,
+        )
+        if strict_contract is not None and decode_backend_requested == "read_slice":
+            raise ValueError(
+                "Strict crop flat caches require roi_decode_backend='pynvvc_luma' "
+                "or 'auto'; read_slice is not authoritative."
+            )
         cache_key = source._build_roi_cache_key(archive_path)  # Internal shared cache identity.
         resolved_manifest_path = _default_manifest_path(
             archive_path=archive_path,
@@ -290,7 +303,23 @@ def _build_manifest(
     decode_backend_effective: str,
 ) -> dict[str, Any]:
     roi_h, roi_w = source.roi_shape
-    pixel_contract = flat_cache_pixel_contract_for_backend(decode_backend_effective)
+    required_contract = authoritative_crop_roi_pixel_contract(
+        source.crop_group,
+        run_id=source.crop_run_name,
+    )
+    pixel_contract = (
+        required_contract
+        if required_contract is not None
+        else flat_cache_pixel_contract_for_backend(decode_backend_effective)
+    )
+    strict_contract = strict_crop_required_roi_pixel_contract(
+        source.crop_group,
+        run_id=source.crop_run_name,
+    )
+    if strict_contract is not None and decode_backend_effective != "pynvvc_luma":
+        raise ValueError(
+            "Strict crop flat caches require the pynvvc_luma decode backend."
+        )
     return {
         "schema": FLAT_ROI_CACHE_SCHEMA,
         "layout": FLAT_ROI_CACHE_LAYOUT,
@@ -350,6 +379,22 @@ def _write_flat_cache_payload(
     progress_every_batches: int,
     started: float,
 ) -> tuple[dict[str, Any], str | None, str]:
+    if (
+        decode_backend_requested in {"auto", "pynvvc_luma"}
+        and _source_is_pure_acquisition_crop_video(source)
+    ):
+        timing, payload_sha256, _ = _write_flat_cache_payload_read_slice(
+            source=source,
+            bin_tmp=bin_tmp,
+            total_bytes=total_bytes,
+            batch_size=batch_size,
+            compute_sha256=compute_sha256,
+            progress_callback=progress_callback,
+            progress_interval_seconds=progress_interval_seconds,
+            progress_every_batches=progress_every_batches,
+            started=started,
+        )
+        return timing, payload_sha256, "pynvvc_luma"
     if decode_backend_requested in {"auto", "pynvvc_luma"} and _source_supports_pynvvc_luma(source):
         try:
             return _write_flat_cache_payload_pynvvc_luma(
@@ -567,6 +612,15 @@ def _source_supports_pynvvc_luma(source: Any) -> bool:
         and bool(getattr(source, "frame_source_path", None))
         and getattr(source, "frame_shape", None) is not None
     )
+
+
+def _source_is_pure_acquisition_crop_video(source: Any) -> bool:
+    if str(getattr(source, "frame_source_kind", "")) != "acquisition_crop_video":
+        return False
+    source_kinds = getattr(source, "source_pixel_kind_codes", None)
+    if source_kinds is None:
+        return True
+    return bool(np.all(np.asarray(source_kinds, dtype=np.int16) == 0))
 
 
 def _open_pynvvc_luma_reader(video_path: Path) -> Any:

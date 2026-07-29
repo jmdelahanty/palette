@@ -12,6 +12,9 @@ from fisheye.cluster.keypoints import registry_finalize as registry_finalize_mod
 from fisheye.cluster.keypoints import whole_recording as planner
 from fisheye.cluster import whole_recording_analysis as analysis_planner
 from fisheye.cluster.lsf import LsfJob, LsfResources
+from fisheye.shared.roi_pixel_contract import (
+    orange_mono_pynvvc_luma_pixel_contract,
+)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -697,6 +700,7 @@ def test_keypoint_input_dag_accepts_large_cache_when_other_sources_are_unavailab
         shape=(2, 348, 348),
         total_bytes=2 * 348 * 348,
         payload_sha256=None,
+        pixel_contract=orange_mono_pynvvc_luma_pixel_contract(),
     )
 
     capability = common_mod.validate_keypoint_input_dag(

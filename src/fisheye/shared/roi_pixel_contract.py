@@ -11,10 +11,12 @@ from fisheye.shared.grayscale import UNWEIGHTED_MEAN
 ROI_PIXEL_CONTRACT_SCHEMA = "palette_roi_pixel_contract_v1"
 ROI_IMAGE_REPRESENTATION = "uint8_grayscale_roi_v1"
 ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME = "orange_mono_pynvvc_luma_uint8_v1"
+ORANGE_MONO_PYNVVC_LUMA_HYBRID_CONTRACT_NAME = "orange_mono_pynvvc_luma_hybrid_uint8_v1"
 SOURCE_PIXELS_PALETTE_CROP_RUN = "palette_crop_run"
 SOURCE_PIXELS_ACQUISITION_CROP_VIDEO = "acquisition_crop_video"
 SOURCE_PIXELS_RAW_CAMERA_VIDEO = "raw_camera_video"
 SOURCE_PIXELS_ANALYSIS_RAW_VIDEO = "analysis_raw_video"
+SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME = "hybrid_acquisition_crop_video_offline_supplement"
 DECODE_BACKEND_PYNVVC_LUMA = "pynvvc_luma"
 APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE = "orange_mono8_full_range_0_255"
 CENTER_ROUNDING_NP_ROUND = "np.round_half_to_even"
@@ -91,9 +93,25 @@ def flat_cache_pixel_contract_for_backend(decode_backend: str) -> dict[str, Any]
     )
 
 
-def orange_mono_pynvvc_luma_pixel_contract() -> dict[str, Any]:
+def orange_mono_pynvvc_luma_pixel_contract(
+    *,
+    source_pixels: str = SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+) -> dict[str, Any]:
     """Return the source-aligned crop-pixel contract for Orange mono videos."""
 
+    if source_pixels not in {
+        SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+        SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+    }:
+        raise ValueError(
+            "Orange mono PyNvVC luma pixels must originate from an acquisition crop video or the raw camera video."
+        )
+
+    production_status = (
+        "canonical_orange_acquisition_crop_video_path"
+        if source_pixels == SOURCE_PIXELS_ACQUISITION_CROP_VIDEO
+        else "canonical_orange_raw_camera_video_crop_path"
+    )
     return roi_pixel_contract(
         name=ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
         color_conversion=(
@@ -101,9 +119,9 @@ def orange_mono_pynvvc_luma_pixel_contract() -> dict[str, Any]:
             "For Orange monochrome recordings, the camera intensity image is encoded "
             "into NV12 Y with neutral chroma, so no RGB reconstruction is applied."
         ),
-        production_status="canonical_orange_acquisition_training_path",
+        production_status=production_status,
         source_frame_representation="Orange mono NV12 Y plane decoded by PyNvVideoCodec",
-        source_pixels=SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+        source_pixels=source_pixels,
         decode_backend=DECODE_BACKEND_PYNVVC_LUMA,
         applied_range_semantics=APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
         container_color_range_handling=(
@@ -112,6 +130,33 @@ def orange_mono_pynvvc_luma_pixel_contract() -> dict[str, Any]:
         ),
         center_rounding=CENTER_ROUNDING_NP_ROUND,
     )
+
+
+def orange_mono_pynvvc_luma_hybrid_pixel_contract() -> dict[str, Any]:
+    """Return the exact mixed-source contract for hybrid crop runs."""
+
+    acquisition_contract = orange_mono_pynvvc_luma_pixel_contract()
+    supplemental_contract = orange_mono_pynvvc_luma_pixel_contract(
+        source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+    )
+    contract = dict(acquisition_contract)
+    contract.update(
+        {
+            "name": ORANGE_MONO_PYNVVC_LUMA_HYBRID_CONTRACT_NAME,
+            "source_pixels": SOURCE_PIXELS_HYBRID_ACQUISITION_FULL_FRAME,
+            "production_status": "canonical_hybrid_crop_reader_path",
+            "source_pixel_routing_array": "source_pixel_kind_codes",
+            "source_pixel_kind_map": {
+                "acquisition_crop_video": 0,
+                "offline_full_frame_supplemental_flat_cache": 1,
+            },
+            "source_pixel_contracts": {
+                "acquisition_crop_video": acquisition_contract,
+                "offline_full_frame_supplemental_flat_cache": supplemental_contract,
+            },
+        }
+    )
+    return contract
 
 
 def crop_run_pixel_contract(

@@ -36,8 +36,8 @@ from fisheye.shared.refined_detect_curation import (
     resolve_curated_refined_detect_run,
 )
 from fisheye.shared.roi_pixel_contract import (
-    ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
-    flat_cache_pixel_contract_for_backend,
+    SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+    orange_mono_pynvvc_luma_hybrid_pixel_contract,
     orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
@@ -471,7 +471,9 @@ def _write_supplemental_cache(
             raise
 
     total_bytes = int(roi_coordinates_full.shape[0]) * int(roi_shape[0]) * int(roi_shape[1])
-    pixel_contract = flat_cache_pixel_contract_for_backend("pynvvc_luma")
+    pixel_contract = orange_mono_pynvvc_luma_pixel_contract(
+        source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+    )
     manifest = {
         "schema": FLAT_ROI_CACHE_SCHEMA,
         "layout": FLAT_ROI_CACHE_LAYOUT,
@@ -882,6 +884,7 @@ def build_hybrid_acquisition_offline_crop_run(
         stamp_geometry_preload_attrs(group)
 
         now = _utc_now()
+        hybrid_pixel_contract = orange_mono_pynvvc_luma_hybrid_pixel_contract()
         attrs = {
             "schema_id": SCHEMA_ID,
             "crop_storage_mode": "geometry_only",
@@ -889,8 +892,8 @@ def build_hybrid_acquisition_offline_crop_run(
             "roi_pixel_provider": "hybrid_acquisition_crop_video_offline_supplement",
             "source_type": "hybrid_acquisition_crop_video_offline_supplement",
             "roi_size": [int(roi_shape[0]), int(roi_shape[1])],
-            "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
-            "roi_pixel_contract": orange_mono_pynvvc_luma_pixel_contract(),
+            "roi_pixel_contract_name": hybrid_pixel_contract["name"],
+            "roi_pixel_contract": hybrid_pixel_contract,
             "decode_backend": "pynvvc_luma",
             "decode_mode_requested": str(decode_mode),
             "source_video_path": str(full_video_path),

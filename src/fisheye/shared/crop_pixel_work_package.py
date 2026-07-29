@@ -20,6 +20,13 @@ from fisheye.shared.row_source_signature import (
     ROW_SOURCE_SIGNATURE_WIDTH_BYTES,
     load_row_source_signature_spec,
 )
+from fisheye.shared.zarr.crop_consumer import (
+    CROP_RUN_REFERENCE_SIGNED_PROFILE,
+    CROP_RUN_REFERENCE_STRICT_PROFILE,
+    authoritative_crop_roi_pixel_contract,
+    build_crop_run_reference,
+    strict_crop_row_source_signature_spec,
+)
 
 
 CROP_PIXEL_WORK_PACKAGE_SCHEMA_ID = "palette.crop_pixel_work_package"
@@ -29,6 +36,9 @@ CROP_PIXEL_WORK_PACKAGE_ROWS_SCHEMA_ID = "palette.crop_pixel_work_package.rows"
 CROP_PIXEL_WORK_PACKAGE_ROWS_SCHEMA_VERSION = 1
 PIXEL_SHA256_ARRAY = "pixel_sha256"
 DEFAULT_WORK_PACKAGE_BATCH_ROWS = 256
+STRICT_SOURCE_BINDING_PROFILE = "immutable_crop_run_manifest_v1"
+SIGNED_SOURCE_BINDING_PROFILE = "signed_crop_run_v1"
+LEGACY_SOURCE_BINDING_PROFILE = "legacy_crop_signature_revision_v1"
 
 
 class CropPixelWorkPackageError(RuntimeError):
@@ -227,15 +237,88 @@ def _normalize_target_rows(values: Sequence[int] | np.ndarray, *, total_rows: in
     return rows
 
 
-def _source_binding(crop_group: Any) -> dict[str, Any]:
+def _source_binding(crop_group: Any, *, run_id: str) -> dict[str, Any]:
+    reference = build_crop_run_reference(
+        crop_group,
+        run_id=run_id,
+        allow_unversioned_legacy=True,
+    )
+    if reference["profile"] == CROP_RUN_REFERENCE_STRICT_PROFILE:
+        spec = strict_crop_row_source_signature_spec(crop_group, run_id=run_id)
+        if spec is None:  # pragma: no cover - strict reference guarantees a manifest
+            raise CropPixelWorkPackageError(
+                "Strict crop work package lacks a row-signature specification."
+            )
+        authoritative_crop_roi_pixel_contract(crop_group, run_id=run_id)
+        authority = crop_group.attrs.get("source_pixel_authority")
+        if not isinstance(authority, Mapping):
+            raise CropPixelWorkPackageError(
+                "Strict crop work package lacks source pixel authority."
+            )
+        return {
+            "source_binding_profile": STRICT_SOURCE_BINDING_PROFILE,
+            "crop_run_reference": reference,
+            "source_row_signature_spec_digest": spec.spec_digest,
+            "source_pixel_authority_id": authority.get("authority_id"),
+            "source_pixel_authority_manifest_digest": authority.get(
+                "authority_manifest_digest"
+            ),
+        }
+
     spec = load_row_source_signature_spec(crop_group.attrs)
+    binding_profile = (
+        SIGNED_SOURCE_BINDING_PROFILE
+        if reference["profile"] == CROP_RUN_REFERENCE_SIGNED_PROFILE
+        else LEGACY_SOURCE_BINDING_PROFILE
+    )
     return {
+        "source_binding_profile": binding_profile,
         "source_row_signature_spec_digest": spec.spec_digest,
         "source_pixel_fingerprint": crop_group.attrs.get("source_pixel_fingerprint"),
         "source_rowset_fingerprint": crop_group.attrs.get("source_rowset_fingerprint"),
         "crop_revision": crop_group.attrs.get("crop_revision"),
         "crop_signature": crop_group.attrs.get("crop_signature"),
     }
+
+
+def _manifest_source_binding(source: Mapping[str, Any]) -> dict[str, Any]:
+    profile = source.get("source_binding_profile")
+    if profile == STRICT_SOURCE_BINDING_PROFILE:
+        fields = (
+            "source_binding_profile",
+            "crop_run_reference",
+            "source_row_signature_spec_digest",
+            "source_pixel_authority_id",
+            "source_pixel_authority_manifest_digest",
+        )
+    elif profile in (
+        None,
+        SIGNED_SOURCE_BINDING_PROFILE,
+        LEGACY_SOURCE_BINDING_PROFILE,
+    ):
+        legacy_fields = (
+            "source_row_signature_spec_digest",
+            "source_pixel_fingerprint",
+            "source_rowset_fingerprint",
+            "crop_revision",
+            "crop_signature",
+        )
+        fields = (
+            ("source_binding_profile", *legacy_fields)
+            if profile is not None
+            else legacy_fields
+        )
+    else:
+        raise CropPixelWorkPackageError(
+            f"Unsupported crop pixel source binding profile {profile!r}."
+        )
+    missing = [name for name in fields if name not in source]
+    if missing:
+        raise CropPixelWorkPackageError(
+            "Crop pixel work-package source binding is incomplete: "
+            + ", ".join(missing)
+        )
+    return {name: source.get(name) for name in fields}
 
 
 def _write_rows_npz(
@@ -309,7 +392,16 @@ def build_crop_pixel_work_package_from_source(
     pixel_contract = normalize_pixel_contract(source.roi_pixel_contract)
     if pixel_contract is None:
         raise CropPixelWorkPackageError("Crop source has no valid ROI pixel contract.")
-    binding = _source_binding(crop_group)
+    binding = _source_binding(crop_group, run_id=str(source.crop_run_name))
+    required_pixel_contract = authoritative_crop_roi_pixel_contract(
+        crop_group,
+        run_id=str(source.crop_run_name),
+    )
+    if required_pixel_contract is not None and pixel_contract != required_pixel_contract:
+        raise CropPixelWorkPackageError(
+            "Crop work packages must be built from the authoritative "
+            f"{required_pixel_contract['name']!r} pixel materialization."
+        )
 
     manifest = Path(manifest_path).expanduser().resolve()
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -542,12 +634,25 @@ def _validate_live_binding(
         package.roi_coordinates_full,
     ):
         raise CropPixelWorkPackageError("Work-package geometry no longer matches the crop run.")
-    binding = _source_binding(crop)
-    for name, value in binding.items():
-        if source.get(name) != value:
+    binding = _source_binding(crop, run_id=crop_name)
+    persisted_binding = _manifest_source_binding(source)
+    for name, value in persisted_binding.items():
+        if binding.get(name) != value:
             raise CropPixelWorkPackageError(
                 f"Work-package source binding changed for {name!r}."
             )
+    required_pixel_contract = authoritative_crop_roi_pixel_contract(
+        crop,
+        run_id=crop_name,
+    )
+    if (
+        required_pixel_contract is not None
+        and dict(package.pixel_contract) != required_pixel_contract
+    ):
+        raise CropPixelWorkPackageError(
+            "Work-package pixel contract differs from its authoritative crop "
+            "pixel source."
+        )
 
 
 def open_crop_pixel_work_package(
@@ -640,16 +745,7 @@ def open_crop_pixel_work_package(
             roi_coordinates_full=rows["roi_coordinates_full"],
             pixel_sha256=rows["pixel_sha256"],
         )
-        binding_for_id = {
-            name: source.get(name)
-            for name in (
-                "source_row_signature_spec_digest",
-                "source_pixel_fingerprint",
-                "source_rowset_fingerprint",
-                "crop_revision",
-                "crop_signature",
-            )
-        }
+        binding_for_id = _manifest_source_binding(source)
         expected_id = _logical_package_id(
             crop_run_name=package.crop_run_name,
             crop_row_indices=package.crop_row_indices,
@@ -739,6 +835,9 @@ __all__ = [
     "CROP_PIXEL_WORK_PACKAGE_ROWS_SCHEMA_VERSION",
     "PIXEL_SHA256_ARRAY",
     "DEFAULT_WORK_PACKAGE_BATCH_ROWS",
+    "STRICT_SOURCE_BINDING_PROFILE",
+    "SIGNED_SOURCE_BINDING_PROFILE",
+    "LEGACY_SOURCE_BINDING_PROFILE",
     "CropPixelWorkPackageError",
     "CropPixelWorkPackageArray",
     "CropPixelWorkPackage",
