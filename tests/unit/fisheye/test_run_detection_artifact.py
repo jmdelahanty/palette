@@ -61,6 +61,22 @@ def test_strict_json_report_rejects_non_finite_json(tmp_path: Path) -> None:
     assert report["bad_files"][0]["path"] == "bad/zarr.json"
 
 
+def test_recording_identity_tolerates_unrelated_legacy_infinity(tmp_path: Path) -> None:
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    target_zarr.mkdir()
+    (target_zarr / "zarr.json").write_text(
+        '{"zarr_format":3,"node_type":"group","attributes":'
+        '{"recording_id":"recording_2010094","legacy_limit":Infinity}}',
+        encoding="utf-8",
+    )
+
+    assert mod._canonical_recording_identity(target_zarr) == "recording_2010094"
+
+    report = mod.strict_json_report(target_zarr)
+    assert report["status"] == "fail"
+    assert report["bad_json_files"] == 1
+
+
 def test_artifact_reports_reject_canonical_instance_identity(tmp_path: Path) -> None:
     run = tmp_path / "run_group"
     _write_group(
