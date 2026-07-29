@@ -104,6 +104,14 @@ coordinate catalog, crop manifest, pixel contract/package when used, model and
 preprocessing identities, exact logical schema, physical storage plan, and
 consolidated/direct metadata equivalence.
 
+The selector-ineligible raw-v2 publisher now enforces that envelope. Its
+YOLO-facing preparation adapter converts the current float64 payload to the
+exact float32 schema, derives `frame_row_offsets`, validity and row signatures,
+recomputes source-camera projections from the bound crop-v2 geometry, and
+records the maximum conversion/reprojection error. It deliberately drops
+legacy heading, normalized-coordinate, count-alias, and embedded-QC families.
+This is a canary boundary, not a production selector change.
+
 ## Keypoint Quality v1
 
 `keypoint_quality_runs/<run>` is an immutable, selector-independent diagnostic
@@ -254,6 +262,12 @@ The v1 keypoint body-frame producer resolves landmark indices from the ordered
 pose-schema labels. It does not accept a run override, deprecated alias, or
 caller-supplied hard-coded positions as canonical provenance.
 
+Masks are not required for that estimator. A future mask/spline or hybrid
+body-frame estimator may publish the same logical output arrays only under a
+new estimator ID/version with exact mask inputs, polarity evidence, validity
+rules, and digests. Different estimators are never silently substituted or
+declared scientifically equivalent merely because their output shapes match.
+
 ## QC Boundary
 
 QC is classified by what it describes, not by placing every metric in one
@@ -382,7 +396,9 @@ It must not be encoded by silently changing `heading_deg`.
       storage builders, and enforce canonical digests.
 - [x] Add the exact body-frame run manifest and publication reconstruction
       gate.
-- [ ] Add equivalent exact run manifests for raw and refined keypoints.
+- [x] Add the exact raw-keypoint-v2 run manifest and publication reconstruction
+      gate.
+- [ ] Add the equivalent exact run manifest for refined keypoints.
 
 ### Writer and lifecycle
 
@@ -390,8 +406,12 @@ It must not be encoded by silently changing `heading_deg`.
       changing current defaults.
 - [x] Add the observation-local keypoint-quality producer and immutable
       publication gate.
-- [ ] Freeze the exact raw-keypoint-v2 run manifest, then publish one
-      selector-ineligible YOLO canary before inserting the quality DAG node.
+- [x] Freeze the exact raw-keypoint-v2 run manifest, byte-derived storage plan,
+      selector-ineligible publisher, and legacy-YOLO preparation adapter.
+- [x] Validate a deterministic selector-ineligible YOLO-shaped raw-v2 canary,
+      including a mask-free keypoint-to-body-frame chain.
+- [ ] Publish and measure one representative selector-ineligible YOLO canary
+      from a real completed run before inserting the quality DAG node.
 - [ ] Make clipped finalization and later delta compaction publish the same
       raw/refined v2 contracts rather than parallel layouts.
 - [ ] Add a bounded-row DAG materializer that accepts only a validated
