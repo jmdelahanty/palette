@@ -888,13 +888,24 @@ class KeypointSnapshotSchema:
             and confidence_valid is not None
             and geometry_valid is not None
         ):
-            allowed = refined_success & confidence_valid & geometry_valid
-            if np.any(usable & ~allowed):
+            expected_usable = refined_success & confidence_valid & geometry_valid
+            if not np.array_equal(usable, expected_usable):
                 issues.append(
                     _issue(
                         "usable_keypoints_policy_mismatch",
                         "usable_keypoints",
-                        "Usable rows must pass refined-success, confidence, and geometry gates.",
+                        "Usable rows must exactly equal the refined-success, confidence, and geometry gates.",
+                    )
+                )
+        valid = values.get("keypoint_valid")
+        if refined_success is not None and valid is not None:
+            any_valid = np.any(valid, axis=1)
+            if not np.array_equal(refined_success, any_valid):
+                issues.append(
+                    _issue(
+                        "refined_success_mismatch",
+                        "refined_success",
+                        "refined_success must exactly mark rows with at least one valid landmark.",
                     )
                 )
         flips = values.get("flip_corrected")

@@ -226,6 +226,23 @@ snapshot. Training exports cite that compact snapshot and materialize their own
 dense image/label representation; they do not treat an edit delta as training
 authority.
 
+The first-snapshot refined-v2 producer and selector-ineligible publisher are
+implemented. The producer consumes one completely validated raw-keypoint-v2
+snapshot, its exact quality-v1 snapshot, the bound crop geometry, and explicit
+decisions keyed by `instance_key`. It preserves row order and source facts,
+recomputes image projections and row signatures after accepted landmark edits,
+and supports rejection, recovery of source failures, validity edits, and exact
+skeleton permutations. Every destination buffer is independent of its inputs.
+
+The persisted manifest binds the complete raw, quality, and crop manifests;
+recording, skeleton, coordinate-catalog, and row-signature identities; exact
+review/reason registries; immutable snapshot identity; retired-key evidence;
+the reconstructed byte-derived storage plan; all decoded array hashes; and
+direct/consolidated declarations. The publication gate requires refined keys
+to preserve the raw key order and forbids live/retired overlap. Parent/successor
+validation remains deliberately deferred to the delta compactor rather than
+being approximated by this initial-snapshot writer.
+
 ## Body-Frame v1
 
 Reuse pressure from Crimson rendering, eye angles, tracking, subject shape, and
@@ -389,7 +406,7 @@ It must not be encoded by silently changing `heading_deg`.
       metric catalogs, bit registries, policy digest, and cross-array checks.
 - [x] Register the keypoint-quality artifact family and dependency/invalidation
       edges without activating production status or selection.
-- [ ] Freeze exact refined accepted-QC code maps and manifest bindings to the
+- [x] Freeze exact refined accepted-QC code maps and manifest bindings to the
       quality run used during review.
 - [x] Implement body-frame-v1 logical contracts and derivation validation.
 - [x] Require exact quality manifest field sets, reconstruct the logical and
@@ -398,7 +415,7 @@ It must not be encoded by silently changing `heading_deg`.
       gate.
 - [x] Add the exact raw-keypoint-v2 run manifest and publication reconstruction
       gate.
-- [ ] Add the equivalent exact run manifest for refined keypoints.
+- [x] Add the equivalent exact run manifest for refined keypoints.
 
 ### Writer and lifecycle
 
@@ -417,6 +434,8 @@ It must not be encoded by silently changing `heading_deg`.
       `flat_bin_v1` cache under NRS, including a complete payload SHA-256.
 - [x] Publish and measure one representative selector-ineligible YOLO canary
       from a real completed run before inserting the quality DAG node.
+- [x] Add the pure refined-v2 producer, byte-derived storage planner, and
+      first-snapshot selector-ineligible publication/reopen gate.
 - [ ] Make clipped finalization and later delta compaction publish the same
       raw/refined v2 contracts rather than parallel layouts.
 - [ ] Add a bounded-row DAG materializer that accepts only a validated
