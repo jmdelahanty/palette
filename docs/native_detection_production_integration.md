@@ -127,6 +127,15 @@ that artifact without reconstructing storage policy or relying on `latest`.
 The module is also independently composable as a detection-only workflow for
 one or many recordings.
 
+`fisheye.cluster.native_detection_campaign` is the production-facing planner.
+It resolves the exact registered model and canonical acquisition authority,
+materializes immutable plan evidence in dry-run mode, and submits only the two
+native jobs through the Citrus login poller in apply mode.  Both source-evidence
+roles may point to the same acquisition-camera record: that record owns the
+recording frame domain as well as the native `width_px`/`height_px` extent.
+The planner records that co-resolution explicitly and never synthesizes a
+second pixel authority.
+
 ## Deliberately Open
 
 This checkpoint does not activate the raw selector, mutate the registry, or
