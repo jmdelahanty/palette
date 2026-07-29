@@ -243,7 +243,7 @@ Before production integration:
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
 - [x] bind full-frame and acquisition crop-video materializations to distinct
       exact pixel contracts and reject cross-source cache substitution;
-- [ ] run the real Palette pixel materialization and downstream keypoint/mask
+- [x] run the real Palette pixel materialization and downstream keypoint/mask
       compute canary;
 - [x] benchmark representative row/window/full reads on workstation and LSF;
 - [x] benchmark selector-ineligible publication and record object counts;
@@ -254,8 +254,9 @@ Before production integration:
 
 The DAG review closed on the integration branch after identifying and fixing
 the standard completion-marker gap and replacing the cache planner's legacy-
-only identity requirement with the manifest-bound run reference. Pixel decode
-and mask-reader validation remain open and are not implied by that review.
+only identity requirement with the manifest-bound run reference. That review
+alone did not imply pixel decode or model-consumer validation; the bounded gate
+recorded below supplies that later evidence.
 
 The combined publisher was revalidated at reconciliation commit `2b9b816a`.
 The selector-ineligible integrated canary retained the Crimson-tested logical
@@ -270,3 +271,16 @@ The supplied evidence SHA-256 is
 Crimson validated exact typed opens, CSR offsets, lineage, and ROI-to-source
 camera transforms; this closes the coordinate-consumer gate but does not
 activate a Palette crop selector.
+
+The downstream pixel/materialization gate passed as LSF job `153227442` at
+Palette commit `229ceadd600b27c384684e474fe3940fd077ac13`. It materialized one
+`2,048`-row acquisition-video package on node-local scratch and ran the real
+YOLO keypoint and unified subject-mask consumers against that one package.
+Both outputs retained exact crop-row, `instance_key`, source-signature, and
+package identity. The immutable receipt is under
+`.palette_benchmarks/crop_pixel_materialization/workflows/`
+`20260729_redscare_acquisition_crop_consumers_229ceadd_v4/receipt.json` with
+SHA-256
+`8fa5ec642b34e1f365ae6b24e2513cc5e06d213e10acb59e8694e590f06fb0fe`.
+This closes the bounded pixel-consumer integration gate; recording-scale
+publication and guarded selector activation remain separate checkpoints.

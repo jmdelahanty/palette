@@ -1,9 +1,9 @@
 # Crop Pixel Work-Package Contract
 
 <!-- contract-meta
-status: implemented-local
+status: implemented-cluster-canary
 schema: palette.crop_pixel_work_package v1
-last_updated: 2026-07-18
+last_updated: 2026-07-29
 owner: jeremy
 depends_on: docs/composite_crop_storage_contract.md,
   docs/instance_track_subject_identity_contract.md,
@@ -215,6 +215,37 @@ This checkpoint precedes the keypoint storage contract. Its row identity,
 coordinate, pixel-source, and edit-lifecycle evidence informs that contract; it
 does not select keypoint chunk or shard sizes by itself.
 
+The real RedScare canary passed as LSF job `153227442` at Palette commit
+`229ceadd600b27c384684e474fe3940fd077ac13`. Its immutable receipt is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/
+crop_pixel_materialization/workflows/
+20260729_redscare_acquisition_crop_consumers_229ceadd_v4/receipt.json
+```
+
+The receipt SHA-256 is
+`8fa5ec642b34e1f365ae6b24e2513cc5e06d213e10acb59e8694e590f06fb0fe`;
+its recomputed internal evidence digest is
+`252ffab529bfdf771560bc64d368c63369e5e4a8e6a1680ded3b435977b66c15`.
+The canary materialized `2,048` `384x384` rows (`301,989,888` bytes) in
+`1.880 s`. The complete worker/publish/package setup took `13.411 s`, YOLO pose
+inference took `9.5 s`, unified subject-mask inference took `24.1 s`, and the
+complete workflow took `65.820 s`. Peak child RSS was `2,554,011,648` bytes.
+
+Both real consumers preserved the same `source_crop_row_ids`, unique
+`instance_key`, `source_row_signature`, and package ID. They independently read
+the same pixel digest. The source root metadata hash was unchanged, and no
+selector, registry, or production archive state changed.
+
+Two fail-closed canary findings were corrected before that pass:
+
+- PyNvVC materialization now runs in a short-lived worker process so its
+  exclusive CUDA context is released before model consumers start; and
+- immutable output validation recognizes only the exact declared
+  shared-columnar short-array optimization, including requested and effective
+  shard shapes, while still rejecting undeclared ordinary arrays.
+
 ## Synthetic Evidence
 
 `tools/benchmark_crop_pixel_work_package.py` compares a complete package with a
@@ -223,5 +254,6 @@ selected-row package while preserving the same validation work. On the
 20-row package wrote `20,480` pixel bytes instead of `2,097,152` bytes, a
 `102.4x` payload reduction. Median build times were about `8.4 ms` versus
 `28.1 ms`. This proves subset scaling and is not a PRFS or model-throughput
-claim; the production canary still needs compute-node source reads and GPU
-fan-out timing.
+claim. The later real canary above supplies compute-node source-read and GPU
+fan-out evidence; this synthetic comparison remains useful only for
+subset-scaling isolation.
