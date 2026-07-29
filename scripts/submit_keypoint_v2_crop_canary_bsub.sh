@@ -169,7 +169,10 @@ fi
 case "\${scratch_base}" in /groups/*|/nrs/*) printf 'Refusing shared scratch.\n' >&2; exit 2;; esac
 scratch_root="\${scratch_base}/keypoint_v2_crop_\${CANARY_ID}"
 [[ ! -e "\${scratch_root}" ]] || { printf 'Scratch root exists.\n' >&2; exit 2; }
-export PYTHONPYCACHEPREFIX="\${scratch_root}/pycache"
+# Python may populate its bytecode cache while importing the canary module,
+# before the driver gets a chance to assert that scratch_root is new.  Keep
+# bytecode in a sibling so that importing cannot create the driver-owned root.
+export PYTHONPYCACHEPREFIX="\${scratch_root}.pycache"
 export MPLBACKEND=Agg
 export PALETTE_DISABLE_REGISTRY_WRITES=1
 
@@ -205,7 +208,9 @@ status_tmp="\${STATUS_FILE}.tmp.\$\$"
   printf 'payload_returncode=%s\n' "\${payload_rc}"
 } >"\${status_tmp}"
 mv "\${status_tmp}" "\${STATUS_FILE}"
-if [[ "\${payload_rc}" == "0" ]]; then rm -rf -- "\${scratch_root}"; fi
+if [[ "\${payload_rc}" == "0" ]]; then
+  rm -rf -- "\${scratch_root}" "\${PYTHONPYCACHEPREFIX}"
+fi
 exit "\${payload_rc}"
 JOBSCRIPT
 chmod +x "$JOB_SCRIPT"

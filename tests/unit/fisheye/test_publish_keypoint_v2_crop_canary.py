@@ -12,6 +12,9 @@ from fisheye.diagnostics.publish_keypoint_v2_crop_canary import (
 )
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
 def test_canary_paths_fail_closed_outside_namespace(tmp_path: Path) -> None:
     root = tmp_path / "benchmarks"
     accepted = _require_below(root / "run" / "artifact", root, label="test")
@@ -60,3 +63,12 @@ def test_canary_pose_binding_freezes_three_point_dtype_semantics() -> None:
     ]
     assert binding["pose_schema"]["kpt_shape"] == [3, 2]
     assert binding["pose_schema"]["metadata"]["model_kpt_shape"] == [3, 3]
+
+
+def test_cluster_wrapper_does_not_precreate_driver_scratch_with_pycache() -> None:
+    wrapper = (
+        REPOSITORY_ROOT / "scripts" / "submit_keypoint_v2_crop_canary_bsub.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'PYTHONPYCACHEPREFIX="\\${scratch_root}.pycache"' in wrapper
+    assert 'PYTHONPYCACHEPREFIX="\\${scratch_root}/pycache"' not in wrapper
