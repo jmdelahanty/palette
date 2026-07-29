@@ -159,6 +159,8 @@ Before production integration:
       binder;
 - [x] implement node-local materialization and atomic selector-ineligible
       production-candidate import;
+- [x] implement a benchmark-only package builder that exercises the production
+      candidate path and preserves publication/read handoff evidence;
 - [ ] obtain parallel Palette producer/DAG review of this exact contract;
 - [x] publish a small immutable canary outside production selectors;
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;

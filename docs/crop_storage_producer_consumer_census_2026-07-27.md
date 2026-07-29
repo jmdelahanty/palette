@@ -537,6 +537,9 @@ tensor.
 - [x] Add node-local materialization, atomic production-candidate run import,
       post-transaction manifest reconstruction, archive reconsolidation, and
       complete reopen validation without changing selectors or registries.
+- [x] Add a benchmark-only fixture packager with exact source-copy verification,
+      publication timings, final tree hashes, strict handoff JSON, and atomic
+      package visibility for Crimson reads.
 - [ ] Preserve exact `instance_key` and `source_refined_row_ids`; compute new or
       changed rows and copy only signature-equal predecessor rows.
 - [ ] Keep acquisition and clipped compatibility adapters outside the common

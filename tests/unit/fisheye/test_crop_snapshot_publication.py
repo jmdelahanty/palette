@@ -101,6 +101,17 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
     assert source_calls == [archive, archive, archive]
     assert pixels.verification_count == 3
     assert list(scratch.iterdir()) == []
+    writer_receipt = result["node_local_materialization"]["writer_receipt"]
+    assert set(writer_receipt) == {
+        "publication_seconds",
+        "phase_seconds",
+        "per_array_write_seconds",
+        "writes",
+        "logical_hashes",
+        "consolidation",
+    }
+    assert len(writer_receipt["writes"]) == 13
+    assert len(writer_receipt["logical_hashes"]) == 13
 
     direct_root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     consolidated_root = zarr.open_group(str(archive), mode="r", use_consolidated=True)
