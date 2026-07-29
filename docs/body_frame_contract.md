@@ -1,8 +1,8 @@
 # Body Frame Contract
 <!-- contract-meta
-version: 2
+version: 3
 status: active
-last_verified: 2026-07-19
+last_verified: 2026-07-29
 -->
 
 Purpose: define a shared fish-relative coordinate-frame contract that can be
@@ -218,11 +218,18 @@ Such local caches must declare their estimator and source refs. They should be
 treated as analysis-local support data, not as the canonical shared body-frame
 surface.
 
-### Future Dedicated Body-Frame Runs
+### Dedicated Body-Frame Runs
 
-A separate `analysis/body_frame_runs/<run>` family is not required now. It may
-be justified later if multiple independent analyses need a shared body frame
-that is not naturally part of a coherent `analysis/subject_shape_runs` product.
+Reuse by Crimson rendering, eye angles, tracking, keypoint review, subject
+shape, and bout analyses now justifies `analysis/body_frame_runs/<run>` as the
+shared immutable materialized surface. A run binds one exact source snapshot
+and one controlled estimator profile. Keypoint-derived body frames no longer
+need to be embedded in `keypoints_runs` or `refined_keypoints_runs`.
+
+`analysis/subject_shape_runs/<run>/body_frame/` and analysis-local
+`support/body_frame/` remain valid estimator-local outputs and compatibility
+surfaces. A reusable publisher may normalize either into a dedicated
+body-frame run without changing the source authority.
 
 ## Recommended Materialized Layout
 
@@ -383,7 +390,9 @@ Metric schemas should reference it.
 
 Short term:
 
-- keep current keypoint heading semantics unchanged
+- keep current keypoint heading semantics unchanged for v1 compatibility
+- omit materialized heading from the new keypoint/refined-keypoint v2 schema
+- publish keypoint-derived orientation under `analysis/body_frame_runs`
 - let `analysis/eye_angle_runs` declare any local body-frame support data it
   computes
 - document `analysis/subject_shape_runs/<run>/body_frame/` as the future shared
@@ -405,8 +414,7 @@ Long term:
 - keep semantic anchors such as `tail_tip` separate from source-specific
   measurements such as keypoint `tail_tip` or spline-derived `tail_tip_xy`
 - keep keypoint-only body-frame production supported for datasets without masks
-- materialize a dedicated `analysis/body_frame_runs` family only if reuse
-  pressure justifies it
+- use the dedicated `analysis/body_frame_runs` family for shared consumers
 
 ## Open Questions
 

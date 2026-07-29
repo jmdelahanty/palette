@@ -215,6 +215,9 @@ This checkpoint precedes the keypoint storage contract. Its row identity,
 coordinate, pixel-source, and edit-lifecycle evidence informs that contract; it
 does not select keypoint chunk or shard sizes by itself.
 
+The resulting keypoint/body-frame/QC boundary is documented in
+`docs/keypoint_storage_contract_v2.md`.
+
 The real RedScare canary passed as LSF job `153227442` at Palette commit
 `229ceadd600b27c384684e474fe3940fd077ac13`. Its immutable receipt is:
 

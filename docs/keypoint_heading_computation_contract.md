@@ -2,7 +2,7 @@
 
 <!-- contract-meta
 status: active
-last_verified: 2026-04-09
+last_verified: 2026-07-29
 -->
 
 Purpose: define explicit, machine-readable metadata for how keypoint runs
@@ -33,6 +33,12 @@ Those are heuristic-policy concerns, not heading semantics. See:
 
 This contract does not require every keypoint run to define heading semantics.
 Runs may explicitly disable heading computation or omit it entirely.
+
+For the new keypoint/refined-keypoint v2 storage boundary, the recipe remains
+in `pose_schema.metadata.heading_computation`, but materialized heading values
+do not live in the keypoint run. They are published with the complete derived
+orientation geometry in `analysis/body_frame_runs/<run>`. Historical embedded
+heading arrays remain an explicit v1 compatibility surface.
 
 ## Relationship To Body Frame
 
@@ -264,8 +270,11 @@ This prevents edits to non-heading landmarks from changing heading previews.
 
 ## Writer Guidance
 
-New keypoint/refined-keypoint runs that store meaningful `heading` should write
-their canonical heading definition into `pose_schema.metadata.heading_computation`.
+Legacy-compatible keypoint/refined-keypoint runs that store meaningful
+`heading` should write their canonical heading definition into
+`pose_schema.metadata.heading_computation`. New v2 keypoint snapshots always
+write that definition but place materialized values in a separately bound
+body-frame run.
 
 Only write `heading_computation_override` when a run must intentionally diverge
 from the skeleton-level definition or explicitly disable heading semantics.
