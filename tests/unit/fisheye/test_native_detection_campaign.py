@@ -40,7 +40,13 @@ def _target(tmp_path: Path) -> CampaignTarget:
         "frame_count": 3,
     }
     digest = canonical_json_sha256(record)
-    _write_zarr_node(archive, {"recording_id": "recording_a"})
+    _write_zarr_node(
+        archive,
+        {
+            "recording_id": "recording_a",
+            "unrelated_legacy_metric": float("inf"),
+        },
+    )
     _write_zarr_node(
         archive / "raw_video",
         {

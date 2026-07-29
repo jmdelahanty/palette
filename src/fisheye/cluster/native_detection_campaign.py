@@ -124,7 +124,14 @@ def _read_strict_json(path: Path) -> dict[str, Any]:
 
 
 def _zarr_attrs(path: Path) -> Mapping[str, Any]:
-    payload = _read_strict_json(path / "zarr.json")
+    # Historical archives may contain unrelated legacy NaN/Infinity values in
+    # other root attributes.  Parse the enclosing Zarr declaration permissively,
+    # then apply canonical finite-JSON validation to the exact selected
+    # acquisition record through ``canonical_json_sha256`` below.
+    with (path / "zarr.json").open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a Zarr JSON object at {path}.")
     attrs = payload.get("attributes")
     if not isinstance(attrs, Mapping):
         raise ValueError(f"Zarr node has no attributes mapping: {path}")
