@@ -6,6 +6,7 @@ import pytest
 
 from fisheye.diagnostics.benchmark_crop_pixel_materialization_consumers import (
     _consumer_commands,
+    _prepare_command,
     _require_node_local_scratch,
 )
 
@@ -44,3 +45,28 @@ def test_consumer_commands_are_shard_only_and_use_one_package(tmp_path: Path) ->
         "legacy_noncanonical"
     )
     assert "--defer-registry-status" in masks
+
+
+def test_prepare_command_is_a_separate_worker_process(tmp_path: Path) -> None:
+    class _Args:
+        source_analysis_zarr = tmp_path / "source.zarr"
+        recording_dir = tmp_path / "recording"
+        crop_meta = tmp_path / "crop.csv"
+        crop_video = tmp_path / "crop.mp4"
+        crop_run = "crop_canary"
+        row_count = 2048
+        batch_rows = 256
+        source_width = None
+        source_height = None
+
+    command = _prepare_command(
+        _Args(),
+        scratch=tmp_path / "scratch",
+        output_json=tmp_path / "prepare.json",
+    )
+
+    assert command[1:3] == [
+        "-m",
+        "fisheye.diagnostics.prepare_crop_pixel_materialization_canary",
+    ]
+    assert command[command.index("--row-count") + 1] == "2048"

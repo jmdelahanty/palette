@@ -9,7 +9,6 @@ receipt (plus consumer logs) written to an explicit benchmark directory.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -27,22 +26,10 @@ import zarr
 
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.crop_pixel_work_package import (
-    build_crop_pixel_work_package_from_source,
     open_crop_pixel_work_package,
-)
-from fisheye.shared.instance_keys import resolve_recording_identity
-from fisheye.shared.zarr.crop_consumer import (
-    CROP_RUN_REFERENCE_SIGNED_PROFILE,
-    build_crop_run_reference,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.system_metadata import get_git_info
-from fisheye.utils.build_analysis_acquisition_crop_run import (
-    build_analysis_acquisition_crop_run,
-)
-from fisheye.utils.import_acquisition_detections_to_detect_run import (
-    resolve_source_dimensions,
-)
 
 
 SCHEMA_ID = "palette.crop_pixel_materialization_consumer_canary"
@@ -66,8 +53,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _max_rss_bytes() -> int:
-    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+def _max_rss_bytes(who: int) -> int:
+    value = int(resource.getrusage(who).ru_maxrss)
     return value if sys.platform == "darwin" else value * 1024
 
 
@@ -89,28 +76,6 @@ def _require_node_local_scratch(path: Path) -> Path:
         )
     resolved.mkdir(parents=True, exist_ok=False)
     return resolved
-
-
-def _copy_minimal_root_identity(
-    source: Any,
-    target: Any,
-    *,
-    recording_identity: str,
-    width: int,
-    height: int,
-) -> None:
-    target.attrs.update(
-        {
-            "recording_id": recording_identity,
-            "source_video_width": int(width),
-            "source_video_height": int(height),
-        }
-    )
-    for name in ("total_frames", "n_frames", "source_video_total_frames"):
-        value = source.attrs.get(name)
-        if type(value) is int and int(value) > 0:
-            target.attrs[name] = int(value)
-            break
 
 
 def _digest_crop_source(source: CropImageSource, *, batch_rows: int) -> str:
@@ -269,6 +234,42 @@ def _consumer_commands(
     return keypoints, masks
 
 
+def _prepare_command(
+    args: argparse.Namespace,
+    *,
+    scratch: Path,
+    output_json: Path,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "fisheye.diagnostics.prepare_crop_pixel_materialization_canary",
+        "--source-analysis-zarr",
+        str(args.source_analysis_zarr.expanduser().resolve()),
+        "--recording-dir",
+        str(args.recording_dir.expanduser().resolve()),
+        "--crop-meta",
+        str(args.crop_meta.expanduser().resolve()),
+        "--crop-video",
+        str(args.crop_video.expanduser().resolve()),
+        "--scratch-root",
+        str(scratch),
+        "--output-json",
+        str(output_json),
+        "--crop-run",
+        str(args.crop_run),
+        "--row-count",
+        str(int(args.row_count)),
+        "--batch-rows",
+        str(int(args.batch_rows)),
+    ]
+    if args.source_width is not None:
+        command.extend(("--source-width", str(int(args.source_width))))
+    if args.source_height is not None:
+        command.extend(("--source-height", str(int(args.source_height))))
+    return command
+
+
 def run_canary(args: argparse.Namespace) -> dict[str, Any]:
     started = time.perf_counter()
     source_archive = args.source_analysis_zarr.expanduser().resolve()
@@ -277,75 +278,28 @@ def run_canary(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"Source is not a Zarr v3 archive: {source_archive}")
     source_metadata_sha256_before = _sha256_file(source_metadata_path)
     scratch = _require_node_local_scratch(args.scratch_root)
-    local_archive = scratch / "analysis.zarr"
-    package_manifest = scratch / "crop_pixels" / "package.json"
-    package_manifest.parent.mkdir(parents=True, exist_ok=True)
-
-    source_root = zarr.open_group(
-        str(source_archive), mode="r", use_consolidated=False
+    prepare_json = scratch / "prepare.json"
+    prepare_log = args.output_json.with_suffix(".prepare.log")
+    prepare_command = _prepare_command(
+        args,
+        scratch=scratch,
+        output_json=prepare_json,
     )
-    recording_identity = resolve_recording_identity(
-        source_root.attrs,
-        fallback_path=source_archive,
-    )
-    width, height = resolve_source_dimensions(
-        source_root,
-        recording_dir=args.recording_dir,
-        source_width=args.source_width,
-        source_height=args.source_height,
-    )
-    local_root = zarr.open_group(str(local_archive), mode="w", zarr_format=3)
-    _copy_minimal_root_identity(
-        source_root,
-        local_root,
-        recording_identity=recording_identity,
-        width=width,
-        height=height,
-    )
-
-    phases: dict[str, float] = {}
-    phase = time.perf_counter()
-    crop_result = build_analysis_acquisition_crop_run(
-        local_archive,
-        recording_dir=args.recording_dir,
-        crop_meta_path=args.crop_meta,
-        crop_video_path=args.crop_video,
-        run_name=args.crop_run,
-        source_width=width,
-        source_height=height,
-        apply=True,
-    )
-    phases["publish_local_modern_crop"] = float(time.perf_counter() - phase)
-
-    local_root = zarr.open_group(str(local_archive), mode="r", use_consolidated=False)
-    crop = local_root[f"crop_runs/{args.crop_run}"]
-    reference = build_crop_run_reference(crop, run_id=args.crop_run)
-    if reference["profile"] != CROP_RUN_REFERENCE_SIGNED_PROFILE:
-        raise ValueError("Canary crop did not publish the signed current-source profile.")
-    total_rows = int(crop["instance_key"].shape[0])
-    selected_count = min(int(args.row_count), total_rows)
-    if selected_count <= 0:
-        raise ValueError("Canary crop has no rows.")
+    prepare_process = _run_logged(prepare_command, log_path=prepare_log)
+    prepared = json.loads(prepare_json.read_text(encoding="utf-8"))
+    if prepared.get("status") != "complete":
+        raise RuntimeError("Crop pixel preparation worker did not complete.")
+    local_archive = Path(str(prepared["local_archive"])).resolve()
+    package_manifest = Path(str(prepared["package_manifest"])).resolve()
+    recording_identity = str(prepared["recording_identity"])
+    reference = prepared["crop_run_reference"]
+    total_rows = int(prepared["source_crop_total_rows"])
+    selected_count = int(prepared["selected_rows"])
     selected_rows = np.arange(selected_count, dtype=np.int64)
-
-    phase = time.perf_counter()
-    direct_source = CropImageSource.open(
-        local_root,
-        crop_run=args.crop_run,
-        zarr_path=local_archive,
-        roi_cache_policy="never",
-    )
-    try:
-        package = build_crop_pixel_work_package_from_source(
-            direct_source,
-            target_crop_rows=selected_rows,
-            manifest_path=package_manifest,
-            archive_path=local_archive,
-            batch_rows=int(args.batch_rows),
-        )
-    finally:
-        direct_source.close()
-    phases["materialize_pixel_work_package"] = float(time.perf_counter() - phase)
+    package = prepared["package"]
+    phases = dict(prepared["timing_seconds"])
+    phases["prepare_worker_process"] = float(prepare_process["seconds"])
+    local_root = zarr.open_group(str(local_archive), mode="r", use_consolidated=False)
 
     opened = open_crop_pixel_work_package(
         package_manifest,
@@ -478,7 +432,7 @@ def run_canary(args: argparse.Namespace) -> dict[str, Any]:
             "last_crop_row": int(selected_rows[-1]),
         },
         "local_crop_publication": {
-            **asdict(crop_result),
+            **prepared["crop_result"],
             "crop_run_reference": reference,
             "selector_eligible": False,
         },
@@ -497,7 +451,12 @@ def run_canary(args: argparse.Namespace) -> dict[str, Any]:
             "total": float(time.perf_counter() - started),
         },
         "resources": {
-            "peak_rss_bytes": _max_rss_bytes(),
+            "peak_rss_bytes": max(
+                _max_rss_bytes(resource.RUSAGE_SELF),
+                _max_rss_bytes(resource.RUSAGE_CHILDREN),
+            ),
+            "parent_peak_rss_bytes": _max_rss_bytes(resource.RUSAGE_SELF),
+            "child_peak_rss_bytes": _max_rss_bytes(resource.RUSAGE_CHILDREN),
             "local_store": _storage_stats(scratch),
         },
         "runtime": {
@@ -517,6 +476,7 @@ def run_canary(args: argparse.Namespace) -> dict[str, Any]:
             "production_state_changes": [],
             "durable_artifacts": [
                 str(args.output_json.expanduser().resolve()),
+                str(prepare_log),
                 *(
                     [
                         str(args.output_json.with_suffix(".keypoints.log")),
