@@ -94,7 +94,7 @@ accepts the v2 manifest envelope carrying logical schema v1.
 - [x] Integrate the reusable detection-snapshot DAG boundary.
 - [x] Keep the refined-to-crop handoff as a non-authorizing boundary prototype;
       it is not a crop storage or publication contract.
-- [ ] Reconcile this branch with current `sun` and resolve tests without weakening
+- [x] Reconcile this branch with current `sun` and resolve tests without weakening
       either contract.
 - [ ] Merge one reviewed checkpoint before another agent routes native writers.
 
@@ -105,28 +105,29 @@ copying schema, storage, manifest, or selection rules.
 
 - [x] Add a strict native source-evidence builder and validator without
       weakening or reinterpreting the accepted legacy-conversion manifest v1.
-- [ ] Adapt `detect_yolo` logical output to all nine canonical v1 arrays.
-- [ ] Derive exact int64 `frame_row_offsets`; do not publish `frame_counts` or
+- [x] Adapt `detect_yolo` logical output to all nine canonical v1 arrays.
+- [x] Derive exact int64 `frame_row_offsets`; do not publish `frame_counts` or
       `n_detections` in the canonical v1 run.
-- [ ] Cast canonical geometry once to float32 and derive image-space projections
+- [x] Cast canonical geometry once to float32 and derive image-space projections
       from those persisted values.
-- [ ] Create arrays only through the shared array factory and resolved storage
+- [x] Create arrays only through the shared array factory and resolved storage
       plan.
-- [ ] Make each worker own complete non-overlapping physical chunks or shards.
-- [ ] Construct on node-local scratch and atomically copy a fresh immutable run
+- [x] Make each worker own complete non-overlapping physical chunks or shards;
+      artifact workers own separate stores and canonical assembly has one writer.
+- [x] Construct on node-local scratch and atomically copy a fresh immutable run
       back to the recording archive.
-- [ ] Persist logical schema, storage profile, resolved plans, source identity,
+- [x] Persist logical schema, storage profile, resolved plans, source identity,
       worker ownership, and complete validation receipts.
-- [ ] Retain the existing writer as an explicit rollback/compatibility path.
+- [x] Retain the existing writer as an explicit rollback/compatibility path.
 - [ ] Confirm Crimson accepts canonical logical schema v1 carried by native
       run-manifest v2 before any native run becomes selector-eligible.
 
 Tests:
 
-- [ ] empty run and long empty-frame gaps;
-- [ ] one and multiple detections per frame;
-- [ ] deterministic keys, ordering, offsets, and derived geometry;
-- [ ] exact dtype and unexpected-array rejection;
+- [x] empty run and long empty-frame gaps;
+- [x] one and multiple detections per frame;
+- [x] deterministic keys, ordering, offsets, and derived geometry;
+- [x] exact dtype and unexpected-array rejection;
 - [ ] interrupted write, failed validation, failed consolidation, and copy-back
       tombstone behavior; and
 - [ ] exact Palette and Crimson reads with no dtype probing.
@@ -199,13 +200,14 @@ Crimson.
 
 ## Gate F — Canary And Default Adoption
 
-- [ ] Run one raw-only selector-ineligible native canary.
+- [x] Run one raw-only selector-ineligible native canary.
 - [ ] Run one refined delta/compaction selector-ineligible canary.
 - [ ] Validate both through Palette and Crimson exact-schema readers.
 - [ ] Perform one explicitly approved selector activation with rollback evidence.
 - [ ] Confirm registry, selector, run manifest, and consolidated metadata agree.
 - [ ] Confirm no stale downstream product is selectable.
-- [ ] Observe publication time, peak RSS, object count, and read behavior; this is
+- [x] Observe publication time, peak RSS, object count, and fresh direct/
+      consolidated read behavior; this is
       a regression check, not a new profile search.
 - [ ] Make the v1 writer path the default only after the canary passes.
 

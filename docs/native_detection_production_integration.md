@@ -1,7 +1,8 @@
 # Native Detection Production Integration
 
-Status: implemented selector-ineligible raw publication boundary; activation and
-native refined publication remain separate gates
+Status: implemented and exercised selector-ineligible raw publication boundary;
+compatibility parity, Crimson acceptance, activation, and native refined
+publication remain separate gates
 
 Date: 2026-07-27
 
@@ -150,6 +151,72 @@ nested canonical arrays. The next integration must:
 Until those gates land, the new raw fragment is safe to run as a detection-only
 selector-ineligible canary. The existing full clipped inference workflow remains
 a compatibility surface rather than being silently redirected.
+
+## First Production-Scale Canary
+
+The first complete native canary used the 22-clip Sleepyfish Cam2010094
+recording on 2026-07-28. It deliberately published no selector and made no
+registry update.
+
+The exercise had three publication attempts:
+
+1. `v001` failed before inference because strict JSON parsing was incorrectly
+   applied to unrelated historical root metadata containing a bare `Infinity`.
+   No output was mutated. Run identity discovery now tolerates unrelated legacy
+   metadata while new native evidence remains strict JSON.
+2. `v002` completed all 22 L4 inference array elements and built the canonical
+   run, but post-copy validation hit the same enclosing-root issue. The exact
+   owner-bound run was tombstoned as failed and selector-ineligible. Post-copy
+   failures now fail closed automatically and cannot leave a run labeled
+   complete.
+3. `v003` reused the 22 immutable, validated detector artifacts and reran only
+   the CPU assembly/publication job. LSF job `153226799` completed in 74 seconds
+   with 939 MB peak RSS.
+
+The completed run is:
+
+```text
+detect_runs/
+  detect_native_sleepyfish_cam2010094_native_canary_20260728_v003_sleepyfish_cam2010094
+```
+
+Fresh, unconsolidated and consolidated reads validated:
+
+- 1,188,000 recording frames;
+- 1,168,175 detection rows and 1,168,175 unique `instance_key` values;
+- source-frame coverage from 0 through 1,187,999, with 19,825 valid empty
+  frames;
+- exact `F+1` monotonic offsets and equality between canonical and acquisition
+  frame indices;
+- native manifest v2, logical schema v1, and
+  `detection_published_access_aware_v1` storage;
+- 24 MB stored in 27 files; and
+- null `latest`, `latest_complete`, `latest_pending`, and `authoritative_run`
+  selectors.
+
+The retained publication receipt is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/staging/.processing_logs/
+  native_detection_canary_20260728_v003_republish/native_detection/
+  sleepyfish_cam2010094.publication.json
+```
+
+Its SHA-256 is
+`50d4e1b68b3b52c64f354a01f88a907271368bc9c70d6ae42f652b8a947f159c`.
+The adjacent validation receipt records the independent fresh-read audit.
+
+The logical content from the failed `v002` placement and successful `v003`
+republish was identical, with digest
+`8a841f6a866da96a6eee6a2eb483f0f897998742c38f374af22ec05f8d7f9431`.
+This proves deterministic replay from the same immutable artifacts. It does not
+yet prove compatibility-writer parity: the historical comparison run used a
+different model version. The remaining raw-writer gate is an exact same-input
+compatibility/native comparison followed by a Crimson read canary.
+
+The GPU array produced one operational warning: concurrent workers could race
+while creating the optional Ultralytics user-settings file. Inference was not
+affected, but production jobs should isolate `YOLO_CONFIG_DIR` per worker.
 
 ## Focused Validation
 
