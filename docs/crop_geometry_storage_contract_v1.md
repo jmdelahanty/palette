@@ -226,6 +226,12 @@ the standard completion-marker gap and replacing the cache planner's legacy-
 only identity requirement with the manifest-bound run reference. Pixel decode
 and mask-reader validation remain open and are not implied by that review.
 
+The combined publisher was revalidated at reconciliation commit `2b9b816a`.
+The selector-ineligible integrated canary retained the Crimson-tested logical
+content digest while adding and validating the standard complete-run envelope.
+Its immutable paths and hashes are recorded in
+`docs/crop_geometry_read_fixture_contract.md`.
+
 The Crimson coordinate canary passed at implementation commit
 `ce478c7d13d2f870e6c711308090e28364872602` and evidence commit `4100719`.
 The supplied evidence SHA-256 is

@@ -164,8 +164,35 @@ self-test. Its evidence is recorded in
 `docs/diagnostics/crop_geometry_v2_read_benchmark_2026-07-29/` in the Crimson
 repository.
 
-The fixture predates the standard Palette completion attributes added by crop
-DAG integration commit `0d31e0b9`. That metadata-only difference does not
-invalidate the array-layout or read-performance result. A new
-selector-ineligible integrated canary should verify the completion envelope
-before guarded activation; it does not require another performance matrix.
+The Crimson-tested fixture predates the standard Palette completion attributes
+added by crop DAG integration commit `0d31e0b9`. That metadata-only difference
+does not invalidate the array-layout or read-performance result.
+
+An integrated selector-ineligible canary was subsequently published from clean
+reconciliation commit `2b9b816a28f2a4431536ad04eb5ff0b588305d20` at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/
+crop_geometry/publication_reads/
+20260128_crop_v2_publication_read_20260729_v2/
+```
+
+Its handoff SHA-256 is
+`b6115f49d46ce97579f331ef251c860e15ecbfb07da5a0df37b623b2c2100afb`,
+and its canonical payload digest is
+`1bd96d9a598ece7e4687d03188982fcda6953ac19344a4115abf519d20586e2a`.
+The canary explicitly validated:
+
+- `palette_run_completion_contract=palette.zarr_run_completion.v1`;
+- `palette_run_completion_status=complete`;
+- the exact crop run name;
+- `stage_selector_eligible=false` and `production_candidate=true`;
+- direct/consolidated metadata equivalence; and
+- the same logical-content digest
+  `c58278b28a4a77bae623797d154c94d19b27e0d3fb54bb25cf790e4641cb5f0b`
+  as the Crimson-tested fixture.
+
+The integrated canary completed in 11.778 seconds without changing a selector,
+registry, source archive, or production store. Since its logical arrays and
+physical profile are unchanged, the completion-envelope check closes the
+integration gap without another performance matrix.
