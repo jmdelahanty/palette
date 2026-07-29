@@ -15,11 +15,14 @@ from fisheye.shared.coordinate_surface_contract import (
     SOURCE_CAMERA_POINT_XY,
 )
 from fisheye.shared.zarr.array_contracts import (
+    BODY_FRAME_ARRAY_CONTRACTS,
     CORE_ARRAY_CONTRACTS,
     CROP_ARRAY_CONTRACTS,
     DETECTION_ARRAY_CONTRACTS,
     DETECTION_BBOX_NORM_COORDS_V1,
     KEYPOINTS_IMG_V1,
+    KEYPOINT_ARRAY_CONTRACTS,
+    REFINED_KEYPOINT_ARRAY_CONTRACTS,
     REFINED_DETECTION_ARRAY_CONTRACTS,
 )
 from fisheye.shared.zarr.coordinate_contracts import (
@@ -52,6 +55,9 @@ def test_every_coordinate_bearing_core_array_has_one_exact_binding() -> None:
         DETECTION_ARRAY_CONTRACTS,
         REFINED_DETECTION_ARRAY_CONTRACTS,
         CROP_ARRAY_CONTRACTS,
+        KEYPOINT_ARRAY_CONTRACTS,
+        REFINED_KEYPOINT_ARRAY_CONTRACTS,
+        BODY_FRAME_ARRAY_CONTRACTS,
     ),
 )
 def test_stage_coordinate_catalogs_are_complete(catalog: object) -> None:

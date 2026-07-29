@@ -903,6 +903,305 @@ KEYPOINTS_NORM_V1 = ArrayContract(
     coordinate_space="image_normalized",
 )
 
+KEYPOINT_FRAME_INDICES_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.frame_indices",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Recording-frame index for each keypoint observation.",
+    units="camera_frame_index",
+)
+
+KEYPOINT_SOURCE_ACQUISITION_FRAME_INDEX_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.source_acquisition_frame_index",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Sealed acquisition-frame identity for each keypoint observation.",
+    units="acquisition_frame_index",
+)
+
+KEYPOINT_INSTANCE_KEY_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.instance_key",
+    schema_version=1,
+    dtype=UINT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description=(
+        "Stable observation and edit-lineage identity copied from the bound "
+        "detection and crop snapshot; not a subject or track identity."
+    ),
+    units="instance_identity",
+)
+
+KEYPOINT_SOURCE_CROP_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.source_crop_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Exact row index in the bound geometry-only crop snapshot.",
+    units="crop_row_index",
+)
+
+KEYPOINT_SOURCE_CROP_ROW_SIGNATURE_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.source_crop_row_signature",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_instances", 32),
+    axis_names=("instance", "sha256_byte"),
+    description="Exact per-row compatibility signature copied from the source crop.",
+    units="sha256_digest_byte",
+)
+
+KEYPOINT_ROW_SIGNATURE_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.keypoint_row_signature",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_instances", 32),
+    axis_names=("instance", "sha256_byte"),
+    description=(
+        "Digest of landmark coordinates, validity, ordered skeleton identity, "
+        "observation identity, and source binding."
+    ),
+    units="sha256_digest_byte",
+)
+
+KEYPOINTS_ROI_V2 = ArrayContract(
+    schema_id="palette.array.keypoints_roi",
+    schema_version=2,
+    dtype=FLOAT32,
+    shape_template=("n_instances", "n_keypoints", 2),
+    axis_names=("instance", "keypoint", "xy"),
+    description="Authoritative keypoint coordinates in ROI-local continuous pixels.",
+    units="pixels",
+    coordinate_space="roi_pixel",
+)
+
+KEYPOINTS_IMG_V2 = ArrayContract(
+    schema_id="palette.array.keypoints_img",
+    schema_version=2,
+    dtype=FLOAT32,
+    shape_template=("n_instances", "n_keypoints", 2),
+    axis_names=("instance", "keypoint", "xy"),
+    description="Exact source-camera projection of keypoints_roi.",
+    units="pixels",
+    coordinate_space="image_pixel",
+)
+
+KEYPOINT_CONFIDENCES_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.keypoint_confidences",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", "n_keypoints"),
+    axis_names=("instance", "keypoint"),
+    description="Per-landmark source-model confidence in skeleton order.",
+    units="probability",
+)
+
+KEYPOINT_VALID_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.keypoint_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances", "n_keypoints"),
+    axis_names=("instance", "keypoint"),
+    description="Explicit validity mask for landmark coordinates and confidence.",
+)
+
+KEYPOINT_POSE_CONFIDENCE_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.pose_confidence",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Source-model row-level pose confidence.",
+    units="probability",
+)
+
+KEYPOINT_POSE_SUCCESS_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.pose_success",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Whether the source producer resolved a pose for this observation.",
+)
+
+KEYPOINT_POSE_BBOX_XYXY_ROI_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.pose_bbox_xyxy_roi",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 4),
+    axis_names=("instance", "xyxy"),
+    description="Source pose box in ROI-local continuous half-open pixel edges.",
+    units="pixels",
+    coordinate_space="crop_pixel_edges",
+)
+
+KEYPOINT_POSE_BBOX_XYXY_IMG_V1 = ArrayContract(
+    schema_id="palette.array.keypoint.pose_bbox_xyxy_img",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 4),
+    axis_names=("instance", "xyxy"),
+    description="Exact source-camera projection of pose_bbox_xyxy_roi.",
+    units="pixels",
+    coordinate_space="source_camera_pixel_edges",
+)
+
+REFINED_KEYPOINT_SOURCE_SUCCESS_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.source_success",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Whether the parent keypoint observation was usable before refinement.",
+)
+
+REFINED_KEYPOINT_REFINED_SUCCESS_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.refined_success",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Whether the reviewed row is accepted as a usable refined pose.",
+)
+
+REFINED_KEYPOINT_EDIT_FLAGS_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.keypoint_edit_flags",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances", "n_keypoints"),
+    axis_names=("instance", "keypoint"),
+    description="Per-landmark indication that coordinates differ from the parent.",
+)
+
+REFINED_KEYPOINT_FLIP_CORRECTED_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.flip_corrected",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Whether anatomical label or polarity correction was applied.",
+)
+
+REFINED_KEYPOINT_CONFIDENCE_VALID_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.confidence_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Result of the snapshot's declared confidence acceptance policy.",
+)
+
+REFINED_KEYPOINT_GEOMETRY_VALID_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.geometry_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Result of the snapshot's declared skeleton-geometry policy.",
+)
+
+REFINED_KEYPOINT_USABLE_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.usable_keypoints",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Combined review and promotion usability result.",
+)
+
+REFINED_KEYPOINT_REVIEW_STATE_CODES_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.review_state_codes",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Controlled refined-keypoint review-state code.",
+)
+
+REFINED_KEYPOINT_REASON_CODES_V1 = ArrayContract(
+    schema_id="palette.array.refined_keypoint.reason_codes",
+    schema_version=1,
+    dtype=UINT16,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Controlled acceptance or rejection reason; zero means no reason.",
+)
+
+BODY_FRAME_SOURCE_KEYPOINT_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.body_frame.source_keypoint_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Exact row index in the bound keypoint snapshot.",
+    units="keypoint_row_index",
+)
+
+BODY_FRAME_SOURCE_KEYPOINT_ROW_SIGNATURE_V1 = ArrayContract(
+    schema_id="palette.array.body_frame.source_keypoint_row_signature",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_instances", 32),
+    axis_names=("instance", "sha256_byte"),
+    description="Exact input keypoint-row signature copied from the source snapshot.",
+    units="sha256_digest_byte",
+)
+
+BODY_FRAME_ORIGIN_XY_V1 = ArrayContract(
+    schema_id="palette.array.body_frame.origin_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 2),
+    axis_names=("instance", "xy"),
+    description="Anatomical body-frame origin in source-camera continuous pixels.",
+    units="pixels",
+    coordinate_space="image_pixel",
+)
+
+BODY_FRAME_FORWARD_AXIS_XY_V1 = ArrayContract(
+    schema_id="palette.array.body_frame.forward_axis_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 2),
+    axis_names=("instance", "xy"),
+    description="Unit vector from posterior toward anterior in camera XY axes.",
+    units="unit_vector",
+)
+
+BODY_FRAME_LEFT_AXIS_XY_V1 = ArrayContract(
+    schema_id="palette.array.body_frame.left_axis_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances", 2),
+    axis_names=("instance", "xy"),
+    description="Unit vector toward anatomical left in camera XY axes.",
+    units="unit_vector",
+)
+
+BODY_FRAME_AXIS_VALID_V1 = ArrayContract(
+    schema_id="palette.array.body_frame.axis_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Whether origin and anatomical axes were resolved by the estimator.",
+)
+
+BODY_FRAME_HEADING_DEG_V1 = ArrayContract(
+    schema_id="palette.array.body_frame.heading_deg",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_instances",),
+    axis_names=("instance",),
+    description="Derived atan2(-forward_y, forward_x) heading cache.",
+    units="degrees",
+)
+
 DENSE_SUBJECT_MASKS_ROI_V1 = ArrayContract(
     schema_id="palette.array.subject_masks_roi_dense",
     schema_version=1,
@@ -1004,6 +1303,61 @@ CROP_ARRAY_CONTRACTS = ArrayContractCatalog(
 )
 
 
+KEYPOINT_SHARED_ARRAY_CONTRACTS = (
+    KEYPOINT_INSTANCE_KEY_V1,
+    KEYPOINT_SOURCE_CROP_ROW_IDS_V1,
+    KEYPOINT_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+    KEYPOINT_FRAME_INDICES_V1,
+    FRAME_ROW_OFFSETS_V1,
+    KEYPOINT_SOURCE_CROP_ROW_SIGNATURE_V1,
+    KEYPOINT_ROW_SIGNATURE_V1,
+    KEYPOINTS_ROI_V2,
+    KEYPOINTS_IMG_V2,
+    KEYPOINT_CONFIDENCES_V1,
+    KEYPOINT_VALID_V1,
+    KEYPOINT_POSE_CONFIDENCE_V1,
+    KEYPOINT_POSE_BBOX_XYXY_ROI_V1,
+    KEYPOINT_POSE_BBOX_XYXY_IMG_V1,
+)
+
+
+KEYPOINT_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (*KEYPOINT_SHARED_ARRAY_CONTRACTS, KEYPOINT_POSE_SUCCESS_V1)
+)
+
+
+REFINED_KEYPOINT_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        *KEYPOINT_SHARED_ARRAY_CONTRACTS,
+        REFINED_KEYPOINT_SOURCE_SUCCESS_V1,
+        REFINED_KEYPOINT_REFINED_SUCCESS_V1,
+        REFINED_KEYPOINT_EDIT_FLAGS_V1,
+        REFINED_KEYPOINT_FLIP_CORRECTED_V1,
+        REFINED_KEYPOINT_CONFIDENCE_VALID_V1,
+        REFINED_KEYPOINT_GEOMETRY_VALID_V1,
+        REFINED_KEYPOINT_USABLE_V1,
+        REFINED_KEYPOINT_REVIEW_STATE_CODES_V1,
+        REFINED_KEYPOINT_REASON_CODES_V1,
+    )
+)
+
+
+BODY_FRAME_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        KEYPOINT_INSTANCE_KEY_V1,
+        BODY_FRAME_SOURCE_KEYPOINT_ROW_IDS_V1,
+        BODY_FRAME_SOURCE_KEYPOINT_ROW_SIGNATURE_V1,
+        KEYPOINT_FRAME_INDICES_V1,
+        FRAME_ROW_OFFSETS_V1,
+        BODY_FRAME_ORIGIN_XY_V1,
+        BODY_FRAME_FORWARD_AXIS_XY_V1,
+        BODY_FRAME_LEFT_AXIS_XY_V1,
+        BODY_FRAME_AXIS_VALID_V1,
+        BODY_FRAME_HEADING_DEG_V1,
+    )
+)
+
+
 CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
         FRAME_COUNTS_V1,
@@ -1057,6 +1411,36 @@ CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
         KEYPOINTS_ROI_V1,
         KEYPOINTS_IMG_V1,
         KEYPOINTS_NORM_V1,
+        KEYPOINT_FRAME_INDICES_V1,
+        KEYPOINT_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        KEYPOINT_INSTANCE_KEY_V1,
+        KEYPOINT_SOURCE_CROP_ROW_IDS_V1,
+        KEYPOINT_SOURCE_CROP_ROW_SIGNATURE_V1,
+        KEYPOINT_ROW_SIGNATURE_V1,
+        KEYPOINTS_ROI_V2,
+        KEYPOINTS_IMG_V2,
+        KEYPOINT_CONFIDENCES_V1,
+        KEYPOINT_VALID_V1,
+        KEYPOINT_POSE_CONFIDENCE_V1,
+        KEYPOINT_POSE_SUCCESS_V1,
+        KEYPOINT_POSE_BBOX_XYXY_ROI_V1,
+        KEYPOINT_POSE_BBOX_XYXY_IMG_V1,
+        REFINED_KEYPOINT_SOURCE_SUCCESS_V1,
+        REFINED_KEYPOINT_REFINED_SUCCESS_V1,
+        REFINED_KEYPOINT_EDIT_FLAGS_V1,
+        REFINED_KEYPOINT_FLIP_CORRECTED_V1,
+        REFINED_KEYPOINT_CONFIDENCE_VALID_V1,
+        REFINED_KEYPOINT_GEOMETRY_VALID_V1,
+        REFINED_KEYPOINT_USABLE_V1,
+        REFINED_KEYPOINT_REVIEW_STATE_CODES_V1,
+        REFINED_KEYPOINT_REASON_CODES_V1,
+        BODY_FRAME_SOURCE_KEYPOINT_ROW_IDS_V1,
+        BODY_FRAME_SOURCE_KEYPOINT_ROW_SIGNATURE_V1,
+        BODY_FRAME_ORIGIN_XY_V1,
+        BODY_FRAME_FORWARD_AXIS_XY_V1,
+        BODY_FRAME_LEFT_AXIS_XY_V1,
+        BODY_FRAME_AXIS_VALID_V1,
+        BODY_FRAME_HEADING_DEG_V1,
         DENSE_SUBJECT_MASKS_ROI_V1,
         CONTOUR_POINTS_XY_V1,
     )

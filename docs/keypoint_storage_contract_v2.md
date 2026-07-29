@@ -104,11 +104,13 @@ consolidated/direct metadata equivalence.
 
 ### Refined keypoint snapshots
 
-A compact `refined_keypoints_runs/<run>` v2 snapshot reuses the core table and
-adds authoring provenance, including exact parent snapshot identity,
-per-landmark edit flags, review state, acceptance reasons, and accepted
-edit/delta digests. It does not add heading. It does retain the exact QC facts
-used to validate or approve that snapshot.
+A compact `refined_keypoints_runs/<run>` v2 snapshot reuses the shared identity,
+lineage, coordinate, confidence, validity, bbox, and signature fields. It
+replaces raw-only `pose_success` with the unambiguous pair `source_success` and
+`refined_success`, then adds authoring provenance including exact parent
+snapshot identity, per-landmark edit flags, review state, acceptance reasons,
+and accepted edit/delta digests. It does not add heading. It does retain the
+exact QC facts used to validate or approve that snapshot.
 
 The initial refined QC surface is:
 
@@ -265,11 +267,11 @@ It must not be encoded by silently changing `heading_deg`.
 
 ### Logical schemas
 
-- [ ] Add exact float32 keypoint-v2 array contracts and coordinate bindings.
-- [ ] Implement the raw/refined shared stage schema and cross-array invariants.
+- [x] Add exact float32 keypoint-v2 array contracts and coordinate bindings.
+- [x] Implement the raw/refined shared stage schema and cross-array invariants.
 - [ ] Freeze exact snapshot-local raw/refined QC arrays, code maps, and policy
       digests.
-- [ ] Implement body-frame-v1 logical contracts and derivation validation.
+- [x] Implement body-frame-v1 logical contracts and derivation validation.
 - [ ] Require exact manifest field sets and canonical digests.
 
 ### Writer and lifecycle

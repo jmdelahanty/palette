@@ -28,6 +28,7 @@ from fisheye.shared.coordinate_surface_contract import (
     SOURCE_CAMERA_POINT_XY,
 )
 from fisheye.shared.zarr.array_contracts import (
+    BODY_FRAME_ORIGIN_XY_V1,
     CONTOUR_POINTS_XY_V1,
     CROP_BBOX_ROI_XYXY_V1,
     CROP_ROI_COORDINATES_FULL_V1,
@@ -38,8 +39,12 @@ from fisheye.shared.zarr.array_contracts import (
     DETECTION_BBOX_NORM_COORDS_V1,
     DETECTION_CENTERS_IMG_XY_V1,
     KEYPOINTS_IMG_V1,
+    KEYPOINTS_IMG_V2,
     KEYPOINTS_NORM_V1,
     KEYPOINTS_ROI_V1,
+    KEYPOINTS_ROI_V2,
+    KEYPOINT_POSE_BBOX_XYXY_IMG_V1,
+    KEYPOINT_POSE_BBOX_XYXY_ROI_V1,
     REFINED_SOURCE_BBOX_IMG_XYXY_V1,
     REFINED_SOURCE_BBOX_NORM_COORDS_V1,
     REFINED_SOURCE_CENTERS_IMG_XY_V1,
@@ -184,6 +189,19 @@ _BINDINGS = (
         SOURCE_CAMERA_NORMALIZED_POINT_XY,
         semantic_role=DERIVED,
     ),
+    _binding(KEYPOINTS_ROI_V2, ROI_POINT_XY, semantic_role=AUTHORITY),
+    _binding(KEYPOINTS_IMG_V2, SOURCE_CAMERA_POINT_XY, semantic_role=DERIVED),
+    _binding(
+        KEYPOINT_POSE_BBOX_XYXY_ROI_V1,
+        ROI_BBOX_XYXY,
+        semantic_role=AUTHORITY,
+    ),
+    _binding(
+        KEYPOINT_POSE_BBOX_XYXY_IMG_V1,
+        SOURCE_CAMERA_BBOX_XYXY,
+        semantic_role=DERIVED,
+    ),
+    _binding(BODY_FRAME_ORIGIN_XY_V1, SOURCE_CAMERA_POINT_XY, semantic_role=DERIVED),
     _binding(DENSE_SUBJECT_MASKS_ROI_V1, ROI_RASTER_YX, semantic_role=AUTHORITY),
     _binding(CONTOUR_POINTS_XY_V1, ROI_POINTS_XY, semantic_role=SAMPLED),
 )
