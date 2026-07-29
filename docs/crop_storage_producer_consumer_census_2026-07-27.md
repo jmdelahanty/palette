@@ -558,11 +558,12 @@ tensor.
 
 - [x] Publish a small selector-ineligible refined-source geometry-only crop
       canary with at least two ROI sizes represented in contract tests.
-- [ ] Validate exact values, multi-instance frames, empty frames, offsets,
+- [x] Validate exact values, multi-instance frames, empty frames, offsets,
       source lineage, pixel parity, direct/consolidated metadata, and codecs.
 - [x] Benchmark selector-ineligible geometry publication and object count.
-- [ ] Benchmark eager metadata open, random single-row review, sequential
-      inference, and training export.
+- [x] Benchmark eager metadata open, random single-row review, and sequential
+      windows on the workstation, LSF, and Crimson.
+- [ ] Benchmark pixel materialization and training export.
 - [ ] Run one full-duration regression only after the small contract canary
       passes.
 - [ ] Require downstream keypoint, subject-mask, tracking, and training

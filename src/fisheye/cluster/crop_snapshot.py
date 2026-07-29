@@ -75,8 +75,7 @@ def build_crop_snapshot_fragment(
     job_key = f"crop_snapshot_publish:{target_safe}"
     receipt = inputs.run_root / "crop_snapshot" / f"{target_safe}.publication.json"
     scratch = (
-        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
-        "crop_geometry_candidate"
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/crop_geometry_candidate"
     )
     command = [
         "scripts/py",

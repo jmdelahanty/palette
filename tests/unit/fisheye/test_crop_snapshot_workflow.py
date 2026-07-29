@@ -32,9 +32,7 @@ def _inputs(tmp_path: Path, *, family: str) -> CropSnapshotFragmentInputs:
 def test_crop_fragment_is_partition_independent_and_selector_ineligible(
     tmp_path: Path,
 ) -> None:
-    module = build_crop_snapshot_fragment(
-        _inputs(tmp_path, family="analysis.clipped")
-    )
+    module = build_crop_snapshot_fragment(_inputs(tmp_path, family="analysis.clipped"))
     job = module.fragment.jobs[0]
     command = " ".join(job.command)
 
@@ -50,12 +48,8 @@ def test_crop_fragment_is_partition_independent_and_selector_ineligible(
 
 
 def test_crop_fragment_uses_same_publisher_for_whole_recording(tmp_path: Path) -> None:
-    clipped = build_crop_snapshot_fragment(
-        _inputs(tmp_path, family="analysis.clipped")
-    )
-    whole = build_crop_snapshot_fragment(
-        _inputs(tmp_path, family="analysis.whole")
-    )
+    clipped = build_crop_snapshot_fragment(_inputs(tmp_path, family="analysis.clipped"))
+    whole = build_crop_snapshot_fragment(_inputs(tmp_path, family="analysis.whole"))
 
     assert clipped.outputs.to_json() == whole.outputs.to_json()
     assert clipped.fragment.metadata == whole.fragment.metadata
@@ -110,4 +104,3 @@ def test_crop_candidate_cli_builds_fixed_policy_and_writes_receipt(
     assert policy.fixed_size_wh == (512, 384)
     assert policy.padding_mode is CropPaddingMode.ZERO_OUTSIDE_SOURCE_FRAME
     assert captured["expected_camera_identity"] == "2010093"
-

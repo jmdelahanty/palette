@@ -28,7 +28,8 @@ def test_crop_read_benchmark_verifies_manifest_hashes_and_reopen_modes(
 
     assert result["status"] == "passed"
     assert len(result["passes"]) == 2
-    assert all(len(item["full_scan"]["array_sha256"]) == 13 for item in result["passes"])
+    assert all(
+        len(item["full_scan"]["array_sha256"]) == 13 for item in result["passes"]
+    )
     assert all(len(item["windows"]) == 3 for item in result["passes"])
     assert json.loads(output.read_text(encoding="utf-8"))["status"] == "passed"
-

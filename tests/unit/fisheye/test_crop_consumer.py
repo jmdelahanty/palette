@@ -52,12 +52,13 @@ def test_strict_reference_uses_manifest_and_logical_digests(tmp_path: Path) -> N
     reference = build_crop_run_reference(crop, run_id="strict_crop")
 
     assert reference["profile"] == CROP_RUN_REFERENCE_STRICT_PROFILE
-    assert reference["run_manifest_digest"] == crop.attrs["run_manifest"][
-        "payload_digest"
-    ]
-    assert reference["logical_content_digest"] == crop.attrs["run_manifest"][
-        "payload"
-    ]["logical_content"]["digest"]
+    assert (
+        reference["run_manifest_digest"] == crop.attrs["run_manifest"]["payload_digest"]
+    )
+    assert (
+        reference["logical_content_digest"]
+        == crop.attrs["run_manifest"]["payload"]["logical_content"]["digest"]
+    )
     assert validate_crop_run_reference(reference) == reference
     assert strict_crop_fixed_roi_shape(crop, run_id="strict_crop") == (8, 8)
     assert strict_crop_source_frame_shape(crop, run_id="strict_crop") == (80, 100)

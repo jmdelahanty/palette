@@ -92,9 +92,7 @@ def _window_read(run: Any, *, start: int, stop: int) -> dict[str, Any]:
         "rows": int(stop - start),
         "logical_bytes": logical_bytes,
         "seconds": seconds,
-        "mib_per_second": (
-            logical_bytes / 1024**2 / seconds if seconds > 0 else None
-        ),
+        "mib_per_second": (logical_bytes / 1024**2 / seconds if seconds > 0 else None),
         "digest": digest.hexdigest(),
     }
 
@@ -124,9 +122,7 @@ def _full_scan(
         "batch_rows": int(batch_rows),
         "logical_bytes": logical_bytes,
         "seconds": seconds,
-        "mib_per_second": (
-            logical_bytes / 1024**2 / seconds if seconds > 0 else None
-        ),
+        "mib_per_second": (logical_bytes / 1024**2 / seconds if seconds > 0 else None),
         "array_sha256": observed,
     }
 
@@ -172,8 +168,7 @@ def _measure_pass(
     count = min(int(window_rows), n_rows)
     starts = sorted({0, max(0, (n_rows - count) // 2), max(0, n_rows - count)})
     windows = [
-        _window_read(consolidated, start=start, stop=start + count)
-        for start in starts
+        _window_read(consolidated, start=start, stop=start + count) for start in starts
     ]
     full_scan = _full_scan(
         consolidated,

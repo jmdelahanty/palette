@@ -58,6 +58,13 @@ from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_NAME_ATTR,
+    RUN_STATUS_COMPLETE,
+)
 
 
 CROP_READ_FIXTURE_SCHEMA_ID = "palette.crop_geometry.crimson_read_fixture"
@@ -348,6 +355,17 @@ def _validate_final_archive(
     run = family[crop_run_id]
     if run.attrs.get("stage_selector_eligible") is not False:
         raise RuntimeError("Crop fixture run became selector-eligible.")
+    expected_completion = {
+        RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
+        RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
+        RUN_NAME_ATTR: crop_run_id,
+    }
+    observed_completion = {name: run.attrs.get(name) for name in expected_completion}
+    if observed_completion != expected_completion:
+        raise RuntimeError(
+            "Crop fixture completion envelope differs from the standard contract: "
+            f"expected {expected_completion}, observed {observed_completion}."
+        )
     if "roi_images" in run:
         raise RuntimeError(
             "Geometry-only crop fixture unexpectedly contains roi_images."
@@ -396,6 +414,7 @@ def _validate_final_archive(
         "row_count": dimensions.n_instances,
         "geometry_only": True,
         "selector_eligible": False,
+        "completion_contract_valid": True,
     }
 
 

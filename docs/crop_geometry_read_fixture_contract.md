@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: implemented and published; Crimson read benchmark pending
+Status: implemented, published, and passed by Crimson
 
 ## Purpose
 
@@ -143,3 +143,29 @@ Crimson should use the explicit archive and run in the handoff and:
 The 23k-frame result validates publication/read integration and instrumentation.
 A full-duration fixture should be requested only if the smaller checkpoint
 reveals scaling questions that cannot be answered analytically.
+
+## Crimson Result
+
+Crimson implemented the backend-neutral reader at commit `e972cef` and
+published evidence at commit `8349c14`. The mounted-macOS benchmark passed:
+
+- all 13 arrays opened with exact dtypes;
+- `frame_row_offsets` was read exactly once and retained;
+- first usable geometry was available in 1.25 seconds, including the diagnostic
+  direct/consolidated metadata comparison;
+- warm random-frame p95 was 0.129 ms;
+- 70-frame sequential-window p95 was 0.105 ms;
+- all 32 cancelled requests were discarded with zero stale publication;
+- peak RSS was 20.4 MB; and
+- `roi_images` was never opened.
+
+Crimson passed all 62 macOS tests and its isolated Linux/CUDA 12.4 compile and
+self-test. Its evidence is recorded in
+`docs/diagnostics/crop_geometry_v2_read_benchmark_2026-07-29/` in the Crimson
+repository.
+
+The fixture predates the standard Palette completion attributes added by crop
+DAG integration commit `0d31e0b9`. That metadata-only difference does not
+invalidate the array-layout or read-performance result. A new
+selector-ineligible integrated canary should verify the completion envelope
+before guarded activation; it does not require another performance matrix.

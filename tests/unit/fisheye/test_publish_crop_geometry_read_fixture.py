@@ -91,6 +91,7 @@ def test_fixture_exercises_real_candidate_publisher_without_source_mutation(
         "row_count": 4,
         "geometry_only": True,
         "selector_eligible": False,
+        "completion_contract_valid": True,
     }
     assert payload["handoff_policy"]["profile_promotion_evidence"] is False
     assert payload["publication"]["node_local_materialization"]["writer_receipt"]

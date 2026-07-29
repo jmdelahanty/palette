@@ -155,10 +155,9 @@ def validate_crop_run_reference(value: object) -> dict[str, object]:
         }
         if set(reference) != expected:
             raise ValueError("Legacy crop run reference has an unexpected field set.")
-        if (
-            reference.get("crop_signature") in (None, "")
-            or reference.get("crop_revision") in (None, "")
-        ):
+        if reference.get("crop_signature") in (None, "") or reference.get(
+            "crop_revision"
+        ) in (None, ""):
             raise ValueError("Legacy crop run reference is incomplete.")
     elif profile == CROP_RUN_REFERENCE_UNVERSIONED_LEGACY_PROFILE:
         expected = {
