@@ -250,6 +250,9 @@ For the keypoint estimator, the manifest binds the exact source snapshot,
 the source-camera coordinate descriptor, estimator version, and all output
 digests. A run may use mask, spline, or hybrid inputs only through another
 explicit estimator profile; it cannot relabel those outputs as keypoint-derived.
+The v1 keypoint body-frame producer resolves landmark indices from the ordered
+pose-schema labels. It does not accept a run override, deprecated alias, or
+caller-supplied hard-coded positions as canonical provenance.
 
 ## QC Boundary
 
@@ -304,6 +307,23 @@ evaluation artifacts, not per-observation authority fields.
   a longitudinal subject or track identity.
 - Training exports use reviewed keypoints. Heading is recomputed from the bound
   skeleton recipe or included only as an explicitly derived auxiliary target.
+
+### DAG and registry boundary
+
+The first archive-native quality node must accept a run name, not caller-built
+source dictionaries. It resolves and validates the raw-keypoint-v2 manifest,
+crop/model/skeleton bindings, policy, and destination itself, then returns a
+receipt containing the source, quality-manifest, policy, profile, and logical
+content digests plus phase timings. Until raw-v2 is persisted, the quality
+publisher remains a standalone benchmark shadow rather than a production DAG
+edge.
+
+The existing SQLite `keypoint_quality` table is a legacy summary extracted from
+`refined_keypoints_runs`; it is not an index of the new
+`keypoint_quality_runs` artifacts. Do not write new quality runs through that
+table or silently change its meaning. If operational discovery later needs an
+artifact index, add a distinctly named, manifest-keyed surface such as
+`keypoint_quality_artifacts`.
 
 ## Storage And Publication
 
@@ -360,8 +380,9 @@ It must not be encoded by silently changing `heading_deg`.
 - [x] Implement body-frame-v1 logical contracts and derivation validation.
 - [x] Require exact quality manifest field sets, reconstruct the logical and
       storage builders, and enforce canonical digests.
-- [ ] Add equivalent exact run manifests for raw/refined keypoints and body
-      frames.
+- [x] Add the exact body-frame run manifest and publication reconstruction
+      gate.
+- [ ] Add equivalent exact run manifests for raw and refined keypoints.
 
 ### Writer and lifecycle
 
@@ -369,6 +390,18 @@ It must not be encoded by silently changing `heading_deg`.
       changing current defaults.
 - [x] Add the observation-local keypoint-quality producer and immutable
       publication gate.
+- [ ] Freeze the exact raw-keypoint-v2 run manifest, then publish one
+      selector-ineligible YOLO canary before inserting the quality DAG node.
+- [ ] Make clipped finalization and later delta compaction publish the same
+      raw/refined v2 contracts rather than parallel layouts.
+- [ ] Add a bounded-row DAG materializer that accepts only a validated
+      raw-keypoint-v2 manifest, writes complete destination physical units,
+      and does not retain duplicate full source/output tables.
+- [x] Add the body-frame-v1 producer, exact manifest, and byte-planned
+      selector-ineligible shadow publisher.
+- [ ] Add the bounded-row body-frame DAG node after refined-keypoint selection.
+- [ ] Keep legacy embedded heading readable but never copy it into v2; migrate
+      by recomputation into a new body-frame run after numerical/consumer gates.
 - [ ] Add keyed refined-keypoint deltas and immutable compaction.
 - [ ] Recompute accepted snapshot-local QC during compaction and body frame
       after it.
@@ -380,10 +413,14 @@ It must not be encoded by silently changing `heading_deg`.
 
 - [ ] Compare v1 float64 and v2 float32 landmark/source-camera projections,
       editing round trips, and derived heading.
-- [ ] Benchmark writer, compaction, publication, random-frame, window, full-read,
-      and training-export workloads.
+- [x] Add one deterministic compute, publication, retained-offset,
+      random-frame, 70-frame-window, and full-scan integration benchmark.
+- [ ] Repeat publication/read measurement on selector-ineligible
+      representative short and full-duration raw-keypoint-v2 sources.
+- [ ] Benchmark refined compaction and training-export workloads.
 - [ ] Benchmark common-row chunk alignment for hot keypoint/body-frame columns.
-- [ ] Record requested and effective chunk/shard shapes and object estimates.
+- [x] Record requested and effective chunk/shard shapes, object estimates,
+      publication phases, physical file statistics, and peak process RSS.
 
 ### Consumer and migration
 
@@ -405,3 +442,51 @@ Promotion requires exact logical validation, stable multi-observation frame
 lookup, edit/compaction correctness, numerical acceptance, direct/consolidated
 metadata equivalence, supported codecs, Crimson correctness, and benchmarked
 read/write/publication behavior on representative short and full recordings.
+
+## Deterministic Publication/Read Checkpoint
+
+The first bounded integration benchmark ran on 2026-07-29 using 23,287 frames,
+22,926 observations, five landmarks, 365 empty frames, and four frames with two
+observations. It passed publication validation, direct/consolidated manifest
+equality, exact retained offsets, deterministic random-frame and 70-frame
+window digests, and all-array full-scan digests.
+
+Local `/tmp` results on the Palette workstation were:
+
+| Measurement | Result |
+| --- | ---: |
+| Source validation + quality computation | 72.2 ms |
+| Validated publication | 225.1 ms |
+| Physical payload objects | 13 |
+| Apparent archive bytes | 1,596,377 |
+| Retained offset load | 1.61 ms / 186,304 bytes / exactly one read |
+| Random-frame median / p95 | 8.92 / 9.73 ms |
+| 70-frame-window median / p95 | 8.96 / 9.61 ms |
+| Full scan | 14.23 ms / 172.27 MiB/s |
+| Peak RSS delta from fresh driver entry | 30,273,536 bytes |
+
+This is integration evidence only. All 13 quality arrays fit in one payload
+object apiece at this row count, so the run does not exercise indexed sharding,
+remote filesystem behavior, cache pressure, or full-duration object counts.
+It cannot promote `published_http_v1` or choose a distinct quality profile.
+Representative evidence first requires a persisted raw-keypoint-v2 source with
+an exact manifest; using a legacy float64/embedded-heading run as though it were
+v2 would weaken the contract. The benchmark driver intentionally marks its
+deterministic source and result as selector-ineligible and promotion-ineligible.
+
+The same driver also passed a synthetic full-duration-shape checkpoint with
+1,188,000 frames, 1,187,087 observations, 929 empty frames, and 16 two-row
+frames. This run did exercise the physical plan: all 13 arrays were
+indexed-sharded into 14 payload objects. It wrote 132,961,056 logical bytes as
+68,234,804 apparent bytes and completed validated publication in 4.01 seconds
+on local ext4. The 9,504,008-byte retained offset index loaded once in 9.96 ms;
+random-frame median/p95 was 33.76/35.20 ms, 70-frame-window median/p95 was
+32.28/34.46 ms, and a complete scan took 751.7 ms at 168.69 MiB/s.
+
+That checkpoint is physical-scale integration evidence, not representative
+scientific-data or PRFS/macOS evidence. It also exposed a workflow concern:
+the fresh process peaked at 1,089,241,088 bytes RSS, 915,832,832 bytes above
+driver entry. Production DAG execution should read and compute bounded row
+blocks instead of retaining the synthetic source, copied source evidence, and
+complete prepared output simultaneously. Streaming must preserve complete
+row units and single-writer ownership of each physical shard.
