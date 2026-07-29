@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: implemented; persistent 23k-frame publication pending
+Status: implemented and published; Crimson read benchmark pending
 
 ## Purpose
 
@@ -51,7 +51,7 @@ production selection. The published crop run remains
 `stage_selector_eligible=false`, and `crop_runs` receives no `latest`,
 `latest_complete`, or authoritative pointer.
 
-## Planned Representative Publication
+## Representative Publication
 
 Seed archive:
 
@@ -90,6 +90,42 @@ scripts/py -m fisheye.diagnostics.publish_crop_geometry_read_fixture \
   --crop-size 512
 ```
 
+The publication completed from clean Palette commit
+`bab8e715fa9bfecf50eecb979b70acdb4356edb1`. The immutable handoff is:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/
+crop_geometry/publication_reads/
+20260128_crop_v2_publication_read_20260729_v1/handoff_manifest.json
+```
+
+Its handoff SHA-256 is
+`e3da633b55e9f5f8fcfee8f7036aa7ce5f93b18ad12b5b9edae8dca3c52164b2`,
+and its canonical payload digest is
+`c02ff0b61f5c3baee75f619105cc6937165fdafc9b8a45006e398e018a3560bc`.
+The final validation recorded:
+
+- 23,287 frames, 22,926 rows, and exactly 13 geometry/lineage arrays;
+- no `roi_images` array;
+- `published_http_v1` physical storage;
+- exact direct/consolidated metadata equivalence;
+- valid refined-source and source-pixel authority bindings;
+- crop run-manifest digest
+  `2ea77755feeed1e2602237b3b6ca70b9c822e7ba01f92db37205616cc801930a`;
+- logical-content digest
+  `c58278b28a4a77bae623797d154c94d19b27e0d3fb54bb25cf790e4641cb5f0b`;
+- 91 archive files, including 39 payload objects, with 3,830,584 apparent
+  bytes; and
+- unchanged source-refined tree, no selector or registry update, no visible
+  partial package, and an empty node-local work root after success.
+
+End-to-end candidate publication took 11.411 seconds. The crop writer itself
+took 1.243 seconds, including 0.127 seconds to create and write all arrays. The
+atomic run import took 1.685 seconds. Copy-only times were 0.530 seconds for the
+source seed into local scratch and 1.187 seconds from the prepared seed into
+shared hidden staging. These are single workstation/PRFS integration
+measurements, not promotion latency gates.
+
 ## Crimson Workload
 
 Crimson should use the explicit archive and run in the handoff and:
@@ -107,4 +143,3 @@ Crimson should use the explicit archive and run in the handoff and:
 The 23k-frame result validates publication/read integration and instrumentation.
 A full-duration fixture should be requested only if the smaller checkpoint
 reveals scaling questions that cannot be answered analytically.
-

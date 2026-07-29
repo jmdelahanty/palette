@@ -165,7 +165,8 @@ Before production integration:
 - [x] publish a small immutable canary outside production selectors;
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
 - [ ] test Palette pixel materialization and downstream keypoint/mask readers;
-- [ ] benchmark publication and representative row/window reads;
+- [x] benchmark selector-ineligible publication and record object counts;
+- [ ] benchmark representative row/window reads in Crimson;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.
 
