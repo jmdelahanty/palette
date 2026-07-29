@@ -501,6 +501,8 @@ Cache reuse and compute/publication timing was:
 | Validate and publish keypoint quality v1 | 0.51 |
 | Validate and publish body frame v1 | 0.54 |
 
+The 1.82-second cache stage was an immediate same-day reuse measurement and is
+not a cold-NRS transfer gate; cold staging still needs its own repetitions.
 Inference resolved 22,858 poses and retained 68 explicit failed rows. The
 float32 conversion introduced zero ROI-coordinate error for this result; the
 largest source-camera reprojection difference was 0.000244140625 pixels, below
