@@ -41,9 +41,6 @@ from fisheye.cluster.lsf import (
     submit_lsf_workflow,
     write_json_snapshot,
 )
-from fisheye.cluster.lsf.runtime import (
-    RUNTIME_JOB_ID_TOKEN,
-)
 from fisheye.registry.db import Registry
 from fisheye.registry.model_resolution import (
     load_candidates,
@@ -257,6 +254,24 @@ def _resolve_ranked_binding(
     )
     _verify_binding(binding)
     return binding
+
+
+def resolve_detection_model_binding(
+    *,
+    registry_path: Path,
+    target: CampaignTarget,
+    set_id: str,
+    run_id: str,
+) -> ModelBinding:
+    """Resolve and content-verify one exact registered detection model."""
+
+    return _resolve_ranked_binding(
+        registry_path=registry_path,
+        target=target,
+        task="detect",
+        set_id=set_id,
+        run_id=run_id,
+    )
 
 
 def _resolve_subject_binding(
@@ -601,7 +616,6 @@ def build_plan(
             output_dir=run_root / "targets" / target_safe / "detection_artifacts",
         )
         work_units = list(detection_plan["work_units"])
-        clip_ids = [str(unit["clip_id"]) for unit in work_units]
         if len(work_units) != 22:
             raise ValueError(
                 f"Target {target.target_id!r} must have exactly 22 clip-camera work units; "

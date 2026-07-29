@@ -85,6 +85,19 @@ def _read_json_strict(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
 
 
+def _read_historical_zarr_envelope(path: Path) -> Any:
+    """Read a legacy Zarr declaration without blessing its unrelated attrs.
+
+    Some historical analysis roots contain bare ``NaN``/``Infinity`` values in
+    attributes unrelated to recording identity.  Python's JSON reader can
+    recover those envelopes so the exact identity field can be selected.  All
+    newly produced artifact metadata and the canonical authority records remain
+    subject to strict finite-JSON validation elsewhere in this workflow.
+    """
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _find_non_finite(value: Any, path: str = "$") -> list[str]:
     findings: list[str] = []
     if isinstance(value, float) and not math.isfinite(value):
@@ -308,7 +321,7 @@ def _extract_timing(source_run_group: Path) -> dict[str, Any]:
 
 def _canonical_recording_identity(target_zarr: Path) -> str:
     root_metadata = target_zarr / "zarr.json"
-    payload = _read_json_strict(root_metadata)
+    payload = _read_historical_zarr_envelope(root_metadata)
     attrs = payload.get("attributes") if isinstance(payload, dict) else None
     if not isinstance(attrs, dict):
         attrs = {}
