@@ -36,6 +36,7 @@ from ..registry.db import RegistryPaths
 from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
+from ..shared.zarr.crop_consumer import strict_crop_source_dimensions
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from ..shared.keypoint_summary import build_frame_keypoint_counts
@@ -1329,7 +1330,12 @@ def _first_attr(attrs: Any, names: Tuple[str, ...]) -> Any:
     return None
 
 
-def _resolve_full_image_shape(root: zarr.Group, crop_group: zarr.Group) -> Tuple[Tuple[int, int], Optional[int]]:
+def _resolve_full_image_shape(
+    root: zarr.Group,
+    crop_group: zarr.Group,
+    *,
+    crop_run_id: str | None = None,
+) -> Tuple[Tuple[int, int], Optional[int]]:
     """Resolve full-frame shape for normalized keypoint coordinates.
 
     Modern crop-first analysis zarrs may intentionally omit raw_video/images_full.
@@ -1352,6 +1358,20 @@ def _resolve_full_image_shape(root: zarr.Group, crop_group: zarr.Group) -> Tuple
         return (int(img_h), int(img_w)), total_frames
     except KeyError:
         pass
+
+    if crop_run_id is not None:
+        strict_dimensions = strict_crop_source_dimensions(
+            crop_group,
+            run_id=crop_run_id,
+        )
+        if strict_dimensions is not None:
+            strict_frames, strict_height, strict_width = strict_dimensions
+            if total_frames is not None and total_frames != strict_frames:
+                raise ValueError(
+                    "Root frame count differs from strict crop-v2 source-pixel "
+                    "authority."
+                )
+            return (strict_height, strict_width), strict_frames
 
     width_names = (
         "video_width",
@@ -1378,7 +1398,7 @@ def _resolve_full_image_shape(root: zarr.Group, crop_group: zarr.Group) -> Tuple
         raise ValueError(
             "Unable to determine full-resolution image dimensions. "
             "Expected raw_video/images_full, root video_width/video_height attrs, "
-            "or crop-run width/height attrs."
+            "strict crop-v2 source-pixel authority, or crop-run width/height attrs."
         )
     return (int(img_h), int(img_w)), total_frames
 
@@ -2125,7 +2145,11 @@ def detect_keypoints_yolo(
             keypoint_coordinate_context.source.crop_geometry.source_geometry.frame_evidence.acquisition_frame.record.source_total_frames
         )
     else:
-        full_img_shape, total_frames = _resolve_full_image_shape(root, crop_group)
+        full_img_shape, total_frames = _resolve_full_image_shape(
+            root,
+            crop_group,
+            crop_run_id=latest_crop,
+        )
 
     norm_factor = np.array([full_img_shape[1], full_img_shape[0]], dtype="f8")
 

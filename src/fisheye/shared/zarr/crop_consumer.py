@@ -234,12 +234,27 @@ def strict_crop_source_frame_shape(
 ) -> tuple[int, int] | None:
     """Return ``(height, width)`` from strict source-pixel authority."""
 
+    dimensions = strict_crop_source_dimensions(crop_group, run_id=run_id)
+    if dimensions is None:
+        return None
+    _, height, width = dimensions
+    return height, width
+
+
+def strict_crop_source_dimensions(
+    crop_group: Any,
+    *,
+    run_id: str,
+) -> tuple[int, int, int] | None:
+    """Return ``(n_frames, height, width)`` from strict pixel authority."""
+
     normalized_run_id = _required_run_id(run_id)
     manifest = _strict_manifest(crop_group, run_id=normalized_run_id)
     if manifest is None:
         return None
     pixel_authority = manifest["payload"]["source_pixel_authority"]
     return (
+        int(pixel_authority["n_frames"]),
         int(pixel_authority["source_height"]),
         int(pixel_authority["source_width"]),
     )
@@ -352,6 +367,7 @@ __all__ = [
     "strict_crop_fixed_roi_shape",
     "strict_crop_required_roi_pixel_contract",
     "strict_crop_row_source_signature_spec",
+    "strict_crop_source_dimensions",
     "strict_crop_source_frame_shape",
     "validate_crop_run_reference",
 ]

@@ -22,6 +22,7 @@ from fisheye.shared.zarr.crop_consumer import (
     strict_crop_fixed_roi_shape,
     strict_crop_required_roi_pixel_contract,
     strict_crop_row_source_signature_spec,
+    strict_crop_source_dimensions,
     strict_crop_source_frame_shape,
     validate_crop_run_reference,
 )
@@ -94,6 +95,7 @@ def test_strict_reference_uses_manifest_and_logical_digests(tmp_path: Path) -> N
     assert reference["logical_content_digest"] == crop.attrs["run_manifest"]["payload"]["logical_content"]["digest"]
     assert validate_crop_run_reference(reference) == reference
     assert strict_crop_fixed_roi_shape(crop, run_id="strict_crop") == (8, 8)
+    assert strict_crop_source_dimensions(crop, run_id="strict_crop") == (4, 80, 100)
     assert strict_crop_source_frame_shape(crop, run_id="strict_crop") == (80, 100)
     row_signature = strict_crop_row_source_signature_spec(
         crop,

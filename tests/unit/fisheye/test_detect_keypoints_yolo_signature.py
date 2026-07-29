@@ -122,6 +122,25 @@ def test_resolve_full_image_shape_uses_crop_run_dimensions_without_raw_video() -
     assert total_frames == 143447
 
 
+def test_resolve_full_image_shape_uses_strict_crop_v2_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        yolo_mod,
+        "strict_crop_source_dimensions",
+        lambda crop_group, *, run_id: (23_287, 4_512, 4_512),
+    )
+
+    shape, total_frames = yolo_mod._resolve_full_image_shape(
+        _FakeGroup(attrs={}),
+        _FakeGroup(attrs={}),
+        crop_run_id="strict_crop_v2",
+    )
+
+    assert shape == (4_512, 4_512)
+    assert total_frames == 23_287
+
+
 def test_resolve_full_image_shape_uses_root_dimension_aliases_without_raw_video() -> None:
     root = _FakeGroup(attrs={"source_video_width": "4512", "source_video_height": 4512, "n_frames": 12})
     crop_group = _FakeGroup(attrs={})
