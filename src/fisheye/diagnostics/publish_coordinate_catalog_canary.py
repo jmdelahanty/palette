@@ -293,6 +293,7 @@ def publish_coordinate_catalog_canary(
     crimson_commit: str,
     crimson_review_path: str,
     crimson_review_sha256: str,
+    allow_initialize_missing_source_keys: bool = False,
 ) -> dict[str, object]:
     """Create locally, validate, copy, and atomically expose one canary package."""
 
@@ -307,6 +308,8 @@ def publish_coordinate_catalog_canary(
         raise FileNotFoundError("Video reference or recording manifest is missing.")
     if type(crop_size) is not int or crop_size <= 0:
         raise ValueError("crop_size must be a positive exact integer.")
+    if type(allow_initialize_missing_source_keys) is not bool:
+        raise TypeError("allow_initialize_missing_source_keys must be an exact bool.")
     recording_document = _strict_json(recording_record)
     manifest_recording_identity = recording_document.get(
         "session_uuid", recording_document.get("recording_id")
@@ -371,6 +374,7 @@ def publish_coordinate_catalog_canary(
             source_height=canonical.dimensions.source_height,
             recording_identity=recording_identity,
             source_detect_group=detect_group,
+            allow_initialize_missing_source_keys=(allow_initialize_missing_source_keys),
         )
         refined_ids = np.asarray(
             transition.arrays["instances/refined_row_ids"], dtype=np.int64
@@ -598,6 +602,14 @@ def publish_coordinate_catalog_canary(
                 "camera_identity": camera_identity,
                 "legacy_detect_run": legacy_detect_run,
                 "legacy_refined_run": legacy_refined_run,
+                "historical_identity_migration": {
+                    "allow_initialize_missing_source_keys": (
+                        allow_initialize_missing_source_keys
+                    ),
+                    "transition_identity_initializations": transition.report[
+                        "identity_initializations"
+                    ],
+                },
                 "open_mode": "read_only_direct_metadata",
                 "pixel_authority_document": pixel_document,
                 "pixel_authority_document_digest": pixel_document_digest,
@@ -714,6 +726,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--refined-run-id", required=True)
     parser.add_argument("--crop-run-id", required=True)
     parser.add_argument("--crop-size", type=int, default=512)
+    parser.add_argument(
+        "--allow-initialize-missing-source-keys",
+        action="store_true",
+        help=(
+            "Explicit historical migration for source-audit tables that predate "
+            "durable instance keys. Modern sources must not need this flag."
+        ),
+    )
     parser.add_argument("--crimson-commit", required=True)
     parser.add_argument("--crimson-review-path", required=True)
     parser.add_argument("--crimson-review-sha256", required=True)
@@ -736,6 +756,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         refined_run_id=args.refined_run_id,
         crop_run_id=args.crop_run_id,
         crop_size=args.crop_size,
+        allow_initialize_missing_source_keys=(
+            args.allow_initialize_missing_source_keys
+        ),
         crimson_commit=args.crimson_commit,
         crimson_review_path=args.crimson_review_path,
         crimson_review_sha256=args.crimson_review_sha256,
