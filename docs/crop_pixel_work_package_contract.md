@@ -98,6 +98,14 @@ actually used. Legacy `refined_roi_path` overrides are rejected: those pixels
 must be folded into the logical crop definition before a shared package can be
 cited.
 
+Maintained acquisition crop-video producers are not a legacy exception. New
+`palette.analysis_acquisition_crop_run.v1` outputs mint stable detection-origin
+`instance_key` values and persist `source_row_signature` directly. Their signed
+current-source reference binds the Orange PyNvVC luma pixel contract, crop-video
+descriptor, crop-meta row/video-frame identities, geometry, and complete rowset
+fingerprint. Historical acquisition runs that lack those arrays remain readable
+but cannot create a modern work package until they are republished or migrated.
+
 ## Consumer And Publication Rules
 
 Package row zero is not crop row zero. Every package-backed output must write:
@@ -183,6 +191,29 @@ scripts/py -m fisheye.utils.cleanup_crop_pixel_work_package \
 ```
 
 Add `--apply` only after reviewing the unreferenced generation list.
+
+## Bounded Acquisition-Source Canary
+
+The first real producer/consumer checkpoint uses the maintained RedScare
+acquisition crop video without modifying its source archive. A GPU-node job:
+
+1. creates a minimal analysis archive on node-local scratch;
+2. republishes acquisition crop metadata through the current writer;
+3. materializes a deterministic prefix of at most 2,048 crop rows once;
+4. reopens that package through both keypoint and subject-mask input paths;
+5. optionally runs both real model consumers into selector-ineligible shard
+   parents in the local archive; and
+6. publishes only strict JSON evidence and logs under `.palette_benchmarks`.
+
+Use `scripts/submit_crop_pixel_materialization_canary_bsub.sh`. It is dry-run
+unless `--apply` is supplied, requires a clean commit-pinned cluster worktree,
+rejects shared mounts as compute scratch, disables registry writes, and records
+that production selectors and archives were unchanged. The local work package
+and model outputs are ephemeral integration evidence, not training artifacts.
+
+This checkpoint precedes the keypoint storage contract. Its row identity,
+coordinate, pixel-source, and edit-lifecycle evidence informs that contract; it
+does not select keypoint chunk or shard sizes by itself.
 
 ## Synthetic Evidence
 

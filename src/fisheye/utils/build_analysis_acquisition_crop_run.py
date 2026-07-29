@@ -16,7 +16,12 @@ import numpy as np
 import zarr
 
 from fisheye.diagnostics.compare_realtime_offline_detections import infer_recording_dir_from_zarr
+from fisheye.shared.acquisition_crop_identity import (
+    acquisition_crop_video_descriptor,
+    build_acquisition_crop_identity,
+)
 from fisheye.shared.crop_geometry import bbox_img_xyxy_to_norm_cxcywh
+from fisheye.shared.instance_keys import resolve_recording_identity
 from fisheye.shared.roi_pixel_contract import (
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
     orange_mono_pynvvc_luma_pixel_contract,
@@ -397,6 +402,8 @@ def _write_crop_run(
     source_height: int,
     overwrite: bool,
 ) -> None:
+    if crop_video_path is None:
+        raise ValueError("Acquisition crop publication requires a crop video path.")
     parent = require_runs_parent(root, "crop_runs")
     if run_name in parent:
         if not overwrite:
@@ -405,6 +412,30 @@ def _write_crop_run(
     group = parent.create_group(run_name)
     mark_run_started(group, run_name=run_name, stage="crop")
     try:
+        pixel_contract = orange_mono_pynvvc_luma_pixel_contract()
+        recording_identity = resolve_recording_identity(
+            root.attrs,
+            fallback_path=zarr_path,
+        )
+        identity = build_acquisition_crop_identity(
+            {
+                "bbox_norm_coords": payload.selected_live_detection_bbox_norm_coords,
+                "crop_state_codes": payload.crop_state_codes,
+                "frame_indices": payload.frame_indices,
+                "roi_coordinates_full": payload.roi_coordinates_full,
+                "roi_sizes_full": payload.roi_sizes_full,
+                "source_crop_local_frame_ids": payload.source_crop_local_frame_ids,
+                "source_crop_meta_row_indices": payload.source_crop_meta_row_indices,
+                "source_crop_video_frame_indices": payload.source_crop_video_frame_indices,
+                "source_pixel_kind_codes": payload.source_pixel_kind_codes,
+            },
+            recording_identity=recording_identity,
+            source_video_descriptor=acquisition_crop_video_descriptor(crop_video_path),
+            source_crop_meta_path=crop_meta_path,
+            source_width=source_width,
+            source_height=source_height,
+            pixel_contract=pixel_contract,
+        )
         _create_array(group, "frame_indices", payload.frame_indices)
         _create_array(group, "source_frame_indices", payload.frame_indices.astype(np.int64, copy=False))
         _create_array(group, "source_recording_frame_ids", payload.source_recording_frame_ids)
@@ -429,6 +460,12 @@ def _write_crop_run(
         _create_array(group, "detection_source", payload.detection_source)
         _create_array(group, "source_pixel_kind_codes", payload.source_pixel_kind_codes)
         _create_array(group, "crop_state_codes", payload.crop_state_codes)
+        _create_array(group, "instance_key", identity.instance_keys)
+        _create_array(
+            group,
+            "source_row_signature",
+            identity.row_signatures.signatures,
+        )
         stamp_geometry_preload_attrs(group)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -458,7 +495,7 @@ def _write_crop_run(
                 "source_type": "acquisition_crop_video",
                 "roi_size": roi_size,
                 "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
-                "roi_pixel_contract": orange_mono_pynvvc_luma_pixel_contract(),
+                "roi_pixel_contract": pixel_contract,
                 "decode_backend": "pynvvc_luma",
                 "detection_source_type": "external_crop_recorder_crop_meta_selected_live_detection",
                 "source_video_path": str(crop_video_path) if crop_video_path is not None else None,
@@ -489,6 +526,7 @@ def _write_crop_run(
                 "summary_statistics": summary,
                 "status": "completed",
                 "completed_at_utc": now,
+                **identity.attrs(),
             }
         )
         git_info = get_git_info(Path(__file__).resolve().parents[3])

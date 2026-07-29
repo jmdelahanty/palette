@@ -141,6 +141,14 @@ not interchangeable. Hybrid artifacts declare
 array. A cache or work package must bind the exact source family that produced
 its bytes.
 
+New acquisition crop-video analysis runs also publish stable observation keys
+and per-row source signatures. This makes the maintained geometry/pixel-source
+snapshot eligible for keyed keypoint and subject-mask work packages without a
+later identity backfill. The signed-current profile is an explicit transition
+surface for maintained acquisition sources; strict crop manifests remain the
+preferred publication envelope once the acquisition stream has a complete
+digest-bound authority record.
+
 `bind_refined_crop_source_pixel_authority()` is the future-facing strict
 authority binder for a single external full-frame source video. It reopens the
 direct archive metadata, requires the mirrored acquisition publication state to be

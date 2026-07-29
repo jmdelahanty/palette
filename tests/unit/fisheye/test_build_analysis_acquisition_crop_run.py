@@ -5,6 +5,10 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.shared.zarr.crop_consumer import (
+    CROP_RUN_REFERENCE_SIGNED_PROFILE,
+    build_crop_run_reference,
+)
 from fisheye.utils.build_analysis_acquisition_crop_run import build_analysis_acquisition_crop_run
 
 
@@ -142,3 +146,19 @@ def test_build_analysis_acquisition_crop_run_writes_geometry_only_contract(tmp_p
     assert crop["detection_success"][:].tolist() == [True, True]
     assert crop["source_pixel_kind_codes"][:].tolist() == [0, 0]
     assert crop["crop_state_codes"][:].tolist() == [0, 0]
+    assert crop["instance_key"].dtype == np.dtype(np.uint64)
+    assert np.unique(crop["instance_key"][:]).shape == (2,)
+    assert crop["source_row_signature"].dtype == np.dtype(np.uint8)
+    assert crop["source_row_signature"].shape == (2, 32)
+    assert crop.attrs["instance_key_policy"] == (
+        "minted_at_acquisition_detection_origin"
+    )
+    assert crop.attrs["source_row_signature_stage"] == "crop"
+    assert crop.attrs["source_pixel_fingerprint_basis"] == (
+        "sha256_canonical_source_descriptor_v1_not_video_content_hash"
+    )
+    assert crop.attrs["source_rowset_fingerprint_basis"] == (
+        "sha256_instance_keys_and_row_source_signatures_v1"
+    )
+    reference = build_crop_run_reference(crop, run_id="crop_test")
+    assert reference["profile"] == CROP_RUN_REFERENCE_SIGNED_PROFILE
