@@ -2,7 +2,7 @@
 
 Date: 2026-07-28
 
-Status: published and Palette-validated; Crimson archive gate pending
+Status: passed Palette and Crimson archive gates; selector-ineligible
 
 ## Result
 
@@ -141,9 +141,15 @@ Validation completed with:
 
 ## Crimson Archive Gate
 
-Crimson should use the macOS paths above and the exact run IDs in the artifact
-table. The remaining gate is the one frozen in
-`docs/diagnostics/coordinate_catalog_cross_language_review_2026-07-28.md`:
-exact typed opens, direct/consolidated equivalence, nested and outer manifest
-validation, live dimension/pixel-authority checks, both declared coordinate
-samples, tamper rejection, and isolation of legacy adapters.
+Crimson passed the gate using implementation commit
+`ce478c7d13d2f870e6c711308090e28364872602` and evidence commit `4100719`.
+The supplied evidence SHA-256 is
+`9918615e142a1f946eb98865f46e264cacff23a2885e008ce0030d87efc6fd7d`.
+
+The consumer validated canonical-v3, refined-v2, and crop-v2 coordinate
+manifests, exact typed TensorStore opens, CSR offsets, lineage, and
+ROI-box-to-source-camera transforms while retaining the legacy crop adapter as
+a separate compatibility surface. The normalized projection differed by
+`0.000109` pixel after float32-to-double promotion, within the frozen
+`0.001`-pixel tolerance; the ROI transformation was exact. This gate changes no
+Palette selector or production writer default.

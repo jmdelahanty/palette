@@ -3,7 +3,7 @@
 Status: implemented for selector-ineligible refined-source shadows; not a
 production selector or writer default
 
-Date: 2026-07-28
+Date: 2026-07-29
 
 ## Purpose
 
@@ -72,9 +72,18 @@ full-acquisition refined-detection v1 snapshot. The crop manifest binds its:
 The source-pixel authority separately binds recording/camera identity,
 acquisition frame domain, dimensions, decoded `uint8` grayscale semantics, and
 the digest of the external authority manifest. The shadow publisher accepts a
-typed, already-proven authority. A production adapter must reopen and validate
-the external recording/video manifest rather than accepting an arbitrary
-caller-provided digest.
+typed, already-proven authority.
+
+`bind_refined_crop_source_pixel_authority()` is the future-facing production
+adapter for a single external full-frame source video. It reopens the direct
+archive metadata, requires the mirrored acquisition publication state to be
+`published_canonical_v1` in `external_video_v1` mode, reloads the sealed import
+ownership and acquisition-camera frame, resolves the exact source-video
+locator, and recomputes the live `stat_v1` fingerprint. It then binds the
+`orange_mono_pynvvc_luma_uint8_v1` full-frame decode policy into the crop
+authority digest. Recording identity, camera identity, `F`, width, and height
+must exactly match the refined handoff. Materialized source arrays, acquisition
+crop videos, and clipped collections intentionally require separate adapters.
 
 ## Manifest and Publication Gate
 
@@ -129,10 +138,20 @@ update `latest`, activate a selector, or write into an analysis archive.
 
 Before production integration:
 
-- [ ] implement and validate the external source-pixel authority adapter;
+- [x] implement and validate the external full-frame source-pixel authority
+      adapter;
 - [ ] obtain parallel Palette producer/DAG review of this exact contract;
-- [ ] publish a small immutable benchmark canary outside production selectors;
+- [x] publish a small immutable canary outside production selectors;
+- [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
 - [ ] test Palette pixel materialization and downstream keypoint/mask readers;
 - [ ] benchmark publication and representative row/window reads;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.
+
+The Crimson coordinate canary passed at implementation commit
+`ce478c7d13d2f870e6c711308090e28364872602` and evidence commit `4100719`.
+The supplied evidence SHA-256 is
+`9918615e142a1f946eb98865f46e264cacff23a2885e008ce0030d87efc6fd7d`.
+Crimson validated exact typed opens, CSR offsets, lineage, and ROI-to-source
+camera transforms; this closes the coordinate-consumer gate but does not
+activate a Palette crop selector.

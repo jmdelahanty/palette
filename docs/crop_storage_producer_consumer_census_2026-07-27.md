@@ -63,9 +63,25 @@ contract surfaces:
 The source-video geometry profile now freezes a recording identity, camera
 identity, frame/dimension domain, decoded `uint8` grayscale contract, and an
 exact source-pixel authority manifest digest. The first publisher accepts that
-typed authority as already proven evidence. Reopening and validating the
-external Orange/video authority that produced the digest remains an adapter
-checkpoint before production activation.
+typed authority as already proven evidence. The external full-frame adapter
+described below now replaces that caller-provided evidence for its supported
+profile.
+
+### External source-pixel adapter checkpoint (2026-07-29)
+
+`fisheye.shared.zarr.crop_pixel_authority` now closes that checkpoint for the
+future-facing single external full-frame video profile. It derives no identity
+from paths or caller strings: it reloads the published acquisition status,
+sealed acquisition ownership/frame records, exact source-video metadata and
+locator, and the live `stat_v1` source fingerprint. The resulting sealed
+binding exact-compares recording identity, camera identity, frame count, and
+source dimensions with the refined handoff and binds the full-frame
+`orange_mono_pynvvc_luma_uint8_v1` decode contract into the digest consumed by
+`CropPixelAuthority`.
+
+This does not generalize source semantics. Materialized `raw_video` arrays,
+acquisition crop-video streams, clipped collections, and hybrid caches still
+require distinct typed adapters and frame-map validation.
 
 ## Outcome
 
@@ -531,7 +547,7 @@ tensor.
 
 ### Canary and activation
 
-- [ ] Publish a small selector-ineligible refined-source geometry-only crop
+- [x] Publish a small selector-ineligible refined-source geometry-only crop
       canary with at least two ROI sizes represented in contract tests.
 - [ ] Validate exact values, multi-instance frames, empty frames, offsets,
       source lineage, pixel parity, direct/consolidated metadata, and codecs.

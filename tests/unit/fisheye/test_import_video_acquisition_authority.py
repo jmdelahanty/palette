@@ -34,6 +34,10 @@ from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     load_persisted_acquisition_camera_authority,
 )
+from fisheye.shared.zarr.crop_pixel_authority import (
+    CROP_SOURCE_VIDEO_DECODE_PROFILE,
+    bind_external_video_crop_pixel_authority,
+)
 
 
 def _organized_source(tmp_path: Path) -> tuple[Path, dict[str, str]]:
@@ -253,7 +257,8 @@ def test_external_video_publication_is_mode_explicit_and_idempotent(
         },
         organized_context=context,
     )
-    zarr_path = tmp_path / "external-analysis.zarr"
+    zarr_path = tmp_path / "recording" / "zarr" / "external-analysis.zarr"
+    zarr_path.parent.mkdir(parents=True)
     root = zarr.open_group(
         store=LocalStore(str(zarr_path)),
         mode="w",
@@ -283,6 +288,21 @@ def test_external_video_publication_is_mode_explicit_and_idempotent(
     )
     assert ownership.record.mode == EXTERNAL_ACQUISITION_AUTHORITY_MODE
     assert frame.record.frame_array is None
+    crop_pixels = bind_external_video_crop_pixel_authority(
+        zarr_path,
+        expected_recording_identity=context["recording_id"],
+        expected_camera_identity=context["camera_id"],
+        expected_n_frames=4,
+        expected_source_width=4,
+        expected_source_height=3,
+    )
+    assert crop_pixels.pixel_authority.authority_id.endswith(
+        f"#decode={CROP_SOURCE_VIDEO_DECODE_PROFILE}"
+    )
+    assert crop_pixels.pixel_authority.authority_manifest_digest == (
+        crop_pixels.binding_document_digest
+    )
+    crop_pixels.assert_verified()
     del root.attrs[ACQUISITION_AUTHORITY_STATUS_ATTR]
     del root["raw_video"].attrs[ACQUISITION_AUTHORITY_STATUS_ATTR]
     with pytest.raises(PixelFrameAuthorityError, match="requires explicit repair"):
