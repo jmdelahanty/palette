@@ -559,9 +559,11 @@ reason to weaken or delay the storage schemas.
 
 ### Consumer and migration
 
-- [ ] Publish selector-ineligible raw-keypoint-v2, keypoint-quality-v1,
-      and body-frame-v1 fixtures for Crimson; add refined-keypoint-v2 after
-      its exact manifest gate is complete.
+- [x] Publish selector-ineligible raw-keypoint-v2, keypoint-quality-v1,
+      and body-frame-v1 fixtures for Crimson. The immutable paths, exact typed
+      surfaces, object receipt, and consumer gate are frozen in
+      `docs/keypoint_v2_crimson_fixture_contract.md`; add refined-keypoint-v2
+      after its exact manifest gate is complete.
 - [ ] Add Crimson exact-schema adapters for keypoint v2, body-frame v1, and
       the snapshot-local QC surface.
 - [ ] Census consumers of current embedded temporal-heading diagnostics and
