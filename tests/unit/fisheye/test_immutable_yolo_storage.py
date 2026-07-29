@@ -11,6 +11,7 @@ from fisheye.shared.immutable_yolo_storage import (
     IMMUTABLE_YOLO_STORAGE_SCHEMA,
     validate_immutable_yolo_storage,
 )
+from fisheye.shared.zarr.columnar import store_array
 
 
 def _create_array(
@@ -259,6 +260,46 @@ def test_validates_keypoint_contract_and_rejects_duplicate_identity(tmp_path) ->
 
     run["instance_key"][:] = np.asarray([201, 201, 203], dtype=np.uint64)
     with pytest.raises(RuntimeError, match="duplicate values"):
+        validate_immutable_yolo_storage(
+            run,
+            stage="keypoints",
+            row_shard_rows=8,
+            frame_shard_rows=8,
+        )
+
+
+def test_accepts_exact_columnar_short_array_optimization(tmp_path) -> None:
+    run = _keypoint_run(tmp_path)
+    signature = store_array(
+        run,
+        "source_row_signature",
+        np.zeros((3, 32), dtype=np.uint8),
+        shard_rows=8,
+    )
+    assert signature.shards is None
+
+    report = validate_immutable_yolo_storage(
+        run,
+        stage="keypoints",
+        row_shard_rows=8,
+        frame_shard_rows=8,
+    )
+
+    checked = {item["name"]: item for item in report["arrays"]}
+    assert checked["source_row_signature"]["expected_shards"] is None
+
+
+def test_rejects_tampered_columnar_short_array_declaration(tmp_path) -> None:
+    run = _keypoint_run(tmp_path)
+    signature = store_array(
+        run,
+        "source_row_signature",
+        np.zeros((3, 32), dtype=np.uint8),
+        shard_rows=8,
+    )
+    signature.attrs["palette_shard_rows_requested"] = 16
+
+    with pytest.raises(RuntimeError, match="palette_shard_rows_requested"):
         validate_immutable_yolo_storage(
             run,
             stage="keypoints",

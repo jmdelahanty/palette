@@ -9,6 +9,12 @@ from typing import Any, Literal
 
 import numpy as np
 
+from fisheye.shared.zarr.columnar import (
+    COLUMNAR_SHARD_ALIGNMENT_POLICY,
+    COLUMNAR_STORAGE_SCHEMA_ID,
+    pick_shards,
+)
+
 
 IMMUTABLE_YOLO_STORAGE_SCHEMA = "palette.immutable_yolo_storage_completion.v1"
 IMMUTABLE_YOLO_STORAGE_ATTR = "immutable_yolo_storage_validation"
@@ -96,6 +102,52 @@ def _direct_arrays(run_group: Any) -> dict[str, Any]:
 
 def _shape(array: Any) -> tuple[int, ...]:
     return tuple(int(item) for item in array.shape)
+
+
+def _columnar_expected_shards(
+    array: Any,
+    *,
+    name: str,
+    shape: tuple[int, ...],
+    chunks: tuple[int, ...],
+    requested_rows: int,
+) -> tuple[tuple[int, ...] | None, list[str]] | None:
+    """Validate the shared columnar writer's short-array shard optimization."""
+
+    attrs = getattr(array, "attrs", None)
+    if attrs is None or attrs.get("palette_storage_schema_id") != COLUMNAR_STORAGE_SCHEMA_ID:
+        return None
+    expected = pick_shards(shape, chunks, shard_rows=int(requested_rows))
+    errors: list[str] = []
+    actual = _shards(array)
+    expected_layout = "indexed_sharding_v1" if expected is not None else "regular_chunks_v1"
+    if expected is not None:
+        expected_skip_reason = None
+    elif int(shape[0]) <= 0:
+        expected_skip_reason = "empty_array"
+    else:
+        expected_skip_reason = "single_logical_row_chunk"
+    declarations = {
+        "palette_storage_writer": "fisheye.shared.zarr.columnar.store_array",
+        "palette_physical_layout": expected_layout,
+        "palette_logical_chunk_shape": list(chunks),
+        "palette_shard_rows_requested": int(requested_rows),
+        "palette_shard_rows_effective": int(expected[0]) if expected is not None else None,
+        "palette_shard_shape": list(expected) if expected is not None else None,
+        "palette_shard_alignment_policy": COLUMNAR_SHARD_ALIGNMENT_POLICY,
+        "palette_sharding_skip_reason": expected_skip_reason,
+    }
+    for field, expected_value in declarations.items():
+        actual_value = attrs.get(field)
+        if actual_value != expected_value:
+            errors.append(
+                f"{name} {field}={actual_value!r}, expected {expected_value!r}"
+            )
+    if actual != expected:
+        errors.append(
+            f"{name} columnar shards={actual!r}, expected short-array layout {expected!r}"
+        )
+    return expected, errors
 
 
 def _summary_errors(
@@ -256,9 +308,20 @@ def validate_immutable_yolo_storage(
                     *chunks[1:],
                 )
                 if actual_shards != expected_shards:
-                    errors.append(
-                        f"{name} shards={actual_shards!r}, expected {expected_shards!r}"
+                    columnar = _columnar_expected_shards(
+                        array,
+                        name=name,
+                        shape=shape,
+                        chunks=chunks,
+                        requested_rows=requested,
                     )
+                    if columnar is None:
+                        errors.append(
+                            f"{name} shards={actual_shards!r}, expected {expected_shards!r}"
+                        )
+                    else:
+                        expected_shards, columnar_errors = columnar
+                        errors.extend(columnar_errors)
         elif actual_shards is not None:
             errors.append(f"{name} is sharded under the explicit regular-chunk contract")
         checked.append(
