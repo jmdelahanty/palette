@@ -1,13 +1,15 @@
 """Bind geometry-only crops to one live, published source-video authority.
 
-The crop schema deliberately persists no pixels.  This adapter therefore
+The crop schema deliberately persists no pixels.  This strict binder therefore
 reopens the archive-owned acquisition authority, verifies its publication
 status and live source-video fingerprint, and converts that evidence into the
 ``CropPixelAuthority`` stored by a crop run.
 
 Only the future-facing single external full-frame video profile is supported
 here.  Materialized arrays, acquisition crop videos, and clipped collections
-need separate adapters because their frame maps and decode contracts differ.
+need separate typed authority binders because their frame maps and decode
+contracts differ. No compatibility aliases, dtype probing, inference, or
+fallback are permitted here.
 """
 
 from __future__ import annotations

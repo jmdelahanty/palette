@@ -63,11 +63,11 @@ contract surfaces:
 The source-video geometry profile now freezes a recording identity, camera
 identity, frame/dimension domain, decoded `uint8` grayscale contract, and an
 exact source-pixel authority manifest digest. The first publisher accepts that
-typed authority as already proven evidence. The external full-frame adapter
+typed authority as already proven evidence. The external full-frame binder
 described below now replaces that caller-provided evidence for its supported
 profile.
 
-### External source-pixel adapter checkpoint (2026-07-29)
+### External source-pixel authority-binder checkpoint (2026-07-29)
 
 `fisheye.shared.zarr.crop_pixel_authority` now closes that checkpoint for the
 future-facing single external full-frame video profile. It derives no identity
@@ -81,7 +81,9 @@ source dimensions with the refined handoff and binds the full-frame
 
 This does not generalize source semantics. Materialized `raw_video` arrays,
 acquisition crop-video streams, clipped collections, and hybrid caches still
-require distinct typed adapters and frame-map validation.
+require distinct typed authority binders and frame-map validation. These strict
+binders are not compatibility adapters: aliases, dtype probing, inference, and
+fallback remain forbidden on the future-facing path.
 
 ## Outcome
 
@@ -532,10 +534,14 @@ tensor.
 - [x] First implement a selector-ineligible geometry-only analysis writer from
       the exact refined-v1 binder; do not create `roi_images` in the analysis
       archive.
+- [x] Add node-local materialization, atomic production-candidate run import,
+      post-transaction manifest reconstruction, archive reconsolidation, and
+      complete reopen validation without changing selectors or registries.
 - [ ] Preserve exact `instance_key` and `source_refined_row_ids`; compute new or
       changed rows and copy only signature-equal predecessor rows.
-- [ ] Keep acquisition and clipped adapters outside the common writer until each
-      can produce a complete typed source binding.
+- [ ] Keep acquisition and clipped compatibility adapters outside the common
+      writer; add future-facing providers only when each can produce a complete
+      typed authority binding.
 - [ ] Make explicit public-reader selection validate completion, manifest,
       selector eligibility, and logical/storage declarations.
 - [ ] Replace ambiguous single-latest assumptions with exact crop-run binding or
@@ -576,6 +582,7 @@ The smallest safe code slice is:
    validated refined-v1 handoff, without a dense pixel array.
 
 Acquisition, clipped, composite, training, selector, and production-writer
-migrations should follow as explicit adapters after that core passes. This
-keeps current processing safe while giving the parallel producer/DAG work one
-stable contract API to target.
+migrations should follow as explicit typed providers after that core passes.
+Legacy adapters remain only at the compatibility boundary. This keeps current
+processing safe while giving the parallel producer/DAG work one stable
+contract API to target.

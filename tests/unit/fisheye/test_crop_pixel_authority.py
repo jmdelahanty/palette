@@ -159,7 +159,7 @@ def _bind(archive: Path) -> BoundCropPixelAuthority:
     )
 
 
-def test_external_video_adapter_binds_live_acquisition_and_decode_contract(
+def test_external_video_binder_binds_live_acquisition_and_decode_contract(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -190,7 +190,7 @@ def test_external_video_adapter_binds_live_acquisition_and_decode_contract(
     assert acquisition.verified == 2
 
 
-def test_external_video_adapter_detects_live_source_replacement(
+def test_external_video_binder_detects_live_source_replacement(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -213,7 +213,7 @@ def test_external_video_adapter_detects_live_source_replacement(
         ({"expected_source_height": 81}, "source height"),
     ],
 )
-def test_external_video_adapter_rejects_refined_source_mismatch(
+def test_external_video_binder_rejects_refined_source_mismatch(
     monkeypatch,
     tmp_path: Path,
     override: dict[str, object],
@@ -233,7 +233,7 @@ def test_external_video_adapter_rejects_refined_source_mismatch(
         bind_external_video_crop_pixel_authority(archive, **kwargs)
 
 
-def test_external_video_adapter_rejects_non_external_publication(
+def test_external_video_binder_rejects_non_external_publication(
     monkeypatch,
     tmp_path: Path,
 ) -> None:

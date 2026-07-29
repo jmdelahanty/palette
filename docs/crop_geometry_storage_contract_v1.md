@@ -74,16 +74,19 @@ acquisition frame domain, dimensions, decoded `uint8` grayscale semantics, and
 the digest of the external authority manifest. The shadow publisher accepts a
 typed, already-proven authority.
 
-`bind_refined_crop_source_pixel_authority()` is the future-facing production
-adapter for a single external full-frame source video. It reopens the direct
-archive metadata, requires the mirrored acquisition publication state to be
+`bind_refined_crop_source_pixel_authority()` is the future-facing strict
+authority binder for a single external full-frame source video. It reopens the
+direct archive metadata, requires the mirrored acquisition publication state to be
 `published_canonical_v1` in `external_video_v1` mode, reloads the sealed import
 ownership and acquisition-camera frame, resolves the exact source-video
 locator, and recomputes the live `stat_v1` fingerprint. It then binds the
 `orange_mono_pynvvc_luma_uint8_v1` full-frame decode policy into the crop
 authority digest. Recording identity, camera identity, `F`, width, and height
 must exactly match the refined handoff. Materialized source arrays, acquisition
-crop videos, and clipped collections intentionally require separate adapters.
+crop videos, and clipped collections intentionally require separate typed
+authority binders. These are contract boundaries, not compatibility adapters:
+they do not probe dtypes, translate aliases, infer identities, or fall back to
+another source.
 
 ## Manifest and Publication Gate
 
@@ -132,14 +135,30 @@ column; the remaining arrays each fit in one large shard.
 
 ## Current Safety Boundary
 
-The implemented publisher can create only a fresh child below `/tmp`,
-`.palette_scratch`, or `.palette_benchmarks`. It does not register an artifact,
-update `latest`, activate a selector, or write into an analysis archive.
+The standalone writer can create only a fresh child below `/tmp`,
+`.palette_scratch`, or `.palette_benchmarks`. The production-candidate boundary
+`publish_crop_geometry_production_candidate()` additionally:
+
+1. binds only the approved authoritative refined-detection snapshot;
+2. binds and re-verifies the exact published external-video pixel authority;
+3. materializes and fully validates a geometry-only crop run on bounded
+   node-local scratch;
+4. atomically imports the immutable run into `crop_runs/<run>`;
+5. rebuilds the exact run manifest after publisher transaction metadata exists;
+6. reconsolidates and revalidates the complete imported publication; and
+7. proves root and crop-family selector attributes are unchanged.
+
+It does not register an artifact, update `latest`, activate a selector, change
+a production default, or replace an existing run. A post-import failure is
+retained as an owner-bound selector-ineligible failed child rather than being
+made authoritative.
 
 Before production integration:
 
 - [x] implement and validate the external full-frame source-pixel authority
-      adapter;
+      binder;
+- [x] implement node-local materialization and atomic selector-ineligible
+      production-candidate import;
 - [ ] obtain parallel Palette producer/DAG review of this exact contract;
 - [x] publish a small immutable canary outside production selectors;
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
