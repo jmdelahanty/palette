@@ -215,6 +215,8 @@ Before production integration:
 - [x] pass the Crimson canonical-v3/refined-v2/crop-v2 coordinate archive gate;
 - [ ] test Palette pixel materialization and downstream keypoint/mask readers;
 - [x] benchmark representative row/window/full reads on workstation and LSF;
+- [x] benchmark selector-ineligible publication and record object counts;
+- [x] benchmark representative row/window reads in Crimson;
 - [ ] benchmark production-candidate publication and reads at recording scale;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.

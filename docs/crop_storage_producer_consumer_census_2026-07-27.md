@@ -560,8 +560,9 @@ tensor.
       canary with at least two ROI sizes represented in contract tests.
 - [ ] Validate exact values, multi-instance frames, empty frames, offsets,
       source lineage, pixel parity, direct/consolidated metadata, and codecs.
-- [ ] Benchmark publication, object count, eager metadata open, random single-row
-      review, sequential inference, and training export.
+- [x] Benchmark selector-ineligible geometry publication and object count.
+- [ ] Benchmark eager metadata open, random single-row review, sequential
+      inference, and training export.
 - [ ] Run one full-duration regression only after the small contract canary
       passes.
 - [ ] Require downstream keypoint, subject-mask, tracking, and training
