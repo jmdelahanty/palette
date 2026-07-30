@@ -543,8 +543,9 @@ not a substitute for the final canonical/refined snapshot pair.
       and bind their standalone crop output into the recording-level keypoint
       finalizer.
 - [ ] Insert those fragments into the maintained clipped campaign around
-      pixel-package creation and clip inference; this remains blocked until
-      each clip refine worker emits strict recording-stable evidence.
+      pixel-package creation and clip inference. The strict clip-evidence and
+      binding fragment is now implemented; final insertion remains coordinated
+      with the detection-DAG refactor.
 - [ ] Import the four finalized keypoint-family candidates atomically into the
       recording archive while preserving the standalone receipts as evidence.
 - [ ] Add a bounded-row DAG materializer that accepts only a validated

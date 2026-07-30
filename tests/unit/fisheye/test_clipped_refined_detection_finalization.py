@@ -69,6 +69,8 @@ def _clip(
     refined_row_id: int,
     bbox: np.ndarray,
     class_id: int,
+    instance_reason_label: str | None = None,
+    source_reason_label: str | None = None,
 ) -> tuple[RefinedDetectionBoundClipEvidence, RefinedDetectionSourceIdentity]:
     dimensions = RefinedDetectionDimensions(
         n_frames=2,
@@ -114,7 +116,10 @@ def _clip(
             ),
             "instances/manual_edit_flags": np.asarray([False], dtype=np.bool_),
             "instances/source_detect_row_index": np.asarray([0], dtype=np.int64),
-            "instances/reason_codes": np.asarray([0], dtype=np.uint16),
+            "instances/reason_codes": np.asarray(
+                [0 if instance_reason_label is None else 1],
+                dtype=np.uint16,
+            ),
             **{
                 f"source_detections/{name}": value.copy()
                 for name, value in shared.items()
@@ -128,7 +133,10 @@ def _clip(
             "source_detections/resolved_refined_row_id": np.asarray(
                 [refined_row_id], dtype=np.int64
             ),
-            "source_detections/reason_codes": np.asarray([0], dtype=np.uint16),
+            "source_detections/reason_codes": np.asarray(
+                [0 if source_reason_label is None else 1],
+                dtype=np.uint16,
+            ),
         }
     )
     offsets = np.asarray(
@@ -156,8 +164,14 @@ def _clip(
             next_refined_row_id=refined_row_id + 1,
         ),
         source=raw,
-        instance_reason_codes={0: "none"},
-        source_reason_codes={0: "none"},
+        instance_reason_codes={
+            0: "none",
+            **({1: instance_reason_label} if instance_reason_label else {}),
+        },
+        source_reason_codes={
+            0: "none",
+            **({1: source_reason_label} if source_reason_label else {}),
+        },
         direct_metadata_declarations=direct,
         consolidated_metadata_declarations=consolidated,
         selector_eligible=False,
@@ -172,7 +186,11 @@ def _clip(
     )
 
 
-def _fixture():
+def _fixture(
+    *,
+    instance_reason_labels: tuple[str | None, str | None] = (None, None),
+    source_reason_labels: tuple[str | None, str | None] = (None, None),
+):
     clip_0, _ = _clip(
         clip_index=0,
         parent_start=0,
@@ -180,6 +198,8 @@ def _fixture():
         refined_row_id=7,
         bbox=np.asarray([0.25, 0.4, 0.2, 0.2]),
         class_id=1,
+        instance_reason_label=instance_reason_labels[0],
+        source_reason_label=source_reason_labels[0],
     )
     clip_1, _ = _clip(
         clip_index=1,
@@ -188,6 +208,8 @@ def _fixture():
         refined_row_id=8,
         bbox=np.asarray([0.75, 0.6, 0.1, 0.2]),
         class_id=2,
+        instance_reason_label=instance_reason_labels[1],
+        source_reason_label=source_reason_labels[1],
     )
     evidence = (clip_0, clip_1)
     binding = RefinedDetectionClippedBinding(
@@ -274,6 +296,35 @@ def test_prepares_complete_recording_pair_with_empty_frames() -> None:
     assert prepared.arrays["instances/source_clip_indices"].tolist() == [0, 1]
     assert prepared.arrays["instances/source_refined_row_ids"].tolist() == [7, 8]
     assert len(prepared.source_collection.members) == 2
+
+
+def test_merges_and_remaps_clip_local_reason_registries() -> None:
+    evidence, binding, canonical, canonical_dimensions, source = _fixture(
+        instance_reason_labels=("edge_case", "occluded"),
+        source_reason_labels=("filtered_jump", "filtered_blip"),
+    )
+
+    prepared = prepare_clipped_refined_detection_snapshot(
+        evidence,
+        clipped_binding=binding,
+        canonical_arrays=canonical,
+        canonical_dimensions=canonical_dimensions,
+        canonical_source=source,
+        recording_identity=RECORDING_IDENTITY,
+    )
+
+    assert prepared.instance_reason_codes == {
+        0: "none",
+        1: "edge_case",
+        2: "occluded",
+    }
+    assert prepared.arrays["instances/reason_codes"].tolist() == [1, 2]
+    assert prepared.source_reason_codes == {
+        0: "none",
+        1: "filtered_blip",
+        2: "filtered_jump",
+    }
+    assert prepared.arrays["source_detections/reason_codes"].tolist() == [2, 1]
 
 
 def test_rejects_overlapping_global_refined_row_ids() -> None:

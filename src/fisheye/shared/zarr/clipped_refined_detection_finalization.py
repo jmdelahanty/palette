@@ -111,6 +111,57 @@ def _reason_codes(manifest: Mapping[str, Any], name: str) -> dict[int, str]:
         ) from exc
 
 
+def _merged_reason_registry(
+    manifests: Sequence[Mapping[str, Any]],
+    *,
+    name: str,
+) -> dict[int, str]:
+    """Build one deterministic recording registry from clip-local labels."""
+
+    labels: set[str] = set()
+    for manifest in manifests:
+        registry = _reason_codes(manifest, name)
+        if registry.get(0) != "none":
+            raise ClippedRefinedDetectionFinalizationError(
+                f"Clip {name} reason registry must reserve code zero for 'none'."
+            )
+        labels.update(label for code, label in registry.items() if code != 0)
+    ordered = sorted(labels)
+    if len(ordered) > int(np.iinfo(np.uint16).max):
+        raise ClippedRefinedDetectionFinalizationError(
+            f"Merged {name} reason registry exceeds the uint16 domain."
+        )
+    return {0: "none", **{index + 1: label for index, label in enumerate(ordered)}}
+
+
+def _remap_reason_codes(
+    values: Any,
+    *,
+    source_registry: Mapping[int, str],
+    destination_registry: Mapping[int, str],
+    label: str,
+) -> np.ndarray:
+    """Translate one clip's codes into the recording-level registry."""
+
+    source = np.asarray(_values(values), dtype=np.uint16).reshape(-1)
+    destination_by_label = {
+        reason: code for code, reason in destination_registry.items()
+    }
+    unknown = sorted(
+        int(code)
+        for code in np.unique(source).tolist()
+        if int(code) not in source_registry
+    )
+    if unknown:
+        raise ClippedRefinedDetectionFinalizationError(
+            f"{label} contains unregistered reason codes {unknown!r}."
+        )
+    return np.asarray(
+        [destination_by_label[source_registry[int(code)]] for code in source],
+        dtype=np.uint16,
+    )
+
+
 def _source_identity(manifest: Mapping[str, Any]) -> RefinedDetectionSourceIdentity:
     payload = manifest.get("payload")
     source = payload.get("source_detection") if isinstance(payload, Mapping) else None
@@ -210,8 +261,14 @@ def prepare_clipped_refined_detection_snapshot(
     instance_parts: dict[str, list[np.ndarray]] = {}
     source_parts: dict[str, list[np.ndarray]] = {}
     members: list[RefinedDetectionClipSourceIdentity] = []
-    instance_registry: dict[int, str] | None = None
-    source_registry: dict[int, str] | None = None
+    instance_registry = _merged_reason_registry(
+        [item.manifest for item in ordered],
+        name="instances",
+    )
+    source_registry = _merged_reason_registry(
+        [item.manifest for item in ordered],
+        name="source_detections",
+    )
     source_width: int | None = None
     source_height: int | None = None
     source_row_cursor = 0
@@ -277,15 +334,6 @@ def prepare_clipped_refined_detection_snapshot(
             )
         observed_instance_registry = _reason_codes(item.manifest, "instances")
         observed_source_registry = _reason_codes(item.manifest, "source_detections")
-        if instance_registry is None:
-            instance_registry = observed_instance_registry
-            source_registry = observed_source_registry
-        elif instance_registry != observed_instance_registry or (
-            source_registry != observed_source_registry
-        ):
-            raise ClippedRefinedDetectionFinalizationError(
-                "All clip snapshots must use identical reason registries."
-            )
 
         raw_source = _source_identity(item.manifest)
         members.append(
@@ -325,9 +373,18 @@ def prepare_clipped_refined_detection_snapshot(
             "class_ids",
             "source_kind_codes",
             "manual_edit_flags",
-            "reason_codes",
         ):
             append(instance_parts, name, item.arrays[f"instances/{name}"])
+        append(
+            instance_parts,
+            "reason_codes",
+            _remap_reason_codes(
+                item.arrays["instances/reason_codes"],
+                source_registry=observed_instance_registry,
+                destination_registry=instance_registry,
+                label=f"clip {clip.clip_index} instances/reason_codes",
+            ),
+        )
         append(instance_parts, "frame_indices", parent_instance_frames)
         append(
             instance_parts,
@@ -366,9 +423,18 @@ def prepare_clipped_refined_detection_snapshot(
             "class_ids",
             "decision_codes",
             "resolved_refined_row_id",
-            "reason_codes",
         ):
             append(source_parts, name, item.arrays[f"source_detections/{name}"])
+        append(
+            source_parts,
+            "reason_codes",
+            _remap_reason_codes(
+                item.arrays["source_detections/reason_codes"],
+                source_registry=observed_source_registry,
+                destination_registry=source_registry,
+                label=f"clip {clip.clip_index} source_detections/reason_codes",
+            ),
+        )
         local_source_rows = _values(
             item.arrays["source_detections/source_detect_row_index"]
         ).astype(np.int64, copy=False)
@@ -403,7 +469,6 @@ def prepare_clipped_refined_detection_snapshot(
         source_row_cursor += dimensions.n_source_detections
 
     assert source_width is not None and source_height is not None
-    assert instance_registry is not None and source_registry is not None
     instance_count = sum(part.shape[0] for part in instance_parts["frame_indices"])
     source_count = source_row_cursor
     dimensions = RefinedDetectionDimensions(

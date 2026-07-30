@@ -545,10 +545,14 @@ Before production routing:
       profile canary; no new performance matrix is required.
 - [ ] Route no selector until decoded values, manifest, direct metadata, and
       consolidated metadata all validate.
-- [ ] Make each maintained clip refine worker emit a strict full-acquisition
-      refined-v1 artifact using recording-stable keys and one coordinated
-      recording-global refined-row allocator; the recording finalizer rejects
-      overlapping clip-local row IDs rather than rebasing them.
+- [x] Add a bounded strict clip-evidence publisher that converts complete
+      compatibility detect/refine groups, proves recording-stable keys against
+      the native canonical slice, and allocates automated raw-backed refined
+      IDs from recording canonical source-row positions. It rejects manual
+      clip rows so manual identity remains owned by delta compaction.
+- [ ] Invoke that strict clip-evidence fragment from every maintained clipped
+      campaign. The recording finalizer continues to reject overlapping or
+      unproven identities.
 - [ ] Insert the strict recording finalizer into the maintained clipped
       campaign and run one selector-ineligible full-recording canary before
       archive import or selection.

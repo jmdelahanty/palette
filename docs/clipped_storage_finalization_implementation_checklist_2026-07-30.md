@@ -2,8 +2,9 @@
 
 Date: 2026-07-30
 
-Status: strict selector-ineligible recording finalization implemented; main
-campaign adoption and archive import remain gated.
+Status: strict selector-ineligible clip evidence, binding, and recording
+finalization implemented as composable DAG fragments; main campaign insertion,
+canary execution, and archive import remain gated.
 
 ## Goal
 
@@ -54,19 +55,66 @@ finalizer copies physical chunk or shard declarations from clip outputs.
       helper that freezes its dependency edge into keypoint-v2 finalization.
 - [x] Cover empty frames, two clips, canonical mismatch, overlapping identity,
       publication/reopen, crop handoff, DAG ordering, and selector safety.
+- [x] Convert each complete compatibility clip detect/refine pair into fresh
+      strict canonical/refined evidence below `/tmp` or `.palette_benchmarks`.
+- [x] Prove each strict clip canonical row/frame interval against the native
+      recording canonical manifest and all nine recording arrays.
+- [x] Allocate automated raw-backed `refined_row_ids` from recording canonical
+      source-row positions, independent of clip worker scheduling.
+- [x] Reject manual clip rows at this adoption boundary. Manual additions use
+      recording-level deltas and compaction, where one global allocator owns
+      new row IDs and keys.
+- [x] Build the clipped binding from the finalized collection, recording clip
+      manifest, streaming recording-frame-index digest, strict clip receipts,
+      and freshly reopened refined manifests. The binding is not hand-authored.
+- [x] Merge clip-local reason registries into one deterministic recording
+      registry and remap `uint16` codes during finalization.
+- [x] Add a composable dependency chain for strict clip evidence -> clipped
+      binding -> recording refined snapshot -> crop-v2.
+
+## Adoption and physical-layout boundary
+
+This checkpoint adopts the logical and publication contracts without claiming
+that one chunk budget is optimal forever. Every new strict canonical/refined,
+crop, and keypoint output uses a named, versioned storage profile and the shared
+byte planner. A later benchmark may promote a new profile ID; it must not alter
+the logical dtype, identity, coordinate, or lineage contract in place.
+
+Clip evidence is compute/publication evidence, not the selected recording
+authority. It is safe to write clips independently because every worker owns a
+fresh standalone Zarr. The recording finalizers then rematerialize complete
+physical shards from logical rows; they never copy clip chunk or shard metadata.
+
+The first maintained adoption is intentionally raw-backed-only. It supports
+empty frames, multiple detections in a frame, filtered source detections, and
+multiple subjects because all lookup uses `F+1` offsets and stable keys. It
+does not assign manual observations inside clip workers. A manual addition is a
+recording-level delta event; compaction publishes a new immutable refined run,
+then crop/keypoint completion derives the corresponding new rows.
+
+Binding digests are evidence digests, not a second copy of video pixels. The
+global video digest hashes the strict `recording_clip_index.json`; each media
+digest hashes its exact clip/camera source descriptor plus that global digest.
+The recording and per-clip frame-map digests stream canonical ordered rows from
+`recording_frame_index.parquet` and require
+`recording_frame_id == parent_frame_index + 1`. Crop publication separately
+revalidates the live pixel authority before any geometry becomes usable.
 
 ## Required before a real campaign
 
-- [ ] Make every clip detector/refiner publish strict full-acquisition
-      canonical/refined evidence rather than only legacy groups.
-- [ ] Allocate manual `refined_row_ids` from one recording-global range before
-      clip workers run. A clip-local `0..N` allocator is intentionally rejected.
-- [ ] Mint raw and manual `instance_key` values in the recording frame and
-      recording identity domain, not the clip-local frame domain.
-- [ ] Generate the exact clipped-binding JSON from the finalized collection
-      and recording-frame index; never hand-author media or frame-map digests.
+- [x] Add the strict clip canonical/refined evidence publisher and bounded LSF
+      array. The main campaign still needs to invoke the fragment.
+- [ ] Allocate manual `refined_row_ids` through the recording delta/compaction
+      allocator. Clip-local `0..N` manual allocation remains rejected.
+- [x] Require raw `instance_key` values in the recording frame and recording
+      identity domain by comparing every clip key with the native recording
+      canonical slice. Manual keys remain owned by delta compaction.
+- [x] Generate exact clipped-binding JSON from persisted collection and frame
+      evidence; no caller supplies media or frame-map digests by hand.
 - [ ] Insert the storage fragments into the maintained clipped campaign after
-      canonical publication and before pixel-package/keypoint terminal gates.
+      native canonical publication and legacy refinement, before
+      pixel-package/keypoint terminal gates. The composable dependency chain is
+      implemented; the parallel DAG review owns final monolith insertion.
 - [ ] Ensure pixel packages bind the new crop manifest and row signatures.
 - [ ] Run one small selector-ineligible campaign canary with an empty frame,
       multiple subjects in one frame, a rejected raw detection, and a manual
