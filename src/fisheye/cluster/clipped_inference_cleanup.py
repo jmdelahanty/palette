@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 from fisheye.cluster.clipped_inference import (
     DEFAULT_CACHE_ROOT,
     DEFAULT_PACKAGE_ROOT,
-    PLAN_SCHEMA,
+    SUPPORTED_PLAN_SCHEMAS,
 )
 from fisheye.cluster.lsf import write_json_snapshot
 from fisheye.shared.batch_logging import utc_now
@@ -39,7 +39,10 @@ def cleanup(
 ) -> dict[str, Any]:
     plan_path = plan_path.expanduser().resolve()
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping) or payload.get("schema") != PLAN_SCHEMA:
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema") not in SUPPORTED_PLAN_SCHEMAS
+    ):
         raise ValueError(f"Unsupported clipped inference plan: {plan_path}")
     targets = payload.get("targets")
     if not isinstance(targets, list) or not targets:

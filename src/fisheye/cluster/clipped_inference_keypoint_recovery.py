@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from fisheye.cluster.clipped_inference import (
     FAMILY,
     PLAN_SCHEMA,
+    SUPPORTED_PLAN_SCHEMAS,
     build_ssh_bsub_runner,
 )
 from fisheye.cluster.clipped_lsf import (
@@ -136,7 +137,10 @@ def build_plan(
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
     source = _read_json(source_plan_path)
-    if not isinstance(source, Mapping) or source.get("schema") != PLAN_SCHEMA:
+    if (
+        not isinstance(source, Mapping)
+        or source.get("schema") not in SUPPORTED_PLAN_SCHEMAS
+    ):
         raise ValueError(f"Unsupported clipped inference plan: {source_plan_path}")
     targets = source.get("targets")
     workflow_payload = source.get("lsf_workflow")
