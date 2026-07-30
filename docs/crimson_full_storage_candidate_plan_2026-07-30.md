@@ -55,6 +55,16 @@ task failed before reading data and all descendants remained blocked. The
 composer now has one authoritative plan path, asserted directly by tests. The
 failed v4 root remains immutable evidence and is not resumed in place.
 
+Candidate v5 reached the strict clip evidence gate and exposed an identity
+bug in that converter: it re-minted `instance_key` from clip-local frame
+numbers. Clip zero happened to share the recording origin, while later clips
+correctly disagreed with the recording canonical slice. Strict conversion now
+preserves the already persisted recording-global `uint64` keys and requires
+exact equality with the native recording slice. A regression fixture places
+the tested clip after a leading clip so local and recording frame domains
+cannot accidentally coincide. The failed v5 root remains selector-ineligible
+and has no handoff.
+
 ## Sleepyfish pins
 
 The first full fixture uses:

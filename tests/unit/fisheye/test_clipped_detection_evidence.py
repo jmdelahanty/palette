@@ -131,7 +131,7 @@ def test_publishes_clip_pair_bound_to_native_recording_canonical(
     scores = np.asarray([0.9, 0.8], dtype=np.float32)
     classes = np.asarray([0, 0], dtype=np.int32)
     counts = np.asarray([1, 0, 1], dtype=np.int32)
-    member = ClippedDetectionArtifactMember(
+    leading = ClippedDetectionArtifactMember(
         work_unit_id="work_0",
         artifact_run_id="artifact_0",
         clip_id="clip_000000",
@@ -139,9 +139,28 @@ def test_publishes_clip_pair_bound_to_native_recording_canonical(
         camera_serial="2010095",
         source_width=640,
         source_height=480,
+        artifact_manifest_sha256="c" * 64,
+        run_group_tree_sha256="d" * 64,
+        parent_frame_indices=np.arange(3, dtype=np.int64),
+        frame_indices=np.empty(0, dtype=np.int32),
+        bbox_norm_coords=np.empty((0, 4), dtype=np.float64),
+        scores=np.empty(0, dtype=np.float32),
+        class_ids=np.empty(0, dtype=np.int32),
+        artifact_row_id=np.empty(0, dtype=np.uint64),
+        frame_counts=np.zeros(3, dtype=np.int32),
+        n_detections=np.zeros(3, dtype=np.int32),
+    )
+    member = ClippedDetectionArtifactMember(
+        work_unit_id="work_1",
+        artifact_run_id="artifact_1",
+        clip_id="clip_000001",
+        clip_index=1,
+        camera_serial="2010095",
+        source_width=640,
+        source_height=480,
         artifact_manifest_sha256="a" * 64,
         run_group_tree_sha256="b" * 64,
-        parent_frame_indices=np.arange(3, dtype=np.int64),
+        parent_frame_indices=np.arange(3, 6, dtype=np.int64),
         frame_indices=local_frames,
         bbox_norm_coords=boxes,
         scores=scores,
@@ -151,9 +170,9 @@ def test_publishes_clip_pair_bound_to_native_recording_canonical(
         n_detections=counts.copy(),
     )
     bound = bind_clipped_detection_artifacts(
-        [member],
+        [leading, member],
         recording_identity=recording_identity,
-        n_frames=3,
+        n_frames=6,
         source_width=640,
         source_height=480,
     )
@@ -184,11 +203,11 @@ def test_publishes_clip_pair_bound_to_native_recording_canonical(
     root.attrs["recording_id"] = recording_identity
     raw = (
         root.require_group("clips")
-        .require_group("clip_000000")
+        .require_group("clip_000001")
         .require_group("cameras")
         .require_group("2010095")
         .require_group("detection_artifact_runs")
-        .create_group("artifact_0")
+        .create_group("artifact_1")
     )
     raw.attrs.update({"source_video_width": 640, "source_video_height": 480})
     keys = np.asarray(bound.arrays["instances/instance_key"])
@@ -199,7 +218,7 @@ def test_publishes_clip_pair_bound_to_native_recording_canonical(
     raw.create_array("instance_key", data=keys)
     raw.create_array("frame_counts", data=counts)
     refined = (
-        root["clips/clip_000000/cameras/2010095"]
+        root["clips/clip_000001/cameras/2010095"]
         .require_group("refined_detect_runs")
         .create_group("legacy_refined")
     )
@@ -256,19 +275,28 @@ def test_publishes_clip_pair_bound_to_native_recording_canonical(
     publication = publish_strict_clip_detection_evidence(
         analysis_zarr=analysis,
         source_detect_group_path=(
-            "clips/clip_000000/cameras/2010095/detection_artifact_runs/artifact_0"
+            "clips/clip_000001/cameras/2010095/detection_artifact_runs/artifact_1"
         ),
         source_refined_group_path=(
-            "clips/clip_000000/cameras/2010095/refined_detect_runs/legacy_refined"
+            "clips/clip_000001/cameras/2010095/refined_detect_runs/legacy_refined"
         ),
         recording_canonical_archive=recording.output_path,
         recording_canonical_run_id=recording.run_id,
         recording_identity=recording_identity,
-        clip_id="clip_000000",
-        clip_index=0,
+        clip_id="clip_000001",
+        clip_index=1,
         output_root=output_root,
         canonical_run_id="strict_canonical_0",
         refined_run_id="strict_refined_0",
+    )
+
+    assert publication.member.parent_frame_start == 3
+    assert publication.canonical.receipt["instance_key_policy"] == (
+        "preserved_from_source"
+    )
+    assert np.array_equal(
+        publication.canonical.arrays["instances/instance_key"][:],
+        keys,
     )
 
     assert publication.receipt["status"] == "complete"

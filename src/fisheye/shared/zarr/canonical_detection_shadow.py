@@ -14,6 +14,7 @@ import zarr
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.canonical_detection_benchmark_input import (
+    CanonicalDetectionBenchmarkInput,
     load_detection_benchmark_input,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
@@ -251,11 +252,14 @@ def publish_legacy_canonical_detection_shadow(
     shadow_root: Path = DEFAULT_CANONICAL_DETECTION_SHADOW_ROOT,
     profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
     coordinate_catalog: bool = False,
+    preserve_source_instance_keys: bool = False,
 ) -> CanonicalDetectionShadowPublication:
     """Convert one complete legacy run into a validated canonical shadow."""
 
     if type(coordinate_catalog) is not bool:
         raise TypeError("coordinate_catalog must be an exact bool.")
+    if type(preserve_source_instance_keys) is not bool:
+        raise TypeError("preserve_source_instance_keys must be an exact bool.")
 
     output_path = require_safe_canonical_detection_shadow_destination(
         destination,
@@ -272,6 +276,22 @@ def publish_legacy_canonical_detection_shadow(
         recording_identity=str(recording_identity),
         frame_limit=None,
     )
+    if preserve_source_instance_keys:
+        if "instance_key" not in source_group:
+            raise ValueError("Canonical source lacks persisted instance_key values.")
+        arrays = dict(benchmark_input.arrays)
+        arrays["instances/instance_key"] = np.ascontiguousarray(
+            np.asarray(source_group["instance_key"][:])
+        )
+        source_identity = dict(benchmark_input.source_identity)
+        conversion = dict(source_identity.get("conversion") or {})
+        conversion["instance_key"] = "preserved_from_source_explicit_policy"
+        source_identity["conversion"] = conversion
+        benchmark_input = CanonicalDetectionBenchmarkInput(
+            dimensions=benchmark_input.dimensions,
+            arrays=arrays,
+            source_identity=source_identity,
+        )
     evidence_path = (
         source_path
         if source_evidence_group_path is None
@@ -464,6 +484,11 @@ def publish_legacy_canonical_detection_shadow(
             "run_manifest_digest": manifest["payload_digest"],
             "logical_content_digest": manifest["payload"]["logical_content"]["digest"],
             "logical_hashes": destination_hashes,
+            "instance_key_policy": (
+                "preserved_from_source"
+                if preserve_source_instance_keys
+                else "minted_from_canonical_values"
+            ),
             "writes": writes,
             "consolidation": {
                 "before_manifest": first_consolidation,

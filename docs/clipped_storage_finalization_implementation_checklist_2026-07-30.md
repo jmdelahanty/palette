@@ -128,7 +128,9 @@ revalidates the live pixel authority before any geometry becomes usable.
       allocator. Clip-local `0..N` manual allocation remains rejected.
 - [x] Require raw `instance_key` values in the recording frame and recording
       identity domain by comparing every clip key with the native recording
-      canonical slice. Manual keys remain owned by delta compaction.
+      canonical slice. Strict clip conversion explicitly preserves these
+      persisted global keys; it never re-mints from clip-local frame numbers.
+      Manual keys remain owned by delta compaction.
 - [x] Generate exact clipped-binding JSON from persisted collection and frame
       evidence; no caller supplies media or frame-map digests by hand.
 - [ ] Insert the storage fragments into the maintained clipped campaign after

@@ -373,6 +373,7 @@ def publish_strict_clip_detection_evidence(
         run_id=canonical_run_id,
         shadow_root=root,
         coordinate_catalog=coordinate_catalog,
+        preserve_source_instance_keys=True,
     )
     _validate_clip_canonical_slice(
         canonical,
