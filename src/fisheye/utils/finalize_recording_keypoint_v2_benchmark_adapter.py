@@ -74,6 +74,7 @@ _SOURCE_ARRAY_PATHS = (
     "pose_bbox_xyxy_roi",
 )
 _HEX = frozenset("0123456789abcdef")
+_SELECTOR_ATTRIBUTE_NAMES = ("latest", "latest_complete", "latest_pending")
 
 
 def _safe_group(value: str) -> str:
@@ -144,6 +145,49 @@ def _metadata_sha256(group_path: Path) -> str:
     if not metadata.is_file():
         raise FileNotFoundError(f"Source group metadata not found: {metadata}")
     return sha256_file(metadata)
+
+
+def _source_selector_evidence(
+    parent_attrs: Mapping[str, Any],
+    *,
+    run_id: str,
+    stage_selector_eligible: object,
+) -> dict[str, object]:
+    """Prove that one explicitly pinned historical source is not selected."""
+
+    if type(stage_selector_eligible) is not bool:
+        raise ValueError(
+            "Historical aggregate stage_selector_eligible must be an exact bool."
+        )
+    selectors: dict[str, str | None] = {}
+    for attribute_name in _SELECTOR_ATTRIBUTE_NAMES:
+        value = parent_attrs.get(attribute_name)
+        if value is None:
+            selectors[attribute_name] = None
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Keypoint selector {attribute_name} must be a non-empty string or null."
+            )
+        selectors[attribute_name] = value.strip()
+    selected_by = [
+        attribute_name
+        for attribute_name, selected_run_id in selectors.items()
+        if selected_run_id == run_id
+    ]
+    if selected_by:
+        raise ValueError(
+            "Historical benchmark source is currently selected by "
+            + ", ".join(selected_by)
+            + "."
+        )
+    return {
+        "run_id": run_id,
+        "stage_selector_eligible": stage_selector_eligible,
+        "selectors": selectors,
+        "selected_by": [],
+        "explicit_metadata_pin_required": True,
+    }
 
 
 def _pose_binding(attrs: Mapping[str, Any], *, model_sha256: str) -> dict[str, Any]:
@@ -294,7 +338,12 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
     )
     expected_model = _require_sha256(expected_model_sha256, name="model")
     source_metadata_path = archive / source_group_name
+    source_parent_name, separator, source_run_id = source_group_name.rpartition("/")
+    if not separator or not source_parent_name or not source_run_id:
+        raise ValueError("source_group must include its run-family parent and run id.")
+    source_parent_metadata_path = archive / source_parent_name
     observed_metadata_before = _metadata_sha256(source_metadata_path)
+    observed_parent_metadata_before = _metadata_sha256(source_parent_metadata_path)
     if observed_metadata_before != expected_metadata:
         raise ValueError("Historical aggregate metadata differs from the pinned input.")
 
@@ -306,8 +355,11 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
     attrs = dict(source.attrs)
     if attrs.get("source_kind") != "keypoint_shard_collection_finalizer":
         raise ValueError("Source is not the frozen recording keypoint aggregate kind.")
-    if attrs.get("stage_selector_eligible") is not False:
-        raise ValueError("Historical benchmark source unexpectedly became selected.")
+    selector_evidence = _source_selector_evidence(
+        dict(root[source_parent_name].attrs),
+        run_id=source_run_id,
+        stage_selector_eligible=attrs.get("stage_selector_eligible"),
+    )
     if attrs.get("instance_key_backfill_status") != "complete":
         raise ValueError("Historical aggregate lacks completed stable instance keys.")
     if attrs.get("instance_key_backfill_recording_identity") != recording_identity:
@@ -416,6 +468,9 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
         "source_archive": str(archive),
         "source_group": source_group_name,
         "source_group_metadata_sha256": observed_metadata_before,
+        "source_parent_group": source_parent_name,
+        "source_parent_metadata_sha256": observed_parent_metadata_before,
+        "source_selector_evidence": selector_evidence,
         "source_array_hashes": source_hashes,
         "source_crop_run": old_crop_run,
         "source_crop_geometry_equal": True,
@@ -505,6 +560,9 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
     observed_metadata_after = _metadata_sha256(source_metadata_path)
     if observed_metadata_after != observed_metadata_before:
         raise RuntimeError("Historical source metadata changed during republishing.")
+    observed_parent_metadata_after = _metadata_sha256(source_parent_metadata_path)
+    if observed_parent_metadata_after != observed_parent_metadata_before:
+        raise RuntimeError("Historical source selector metadata changed during republishing.")
     return {
         "schema_id": ADAPTER_SCHEMA_ID,
         "schema_version": ADAPTER_SCHEMA_VERSION,
@@ -515,6 +573,9 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
         "crop_run_id": crop.run_id,
         "source_group_path": source_group_name,
         "source_group_metadata_sha256": observed_metadata_before,
+        "source_parent_group": source_parent_name,
+        "source_parent_metadata_sha256": observed_parent_metadata_before,
+        "source_selector_evidence": selector_evidence,
         "bundle_root": str(destination),
         "finalization_receipt_path": str(
             destination / CLIPPED_KEYPOINT_FINALIZATION_RECEIPT_NAME

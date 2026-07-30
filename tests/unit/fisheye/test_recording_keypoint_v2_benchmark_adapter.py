@@ -44,6 +44,49 @@ def test_node_local_scratch_rejects_shared_storage(tmp_path: Path) -> None:
         mod._require_node_local_scratch(Path("/groups/example"))
 
 
+def test_source_selector_evidence_accepts_eligible_superseded_run() -> None:
+    evidence = mod._source_selector_evidence(
+        {
+            "latest": "newer",
+            "latest_complete": "newer",
+            "latest_pending": None,
+        },
+        run_id="historical",
+        stage_selector_eligible=True,
+    )
+
+    assert evidence == {
+        "run_id": "historical",
+        "stage_selector_eligible": True,
+        "selectors": {
+            "latest": "newer",
+            "latest_complete": "newer",
+            "latest_pending": None,
+        },
+        "selected_by": [],
+        "explicit_metadata_pin_required": True,
+    }
+
+
+@pytest.mark.parametrize("selector", mod._SELECTOR_ATTRIBUTE_NAMES)
+def test_source_selector_evidence_rejects_selected_source(selector: str) -> None:
+    with pytest.raises(ValueError, match=f"currently selected by {selector}"):
+        mod._source_selector_evidence(
+            {selector: "historical"},
+            run_id="historical",
+            stage_selector_eligible=True,
+        )
+
+
+def test_source_selector_evidence_requires_exact_eligibility_bool() -> None:
+    with pytest.raises(ValueError, match="must be an exact bool"):
+        mod._source_selector_evidence(
+            {},
+            run_id="historical",
+            stage_selector_eligible=1,
+        )
+
+
 def test_rebound_receipt_changes_only_output_locations(tmp_path: Path) -> None:
     payload = {
         "status": "complete",

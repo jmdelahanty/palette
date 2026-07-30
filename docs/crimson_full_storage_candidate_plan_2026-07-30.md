@@ -65,6 +65,17 @@ the tested clip after a leading clip so local and recording frame domains
 cannot accidentally coincide. The failed v5 root remains selector-ineligible
 and has no handoff.
 
+Candidate v6 completed canonical detection, all 22 strict clip-evidence tasks,
+refined detection, and crop-v2. Its keypoint adapter then failed before writing
+because it incorrectly equated `stage_selector_eligible: true` with active
+selection. The pinned July 8 aggregate is eligible but superseded: `latest`
+and `latest_complete` both name the July 18 snapshot and `latest_pending` is
+absent. The adapter now checks those exact selectors, records their values,
+and hashes the parent run-family metadata before and after publication. An
+eligible but unselected historical input is allowed only through the explicit
+metadata pin; a source named by any selector still fails closed. The failed v6
+root remains immutable and has no handoff.
+
 ## Sleepyfish pins
 
 The first full fixture uses:
@@ -98,13 +109,13 @@ aggregate adapter.
 The adapter fails unless all of these checks pass:
 
 - source group metadata and model bytes match their pinned hashes;
-- source completion, selector-ineligible status, recording identity, ordered
+- source completion, exact selector state, recording identity, ordered
   skeleton, and stable-key backfill are exact;
 - historical and crop-v2 `instance_key` sets form a bijection;
 - historical and crop-v2 frame/acquisition mappings match;
 - ROI origins and sizes match for every row;
 - float64-to-float32 normalization passes the v2 projection tolerance; and
-- source metadata is unchanged after publication.
+- source and parent selector metadata are unchanged after publication.
 
 The four keypoint-family stores are built on bounded node-local scratch and
 copied to a hidden shared sibling before a same-filesystem rename. Their
