@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import time
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import zarr
@@ -234,14 +234,30 @@ def materialize_dense_masks_roi_from_store(
     overwrite: bool = False,
     source_path: str = "",
 ) -> dict[str, object]:
-    """Create or refresh the dense ``masks_roi`` compatibility cache from compact storage."""
+    """Create or refresh authoritative dense ``masks_roi`` from compact storage.
+
+    Materialization establishes an editable pixel authority. It does not
+    regenerate or validate metrics, contours, or compact caches, so it must
+    never clear their existing freshness markers.
+    """
 
     has_dense = "masks_roi" in run_group
     has_rle = "mask_rle" in run_group
     has_bitpacked = "mask_bitpacked" in run_group
     if has_dense and not overwrite:
-        update_mask_storage_attrs(run_group, has_dense=True, has_rle=has_rle, has_bitpacked=has_bitpacked)
-        return {"status": "existing", "encoding": "dense_uint8", "has_dense_after": True}
+        update_mask_storage_attrs(
+            run_group,
+            has_dense=True,
+            has_rle=has_rle,
+            has_bitpacked=has_bitpacked,
+            reset_stale_flags=False,
+        )
+        return {
+            "status": "existing",
+            "encoding": "dense_uint8",
+            "has_dense_after": True,
+            "derived_freshness_policy": "preserved_not_validated_v1",
+        }
     if not has_rle and not has_bitpacked:
         raise MaskStoreError(
             "Dense masks_roi cannot be materialized because no compact mask store is available."
@@ -278,7 +294,17 @@ def materialize_dense_masks_roi_from_store(
     run_group.attrs["masks_roi_materialized_from"] = mask_store.storage_surface
     run_group.attrs["masks_roi_materialized_at_utc"] = _utc_now()
     run_group.attrs["masks_roi_materialization_chunk_size"] = int(row_chunk)
-    update_mask_storage_attrs(run_group, has_dense=True, has_rle=has_rle, has_bitpacked=has_bitpacked)
+    run_group.attrs["masks_roi_materialization_derivatives_validated"] = False
+    run_group.attrs["masks_roi_materialization_freshness_policy"] = (
+        "preserve_existing_stale_flags_v1"
+    )
+    update_mask_storage_attrs(
+        run_group,
+        has_dense=True,
+        has_rle=has_rle,
+        has_bitpacked=has_bitpacked,
+        reset_stale_flags=False,
+    )
     return {
         "status": "materialized",
         "encoding": "dense_uint8",
@@ -289,6 +315,7 @@ def materialize_dense_masks_roi_from_store(
         "chunks": [int(value) for value in chunks],
         "rows_written": int(rows_written),
         "has_dense_after": True,
+        "derived_freshness_policy": "preserved_not_validated_v1",
     }
 
 

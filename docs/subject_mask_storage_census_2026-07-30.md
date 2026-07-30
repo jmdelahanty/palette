@@ -1,7 +1,8 @@
 # Subject-Mask Storage Census
 
-Status: read-only ground-truth investigation; this document does not promote a
-schema, storage profile, writer, selector, registry entry, or archive
+Status: ground-truth census plus selector-ineligible contract implementation;
+this document does not promote a storage profile, writer, selector, registry
+entry, or archive
 
 Date: 2026-07-30
 
@@ -36,6 +37,35 @@ The next design step should freeze four related but distinct profiles:
 
 It would be unsafe to collapse these access and mutability patterns into one
 permissive schema or one physical layout.
+
+## Implementation Checkpoint
+
+The first exact logical/storage-policy checkpoint is implemented without
+writer or selector adoption. Here, "full-duration Sleepyfish" means all
+1,188,000 camera frames and the 1,169,010 mask-observation rows in Cam2010095:
+
+- [x] Freeze raw `uint8` and `float16` probability schemas separately.
+- [x] Freeze the refined dense scientific core with exact crop-v2 placement,
+      observation identity, `frame_row_offsets`, binary pixels, and metrics.
+- [x] Plan raw/refined core arrays by uncompressed bytes and access/mutability,
+      including full-duration Sleepyfish object estimates.
+- [x] Freeze a separate selector-ineligible editable draft audit extension.
+- [x] Freeze exact bitpacked, component-RLE, sampled-contour, and packed full-
+      contour array contracts.
+- [x] Freeze digest-bound published-cache receipts requiring full dense
+      equivalence and `authoritative_pixels=false`.
+- [x] Prevent dense materialization from clearing existing derivative
+      freshness markers.
+- [ ] Adopt the draft audit extension in the maintained draft producer/editor.
+- [ ] Persist cache receipts from cache regeneration writers.
+- [ ] Add accepted-draft-to-new-publication compaction and physical replanning.
+- [ ] Run the full-duration publication/write/read benchmark before profile
+      activation.
+
+The contracts live in `src/fisheye/shared/zarr/subject_mask_schema.py` and
+`src/fisheye/shared/zarr/refined_subject_mask_extensions.py`; reusable exact
+array dtypes and shapes live in
+`src/fisheye/shared/zarr/array_contracts.py`.
 
 ## Scope And Method
 
@@ -262,15 +292,15 @@ stale (`src/fisheye/tune/refined_subject_mask_review.py:3185-3383`). Historical
 compact-only input must first be materialized to dense
 (`src/fisheye/shared/mask_store.py:230-292`).
 
-Dense materialization currently has a dangerous freshness side effect:
-`materialize_dense_masks_roi_from_store` calls `update_mask_storage_attrs` with
-the default `reset_stale_flags=True`, which can clear derived mask, metric, and
-contour stale flags without regenerating or validating those surfaces
-(`src/fisheye/shared/mask_store.py:192-244`,
-`src/fisheye/shared/mask_store.py:277-281`). The future contract must make dense
-materialization establish authority while preserving derivative staleness.
-Only a successful per-surface regeneration and validation receipt may clear a
-freshness flag.
+Dense materialization previously had a dangerous freshness side effect:
+`materialize_dense_masks_roi_from_store` called `update_mask_storage_attrs`
+with the default `reset_stale_flags=True`, which could clear derived mask,
+metric, and contour stale flags without regenerating or validating those
+surfaces. This checkpoint fixes that path: materialization establishes dense
+authority, records that derivatives were not validated, and calls the storage
+attribute helper with `reset_stale_flags=False`
+(`src/fisheye/shared/mask_store.py`). Only successful per-surface regeneration
+and a full dense-equivalence receipt may clear that surface's freshness flag.
 
 The future draft should store merge-safe row/component dirty state or an
 append-only stale log. Current run-level stale attributes are vulnerable to
@@ -281,6 +311,36 @@ Draft dense chunks should be regular and unsharded for random mutation. At
 512x512, one component row is 256 KiB; candidate row depths of one and four are
 defensible benchmark points. Outer sharding is inappropriate unless one
 exclusive writer owns the complete shard for its lifetime.
+
+#### What the two extensions mean
+
+The editable audit/revision extension is mutable bookkeeping, not another
+scientific mask payload. It requires root and component-local `edit_applied`,
+`manual_override`, monotonic `row_revision`, and fixed-width UTF-8 UTC/reason
+rows. Root/component mirrors must agree. A revised row must have a UTC
+timestamp and reason. Writers use `row_revision` as the compare-and-swap token;
+the whole extension stays selector-ineligible and is compacted into a new
+immutable snapshot rather than entering scientific content identity.
+
+The published-cache extension is the inverse: immutable proof about optional
+derived data. Bitpacked, RLE, sampled-contour, and full-contour payloads receive
+exact dtype/shape and canonical-packing validation. Each published cache has a
+closed canonical-JSON receipt binding:
+
+- cache kind and exact path;
+- refined dense schema/version and immutable dense-core manifest digest;
+- exact dense `masks_roi` value digest and component-registry digest;
+- cache logical-content digest and generator version;
+- full dense-equivalence validation; and
+- `stale=false` plus `authoritative_pixels=false`.
+
+This is more than another stale boolean. A caller cannot make an old cache
+current merely by clearing a flag: it must regenerate the cache, validate it
+against the exact dense authority, and issue a digest-bound receipt. The
+extension remains optional—dense `masks_roi` is sufficient for editing and
+training—but a published cache is trusted only when this proof exists.
+The dense value digest is reused from the core publication scan; issuing a
+cache receipt must not trigger a second full `masks_roi` hash pass.
 
 ### Profile 3: refined immutable publication
 

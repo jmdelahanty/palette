@@ -14,8 +14,10 @@ from fisheye.shared.zarr.array_contracts import (
     RAW_SUBJECT_MASK_FLOAT16_ARRAY_CONTRACTS,
     RAW_SUBJECT_MASK_UINT8_ARRAY_CONTRACTS,
     REFINED_SUBJECT_MASK_CORE_ARRAY_CONTRACTS,
+    REFINED_SUBJECT_MASK_DRAFT_ARRAY_CONTRACTS,
     REFINED_DETECTION_REFINED_ROW_IDS_V1,
     REFINED_SOURCE_FRAME_ROW_OFFSETS_V1,
+    SUBJECT_MASK_DERIVED_CACHE_ARRAY_CONTRACTS,
     SUBJECT_MASK_PROBABILITIES_FLOAT16_V1,
     SUBJECT_MASK_PROBABILITIES_UINT8_V1,
     UTF8,
@@ -35,7 +37,7 @@ def test_core_contract_catalog_is_versioned_and_json_safe() -> None:
     manifest = CORE_ARRAY_CONTRACTS.as_manifest()
     assert json.loads(json.dumps(manifest)) == manifest
     assert manifest["schema_id"] == "palette.array_contract_catalog"
-    assert len(manifest["contracts"]) == 104
+    assert len(manifest["contracts"]) == 122
     assert (
         CORE_ARRAY_CONTRACTS.resolve(
             "palette.array.crop.roi_sizes_full",
@@ -58,6 +60,8 @@ def test_core_contract_catalog_is_versioned_and_json_safe() -> None:
         is REFINED_SOURCE_FRAME_ROW_OFFSETS_V1
     )
     assert len(KEYPOINT_QUALITY_ARRAY_CONTRACTS.contracts) == 13
+    assert len(REFINED_SUBJECT_MASK_DRAFT_ARRAY_CONTRACTS.contracts) == 6
+    assert len(SUBJECT_MASK_DERIVED_CACHE_ARRAY_CONTRACTS.contracts) == 12
     assert (
         CORE_ARRAY_CONTRACTS.resolve(
             "palette.array.keypoint_quality.pose_quality_flags",

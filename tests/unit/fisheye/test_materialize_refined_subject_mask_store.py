@@ -74,6 +74,40 @@ def test_materialize_refined_subject_mask_store_recreates_dense_cache(tmp_path: 
     assert run.attrs["mask_store_encodings"] == ["dense_uint8", "component_rle_v1"]
     assert run.attrs["mask_storage_encoding"] == "dense_uint8+component_rle_v1"
     assert run.attrs["masks_roi_materialized_from"] == "mask_rle"
+    assert run.attrs["masks_roi_materialization_derivatives_validated"] is False
+    assert (
+        run.attrs["masks_roi_materialization_freshness_policy"]
+        == "preserve_existing_stale_flags_v1"
+    )
+
+
+def test_materialize_dense_authority_preserves_derived_stale_flags(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _expected, root = _build_compact_refined_zarr(zarr_path)
+    run = root["refined_subject_masks_runs/refined_001"]
+    run.attrs["derived_mask_caches_stale"] = True
+    run.attrs["metrics_stale"] = True
+    run.attrs["contours_stale"] = True
+    run.attrs["mask_rle_stale"] = False
+    run.attrs["derived_mask_caches_stale_reason"] = "preexisting_edit"
+
+    summary = materialize_refined_subject_mask_store(
+        zarr_path,
+        apply=True,
+        chunk_size=2,
+    )
+
+    assert summary["status"] == "materialized"
+    assert summary["derived_freshness_policy"] == "preserved_not_validated_v1"
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    materialized = reopened["refined_subject_masks_runs/refined_001"]
+    assert materialized.attrs["derived_mask_caches_stale"] is True
+    assert materialized.attrs["metrics_stale"] is True
+    assert materialized.attrs["contours_stale"] is True
+    assert materialized.attrs["mask_rle_stale"] is False
+    assert materialized.attrs["derived_mask_caches_stale_reason"] == "preexisting_edit"
 
 
 def test_materialize_refined_subject_mask_store_recreates_dense_cache_from_bitpacked(tmp_path: Path) -> None:

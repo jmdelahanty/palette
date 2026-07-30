@@ -18,7 +18,6 @@ from fisheye.shared.zarr.storage_intent import (
     WriteMode,
 )
 
-
 ShapeDimension = str | int
 
 
@@ -1420,6 +1419,183 @@ DENSE_SUBJECT_MASKS_ROI_V1 = ArrayContract(
     coordinate_space="roi_pixel",
 )
 
+REFINED_SUBJECT_MASK_EDIT_APPLIED_V1 = ArrayContract(
+    schema_id="palette.array.refined_subject_mask.edit_applied",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Whether the editable dense component differs from its source row.",
+)
+
+REFINED_SUBJECT_MASK_COMPONENT_EDIT_APPLIED_V1 = ArrayContract(
+    schema_id="palette.array.refined_subject_mask.component.edit_applied",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Component-local mirror of the root edit-applied column.",
+)
+
+REFINED_SUBJECT_MASK_MANUAL_OVERRIDE_V1 = ArrayContract(
+    schema_id="palette.array.refined_subject_mask.component.manual_override",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Whether the component row is protected as a manual override.",
+)
+
+REFINED_SUBJECT_MASK_ROW_REVISION_V1 = ArrayContract(
+    schema_id="palette.array.refined_subject_mask.component.row_revision",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Monotonic component-row compare-and-swap revision counter.",
+    units="revision",
+)
+
+REFINED_SUBJECT_MASK_ROW_UPDATED_AT_UTC_BYTES_V1 = ArrayContract(
+    schema_id="palette.array.refined_subject_mask.component.row_updated_at_utc_bytes",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_rois", 40),
+    axis_names=("roi", "utf8_byte"),
+    description="NUL-padded UTF-8 UTC timestamp for the most recent row revision.",
+)
+
+REFINED_SUBJECT_MASK_ROW_UPDATE_REASON_BYTES_V1 = ArrayContract(
+    schema_id="palette.array.refined_subject_mask.component.row_update_reason_bytes",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_rois", 128),
+    axis_names=("roi", "utf8_byte"),
+    description="NUL-padded UTF-8 controlled reason for the most recent row revision.",
+)
+
+SUBJECT_MASK_BITPACKED_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.bitpacked",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_rois", "n_channels", "H", "packed_W"),
+    axis_names=("roi", "component", "y", "packed_x_byte"),
+    description="Derived width-bitpacked binary mask cache.",
+    units="packed_binary_label",
+    coordinate_space="roi_pixel",
+)
+
+SUBJECT_MASK_RLE_COUNTS_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.rle.counts",
+    schema_version=1,
+    dtype=UINT32,
+    shape_template=("n_rle_counts",),
+    axis_names=("run_length",),
+    description="Flat component RLE counts in row order.",
+    units="pixels",
+)
+
+SUBJECT_MASK_RLE_INDPTR_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.rle.indptr",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_rle_boundaries",),
+    axis_names=("roi_boundary",),
+    description="F+1-style offsets into one component's flat RLE counts.",
+    units="run_length_index",
+)
+
+SUBJECT_MASK_RLE_PRESENT_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.rle.present",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Whether an RLE component row contains foreground pixels.",
+)
+
+SUBJECT_MASK_RLE_AREA_PX_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.rle.area_px",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Foreground area cached with one RLE component.",
+    units="pixels_squared",
+)
+
+SUBJECT_MASK_RLE_BBOX_XYXY_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.rle.bbox_xyxy",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_rois", 4),
+    axis_names=("roi", "xyxy"),
+    description="Half-open foreground bounding box cached with one RLE component.",
+    units="pixels",
+    coordinate_space="roi_pixel",
+)
+
+SUBJECT_MASK_SAMPLED_CONTOUR_POINTS_XY_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.sampled_contour.points_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_rois", "n_samples", 2),
+    axis_names=("roi", "sample", "xy"),
+    description="Fixed-count arc-length sampled contour points.",
+    units="pixels",
+    coordinate_space="roi_pixel",
+)
+
+SUBJECT_MASK_SAMPLED_CONTOUR_VALID_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.sampled_contour.valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Whether one fixed-count sampled contour row is valid.",
+)
+
+SUBJECT_MASK_SAMPLED_CONTOUR_SOURCE_POINT_COUNT_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.sampled_contour.source_point_count",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Source full-contour point count before fixed-count sampling.",
+    units="points",
+)
+
+SUBJECT_MASK_CONTOUR_PTR_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.contour.ptr",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Start offset into canonical packed full-contour points; -1 when absent.",
+    units="point_index",
+)
+
+SUBJECT_MASK_CONTOUR_LEN_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.contour.len",
+    schema_version=1,
+    dtype=INT32,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Full-contour point count for each mask row.",
+    units="points",
+)
+
+SUBJECT_MASK_CONTOUR_POINTS_XY_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.cache.contour.points_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_contour_points", 2),
+    axis_names=("point", "xy"),
+    description="Canonical packed full-contour coordinates.",
+    units="pixels",
+    coordinate_space="roi_pixel",
+)
+
 CONTOUR_POINTS_XY_V1 = ArrayContract(
     schema_id="palette.array.contour_points_xy",
     schema_version=1,
@@ -1632,6 +1808,34 @@ REFINED_SUBJECT_MASK_CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
     )
 )
 
+REFINED_SUBJECT_MASK_DRAFT_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        REFINED_SUBJECT_MASK_EDIT_APPLIED_V1,
+        REFINED_SUBJECT_MASK_COMPONENT_EDIT_APPLIED_V1,
+        REFINED_SUBJECT_MASK_MANUAL_OVERRIDE_V1,
+        REFINED_SUBJECT_MASK_ROW_REVISION_V1,
+        REFINED_SUBJECT_MASK_ROW_UPDATED_AT_UTC_BYTES_V1,
+        REFINED_SUBJECT_MASK_ROW_UPDATE_REASON_BYTES_V1,
+    )
+)
+
+SUBJECT_MASK_DERIVED_CACHE_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        SUBJECT_MASK_BITPACKED_V1,
+        SUBJECT_MASK_RLE_COUNTS_V1,
+        SUBJECT_MASK_RLE_INDPTR_V1,
+        SUBJECT_MASK_RLE_PRESENT_V1,
+        SUBJECT_MASK_RLE_AREA_PX_V1,
+        SUBJECT_MASK_RLE_BBOX_XYXY_V1,
+        SUBJECT_MASK_SAMPLED_CONTOUR_POINTS_XY_V1,
+        SUBJECT_MASK_SAMPLED_CONTOUR_VALID_V1,
+        SUBJECT_MASK_SAMPLED_CONTOUR_SOURCE_POINT_COUNT_V1,
+        SUBJECT_MASK_CONTOUR_PTR_V1,
+        SUBJECT_MASK_CONTOUR_LEN_V1,
+        SUBJECT_MASK_CONTOUR_POINTS_XY_V1,
+    )
+)
+
 
 CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
@@ -1738,6 +1942,24 @@ CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
         SUBJECT_MASK_BBOX_XYXY_V1,
         SUBJECT_MASK_BBOX_VALID_V1,
         DENSE_SUBJECT_MASKS_ROI_V1,
+        REFINED_SUBJECT_MASK_EDIT_APPLIED_V1,
+        REFINED_SUBJECT_MASK_COMPONENT_EDIT_APPLIED_V1,
+        REFINED_SUBJECT_MASK_MANUAL_OVERRIDE_V1,
+        REFINED_SUBJECT_MASK_ROW_REVISION_V1,
+        REFINED_SUBJECT_MASK_ROW_UPDATED_AT_UTC_BYTES_V1,
+        REFINED_SUBJECT_MASK_ROW_UPDATE_REASON_BYTES_V1,
+        SUBJECT_MASK_BITPACKED_V1,
+        SUBJECT_MASK_RLE_COUNTS_V1,
+        SUBJECT_MASK_RLE_INDPTR_V1,
+        SUBJECT_MASK_RLE_PRESENT_V1,
+        SUBJECT_MASK_RLE_AREA_PX_V1,
+        SUBJECT_MASK_RLE_BBOX_XYXY_V1,
+        SUBJECT_MASK_SAMPLED_CONTOUR_POINTS_XY_V1,
+        SUBJECT_MASK_SAMPLED_CONTOUR_VALID_V1,
+        SUBJECT_MASK_SAMPLED_CONTOUR_SOURCE_POINT_COUNT_V1,
+        SUBJECT_MASK_CONTOUR_PTR_V1,
+        SUBJECT_MASK_CONTOUR_LEN_V1,
+        SUBJECT_MASK_CONTOUR_POINTS_XY_V1,
         CONTOUR_POINTS_XY_V1,
     )
 )
