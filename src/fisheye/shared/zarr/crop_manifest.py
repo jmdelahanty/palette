@@ -41,6 +41,7 @@ from fisheye.shared.zarr.manifest_digest import (
     metadata_without_empty_group_consolidation,
 )
 from fisheye.shared.zarr.refined_detection_manifest import (
+    parse_refined_detection_clipped_binding,
     refined_detection_dimensions_from_manifest,
     refined_detection_logical_content_digest,
     validate_refined_detection_run_manifest,
@@ -52,15 +53,11 @@ CROP_RUN_MANIFEST_SCHEMA_ID = "palette.crop_geometry.run_manifest"
 CROP_RUN_MANIFEST_SCHEMA_VERSION = 1
 CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION = 2
 CROP_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
-CROP_RUN_MANIFEST_PERSISTED_PATH = (
-    "crop_runs/<run>/zarr.json.attributes.run_manifest"
-)
+CROP_RUN_MANIFEST_PERSISTED_PATH = "crop_runs/<run>/zarr.json.attributes.run_manifest"
 CROP_LOGICAL_CONTENT_SCHEMA_ID = "palette.crop_geometry.logical_content"
 CROP_LOGICAL_CONTENT_SCHEMA_VERSION = 1
 CROP_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
-CROP_METADATA_DECLARATIONS_SCHEMA_ID = (
-    "palette.crop_geometry.metadata_declarations"
-)
+CROP_METADATA_DECLARATIONS_SCHEMA_ID = "palette.crop_geometry.metadata_declarations"
 CROP_METADATA_DECLARATIONS_SCHEMA_VERSION = 1
 CROP_METADATA_DIGEST_SCOPE = (
     "exact_group_and_array_declarations_with_attributes_redacting_only_run_manifest"
@@ -338,8 +335,7 @@ def crop_pixel_authority_from_manifest(
         or value.get("provider_profile") != "source_video_geometry_v1"
         or value.get("authority_manifest_digest_algorithm")
         != CANONICAL_JSON_DIGEST_ALGORITHM
-        or value.get("frame_index_domain")
-        != "zero_based_acquisition_camera_frame"
+        or value.get("frame_index_domain") != "zero_based_acquisition_camera_frame"
     ):
         raise ValueError("Crop pixel authority header mismatch.")
     authority = CropPixelAuthority(
@@ -381,8 +377,7 @@ def build_crop_row_source_signatures(
         stage=CROP_ROW_SIGNATURE_STAGE,
         instance_keys=_array_values(arrays["instance_key"]),
         content_components={
-            path: _array_values(arrays[path])
-            for path in _CROP_SIGNATURE_CONTENT_PATHS
+            path: _array_values(arrays[path]) for path in _CROP_SIGNATURE_CONTENT_PATHS
         },
         compatibility_context={
             "crop_schema": {
@@ -393,9 +388,7 @@ def build_crop_row_source_signatures(
             "recording_identity": source.recording_identity,
             "source_refined_run_id": source.run_id,
             "source_refined_manifest_digest": source.run_manifest_digest,
-            "source_refined_logical_content_digest": (
-                source.logical_content_digest
-            ),
+            "source_refined_logical_content_digest": (source.logical_content_digest),
             "source_refined_lineage_id": source.lineage_id,
             "source_refined_snapshot_id": source.snapshot_id,
             "source_pixel_authority_id": pixel_authority.authority_id,
@@ -465,7 +458,9 @@ def normalize_crop_metadata_declarations(
             item,
             path=path,
         ) != metadata_without_empty_group_consolidation(candidate, path=path):
-            raise ValueError(f"Direct and consolidated crop metadata differ at {path!r}.")
+            raise ValueError(
+                f"Direct and consolidated crop metadata differ at {path!r}."
+            )
         direct[path] = item
 
     normalized: dict[str, dict[str, Any]] = {}
@@ -690,9 +685,7 @@ def _build_crop_run_manifest(
             "stage_selector_eligible": selector_eligible,
             "metadata_state": "direct_and_consolidated_validated",
             "metadata_declarations_digest_scope": CROP_METADATA_DIGEST_SCOPE,
-            "metadata_declarations_digest_algorithm": (
-                CANONICAL_JSON_DIGEST_ALGORITHM
-            ),
+            "metadata_declarations_digest_algorithm": (CANONICAL_JSON_DIGEST_ALGORITHM),
             "metadata_declarations_digest": metadata_digest,
         },
         "logical_schema": CROP_GEOMETRY_SCHEMA_V1.as_manifest(
@@ -862,9 +855,7 @@ def _validate_logical_content_declarations(
         CROP_GEOMETRY_SCHEMA_V1.binding_paths
     ):
         return (*errors, "crop logical_content array declarations mismatch")
-    bindings = {
-        binding.path: binding for binding in CROP_GEOMETRY_SCHEMA_V1.bindings
-    }
+    bindings = {binding.path: binding for binding in CROP_GEOMETRY_SCHEMA_V1.bindings}
     for path in CROP_GEOMETRY_SCHEMA_V1.binding_paths:
         item = arrays[path]
         if not isinstance(item, Mapping) or set(item) != {
@@ -893,9 +884,7 @@ def _validate_logical_content_declarations(
         if item.get("dtype") != str(contract.dtype.numpy_dtype):
             errors.append(f"crop logical_content dtype mismatch at {path!r}")
         if item.get("digest_algorithm") != CROP_ARRAY_DIGEST_ALGORITHM:
-            errors.append(
-                f"crop logical_content digest algorithm mismatch at {path!r}"
-            )
+            errors.append(f"crop logical_content digest algorithm mismatch at {path!r}")
         try:
             _require_sha256(item.get("sha256"), name=f"logical_content {path} sha256")
         except ValueError as exc:
@@ -921,7 +910,8 @@ def validate_crop_run_manifest(manifest: Mapping[str, Any]) -> tuple[str, ...]:
     manifest_schema_version = manifest.get("schema_version")
     if (
         manifest.get("schema_id") != CROP_RUN_MANIFEST_SCHEMA_ID
-        or manifest_schema_version not in {
+        or manifest_schema_version
+        not in {
             CROP_RUN_MANIFEST_SCHEMA_VERSION,
             CROP_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
         }
@@ -972,9 +962,7 @@ def validate_crop_run_manifest(manifest: Mapping[str, Any]) -> tuple[str, ...]:
             "stage_selector_eligible": publication.get("stage_selector_eligible"),
             "metadata_state": "direct_and_consolidated_validated",
             "metadata_declarations_digest_scope": CROP_METADATA_DIGEST_SCOPE,
-            "metadata_declarations_digest_algorithm": (
-                CANONICAL_JSON_DIGEST_ALGORITHM
-            ),
+            "metadata_declarations_digest_algorithm": (CANONICAL_JSON_DIGEST_ALGORITHM),
             "metadata_declarations_digest": publication.get(
                 "metadata_declarations_digest"
             ),
@@ -1079,7 +1067,11 @@ def validate_crop_run_manifest(manifest: Mapping[str, Any]) -> tuple[str, ...]:
         else:
             try:
                 load_row_source_signature_spec(
-                    {key: value for key, value in row_signature.items() if key != "array_path"},
+                    {
+                        key: value
+                        for key, value in row_signature.items()
+                        if key != "array_path"
+                    },
                     prefix="",
                 )
             except (TypeError, ValueError) as exc:
@@ -1228,9 +1220,18 @@ def validate_crop_publication(
             source_dimensions = refined_detection_dimensions_from_manifest(
                 source_manifest
             )
+            raw_clipped_binding = source_payload["logical_schema"].get(
+                "clipped_binding"
+            )
+            clipped_binding = (
+                None
+                if raw_clipped_binding is None
+                else parse_refined_detection_clipped_binding(raw_clipped_binding)
+            )
             observed_source_digest = refined_detection_logical_content_digest(
                 source_arrays,
                 dimensions=source_dimensions,
+                clipped_binding=clipped_binding,
             )
         except (KeyError, TypeError, ValueError) as exc:
             errors.append(f"source refined decoded arrays are invalid: {exc}")

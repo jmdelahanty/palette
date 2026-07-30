@@ -292,7 +292,9 @@ def _native_authority_record(
     name: str,
 ) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != {"record_ref", "record_sha256"}:
-        raise ValueError(f"{name} must contain exact record_ref and record_sha256 fields.")
+        raise ValueError(
+            f"{name} must contain exact record_ref and record_sha256 fields."
+        )
     return {
         "record_ref": _require_text(value.get("record_ref"), name=f"{name}.record_ref"),
         "record_sha256": _require_sha256(
@@ -360,7 +362,9 @@ def build_native_detection_source_evidence(
         dimensions=dimensions,
     )
     if errors:
-        raise ValueError("Invalid native detection source evidence: " + "; ".join(errors))
+        raise ValueError(
+            "Invalid native detection source evidence: " + "; ".join(errors)
+        )
     return evidence
 
 
@@ -640,9 +644,7 @@ def _build_canonical_detection_run_manifest(
         if manifest_schema_version != (
             CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
         ):
-            raise ValueError(
-                "Canonical coordinate catalogs require run-manifest v3."
-            )
+            raise ValueError("Canonical coordinate catalogs require run-manifest v3.")
         if source_evidence_kind not in {"legacy_conversion", "native_detection"}:
             raise ValueError(
                 "Canonical run-manifest v3 requires an exact source_evidence_kind."
@@ -756,7 +758,9 @@ def build_coordinate_canonical_detection_run_manifest(
             "source_evidence_kind must be legacy_conversion or native_detection."
         )
     if source_errors:
-        raise ValueError("Invalid canonical source evidence: " + "; ".join(source_errors))
+        raise ValueError(
+            "Invalid canonical source evidence: " + "; ".join(source_errors)
+        )
     return _build_canonical_detection_run_manifest(
         run_id=run_id,
         dimensions=dimensions,
@@ -795,6 +799,21 @@ def _dimensions_from_manifest(
     if raw.get("n_frame_boundaries") != dimensions.n_frames + 1:
         raise ValueError("n_frame_boundaries must equal n_frames + 1.")
     return dimensions
+
+
+def canonical_detection_dimensions_from_manifest(
+    manifest: Mapping[str, Any],
+) -> CanonicalDetectionDimensions:
+    """Return exact dimensions from one deeply valid canonical manifest."""
+
+    errors = validate_canonical_detection_run_manifest(manifest)
+    if errors:
+        raise ValueError("Invalid canonical detection manifest: " + "; ".join(errors))
+    payload = manifest.get("payload")
+    logical = payload.get("logical_schema") if isinstance(payload, Mapping) else None
+    if not isinstance(logical, Mapping):  # pragma: no cover - validator guarantees it
+        raise ValueError("Canonical detection manifest lacks logical_schema.")
+    return _dimensions_from_manifest(logical)
 
 
 def validate_canonical_detection_run_manifest(
@@ -848,9 +867,7 @@ def validate_canonical_detection_run_manifest(
     if manifest_schema_version == (
         CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
     ):
-        expected_payload_fields.update(
-            {"source_evidence_kind", "coordinate_contract"}
-        )
+        expected_payload_fields.update({"source_evidence_kind", "coordinate_contract"})
     if set(payload) != expected_payload_fields:
         errors.append("canonical run manifest payload has unexpected fields")
     if payload.get("stage") != "detect":
@@ -1190,6 +1207,7 @@ __all__ = [
     "build_native_canonical_detection_run_manifest",
     "build_native_detection_source_evidence",
     "canonical_detection_logical_content_digest",
+    "canonical_detection_dimensions_from_manifest",
     "canonical_detection_logical_content_document",
     "canonical_detection_metadata_declarations_digest",
     "normalize_canonical_detection_metadata_declarations",

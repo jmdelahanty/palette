@@ -468,6 +468,15 @@ Contract freeze:
 - [x] Add recomputed-digest tampering and multiple-subject-per-frame identity
       tests.
 - [x] Add deterministic schema and storage-plan tests without Zarr I/O.
+- [x] Generalize the shared immutable snapshot publisher to the clipped
+      recording profile while requiring both the exact clipped binding and
+      every bound per-clip artifact at publication time.
+- [x] Implement the recording finalizer that preserves recording-stable
+      `instance_key`, requires globally allocated non-overlapping
+      `refined_row_ids`, rebuilds both `F+1` indexes, and proves the complete
+      source-audit table equals the strict recording-level canonical run.
+- [x] Add maintained selector-ineligible CLIs and an LSF fragment for strict
+      refined-detection then crop-v2 recording publication.
 
 Before production routing:
 
@@ -536,6 +545,13 @@ Before production routing:
       profile canary; no new performance matrix is required.
 - [ ] Route no selector until decoded values, manifest, direct metadata, and
       consolidated metadata all validate.
+- [ ] Make each maintained clip refine worker emit a strict full-acquisition
+      refined-v1 artifact using recording-stable keys and one coordinated
+      recording-global refined-row allocator; the recording finalizer rejects
+      overlapping clip-local row IDs rather than rebasing them.
+- [ ] Insert the strict recording finalizer into the maintained clipped
+      campaign and run one selector-ineligible full-recording canary before
+      archive import or selection.
 
 Deferred until this contract is accepted:
 

@@ -83,6 +83,7 @@ def _group(root: Any, path: str) -> Any:
 def build_clip_terminal_receipt(
     *,
     analysis_zarr: Path,
+    crop_archive: Path | None = None,
     crop_run_id: str,
     source_group_path: str,
     clip_id: str,
@@ -94,14 +95,15 @@ def build_clip_terminal_receipt(
     """Recompute one sidecar from immutable crop, model, cache, and result data."""
 
     archive = analysis_zarr.expanduser().resolve()
+    resolved_crop_archive = (
+        archive if crop_archive is None else crop_archive.expanduser().resolve()
+    )
     crop = open_persisted_crop_geometry_publication(
-        archive,
+        resolved_crop_archive,
         run_id=crop_run_id,
     )
     binding = load_pose_model_schema_binding(pose_binding_path)
-    preprocessing = keypoint_preprocessing_from_manifest(
-        _read_json(preprocessing_path)
-    )
+    preprocessing = keypoint_preprocessing_from_manifest(_read_json(preprocessing_path))
     package_path = input_package_manifest_path.expanduser().resolve()
     if not package_path.is_file():
         raise FileNotFoundError(f"Input package manifest not found: {package_path}")
@@ -116,9 +118,7 @@ def build_clip_terminal_receipt(
         )
     provenance = source.attrs.get("provenance")
     resolution = (
-        provenance.get("model_resolution")
-        if isinstance(provenance, Mapping)
-        else None
+        provenance.get("model_resolution") if isinstance(provenance, Mapping) else None
     )
     artifacts = resolution.get("artifacts") if isinstance(resolution, Mapping) else None
     observed_binding = (
@@ -214,6 +214,11 @@ def build_clip_terminal_receipt(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--analysis-zarr", type=Path, required=True)
+    parser.add_argument(
+        "--crop-archive",
+        type=Path,
+        help="Optional standalone crop-v2 archive; defaults to --analysis-zarr.",
+    )
     parser.add_argument("--crop-run", required=True)
     parser.add_argument("--source-group", required=True)
     parser.add_argument("--clip-id", required=True)
@@ -230,6 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         receipt = build_clip_terminal_receipt(
             analysis_zarr=args.analysis_zarr,
+            crop_archive=args.crop_archive,
             crop_run_id=args.crop_run,
             source_group_path=args.source_group,
             clip_id=args.clip_id,

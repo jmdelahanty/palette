@@ -285,6 +285,11 @@ Before production integration:
       selector-ineligible standalone publication;
 - [x] test a real compacted detection addition through complete crop
       publication with unchanged-row reuse;
+- [x] allow an explicit selector-ineligible clipped refined candidate to feed
+      crop-v2 while revalidating its complete per-clip evidence and the live
+      acquisition pixel authority;
+- [x] allow the keypoint clip receipts and recording finalizer to consume this
+      standalone crop archive without moving pixels into the analysis Zarr;
 - [ ] insert the successor publisher into the production DAG's atomic
       selector-ineligible import path;
 - [ ] feed its added/changed rows into the raw-keypoint successor materializer;

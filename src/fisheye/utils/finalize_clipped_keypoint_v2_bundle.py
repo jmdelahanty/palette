@@ -105,8 +105,9 @@ def _load_terminal_results(
             raise ValueError(
                 f"Clip receipt source is no longer complete: {receipt_path}"
             )
-        if source.attrs.get("coordinate_contract_mode") != (
-            payload["source_coordinate_contract_mode"]
+        if (
+            source.attrs.get("coordinate_contract_mode")
+            != (payload["source_coordinate_contract_mode"])
         ):
             raise ValueError(
                 f"Clip source coordinate mode changed after receipt: {receipt_path}"
@@ -143,10 +144,10 @@ def _load_terminal_results(
             raise ValueError(
                 f"Clip source preprocessing changed after receipt: {receipt_path}"
             )
-        package_path = Path(payload["input_package_manifest_path"]).expanduser().resolve()
-        declared_package = source.attrs.get(
-            "source_crop_pixel_work_package_manifest"
+        package_path = (
+            Path(payload["input_package_manifest_path"]).expanduser().resolve()
         )
+        declared_package = source.attrs.get("source_crop_pixel_work_package_manifest")
         if (
             not package_path.is_file()
             or not isinstance(declared_package, str)
@@ -167,9 +168,7 @@ def _load_terminal_results(
                 f"Clip source crop binding changed after receipt: {receipt_path}"
             )
         if not is_run_complete(source_crop):
-            raise ValueError(
-                f"Clip source crop is no longer complete: {receipt_path}"
-            )
+            raise ValueError(f"Clip source crop is no longer complete: {receipt_path}")
         roi_shape = payload["source_crop_roi_shape_hw"]
         observed_roi_shape = source_crop.attrs.get(
             "roi_shape"
@@ -209,9 +208,7 @@ def _load_terminal_results(
             clip_index=persisted["clip_index"],
             pose_model_schema_binding=pose_model_schema_binding,
             preprocessing=preprocessing,
-            input_package_manifest_digest=persisted[
-                "input_package_manifest_digest"
-            ],
+            input_package_manifest_digest=persisted["input_package_manifest_digest"],
         )
         if result.as_manifest() != persisted:
             raise ValueError(
@@ -224,6 +221,7 @@ def _load_terminal_results(
 def finalize_clipped_keypoint_v2_bundle(
     *,
     analysis_zarr: Path,
+    crop_archive: Path | None = None,
     crop_run_id: str,
     clip_receipt_paths: Sequence[Path],
     pose_binding_path: Path,
@@ -240,11 +238,15 @@ def finalize_clipped_keypoint_v2_bundle(
     if not clip_receipt_paths:
         raise ValueError("At least one --clip-receipt is required.")
     archive = analysis_zarr.expanduser().resolve()
-    crop = open_persisted_crop_geometry_publication(archive, run_id=crop_run_id)
-    binding = load_pose_model_schema_binding(pose_binding_path)
-    preprocessing = keypoint_preprocessing_from_manifest(
-        _read_json(preprocessing_path)
+    resolved_crop_archive = (
+        archive if crop_archive is None else crop_archive.expanduser().resolve()
     )
+    crop = open_persisted_crop_geometry_publication(
+        resolved_crop_archive,
+        run_id=crop_run_id,
+    )
+    binding = load_pose_model_schema_binding(pose_binding_path)
+    preprocessing = keypoint_preprocessing_from_manifest(_read_json(preprocessing_path))
     clips = _load_terminal_results(
         analysis_zarr=archive,
         crop=crop,
@@ -274,6 +276,7 @@ def finalize_clipped_keypoint_v2_bundle(
         "schema_version": 1,
         "status": "complete",
         "analysis_zarr": str(archive),
+        "crop_archive": str(resolved_crop_archive),
         "crop_run_id": crop.run_id,
         "clip_receipt_paths": [
             str(path.expanduser().resolve()) for path in clip_receipt_paths
@@ -291,10 +294,13 @@ def finalize_clipped_keypoint_v2_bundle(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--analysis-zarr", type=Path, required=True)
-    parser.add_argument("--crop-run", required=True)
     parser.add_argument(
-        "--clip-receipt", type=Path, action="append", required=True
+        "--crop-archive",
+        type=Path,
+        help="Optional standalone crop-v2 archive; defaults to --analysis-zarr.",
     )
+    parser.add_argument("--crop-run", required=True)
+    parser.add_argument("--clip-receipt", type=Path, action="append", required=True)
     parser.add_argument("--pose-binding", type=Path, required=True)
     parser.add_argument("--preprocessing", type=Path, required=True)
     parser.add_argument("--bundle-root", type=Path, required=True)
@@ -314,6 +320,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = finalize_clipped_keypoint_v2_bundle(
             analysis_zarr=args.analysis_zarr,
+            crop_archive=args.crop_archive,
             crop_run_id=args.crop_run,
             clip_receipt_paths=args.clip_receipt,
             pose_binding_path=args.pose_binding,
@@ -333,6 +340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "schema_version": 1,
             "status": "failed",
             "analysis_zarr": str(args.analysis_zarr),
+            "crop_archive": str(args.crop_archive or args.analysis_zarr),
             "crop_run_id": args.crop_run,
             "bundle_root": str(args.bundle_root),
             "error": f"{type(exc).__name__}: {exc}",

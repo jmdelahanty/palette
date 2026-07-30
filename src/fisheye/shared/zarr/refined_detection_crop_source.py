@@ -17,13 +17,16 @@ from fisheye.shared.zarr.refined_detection_manifest import (
     REFINED_DETECTION_AUTHORITY_PROVENANCE_ATTRIBUTE,
     REFINED_DETECTION_AUTHORITY_RUN_ATTRIBUTE,
     REFINED_DETECTION_RUN_MANIFEST_ATTRIBUTE,
+    RefinedDetectionBoundClipEvidence,
     refined_detection_dimensions_from_manifest,
     refined_detection_logical_content_digest,
+    parse_refined_detection_clipped_binding,
     validate_refined_detection_authority_provenance,
     validate_refined_detection_publication,
 )
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
+    RefinedDetectionClippedBinding,
     RefinedDetectionDimensions,
     RefinedDetectionLineageProfile,
 )
@@ -52,7 +55,7 @@ class RefinedDetectionCropSourceError(RuntimeError):
 
 @dataclass(frozen=True)
 class BoundRefinedDetectionCropSource:
-    """One exact full-acquisition refined-v1 rowset and its evidence."""
+    """One exact recording-level refined-v1 rowset and its evidence."""
 
     archive_path: Path
     run_id: str
@@ -66,6 +69,8 @@ class BoundRefinedDetectionCropSource:
     instances_group: Any
     logical_content_digest: str
     handoff_manifest: Mapping[str, Any]
+    parent_manifest: Mapping[str, Any] | None
+    parent_arrays: Mapping[str, Any] | None
 
 
 def _run_arrays(
@@ -153,6 +158,8 @@ def bind_refined_detection_crop_source(
     allow_selector_ineligible_benchmark: bool = False,
     parent_manifest: Mapping[str, Any] | None = None,
     parent_arrays: Mapping[str, Any] | None = None,
+    clipped_source_evidence: tuple[RefinedDetectionBoundClipEvidence, ...]
+    | None = None,
 ) -> BoundRefinedDetectionCropSource:
     """Open and prove one refined-v1 source before any crop write is planned."""
 
@@ -181,14 +188,23 @@ def bind_refined_detection_crop_source(
             "Refined detection run lacks its exact run_manifest."
         )
     dimensions = refined_detection_dimensions_from_manifest(manifest)
+    payload = manifest["payload"]
+    clipped_binding: RefinedDetectionClippedBinding | None = None
     if (
         dimensions.lineage_profile
-        is not RefinedDetectionLineageProfile.FULL_ACQUISITION
+        is RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT
     ):
-        raise RefinedDetectionCropSourceError(
-            "Ordinary crop handoff requires a full-acquisition refined snapshot."
-        )
-    payload = manifest["payload"]
+        raw_binding = payload["logical_schema"].get("clipped_binding")
+        if not isinstance(raw_binding, Mapping):
+            raise RefinedDetectionCropSourceError(
+                "Clipped refined crop source lacks its clipped binding."
+            )
+        try:
+            clipped_binding = parse_refined_detection_clipped_binding(raw_binding)
+        except (TypeError, ValueError) as exc:
+            raise RefinedDetectionCropSourceError(
+                f"Clipped refined crop binding is invalid: {exc}"
+            ) from exc
     if payload["run_id"] != selected:
         raise RefinedDetectionCropSourceError(
             "Selected run name differs from the manifest run_id."
@@ -243,6 +259,7 @@ def bind_refined_detection_crop_source(
         arrays=arrays,
         parent_manifest=parent_manifest,
         parent_arrays=parent_arrays,
+        clipped_source_evidence=clipped_source_evidence,
     )
     if publication_errors:
         raise RefinedDetectionCropSourceError(
@@ -264,6 +281,7 @@ def bind_refined_detection_crop_source(
     logical_digest = refined_detection_logical_content_digest(
         arrays,
         dimensions=dimensions,
+        clipped_binding=clipped_binding,
     )
     instances = run["instances"]
     evidence_paths = (
@@ -306,6 +324,8 @@ def bind_refined_detection_crop_source(
         instances_group=instances,
         logical_content_digest=logical_digest,
         handoff_manifest=handoff,
+        parent_manifest=parent_manifest,
+        parent_arrays=parent_arrays,
     )
 
 

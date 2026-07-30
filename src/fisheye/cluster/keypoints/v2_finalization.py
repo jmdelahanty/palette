@@ -58,6 +58,7 @@ class ClippedKeypointV2FinalizationInputs:
     refined_snapshot_id: str
     repo: Path
     run_root: Path
+    crop_archive: Path | None = None
     upstream_job_keys: tuple[str, ...] = ()
     required_artifacts: tuple[str, ...] = ()
     receipt_array_concurrency: int = 8
@@ -78,6 +79,7 @@ class ClippedKeypointV2FinalizationInputs:
 @dataclass(frozen=True)
 class ClippedKeypointV2FinalizationOutputs:
     target_id: str
+    crop_archive: Path
     crop_run_id: str
     clip_receipt_paths: tuple[Path, ...]
     bundle_root: Path
@@ -89,6 +91,7 @@ class ClippedKeypointV2FinalizationOutputs:
     def to_json(self) -> dict[str, Any]:
         return {
             "target_id": self.target_id,
+            "crop_archive": str(self.crop_archive),
             "crop_run_id": self.crop_run_id,
             "clip_receipt_paths": [str(path) for path in self.clip_receipt_paths],
             "bundle_root": str(self.bundle_root),
@@ -122,35 +125,41 @@ def build_clipped_keypoint_v2_finalization_fragment(
         clip_safe = safe_component(clip.clip_id, default="clip", max_length=56)
         receipt = receipt_dir / f"{clip.clip_index:04d}_{clip_safe}.json"
         receipt_paths.append(receipt)
-        command = (
+        command: list[str] = [
             "scripts/py",
             "-m",
             "fisheye.utils.write_keypoint_clip_terminal_receipt",
             "--analysis-zarr",
             str(inputs.analysis_zarr),
-            "--crop-run",
-            inputs.crop_run_id,
-            "--source-group",
-            clip.source_group_path,
-            "--clip-id",
-            clip.clip_id,
-            "--clip-index",
-            str(clip.clip_index),
-            "--pose-binding",
-            str(inputs.pose_binding_path),
-            "--preprocessing",
-            str(inputs.preprocessing_path),
-            "--input-package-manifest",
-            str(clip.input_package_manifest_path),
-            "--output",
-            str(receipt),
+        ]
+        if inputs.crop_archive is not None:
+            command.extend(("--crop-archive", str(inputs.crop_archive)))
+        command.extend(
+            (
+                "--crop-run",
+                inputs.crop_run_id,
+                "--source-group",
+                clip.source_group_path,
+                "--clip-id",
+                clip.clip_id,
+                "--clip-index",
+                str(clip.clip_index),
+                "--pose-binding",
+                str(inputs.pose_binding_path),
+                "--preprocessing",
+                str(inputs.preprocessing_path),
+                "--input-package-manifest",
+                str(clip.input_package_manifest_path),
+                "--output",
+                str(receipt),
+            )
         )
         terminal_tasks.append(
             build_execution_task(
                 run_root=inputs.run_root,
                 task_key=f"keypoint_v2_terminal:{target_safe}:{clip_safe}",
                 stage="keypoint_v2_terminal_receipt",
-                command=command,
+                command=tuple(command),
                 expected_outputs=(receipt,),
                 array_indexed=True,
             )
@@ -180,31 +189,37 @@ def build_clipped_keypoint_v2_finalization_fragment(
         "fisheye.utils.finalize_clipped_keypoint_v2_bundle",
         "--analysis-zarr",
         str(inputs.analysis_zarr),
-        "--crop-run",
-        inputs.crop_run_id,
-        "--pose-binding",
-        str(inputs.pose_binding_path),
-        "--preprocessing",
-        str(inputs.preprocessing_path),
-        "--bundle-root",
-        str(inputs.bundle_root),
-        "--raw-run",
-        inputs.raw_run_id,
-        "--quality-run",
-        inputs.quality_run_id,
-        "--refined-run",
-        inputs.refined_run_id,
-        "--body-frame-run",
-        inputs.body_frame_run_id,
-        "--recording-identity",
-        inputs.recording_identity,
-        "--refined-lineage-id",
-        inputs.refined_lineage_id,
-        "--refined-snapshot-id",
-        inputs.refined_snapshot_id,
-        "--result-json",
-        str(result_path),
     ]
+    if inputs.crop_archive is not None:
+        command.extend(("--crop-archive", str(inputs.crop_archive)))
+    command.extend(
+        [
+            "--crop-run",
+            inputs.crop_run_id,
+            "--pose-binding",
+            str(inputs.pose_binding_path),
+            "--preprocessing",
+            str(inputs.preprocessing_path),
+            "--bundle-root",
+            str(inputs.bundle_root),
+            "--raw-run",
+            inputs.raw_run_id,
+            "--quality-run",
+            inputs.quality_run_id,
+            "--refined-run",
+            inputs.refined_run_id,
+            "--body-frame-run",
+            inputs.body_frame_run_id,
+            "--recording-identity",
+            inputs.recording_identity,
+            "--refined-lineage-id",
+            inputs.refined_lineage_id,
+            "--refined-snapshot-id",
+            inputs.refined_snapshot_id,
+            "--result-json",
+            str(result_path),
+        ]
+    )
     for receipt in receipt_paths:
         command.extend(("--clip-receipt", str(receipt)))
     final_job = build_job(
@@ -236,6 +251,9 @@ def build_clipped_keypoint_v2_finalization_fragment(
     artifact_key = f"selector_ineligible_keypoint_v2_chain:{target_safe}"
     outputs = ClippedKeypointV2FinalizationOutputs(
         target_id=inputs.target_id,
+        crop_archive=(
+            inputs.analysis_zarr if inputs.crop_archive is None else inputs.crop_archive
+        ),
         crop_run_id=inputs.crop_run_id,
         clip_receipt_paths=tuple(receipt_paths),
         bundle_root=inputs.bundle_root,

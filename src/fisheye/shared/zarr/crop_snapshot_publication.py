@@ -49,6 +49,9 @@ from fisheye.shared.zarr.refined_detection_crop_source import (
     BoundRefinedDetectionCropSource,
     bind_refined_detection_crop_source,
 )
+from fisheye.shared.zarr.refined_detection_manifest import (
+    RefinedDetectionBoundClipEvidence,
+)
 from fisheye.shared.zarr.storage_profiles import (
     PUBLISHED_HTTP_V1,
     StorageProfile,
@@ -73,6 +76,53 @@ _SELECTOR_ATTRIBUTES = (
     "latest_pending",
     "authoritative_run",
 )
+
+
+def publish_crop_geometry_from_explicit_refined_candidate(
+    *,
+    refined_archive: Path,
+    refined_run_id: str,
+    pixel_authority: BoundCropPixelAuthority,
+    policy: CropGeometryPolicy,
+    destination: Path,
+    run_id: str,
+    safe_root: Path,
+    clipped_source_evidence: tuple[RefinedDetectionBoundClipEvidence, ...]
+    | None = None,
+    roi_sizes_full: np.ndarray | None = None,
+    profile: StorageProfile = PUBLISHED_HTTP_V1,
+    created_by: str = "explicit_refined_crop_candidate",
+) -> CropGeometryShadowPublication:
+    """Publish geometry from one explicit selector-ineligible refined source.
+
+    This is the candidate-set boundary used before selector activation.  It
+    accepts both full-acquisition and clipped recording snapshots, but clipped
+    sources remain fail-closed unless every bound per-clip artifact is supplied
+    again for publication validation.
+    """
+
+    source = bind_refined_detection_crop_source(
+        refined_archive,
+        run_id=refined_run_id,
+        allow_selector_ineligible_benchmark=True,
+        clipped_source_evidence=clipped_source_evidence,
+    )
+    pixel_authority.assert_verified()
+    prepared = prepare_crop_geometry_from_refined_source(
+        source,
+        policy=policy,
+        pixel_authority=pixel_authority.pixel_authority,
+        roi_sizes_full=roi_sizes_full,
+    )
+    return publish_selector_ineligible_crop_geometry_snapshot(
+        prepared,
+        destination=destination,
+        run_id=run_id,
+        shadow_root=safe_root,
+        profile=profile,
+        created_by=created_by,
+        coordinate_catalog=True,
+    )
 
 
 def _require_run_id(value: str) -> str:
@@ -527,5 +577,6 @@ def publish_crop_geometry_production_candidate(
 __all__ = [
     "CROP_SNAPSHOT_PUBLICATION_SCHEMA_ID",
     "CROP_SNAPSHOT_PUBLICATION_SCHEMA_VERSION",
+    "publish_crop_geometry_from_explicit_refined_candidate",
     "publish_crop_geometry_production_candidate",
 ]

@@ -538,9 +538,13 @@ not a substitute for the final canonical/refined snapshot pair.
 - [x] Add exact terminal clip sidecars, a composable LSF finalization fragment,
       and one receipt binding every clip plus crop/raw/quality/refined/body
       manifests; keep the integration bundle selector-ineligible.
-- [ ] Compose strict recording-level canonical/refined detection publication,
-      crop-v2 publication, pixel-package creation, clip inference, and the new
-      keypoint finalizer in the maintained clipped campaign.
+- [x] Add composable strict recording-level refined-detection and crop-v2
+      publication fragments downstream of the existing canonical publisher,
+      and bind their standalone crop output into the recording-level keypoint
+      finalizer.
+- [ ] Insert those fragments into the maintained clipped campaign around
+      pixel-package creation and clip inference; this remains blocked until
+      each clip refine worker emits strict recording-stable evidence.
 - [ ] Import the four finalized keypoint-family candidates atomically into the
       recording archive while preserving the standalone receipts as evidence.
 - [ ] Add a bounded-row DAG materializer that accepts only a validated

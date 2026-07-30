@@ -20,7 +20,9 @@ import zarr
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.refined_detection_manifest import (
+    RefinedDetectionBoundClipEvidence,
     RefinedDetectionSnapshotLineage,
+    RefinedDetectionSourceCollectionIdentity,
     RefinedDetectionSourceIdentity,
     build_coordinate_refined_detection_run_manifest,
     build_refined_detection_run_manifest,
@@ -29,6 +31,7 @@ from fisheye.shared.zarr.refined_detection_manifest import (
 )
 from fisheye.shared.zarr.refined_detection_schema import (
     REFINED_DETECTION_SCHEMA_V1,
+    RefinedDetectionClippedBinding,
     RefinedDetectionDimensions,
     RefinedDetectionLineageProfile,
 )
@@ -191,13 +194,16 @@ def publish_selector_ineligible_refined_detection_snapshot(
     destination: Path,
     run_id: str,
     lineage: RefinedDetectionSnapshotLineage,
-    source: RefinedDetectionSourceIdentity,
+    source: RefinedDetectionSourceIdentity | RefinedDetectionSourceCollectionIdentity,
     created_by: str,
     publication_kind: str,
     safe_root: Path = DEFAULT_REFINED_DETECTION_SNAPSHOT_ROOT,
     profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
     parent_manifest: Mapping[str, Any] | None = None,
     parent_arrays: Mapping[str, Any] | None = None,
+    clipped_binding: RefinedDetectionClippedBinding | None = None,
+    clipped_source_evidence: tuple[RefinedDetectionBoundClipEvidence, ...]
+    | None = None,
     run_attributes: Mapping[str, Any] | None = None,
     selection_contract: str = "none_direct_path_only",
     coordinate_catalog: bool = False,
@@ -211,13 +217,23 @@ def publish_selector_ineligible_refined_detection_snapshot(
         destination,
         safe_root=safe_root,
     )
-    if (
+    is_clipped = (
         dimensions.lineage_profile
-        is not RefinedDetectionLineageProfile.FULL_ACQUISITION
-    ):
+        is RefinedDetectionLineageProfile.CLIPPED_RECORDING_SNAPSHOT
+    )
+    if is_clipped != (clipped_binding is not None):
         raise ValueError(
-            "This publisher currently supports full-acquisition snapshots."
+            "clipped_binding must be present exactly for clipped recording snapshots."
         )
+    if is_clipped != (clipped_source_evidence is not None):
+        raise ValueError(
+            "clipped_source_evidence must be present exactly for clipped recording "
+            "snapshots."
+        )
+    if is_clipped and not isinstance(source, RefinedDetectionSourceCollectionIdentity):
+        raise TypeError("Clipped snapshots require a source collection identity.")
+    if not is_clipped and not isinstance(source, RefinedDetectionSourceIdentity):
+        raise TypeError("Full-acquisition snapshots require one source run identity.")
     if (
         not str(created_by).strip()
         or not str(publication_kind).strip()
@@ -230,7 +246,11 @@ def publish_selector_ineligible_refined_detection_snapshot(
         raise ValueError("parent_manifest and parent_arrays must be supplied together.")
     if (lineage.parent_run_id is None) != (parent_manifest is None):
         raise ValueError("Successor lineage and parent evidence must agree.")
-    REFINED_DETECTION_SCHEMA_V1.require(arrays, dimensions=dimensions)
+    REFINED_DETECTION_SCHEMA_V1.require(
+        arrays,
+        dimensions=dimensions,
+        clipped_binding=clipped_binding,
+    )
 
     phase_seconds: dict[str, float] = {}
     phase_started = time.perf_counter()
@@ -266,7 +286,8 @@ def publish_selector_ineligible_refined_detection_snapshot(
         "stage_selector_eligible": False,
         "publication_kind": str(publication_kind),
         "logical_schema": REFINED_DETECTION_SCHEMA_V1.as_manifest(
-            dimensions=dimensions
+            dimensions=dimensions,
+            clipped_binding=clipped_binding,
         ),
         "storage_plan": plans.as_manifest(),
     }
@@ -337,6 +358,7 @@ def publish_selector_ineligible_refined_detection_snapshot(
         destination_issues = REFINED_DETECTION_SCHEMA_V1.validate(
             destination_arrays,
             dimensions=dimensions,
+            clipped_binding=clipped_binding,
         )
         if destination_issues:
             raise RuntimeError(
@@ -356,6 +378,7 @@ def publish_selector_ineligible_refined_detection_snapshot(
         logical_content_digest = refined_detection_logical_content_digest(
             destination_arrays,
             dimensions=dimensions,
+            clipped_binding=clipped_binding,
         )
         phase_seconds["logical_hash_equivalence"] = time.perf_counter() - phase_started
 
@@ -389,6 +412,7 @@ def publish_selector_ineligible_refined_detection_snapshot(
             direct_metadata_declarations=direct,
             consolidated_metadata_declarations=consolidated,
             selector_eligible=False,
+            clipped_binding=clipped_binding,
         )
         run.attrs["run_manifest"] = manifest
         phase_seconds["build_manifest"] = time.perf_counter() - phase_started
@@ -413,6 +437,7 @@ def publish_selector_ineligible_refined_detection_snapshot(
             arrays=destination_arrays,
             parent_manifest=parent_manifest,
             parent_arrays=parent_arrays,
+            clipped_source_evidence=clipped_source_evidence,
         )
         if publication_errors:
             raise RuntimeError(

@@ -307,10 +307,15 @@ def refined_detection_logical_content_document(
     arrays: Mapping[str, Any],
     *,
     dimensions: RefinedDetectionDimensions,
+    clipped_binding: RefinedDetectionClippedBinding | None = None,
 ) -> dict[str, object]:
     """Describe every decoded refined-v1 array with an exact content digest."""
 
-    REFINED_DETECTION_SCHEMA_V1.require(arrays, dimensions=dimensions)
+    REFINED_DETECTION_SCHEMA_V1.require(
+        arrays,
+        dimensions=dimensions,
+        clipped_binding=clipped_binding,
+    )
     expected = REFINED_DETECTION_SCHEMA_V1.binding_paths_for(dimensions)
     if set(arrays) != set(expected):
         raise ValueError("Refined logical content requires the exact array set.")
@@ -341,6 +346,7 @@ def refined_detection_logical_content_digest(
     arrays: Mapping[str, Any],
     *,
     dimensions: RefinedDetectionDimensions,
+    clipped_binding: RefinedDetectionClippedBinding | None = None,
 ) -> str:
     """Return the aggregate digest for one exact decoded refined-v1 rowset."""
 
@@ -348,6 +354,7 @@ def refined_detection_logical_content_digest(
         refined_detection_logical_content_document(
             arrays,
             dimensions=dimensions,
+            clipped_binding=clipped_binding,
         )
     )
 
