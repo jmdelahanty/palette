@@ -345,6 +345,7 @@ def open_persisted_crop_geometry_publication(
     archive_path: Path,
     *,
     run_id: str,
+    source_refined_archive: Path | None = None,
 ) -> CropGeometryShadowPublication:
     """Rebind and deeply validate one persisted selector-ineligible crop run.
 
@@ -402,11 +403,28 @@ def open_persisted_crop_geometry_publication(
     source_run_id = str(source_value.get("run_id") or "").strip()
     if not source_run_id or "/" in source_run_id:
         raise ValueError("Persisted crop refined-source run id is invalid.")
+    refined_archive = (
+        archive
+        if source_refined_archive is None
+        else source_refined_archive.expanduser().resolve()
+    )
+    if not refined_archive.is_dir():
+        raise FileNotFoundError(
+            f"Crop refined-source archive not found: {refined_archive}"
+        )
+    refined_root = (
+        root
+        if refined_archive == archive
+        else zarr.open_group(
+            str(refined_archive), mode="r", use_consolidated=False
+        )
+    )
     try:
-        source_run = root[f"refined_detect_runs/{source_run_id}"]
+        source_run = refined_root[f"refined_detect_runs/{source_run_id}"]
     except KeyError as exc:
         raise FileNotFoundError(
-            f"Crop refined source not found: refined_detect_runs/{source_run_id}"
+            "Crop refined source not found: "
+            f"{refined_archive}/refined_detect_runs/{source_run_id}"
         ) from exc
     source_manifest_value = source_run.attrs.get("run_manifest")
     if not isinstance(source_manifest_value, Mapping):

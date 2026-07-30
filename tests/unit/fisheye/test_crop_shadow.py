@@ -17,6 +17,7 @@ from fisheye.shared.zarr.crop_schema import (
     CropSizeMode,
 )
 from fisheye.shared.zarr.crop_shadow import (
+    open_persisted_crop_geometry_publication,
     prepare_crop_geometry_from_refined_source,
     publish_refined_crop_geometry_shadow,
     require_safe_crop_geometry_shadow_destination,
@@ -203,6 +204,17 @@ def test_real_shadow_is_geometry_only_consolidated_and_selector_ineligible(
         / "crop_geometry_shadow"
         / "zarr.json"
     ).is_file()
+
+    rebound = open_persisted_crop_geometry_publication(
+        publication.output_path,
+        run_id="crop_geometry_shadow",
+        source_refined_archive=source.archive_path,
+    )
+    assert rebound.output_path == publication.output_path
+    assert rebound.source_manifest == source.manifest
+    assert rebound.receipt["persisted_archive_path"] == str(
+        publication.output_path
+    )
 
 
 def test_variable_size_preparation_preserves_refined_rows_without_pixels(

@@ -44,7 +44,7 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _load_parent_frame_mapping(
+def load_parent_frame_mapping(
     path: Path,
     *,
     camera_serial: str,
@@ -196,7 +196,7 @@ def load_clipped_detection_artifact_member(
         )
     clip_id = str(report["clip_id"])
     camera_serial = str(report["camera_serial"])
-    parent_frames = _load_parent_frame_mapping(
+    parent_frames = load_parent_frame_mapping(
         recording_frame_index,
         camera_serial=camera_serial,
         clip_id=clip_id,
@@ -256,4 +256,5 @@ __all__ = [
     "CLIPPED_DETECTION_WORK_UNIT_REPORT_SCHEMA",
     "load_clipped_detection_artifact_member",
     "load_clipped_detection_artifact_members",
+    "load_parent_frame_mapping",
 ]

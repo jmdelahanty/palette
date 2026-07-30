@@ -84,6 +84,7 @@ def build_clip_terminal_receipt(
     *,
     analysis_zarr: Path,
     crop_archive: Path | None = None,
+    refined_archive: Path | None = None,
     crop_run_id: str,
     source_group_path: str,
     clip_id: str,
@@ -101,6 +102,7 @@ def build_clip_terminal_receipt(
     crop = open_persisted_crop_geometry_publication(
         resolved_crop_archive,
         run_id=crop_run_id,
+        source_refined_archive=refined_archive,
     )
     binding = load_pose_model_schema_binding(pose_binding_path)
     preprocessing = keypoint_preprocessing_from_manifest(_read_json(preprocessing_path))
@@ -219,6 +221,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional standalone crop-v2 archive; defaults to --analysis-zarr.",
     )
+    parser.add_argument(
+        "--refined-archive",
+        type=Path,
+        help=(
+            "Optional standalone refined-detection source bound by crop-v2; "
+            "defaults to the crop archive."
+        ),
+    )
     parser.add_argument("--crop-run", required=True)
     parser.add_argument("--source-group", required=True)
     parser.add_argument("--clip-id", required=True)
@@ -236,6 +246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         receipt = build_clip_terminal_receipt(
             analysis_zarr=args.analysis_zarr,
             crop_archive=args.crop_archive,
+            refined_archive=args.refined_archive,
             crop_run_id=args.crop_run,
             source_group_path=args.source_group,
             clip_id=args.clip_id,

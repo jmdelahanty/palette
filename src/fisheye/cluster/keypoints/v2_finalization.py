@@ -59,6 +59,7 @@ class ClippedKeypointV2FinalizationInputs:
     repo: Path
     run_root: Path
     crop_archive: Path | None = None
+    refined_archive: Path | None = None
     upstream_job_keys: tuple[str, ...] = ()
     required_artifacts: tuple[str, ...] = ()
     receipt_array_concurrency: int = 8
@@ -111,6 +112,54 @@ class ClippedKeypointV2FinalizationModule:
     outputs: ClippedKeypointV2FinalizationOutputs
 
 
+@dataclass(frozen=True)
+class RecordingAggregateKeypointV2AdapterInputs:
+    """Benchmark-only reuse of a completed historical recording aggregate."""
+
+    workflow_id: str
+    family: str
+    target_id: str
+    analysis_zarr: Path
+    source_group_path: str
+    source_group_metadata_sha256: str
+    expected_model_sha256: str
+    expected_n_frames: int
+    expected_n_instances: int
+    crop_run_id: str
+    bundle_root: Path
+    raw_run_id: str
+    quality_run_id: str
+    refined_run_id: str
+    body_frame_run_id: str
+    recording_identity: str
+    refined_lineage_id: str
+    refined_snapshot_id: str
+    repo: Path
+    run_root: Path
+    crop_archive: Path | None = None
+    refined_archive: Path | None = None
+    scratch_parent: Path | None = None
+    upstream_job_keys: tuple[str, ...] = ()
+    required_artifacts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        group = str(self.source_group_path).strip().strip("/")
+        if not group or any(part in {"", ".", ".."} for part in group.split("/")):
+            raise ValueError("source_group_path must be one safe relative Zarr path.")
+        object.__setattr__(self, "source_group_path", group)
+        for name in ("source_group_metadata_sha256", "expected_model_sha256"):
+            value = str(getattr(self, name)).strip().lower()
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise ValueError(f"{name} must be one lowercase SHA-256 digest.")
+            object.__setattr__(self, name, value)
+        for name in ("expected_n_frames", "expected_n_instances"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive exact integer.")
+
+
 def build_clipped_keypoint_v2_finalization_fragment(
     inputs: ClippedKeypointV2FinalizationInputs,
 ) -> ClippedKeypointV2FinalizationModule:
@@ -134,6 +183,8 @@ def build_clipped_keypoint_v2_finalization_fragment(
         ]
         if inputs.crop_archive is not None:
             command.extend(("--crop-archive", str(inputs.crop_archive)))
+        if inputs.refined_archive is not None:
+            command.extend(("--refined-archive", str(inputs.refined_archive)))
         command.extend(
             (
                 "--crop-run",
@@ -192,6 +243,8 @@ def build_clipped_keypoint_v2_finalization_fragment(
     ]
     if inputs.crop_archive is not None:
         command.extend(("--crop-archive", str(inputs.crop_archive)))
+    if inputs.refined_archive is not None:
+        command.extend(("--refined-archive", str(inputs.refined_archive)))
     command.extend(
         [
             "--crop-run",
@@ -281,10 +334,127 @@ def build_clipped_keypoint_v2_finalization_fragment(
     return ClippedKeypointV2FinalizationModule(fragment=fragment, outputs=outputs)
 
 
+def build_recording_aggregate_keypoint_v2_adapter_fragment(
+    inputs: RecordingAggregateKeypointV2AdapterInputs,
+) -> ClippedKeypointV2FinalizationModule:
+    """Plan one local-scratch, benchmark-only recording aggregate republish."""
+
+    target_safe = safe_component(inputs.target_id, default="target", max_length=56)
+    job_key = f"keypoint_v2_recording_adapter:{target_safe}"
+    result_path = (
+        inputs.run_root / "keypoint_v2_recording_adapter" / f"{target_safe}.json"
+    )
+    command: list[str] = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.finalize_recording_keypoint_v2_benchmark_adapter",
+        "--analysis-zarr",
+        str(inputs.analysis_zarr),
+        "--source-group",
+        inputs.source_group_path,
+        "--source-group-metadata-sha256",
+        inputs.source_group_metadata_sha256,
+        "--expected-model-sha256",
+        inputs.expected_model_sha256,
+        "--expected-n-frames",
+        str(inputs.expected_n_frames),
+        "--expected-n-instances",
+        str(inputs.expected_n_instances),
+    ]
+    if inputs.crop_archive is not None:
+        command.extend(("--crop-archive", str(inputs.crop_archive)))
+    if inputs.refined_archive is not None:
+        command.extend(("--refined-archive", str(inputs.refined_archive)))
+    if inputs.scratch_parent is not None:
+        command.extend(("--scratch-parent", str(inputs.scratch_parent)))
+    command.extend(
+        (
+            "--crop-run",
+            inputs.crop_run_id,
+            "--bundle-root",
+            str(inputs.bundle_root),
+            "--raw-run",
+            inputs.raw_run_id,
+            "--quality-run",
+            inputs.quality_run_id,
+            "--refined-run",
+            inputs.refined_run_id,
+            "--body-frame-run",
+            inputs.body_frame_run_id,
+            "--recording-identity",
+            inputs.recording_identity,
+            "--refined-lineage-id",
+            inputs.refined_lineage_id,
+            "--refined-snapshot-id",
+            inputs.refined_snapshot_id,
+            "--result-json",
+            str(result_path),
+        )
+    )
+    job = build_job(
+        workflow_id=inputs.workflow_id,
+        family=inputs.family,
+        repo=inputs.repo,
+        run_root=inputs.run_root,
+        job_key=job_key,
+        stage="keypoint_v2_recording_aggregate_benchmark_adapter",
+        command=tuple(command),
+        resources=LsfResources(
+            queue="short", ncores=8, mem_gb=64, walltime="4:00", span_hosts=1
+        ),
+        upstream=inputs.upstream_job_keys,
+        expected_outputs=(
+            result_path,
+            inputs.bundle_root / "finalization_receipt.json",
+            inputs.bundle_root / "historical_aggregate_adapter_receipt.json",
+            inputs.bundle_root / "raw_keypoints.zarr" / "zarr.json",
+            inputs.bundle_root / "keypoint_quality.zarr" / "zarr.json",
+            inputs.bundle_root / "refined_keypoints.zarr" / "zarr.json",
+            inputs.bundle_root / "body_frame.zarr" / "zarr.json",
+        ),
+    )
+    artifact_key = f"selector_ineligible_keypoint_v2_chain:{target_safe}"
+    outputs = ClippedKeypointV2FinalizationOutputs(
+        target_id=inputs.target_id,
+        crop_archive=(
+            inputs.analysis_zarr if inputs.crop_archive is None else inputs.crop_archive
+        ),
+        crop_run_id=inputs.crop_run_id,
+        clip_receipt_paths=(),
+        bundle_root=inputs.bundle_root,
+        result_path=result_path,
+        finalization_receipt_path=inputs.bundle_root / "finalization_receipt.json",
+        terminal_job_key=job_key,
+        artifact_key=artifact_key,
+    )
+    fragment = LsfWorkflowFragment(
+        fragment_id=f"keypoint_v2_recording_aggregate_adapter:{target_safe}",
+        jobs=(job,),
+        requires=inputs.required_artifacts,
+        provides=(artifact_key,),
+        metadata={
+            "module": "recording_keypoint_v2_benchmark_adapter",
+            "target_id": inputs.target_id,
+            "source_group_path": inputs.source_group_path,
+            "source_boundary": "historical_recording_aggregate_benchmark_only",
+            "inference_executed": False,
+            "publication_partition": "complete_recording_snapshot",
+            "physical_layout_source": "shared_byte_planners",
+            "compute_storage_tier": "node_local_scratch",
+            "selector_activation": "none_direct_path_only",
+            "registry_update": False,
+            "outputs": outputs.to_json(),
+        },
+    )
+    return ClippedKeypointV2FinalizationModule(fragment=fragment, outputs=outputs)
+
+
 __all__ = [
     "ClipKeypointV2FinalizationInput",
     "ClippedKeypointV2FinalizationInputs",
     "ClippedKeypointV2FinalizationModule",
     "ClippedKeypointV2FinalizationOutputs",
+    "RecordingAggregateKeypointV2AdapterInputs",
     "build_clipped_keypoint_v2_finalization_fragment",
+    "build_recording_aggregate_keypoint_v2_adapter_fragment",
 ]

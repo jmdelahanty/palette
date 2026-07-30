@@ -648,9 +648,9 @@ def prepare_clipped_keypoint_finalization(
             "Crop instance_key must have exact uint64 dtype."
         )
     if np.unique(target_keys).shape[0] != target_keys.shape[0]:
-        raise ClippedKeypointFinalizationError("Crop instance_key values are not unique.")
-    rows_by_key = {int(key): row for row, key in enumerate(target_keys)}
-
+        raise ClippedKeypointFinalizationError(
+            "Crop instance_key values are not unique."
+        )
     all_keys = np.concatenate(
         [np.asarray(clip.inference.instance_key) for clip in ordered_clips]
     )
@@ -675,23 +675,33 @@ def prepare_clipped_keypoint_finalization(
     bbox = np.full((row_count, 4), np.nan, dtype=np.float32)
     pose_success = np.zeros(row_count, dtype=bool)
     assigned = np.zeros(row_count, dtype=bool)
+    target_order = np.argsort(target_keys, kind="stable")
+    sorted_target_keys = target_keys[target_order]
     for clip in ordered_clips:
-        for source_row, key in enumerate(clip.inference.instance_key):
-            target_row = rows_by_key[int(key)]
-            if not np.array_equal(
-                clip.source_crop_row_signature[source_row],
-                target_signatures[target_row],
-            ):
-                raise ClippedKeypointFinalizationError(
-                    f"Clip {clip.clip_id!r} crop signature differs for "
-                    f"instance_key {int(key)}."
-                )
-            points[target_row] = clip.inference.keypoints_roi[source_row]
-            confidences[target_row] = clip.inference.keypoint_confidences[source_row]
-            pose_confidence[target_row] = clip.inference.pose_confidence[source_row]
-            bbox[target_row] = clip.inference.pose_bbox_xyxy_roi[source_row]
-            pose_success[target_row] = clip.inference.pose_success[source_row]
-            assigned[target_row] = True
+        clip_keys = np.asarray(clip.inference.instance_key, dtype=np.uint64)
+        positions = np.searchsorted(sorted_target_keys, clip_keys)
+        if np.any(positions >= sorted_target_keys.shape[0]):
+            raise ClippedKeypointFinalizationError(
+                f"Clip {clip.clip_id!r} contains an unknown instance_key."
+            )
+        target_rows = target_order[positions]
+        if not np.array_equal(target_keys[target_rows], clip_keys):
+            raise ClippedKeypointFinalizationError(
+                f"Clip {clip.clip_id!r} contains an unknown instance_key."
+            )
+        if not np.array_equal(
+            clip.source_crop_row_signature,
+            target_signatures[target_rows],
+        ):
+            raise ClippedKeypointFinalizationError(
+                f"Clip {clip.clip_id!r} crop signatures differ from crop-v2."
+            )
+        points[target_rows] = clip.inference.keypoints_roi
+        confidences[target_rows] = clip.inference.keypoint_confidences
+        pose_confidence[target_rows] = clip.inference.pose_confidence
+        bbox[target_rows] = clip.inference.pose_bbox_xyxy_roi
+        pose_success[target_rows] = clip.inference.pose_success
+        assigned[target_rows] = True
     if not np.all(assigned):
         raise ClippedKeypointFinalizationError(
             "One or more crop rows lacks terminal inference evidence."

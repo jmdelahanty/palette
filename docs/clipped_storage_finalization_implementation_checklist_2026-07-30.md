@@ -51,6 +51,9 @@ finalizer copies physical chunk or shard declarations from clip outputs.
 - [x] Allow keypoint terminal receipts and recording finalization to read the
       standalone crop archive while clip inference arrays remain in the source
       analysis archive.
+- [x] Make the standalone crop reopen contract name its separate refined-source
+      archive explicitly. Reopen validation still recomputes the crop logical
+      digest and compares the 13 crop arrays with the bound refined arrays.
 - [x] Add an LSF fragment for refined then crop publication and a composition
       helper that freezes its dependency edge into keypoint-v2 finalization.
 - [x] Cover empty frames, two clips, canonical mismatch, overlapping identity,
@@ -71,6 +74,21 @@ finalizer copies physical chunk or shard declarations from clip outputs.
       registry and remap `uint16` codes during finalization.
 - [x] Add a composable dependency chain for strict clip evidence -> clipped
       binding -> recording refined snapshot -> crop-v2.
+- [x] Add one selector-ineligible Crimson candidate composer spanning strict
+      clip evidence, recording refined detections, crop-v2, raw/quality/refined
+      keypoints, body frame, and a final fail-closed handoff manifest.
+- [x] Add a benchmark-only adapter for the existing full recording keypoint
+      aggregate. It requires pinned source metadata and model digests, exact
+      `instance_key` set equality, crop origin/size equality, frame-map
+      equality, node-local materialization, and shared-byte-planner output.
+- [x] Add a benchmark-only canonical adapter for the old full-duration Crimson
+      anchor. It rebuilds from all clip detection groups, verifies stable keys
+      and the recording frame map, requires exact nine-array equality with the
+      anchor, and publishes a current native-manifest-v2 access-aware store on
+      node-local scratch before shared placement.
+- [x] Vectorize recording keypoint row reconciliation by `instance_key`; the
+      full-duration finalizer no longer performs one Python dictionary/loop
+      operation per observation.
 
 ## Adoption and physical-layout boundary
 
@@ -119,6 +137,8 @@ revalidates the live pixel authority before any geometry becomes usable.
 - [ ] Run one small selector-ineligible campaign canary with an empty frame,
       multiple subjects in one frame, a rejected raw detection, and a manual
       addition.
+- [x] Implement the immutable full-duration plan, LSF composition, commit pin,
+      node-local keypoint republish, and final seven-artifact handoff gate.
 - [ ] Run the recording-scale publication/read/peak-RSS benchmark. Record
       detection, refined, crop, and keypoint phase timings separately.
 - [ ] Add one atomic archive-import transaction for the complete candidate set.

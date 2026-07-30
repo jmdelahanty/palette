@@ -272,6 +272,7 @@ def build_clipped_storage_keypoint_chain_fragments(
         replace(
             keypoint_inputs,
             crop_archive=storage.outputs.crop_archive,
+            refined_archive=storage.outputs.refined_archive,
             crop_run_id=storage.outputs.crop_run_id,
             upstream_job_keys=tuple(
                 dict.fromkeys(
