@@ -48,6 +48,13 @@ native clip evidence is required by strict refined detection, crop, keypoint,
 and final handoff gates. The older v002 fixture remains untouched and is not an
 input to this candidate.
 
+Candidate v4 then exposed a separate orchestration defect: its LSF array
+command named `<root>/lsf/lsf_plan.json` while the composer materialized the
+plan at `<root>/lsf_plan.json`. The canonical stage completed, but every array
+task failed before reading data and all descendants remained blocked. The
+composer now has one authoritative plan path, asserted directly by tests. The
+failed v4 root remains immutable evidence and is not resumed in place.
+
 ## Sleepyfish pins
 
 The first full fixture uses:

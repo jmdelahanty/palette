@@ -135,6 +135,7 @@ def test_full_plan_pins_all_inputs_and_uses_recording_adapter(
         "crimson_storage_candidate_handoff",
     ]
     evidence_job = plan.candidate.detection_storage.evidence.fragment.jobs[0]
+    assert str(plan.lsf_plan_path) in evidence_job.command
     assert evidence_job.dependency is not None
     assert evidence_job.dependency.upstream_job_keys == (
         "canonical_detection_adapter:sleepyfish_full_v1",

@@ -165,7 +165,7 @@ class CrimsonFullStorageCandidateLsfPlan:
 
     @property
     def lsf_plan_path(self) -> Path:
-        return self.request.output_root / "lsf_plan.json"
+        return self.request.output_root / "lsf" / "lsf_plan.json"
 
     @property
     def submission_path(self) -> Path:
