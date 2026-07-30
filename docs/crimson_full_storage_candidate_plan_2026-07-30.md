@@ -2,8 +2,9 @@
 
 Date: 2026-07-30
 
-Status: implementation and focused validation complete; immutable deployment,
-LSF submission, and Crimson full-duration measurement remain pending.
+Status: implementation corrected after the first cluster preflight failed
+closed on a raw-source identity mismatch; corrected immutable deployment,
+resubmission, and Crimson full-duration measurement remain pending.
 
 ## Why the full run is required
 
@@ -36,12 +37,21 @@ dimension, consolidated declaration, and selector state has been reopened.
 The earlier full-duration canonical detection fixture is only a decoded-value
 anchor. Its physical layout is useful, but it predates the current embedded
 canonical `run_manifest`. The workflow therefore does not pass that older
-envelope downstream. Its first job rebuilds the recording table from all 22
-completed clip detection groups through the current native binder, verifies
-the persisted clip keys and complete recording frame map, proves all nine
-decoded arrays equal the old anchor, and writes a fresh manifest-v2
-access-aware canonical store on node-local scratch. Only that current store is
-used by refined detection, crop, keypoint, and final handoff gates.
+envelope downstream. Its first job now reads the exact recording-level legacy
+run from which the anchor was derived,
+`detect_runs/detect_2026-05-14_15-39-11`. It validates both legacy count
+aliases against `frame_indices`, pins the recorded v002 model identity and
+shared model bytes, proves all nine decoded arrays equal the old anchor, and
+writes a fresh coordinate-catalog manifest-v3 access-aware canonical store on
+node-local scratch. Only that current store is used by refined detection,
+crop, keypoint, and final handoff gates.
+
+The 22 per-clip v003 detect/refine artifacts are intentionally different
+logical snapshots. They remain the strict inputs to the refined, crop, and
+keypoint chain, but are not used to reconstruct the raw canonical anchor. The
+first submitted workflow correctly rejected the accidental conflation: the
+clip groups contained 1,186,376 rows while the pinned recording-level anchor
+contains 1,187,087 rows.
 
 ## Sleepyfish pins
 
@@ -56,8 +66,10 @@ The first full fixture uses:
   `57bba596f9c2c76626909d99ff084dec5935e2cd829817a140a836f1b0fdfa03`;
 - pose model SHA-256:
   `cce63d534a8f1491db1e2c71cb9236768c445722013dc39faeaf62a9d0a9a377`;
-- detection model SHA-256:
+- per-clip v003 detection model SHA-256:
   `b365e5da4c712e8ed347baed260915b939251036f06a91e17c96f6028dde1e1d`;
+- canonical recording-level v002 detection model SHA-256:
+  `305abbf0d93271c4b4d278dd1a12e8f6ce4f6d67f9af96309fa196375858aa82`;
 - recording frame-index SHA-256:
   `081c40df4a5a72aa3e77c4eb1c61c8edb2413ae3f8b99d5c17e6aa9c9ed5f7f5`;
 - Crimson full-analysis contract commit:
@@ -112,7 +124,7 @@ and Crimson revisions, host, and LSF job identity.
 
 - [x] Compose the seven-store DAG and one terminal handoff.
 - [x] Add standalone crop/refined archive rebinding.
-- [x] Normalize the historical canonical anchor into a current native-v2,
+- [x] Normalize the historical canonical anchor into a current manifest-v3,
       selector-ineligible, access-aware standalone store.
 - [x] Add the benchmark-only recording aggregate adapter.
 - [x] Use node-local compute then shared publication for keypoint stores.
@@ -122,9 +134,12 @@ and Crimson revisions, host, and LSF job identity.
 - [x] Route jobs requesting more than the `short` queue's 61-minute hard limit
       to the normal CPU `local` queue; keep one-hour validation jobs on
       `short`.
-- [ ] Commit and deploy this branch as a unique `/groups` worktree.
-- [ ] Materialize and review `candidate_plan.json` and `lsf_plan.json`.
-- [ ] Submit the full candidate through `login1-citrus-poller`.
+- [x] Commit and deploy the initial branch as a unique `/groups` worktree.
+- [x] Materialize, review, and submit the initial full candidate; retain its
+      fail-closed source-mismatch evidence without modifying it.
+- [ ] Commit and deploy the corrected recording-level canonical source pin.
+- [ ] Materialize and submit a new immutable candidate version through
+      `login1-citrus-poller`.
 - [ ] Require terminal `handoff_manifest.json` before giving paths to Crimson.
 - [ ] Run Crimson's fresh-process full-duration startup, seek, traversal,
       physical-I/O, cache, and RSS matrix.

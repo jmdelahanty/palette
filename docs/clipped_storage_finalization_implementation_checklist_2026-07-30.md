@@ -82,10 +82,11 @@ finalizer copies physical chunk or shard declarations from clip outputs.
       `instance_key` set equality, crop origin/size equality, frame-map
       equality, node-local materialization, and shared-byte-planner output.
 - [x] Add a benchmark-only canonical adapter for the old full-duration Crimson
-      anchor. It rebuilds from all clip detection groups, verifies stable keys
-      and the recording frame map, requires exact nine-array equality with the
-      anchor, and publishes a current native-manifest-v2 access-aware store on
-      node-local scratch before shared placement.
+      anchor. It reads the exact pinned recording-level legacy run, validates
+      count aliases and the recorded model identity, requires exact nine-array
+      equality with the anchor, and publishes a current coordinate-catalog
+      manifest-v3 access-aware store on node-local scratch before shared
+      placement. Per-clip v003 detections remain separate refined-chain inputs.
 - [x] Vectorize recording keypoint row reconciliation by `instance_key`; the
       full-duration finalizer no longer performs one Python dictionary/loop
       operation per observation.

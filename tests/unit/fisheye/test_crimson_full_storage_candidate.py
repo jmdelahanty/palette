@@ -50,9 +50,17 @@ def test_full_plan_pins_all_inputs_and_uses_recording_adapter(
     source_sha = "b" * 64
     plan_sha = "c" * 64
     detection_model_sha = "1" * 64
+    canonical_model_sha = "2" * 64
     detection_model = recording / "detect.pt"
     detection_model.parent.mkdir(parents=True)
     detection_model.write_bytes(b"model")
+    canonical_model = recording / "canonical.pt"
+    canonical_model.write_bytes(b"canonical-model")
+    canonical_source_metadata = (
+        analysis / "detect_runs" / "recording_source" / "zarr.json"
+    )
+    canonical_source_metadata.parent.mkdir(parents=True)
+    canonical_source_metadata.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         mod,
         "_read_json",
@@ -68,6 +76,8 @@ def test_full_plan_pins_all_inputs_and_uses_recording_adapter(
         lambda path: (
             source_sha
             if path.name == "zarr.json"
+            else canonical_model_sha
+            if path == canonical_model
             else detection_model_sha
             if path == detection_model
             else plan_sha
@@ -86,6 +96,9 @@ def test_full_plan_pins_all_inputs_and_uses_recording_adapter(
         collection_id="collection",
         canonical_archive=tmp_path / "canonical.zarr",
         canonical_run_id="canonical_run",
+        canonical_source_group_path="detect_runs/recording_source",
+        canonical_model_artifact=canonical_model,
+        expected_canonical_model_sha256=canonical_model_sha,
         source_keypoint_group_path="keypoints_runs/full",
         source_keypoint_metadata_sha256=source_sha,
         expected_detection_model_sha256=detection_model_sha,
@@ -109,6 +122,12 @@ def test_full_plan_pins_all_inputs_and_uses_recording_adapter(
     assert (
         payload["inputs"]["expected_detection_model_sha256"]
         == detection_model_sha
+    )
+    assert payload["inputs"]["expected_canonical_model_sha256"] == (
+        canonical_model_sha
+    )
+    assert payload["inputs"]["canonical_source_group_path"] == (
+        "detect_runs/recording_source"
     )
     assert payload["publication"]["node_local_keypoint_materialization"] is True
     assert payload["publication"]["video_copy_included"] is False

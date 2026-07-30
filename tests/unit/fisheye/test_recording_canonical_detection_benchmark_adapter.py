@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import zarr
 
-from fisheye.detection.clipped_native_binding import (
-    ClippedDetectionArtifactMember,
-    bind_clipped_detection_artifacts,
+from fisheye.shared.zarr.canonical_detection_benchmark_input import (
+    build_canonical_detection_benchmark_input,
 )
 from fisheye.shared.zarr.benchmark_runtime import sha256_file
 from fisheye.utils.finalize_recording_canonical_detection_benchmark_adapter import (
@@ -38,51 +34,30 @@ def test_rebuilds_current_canonical_store_without_touching_source(
     scores = np.asarray([0.9, 0.8], dtype=np.float32)
     classes = np.asarray([0, 1], dtype=np.int32)
     counts = np.asarray([1, 0, 1], dtype=np.int32)
-    member = ClippedDetectionArtifactMember(
-        work_unit_id="clip_000000:camera_1",
-        artifact_run_id="detect_clip_000000",
-        clip_id="clip_000000",
-        clip_index=0,
-        camera_serial="1",
-        source_width=640,
-        source_height=480,
-        artifact_manifest_sha256="a" * 64,
-        run_group_tree_sha256="b" * 64,
-        parent_frame_indices=np.arange(3, dtype=np.int64),
-        frame_indices=frames,
-        bbox_norm_coords=boxes,
-        scores=scores,
-        class_ids=classes,
-        artifact_row_id=np.arange(2, dtype=np.uint64),
-        frame_counts=counts,
-        n_detections=counts.copy(),
-    )
-    bound = bind_clipped_detection_artifacts(
-        (member,),
+    canonical_input = build_canonical_detection_benchmark_input(
+        {
+            "frame_indices": frames,
+            "bbox_norm_coords": boxes,
+            "scores": scores,
+            "class_ids": classes,
+        },
         recording_identity=recording_identity,
-        n_frames=3,
+        frame_count=3,
         source_width=640,
         source_height=480,
     )
 
     root = zarr.open_group(str(analysis_path), mode="w", zarr_format=3)
-    source = (
-        root.require_group("clips")
-        .require_group("clip_000000")
-        .require_group("cameras")
-        .require_group("1")
-        .require_group("detect_runs")
-        .create_group("detect_clip_000000")
-    )
+    source = root.require_group("detect_runs").create_group("detect_recording")
     source.attrs.update(
         {
-            "palette_run_completion_contract": "palette.zarr_run_completion.v1",
-            "palette_run_completion_status": "complete",
             "source_video_width": 640,
             "source_video_height": 480,
             "model_path": str(model_path),
-            "instance_key_backfill_status": "complete",
-            "instance_key_backfill_recording_identity": recording_identity,
+            "summary_statistics": {
+                "total_detections": 2,
+                "frames_with_zero_detections": 1,
+            },
         }
     )
     _write_array(source, "frame_indices", frames)
@@ -91,49 +66,8 @@ def test_rebuilds_current_canonical_store_without_touching_source(
     _write_array(source, "class_ids", classes)
     _write_array(source, "frame_counts", counts)
     _write_array(source, "n_detections", counts.copy())
-    _write_array(
-        source,
-        "instance_key",
-        np.asarray(bound.arrays["instances/instance_key"]),
-    )
-    source_metadata_before = (analysis_path / (
-        "clips/clip_000000/cameras/1/detect_runs/"
-        "detect_clip_000000/zarr.json"
-    )).read_bytes()
-
-    frame_index_path = tmp_path / "recording_frame_index.parquet"
-    pq.write_table(
-        pa.table(
-            {
-                "camera_serial": ["1", "1", "1"],
-                "clip_id": ["clip_000000"] * 3,
-                "clip_local_frame_index": [0, 1, 2],
-                "parent_frame_index": [0, 1, 2],
-            }
-        ),
-        frame_index_path,
-    )
-    plan_path = tmp_path / "plan.json"
-    plan = {
-        "recording_id": recording_identity,
-        "analysis_zarr": str(analysis_path),
-        "work_unit_count": 1,
-        "work_units": [
-            {
-                "clip_id": "clip_000000",
-                "clip_index": 0,
-                "camera_serial": "1",
-                "frame_count": 3,
-                "zarr_paths": {
-                    "detect_target_group_path": (
-                        "clips/clip_000000/cameras/1/detect_runs/"
-                        "detect_clip_000000"
-                    )
-                },
-            }
-        ],
-    }
-    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    source_path = analysis_path / "detect_runs" / "detect_recording"
+    source_metadata_before = (source_path / "zarr.json").read_bytes()
 
     anchor = tmp_path / "anchor.zarr"
     anchor_root = zarr.open_group(str(anchor), mode="w", zarr_format=3)
@@ -141,13 +75,13 @@ def test_rebuilds_current_canonical_store_without_touching_source(
     anchor_group.attrs.update(
         {
             "logical_schema": {
-                "dimensions": bound.dimensions.as_manifest(),
+                "dimensions": canonical_input.dimensions.as_manifest(),
             },
             "selector_eligible": False,
         }
     )
     anchor_run = anchor_group.create_group("instances")
-    for path, values in bound.arrays.items():
+    for path, values in canonical_input.arrays.items():
         _write_array(anchor_run, path.split("/", 1)[1], np.asarray(values))
 
     benchmark_root = tmp_path / ".palette_benchmarks" / "candidate"
@@ -155,10 +89,9 @@ def test_rebuilds_current_canonical_store_without_touching_source(
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     result = finalize_recording_canonical_detection_benchmark_adapter(
-        analysis_zarr=analysis_path,
-        detection_plan_path=plan_path,
-        recording_frame_index=frame_index_path,
+        source_detection_group_path=source_path,
         recording_identity=recording_identity,
+        source_model_artifact=model_path,
         canonical_anchor_archive=anchor,
         canonical_anchor_run_id="anchor",
         expected_model_sha256=sha256_file(model_path),
@@ -178,9 +111,7 @@ def test_rebuilds_current_canonical_store_without_touching_source(
         mode="r",
         use_consolidated=False,
     )
-    assert published.attrs["run_manifest"]["schema_version"] == 2
+    assert published.attrs["run_manifest"]["schema_version"] == 3
+    assert result["coordinate_catalog"] is True
     assert published.attrs["stage_selector_eligible"] is False
-    assert source_metadata_before == (analysis_path / (
-        "clips/clip_000000/cameras/1/detect_runs/"
-        "detect_clip_000000/zarr.json"
-    )).read_bytes()
+    assert source_metadata_before == (source_path / "zarr.json").read_bytes()
