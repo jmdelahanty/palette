@@ -1,5 +1,17 @@
 # Clipped Refined-Detection Recording Snapshot Contract
 
+> Status clarification (2026-07-29): this document describes the historical
+> collection snapshot publisher and its compatibility layout. It is not the
+> future strict canonical-detection-v3/refined-detection-v2 publication
+> boundary. In particular, the fixed 131,072/1,024/16,384 row policy and the
+> direct `latest` promotion described below must not be copied into new DAG
+> work. Future clipped finalization must treat per-clip detect/refine runs as
+> compute evidence, rematerialize complete recording-level canonical and
+> refined snapshots through the shared byte planners, keep both candidates
+> selector-ineligible, and bind every clip plus both output manifests in one
+> receipt. The maintained keypoint-v2 clipped finalizer is intentionally
+> blocked from production composition until this upstream transition exists.
+
 ## Decision
 
 Per-clip detection and refinement runs are immutable production evidence. A

@@ -380,6 +380,42 @@ Initial production order is raw keypoints, one bound quality snapshot, one
 reviewed refined snapshot, then body-frame materialization from the selected
 refined authority. Quality runs are not authority selectors themselves.
 
+Names such as `D2`, `C2`, `Kraw2`, and `Kref2` are explanatory generation
+labels only. They are not persisted array or group names. Concrete artifacts
+remain versioned runs under `refined_detect_runs/<run>`, `crop_runs/<run>`,
+`keypoints_runs/<run>`, and `refined_keypoints_runs/<run>`, with exact parent
+run and manifest-digest bindings.
+
+When a detection successor changes the observation row set, the first
+implemented successor chain is:
+
+```text
+immutable refined-detection successor
+  -> complete geometry-only crop successor
+  -> complete raw-keypoint successor
+```
+
+Crop reconciliation is keyed by `instance_key`. An unchanged observation and
+unchanged crop geometry may reuse its parent pose payload. A new observation or
+a surviving observation whose crop geometry changed must have one terminal
+inference result. A successful attempt persists finite pose payload; a failed
+attempt persists a real row with `pose_success=false` and exact NaN pose
+payloads. An absent result means pending work and blocks successor publication.
+A retired detection and crop row is omitted from the new keypoint snapshot.
+
+This rule keeps the raw snapshot total over the target crop row set: one raw
+keypoint row exists for every crop observation, including attempted failures.
+Later manual keypoint recovery edits that failed row through the refined
+keypoint lifecycle; they do not synthesize a new detection or crop row.
+
+The current successor publisher is deliberately selector-ineligible and
+unregistered. It writes a fresh immutable Zarr and a digest-bound receipt that
+records reused, inference-success, inference-failure, and retired key sets.
+Atomic archive import, production DAG registration, and selector activation
+remain separate gates. The cross-application ownership, pluggable inference,
+commit, compaction, and promotion decisions are frozen in the
+[Crimson inference, commit, and Palette compaction decision](crimson_inference_commit_compaction_decision_2026-07-29.md).
+
 1. Write a keyed keypoint edit delta; never edit heading directly.
 2. Validate source snapshot, `instance_key`, landmark label, and row signature.
 3. Compact into a new immutable refined-keypoint snapshot.
@@ -395,6 +431,61 @@ refined authority. Quality runs are not authority selectors themselves.
 If landmarks are scientifically correct but anatomical polarity requires a
 manual override, that is a separately versioned body-frame correction input.
 It must not be encoded by silently changing `heading_deg`.
+
+## Clipped Compute and Recording-Level Finalization (2026-07-29)
+
+Clip boundaries are bounded compute partitions, not public storage
+partitions. The maintained execution shape remains:
+
+1. materialize one immutable pixel package per clip;
+2. run clip-local keypoint inference in an LSF array;
+3. write one terminal sidecar per clip; and
+4. rematerialize complete recording-level snapshots with the shared planners.
+
+`ClipTerminalKeypointResult` now makes the clip boundary exact. The existing
+clip shard deliberately remains `coordinate_contract_mode=legacy_noncanonical`;
+it cannot self-certify keypoint-v2. Every sidecar binds the clip index, complete
+`instance_key` set, source crop-row signatures, crop manifest and coordinate-
+catalog digests, keypoint coordinate-catalog digest, pose-model binding,
+preprocessing contract, input-package manifest, exact hashes of the eight
+legacy YOLO result arrays, four proxy-crop lineage/geometry arrays, and the
+fixed proxy ROI shape. The package path must also equal the package recorded by
+the clip shard, and finalization rehashes that file. The adapter proves proxy
+instance keys, frame identities,
+crop-row mapping, integer origins, and sizes equal the strict crop-v2 rows before
+narrowing legacy float64 pose values to canonical float32. Acquisition-frame
+identity is taken from crop-v2 rather than invented by the legacy shard.
+
+The preprocessing reference must include an exact `clip_source_contract`
+object containing the legacy coordinate mode, `input_mode_effective`, and
+`model_input_transform` copied from the completed clip shard. A completed clip
+artifact contains one result for every expected row. Model failure is a real
+terminal row with `pose_success=false` and NaN pose payload; a missing row is
+pending/incomplete and blocks finalization.
+
+The recording finalizer joins by `instance_key`, verifies the clip keysets
+exactly partition the crop-v2 rowset, restores crop row order, and recomputes
+source-camera projections and row signatures. It never copies chunk or shard
+metadata from clip outputs. Raw keypoints, keypoint quality, refined
+keypoints, and body frame are each written through their byte-based
+`published_http_v1` planner. One canonical JSON receipt binds every clip
+sidecar, the crop-v2 manifest, and all four finalized run manifests.
+
+The first integration surface is deliberately selector-ineligible and
+unregistered. It writes a direct-path bundle rather than importing the four
+keypoint families into a recording archive. This is sufficient to test exact
+contracts and physical rematerialization without changing production. The
+later archive-import transaction must reuse these same builders and receipts.
+
+Detections, refined detections, and crops follow the same ownership rule:
+per-clip detect/refine results are compute evidence; canonical/refined
+detection snapshots and crop-v2 are complete recording-level publications.
+Palette already has strict selector-ineligible snapshot publishers for the
+detection pair and crop-v2. The legacy clipped campaign has not yet composed
+those publishers into its main path, so the new keypoint finalizer must remain
+an opt-in fragment until that upstream recording-level detection/crop boundary
+is present. Detect quality may use a collection-wide intermediate, but it is
+not a substitute for the final canonical/refined snapshot pair.
 
 ## Implementation Checklist
 
@@ -436,8 +527,22 @@ It must not be encoded by silently changing `heading_deg`.
       from a real completed run before inserting the quality DAG node.
 - [x] Add the pure refined-v2 producer, byte-derived storage planner, and
       first-snapshot selector-ineligible publication/reopen gate.
-- [ ] Make clipped finalization and later delta compaction publish the same
-      raw/refined v2 contracts rather than parallel layouts.
+- [x] Add exact refined-detection-to-crop successor reconciliation and a
+      selector-ineligible immutable crop-successor publisher.
+- [x] Add complete raw-keypoint successor preparation and selector-ineligible
+      publication: reuse unchanged crop rows, require terminal inference for
+      added/changed rows, persist attempted failures, and omit retired rows.
+- [x] Make clipped finalization publish raw, quality, refined, and body-frame
+      contracts through the same byte planners used by standalone v2
+      publications, never through inherited per-clip shard metadata.
+- [x] Add exact terminal clip sidecars, a composable LSF finalization fragment,
+      and one receipt binding every clip plus crop/raw/quality/refined/body
+      manifests; keep the integration bundle selector-ineligible.
+- [ ] Compose strict recording-level canonical/refined detection publication,
+      crop-v2 publication, pixel-package creation, clip inference, and the new
+      keypoint finalizer in the maintained clipped campaign.
+- [ ] Import the four finalized keypoint-family candidates atomically into the
+      recording archive while preserving the standalone receipts as evidence.
 - [ ] Add a bounded-row DAG materializer that accepts only a validated
       raw-keypoint-v2 manifest, writes complete destination physical units,
       and does not retain duplicate full source/output tables.
@@ -449,8 +554,9 @@ It must not be encoded by silently changing `heading_deg`.
 - [ ] Add keyed refined-keypoint deltas and immutable compaction.
 - [ ] Recompute accepted snapshot-local QC during compaction and body frame
       after it.
-- [ ] Preserve source crop, pixel-package, skeleton, model, and coordinate
-      provenance through every publication.
+- [x] Preserve source crop, pixel-package, skeleton, model, preprocessing, and
+      coordinate identities through every clip receipt and the final bundle
+      receipt.
 - [ ] Keep production selectors unchanged until all gates pass.
 
 The representative canary uses the geometry-only crop snapshot at

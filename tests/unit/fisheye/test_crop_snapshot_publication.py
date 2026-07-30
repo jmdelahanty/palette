@@ -15,6 +15,9 @@ from fisheye.shared.zarr.crop_snapshot_publication import (
     CROP_SNAPSHOT_PUBLICATION_SCHEMA_ID,
     publish_crop_geometry_production_candidate,
 )
+from fisheye.shared.zarr.crop_shadow import (
+    open_persisted_crop_geometry_publication,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -148,6 +151,14 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
         for _name, array in run.arrays():
             assert "benchmark_only" not in array.attrs
             assert array.attrs["selector_eligible"] is False
+
+    rebound = open_persisted_crop_geometry_publication(
+        archive,
+        run_id="crop_candidate_v2",
+    )
+    assert rebound.run_id == "crop_candidate_v2"
+    assert rebound.plans.profile.profile_id == "published_http_v1"
+    assert rebound.receipt["persisted_archive_path"] == str(archive)
 
 
 def test_authority_drift_fails_before_archive_import(

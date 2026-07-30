@@ -39,9 +39,16 @@ from fisheye.shared.zarr.crop_storage import (
 from fisheye.shared.zarr.refined_detection_crop_source import (
     BoundRefinedDetectionCropSource,
 )
+from fisheye.shared.zarr.refined_detection_manifest import (
+    refined_detection_dimensions_from_manifest,
+)
+from fisheye.shared.zarr.refined_detection_schema import (
+    REFINED_DETECTION_SCHEMA_V1,
+)
 from fisheye.shared.zarr.storage_profiles import (
     PUBLISHED_HTTP_V1,
     StorageProfile,
+    storage_profile_from_manifest,
 )
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
@@ -332,6 +339,108 @@ def validate_crop_geometry_shadow_publication(
         source_manifest=publication.source_manifest,
         source_arrays=publication.source_arrays,
     )
+
+
+def open_persisted_crop_geometry_publication(
+    archive_path: Path,
+    *,
+    run_id: str,
+) -> CropGeometryShadowPublication:
+    """Rebind and deeply validate one persisted selector-ineligible crop run.
+
+    The returned object uses the same complete validation surface as a freshly
+    written shadow.  This lets later DAG nodes consume an archive-owned crop-v2
+    snapshot without weakening its refined-detection lineage or physical-plan
+    checks.
+    """
+
+    archive = archive_path.expanduser().resolve()
+    if not archive.is_dir():
+        raise FileNotFoundError(f"Analysis Zarr not found: {archive}")
+    resolved_run = str(run_id).strip()
+    if not resolved_run or "/" in resolved_run:
+        raise ValueError("run_id must be one nonempty archive group name.")
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    try:
+        run = root[f"crop_runs/{resolved_run}"]
+    except KeyError as exc:
+        raise FileNotFoundError(
+            f"Crop run not found: crop_runs/{resolved_run}"
+        ) from exc
+    manifest_value = run.attrs.get(CROP_RUN_MANIFEST_ATTRIBUTE)
+    if not isinstance(manifest_value, Mapping):
+        raise ValueError("Persisted crop run lacks its exact run_manifest attribute.")
+    manifest = dict(manifest_value)
+    payload = manifest.get("payload")
+    logical = payload.get("logical_schema") if isinstance(payload, Mapping) else None
+    dimensions_value = logical.get("dimensions") if isinstance(logical, Mapping) else None
+    if not isinstance(dimensions_value, Mapping):
+        raise ValueError("Persisted crop manifest lacks dimensions.")
+    dimensions = CropDimensions(
+        n_frames=dimensions_value.get("n_frames"),
+        n_instances=dimensions_value.get("n_instances"),
+        source_width=dimensions_value.get("source_width"),
+        source_height=dimensions_value.get("source_height"),
+    )
+    storage = payload.get("storage_plan") if isinstance(payload, Mapping) else None
+    profile_value = (
+        storage.get("storage_profile") if isinstance(storage, Mapping) else None
+    )
+    if not isinstance(profile_value, Mapping):
+        raise ValueError("Persisted crop manifest lacks its storage profile.")
+    profile = storage_profile_from_manifest(profile_value)
+    plans = plan_crop_geometry_storage(dimensions, profile=profile)
+    arrays = {path: run[path] for path in CROP_GEOMETRY_SCHEMA_V1.binding_paths}
+
+    source_value = (
+        payload.get("source_refined_snapshot")
+        if isinstance(payload, Mapping)
+        else None
+    )
+    if not isinstance(source_value, Mapping):
+        raise ValueError("Persisted crop manifest lacks refined-source identity.")
+    source_run_id = str(source_value.get("run_id") or "").strip()
+    if not source_run_id or "/" in source_run_id:
+        raise ValueError("Persisted crop refined-source run id is invalid.")
+    try:
+        source_run = root[f"refined_detect_runs/{source_run_id}"]
+    except KeyError as exc:
+        raise FileNotFoundError(
+            f"Crop refined source not found: refined_detect_runs/{source_run_id}"
+        ) from exc
+    source_manifest_value = source_run.attrs.get("run_manifest")
+    if not isinstance(source_manifest_value, Mapping):
+        raise ValueError("Crop refined source lacks its exact run_manifest.")
+    source_manifest = dict(source_manifest_value)
+    source_dimensions = refined_detection_dimensions_from_manifest(source_manifest)
+    source_arrays = {
+        path: source_run[path]
+        for path in REFINED_DETECTION_SCHEMA_V1.binding_paths_for(source_dimensions)
+    }
+    publication = CropGeometryShadowPublication(
+        output_path=archive,
+        run_id=resolved_run,
+        dimensions=dimensions,
+        plans=plans,
+        manifest=manifest,
+        arrays=arrays,
+        source_manifest=source_manifest,
+        source_arrays=source_arrays,
+        receipt={
+            "logical_content_digest": payload["logical_content"]["digest"],
+            "persisted_archive_path": str(archive),
+        },
+    )
+    errors = validate_crop_geometry_shadow_publication(publication)
+    if run.attrs.get("status") != "complete":
+        errors = (*errors, "persisted crop status is not complete")
+    if run.attrs.get("stage_selector_eligible") is not False:
+        errors = (*errors, "persisted crop is not selector-ineligible")
+    if errors:
+        raise ValueError(
+            "Persisted crop publication is invalid: " + "; ".join(errors)
+        )
+    return publication
 
 
 def publish_selector_ineligible_crop_geometry_snapshot(
@@ -640,6 +749,7 @@ __all__ = [
     "PreparedCropGeometrySnapshot",
     "crop_metadata_declaration_maps",
     "prepare_crop_geometry_from_refined_source",
+    "open_persisted_crop_geometry_publication",
     "publish_refined_crop_geometry_shadow",
     "publish_selector_ineligible_crop_geometry_snapshot",
     "require_safe_crop_geometry_shadow_destination",

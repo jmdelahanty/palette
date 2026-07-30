@@ -210,6 +210,39 @@ On a Sleepyfish-sized `N=1,187,087`, `F=1,188,000` plan, the 13 arrays are
 estimated at 14 payload objects. `source_row_signature` is the only two-shard
 column; the remaining arrays each fit in one large shard.
 
+## Successor Reconciliation
+
+Names such as `D2`, `C2`, `Kraw2`, and `Kref2` are explanatory generation
+labels only. They are not persisted array names or required run IDs. Actual
+artifacts use caller-supplied immutable child names below their versioned run
+families, and manifests bind exact run IDs and digests.
+
+A compacted refined-detection successor produces a new complete crop run; it
+never appends rows to its parent crop. `crop_successor.py` now implements the
+selector-ineligible reconciliation and standalone publication boundary. It:
+
+- requires the target refined manifest to bind the crop parent's immediate
+  refined snapshot;
+- requires the same recording, refined lineage, crop policy, pixel authority,
+  frame domain, and source-camera dimensions;
+- compares every row-local identity and geometry field by `instance_key`;
+- classifies exact reused, added, changed, and retired key sets; and
+- publishes a complete immutable successor without selectors, registries, or
+  production-state changes.
+
+The persisted `source_row_signature` remains bound to the exact refined
+snapshot and is not weakened. Cross-snapshot planning uses a separate
+receipt-only reconciliation signature: it omits changing run/snapshot IDs but
+retains the stable lineage and every row-local geometry input. Parent and
+target snapshot IDs and manifest digests remain explicitly bound by the
+successor receipt.
+
+The real integration test compacts a manual detection addition, publishes the
+new crop snapshot, and proves that the three surviving rows are reusable while
+only the new observation is computed. Geometry publication still writes all 13
+logical arrays as a fresh immutable Zarr; the reuse plan primarily controls
+downstream pixel materialization and records invalidation precisely.
+
 ## Current Safety Boundary
 
 The standalone writer can create only a fresh child below `/tmp`,
@@ -248,6 +281,13 @@ Before production integration:
 - [x] benchmark representative row/window/full reads on workstation and LSF;
 - [x] benchmark selector-ineligible publication and record object counts;
 - [x] benchmark representative row/window reads in Crimson;
+- [x] implement exact refined-detection-to-crop successor reconciliation and
+      selector-ineligible standalone publication;
+- [x] test a real compacted detection addition through complete crop
+      publication with unchanged-row reuse;
+- [ ] insert the successor publisher into the production DAG's atomic
+      selector-ineligible import path;
+- [ ] feed its added/changed rows into the raw-keypoint successor materializer;
 - [ ] benchmark production-candidate publication and reads at recording scale;
 - [ ] add a typed purpose/profile selector with guarded activation; and
 - [ ] migrate production writers only after downstream completeness passes.
