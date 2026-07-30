@@ -68,6 +68,7 @@ _SOURCE_ARRAY_PATHS = (
     "source_frame_indices",
     "frame_indices",
     "keypoints_roi",
+    "keypoints_img",
     "keypoint_confidences",
     "confidence",
     "detection_success",
@@ -188,6 +189,68 @@ def _source_selector_evidence(
         "selected_by": [],
         "explicit_metadata_pin_required": True,
     }
+
+
+def _rebase_legacy_roi_coordinates(
+    *,
+    keypoints_roi: np.ndarray,
+    pose_bbox_xyxy_roi: np.ndarray,
+    old_origins: np.ndarray,
+    new_origins: np.ndarray,
+    maximum_origin_delta_pixels: int = 1,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Translate legacy ROI coordinates while preserving camera pixels."""
+
+    old = np.asarray(old_origins)
+    new = np.asarray(new_origins)
+    points = np.asarray(keypoints_roi)
+    boxes = np.asarray(pose_bbox_xyxy_roi)
+    if (
+        old.ndim != 2
+        or old.shape[1:] != (2,)
+        or new.shape != old.shape
+        or not np.issubdtype(old.dtype, np.integer)
+        or not np.issubdtype(new.dtype, np.integer)
+    ):
+        raise ValueError("Historical and crop-v2 origins must be integer [N,2].")
+    if points.ndim != 3 or points.shape[0] != old.shape[0] or points.shape[2] != 2:
+        raise ValueError("Historical keypoints_roi must have shape [N,K,2].")
+    if boxes.shape != (old.shape[0], 4):
+        raise ValueError("Historical pose_bbox_xyxy_roi must have shape [N,4].")
+    if not np.issubdtype(points.dtype, np.floating) or not np.issubdtype(
+        boxes.dtype, np.floating
+    ):
+        raise ValueError("Historical ROI keypoints and pose boxes must be floating.")
+    if (
+        type(maximum_origin_delta_pixels) is not int
+        or maximum_origin_delta_pixels < 0
+    ):
+        raise ValueError("maximum_origin_delta_pixels must be a nonnegative integer.")
+
+    translation = old.astype(np.int64) - new.astype(np.int64)
+    maximum_delta = int(np.max(np.abs(translation), initial=0))
+    if maximum_delta > maximum_origin_delta_pixels:
+        raise ValueError(
+            "Historical and crop-v2 ROI origins differ by more than the "
+            f"{maximum_origin_delta_pixels}-pixel benchmark rebase limit."
+        )
+    rebased_points = np.array(points, copy=True)
+    rebased_boxes = np.array(boxes, copy=True)
+    rebased_points += translation.astype(rebased_points.dtype)[:, None, :]
+    box_translation = np.column_stack((translation, translation))
+    rebased_boxes += box_translation.astype(rebased_boxes.dtype)
+    changed = np.any(translation != 0, axis=1)
+    return (
+        rebased_points,
+        rebased_boxes,
+        {
+            "method": "integer_roi_translation_preserving_source_camera_pixels",
+            "maximum_origin_delta_pixels_allowed": maximum_origin_delta_pixels,
+            "maximum_origin_delta_pixels_observed": maximum_delta,
+            "rebased_row_count": int(np.count_nonzero(changed)),
+            "exact_origin_row_count": int(changed.size - np.count_nonzero(changed)),
+        },
+    )
 
 
 def _pose_binding(attrs: Mapping[str, Any], *, model_sha256: str) -> dict[str, Any]:
@@ -416,8 +479,6 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
         )
     mapped_old_rows = old_rows[source_rows]
     old_origins = _array(old_crop["roi_coordinates_full"])[mapped_old_rows]
-    if not np.array_equal(old_origins, crop_arrays["roi_coordinates_full"]):
-        raise ValueError("Historical and crop-v2 ROI origins differ.")
     old_roi_shape = old_crop.attrs.get("roi_shape") or old_crop.attrs.get("roi_size")
     if not isinstance(old_roi_shape, (list, tuple)) or len(old_roi_shape) != 2:
         raise ValueError("Historical source crop lacks a fixed ROI shape.")
@@ -433,6 +494,14 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
         crop_arrays["source_acquisition_frame_index"],
     ):
         raise ValueError("Historical and crop-v2 acquisition frames differ.")
+    rebased_keypoints_roi, rebased_pose_bbox, roi_rebase = (
+        _rebase_legacy_roi_coordinates(
+            keypoints_roi=source_values["keypoints_roi"][source_rows],
+            pose_bbox_xyxy_roi=source_values["pose_bbox_xyxy_roi"][source_rows],
+            old_origins=old_origins,
+            new_origins=crop_arrays["roi_coordinates_full"],
+        )
+    )
     phases["load_hash_and_align_legacy_rows"] = time.perf_counter() - load_started
 
     prepare_started = time.perf_counter()
@@ -443,11 +512,12 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
             crop_arrays["source_acquisition_frame_index"], copy=True
         ),
         "frame_indices": np.array(crop_arrays["frame_indices"], copy=True),
-        "keypoints_roi": source_values["keypoints_roi"][source_rows],
+        "keypoints_roi": rebased_keypoints_roi,
+        "keypoints_img": source_values["keypoints_img"][source_rows],
         "keypoint_confidences": source_values["keypoint_confidences"][source_rows],
         "confidence": source_values["confidence"][source_rows],
         "detection_success": source_values["detection_success"][source_rows],
-        "pose_bbox_xyxy_roi": source_values["pose_bbox_xyxy_roi"][source_rows],
+        "pose_bbox_xyxy_roi": rebased_pose_bbox,
     }
     dimensions = KeypointDimensions(
         n_frames=expected_n_frames,
@@ -473,7 +543,9 @@ def finalize_recording_keypoint_v2_benchmark_adapter(
         "source_selector_evidence": selector_evidence,
         "source_array_hashes": source_hashes,
         "source_crop_run": old_crop_run,
-        "source_crop_geometry_equal": True,
+        "source_crop_roi_sizes_equal": True,
+        "source_camera_geometry_preserved": True,
+        "source_crop_origin_rebase": roi_rebase,
         "instance_key_set_equal": True,
         "model_path": str(model_path),
         "model_sha256": observed_model,

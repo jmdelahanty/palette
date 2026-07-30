@@ -87,6 +87,46 @@ def test_source_selector_evidence_requires_exact_eligibility_bool() -> None:
         )
 
 
+def test_rebase_legacy_roi_coordinates_preserves_camera_pixels() -> None:
+    points = np.asarray([[[4.5, 8.0]], [[9.0, 2.0]]], dtype=np.float64)
+    boxes = np.asarray(
+        [[1.0, 2.0, 10.0, 12.0], [3.0, 4.0, 11.0, 13.0]],
+        dtype=np.float64,
+    )
+    old_origins = np.asarray([[100, 200], [300, 400]], dtype=np.int32)
+    new_origins = np.asarray([[100, 199], [299, 400]], dtype=np.int32)
+    old_camera_points = points + old_origins[:, None, :]
+
+    rebased_points, rebased_boxes, evidence = (
+        mod._rebase_legacy_roi_coordinates(
+            keypoints_roi=points,
+            pose_bbox_xyxy_roi=boxes,
+            old_origins=old_origins,
+            new_origins=new_origins,
+        )
+    )
+
+    np.testing.assert_array_equal(
+        rebased_points + new_origins[:, None, :], old_camera_points
+    )
+    np.testing.assert_array_equal(
+        rebased_boxes,
+        boxes + np.asarray([[0, 1, 0, 1], [1, 0, 1, 0]]),
+    )
+    assert evidence["rebased_row_count"] == 2
+    assert evidence["maximum_origin_delta_pixels_observed"] == 1
+
+
+def test_rebase_legacy_roi_coordinates_rejects_larger_geometry_change() -> None:
+    with pytest.raises(ValueError, match="more than the 1-pixel"):
+        mod._rebase_legacy_roi_coordinates(
+            keypoints_roi=np.zeros((1, 5, 2), dtype=np.float64),
+            pose_bbox_xyxy_roi=np.zeros((1, 4), dtype=np.float64),
+            old_origins=np.asarray([[10, 20]], dtype=np.int32),
+            new_origins=np.asarray([[8, 20]], dtype=np.int32),
+        )
+
+
 def test_rebound_receipt_changes_only_output_locations(tmp_path: Path) -> None:
     payload = {
         "status": "complete",

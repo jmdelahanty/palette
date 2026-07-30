@@ -76,6 +76,17 @@ eligible but unselected historical input is allowed only through the explicit
 metadata pin; a source named by any selector still fails closed. The failed v6
 root remains immutable and has no handoff.
 
+Candidate v7 passed the corrected selector gate, then exposed a coordinate
+rounding boundary between the historical proxy crops and crop-v2. Exactly 10
+of 1,169,010 ROI origins differ by one pixel; the other 1,169,000 are equal.
+For each affected row, inverse translation of the ROI-local keypoints and pose
+box preserves the persisted source-camera keypoints exactly and leaves every
+finite value within the 512-pixel ROI. The benchmark adapter now permits only
+this bounded integer translation, passes the historical `keypoints_img` into
+the v2 projection validator, and fails if any origin differs by more than one
+pixel. This is a historical benchmark rebase, not a production crop-policy
+exception. The failed v7 root remains immutable and has no handoff.
+
 ## Sleepyfish pins
 
 The first full fixture uses:
@@ -113,7 +124,8 @@ The adapter fails unless all of these checks pass:
   skeleton, and stable-key backfill are exact;
 - historical and crop-v2 `instance_key` sets form a bijection;
 - historical and crop-v2 frame/acquisition mappings match;
-- ROI origins and sizes match for every row;
+- ROI sizes match for every row; origins either match or use the bounded
+  one-pixel benchmark rebase while preserving source-camera keypoints;
 - float64-to-float32 normalization passes the v2 projection tolerance; and
 - source and parent selector metadata are unchanged after publication.
 
