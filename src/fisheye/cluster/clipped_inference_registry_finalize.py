@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from fisheye.cluster.clipped_inference import PLAN_SCHEMA
+from fisheye.cluster.clipped_inference import SUPPORTED_PLAN_SCHEMAS
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import write_json_snapshot
 from fisheye.registry.db import Registry
@@ -20,7 +20,10 @@ REPORT_SCHEMA = "palette.clipped_inference_registry_finalizer.v1"
 def finalize_registry(plan_path: Path, *, output_path: Path | None = None) -> dict[str, Any]:
     plan_path = plan_path.expanduser().resolve()
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping) or payload.get("schema") != PLAN_SCHEMA:
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema") not in SUPPORTED_PLAN_SCHEMAS
+    ):
         raise ValueError(f"Unsupported clipped inference plan: {plan_path}")
     targets = payload.get("targets")
     if not isinstance(targets, list) or not targets:

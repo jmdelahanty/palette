@@ -2,9 +2,10 @@
 
 Date: 2026-07-30
 
-Status: strict selector-ineligible clip evidence, binding, recording
-finalization, and a full-duration seven-store handoff are complete; main
-campaign insertion, archive import, and production selection remain gated.
+Status: strict selector-ineligible clip evidence, binding, and recording
+finalization are inserted into clipped-inference plan schema v2, and the
+full-duration seven-store handoff is complete; atomic archive import and
+production selection remain gated.
 
 ## Goal
 
@@ -123,7 +124,7 @@ revalidates the live pixel authority before any geometry becomes usable.
 ## Required before a real campaign
 
 - [x] Add the strict clip canonical/refined evidence publisher and bounded LSF
-      array. The main campaign still needs to invoke the fragment.
+      array and invoke it from clipped-inference plan schema v2.
 - [ ] Allocate manual `refined_row_ids` through the recording delta/compaction
       allocator. Clip-local `0..N` manual allocation remains rejected.
 - [x] Require raw `instance_key` values in the recording frame and recording
@@ -133,10 +134,11 @@ revalidates the live pixel authority before any geometry becomes usable.
       Manual keys remain owned by delta compaction.
 - [x] Generate exact clipped-binding JSON from persisted collection and frame
       evidence; no caller supplies media or frame-map digests by hand.
-- [ ] Insert the storage fragments into the maintained clipped campaign after
-      native canonical publication and legacy refinement, before
-      pixel-package/keypoint terminal gates. The composable dependency chain is
-      implemented; the parallel DAG review owns final monolith insertion.
+- [x] Insert the storage fragments into the maintained clipped campaign after
+      native canonical publication and legacy refinement, before cache,
+      pixel-package, and keypoint work. Detection artifacts are written once,
+      assembled into the recording canonical run, and reused by compatibility
+      refinement; no duplicate YOLO inference or raw-detection copy is planned.
 - [ ] Ensure pixel packages bind the new crop manifest and row signatures.
 - [ ] Run one small selector-ineligible campaign canary with an empty frame,
       multiple subjects in one frame, a rejected raw detection, and a manual

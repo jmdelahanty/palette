@@ -189,7 +189,7 @@ def _detection_plan(
     work_units = []
     for index in range(22):
         clip_id = f"clip_{index:06d}"
-        camera = "2010093"
+        camera = target.target_id.removeprefix("sleepyfish_cam")
         detect = f"detect_{workflow_id}_{clip_id}"
         refined = f"refined_detect_{workflow_id}_{clip_id}"
         work_units.append(
@@ -207,9 +207,13 @@ def _detection_plan(
                     "refined_detect": refined,
                 },
                 "zarr_paths": {
+                    "detection_artifact_family_path": f"clips/{clip_id}/cameras/{camera}/detection_artifact_runs",
+                    "detection_artifact_target_group_path": f"clips/{clip_id}/cameras/{camera}/detection_artifact_runs/{detect}",
+                    "detect_family_path": f"clips/{clip_id}/cameras/{camera}/detect_runs",
                     "detect_target_group_path": f"clips/{clip_id}/cameras/{camera}/detect_runs/{detect}",
                     "refined_group_path": f"clips/{clip_id}/cameras/{camera}/refined_detect_runs/{refined}",
                 },
+                "commands": {},
             }
         )
     return {"work_unit_count": 22, "work_units": work_units}
@@ -259,6 +263,32 @@ def _build_fixture_plan(
         workflow, "_resolve_subject_binding", lambda **_kwargs: subject_binding
     )
     monkeypatch.setattr(workflow, "_verify_binding", lambda _binding: None)
+    monkeypatch.setattr(workflow, "_repo_commit", lambda _repo: "c" * 40)
+    monkeypatch.setattr(
+        workflow,
+        "load_native_archive_authority",
+        lambda target: SimpleNamespace(
+            recording_identity=target.recording_id,
+            camera_serial=target.target_id.removeprefix("sleepyfish_cam"),
+            n_frames=2200,
+            source_width=4512,
+            source_height=4512,
+            frame=SimpleNamespace(record_ref="/frame", record_sha256="f" * 64),
+            pixel=SimpleNamespace(record_ref="/pixel", record_sha256="p" * 64),
+            to_json=lambda: {
+                "recording_identity": target.recording_id,
+                "camera_serial": target.target_id.removeprefix("sleepyfish_cam"),
+                "n_frames": 2200,
+                "source_width": 4512,
+                "source_height": 4512,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_recording_frame_index",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         workflow,
         "resolve_pose_model_binding",
@@ -324,7 +354,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     clip_id = "clip_000000"
 
-    assert len(plan.lsf_workflow.jobs) == 17
+    assert len(plan.lsf_workflow.jobs) == 22
     keypoint_array = jobs[f"keypoints_array:{target_safe}"]
     subject_mask_array = jobs[f"subject_masks_array:{target_safe}"]
     package_array = jobs[f"mask_package_array:{target_safe}"]
@@ -383,15 +413,16 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     refine_bundle = jobs[f"detect_refine_bundle:{target_safe}"]
     refine = _execution_tasks(refine_bundle)[f"detect_refine:{target_safe}:{clip_id}"]
     assert quality_source.dependency.upstream_job_keys == (
-        f"detect_array:{target_safe}",
+        f"detect_native_publish:{target_safe}",
     )
     assert quality.dependency.upstream_job_keys == (quality_source.job_key,)
     assert refine_bundle.dependency.upstream_job_keys == (quality.job_key,)
     assert "--quality-group-path" in " ".join(refine.command)
-    assert jobs[f"detect_array:{target_safe}"].metadata["max_concurrent"] == 8
+    native_array = jobs[f"detect_artifact_array:{target_safe}"]
+    assert native_array.metadata["max_concurrent"] == 8
     assert keypoint_array.metadata["max_concurrent"] == 4
     assert subject_mask_array.metadata["max_concurrent"] == 4
-    assert len(_execution_tasks(jobs[f"detect_array:{target_safe}"])) == 22
+    assert len(_execution_tasks(native_array)) == 22
     assert len(_execution_tasks(refine_bundle)) == 22
     assert len(cache_tasks) == 3
     first_cache_task = cache_tasks[f"cache:{target_safe}:00"]
@@ -406,8 +437,10 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
 
     fragments = plan.lsf_workflow.to_json()["metadata"]["fragments"]
     assert [fragment["fragment_id"] for fragment in fragments] == [
-        f"raw_detection:{target_safe}",
+        f"native_detection:{target_safe}",
         f"detection_postprocess:{target_safe}",
+        f"strict_clipped_detection_evidence:{target_safe}",
+        f"clipped_storage_finalization:{target_safe}",
         f"crop_roi_cache:{target_safe}",
         f"keypoints:{target_safe}",
         f"subject_mask_inference:{target_safe}",
@@ -416,22 +449,30 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
         "campaign_finalize",
     ]
     detection_output = target["detection_module"]
+    native_output = target["native_detection_module"]
+    strict_output = target["strict_detection_storage"]
     assert detection_output["terminal_job_key"] == f"detect_collection:{target_safe}"
-    assert fragments[0]["provides"] == [f"raw_detection_work_units:{target_safe}"]
-    assert fragments[1]["requires"] == [f"raw_detection_work_units:{target_safe}"]
+    assert fragments[0]["provides"] == [f"canonical_detection:{target_safe}"]
+    assert fragments[1]["requires"] == [native_output["artifact_key"]]
     assert fragments[1]["provides"] == [detection_output["artifact_key"]]
     assert fragments[2]["requires"] == [detection_output["artifact_key"]]
-    assert fragments[3]["requires"] == [f"crop_roi_cache:{target_safe}"]
-    assert fragments[4]["requires"] == [f"crop_roi_cache:{target_safe}"]
-    assert fragments[5]["requires"] == [
+    assert fragments[3]["requires"] == [
+        strict_output["evidence"]["artifact_key"]
+    ]
+    assert fragments[4]["requires"] == [
+        strict_output["storage"]["crop_artifact_key"]
+    ]
+    assert fragments[5]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[6]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[7]["requires"] == [
         f"raw_subject_masks:{target_safe}",
         f"refined_keypoints:{target_safe}",
     ]
-    assert fragments[6]["requires"] == [
+    assert fragments[8]["requires"] == [
         f"refined_keypoints:{target_safe}",
         f"refined_subject_masks:{target_safe}",
     ]
-    assert fragments[7]["provides"] == [
+    assert fragments[9]["provides"] == [
         "registry_reconciled",
         "nrs_cache_cleaned",
     ]
@@ -811,7 +852,7 @@ def test_encoded_mask_packages_add_global_grid_and_join(
     import_key = f"mask_import:{target_safe}"
 
     assert plan.encoded_mask_packages is True
-    assert len(plan.lsf_workflow.jobs) == 18
+    assert len(plan.lsf_workflow.jobs) == 23
     assert jobs[grid_key].dependency.upstream_job_keys == (
         f"keypoint_finalize:{target_safe}",
     )
@@ -870,13 +911,15 @@ def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
         str(target["target_id"]), default="target", max_length=56
     )
     clip_id = "clip_000000"
-    detect_array = jobs[f"detect_array:{target_safe}"]
-    detect = _execution_tasks(detect_array)[f"detect:{target_safe}:{clip_id}"]
+    detect_array = jobs[f"detect_artifact_array:{target_safe}"]
+    detect = _execution_tasks(detect_array)[
+        f"detect_artifact:{target_safe}:{clip_id}"
+    ]
     refine_bundle = jobs[f"detect_refine_bundle:{target_safe}"]
 
     assert plan.resume_existing_detections is True
     assert len(target["detection_resume_preflight"]) == 22
-    assert detect.metadata["stage"] == "detect_reuse"
+    assert detect.metadata["stage"] == "detect_artifact_reuse"
     assert detect_array.resources.queue == "short"
     assert detect_array.resources.gpus == 0
     assert "--reuse-existing" in detect.command
@@ -905,9 +948,11 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
     )
 
     assert len(plan.targets) == 2
-    assert len(plan.lsf_workflow.jobs) == 32
-    assert jobs[f"detect_array:{first_safe}"].dependency is None
-    assert jobs[f"detect_array:{second_safe}"].dependency.upstream_job_keys == (
+    assert len(plan.lsf_workflow.jobs) == 42
+    assert jobs[f"detect_artifact_array:{first_safe}"].dependency is None
+    assert jobs[
+        f"detect_artifact_array:{second_safe}"
+    ].dependency.upstream_job_keys == (
         f"validate:{first_safe}",
     )
     assert jobs["registry_finalize"].dependency.upstream_job_keys == (
@@ -918,15 +963,15 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
         fragment["fragment_id"]: fragment
         for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
     }
-    assert fragments[f"raw_detection:{first_safe}"]["requires"] == []
-    assert fragments[f"raw_detection:{second_safe}"]["requires"] == [
+    assert fragments[f"native_detection:{first_safe}"]["requires"] == []
+    assert fragments[f"native_detection:{second_safe}"]["requires"] == [
         f"validated_analysis:{first_safe}"
     ]
     assert fragments[f"detection_postprocess:{first_safe}"]["requires"] == [
-        f"raw_detection_work_units:{first_safe}"
+        f"canonical_detection:{first_safe}"
     ]
     assert fragments[f"detection_postprocess:{second_safe}"]["requires"] == [
-        f"raw_detection_work_units:{second_safe}"
+        f"canonical_detection:{second_safe}"
     ]
     assert fragments["campaign_finalize"]["requires"] == [
         f"validated_analysis:{first_safe}",
@@ -1029,7 +1074,7 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     repair_key = f"detect_quality_source_geometry_repair:{target_safe}"
     quality_key = f"detect_quality:{target_safe}"
 
-    assert len(plan.workflow.jobs) == len(source.lsf_workflow.jobs) - 1
+    assert len(plan.workflow.jobs) == len(source.lsf_workflow.jobs) - 2
     assert f"detect_array:{target_safe}" not in jobs
     assert f"detect_quality_source:{target_safe}" not in jobs
     assert jobs[quality_key].dependency.upstream_job_keys == (repair_key,)
@@ -1130,7 +1175,7 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     )
     continuation_jobs = {job.job_key: job for job in continuation.workflow.jobs}
     refine_key = f"detect_refine_bundle:{target_safe}"
-    assert len(continuation.workflow.jobs) == len(source.lsf_workflow.jobs) - 3
+    assert len(continuation.workflow.jobs) == len(source.lsf_workflow.jobs) - 4
     assert repair_key not in continuation_jobs
     assert quality_key not in continuation_jobs
     assert continuation_jobs[refine_key].dependency is None
@@ -1341,7 +1386,7 @@ def test_existing_detection_resume_preflight_requires_exact_provenance(
 
     report = workflow._validate_existing_detection_for_resume(
         target=target,
-        target_label="campaign",
+        workflow_id="campaign",
         clip=planned_clip,
         binding=binding,
     )
@@ -1363,7 +1408,7 @@ def test_existing_detection_resume_preflight_requires_exact_provenance(
     with pytest.raises(ValueError, match="provenance mismatch"):
         workflow._validate_existing_detection_for_resume(
             target=target,
-            target_label="campaign",
+            workflow_id="campaign",
             clip=planned_clip,
             binding=binding,
         )
@@ -1375,7 +1420,14 @@ def test_instance_key_validation_rejects_duplicates() -> None:
         _instance_keys(run, label="fixture")
 
 
-def test_cleanup_is_confined_and_requires_registry_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "plan_schema",
+    (workflow.LEGACY_PLAN_SCHEMA, workflow.PLAN_SCHEMA),
+)
+def test_cleanup_is_confined_and_requires_registry_success(
+    tmp_path: Path,
+    plan_schema: str,
+) -> None:
     cache_root = tmp_path / "cache"
     package_root = tmp_path / "packages"
     cache_dir = cache_root / "campaign" / "target"
@@ -1387,7 +1439,7 @@ def test_cleanup_is_confined_and_requires_registry_success(tmp_path: Path) -> No
     _write_json(
         plan_path,
         {
-            "schema": workflow.PLAN_SCHEMA,
+            "schema": plan_schema,
             "run_root": str(run_root),
             "targets": [
                 {

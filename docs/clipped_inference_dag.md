@@ -46,11 +46,20 @@ module by itself for a detection-only workflow. This keeps workflow scope
 (detection-only versus full analysis) separate from scheduler packaging
 (ordinary job, array, or bounded bundle).
 
-For each target, the full campaign composes raw detection and detection
-postprocessing with five downstream capability fragments:
+For each target, the v2 plan composes native artifact-first detection, legacy
+refinement over those same artifact rows, strict recording snapshot
+finalization, and five downstream capability fragments:
+
+New plans are emitted as `palette.clipped_inference_bsub_plan.v2`. Validation,
+registry reconciliation, cleanup, and the maintained recovery entry points
+continue to read v1 plans so completed or interrupted historical campaigns do
+not become administratively stranded.
 
 ```text
-detection_postprocess:<target>
+native_detection:<target>
+  -> detection_postprocess:<target>
+  -> strict_clipped_detection_evidence:<target>
+  -> clipped_storage_finalization:<target>
   -> crop_roi_cache:<target>
        ├─ keypoints:<target>
        └─ subject_mask_inference:<target>
@@ -59,9 +68,17 @@ detection_postprocess:<target>
                  -> analysis_validation:<target>
 ```
 
-These are logical artifact boundaries over the existing commands, not extra
-scheduler submissions. `crop_roi_cache` provides the stable proxy crop and
-cache binding. Keypoints provides both raw and refined artifacts. Subject-mask
+The detector writes each clip once into the selector-free
+`detection_artifact_runs` namespace. One recording-level job then assembles
+the native canonical `detect_runs` snapshot. Recording quality and legacy
+refinement consume the same artifact groups; they do not rerun YOLO or create a
+second raw-detection copy. The strict evidence array proves every compatibility
+refined clip against the native canonical slice, then publishes the generated
+binding, recording refined snapshot, and geometry-only crop-v2 candidate.
+
+`crop_roi_cache` currently provides the stable proxy crop and cache binding,
+but it cannot begin until the strict crop-v2 candidate is complete. Keypoints
+provides both raw and refined artifacts. Subject-mask
 inference does not require keypoints; its refinement fragment joins raw masks
 with the exact refined-keypoint output. Cross-recording concurrency gates
 remain fragment requirements: a later raw-detection fragment may require the
@@ -122,10 +139,17 @@ before importing the planner itself.
 For each recording, the dependency structure is:
 
 ```text
-detect array[22] -> sharded recording-order quality source
-                 -> collection quality reconcile
-                 -> keyed detect-refine CPU bundle[22, max 4]
-                 -> finalized detection collection
+artifact detect array[22] -> native recording canonical publication
+                          -> sharded recording-order quality source
+                          -> collection quality reconcile
+                          -> keyed detect-refine CPU bundle[22, max 4]
+                          -> finalized compatibility collection
+                                      |
+                         strict clip evidence array[22]
+                                      |
+                         generated clipped binding
+                                      |
+                    recording refined snapshot -> crop-v2
                                       |
                     cache array[3 bounded bundles: 8 + 8 + 6]
                                       |
@@ -152,8 +176,8 @@ branches, so up to eight GPU elements for one recording may be active after
 proxy creation. These limits are configurable with the corresponding
 `--*-concurrency` options and are frozen into the immutable plan.
 
-For a 22-clip recording this is 14 recording-specific `bsub` submissions while
-retaining 124 independently identified execution tasks. Registry finalization
+For a 22-clip recording this is 19 recording-specific `bsub` submissions while
+retaining 149 independently identified execution tasks. Registry finalization
 and optional NRS cleanup add two campaign-wide submissions. LSF receives array
 names in the form `name[1-N]%limit`; array logs contain both `%J` and `%I`.
 Downstream stages use a whole-array `done(<job-id>)` barrier, so one failed
@@ -175,6 +199,12 @@ already owns eight process workers and its own package artifact.
 Keypoints and masks safely read the same immutable cache concurrently. Each
 mask package waits for both its clip-local probability shard and the exact
 recording-level refined-keypoint run used for left/right eye assignment.
+
+The strict crop-v2 artifact is currently an execution and identity gate for
+the compatibility cache path, not yet the cache's direct row-level source.
+Binding pixel packages to the crop manifest and its row signatures remains a
+separate required gate before the strict candidate set can be atomically
+imported or selected.
 
 Detection quality is a recording-level stage, not 22 independent clip-local
 state machines. The source materializer streams clip-local raw boxes, stable

@@ -733,6 +733,8 @@ def compose_raw_detection_workflow(
 
 def build_detection_fragment(
     inputs: DetectionFragmentInputs,
+    *,
+    raw_module: RawDetectionWorkflowModule | None = None,
 ) -> DetectionWorkflowModule:
     """Plan detect -> quality -> refine -> finalized collection for one target."""
 
@@ -746,24 +748,32 @@ def build_detection_fragment(
         walltime="1:00",
         span_hosts=1,
     )
-    raw_module = build_raw_detection_fragment(
-        RawDetectionFragmentInputs(
-            workflow_id=inputs.workflow_id,
-            family=inputs.family,
-            target_label=inputs.target_label,
-            target=inputs.target,
-            repo=inputs.repo,
-            run_root=inputs.run_root,
-            work_units=inputs.work_units,
-            model=inputs.model,
-            resume_existing_detections=inputs.resume_existing_detections,
-            detect_array_concurrency=inputs.detect_array_concurrency,
-            upstream_job_keys=inputs.upstream_job_keys,
-            required_artifacts=inputs.required_artifacts,
+    if raw_module is None:
+        raw_module = build_raw_detection_fragment(
+            RawDetectionFragmentInputs(
+                workflow_id=inputs.workflow_id,
+                family=inputs.family,
+                target_label=inputs.target_label,
+                target=inputs.target,
+                repo=inputs.repo,
+                run_root=inputs.run_root,
+                work_units=inputs.work_units,
+                model=inputs.model,
+                resume_existing_detections=inputs.resume_existing_detections,
+                detect_array_concurrency=inputs.detect_array_concurrency,
+                upstream_job_keys=inputs.upstream_job_keys,
+                required_artifacts=inputs.required_artifacts,
+            )
         )
-    )
+    expected_raw_paths = tuple(unit.detect_group_path for unit in inputs.work_units)
+    if raw_module.outputs.target_id != inputs.target_id:
+        raise ValueError("Raw and postprocess detection modules target different recordings.")
+    if raw_module.outputs.raw_detection_group_paths != expected_raw_paths:
+        raise ValueError(
+            "Raw detection outputs do not match the postprocess source groups."
+        )
     detect_array_key = raw_module.outputs.terminal_job_key
-    jobs = list(raw_module.fragment.jobs)
+    jobs: list[LsfJob] = []
 
     quality_source_key = f"detect_quality_source:{target_safe}"
     quality_source_group_path = f"detect_collection_sources/{inputs.quality_source_run}"
@@ -974,7 +984,7 @@ def build_detection_fragment(
     )
     postprocess_fragment = LsfWorkflowFragment(
         fragment_id=f"detection_postprocess:{target_safe}",
-        jobs=tuple(jobs[1:]),
+        jobs=tuple(jobs),
         requires=(raw_artifact_key,),
         provides=(artifact_key,),
         metadata={

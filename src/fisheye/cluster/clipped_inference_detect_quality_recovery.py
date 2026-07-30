@@ -17,6 +17,7 @@ from fisheye.cluster.clipped_inference import (
     DEFAULT_REPO,
     FAMILY,
     PLAN_SCHEMA,
+    SUPPORTED_PLAN_SCHEMAS,
     build_ssh_bsub_runner,
 )
 from fisheye.cluster.clipped_inference_keypoint_recovery import (
@@ -417,7 +418,10 @@ def build_plan(
     run_root = run_root.expanduser().resolve()
     repo = repo.expanduser().resolve()
     source = _read_json(source_plan_path)
-    if not isinstance(source, Mapping) or source.get("schema") != PLAN_SCHEMA:
+    if (
+        not isinstance(source, Mapping)
+        or source.get("schema") not in SUPPORTED_PLAN_SCHEMAS
+    ):
         raise ValueError(f"Unsupported clipped inference plan: {source_plan_path}")
     workflow_payload = source.get("lsf_workflow")
     prior_jobs = workflow_payload.get("jobs") if isinstance(workflow_payload, Mapping) else None

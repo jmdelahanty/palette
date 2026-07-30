@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pyarrow.parquet as pq
 
-from fisheye.cluster.clipped_inference import PLAN_SCHEMA
+from fisheye.cluster.clipped_inference import SUPPORTED_PLAN_SCHEMAS
 from fisheye.cluster.lsf import write_json_snapshot
 from fisheye.cluster.whole_recording_analysis_validate import (
     _require_complete_run,
@@ -35,7 +35,10 @@ def _read_plan_target(
     plan_path: Path, target_id: str
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping) or payload.get("schema") != PLAN_SCHEMA:
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema") not in SUPPORTED_PLAN_SCHEMAS
+    ):
         raise ValueError(f"Unsupported clipped inference plan: {plan_path}")
     targets = payload.get("targets")
     if not isinstance(targets, list):

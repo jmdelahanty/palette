@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 
 import zarr
 
-from fisheye.cluster.clipped_inference import PLAN_SCHEMA
+from fisheye.cluster.clipped_inference import SUPPORTED_PLAN_SCHEMAS
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.utils.repair_clipped_proxy_crop_contract import (
@@ -84,7 +84,10 @@ def _matching_model_artifact(
 
 def _inspect_plan(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = _read_json(plan_path)
-    if not isinstance(payload, dict) or payload.get("schema") != PLAN_SCHEMA:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") not in SUPPORTED_PLAN_SCHEMAS
+    ):
         raise ValueError(f"Unsupported clipped inference plan: {plan_path}")
     targets = payload.get("targets")
     models = payload.get("models")

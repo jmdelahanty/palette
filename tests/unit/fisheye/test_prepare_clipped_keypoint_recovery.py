@@ -6,9 +6,10 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 import zarr
 
-from fisheye.cluster.clipped_inference import PLAN_SCHEMA
+from fisheye.cluster.clipped_inference import LEGACY_PLAN_SCHEMA, PLAN_SCHEMA
 from fisheye.utils.prepare_clipped_keypoint_recovery import (
     prepare_keypoint_recovery,
 )
@@ -19,8 +20,10 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+@pytest.mark.parametrize("plan_schema", (LEGACY_PLAN_SCHEMA, PLAN_SCHEMA))
 def test_prepare_keypoint_recovery_repairs_proxy_and_removes_only_incomplete(
     tmp_path: Path,
+    plan_schema: str,
 ) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -111,7 +114,7 @@ def test_prepare_keypoint_recovery_repairs_proxy_and_removes_only_incomplete(
     _write_json(
         plan_path,
         {
-            "schema": PLAN_SCHEMA,
+            "schema": plan_schema,
             "models": {
                 "subject_masks": {"path": str(model), "sha256": model_sha}
             },
