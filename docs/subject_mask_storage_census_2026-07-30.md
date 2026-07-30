@@ -87,7 +87,7 @@ not a claim that all four profiles are implemented today.
 
 | Profile | Producer today | Authority | Normal consumers | Intended lifecycle | Current implementation status |
 | --- | --- | --- | --- | --- | --- |
-| Raw probability snapshot | `infer_unet_subject_masks` | Decoded `mask_probs_roi` | Refined finalizer, validation, tuning/inspection, training-source preparation | Running ineligible candidate -> validated complete candidate -> atomically selected immutable snapshot | Closest to target; missing exact shared schema/storage manifest, CSR frame index, and mandatory consolidation gate |
+| Raw probability snapshot | `infer_unet_subject_masks` | Decoded `mask_probs_roi` | Refined finalizer, validation, tuning/inspection, training-source preparation | Running ineligible candidate -> validated complete candidate -> atomically selected immutable snapshot | Standalone U-Net is closest to target; composites still use generic completion/selection and both forms lack the exact shared schema/storage manifest, CSR frame index, and mandatory consolidation gate |
 | Refined editable draft | Legacy review tooling and parts of finalization | Dense `uint8 masks_roi` | Review/edit UI, validation, cache regeneration | Draft creating -> editable -> accepted/frozen; never selected for ordinary readers | Not implemented as a distinct future-canonical lifecycle; legacy review conflates mutable state and `latest` |
 | Refined immutable publication | Future-canonical finalizer/coordinate publisher; legacy copy promotion also exists | Dense `uint8 masks_roi`; caches derived | Crimson, shape/measurement analysis, export, inspection | Build a new run from accepted draft -> replan -> regenerate caches -> validate -> complete ineligible -> activate immutable | Strict activation exists, but no accepted-draft-to-new-physical-publication boundary exists |
 | Dense training artifact | `export_subject_mask_training_zarr` | Dense `uint8 masks_roi` plus validity and crop pixels | PyTorch training/evaluation | Resolve exact eligible sources -> stream materialization -> validate whole root -> publish immutable artifact | Dense/compact boundary is good; source selection, exact dtype/profile enforcement, storage planning, and atomic root publication remain incomplete |
@@ -125,6 +125,17 @@ Two additional representations participate in the current lifecycle:
    top-level `mask_probs_roi`
    (`src/fisheye/shared/composite_subject_mask.py:362-410`).
 
+The composite path does not yet share the standalone publisher's fail-closed
+activation transaction. `compact_subject_mask_deltas` marks the still-running
+child selector-eligible, validates it later, and then uses generic completion,
+which mutates `latest` and `latest_complete`; eligibility is not the final
+mutation and strict coordinate/consolidation proof is not part of the same
+transaction (`src/fisheye/utils/compact_subject_mask_deltas.py:945-1006`,
+`src/fisheye/utils/compact_subject_mask_deltas.py:1157-1162`,
+`src/fisheye/utils/compact_subject_mask_deltas.py:1239-1246`,
+`src/fisheye/shared/zarr_run_completion.py:194-242`). Future standalone and
+composite snapshots must converge on one activation contract.
+
 The composite payload contains:
 
 | Array | Exact current dtype/shape | Role |
@@ -144,21 +155,23 @@ coalesces sorted contiguous source rows, and caps an internal read batch at
 
 | Surface | Current strict form | Contract disposition |
 | --- | --- | --- |
-| `mask_probs_roi` | `uint8` or `float16 [N,C,H,W]`; decoded finite `[0,1]` | Required authority. Prefer one exact encoding per version; do not probe. |
+| `mask_probs_roi` | `uint8` or `float16 [N,C,H,W]`; decoded finite `[0,1]`; exact encoding/semantics attributes | Required authority. Prefer one exact encoding per version; do not probe. |
 | `masks_roi` | Optional `uint8 [N,C,H,W]` exact threshold result | Derived cache only; absent by default in canonical U-Net output. |
-| `available_channels` | `bool[C]` | Required component availability. |
+| `available_channels` | `bool[C]`; strict standalone publication currently requires every value true | Required component availability. Sparse/component-scoped outputs require a separate future contract or remain compatibility-only. |
 | `prob_max` | `float32[N,C]` | Required derived metric, exactly recomputed. |
 | `mask_present` | `bool[N,C]` | Required derived metric. |
 | `area_px` | `float32[N,C]` | Required derived metric. |
 | `centroid_xy` / `centroid_valid` | `float32[N,C,2]` / `bool[N,C]` | Required derived metric and validity. |
 | `bbox_xyxy` / `bbox_valid` | `float32[N,C,4]` / `bool[N,C]` | Required ROI-pixel derived metric and validity. |
-| Crop/identity columns | `source_crop_row_ids int64[N]`, `instance_key uint64[N]`, `source_acquisition_frame_index int64[N]`, `source_crop_xywh float32[N,4]` | Required exact selection from bound crop snapshot. |
+| Crop/identity columns | `source_crop_row_ids int64[N]`, `instance_key uint64[N]`, `source_acquisition_frame_index int64[N]`, and currently dtype-preserving `source_crop_xywh[N,4]` | Required exact selection from the bound crop snapshot. The new canonical contract requires crop-v2 and exact `float32[N,4]`; current dtype-preserving behavior remains compatibility-only. |
 | `frame_row_offsets` | Absent today | Required future `int64[F+1]`, or an exact manifest-bound crop-owned equivalent. |
 
-The strict publisher validates the probability encoding and recomputes the
-metrics in bounded row blocks
+The strict publisher requires the declared physical dtype, encoding, multilabel
+output semantics, independent-sigmoid overlap policy, and probability semantics
+to agree exactly, and it recomputes metrics in bounded row blocks. It rejects
+zero-row canonical runs rather than publishing an identity-free mask surface
 (`src/fisheye/shared/subject_mask_coordinate_publication.py:1725-1827`,
-`src/fisheye/shared/subject_mask_coordinate_publication.py:1831-2005`).
+`src/fisheye/shared/subject_mask_coordinate_publication.py:1872-2025`).
 
 #### Raw consumers and access
 
@@ -168,7 +181,7 @@ metrics in bounded row blocks
 | Merge utility | Row window plus one component (`src/fisheye/utils/merge_subject_mask_runs.py:209-221`) |
 | Tuning preview | One observation/component, but currently requires top-level binary `masks_roi` and cannot consume canonical probability-only/composite output (`src/fisheye/tune/subject_mask_tuner.py:403-450`, `src/fisheye/tune/subject_mask_tuner.py:850-900`) |
 | Strict publication validation | Complete logical scan in bounded row blocks |
-| Whole-recording validator | Indexed sample rows, including composite resolution (`src/fisheye/cluster/whole_recording_analysis_validate.py:68-97`) |
+| Whole-recording validator | Indexed sample rows, including composite resolution, but currently hard-requires physical `uint8` even though strict publication permits `float16` (`src/fisheye/cluster/whole_recording_analysis_validate.py:68-97`) |
 
 Future consumers should share one logical probability adapter across standalone,
 shard, and composite representations. Binary consumers must request an explicit
@@ -227,12 +240,37 @@ An exact editable profile should require:
 - no publication-owner/canonical-immutable marker while editable; and
 - selector-ineligible draft states only.
 
+Its exact future-facing surfaces should be separated by authority:
+
+| Surface family | Exact draft role |
+| --- | --- |
+| Dense authority | Binary `masks_roi uint8[N,C,H,W]`; the only pixel edit target |
+| Observation/crop identity | `source_crop_row_ids int64[N]`, `instance_key uint64[N]`, `source_acquisition_frame_index int64[N]`, and placement exact-copied from the bound raw/crop contract |
+| Component availability | `available_channels bool[C]` with an ordered, unique component registry |
+| Edit/audit state | `edit_applied bool[N,C]`; per-component `row_revision int64[N]`, `manual_override bool[N]`, timestamp bytes `[N,40]`, and reason bytes `[N,128]` |
+| Metrics and caches | Derived from dense authority; may be stale during editing and are never edit authority |
+
+Current per-component revision/audit arrays are created in
+`src/fisheye/shared/refined_subject_component_contours.py:446-481`. The strict
+scientific manifest intentionally excludes mutable review/revision/reason state
+(`src/fisheye/shared/refined_subject_mask_coordinate_publication.py:3766-3783`).
+
 Current review writeback already performs the essential pixel transaction: it
 resolves an explicit row/component, checks expected revision/shape, writes only
 `masks_roi[row,component]`, increments revision state, and marks derivatives
 stale (`src/fisheye/tune/refined_subject_mask_review.py:3185-3383`). Historical
 compact-only input must first be materialized to dense
 (`src/fisheye/shared/mask_store.py:230-292`).
+
+Dense materialization currently has a dangerous freshness side effect:
+`materialize_dense_masks_roi_from_store` calls `update_mask_storage_attrs` with
+the default `reset_stale_flags=True`, which can clear derived mask, metric, and
+contour stale flags without regenerating or validating those surfaces
+(`src/fisheye/shared/mask_store.py:192-244`,
+`src/fisheye/shared/mask_store.py:277-281`). The future contract must make dense
+materialization establish authority while preserving derivative staleness.
+Only a successful per-surface regeneration and validation receipt may clear a
+freshness flag.
 
 The future draft should store merge-safe row/component dirty state or an
 append-only stale log. Current run-level stale attributes are vulnerable to
@@ -273,9 +311,17 @@ historical fallback separate
 `src/fisheye/shared/refined_subject_masks_io.py:586-689`).
 
 The older promotion path instead copies a complete tree, requires identical
-chunks, and validates the compatibility schema
-(`src/fisheye/utils/promote_refined_subject_mask_run.py:184-216`). It cannot be
-the future editable-to-published compactor.
+chunks, and validates the compatibility schema. It then mutates selectors and
+the registry after only a completion check, while its import receipt is written
+after those mutations; a receipt-write failure can therefore leave selection
+changed without rollback
+(`src/fisheye/utils/promote_refined_subject_mask_run.py:184-230`,
+`src/fisheye/utils/promote_refined_subject_mask_run.py:304-355`,
+`src/fisheye/utils/promote_refined_subject_mask_run.py:452-496`). It cannot be
+the future editable-to-published compactor. The strict coordinate path already
+provides the required ordering: seal the receipt first, then perform guarded
+selector mutation (`src/fisheye/shared/refined_subject_mask_coordinate_publication.py:4533-4548`,
+`src/fisheye/shared/refined_subject_mask_coordinate_publication.py:4588-4611`).
 
 #### Published derived surfaces
 
@@ -390,15 +436,21 @@ geometry arrays:
 - `source_crop_row_ids : int64[N]`;
 - `instance_key : uint64[N]`;
 - `source_acquisition_frame_index : int64[N]`; and
-- `source_crop_xywh : float32[N,4]`.
+- `source_crop_xywh : float32[N,4]` for the new canonical contract. Current
+  strict raw publication preserves the selected crop dtype, so non-float32
+  sources remain a compatibility boundary rather than weakening the new schema.
 
 It rejects ambiguous legacy row aliases such as `detection_source`
 (`src/fisheye/shared/subject_mask_coordinate_publication.py:895-980`).
+The exact float32 decision follows the existing crop-v2 array contract
+(`src/fisheye/shared/zarr/array_contracts.py:833-846`); canonical writers should
+reject a non-v2/non-float32 crop source instead of silently casting it.
 
 ### Refined subject masks
 
 The maintained refined direction is unambiguous: dense `uint8 masks_roi` must
-be physically present and is the editable authority. Historical compact-only
+be physically present. It is the editable authority in a draft and the
+immutable raster/scientific authority in a publication. Historical compact-only
 runs may be read for compatibility, but they must be materialized to dense
 masks before editing or training. The strict publication layer enforces the
 dense authority and requires stale flags to be cleared before publication
@@ -514,6 +566,15 @@ The current writer does write the four future-facing identity/geometry arrays,
 but it gives them fixed 4,096-row chunks rather than a shared byte-derived plan
 (`src/fisheye/segmentation/infer_unet_subject_masks.py:873-909`).
 
+Composite publication is also outside the shared planner. Delta probabilities
+inherit the primary base's chunk/shard layout and truncate it only for small
+delta row counts. Mapping and lineage arrays use fixed 131,072-row shards,
+while metrics use fixed 16,384-row inner chunks with the same shard-row target
+(`src/fisheye/utils/compact_subject_mask_deltas.py:689-708`,
+`src/fisheye/utils/compact_subject_mask_deltas.py:1005-1126`). The future policy
+must plan composite delta, mapping, lineage, and metric surfaces by bytes rather
+than preserve these inherited row-count contracts.
+
 ### Refined dense and compact writers
 
 The centralized mask-specific constants currently select:
@@ -546,6 +607,17 @@ target about 4 MiB, while row indexes use fixed 256-row chunks and remain
 unsharded (`src/fisheye/shared/mask_store.py:596-663`,
 `src/fisheye/shared/mask_store.py:890-951`).
 
+The current process-shard finalizer does demonstrate the correct minimum
+ownership rule for dense writes: it rounds process row ranges to the physical
+dense chunk grid, assigns contiguous whole-chunk regions per process, and lets
+the driver own shared full-array metric writes
+(`src/fisheye/refinement/finalize_subject_masks.py:2024-2087`,
+`src/fisheye/refinement/finalize_subject_masks.py:4479-4499`,
+`src/fisheye/refinement/finalize_subject_masks.py:4641-4742`). This is not yet a
+general multi-array plan. Every parallel writer must own complete physical
+chunks or shards for every array it writes; variable-length RLE and contour
+values must be serialized or merged deterministically by the driver.
+
 ### Promotion and publication
 
 The existing refined promotion utility copies the selected run tree and then
@@ -559,8 +631,9 @@ editable dense draft
   -> immutable, physically replanned published snapshot
 ```
 
-The logical draft/published lifecycle exists, but physical layout is currently
-preserved across that boundary.
+Completion and activation machinery exists, but an accepted editable draft to
+new physical publication lifecycle does not. The legacy promotion path simply
+preserves physical layout across that boundary.
 
 ### Training writer
 
@@ -719,7 +792,7 @@ Current code and repository policy supersede several older statements:
 1. `docs/mask_rle_storage_design_and_benchmark_plan.md:19-30` says dense masks
    need not remain canonical and describes compact-only refined modes. Current
    finalization explicitly rejects compact-only modern publication
-   (`src/fisheye/refinement/finalize_subject_masks.py:174-186`,
+   (`src/fisheye/refinement/finalize_subject_masks.py:4873-4881`,
    `src/fisheye/refinement/finalize_subject_masks.py:6390-6399`). This document is
    stale for future-facing refined masks.
 2. `docs/refined_subject_masks_runs_contract.md:178-191` proposes a custom
@@ -733,6 +806,17 @@ Current code and repository policy supersede several older statements:
 4. `docs/subject_mask_runs_contract.md:140-152` permits broader dtypes and makes
    some lineage arrays merely recommended. The future schema must freeze exact
    dtypes and required fields per version.
+5. `docs/refined_subject_masks_runs_contract.md:135-148`,
+   `docs/refined_subject_masks_runs_contract.md:630-647`, and
+   `docs/refined_subject_masks_runs_contract.md:813-821` treat
+   `frame_indices`, `frame_counts`, `detection_indices`, and
+   `detection_source` as canonical surfaces. Strict future publication forbids
+   these aliases in favor of exact crop identity and acquisition-frame lineage
+   (`src/fisheye/shared/refined_subject_mask_coordinate_publication.py:724-764`).
+6. `docs/mask_rle_storage_design_and_benchmark_plan.md:76-80` says edit
+   writeback refreshes touched bitpacked rows immediately. Current policy marks
+   bitpacked and other derivatives stale after dense edits
+   (`src/fisheye/shared/mask_store.py:384-390`).
 
 ## Proposed Contract Families
 
@@ -801,6 +885,9 @@ Properties to freeze:
 
 ## Open Contract Decisions
 
+- [x] Require `source_crop_xywh : float32[N,4]` in the new canonical raw,
+  refined, and training source-index schemas, matching crop-v2. Preserve
+  arbitrary source dtypes only behind a legacy conversion boundary.
 - [ ] Freeze exact raw and refined schema IDs and exact array sets.
 - [ ] Decide whether every mask run owns an exact
   `frame_row_offsets : int64[F+1]`, or binds to and validates the crop
@@ -850,6 +937,9 @@ This checklist is intentionally not authorization to mutate production.
 - [ ] Classify each array as `EAGER`, `WINDOWED`, `PER_ROW`, or `INDEXED`.
 - [ ] Classify each output as editable, immutable, or whole-shard-owned append.
 - [ ] Route every mask-family array through `plan_storage`.
+- [ ] Include composite delta, mapping, lineage, and metric arrays in that
+  planning boundary; do not inherit base chunks or retain fixed
+  131,072/16,384-row contracts.
 - [ ] Remove mask-specific row-count constants from contract ownership.
 - [ ] Give flat RLE/contour values and their pointer/index columns separate
   access intents.
@@ -858,9 +948,13 @@ This checklist is intentionally not authorization to mutate production.
 ### Phase C: publication lifecycle
 
 - [ ] Add exact raw and refined run-manifest envelopes.
+- [ ] Route standalone and composite raw snapshots through one fail-closed
+  activation transaction with eligibility as the final mutation.
 - [ ] Implement draft-to-published logical copy with physical replanning.
 - [ ] Regenerate derived caches from dense authority during explicit
   publication or maintenance.
+- [ ] Make dense compatibility materialization preserve all derivative stale
+  flags until each surface has a successful regeneration/validation receipt.
 - [ ] Verify decoded equality, cache digests, CRCs, and stale-state closure.
 - [ ] Consolidate metadata and prove normalized direct/consolidated equality
   before selector eligibility.
