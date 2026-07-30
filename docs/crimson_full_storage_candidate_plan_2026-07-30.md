@@ -119,6 +119,9 @@ and Crimson revisions, host, and LSF job identity.
 - [x] Pin Palette and Crimson commits and source/model hashes.
 - [x] Validate focused workflow, real-Zarr reopen, reconciliation, and handoff
       behavior.
+- [x] Route jobs requesting more than the `short` queue's 61-minute hard limit
+      to the normal CPU `local` queue; keep one-hour validation jobs on
+      `short`.
 - [ ] Commit and deploy this branch as a unique `/groups` worktree.
 - [ ] Materialize and review `candidate_plan.json` and `lsf_plan.json`.
 - [ ] Submit the full candidate through `login1-citrus-poller`.

@@ -169,7 +169,7 @@ def build_clipped_storage_finalization_fragment(
             )
         ),
         resources=LsfResources(
-            queue="short", ncores=4, mem_gb=48, walltime="2:00", span_hosts=1
+            queue="local", ncores=4, mem_gb=48, walltime="2:00", span_hosts=1
         ),
         upstream=inputs.upstream_job_keys,
         expected_outputs=(

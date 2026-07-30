@@ -206,7 +206,7 @@ def build_clipped_detection_evidence_fragment(
         mode=LsfExecutionMode.ARRAY,
         max_concurrent=min(inputs.max_concurrent, len(tasks)),
         resources=LsfResources(
-            queue="short",
+            queue="local",
             ncores=4,
             mem_gb=32,
             walltime="2:00",

@@ -277,7 +277,7 @@ def build_full_storage_candidate_plan(
             str(canonical_result),
         ),
         resources=LsfResources(
-            queue="short", ncores=4, mem_gb=32, walltime="2:00", span_hosts=1
+            queue="local", ncores=4, mem_gb=32, walltime="2:00", span_hosts=1
         ),
         expected_outputs=(
             canonical_archive / "zarr.json",

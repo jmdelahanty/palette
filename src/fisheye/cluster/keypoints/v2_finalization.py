@@ -289,7 +289,7 @@ def build_clipped_keypoint_v2_finalization_fragment(
             )
         ),
         resources=LsfResources(
-            queue="short", ncores=4, mem_gb=48, walltime="2:00", span_hosts=1
+            queue="local", ncores=4, mem_gb=48, walltime="2:00", span_hosts=1
         ),
         upstream=(terminal_key,),
         expected_outputs=(
@@ -400,7 +400,7 @@ def build_recording_aggregate_keypoint_v2_adapter_fragment(
         stage="keypoint_v2_recording_aggregate_benchmark_adapter",
         command=tuple(command),
         resources=LsfResources(
-            queue="short", ncores=8, mem_gb=64, walltime="4:00", span_hosts=1
+            queue="local", ncores=8, mem_gb=64, walltime="4:00", span_hosts=1
         ),
         upstream=inputs.upstream_job_keys,
         expected_outputs=(

@@ -130,6 +130,9 @@ def test_full_plan_pins_all_inputs_and_uses_recording_adapter(
         "canonical_detection_adapter:sleepyfish_full_v1",
     )
     assert plan.candidate.handoff_path == request.output_root / "handoff_manifest.json"
+    for job in plan.candidate.workflow.jobs:
+        if job.resources.walltime in {"2:00", "4:00"}:
+            assert job.resources.queue == "local"
 
 
 def test_detection_plan_requires_exact_contiguous_clips(tmp_path: Path) -> None:
