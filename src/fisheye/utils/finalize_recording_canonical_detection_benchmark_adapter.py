@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Normalize one legacy recording detection run into a canonical candidate.
+"""Normalize clipped legacy detections into one current canonical candidate.
 
-This adapter is benchmark-only.  It reads one explicitly pinned recording-level
-legacy detection run and an earlier logically equivalent recording fixture,
-converts the complete table to the current coordinate-catalog contract, writes
-the approved access-aware profile on node-local scratch, and atomically places
-the validated standalone store below ``.palette_benchmarks``.  It never mutates
-an analysis archive, selector, or registry.
+This adapter is benchmark-only.  It reads the maintained per-clip detection
+outputs, rebuilds the complete recording table through the current canonical
+binder, writes the approved access-aware profile on node-local scratch, and
+atomically places the
+validated standalone store below ``.palette_benchmarks``.  It never mutates an
+analysis archive, selector, or registry.
 """
 
 from __future__ import annotations
@@ -23,6 +23,16 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import zarr
 
+from fisheye.detection.clipped_native_artifact_io import (
+    load_parent_frame_mapping,
+)
+from fisheye.detection.clipped_native_binding import (
+    ClippedDetectionArtifactMember,
+    bind_clipped_detection_artifacts,
+)
+from fisheye.detection.native_canonical_candidate import (
+    write_native_clipped_detection_candidate,
+)
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.benchmark_runtime import (
     peak_rss_bytes,
@@ -31,23 +41,25 @@ from fisheye.shared.zarr.benchmark_runtime import (
     storage_stats,
     utc_now,
 )
-from fisheye.shared.zarr.canonical_detection_benchmark_input import (
-    CanonicalDetectionBenchmarkInput,
-    load_detection_benchmark_input,
-)
-from fisheye.shared.zarr.canonical_detection_shadow import (
-    publish_legacy_canonical_detection_shadow,
-)
-from fisheye.shared.zarr.detection_schema import (
-    CANONICAL_DETECTION_SCHEMA_V1,
-    CanonicalDetectionDimensions,
-)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.native_canonical_detection_publication import (
+    load_native_canonical_detection_candidate,
+)
+from fisheye.shared.zarr_run_completion import is_run_complete
 
 
 ADAPTER_SCHEMA_ID = "palette.canonical_detection.recording_benchmark_adapter"
-ADAPTER_SCHEMA_VERSION = 2
+ADAPTER_SCHEMA_VERSION = 3
 ADAPTER_RECEIPT_NAME = "recording_canonical_adapter_receipt.json"
+_ARRAY_NAMES = (
+    "frame_indices",
+    "bbox_norm_coords",
+    "scores",
+    "class_ids",
+    "frame_counts",
+    "n_detections",
+    "instance_key",
+)
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -67,6 +79,18 @@ def _require_sha256(value: object, *, name: str) -> str:
     if len(text) != 64 or any(character not in _HEX for character in text):
         raise ValueError(f"{name} must be one lowercase SHA-256 digest.")
     return text
+
+
+def _safe_group(value: object, *, name: str) -> str:
+    group = str(value).strip().strip("/")
+    if not group or any(part in {"", ".", ".."} for part in group.split("/")):
+        raise ValueError(f"{name} must be one safe archive-relative group path.")
+    return group
+
+
+def _array(group: Any, name: str) -> np.ndarray:
+    values = np.asarray(group[name][...])
+    return np.ascontiguousarray(values)
 
 
 def _require_node_local_scratch(path: Path) -> Path:
@@ -115,123 +139,106 @@ def _publish_directory(local: Path, destination: Path) -> float:
     return float(time.perf_counter() - started)
 
 
-def _require_recorded_model(
-    source: Any,
+def _source_member(
     *,
-    model_artifact: Path,
-    expected_sha256: str,
-) -> dict[str, str]:
-    artifact = model_artifact.expanduser().resolve()
-    if not artifact.is_file():
-        raise FileNotFoundError(f"Canonical source model artifact is missing: {artifact}")
-    observed_sha = sha256_file(artifact)
-    if observed_sha != expected_sha256:
-        raise ValueError("Canonical source model artifact differs from its pin.")
-    recorded = Path(str(source.attrs.get("model_path") or ""))
-    if len(recorded.parts) < 3 or tuple(recorded.parts[-3:]) != tuple(
-        artifact.parts[-3:]
+    archive: Any,
+    analysis_zarr: Path,
+    recording_frame_index: Path,
+    recording_identity: str,
+    unit: Mapping[str, Any],
+    expected_index: int,
+    expected_model_sha256: str,
+) -> tuple[ClippedDetectionArtifactMember, dict[str, object], np.ndarray]:
+    if unit.get("clip_index") != expected_index:
+        raise ValueError("Detection plan clips must form ordered [0, clip_count).")
+    clip_id = str(unit.get("clip_id") or "").strip()
+    camera_serial = str(unit.get("camera_serial") or "").strip()
+    paths = unit.get("zarr_paths")
+    if not clip_id or not camera_serial or not isinstance(paths, Mapping):
+        raise ValueError(f"Detection plan unit {expected_index} is incomplete.")
+    group_path = _safe_group(
+        paths.get("detect_target_group_path"),
+        name=f"work_units[{expected_index}].detect_target_group_path",
+    )
+    run = archive[group_path]
+    if not is_run_complete(run):
+        raise ValueError(f"Legacy clip detection is not complete: {group_path}")
+    if run.attrs.get("instance_key_backfill_status") != "complete":
+        raise ValueError(f"Legacy clip lacks stable instance keys: {group_path}")
+    if run.attrs.get("instance_key_backfill_recording_identity") != (
+        recording_identity
     ):
-        raise ValueError(
-            "Canonical source recorded model identity differs from the pinned artifact."
-        )
-    selected_run = str(
-        source.attrs.get("model_resolution_selected_run_id") or ""
-    ).strip()
-    if selected_run and selected_run != artifact.parts[-3]:
-        raise ValueError("Canonical source model-resolution run differs from the pin.")
-    return {
-        "recorded_path": str(recorded),
-        "artifact_path": str(artifact),
-        "sha256": observed_sha,
-    }
+        raise ValueError(f"Legacy clip binds a different recording: {group_path}")
+    source_width = int(run.attrs.get("source_video_width") or 0)
+    source_height = int(run.attrs.get("source_video_height") or 0)
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError(f"Legacy clip lacks source dimensions: {group_path}")
+    model_path = Path(str(run.attrs.get("model_path") or "")).expanduser().resolve()
+    if not model_path.is_file():
+        raise FileNotFoundError(f"Legacy clip model is missing: {model_path}")
+    if sha256_file(model_path) != expected_model_sha256:
+        raise ValueError(f"Legacy clip model differs from the pin: {group_path}")
 
-
-def _validate_legacy_counts(
-    source: Any,
-    *,
-    benchmark_input: CanonicalDetectionBenchmarkInput,
-) -> dict[str, object]:
-    frame_counts = np.asarray(source["frame_counts"][...], dtype=np.int64)
-    n_detections = np.asarray(source["n_detections"][...], dtype=np.int64)
-    if not np.array_equal(frame_counts, n_detections):
-        raise ValueError("Canonical source count aliases differ.")
-    if frame_counts.shape != (benchmark_input.dimensions.n_frames,):
-        raise ValueError("Canonical source frame-count length is inconsistent.")
-    frame_indices = np.asarray(
-        benchmark_input.arrays["instances/frame_indices"], dtype=np.int64
+    arrays = {name: _array(run, name) for name in _ARRAY_NAMES}
+    n_rows = int(arrays["frame_indices"].shape[0])
+    parent_frames = load_parent_frame_mapping(
+        recording_frame_index,
+        camera_serial=camera_serial,
+        clip_id=clip_id,
     )
-    observed = np.bincount(
-        frame_indices,
-        minlength=benchmark_input.dimensions.n_frames,
+    if int(unit.get("frame_count") or -1) != parent_frames.shape[0]:
+        raise ValueError(f"Detection plan frame count differs for {clip_id}.")
+    metadata_path = analysis_zarr / group_path / "zarr.json"
+    metadata_sha = sha256_file(metadata_path)
+    logical_hashes = {name: sha256_array(values) for name, values in arrays.items()}
+    tree_sha = canonical_json_sha256(
+        {
+            "group_path": group_path,
+            "metadata_sha256": metadata_sha,
+            "logical_array_sha256": logical_hashes,
+        }
     )
-    if not np.array_equal(frame_counts, observed):
-        raise ValueError("Canonical source counts disagree with frame_indices.")
-    summary = source.attrs.get("summary_statistics")
-    if isinstance(summary, Mapping) and summary.get("total_detections") != (
-        benchmark_input.dimensions.n_instances
-    ):
-        raise ValueError("Canonical source summary row count is inconsistent.")
-    return {
-        "n_frames": benchmark_input.dimensions.n_frames,
-        "n_instances": benchmark_input.dimensions.n_instances,
-        "empty_frames": int(np.count_nonzero(frame_counts == 0)),
-        "multiple_detection_frames": int(np.count_nonzero(frame_counts > 1)),
-        "frame_counts_sha256": sha256_array(frame_counts),
+    member = ClippedDetectionArtifactMember(
+        work_unit_id=f"{clip_id}:camera_{camera_serial}",
+        artifact_run_id=group_path.rsplit("/", 1)[-1],
+        clip_id=clip_id,
+        clip_index=expected_index,
+        camera_serial=camera_serial,
+        source_width=source_width,
+        source_height=source_height,
+        artifact_manifest_sha256=metadata_sha,
+        run_group_tree_sha256=tree_sha,
+        parent_frame_indices=parent_frames,
+        frame_indices=arrays["frame_indices"],
+        bbox_norm_coords=arrays["bbox_norm_coords"],
+        scores=arrays["scores"],
+        class_ids=arrays["class_ids"],
+        artifact_row_id=np.arange(n_rows, dtype=np.uint64),
+        frame_counts=arrays["frame_counts"],
+        n_detections=arrays["n_detections"],
+    )
+    evidence: dict[str, object] = {
+        "clip_id": clip_id,
+        "clip_index": expected_index,
+        "camera_serial": camera_serial,
+        "source_group_path": group_path,
+        "source_group_metadata_sha256": metadata_sha,
+        "source_group_logical_digest": tree_sha,
+        "source_rows": n_rows,
+        "source_frames": int(parent_frames.shape[0]),
     }
-
-
-def _validate_anchor(
-    *,
-    anchor_group_path: Path,
-    canonical_input: CanonicalDetectionBenchmarkInput,
-) -> dict[str, object]:
-    anchor = zarr.open_group(
-        str(anchor_group_path),
-        mode="r",
-        use_consolidated=False,
-    )
-    logical = anchor.attrs.get("logical_schema")
-    raw_dimensions = logical.get("dimensions") if isinstance(logical, Mapping) else None
-    if not isinstance(raw_dimensions, Mapping):
-        raise ValueError("Canonical anchor lacks its frozen logical dimensions.")
-    dimensions = CanonicalDetectionDimensions(
-        n_frames=raw_dimensions.get("n_frames"),
-        n_instances=raw_dimensions.get("n_instances"),
-        source_width=raw_dimensions.get("source_width"),
-        source_height=raw_dimensions.get("source_height"),
-    )
-    if dimensions != canonical_input.dimensions:
-        raise ValueError("Canonical anchor dimensions differ from rebuilt detections.")
-    arrays = {
-        path: anchor[path] for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths
-    }
-    CANONICAL_DETECTION_SCHEMA_V1.require(arrays, dimensions=dimensions)
-    if anchor.attrs.get("selector_eligible") is not False:
-        raise ValueError("Canonical anchor must remain selector-ineligible.")
-    hashes: dict[str, str] = {}
-    for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths:
-        expected = np.asarray(canonical_input.arrays[path])
-        observed = np.asarray(arrays[path][...])
-        if not np.array_equal(observed, expected):
-            raise ValueError(f"Canonical anchor differs at {path!r}.")
-        hashes[path] = sha256_array(expected)
-    return {
-        "source_group_path": str(anchor_group_path),
-        "source_group_metadata_sha256": sha256_file(anchor_group_path / "zarr.json"),
-        "logical_array_sha256": hashes,
-        "decoded_values_equal": True,
-    }
+    return member, evidence, arrays["instance_key"]
 
 
 def finalize_recording_canonical_detection_benchmark_adapter(
     *,
-    source_detection_group_path: Path,
+    analysis_zarr: Path,
+    detection_plan_path: Path,
+    recording_frame_index: Path,
     recording_identity: str,
-    source_model_artifact: Path,
-    canonical_anchor_archive: Path,
-    canonical_anchor_run_id: str,
     expected_model_sha256: str,
     expected_n_frames: int,
+    expected_n_instances: int,
     destination: Path,
     benchmark_root: Path,
     run_id: str,
@@ -241,9 +248,9 @@ def finalize_recording_canonical_detection_benchmark_adapter(
 
     started = time.perf_counter()
     phases: dict[str, float] = {}
-    source_path = source_detection_group_path.expanduser().resolve()
-    anchor_archive = canonical_anchor_archive.expanduser().resolve()
-    anchor_group = anchor_archive / "detect_runs" / canonical_anchor_run_id
+    archive_path = analysis_zarr.expanduser().resolve()
+    plan_path = detection_plan_path.expanduser().resolve()
+    frame_index = recording_frame_index.expanduser().resolve()
     output = _require_benchmark_destination(
         destination,
         benchmark_root=benchmark_root,
@@ -251,81 +258,130 @@ def finalize_recording_canonical_detection_benchmark_adapter(
     model_sha = _require_sha256(expected_model_sha256, name="detection model")
     if type(expected_n_frames) is not int or expected_n_frames <= 0:
         raise ValueError("expected_n_frames must be a positive exact integer.")
-    if not source_path.is_dir() or not anchor_group.is_dir():
-        raise FileNotFoundError("Canonical source run or canonical anchor is missing.")
+    if type(expected_n_instances) is not int or expected_n_instances < 0:
+        raise ValueError("expected_n_instances must be a nonnegative exact integer.")
+    if not archive_path.is_dir():
+        raise FileNotFoundError("Analysis Zarr is missing.")
+    plan = _read_json(plan_path)
+    if plan.get("recording_id") != recording_identity:
+        raise ValueError("Detection plan recording identity differs from the request.")
+    if Path(str(plan.get("analysis_zarr") or "")).resolve() != archive_path:
+        raise ValueError("Detection plan targets a different analysis archive.")
+    units = plan.get("work_units")
+    if not isinstance(units, list) or not units:
+        raise ValueError("Detection plan lacks work_units.")
+    if plan.get("work_unit_count") != len(units):
+        raise ValueError("Detection plan work_unit_count is inconsistent.")
 
     load_started = time.perf_counter()
-    source_metadata_path = source_path / "zarr.json"
-    source_metadata_sha_before = sha256_file(source_metadata_path)
-    source = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
-    canonical_input = load_detection_benchmark_input(
-        source_path,
+    archive = zarr.open_group(str(archive_path), mode="r", use_consolidated=False)
+    loaded = [
+        _source_member(
+            archive=archive,
+            analysis_zarr=archive_path,
+            recording_frame_index=frame_index,
+            recording_identity=recording_identity,
+            unit=unit,
+            expected_index=index,
+            expected_model_sha256=model_sha,
+        )
+        for index, unit in enumerate(units)
+        if isinstance(unit, Mapping)
+    ]
+    if len(loaded) != len(units):
+        raise ValueError("Every detection plan work unit must be an object.")
+    members = tuple(item[0] for item in loaded)
+    source_evidence = tuple(item[1] for item in loaded)
+    source_keys = np.concatenate([item[2] for item in loaded])
+    dimensions = {(item.source_width, item.source_height) for item in members}
+    if len(dimensions) != 1:
+        raise ValueError("Legacy detection clips have inconsistent source dimensions.")
+    source_width, source_height = next(iter(dimensions))
+    bound = bind_clipped_detection_artifacts(
+        members,
         recording_identity=recording_identity,
-        frame_limit=None,
+        n_frames=expected_n_frames,
+        source_width=source_width,
+        source_height=source_height,
     )
-    if canonical_input.dimensions.n_frames != expected_n_frames:
-        raise ValueError("Canonical source frame count differs from the request.")
-    model_evidence = _require_recorded_model(
-        source,
-        model_artifact=source_model_artifact,
-        expected_sha256=model_sha,
-    )
-    count_evidence = _validate_legacy_counts(
-        source,
-        benchmark_input=canonical_input,
-    )
-    phases["load_and_validate_recording_source"] = (
-        time.perf_counter() - load_started
-    )
+    if bound.dimensions.n_instances != expected_n_instances:
+        raise ValueError("Bound clip row count differs from expected_n_instances.")
+    if not np.array_equal(
+        source_keys,
+        np.asarray(bound.arrays["instances/instance_key"]),
+    ):
+        raise ValueError("Rebuilt instance keys differ from persisted clip identities.")
+    phases["load_and_bind_clip_sources"] = time.perf_counter() - load_started
 
-    anchor_started = time.perf_counter()
-    anchor_evidence = _validate_anchor(
-        anchor_group_path=anchor_group,
-        canonical_input=canonical_input,
-    )
-    phases["validate_canonical_anchor"] = time.perf_counter() - anchor_started
-
+    source_pixel_document = {
+        "recording_identity": recording_identity,
+        "source_width": source_width,
+        "source_height": source_height,
+        "clip_sources": list(source_evidence),
+    }
+    provenance: dict[str, object] = {
+        "schema_id": ADAPTER_SCHEMA_ID,
+        "schema_version": ADAPTER_SCHEMA_VERSION,
+        "benchmark_only": True,
+        "recording_identity": recording_identity,
+        "detection_plan": {
+            "path": str(plan_path),
+            "sha256": sha256_file(plan_path),
+        },
+        "source_clips": list(source_evidence),
+        "source_clips_digest": canonical_json_sha256(list(source_evidence)),
+        "input_artifacts": [{"role": "detect_model", "sha256": model_sha}],
+        "conversion": ("legacy_clip_detection_groups_to_native_canonical_v2_benchmark"),
+        "inference_reexecuted": False,
+        "production_state_changes": [],
+    }
+    frame_authority_sha = sha256_file(frame_index)
     scratch = _require_node_local_scratch(scratch_parent)
     with tempfile.TemporaryDirectory(
         prefix="palette_crimson_canonical_", dir=scratch
     ) as temporary_directory:
-        local_root = Path(temporary_directory) / ".palette_benchmarks"
-        local_root.mkdir()
-        local = local_root / "canonical.zarr"
+        local = Path(temporary_directory) / "canonical.zarr"
         write_started = time.perf_counter()
-        candidate = publish_legacy_canonical_detection_shadow(
-            source_group_path=source_path,
+        candidate = write_native_clipped_detection_candidate(
+            bound,
             destination=local,
             run_id=run_id,
             recording_identity=recording_identity,
-            source_run_id=source_path.name,
-            shadow_root=local_root,
-            coordinate_catalog=True,
+            producer_id=(
+                "fisheye.utils.finalize_recording_canonical_detection_benchmark_adapter"
+            ),
+            producer_version="v3",
+            source_frame_authority={
+                "record_ref": str(frame_index),
+                "record_sha256": frame_authority_sha,
+            },
+            source_pixel_authority={
+                "record_ref": "legacy_clip_detect_groups@source_pixel_dimensions",
+                "record_sha256": canonical_json_sha256(source_pixel_document),
+            },
+            model_artifact_sha256=model_sha,
+            run_provenance=provenance,
         )
         phases["node_local_publication"] = time.perf_counter() - write_started
-        shadow_receipt_path = local / "shadow_publication_receipt.json"
-        shadow_receipt = _read_json(shadow_receipt_path)
-        shadow_receipt["output_path"] = str(output)
-        write_json_atomic(shadow_receipt_path, shadow_receipt)
+        native_receipt_path = local / "native_detection_candidate_receipt.json"
+        native_receipt = _read_json(native_receipt_path)
+        native_receipt["output_path"] = str(output)
+        write_json_atomic(native_receipt_path, native_receipt)
         adapter_payload: dict[str, object] = {
             "status": "complete",
             "recording_identity": recording_identity,
             "output_archive": str(output),
             "output_run_id": run_id,
-            "n_frames": canonical_input.dimensions.n_frames,
-            "n_instances": canonical_input.dimensions.n_instances,
-            "source_width": canonical_input.dimensions.source_width,
-            "source_height": canonical_input.dimensions.source_height,
+            "n_frames": bound.dimensions.n_frames,
+            "n_instances": bound.dimensions.n_instances,
+            "source_width": bound.dimensions.source_width,
+            "source_height": bound.dimensions.source_height,
             "run_manifest_digest": candidate.manifest["payload_digest"],
             "storage_profile_id": candidate.plans.profile.profile_id,
-            "source_detection_group_path": str(source_path),
-            "source_detection_metadata_sha256": source_metadata_sha_before,
-            "source_model_artifact": model_evidence,
-            "source_count_validation": count_evidence,
+            "detection_plan_sha256": sha256_file(plan_path),
+            "recording_frame_index_sha256": frame_authority_sha,
             "detection_model_sha256": model_sha,
-            "canonical_anchor": anchor_evidence,
-            "canonical_manifest_schema_version": candidate.manifest["schema_version"],
-            "coordinate_catalog": True,
+            "clip_source_digest": canonical_json_sha256(list(source_evidence)),
             "selector_eligible": False,
             "registry_registered": False,
             "production_state_changes": [],
@@ -342,18 +398,11 @@ def finalize_recording_canonical_detection_benchmark_adapter(
         local_stats = storage_stats(local)
         phases["publish_to_shared_storage"] = _publish_directory(local, output)
 
-    reopened = zarr.open_group(
-        str(output / "detect_runs" / run_id),
-        mode="r",
-        use_consolidated=False,
-    )
-    reopened_manifest = reopened.attrs.get("run_manifest")
-    if not isinstance(reopened_manifest, Mapping) or reopened_manifest.get(
-        "payload_digest"
-    ) != candidate.manifest["payload_digest"]:
-        raise RuntimeError("Published canonical manifest differs from node-local output.")
-    if sha256_file(source_metadata_path) != source_metadata_sha_before:
-        raise RuntimeError("Canonical source metadata changed during publication.")
+    reopened = load_native_canonical_detection_candidate(output, run_id=run_id)
+    if reopened.manifest["payload_digest"] != candidate.manifest["payload_digest"]:
+        raise RuntimeError(
+            "Published canonical manifest differs from node-local output."
+        )
     return {
         "schema_id": ADAPTER_SCHEMA_ID,
         "schema_version": ADAPTER_SCHEMA_VERSION,
@@ -361,7 +410,7 @@ def finalize_recording_canonical_detection_benchmark_adapter(
         "created_at_utc": utc_now(),
         "output_archive": str(output),
         "output_run_id": run_id,
-        "run_manifest_digest": reopened_manifest["payload_digest"],
+        "run_manifest_digest": reopened.manifest["payload_digest"],
         "adapter_receipt_path": str(output / ADAPTER_RECEIPT_NAME),
         "adapter_receipt_digest": adapter_receipt["payload_digest"],
         "selector_eligible": False,
@@ -369,9 +418,7 @@ def finalize_recording_canonical_detection_benchmark_adapter(
         "production_state_changes": [],
         "inference_reexecuted": False,
         "node_local_materialization": True,
-        "canonical_anchor_equal": True,
-        "canonical_manifest_schema_version": candidate.manifest["schema_version"],
-        "coordinate_catalog": True,
+        "native_clip_binding_validated": True,
         "local_store_stats": local_stats,
         "timing_seconds": phases,
         "elapsed_seconds": float(time.perf_counter() - started),
@@ -381,13 +428,13 @@ def finalize_recording_canonical_detection_benchmark_adapter(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-detection-group", type=Path, required=True)
+    parser.add_argument("--analysis-zarr", type=Path, required=True)
+    parser.add_argument("--detection-plan", type=Path, required=True)
+    parser.add_argument("--recording-frame-index", type=Path, required=True)
     parser.add_argument("--recording-identity", required=True)
-    parser.add_argument("--source-model-artifact", type=Path, required=True)
-    parser.add_argument("--canonical-anchor-archive", type=Path, required=True)
-    parser.add_argument("--canonical-anchor-run", required=True)
     parser.add_argument("--expected-model-sha256", required=True)
     parser.add_argument("--expected-n-frames", type=int, required=True)
+    parser.add_argument("--expected-n-instances", type=int, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--benchmark-root", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
@@ -405,13 +452,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         scratch_parent.mkdir(parents=True, exist_ok=True)
     try:
         result = finalize_recording_canonical_detection_benchmark_adapter(
-            source_detection_group_path=args.source_detection_group,
+            analysis_zarr=args.analysis_zarr,
+            detection_plan_path=args.detection_plan,
+            recording_frame_index=args.recording_frame_index,
             recording_identity=args.recording_identity,
-            source_model_artifact=args.source_model_artifact,
-            canonical_anchor_archive=args.canonical_anchor_archive,
-            canonical_anchor_run_id=args.canonical_anchor_run,
             expected_model_sha256=args.expected_model_sha256,
             expected_n_frames=args.expected_n_frames,
+            expected_n_instances=args.expected_n_instances,
             destination=args.destination,
             benchmark_root=args.benchmark_root,
             run_id=args.run_id,

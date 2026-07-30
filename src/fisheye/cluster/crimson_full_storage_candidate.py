@@ -41,7 +41,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 
 PLAN_SCHEMA_ID = "palette.crimson.full_storage_candidate_plan"
-PLAN_SCHEMA_VERSION = 2
+PLAN_SCHEMA_VERSION = 3
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -71,27 +71,20 @@ def _git(repository: Path, *arguments: str) -> str:
 
 def _require_commit(value: str, *, name: str) -> str:
     text = str(value).strip().lower()
-    if len(text) != 40 or any(character not in "0123456789abcdef" for character in text):
+    if len(text) != 40 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
         raise ValueError(f"{name} must be one full lowercase Git commit.")
     return text
 
 
 def _require_sha256(value: str, *, name: str) -> str:
     text = str(value).strip().lower()
-    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+    if len(text) != 64 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
         raise ValueError(f"{name} must be one lowercase SHA-256 digest.")
     return text
-
-
-def _require_relative_group(value: str, *, name: str) -> str:
-    path = Path(str(value).strip())
-    if (
-        path.is_absolute()
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ValueError(f"{name} must be one safe archive-relative group path.")
-    return path.as_posix()
 
 
 def _clips_from_detection_plan(
@@ -143,16 +136,12 @@ class CrimsonFullStorageCandidateRequest:
     analysis_zarr: Path
     detection_plan_path: Path
     collection_id: str
-    canonical_archive: Path
-    canonical_run_id: str
-    canonical_source_group_path: str
-    canonical_model_artifact: Path
-    expected_canonical_model_sha256: str
     source_keypoint_group_path: str
     source_keypoint_metadata_sha256: str
     expected_detection_model_sha256: str
     expected_model_sha256: str
     expected_n_frames: int
+    expected_canonical_n_instances: int
     expected_n_instances: int
     output_root: Path
     palette_repo: Path
@@ -186,7 +175,9 @@ class CrimsonFullStorageCandidateLsfPlan:
 def build_full_storage_candidate_plan(
     request: CrimsonFullStorageCandidateRequest,
 ) -> CrimsonFullStorageCandidateLsfPlan:
-    candidate_id = safe_component(request.candidate_id, default="candidate", max_length=72)
+    candidate_id = safe_component(
+        request.candidate_id, default="candidate", max_length=72
+    )
     if candidate_id != request.candidate_id:
         raise ValueError("candidate_id must already be one canonical path-safe value.")
     root = request.output_root.expanduser().resolve()
@@ -215,10 +206,6 @@ def build_full_storage_candidate_plan(
         request.expected_detection_model_sha256,
         name="expected_detection_model_sha256",
     )
-    expected_canonical_model_sha = _require_sha256(
-        request.expected_canonical_model_sha256,
-        name="expected_canonical_model_sha256",
-    )
     analysis = request.analysis_zarr.expanduser().resolve()
     plan_path = request.detection_plan_path.expanduser().resolve()
     detection_plan = _read_json(plan_path)
@@ -235,32 +222,27 @@ def build_full_storage_candidate_plan(
     )
     if frame_sum != request.expected_n_frames:
         raise ValueError("Detection plan frame sum differs from expected_n_frames.")
-    detection_model_path = Path(
-        str(detection_plan.get("model") or "")
-    ).expanduser().resolve()
+    if (
+        type(request.expected_canonical_n_instances) is not int
+        or request.expected_canonical_n_instances < 0
+    ):
+        raise ValueError(
+            "expected_canonical_n_instances must be a nonnegative exact integer."
+        )
+    if (
+        type(request.expected_n_instances) is not int
+        or request.expected_n_instances < 0
+    ):
+        raise ValueError("expected_n_instances must be a nonnegative exact integer.")
+    detection_model_path = (
+        Path(str(detection_plan.get("model") or "")).expanduser().resolve()
+    )
     if not detection_model_path.is_file():
         raise FileNotFoundError(
             f"Pinned detection model not found: {detection_model_path}"
         )
     if _sha256_file(detection_model_path) != expected_detection_model_sha:
         raise ValueError("Detection plan model differs from its requested pin.")
-    canonical_source_relative = _require_relative_group(
-        request.canonical_source_group_path,
-        name="canonical_source_group_path",
-    )
-    canonical_source = analysis / canonical_source_relative
-    canonical_source_metadata = canonical_source / "zarr.json"
-    if not canonical_source_metadata.is_file():
-        raise FileNotFoundError(
-            f"Canonical recording source not found: {canonical_source}"
-        )
-    canonical_model_artifact = request.canonical_model_artifact.expanduser().resolve()
-    if not canonical_model_artifact.is_file():
-        raise FileNotFoundError(
-            f"Canonical source model not found: {canonical_model_artifact}"
-        )
-    if _sha256_file(canonical_model_artifact) != expected_canonical_model_sha:
-        raise ValueError("Canonical source model differs from its requested pin.")
     source_metadata_path = analysis / request.source_keypoint_group_path / "zarr.json"
     if _sha256_file(source_metadata_path) != source_metadata_sha:
         raise ValueError("Source keypoint metadata differs from its requested pin.")
@@ -282,24 +264,21 @@ def build_full_storage_candidate_plan(
         command=(
             "scripts/py",
             "-m",
-            (
-                "fisheye.utils."
-                "finalize_recording_canonical_detection_benchmark_adapter"
-            ),
-            "--source-detection-group",
-            str(canonical_source),
+            ("fisheye.utils.finalize_recording_canonical_detection_benchmark_adapter"),
+            "--analysis-zarr",
+            str(analysis),
+            "--detection-plan",
+            str(plan_path),
+            "--recording-frame-index",
+            str(request.recording_dir / "recording_frame_index.parquet"),
             "--recording-identity",
             recording_identity,
-            "--source-model-artifact",
-            str(canonical_model_artifact),
-            "--canonical-anchor-archive",
-            str(request.canonical_archive),
-            "--canonical-anchor-run",
-            request.canonical_run_id,
             "--expected-model-sha256",
-            expected_canonical_model_sha,
+            expected_detection_model_sha,
             "--expected-n-frames",
             str(request.expected_n_frames),
+            "--expected-n-instances",
+            str(request.expected_canonical_n_instances),
             "--destination",
             str(canonical_archive),
             "--benchmark-root",
@@ -326,14 +305,10 @@ def build_full_storage_candidate_plan(
             "candidate_id": candidate_id,
             "canonical_archive": str(canonical_archive),
             "canonical_run_id": canonical_run_id,
-            "canonical_anchor_archive": str(request.canonical_archive),
-            "canonical_anchor_run_id": request.canonical_run_id,
-            "canonical_source_group_path": str(canonical_source),
-            "canonical_source_metadata_sha256": _sha256_file(
-                canonical_source_metadata
-            ),
-            "canonical_source_model_artifact": str(canonical_model_artifact),
-            "canonical_source_model_sha256": expected_canonical_model_sha,
+            "canonical_source_role": "native_v003_clipped_collection",
+            "expected_n_instances": request.expected_canonical_n_instances,
+            "detection_plan_sha256": _sha256_file(plan_path),
+            "detection_model_sha256": expected_detection_model_sha,
             "node_local_materialization": True,
             "selector_activation": "none_direct_path_only",
             "registry_update": False,
@@ -450,24 +425,18 @@ def build_full_storage_candidate_plan(
         "recording_identity": recording_identity,
         "dimensions": {
             "n_frames": request.expected_n_frames,
-            "n_instances": request.expected_n_instances,
+            "canonical_n_instances": request.expected_canonical_n_instances,
+            "refined_n_instances": request.expected_n_instances,
         },
         "inputs": {
             "analysis_zarr": str(analysis),
             "detection_plan": str(plan_path),
             "detection_plan_sha256": _sha256_file(plan_path),
-            "canonical_archive": str(request.canonical_archive),
-            "canonical_run_id": request.canonical_run_id,
-            "canonical_anchor_role": "logical_equality_input_only",
+            "canonical_source_role": "native_v003_clipped_collection",
             "canonical_output_archive": str(canonical_archive),
             "canonical_output_run_id": canonical_run_id,
+            "expected_canonical_n_instances": (request.expected_canonical_n_instances),
             "expected_detection_model_sha256": expected_detection_model_sha,
-            "canonical_source_group_path": canonical_source_relative,
-            "canonical_source_metadata_sha256": _sha256_file(
-                canonical_source_metadata
-            ),
-            "canonical_model_artifact": str(canonical_model_artifact),
-            "expected_canonical_model_sha256": expected_canonical_model_sha,
             "source_keypoint_group_path": request.source_keypoint_group_path,
             "source_keypoint_metadata_sha256": source_metadata_sha,
             "expected_model_sha256": expected_model_sha,
@@ -545,16 +514,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-zarr", type=Path, required=True)
     parser.add_argument("--detection-plan", type=Path, required=True)
     parser.add_argument("--collection-id", required=True)
-    parser.add_argument("--canonical-archive", type=Path, required=True)
-    parser.add_argument("--canonical-run", required=True)
-    parser.add_argument("--canonical-source-group", required=True)
-    parser.add_argument("--canonical-model-artifact", type=Path, required=True)
-    parser.add_argument("--expected-canonical-model-sha256", required=True)
     parser.add_argument("--source-keypoint-group", required=True)
     parser.add_argument("--source-keypoint-metadata-sha256", required=True)
     parser.add_argument("--expected-detection-model-sha256", required=True)
     parser.add_argument("--expected-model-sha256", required=True)
     parser.add_argument("--expected-n-frames", type=int, required=True)
+    parser.add_argument("--expected-canonical-n-instances", type=int, required=True)
     parser.add_argument("--expected-n-instances", type=int, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--palette-repo", type=Path, required=True)
@@ -578,20 +543,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             analysis_zarr=args.analysis_zarr,
             detection_plan_path=args.detection_plan,
             collection_id=args.collection_id,
-            canonical_archive=args.canonical_archive,
-            canonical_run_id=args.canonical_run,
-            canonical_source_group_path=args.canonical_source_group,
-            canonical_model_artifact=args.canonical_model_artifact,
-            expected_canonical_model_sha256=(
-                args.expected_canonical_model_sha256
-            ),
             source_keypoint_group_path=args.source_keypoint_group,
             source_keypoint_metadata_sha256=args.source_keypoint_metadata_sha256,
-            expected_detection_model_sha256=(
-                args.expected_detection_model_sha256
-            ),
+            expected_detection_model_sha256=(args.expected_detection_model_sha256),
             expected_model_sha256=args.expected_model_sha256,
             expected_n_frames=args.expected_n_frames,
+            expected_canonical_n_instances=args.expected_canonical_n_instances,
             expected_n_instances=args.expected_n_instances,
             output_root=args.output_root,
             palette_repo=args.palette_repo,
@@ -604,9 +561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     if args.apply:
-        result = apply_full_storage_candidate_plan(
-            plan, submit_host=args.submit_host
-        )
+        result = apply_full_storage_candidate_plan(plan, submit_host=args.submit_host)
     else:
         materialize_full_storage_candidate_plan(plan)
         result = dict(plan.plan_manifest)

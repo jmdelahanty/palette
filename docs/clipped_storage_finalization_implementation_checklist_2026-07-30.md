@@ -81,12 +81,13 @@ finalizer copies physical chunk or shard declarations from clip outputs.
       aggregate. It requires pinned source metadata and model digests, exact
       `instance_key` set equality, crop origin/size equality, frame-map
       equality, node-local materialization, and shared-byte-planner output.
-- [x] Add a benchmark-only canonical adapter for the old full-duration Crimson
-      anchor. It reads the exact pinned recording-level legacy run, validates
-      count aliases and the recorded model identity, requires exact nine-array
-      equality with the anchor, and publishes a current coordinate-catalog
-      manifest-v3 access-aware store on node-local scratch before shared
-      placement. Per-clip v003 detections remain separate refined-chain inputs.
+- [x] Add a benchmark-only canonical adapter for the current v003 clipped
+      collection. It rebuilds from every clip detection group, verifies stable
+      keys and the recording frame map, pins the expected recording row count,
+      and publishes a current native-manifest-v2 access-aware store on
+      node-local scratch before shared placement. The earlier v002 Crimson
+      fixture is an independent performance baseline, not an equality
+      authority for the v003 refined chain.
 - [x] Vectorize recording keypoint row reconciliation by `instance_key`; the
       full-duration finalizer no longer performs one Python dictionary/loop
       operation per observation.

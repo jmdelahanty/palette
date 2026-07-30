@@ -2,9 +2,8 @@
 
 Date: 2026-07-30
 
-Status: implementation corrected after the first cluster preflight failed
-closed on a raw-source identity mismatch; corrected immutable deployment,
-resubmission, and Crimson full-duration measurement remain pending.
+Status: implementation and focused validation complete; immutable deployment,
+LSF submission, and Crimson full-duration measurement remain pending.
 
 ## Why the full run is required
 
@@ -34,24 +33,20 @@ or persist crop pixels in an analysis archive. The only visibility marker is
 `handoff_manifest.json`, written after every receipt, run manifest, decoded
 dimension, consolidated declaration, and selector state has been reopened.
 
-The earlier full-duration canonical detection fixture is only a decoded-value
-anchor. Its physical layout is useful, but it predates the current embedded
-canonical `run_manifest`. The workflow therefore does not pass that older
-envelope downstream. Its first job now reads the exact recording-level legacy
-run from which the anchor was derived,
-`detect_runs/detect_2026-05-14_15-39-11`. It validates both legacy count
-aliases against `frame_indices`, pins the recorded v002 model identity and
-shared model bytes, proves all nine decoded arrays equal the old anchor, and
-writes a fresh coordinate-catalog manifest-v3 access-aware canonical store on
-node-local scratch. Only that current store is used by refined detection,
-crop, keypoint, and final handoff gates.
+The earlier full-duration canonical detection fixture is an independent v002
+performance baseline, not a decoded-value authority for this chain. The
+maintained 22-clip collection was produced by the v003 model and contains a
+different logical snapshot. Candidate attempts v2 and v3 failed closed when
+they incorrectly required equality between those snapshots: the first exposed
+different row counts and the second exposed identity-domain differences.
 
-The 22 per-clip v003 detect/refine artifacts are intentionally different
-logical snapshots. They remain the strict inputs to the refined, crop, and
-keypoint chain, but are not used to reconstruct the raw canonical anchor. The
-first submitted workflow correctly rejected the accidental conflation: the
-clip groups contained 1,186,376 rows while the pinned recording-level anchor
-contains 1,187,087 rows.
+The corrected workflow rebuilds the recording table from all 22 completed
+v003 clip detection groups through the current native binder, verifies the
+persisted clip keys and complete recording frame map, and writes a fresh
+manifest-v2 access-aware canonical store on node-local scratch. That exact
+native clip evidence is required by strict refined detection, crop, keypoint,
+and final handoff gates. The older v002 fixture remains untouched and is not an
+input to this candidate.
 
 ## Sleepyfish pins
 
@@ -59,6 +54,7 @@ The first full fixture uses:
 
 - recording: `sleepyfish_2026_05_05_17_45_30_cam2010095`;
 - camera frames: `1,188,000`;
+- canonical v003 rows: `1,186,376`;
 - refined/crop/keypoint rows: `1,169,010`;
 - source aggregate:
   `keypoints_runs/keypoints_sleepyfish_kp_allclips_20260708_01`;
@@ -66,10 +62,8 @@ The first full fixture uses:
   `57bba596f9c2c76626909d99ff084dec5935e2cd829817a140a836f1b0fdfa03`;
 - pose model SHA-256:
   `cce63d534a8f1491db1e2c71cb9236768c445722013dc39faeaf62a9d0a9a377`;
-- per-clip v003 detection model SHA-256:
+- detection model SHA-256:
   `b365e5da4c712e8ed347baed260915b939251036f06a91e17c96f6028dde1e1d`;
-- canonical recording-level v002 detection model SHA-256:
-  `305abbf0d93271c4b4d278dd1a12e8f6ce4f6d67f9af96309fa196375858aa82`;
 - recording frame-index SHA-256:
   `081c40df4a5a72aa3e77c4eb1c61c8edb2413ae3f8b99d5c17e6aa9c9ed5f7f5`;
 - Crimson full-analysis contract commit:
@@ -124,8 +118,9 @@ and Crimson revisions, host, and LSF job identity.
 
 - [x] Compose the seven-store DAG and one terminal handoff.
 - [x] Add standalone crop/refined archive rebinding.
-- [x] Normalize the historical canonical anchor into a current manifest-v3,
-      selector-ineligible, access-aware standalone store.
+- [x] Rebuild the v003 clip collection into a current native-v2,
+      selector-ineligible, access-aware recording store without conflating it
+      with the earlier v002 performance fixture.
 - [x] Add the benchmark-only recording aggregate adapter.
 - [x] Use node-local compute then shared publication for keypoint stores.
 - [x] Pin Palette and Crimson commits and source/model hashes.
@@ -134,12 +129,9 @@ and Crimson revisions, host, and LSF job identity.
 - [x] Route jobs requesting more than the `short` queue's 61-minute hard limit
       to the normal CPU `local` queue; keep one-hour validation jobs on
       `short`.
-- [x] Commit and deploy the initial branch as a unique `/groups` worktree.
-- [x] Materialize, review, and submit the initial full candidate; retain its
-      fail-closed source-mismatch evidence without modifying it.
-- [ ] Commit and deploy the corrected recording-level canonical source pin.
-- [ ] Materialize and submit a new immutable candidate version through
-      `login1-citrus-poller`.
+- [ ] Commit and deploy this branch as a unique `/groups` worktree.
+- [ ] Materialize and review `candidate_plan.json` and `lsf_plan.json`.
+- [ ] Submit the full candidate through `login1-citrus-poller`.
 - [ ] Require terminal `handoff_manifest.json` before giving paths to Crimson.
 - [ ] Run Crimson's fresh-process full-duration startup, seek, traversal,
       physical-I/O, cache, and RSS matrix.
@@ -150,6 +142,6 @@ and Crimson revisions, host, and LSF job identity.
 
 Thirty-six focused tests pass, including real Zarr v3 publication/reopen tests,
 the standalone crop/refined split, vectorized multi-row reconciliation, full
-plan pins, canonical-anchor equality, node-local guards, receipt rebinding,
+plan pins, native clip binding, node-local guards, receipt rebinding,
 candidate composition, and the terminal handoff. Static compilation, focused
 Ruff checks, and `git diff --check` also pass.
