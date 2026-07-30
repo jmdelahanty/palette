@@ -48,6 +48,10 @@ from fisheye.shared.zarr.array_contracts import (
     REFINED_SOURCE_BBOX_IMG_XYXY_V1,
     REFINED_SOURCE_BBOX_NORM_COORDS_V1,
     REFINED_SOURCE_CENTERS_IMG_XY_V1,
+    SUBJECT_MASK_BBOX_XYXY_V1,
+    SUBJECT_MASK_CENTROID_XY_V1,
+    SUBJECT_MASK_PROBABILITIES_FLOAT16_V1,
+    SUBJECT_MASK_PROBABILITIES_UINT8_V1,
     ArrayContract,
     ArrayContractCatalog,
 )
@@ -202,6 +206,26 @@ _BINDINGS = (
         semantic_role=DERIVED,
     ),
     _binding(BODY_FRAME_ORIGIN_XY_V1, SOURCE_CAMERA_POINT_XY, semantic_role=DERIVED),
+    _binding(
+        SUBJECT_MASK_PROBABILITIES_UINT8_V1,
+        ROI_RASTER_YX,
+        semantic_role=AUTHORITY,
+    ),
+    _binding(
+        SUBJECT_MASK_PROBABILITIES_FLOAT16_V1,
+        ROI_RASTER_YX,
+        semantic_role=AUTHORITY,
+    ),
+    _binding(
+        SUBJECT_MASK_CENTROID_XY_V1,
+        ROI_POINT_XY,
+        semantic_role=DERIVED,
+    ),
+    _binding(
+        SUBJECT_MASK_BBOX_XYXY_V1,
+        ROI_BBOX_XYXY,
+        semantic_role=DERIVED,
+    ),
     _binding(DENSE_SUBJECT_MASKS_ROI_V1, ROI_RASTER_YX, semantic_role=AUTHORITY),
     _binding(CONTOUR_POINTS_XY_V1, ROI_POINTS_XY, semantic_role=SAMPLED),
 )

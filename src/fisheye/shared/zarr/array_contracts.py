@@ -155,9 +155,7 @@ class ArrayContract:
                 f"rank mismatch: expected {len(self.shape_template)}, got "
                 f"{len(observed)} with shape {observed!r}",
             )
-        for axis, (actual, expected) in enumerate(
-            zip(observed, self.shape_template)
-        ):
+        for axis, (actual, expected) in enumerate(zip(observed, self.shape_template)):
             if actual < 0:
                 errors.append(f"axis {axis} ({self.axis_names[axis]}) is negative")
             elif isinstance(expected, int) and actual != expected:
@@ -366,9 +364,7 @@ DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1 = ArrayContract(
     dtype=INT64,
     shape_template=("n_instances",),
     axis_names=("instance",),
-    description=(
-        "Sealed acquisition-camera frame index for each detection instance."
-    ),
+    description=("Sealed acquisition-camera frame index for each detection instance."),
     units="acquisition_frame_index",
 )
 
@@ -416,9 +412,7 @@ DETECTION_CENTERS_IMG_XY_V1 = ArrayContract(
     dtype=FLOAT32,
     shape_template=("n_instances", 2),
     axis_names=("instance", "xy"),
-    description=(
-        "Exact source-camera continuous-pixel midpoint of bbox_img_xyxy."
-    ),
+    description=("Exact source-camera continuous-pixel midpoint of bbox_img_xyxy."),
     units="pixels",
     coordinate_space="source_camera_continuous_pixel",
 )
@@ -450,8 +444,7 @@ REFINED_DETECTION_REFINED_ROW_IDS_V1 = ArrayContract(
     shape_template=("n_instances",),
     axis_names=("instance",),
     description=(
-        "Stable non-reused logical row identity within one refined-detection "
-        "lineage."
+        "Stable non-reused logical row identity within one refined-detection lineage."
     ),
     units="refined_row_identity",
 )
@@ -493,9 +486,7 @@ REFINED_DETECTION_MANUAL_EDIT_FLAGS_V1 = ArrayContract(
     dtype=BOOL,
     shape_template=("n_instances",),
     axis_names=("instance",),
-    description=(
-        "Whether a human changed or created the persisted refined instance."
-    ),
+    description=("Whether a human changed or created the persisted refined instance."),
 )
 
 REFINED_DETECTION_SOURCE_DETECT_ROW_INDEX_V1 = ArrayContract(
@@ -543,9 +534,7 @@ REFINED_SOURCE_FRAME_INDICES_V1 = ArrayContract(
 )
 
 REFINED_SOURCE_ACQUISITION_FRAME_INDEX_V1 = ArrayContract(
-    schema_id=(
-        "palette.array.refined_detection.source.source_acquisition_frame_index"
-    ),
+    schema_id=("palette.array.refined_detection.source.source_acquisition_frame_index"),
     schema_version=1,
     dtype=INT64,
     shape_template=("n_source_detections",),
@@ -627,9 +616,7 @@ REFINED_SOURCE_DECISION_CODES_V1 = ArrayContract(
 )
 
 REFINED_SOURCE_RESOLVED_REFINED_ROW_ID_V1 = ArrayContract(
-    schema_id=(
-        "palette.array.refined_detection.source.resolved_refined_row_id"
-    ),
+    schema_id=("palette.array.refined_detection.source.resolved_refined_row_id"),
     schema_version=1,
     dtype=INT64,
     shape_template=("n_source_detections",),
@@ -695,9 +682,7 @@ REFINED_INSTANCE_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1 = ArrayContract(
 )
 
 REFINED_INSTANCE_SOURCE_CLIP_DETECT_ROW_INDEX_V1 = ArrayContract(
-    schema_id=(
-        "palette.array.refined_detection.lineage.source_clip_detect_row_index"
-    ),
+    schema_id=("palette.array.refined_detection.lineage.source_clip_detect_row_index"),
     schema_version=1,
     dtype=INT64,
     shape_template=("n_instances",),
@@ -742,8 +727,7 @@ REFINED_SOURCE_CLIP_INDICES_V1 = ArrayContract(
 
 REFINED_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1 = ArrayContract(
     schema_id=(
-        "palette.array.refined_detection.source.lineage."
-        "source_clip_local_frame_indices"
+        "palette.array.refined_detection.source.lineage.source_clip_local_frame_indices"
     ),
     schema_version=1,
     dtype=INT32,
@@ -755,8 +739,7 @@ REFINED_SOURCE_CLIP_LOCAL_FRAME_INDICES_V1 = ArrayContract(
 
 REFINED_SOURCE_CLIP_DETECT_ROW_INDEX_V1 = ArrayContract(
     schema_id=(
-        "palette.array.refined_detection.source.lineage."
-        "source_clip_detect_row_index"
+        "palette.array.refined_detection.source.lineage.source_clip_detect_row_index"
     ),
     schema_version=1,
     dtype=INT64,
@@ -768,16 +751,13 @@ REFINED_SOURCE_CLIP_DETECT_ROW_INDEX_V1 = ArrayContract(
 
 REFINED_SOURCE_RESOLVED_SOURCE_REFINED_ROW_ID_V1 = ArrayContract(
     schema_id=(
-        "palette.array.refined_detection.source.lineage."
-        "source_resolved_refined_row_id"
+        "palette.array.refined_detection.source.lineage.source_resolved_refined_row_id"
     ),
     schema_version=1,
     dtype=INT64,
     shape_template=("n_source_detections",),
     axis_names=("source_detection",),
-    description=(
-        "Original clip-local resolved refined row ID, or -1 when unaccepted."
-    ),
+    description=("Original clip-local resolved refined row ID, or -1 when unaccepted."),
     units="clip_refined_row_identity",
 )
 
@@ -864,8 +844,7 @@ CROP_SOURCE_ROW_SIGNATURE_V1 = ArrayContract(
     shape_template=("n_instances", 32),
     axis_names=("instance", "sha256_byte"),
     description=(
-        "Per-row source compatibility signature for incremental crop "
-        "materialization."
+        "Per-row source compatibility signature for incremental crop materialization."
     ),
     units="sha256_digest_byte",
 )
@@ -1211,9 +1190,7 @@ KEYPOINT_QUALITY_POSE_FLAGS_V1 = ArrayContract(
     dtype=UINT16,
     shape_template=("n_instances",),
     axis_names=("instance",),
-    description=(
-        "Bitwise row-level findings from the manifest's pose flag registry."
-    ),
+    description=("Bitwise row-level findings from the manifest's pose flag registry."),
 )
 
 KEYPOINT_QUALITY_PROPOSED_KEYPOINT_VALID_V1 = ArrayContract(
@@ -1308,6 +1285,128 @@ BODY_FRAME_HEADING_DEG_V1 = ArrayContract(
     axis_names=("instance",),
     description="Derived atan2(-forward_y, forward_x) heading cache.",
     units="degrees",
+)
+
+SUBJECT_MASK_SOURCE_CROP_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.source_crop_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Exact row indexes into the bound canonical crop-v2 snapshot.",
+    units="crop_row_index",
+)
+
+SUBJECT_MASK_PROBABILITIES_UINT8_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.probabilities_uint8",
+    schema_version=1,
+    dtype=UINT8,
+    shape_template=("n_rois", "n_channels", "H", "W"),
+    axis_names=("roi", "component", "y", "x"),
+    description=(
+        "Authoritative independent-sigmoid component probabilities encoded "
+        "linearly from 0 to 255 in ROI pixel space."
+    ),
+    units="linear_uint8_probability_0_255",
+    coordinate_space="roi_pixel",
+)
+
+SUBJECT_MASK_PROBABILITIES_FLOAT16_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.probabilities_float16",
+    schema_version=1,
+    dtype=FLOAT16,
+    shape_template=("n_rois", "n_channels", "H", "W"),
+    axis_names=("roi", "component", "y", "x"),
+    description=(
+        "Authoritative independent-sigmoid component probabilities stored in "
+        "unit-interval float16 form in ROI pixel space."
+    ),
+    units="unit_probability",
+    coordinate_space="roi_pixel",
+)
+
+SUBJECT_MASK_AVAILABLE_CHANNELS_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.available_channels",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_channels",),
+    axis_names=("component",),
+    description="Whether each declared component channel is physically available.",
+)
+
+SUBJECT_MASK_PROB_MAX_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.prob_max",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Maximum decoded native-ROI probability for each component.",
+    units="unit_probability",
+)
+
+SUBJECT_MASK_PRESENT_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.mask_present",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Whether thresholded foreground area is nonzero.",
+)
+
+SUBJECT_MASK_AREA_PX_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.area_px",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Thresholded foreground pixel count for each component.",
+    units="pixels_squared",
+)
+
+SUBJECT_MASK_CENTROID_XY_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.centroid_xy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_rois", "n_channels", 2),
+    axis_names=("roi", "component", "xy"),
+    description=(
+        "Thresholded foreground centroid in the ROI continuous pixel frame; "
+        "zero when invalid."
+    ),
+    units="pixels",
+    coordinate_space="roi_pixel",
+)
+
+SUBJECT_MASK_CENTROID_VALID_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.centroid_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Whether the corresponding ROI foreground centroid is defined.",
+)
+
+SUBJECT_MASK_BBOX_XYXY_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.bbox_xyxy",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_rois", "n_channels", 4),
+    axis_names=("roi", "component", "xyxy"),
+    description=(
+        "Thresholded foreground half-open bounding box in ROI pixel edges; "
+        "zero when invalid."
+    ),
+    units="pixels",
+    coordinate_space="roi_pixel",
+)
+
+SUBJECT_MASK_BBOX_VALID_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask.bbox_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Whether the corresponding ROI foreground bounding box is defined.",
 )
 
 DENSE_SUBJECT_MASKS_ROI_V1 = ArrayContract(
@@ -1485,6 +1584,55 @@ BODY_FRAME_ARRAY_CONTRACTS = ArrayContractCatalog(
 )
 
 
+SUBJECT_MASK_IDENTITY_ARRAY_CONTRACTS = (
+    DETECTION_INSTANCE_KEY_V1,
+    SUBJECT_MASK_SOURCE_CROP_ROW_IDS_V1,
+    DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+    FRAME_ROW_OFFSETS_V1,
+    CROP_SOURCE_CROP_XYWH_V1,
+)
+
+SUBJECT_MASK_DERIVED_ARRAY_CONTRACTS = (
+    SUBJECT_MASK_PRESENT_V1,
+    SUBJECT_MASK_AREA_PX_V1,
+    SUBJECT_MASK_CENTROID_XY_V1,
+    SUBJECT_MASK_CENTROID_VALID_V1,
+    SUBJECT_MASK_BBOX_XYXY_V1,
+    SUBJECT_MASK_BBOX_VALID_V1,
+)
+
+RAW_SUBJECT_MASK_UINT8_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        *SUBJECT_MASK_IDENTITY_ARRAY_CONTRACTS,
+        SUBJECT_MASK_PROBABILITIES_UINT8_V1,
+        DENSE_SUBJECT_MASKS_ROI_V1,
+        SUBJECT_MASK_AVAILABLE_CHANNELS_V1,
+        SUBJECT_MASK_PROB_MAX_V1,
+        *SUBJECT_MASK_DERIVED_ARRAY_CONTRACTS,
+    )
+)
+
+RAW_SUBJECT_MASK_FLOAT16_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        *SUBJECT_MASK_IDENTITY_ARRAY_CONTRACTS,
+        SUBJECT_MASK_PROBABILITIES_FLOAT16_V1,
+        DENSE_SUBJECT_MASKS_ROI_V1,
+        SUBJECT_MASK_AVAILABLE_CHANNELS_V1,
+        SUBJECT_MASK_PROB_MAX_V1,
+        *SUBJECT_MASK_DERIVED_ARRAY_CONTRACTS,
+    )
+)
+
+REFINED_SUBJECT_MASK_CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        *SUBJECT_MASK_IDENTITY_ARRAY_CONTRACTS,
+        DENSE_SUBJECT_MASKS_ROI_V1,
+        SUBJECT_MASK_AVAILABLE_CHANNELS_V1,
+        *SUBJECT_MASK_DERIVED_ARRAY_CONTRACTS,
+    )
+)
+
+
 CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
         FRAME_COUNTS_V1,
@@ -1578,6 +1726,17 @@ CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
         BODY_FRAME_LEFT_AXIS_XY_V1,
         BODY_FRAME_AXIS_VALID_V1,
         BODY_FRAME_HEADING_DEG_V1,
+        SUBJECT_MASK_SOURCE_CROP_ROW_IDS_V1,
+        SUBJECT_MASK_PROBABILITIES_UINT8_V1,
+        SUBJECT_MASK_PROBABILITIES_FLOAT16_V1,
+        SUBJECT_MASK_AVAILABLE_CHANNELS_V1,
+        SUBJECT_MASK_PROB_MAX_V1,
+        SUBJECT_MASK_PRESENT_V1,
+        SUBJECT_MASK_AREA_PX_V1,
+        SUBJECT_MASK_CENTROID_XY_V1,
+        SUBJECT_MASK_CENTROID_VALID_V1,
+        SUBJECT_MASK_BBOX_XYXY_V1,
+        SUBJECT_MASK_BBOX_VALID_V1,
         DENSE_SUBJECT_MASKS_ROI_V1,
         CONTOUR_POINTS_XY_V1,
     )

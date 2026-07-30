@@ -924,8 +924,12 @@ This checklist is intentionally not authorization to mutate production.
 
 ### Phase A: exact logical schemas
 
-- [ ] Add exact raw subject-mask array contracts and run schema.
-- [ ] Add exact refined subject-mask array contracts and run schema.
+- [x] Add exact raw probability authority/core array contracts and separate
+  `uint8`/`float16` logical schema variants, without writer adoption.
+- [x] Add the exact refined dense scientific-core array contracts and logical
+  validator, without yet freezing draft audit or optional cache layouts.
+- [ ] Add exact editable-draft audit/revision arrays and published derived-cache
+  extension schemas.
 - [ ] Add exact component/reason registries and decoded-array validation.
 - [ ] Add standard frame lookup and multi-observation tests.
 - [ ] Bind both schemas to exact crop identity, manifest, coordinate contract,
