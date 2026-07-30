@@ -243,6 +243,7 @@ def finalize_recording_canonical_detection_benchmark_adapter(
     benchmark_root: Path,
     run_id: str,
     scratch_parent: Path,
+    coordinate_catalog: bool = False,
 ) -> dict[str, object]:
     """Rebuild and publish one standalone current canonical detection store."""
 
@@ -256,6 +257,8 @@ def finalize_recording_canonical_detection_benchmark_adapter(
         benchmark_root=benchmark_root,
     )
     model_sha = _require_sha256(expected_model_sha256, name="detection model")
+    if type(coordinate_catalog) is not bool:
+        raise TypeError("coordinate_catalog must be an exact bool.")
     if type(expected_n_frames) is not int or expected_n_frames <= 0:
         raise ValueError("expected_n_frames must be a positive exact integer.")
     if type(expected_n_instances) is not int or expected_n_instances < 0:
@@ -361,6 +364,7 @@ def finalize_recording_canonical_detection_benchmark_adapter(
             },
             model_artifact_sha256=model_sha,
             run_provenance=provenance,
+            coordinate_catalog=coordinate_catalog,
         )
         phases["node_local_publication"] = time.perf_counter() - write_started
         native_receipt_path = local / "native_detection_candidate_receipt.json"
@@ -377,6 +381,8 @@ def finalize_recording_canonical_detection_benchmark_adapter(
             "source_width": bound.dimensions.source_width,
             "source_height": bound.dimensions.source_height,
             "run_manifest_digest": candidate.manifest["payload_digest"],
+            "run_manifest_schema_version": candidate.manifest["schema_version"],
+            "coordinate_catalog": coordinate_catalog,
             "storage_profile_id": candidate.plans.profile.profile_id,
             "detection_plan_sha256": sha256_file(plan_path),
             "recording_frame_index_sha256": frame_authority_sha,
@@ -398,7 +404,11 @@ def finalize_recording_canonical_detection_benchmark_adapter(
         local_stats = storage_stats(local)
         phases["publish_to_shared_storage"] = _publish_directory(local, output)
 
-    reopened = load_native_canonical_detection_candidate(output, run_id=run_id)
+    reopened = load_native_canonical_detection_candidate(
+        output,
+        run_id=run_id,
+        expected_manifest_schema_version=candidate.manifest["schema_version"],
+    )
     if reopened.manifest["payload_digest"] != candidate.manifest["payload_digest"]:
         raise RuntimeError(
             "Published canonical manifest differs from node-local output."
@@ -411,6 +421,8 @@ def finalize_recording_canonical_detection_benchmark_adapter(
         "output_archive": str(output),
         "output_run_id": run_id,
         "run_manifest_digest": reopened.manifest["payload_digest"],
+        "run_manifest_schema_version": reopened.manifest["schema_version"],
+        "coordinate_catalog": coordinate_catalog,
         "adapter_receipt_path": str(output / ADAPTER_RECEIPT_NAME),
         "adapter_receipt_digest": adapter_receipt["payload_digest"],
         "selector_eligible": False,
@@ -439,6 +451,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-root", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--scratch-parent", type=Path)
+    parser.add_argument(
+        "--coordinate-catalog",
+        action="store_true",
+        help="Publish canonical run-manifest v3 with the exact coordinate catalog.",
+    )
     parser.add_argument("--result-json", type=Path, required=True)
     return parser
 
@@ -463,6 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             benchmark_root=args.benchmark_root,
             run_id=args.run_id,
             scratch_parent=scratch_parent,
+            coordinate_catalog=args.coordinate_catalog,
         )
     except Exception as exc:
         result = {

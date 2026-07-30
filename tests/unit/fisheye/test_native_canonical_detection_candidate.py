@@ -16,6 +16,7 @@ from fisheye.detection.native_canonical_candidate import (
     write_native_clipped_detection_candidate,
 )
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
 )
 from fisheye.shared.zarr.detection_schema import CANONICAL_DETECTION_SCHEMA_V1
@@ -152,6 +153,68 @@ def test_native_candidate_rejects_different_binding_in_provenance(
             run_provenance=provenance,
         )
     assert not (tmp_path / "must-not-exist.zarr").exists()
+
+
+def test_native_candidate_opt_in_v3_changes_only_manifest_catalog_envelope(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "recording_identity": "recording:native-fixture",
+        "producer_id": "fisheye.detection.detect_yolo",
+        "producer_version": "e3936b9a",
+        "source_frame_authority": {
+            "record_ref": "analysis/acquisition_camera_frames/frame_axis@record",
+            "record_sha256": "1" * 64,
+        },
+        "source_pixel_authority": {
+            "record_ref": "raw_video@source_pixel_authority",
+            "record_sha256": "2" * 64,
+        },
+        "model_artifact_sha256": "3" * 64,
+        "run_provenance": _provenance(),
+    }
+    native = write_native_clipped_detection_candidate(
+        _bound(),
+        destination=tmp_path / "native-v2.zarr",
+        run_id="detect_native_v2",
+        **common,
+    )
+    coordinate = write_native_clipped_detection_candidate(
+        _bound(),
+        destination=tmp_path / "coordinate-v3.zarr",
+        run_id="detect_coordinate_v3",
+        coordinate_catalog=True,
+        **common,
+    )
+
+    assert coordinate.manifest["schema_version"] == (
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+    )
+    assert coordinate.receipt["coordinate_catalog"] is True
+    assert coordinate.manifest["payload"]["source_evidence_kind"] == (
+        "native_detection"
+    )
+    assert coordinate.manifest["payload"]["coordinate_contract"]["document"] == (
+        CANONICAL_DETECTION_SCHEMA_V1.coordinate_contract_manifest()
+    )
+    for field in (
+        "logical_schema",
+        "storage_plan",
+        "logical_content",
+        "source_evidence",
+    ):
+        assert coordinate.manifest["payload"][field] == native.manifest["payload"][
+            field
+        ]
+    assert (
+        coordinate.manifest["payload"]["publication"][
+            "metadata_declarations_digest"
+        ]
+        == native.manifest["payload"]["publication"][
+            "metadata_declarations_digest"
+        ]
+    )
+    assert validate_native_canonical_detection_candidate(coordinate) == ()
 
 
 def test_native_candidate_reopen_validation_detects_manifest_mutation(

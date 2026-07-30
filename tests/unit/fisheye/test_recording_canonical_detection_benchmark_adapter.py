@@ -150,18 +150,25 @@ def test_rebuilds_current_canonical_store_without_touching_source(
         benchmark_root=benchmark_root,
         run_id="canonical_candidate",
         scratch_parent=scratch,
+        coordinate_catalog=True,
     )
 
     assert result["status"] == "complete"
     assert result["native_clip_binding_validated"] is True
     assert result["selector_eligible"] is False
+    assert result["coordinate_catalog"] is True
+    assert result["run_manifest_schema_version"] == 3
     assert (destination / ADAPTER_RECEIPT_NAME).is_file()
     published = zarr.open_group(
         str(destination / "detect_runs" / "canonical_candidate"),
         mode="r",
         use_consolidated=False,
     )
-    assert published.attrs["run_manifest"]["schema_version"] == 2
+    assert published.attrs["run_manifest"]["schema_version"] == 3
+    assert published.attrs["run_manifest"]["payload"]["source_evidence_kind"] == (
+        "native_detection"
+    )
+    assert "coordinate_contract" in published.attrs["run_manifest"]["payload"]
     assert (
         published.attrs["run_manifest"]["payload"]["source_evidence"]["source_kind"]
         == "native_detector"

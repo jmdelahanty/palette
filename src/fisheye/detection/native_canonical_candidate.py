@@ -18,7 +18,9 @@ from fisheye.detection.clipped_native_binding import (
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import sha256_array, utc_now
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
+    build_coordinate_canonical_detection_run_manifest,
     build_native_canonical_detection_run_manifest,
     build_native_detection_source_evidence,
     validate_canonical_detection_publication,
@@ -170,11 +172,20 @@ def write_native_clipped_detection_candidate(
     model_artifact_sha256: str,
     run_provenance: Mapping[str, Any],
     profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+    coordinate_catalog: bool = False,
 ) -> NativeCanonicalDetectionCandidate:
-    """Materialize a complete native-manifest-v2 candidate on local storage."""
+    """Materialize one complete native canonical candidate on local storage.
+
+    The production-compatible default remains native manifest v2. Benchmark
+    companions may opt into manifest v3, which changes only the persisted
+    manifest/catalog envelope and retains the same logical arrays and physical
+    storage plan.
+    """
 
     output_path = _require_node_local_destination(destination)
     normalized_run_id = _require_run_id(run_id)
+    if type(coordinate_catalog) is not bool:
+        raise TypeError("coordinate_catalog must be an exact bool.")
     if str(recording_identity).strip() != str(
         bound.binding_evidence["document"]["recording_identity"]
     ):
@@ -304,20 +315,39 @@ def write_native_clipped_detection_candidate(
             run_id=normalized_run_id,
             plans=plans,
         )
-        manifest = build_native_canonical_detection_run_manifest(
-            run_id=normalized_run_id,
-            dimensions=bound.dimensions,
-            storage_plan=plans,
-            arrays=destination_arrays,
-            source_evidence=source_evidence,
-            direct_metadata_declarations=direct,
-            consolidated_metadata_declarations=consolidated,
-            selector_eligible=False,
-        )
-        if manifest["schema_version"] != (
-            CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
-        ):
-            raise RuntimeError("Native candidate did not receive run manifest v2.")
+        if coordinate_catalog:
+            manifest = build_coordinate_canonical_detection_run_manifest(
+                run_id=normalized_run_id,
+                dimensions=bound.dimensions,
+                storage_plan=plans,
+                arrays=destination_arrays,
+                source_evidence=source_evidence,
+                direct_metadata_declarations=direct,
+                consolidated_metadata_declarations=consolidated,
+                source_evidence_kind="native_detection",
+                selector_eligible=False,
+            )
+            expected_manifest_version = (
+                CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION
+            )
+        else:
+            manifest = build_native_canonical_detection_run_manifest(
+                run_id=normalized_run_id,
+                dimensions=bound.dimensions,
+                storage_plan=plans,
+                arrays=destination_arrays,
+                source_evidence=source_evidence,
+                direct_metadata_declarations=direct,
+                consolidated_metadata_declarations=consolidated,
+                selector_eligible=False,
+            )
+            expected_manifest_version = (
+                CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+            )
+        if manifest["schema_version"] != expected_manifest_version:
+            raise RuntimeError(
+                "Native candidate received the wrong run-manifest version."
+            )
         run.attrs["run_manifest"] = manifest
         second_consolidation = consolidate_metadata_capture_expected_warnings(output_path)
         direct, consolidated = canonical_detection_metadata_declaration_maps(
@@ -344,6 +374,7 @@ def write_native_clipped_detection_candidate(
             "output_path": str(output_path),
             "run_id": normalized_run_id,
             "native_run_manifest_schema_version": manifest["schema_version"],
+            "coordinate_catalog": coordinate_catalog,
             "logical_schema_version": CANONICAL_DETECTION_SCHEMA_V1.schema_version,
             "storage_profile_id": plans.profile.profile_id,
             "run_manifest_digest": manifest["payload_digest"],

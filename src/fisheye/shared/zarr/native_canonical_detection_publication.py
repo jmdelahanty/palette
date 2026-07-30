@@ -32,6 +32,7 @@ from fisheye.detection.native_canonical_candidate import (
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.canonical_detection_manifest import (
+    CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_canonical_detection_publication,
 )
@@ -124,20 +125,37 @@ def load_native_canonical_detection_candidate(
     candidate_zarr: Path,
     *,
     run_id: str,
+    expected_manifest_schema_version: int = (
+        CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+    ),
 ) -> NativeCanonicalDetectionCandidate:
     """Reopen a local candidate without trusting an in-memory writer result."""
 
     output_path = candidate_zarr.expanduser().resolve()
     normalized_run_id = _require_run_id(run_id)
+    if expected_manifest_schema_version not in {
+        CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION,
+        CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
+        raise ValueError(
+            "expected_manifest_schema_version must select canonical v2 or v3."
+        )
     run_path = output_path / "detect_runs" / normalized_run_id
     if not run_path.is_dir():
         raise FileNotFoundError(f"Native candidate run not found: {run_path}")
     run = zarr.open_group(str(run_path), mode="r", use_consolidated=False)
     manifest = dict(run.attrs.get("run_manifest") or {})
-    if manifest.get("schema_version") != (
-        CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
-    ):
-        raise ValueError("Native candidate must carry run-manifest v2.")
+    if manifest.get("schema_version") != expected_manifest_schema_version:
+        version_label = (
+            "v2"
+            if expected_manifest_schema_version
+            == CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+            else "v3"
+        )
+        raise ValueError(
+            f"Native candidate must carry run-manifest {version_label}; its "
+            "persisted version differs from the explicit caller contract."
+        )
     _, plans = _dimensions_and_plans(manifest)
     arrays = {
         path: run[path] for path in CANONICAL_DETECTION_SCHEMA_V1.binding_paths
@@ -152,7 +170,7 @@ def load_native_canonical_detection_candidate(
         "status": "complete",
         "run_id": normalized_run_id,
         "native_run_manifest_schema_version": (
-            CANONICAL_DETECTION_NATIVE_RUN_MANIFEST_SCHEMA_VERSION
+            expected_manifest_schema_version
         ),
         "logical_schema_version": CANONICAL_DETECTION_SCHEMA_V1.schema_version,
         "run_manifest_digest": manifest.get("payload_digest"),
