@@ -37,6 +37,12 @@ Use a small Python LSF orchestration kernel with separate family-specific
 planners. Do not build a generic YAML workflow language, a stage plugin
 registry, or a single command that attempts to understand every Palette stage.
 
+The accepted layout-neutral direction is documented in
+`docs/production_dag_recording_layout_design.md`. The structured LSF kernel is
+the general production DAG engine; clipped and whole-recording layouts are
+adapters used by family-specific stage fragments and workflow recipes. This
+does not weaken the family-planner boundary described below.
+
 The boundary is deliberate:
 
 - The shared kernel knows what a job is, what resources it requests, which

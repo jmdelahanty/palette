@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -11,16 +12,22 @@ import pyarrow.parquet as pq
 import pytest
 
 from fisheye.cluster import clipped_inference as workflow
-from fisheye.cluster import clipped_inference_detect_quality_recovery as quality_recovery
+from fisheye.cluster import (
+    clipped_inference_detect_quality_recovery as quality_recovery,
+)
 from fisheye.cluster import clipped_inference_import_recovery as import_recovery
 from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
 from fisheye.cluster import refined_subject_mask_encoded_chunk_canary as encoded_canary
 from fisheye.cluster.clipped_detection import (
-    DetectionClipSpec,
     DetectionFragmentInputs,
     DetectionModelSpec,
+    DetectionWorkUnitSpec,
+    RawDetectionFragmentInputs,
+    RawDetectionWorkUnitSpec,
     build_detection_fragment,
+    build_raw_detection_fragment,
     compose_detection_workflow,
+    compose_raw_detection_workflow,
 )
 from fisheye.cluster.clipped_inference_cleanup import cleanup
 from fisheye.cluster.clipped_inference_validate import (
@@ -31,6 +38,10 @@ from fisheye.cluster.clipped_inference_validate import (
     _require_exact_instance_key_order,
     _require_exact_vector,
     _validate_run_frame_counts,
+)
+from fisheye.cluster.recording_layout import (
+    clipped_recording_target,
+    whole_video_recording_target,
 )
 from fisheye.shared.flat_roi_cache import FLAT_ROI_CACHE_LAYOUT, FLAT_ROI_CACHE_SCHEMA
 
@@ -145,7 +156,9 @@ def test_clipped_validator_requires_recording_wide_exact_frame_counts() -> None:
 
 
 def test_clipped_validator_post_cleanup_mode_requires_all_caches_absent() -> None:
-    assert _cache_validation_mode(cleaned_cache_count=0, clip_count=22) == "live_payloads"
+    assert (
+        _cache_validation_mode(cleaned_cache_count=0, clip_count=22) == "live_payloads"
+    )
     assert _cache_validation_mode(cleaned_cache_count=22, clip_count=22) == (
         "post_cleanup_all_absent"
     )
@@ -153,11 +166,15 @@ def test_clipped_validator_post_cleanup_mode_requires_all_caches_absent() -> Non
         _cache_validation_mode(cleaned_cache_count=3, clip_count=22)
 
 
-def _target(tmp_path: Path, name: str = "sleepyfish_cam2010093") -> workflow.CampaignTarget:
+def _target(
+    tmp_path: Path, name: str = "sleepyfish_cam2010093"
+) -> workflow.CampaignTarget:
     recording = tmp_path / "recordings" / name
     zarr = recording / "zarr" / f"{name}_analysis.zarr"
     _write_json(recording / "recording_clip_index.json", {"clips": []})
-    _write_json(zarr / "zarr.json", {"zarr_format": 3, "node_type": "group", "attributes": {}})
+    _write_json(
+        zarr / "zarr.json", {"zarr_format": 3, "node_type": "group", "attributes": {}}
+    )
     return workflow.CampaignTarget(
         target_id=name,
         recording_id=f"{name}:zfixture",
@@ -166,7 +183,9 @@ def _target(tmp_path: Path, name: str = "sleepyfish_cam2010093") -> workflow.Cam
     )
 
 
-def _detection_plan(target: workflow.CampaignTarget, workflow_id: str) -> dict[str, object]:
+def _detection_plan(
+    target: workflow.CampaignTarget, workflow_id: str
+) -> dict[str, object]:
     work_units = []
     for index in range(22):
         clip_id = f"clip_{index:06d}"
@@ -179,7 +198,9 @@ def _detection_plan(target: workflow.CampaignTarget, workflow_id: str) -> dict[s
                 "clip_index": index,
                 "camera_serial": camera,
                 "work_unit_id": f"{target.target_id}_{clip_id}",
-                "source": {"video_path": str(target.recording_dir / "clips" / f"{clip_id}.mp4")},
+                "source": {
+                    "video_path": str(target.recording_dir / "clips" / f"{clip_id}.mp4")
+                },
                 "run_names": {
                     "detect": detect,
                     "detect_quality": f"quality_{workflow_id}_{clip_id}",
@@ -207,7 +228,9 @@ def _build_fixture_plan(
     (repo / "scripts").mkdir(parents=True)
     (repo / "scripts" / "py").write_text("#!/bin/sh\n", encoding="utf-8")
     (repo / "configs" / "fisheye").mkdir(parents=True)
-    (repo / "configs" / "fisheye" / "yolo_detect_config.yaml").write_text("{}\n", encoding="utf-8")
+    (repo / "configs" / "fisheye" / "yolo_detect_config.yaml").write_text(
+        "{}\n", encoding="utf-8"
+    )
     (repo / "configs" / "fisheye" / "default.yaml").write_text("{}\n", encoding="utf-8")
     targets = tuple(
         _target(tmp_path, f"sleepyfish_cam{2010093 + index}")
@@ -219,18 +242,31 @@ def _build_fixture_plan(
     model = tmp_path / "models" / "model.pt"
     model.parent.mkdir()
     model.write_bytes(b"model")
-    detect_binding = workflow.ModelBinding("detect", "detect_set", "detect_run", model, "d" * 64)
-    subject_binding = workflow.ModelBinding("subject_masks", "mask_set", "mask_run", model, "m" * 64)
+    detect_binding = workflow.ModelBinding(
+        "detect", "detect_set", "detect_run", model, "d" * 64
+    )
+    subject_binding = workflow.ModelBinding(
+        "subject_masks", "mask_set", "mask_run", model, "m" * 64
+    )
 
-    monkeypatch.setattr(workflow, "validate_registered_analysis_zarr", lambda **_kwargs: None)
-    monkeypatch.setattr(workflow, "_resolve_ranked_binding", lambda **_kwargs: detect_binding)
-    monkeypatch.setattr(workflow, "_resolve_subject_binding", lambda **_kwargs: subject_binding)
+    monkeypatch.setattr(
+        workflow, "validate_registered_analysis_zarr", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        workflow, "_resolve_ranked_binding", lambda **_kwargs: detect_binding
+    )
+    monkeypatch.setattr(
+        workflow, "_resolve_subject_binding", lambda **_kwargs: subject_binding
+    )
     monkeypatch.setattr(workflow, "_verify_binding", lambda _binding: None)
     monkeypatch.setattr(
         workflow,
         "resolve_pose_model_binding",
         lambda **_kwargs: SimpleNamespace(
-            set_id="pose_set", run_id="pose_run", model_path=model, model_sha256="p" * 64
+            set_id="pose_set",
+            run_id="pose_run",
+            model_path=model,
+            model_sha256="p" * 64,
         ),
     )
     monkeypatch.setattr(
@@ -277,29 +313,31 @@ def _execution_tasks(job: object) -> dict[str, object]:
     return {task.task_key: task for task in group.tasks}
 
 
-def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plan = _build_fixture_plan(tmp_path, monkeypatch)
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
     target = plan.target_plans[0]
-    target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
     clip_id = "clip_000000"
 
     assert len(plan.lsf_workflow.jobs) == 16
     keypoint_array = jobs[f"keypoints_array:{target_safe}"]
     subject_mask_array = jobs[f"subject_masks_array:{target_safe}"]
     package_array = jobs[f"mask_package_array:{target_safe}"]
-    assert keypoint_array.dependency.upstream_job_keys == (
-        f"proxy:{target_safe}",
-    )
-    assert subject_mask_array.dependency.upstream_job_keys == (
-        f"proxy:{target_safe}",
-    )
+    assert keypoint_array.dependency.upstream_job_keys == (f"proxy:{target_safe}",)
+    assert subject_mask_array.dependency.upstream_job_keys == (f"proxy:{target_safe}",)
     assert package_array.dependency.upstream_job_keys == (
         f"subject_masks_array:{target_safe}",
         f"keypoint_refine:{target_safe}",
     )
     assert f"keypoints:{target_safe}:{clip_id}" in _execution_tasks(keypoint_array)
-    assert f"subject_masks:{target_safe}:{clip_id}" in _execution_tasks(subject_mask_array)
+    assert f"subject_masks:{target_safe}:{clip_id}" in _execution_tasks(
+        subject_mask_array
+    )
     assert f"mask_package:{target_safe}:{clip_id}" in _execution_tasks(package_array)
     cache_job = jobs[f"cache_array:{target_safe}"]
     cache_tasks = _execution_tasks(cache_job)
@@ -349,15 +387,32 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
 
     fragments = plan.lsf_workflow.to_json()["metadata"]["fragments"]
     assert [fragment["fragment_id"] for fragment in fragments] == [
-        f"detection:{target_safe}",
-        f"analysis:{target_safe}",
+        f"raw_detection:{target_safe}",
+        f"detection_postprocess:{target_safe}",
+        f"crop_roi_cache:{target_safe}",
+        f"keypoints:{target_safe}",
+        f"subject_mask_inference:{target_safe}",
+        f"subject_mask_refinement:{target_safe}",
+        f"analysis_validation:{target_safe}",
         "campaign_finalize",
     ]
     detection_output = target["detection_module"]
     assert detection_output["terminal_job_key"] == f"detect_collection:{target_safe}"
-    assert fragments[0]["provides"] == [detection_output["artifact_key"]]
-    assert fragments[1]["requires"] == [detection_output["artifact_key"]]
-    assert fragments[2]["provides"] == [
+    assert fragments[0]["provides"] == [f"raw_detection_work_units:{target_safe}"]
+    assert fragments[1]["requires"] == [f"raw_detection_work_units:{target_safe}"]
+    assert fragments[1]["provides"] == [detection_output["artifact_key"]]
+    assert fragments[2]["requires"] == [detection_output["artifact_key"]]
+    assert fragments[3]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[4]["requires"] == [f"crop_roi_cache:{target_safe}"]
+    assert fragments[5]["requires"] == [
+        f"raw_subject_masks:{target_safe}",
+        f"refined_keypoints:{target_safe}",
+    ]
+    assert fragments[6]["requires"] == [
+        f"refined_keypoints:{target_safe}",
+        f"refined_subject_masks:{target_safe}",
+    ]
+    assert fragments[7]["provides"] == [
         "registry_reconciled",
         "nrs_cache_cleaned",
     ]
@@ -366,12 +421,26 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
 def test_detection_module_composes_as_a_first_class_detection_only_workflow(
     tmp_path: Path,
 ) -> None:
-    clips = tuple(
-        DetectionClipSpec(
-            clip_id=f"clip_{index:06d}",
-            clip_index=index,
-            camera_serial="2010093",
-            video_path=tmp_path / "clips" / f"clip_{index:06d}.mp4",
+    rows = tuple(
+        {
+            "clip_id": f"clip_{index:06d}",
+            "clip_index": index,
+            "camera_serial": "2010093",
+            "work_unit_id": f"work_unit_{index}",
+            "source": {"video_path": tmp_path / "clips" / f"clip_{index:06d}.mp4"},
+        }
+        for index in range(2)
+    )
+    target = clipped_recording_target(
+        target_id="sleepyfish_cam2010093",
+        recording_id="sleepyfish_cam2010093:zfixture",
+        recording_dir=tmp_path / "recording",
+        analysis_zarr=tmp_path / "analysis.zarr",
+        work_units=rows,
+    )
+    units = tuple(
+        DetectionWorkUnitSpec(
+            work_unit=target.work_units[index],
             detect_run=f"detect_{index}",
             detect_group_path=f"clips/{index}/detect_runs/detect_{index}",
             refined_detect_run=f"refined_{index}",
@@ -385,18 +454,15 @@ def test_detection_module_composes_as_a_first_class_detection_only_workflow(
         DetectionFragmentInputs(
             workflow_id="detection_only_fixture",
             family="clipped_inference",
-            target_id="sleepyfish_cam2010093",
             target_label="fixture_target",
-            recording_id="sleepyfish_cam2010093:zfixture",
-            recording_dir=tmp_path / "recording",
-            analysis_zarr=tmp_path / "analysis.zarr",
+            target=target,
             repo=tmp_path / "repo",
             run_root=tmp_path / "run",
             detection_plan_path=tmp_path / "run" / "detection_plan.json",
             collection_id="refined_detect_collection_fixture",
             quality_source_run="detect_quality_source_fixture",
             quality_run="detect_quality_fixture",
-            clips=clips,
+            work_units=units,
             model=DetectionModelSpec(
                 set_id="detect_set",
                 run_id="detect_run",
@@ -422,12 +488,283 @@ def test_detection_module_composes_as_a_first_class_detection_only_workflow(
     ]
     assert module.outputs.collection_id == "refined_detect_collection_fixture"
     assert module.outputs.terminal_job_key == "detect_collection:sleepyfish_cam2010093"
+    assert [fragment.fragment_id for fragment in module.fragments] == [
+        "raw_detection:sleepyfish_cam2010093",
+        "detection_postprocess:sleepyfish_cam2010093",
+    ]
+    assert module.fragments[1].requires == (module.raw_outputs.artifact_key,)
     assert detection_only.metadata["workflow_scope"] == "detection_only"
     assert len(_execution_tasks(detection_only.jobs[0])) == 2
     assert len(_execution_tasks(detection_only.jobs[3])) == 2
 
 
-def test_materialized_dry_run_is_immutable_and_has_no_submission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_whole_video_raw_detection_uses_atomic_local_publisher(
+    tmp_path: Path,
+) -> None:
+    target = whole_video_recording_target(
+        target_id="batman_arena_1",
+        recording_id="batman_arena_1:zfixture",
+        recording_dir=tmp_path / "recording",
+        analysis_zarr=tmp_path / "recording" / "zarr" / "analysis.zarr",
+        video_path=tmp_path / "recording" / "cams" / "Cam2010093.mp4",
+        camera_serial="2010093",
+    )
+    run_name = "detect_batman_fixture"
+    module = build_raw_detection_fragment(
+        RawDetectionFragmentInputs(
+            workflow_id="batman_raw_detect",
+            family="production_inference",
+            target_label="batman_arena_1",
+            target=target,
+            repo=tmp_path / "repo",
+            run_root=tmp_path / "run",
+            work_units=(
+                RawDetectionWorkUnitSpec(
+                    work_unit=target.work_units[0],
+                    detect_run=run_name,
+                    detect_group_path=f"detect_runs/{run_name}",
+                ),
+            ),
+            model=DetectionModelSpec(
+                set_id="detect_set",
+                run_id="detect_run",
+                path=tmp_path / "model.pt",
+                sha256="a" * 64,
+            ),
+            registry_path=tmp_path / "palette_registry.sqlite",
+        )
+    )
+
+    job = module.fragment.jobs[0]
+    command = list(job.command)
+    assert job.execution_group is None
+    assert "fisheye.utils.run_detection_local_publish" in command
+    assert command[command.index("--zarr") + 1] == str(target.analysis_zarr)
+    assert command[command.index("--video") + 1] == str(target.work_units[0].video_path)
+    assert command[command.index("--run-name") + 1] == run_name
+    assert command[command.index("--decode-backend") + 1] == "pynvvc_nv12_rgb"
+    resize_index = command.index("--resize-dims")
+    assert command[resize_index + 1 : resize_index + 3] == ["640", "640"]
+    assert module.outputs.raw_detection_group_paths == (f"detect_runs/{run_name}",)
+    assert module.fragment.metadata is not None
+    assert module.fragment.metadata["recording_layout"] == "whole_video"
+    assert module.fragment.metadata["publication_policy"] == (
+        "node_local_complete_run_then_atomic_prfs_publication_v1"
+    )
+
+
+def test_whole_video_raw_detection_fails_closed_on_noncanonical_binding(
+    tmp_path: Path,
+) -> None:
+    target = whole_video_recording_target(
+        target_id="whole",
+        recording_id="whole:zfixture",
+        recording_dir=tmp_path / "recording",
+        analysis_zarr=tmp_path / "analysis.zarr",
+        video_path=tmp_path / "video.mp4",
+        camera_serial="2010093",
+    )
+    unit = RawDetectionWorkUnitSpec(
+        work_unit=target.work_units[0],
+        detect_run="detect_fixture",
+        detect_group_path="clips/0/detect_runs/detect_fixture",
+    )
+    kwargs = {
+        "workflow_id": "fixture",
+        "family": "production_inference",
+        "target_label": "whole",
+        "target": target,
+        "repo": tmp_path / "repo",
+        "run_root": tmp_path / "run",
+        "work_units": (unit,),
+        "model": DetectionModelSpec(
+            set_id="set",
+            run_id="run",
+            path=tmp_path / "model.pt",
+            sha256="a" * 64,
+        ),
+        "registry_path": tmp_path / "registry.sqlite",
+    }
+
+    with pytest.raises(ValueError, match="must publish to"):
+        RawDetectionFragmentInputs(**kwargs)
+
+    canonical_unit = RawDetectionWorkUnitSpec(
+        work_unit=target.work_units[0],
+        detect_run="detect_fixture",
+        detect_group_path="detect_runs/detect_fixture",
+    )
+    kwargs["work_units"] = (canonical_unit,)
+    kwargs["registry_path"] = None
+    with pytest.raises(ValueError, match="explicit registry"):
+        RawDetectionFragmentInputs(**kwargs)
+
+    kwargs["registry_path"] = tmp_path / "registry.sqlite"
+    kwargs["resume_existing_detections"] = True
+    with pytest.raises(ValueError, match="reuse needs a separate validation"):
+        RawDetectionFragmentInputs(**kwargs)
+
+
+def test_raw_detection_workflow_composes_clipped_and_whole_targets(
+    tmp_path: Path,
+) -> None:
+    clipped_target = clipped_recording_target(
+        target_id="clipped",
+        recording_id="clipped:zfixture",
+        recording_dir=tmp_path / "clipped",
+        analysis_zarr=tmp_path / "clipped.zarr",
+        work_units=(
+            {
+                "work_unit_id": "clip_0",
+                "clip_id": "clip_000000",
+                "clip_index": 0,
+                "camera_serial": "2010093",
+                "source": {"video_path": tmp_path / "clip.mp4"},
+            },
+        ),
+    )
+    whole_target = whole_video_recording_target(
+        target_id="whole",
+        recording_id="whole:zfixture",
+        recording_dir=tmp_path / "whole",
+        analysis_zarr=tmp_path / "whole.zarr",
+        video_path=tmp_path / "whole.mp4",
+        camera_serial="2010094",
+    )
+    model = DetectionModelSpec(
+        set_id="set",
+        run_id="run",
+        path=tmp_path / "model.pt",
+        sha256="a" * 64,
+    )
+    clipped_module = build_raw_detection_fragment(
+        RawDetectionFragmentInputs(
+            workflow_id="mixed",
+            family="production_inference",
+            target_label="clipped",
+            target=clipped_target,
+            repo=tmp_path / "repo",
+            run_root=tmp_path / "run",
+            work_units=(
+                RawDetectionWorkUnitSpec(
+                    work_unit=clipped_target.work_units[0],
+                    detect_run="detect_clip",
+                    detect_group_path="clips/0/detect_runs/detect_clip",
+                ),
+            ),
+            model=model,
+        )
+    )
+    whole_module = build_raw_detection_fragment(
+        RawDetectionFragmentInputs(
+            workflow_id="mixed",
+            family="production_inference",
+            target_label="whole",
+            target=whole_target,
+            repo=tmp_path / "repo",
+            run_root=tmp_path / "run",
+            work_units=(
+                RawDetectionWorkUnitSpec(
+                    work_unit=whole_target.work_units[0],
+                    detect_run="detect_whole",
+                    detect_group_path="detect_runs/detect_whole",
+                ),
+            ),
+            model=model,
+            registry_path=tmp_path / "registry.sqlite",
+        )
+    )
+
+    composed = compose_raw_detection_workflow(
+        workflow_id="mixed",
+        family="production_inference",
+        modules=(clipped_module, whole_module),
+    )
+
+    assert [job.job_key for job in composed.topological_jobs()] == [
+        "detect_array:clipped",
+        "detect:whole",
+    ]
+    assert composed.metadata is not None
+    assert composed.metadata["target_count"] == 2
+    assert [
+        fragment["metadata"]["recording_layout"]
+        for fragment in composed.metadata["fragments"]
+    ] == ["clipped_collection", "whole_video"]
+
+
+def test_detection_fragment_split_preserves_pre_split_job_contract() -> None:
+    """Freeze commands/resources/dependencies/outputs from the pre-split builder."""
+
+    rows = tuple(
+        {
+            "work_unit_id": f"work_{index}",
+            "clip_id": f"clip_{index:06d}",
+            "clip_index": index,
+            "camera_serial": "2010093",
+            "source": {"video_path": f"/fixture/clips/clip_{index:06d}.mp4"},
+        }
+        for index in range(2)
+    )
+    target = clipped_recording_target(
+        target_id="target",
+        recording_id="recording:z1",
+        recording_dir=Path("/fixture/recording"),
+        analysis_zarr=Path("/fixture/analysis.zarr"),
+        work_units=rows,
+    )
+    units = tuple(
+        DetectionWorkUnitSpec(
+            work_unit=target.work_units[index],
+            detect_run=f"detect_{index}",
+            detect_group_path=f"clips/{index}/detect_runs/detect_{index}",
+            refined_detect_run=f"refined_{index}",
+            refined_detect_group_path=(
+                f"clips/{index}/refined_detect_runs/refined_{index}"
+            ),
+        )
+        for index in range(2)
+    )
+    module = build_detection_fragment(
+        DetectionFragmentInputs(
+            workflow_id="detection_fixture",
+            family="clipped_inference",
+            target_label="fixture_target",
+            target=target,
+            repo=Path("/fixture/repo"),
+            run_root=Path("/fixture/run"),
+            detection_plan_path=Path("/fixture/run/detection_plan.json"),
+            collection_id="collection_fixture",
+            quality_source_run="quality_source_fixture",
+            quality_run="quality_fixture",
+            work_units=units,
+            model=DetectionModelSpec(
+                set_id="set",
+                run_id="run",
+                path=Path("/fixture/model.pt"),
+                sha256="a" * 64,
+            ),
+            detect_array_concurrency=2,
+            refine_bundle_concurrency=2,
+        )
+    )
+    payload = {
+        "jobs": [job.to_json() for job in module.jobs],
+        "outputs": module.outputs.to_json(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    # Captured from the monolithic builder immediately before the fragment
+    # split. Fragment metadata is intentionally excluded; all executable job
+    # commands, resources, dependencies, task envelopes, and outputs are in it.
+    assert hashlib.sha256(encoded.encode("utf-8")).hexdigest() == (
+        "183693e320e885eda3cf56293383797fce7b7e1411054c9b006275abbb1c9b85"
+    )
+
+
+def test_materialized_dry_run_is_immutable_and_has_no_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plan = _build_fixture_plan(tmp_path, monkeypatch)
     first = workflow.materialize_plan_bundle(plan)
     second = workflow.materialize_plan_bundle(plan)
@@ -441,18 +778,24 @@ def test_materialized_dry_run_is_immutable_and_has_no_submission(tmp_path: Path,
     assert first["models"]["subject_masks"]["run_id"] == "mask_run"
 
 
-def test_encoded_mask_packages_add_global_grid_and_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_encoded_mask_packages_add_global_grid_and_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plan = _build_fixture_plan(tmp_path, monkeypatch, encoded_mask_packages=True)
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
     target = plan.target_plans[0]
-    target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
     grid_key = f"mask_grid:{target_safe}"
     package_key = f"mask_package_array:{target_safe}"
     import_key = f"mask_import:{target_safe}"
 
     assert plan.encoded_mask_packages is True
     assert len(plan.lsf_workflow.jobs) == 17
-    assert jobs[grid_key].dependency.upstream_job_keys == (f"keypoint_finalize:{target_safe}",)
+    assert jobs[grid_key].dependency.upstream_job_keys == (
+        f"keypoint_finalize:{target_safe}",
+    )
     assert jobs[package_key].dependency.upstream_job_keys == (
         f"subject_masks_array:{target_safe}",
         f"keypoint_refine:{target_safe}",
@@ -503,7 +846,9 @@ def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
     plan = _build_fixture_plan(tmp_path, monkeypatch, resume_existing_detections=True)
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
     target = plan.target_plans[0]
-    target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
     clip_id = "clip_000000"
     detect_array = jobs[f"detect_array:{target_safe}"]
     detect = _execution_tasks(detect_array)[f"detect:{target_safe}:{clip_id}"]
@@ -553,9 +898,15 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
         fragment["fragment_id"]: fragment
         for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
     }
-    assert fragments[f"detection:{first_safe}"]["requires"] == []
-    assert fragments[f"detection:{second_safe}"]["requires"] == [
+    assert fragments[f"raw_detection:{first_safe}"]["requires"] == []
+    assert fragments[f"raw_detection:{second_safe}"]["requires"] == [
         f"validated_analysis:{first_safe}"
+    ]
+    assert fragments[f"detection_postprocess:{first_safe}"]["requires"] == [
+        f"raw_detection_work_units:{first_safe}"
+    ]
+    assert fragments[f"detection_postprocess:{second_safe}"]["requires"] == [
+        f"raw_detection_work_units:{second_safe}"
     ]
     assert fragments["campaign_finalize"]["requires"] == [
         f"validated_analysis:{first_safe}",
@@ -602,7 +953,9 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         str(job.metadata["stage"])
         for job in plan.workflow.jobs
         if job.metadata is not None
-    }.isdisjoint({"detect", "detect_reuse", "detect_refine", "roi_cache", "subject_masks"})
+    }.isdisjoint(
+        {"detect", "detect_reuse", "detect_refine", "roi_cache", "subject_masks"}
+    )
     keypoint_task = _execution_tasks(jobs[keypoint_key])[
         f"keypoints:{target_safe}:clip_000000"
     ]
@@ -665,19 +1018,26 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     )
     assert jobs[f"detect_refine_bundle:{target_safe}"].resources.walltime == "1:00"
     assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
-    assert plan.payload["detect_quality_recovery"]["source_array_payload_rewritten"] is False
-    assert plan.payload["targets"][0]["detect_quality_source_run"] == target[
-        "detect_quality_source_run"
-    ]
+    assert (
+        plan.payload["detect_quality_recovery"]["source_array_payload_rewritten"]
+        is False
+    )
+    assert (
+        plan.payload["targets"][0]["detect_quality_source_run"]
+        == target["detect_quality_source_run"]
+    )
     quality_inner = quality_recovery._inner_command(jobs[quality_key].to_json())
     assert all(str(source.run_root) not in value for value in quality_inner)
-    assert all(str(source.repo) not in value or str(plan.repo) in value for value in quality_inner)
+    assert all(
+        str(source.repo) not in value or str(plan.repo) in value
+        for value in quality_inner
+    )
 
     quality_recovery.materialize_plan(plan)
     assert plan.recovery_detection_plan.is_file()
-    assert json.loads(plan.recovery_detection_plan.read_text(encoding="utf-8")) == json.loads(
-        plan.source_detection_plan.read_text(encoding="utf-8")
-    )
+    assert json.loads(
+        plan.recovery_detection_plan.read_text(encoding="utf-8")
+    ) == json.loads(plan.source_detection_plan.read_text(encoding="utf-8"))
 
     _write_json(
         source_metadata,
@@ -706,7 +1066,9 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
             "attributes": {
                 "palette_run_completion_status": "complete",
                 "schema_id": "palette.detect_quality_collection.v2",
-                "source_detection_group_path": target["detect_quality_source_group_path"],
+                "source_detection_group_path": target[
+                    "detect_quality_source_group_path"
+                ],
                 "source_row_count": 4,
                 "recording_frame_count": 6,
                 "source_video_width": 4512,
@@ -731,7 +1093,12 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     ):
         _write_json(
             quality_path / name / "zarr.json",
-            {"zarr_format": 3, "node_type": "array", "shape": shape, "data_type": dtype},
+            {
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": shape,
+                "data_type": dtype,
+            },
         )
 
     continuation = quality_recovery.build_plan(
@@ -748,10 +1115,16 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     assert quality_key not in continuation_jobs
     assert continuation_jobs[refine_key].dependency is None
     assert continuation_jobs[refine_key].resources.walltime == "1:00"
-    assert continuation.payload["detect_quality_recovery"]["reused_complete_quality"] is True
-    assert continuation.payload["detect_quality_recovery"]["preflight"][
-        "quality_validation"
-    ]["instance_key_exact"] is True
+    assert (
+        continuation.payload["detect_quality_recovery"]["reused_complete_quality"]
+        is True
+    )
+    assert (
+        continuation.payload["detect_quality_recovery"]["preflight"][
+            "quality_validation"
+        ]["instance_key_exact"]
+        is True
+    )
 
 
 def test_import_recovery_reuses_packages_on_long_queue(
@@ -849,19 +1222,27 @@ def test_import_recovery_can_convert_v1_packages_to_encoded_v2(
     )
     jobs = {job.job_key: job for job in plan.workflow.jobs}
     target = source.target_plans[0]
-    target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
     grid_key = f"mask_grid:{target_safe}"
     conversion_key = f"mask_package_v2:{target_safe}:clip_000000"
     import_key = f"mask_import:{target_safe}"
 
     assert len(plan.workflow.jobs) == 27
     assert jobs[conversion_key].dependency.upstream_job_keys == (grid_key,)
-    assert jobs[import_key].dependency.upstream_job_keys[0].startswith(
-        f"mask_package_v2:{target_safe}:"
+    assert (
+        jobs[import_key]
+        .dependency.upstream_job_keys[0]
+        .startswith(f"mask_package_v2:{target_safe}:")
     )
     assert len(jobs[import_key].dependency.upstream_job_keys) == 22
     assert "--encoded-copy-workers" in jobs[import_key].command
-    assert all("/encoded_v2/" in value for index, value in enumerate(jobs[import_key].command) if jobs[import_key].command[index - 1] == "--package")
+    assert all(
+        "/encoded_v2/" in value
+        for index, value in enumerate(jobs[import_key].command)
+        if jobs[import_key].command[index - 1] == "--package"
+    )
 
 
 def test_existing_detection_resume_preflight_requires_exact_provenance(
@@ -870,7 +1251,11 @@ def test_existing_detection_resume_preflight_requires_exact_provenance(
 ) -> None:
     target = _target(tmp_path)
     binding = workflow.ModelBinding(
-        "detect", "detect_set", "detect_run", (tmp_path / "model.pt").resolve(), "a" * 64
+        "detect",
+        "detect_set",
+        "detect_run",
+        (tmp_path / "model.pt").resolve(),
+        "a" * 64,
     )
     clip = _detection_plan(target, "campaign")["work_units"][0]
     planned_clip = {
@@ -881,7 +1266,9 @@ def test_existing_detection_resume_preflight_requires_exact_provenance(
         "detect_run": clip["run_names"]["detect"],
         "detect_group_path": clip["zarr_paths"]["detect_target_group_path"],
     }
-    group_metadata = target.analysis_zarr / planned_clip["detect_group_path"] / "zarr.json"
+    group_metadata = (
+        target.analysis_zarr / planned_clip["detect_group_path"] / "zarr.json"
+    )
     provenance = {
         "command": "fisheye.utils.run_detection_artifact",
         "params": {

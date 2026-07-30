@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from fisheye.cluster.clipped_detection import (
-    DetectionClipSpec,
     DetectionFragmentInputs,
     DetectionModelSpec,
+    DetectionWorkUnitSpec,
     build_detection_fragment,
 )
 from fisheye.cluster.clipped_lsf import (
@@ -41,6 +41,7 @@ from fisheye.cluster.lsf import (
     submit_lsf_workflow,
     write_json_snapshot,
 )
+from fisheye.cluster.recording_layout import clipped_recording_target
 from fisheye.registry.db import Registry
 from fisheye.registry.model_resolution import (
     load_candidates,
@@ -655,6 +656,17 @@ def build_plan(
                     "package_path": str(package_dir / f"{clip}.tar.gz"),
                 }
             )
+        recording_target = clipped_recording_target(
+            target_id=target.target_id,
+            recording_id=target.recording_id,
+            recording_dir=target.recording_dir,
+            analysis_zarr=target.analysis_zarr,
+            work_units=work_units,
+            expected_subject_count=target.expected_subject_count,
+        )
+        layout_work_units = {
+            unit.work_unit_id: unit for unit in recording_target.work_units
+        }
         target_payload: dict[str, Any] = {
             **target.to_json(),
             "target_label": target_label,
@@ -706,25 +718,27 @@ def build_plan(
             DetectionFragmentInputs(
                 workflow_id=workflow_id,
                 family=FAMILY,
-                target_id=target.target_id,
                 target_label=target_label,
-                recording_id=target.recording_id,
-                recording_dir=target.recording_dir,
-                analysis_zarr=target.analysis_zarr,
+                target=recording_target,
                 repo=repo,
                 run_root=run_root,
                 detection_plan_path=detection_plan_path,
                 collection_id=collection_id,
                 quality_source_run=detect_quality_source_run,
                 quality_run=detect_quality_run,
-                clips=tuple(DetectionClipSpec.from_mapping(clip) for clip in clips),
+                work_units=tuple(
+                    DetectionWorkUnitSpec.from_mapping(
+                        clip,
+                        work_unit=layout_work_units[str(clip["work_unit_id"])],
+                    )
+                    for clip in clips
+                ),
                 model=DetectionModelSpec(
                     set_id=detection_binding.set_id,
                     run_id=detection_binding.run_id,
                     path=detection_binding.path,
                     sha256=detection_binding.sha256,
                 ),
-                expected_subject_count=target.expected_subject_count,
                 resume_existing_detections=resume_existing_detections,
                 detect_array_concurrency=detect_array_concurrency,
                 refine_bundle_concurrency=detect_refine_bundle_concurrency,
@@ -732,12 +746,10 @@ def build_plan(
                 required_artifacts=gate_artifacts,
             )
         )
-        jobs.extend(detection_module.fragment.jobs)
-        fragments.append(detection_module.fragment)
+        jobs.extend(detection_module.jobs)
+        fragments.extend(detection_module.fragments)
         detection_outputs = detection_module.outputs
         target_payload["detection_module"] = detection_outputs.to_json()
-        downstream_job_start = len(jobs)
-
         cache_array_key = f"cache_array:{target_safe}"
         cache_tasks: list[LsfExecutionTask] = []
         for bundle_index, start in enumerate(range(0, len(clips), cache_bundle_size)):
@@ -1051,19 +1063,84 @@ def build_plan(
             )
         )
         target_validation_keys.append(validation_key)
+        crop_cache_artifact = f"crop_roi_cache:{target_safe}"
+        raw_keypoints_artifact = f"raw_keypoints:{target_safe}"
+        refined_keypoints_artifact = f"refined_keypoints:{target_safe}"
+        raw_masks_artifact = f"raw_subject_masks:{target_safe}"
+        refined_masks_artifact = f"refined_subject_masks:{target_safe}"
         validated_artifact = f"validated_analysis:{target_safe}"
-        fragments.append(
-            LsfWorkflowFragment(
-                fragment_id=f"analysis:{target_safe}",
-                jobs=tuple(jobs[downstream_job_start:]),
-                requires=(detection_outputs.artifact_key,),
-                provides=(validated_artifact,),
-                metadata={
-                    "module": "clipped_analysis",
-                    "target_id": target.target_id,
-                    "detection_inputs": detection_outputs.to_json(),
-                    "terminal_job_key": validation_key,
-                },
+        job_by_key = {job.job_key: job for job in jobs}
+        mask_finalize_keys = [package_array_key, mask_import_key]
+        if mask_grid_key is not None:
+            mask_finalize_keys.insert(0, mask_grid_key)
+        fragments.extend(
+            (
+                LsfWorkflowFragment(
+                    fragment_id=f"crop_roi_cache:{target_safe}",
+                    jobs=(job_by_key[cache_array_key], job_by_key[proxy_key]),
+                    requires=(detection_outputs.artifact_key,),
+                    provides=(crop_cache_artifact,),
+                    metadata={
+                        "module": "crop_roi_cache",
+                        "target_id": target.target_id,
+                        "recording_layout": "clipped_collection",
+                        "crop_authority": "proxy_crop_runs_bound_to_flat_roi_cache",
+                        "terminal_job_key": proxy_key,
+                    },
+                ),
+                LsfWorkflowFragment(
+                    fragment_id=f"keypoints:{target_safe}",
+                    jobs=(
+                        job_by_key[keypoint_array_key],
+                        job_by_key[keypoint_finalize_key],
+                        job_by_key[keypoint_refine_key],
+                    ),
+                    requires=(crop_cache_artifact,),
+                    provides=(raw_keypoints_artifact, refined_keypoints_artifact),
+                    metadata={
+                        "module": "keypoints",
+                        "target_id": target.target_id,
+                        "recording_layout": "clipped_collection",
+                        "terminal_job_key": keypoint_refine_key,
+                    },
+                ),
+                LsfWorkflowFragment(
+                    fragment_id=f"subject_mask_inference:{target_safe}",
+                    jobs=(job_by_key[subject_mask_array_key],),
+                    requires=(crop_cache_artifact,),
+                    provides=(raw_masks_artifact,),
+                    metadata={
+                        "module": "subject_mask_inference",
+                        "target_id": target.target_id,
+                        "recording_layout": "clipped_collection",
+                        "assignment_keypoints_required": False,
+                        "terminal_job_key": subject_mask_array_key,
+                    },
+                ),
+                LsfWorkflowFragment(
+                    fragment_id=f"subject_mask_refinement:{target_safe}",
+                    jobs=tuple(job_by_key[key] for key in mask_finalize_keys),
+                    requires=(raw_masks_artifact, refined_keypoints_artifact),
+                    provides=(refined_masks_artifact,),
+                    metadata={
+                        "module": "subject_mask_refinement",
+                        "target_id": target.target_id,
+                        "recording_layout": "clipped_collection",
+                        "terminal_job_key": mask_import_key,
+                    },
+                ),
+                LsfWorkflowFragment(
+                    fragment_id=f"analysis_validation:{target_safe}",
+                    jobs=(job_by_key[validation_key],),
+                    requires=(refined_keypoints_artifact, refined_masks_artifact),
+                    provides=(validated_artifact,),
+                    metadata={
+                        "module": "analysis_validation",
+                        "target_id": target.target_id,
+                        "detection_inputs": detection_outputs.to_json(),
+                        "terminal_job_key": validation_key,
+                    },
+                ),
             )
         )
 

@@ -1,5 +1,10 @@
 # Registry-pinned clipped inference DAG
 
+> **Architecture boundary:** this is the clipped-recording recipe built on the
+> general structured LSF production engine. It is not intended to make the
+> engine exclusive to clipped recordings. The accepted generalization plan is
+> `docs/production_dag_recording_layout_design.md`.
+
 `fisheye.cluster.clipped_inference` composes one immutable LSF workflow for a
 clipped recording cohort. It covers detection, detection refinement, finalized
 collection creation, flat ROI cache construction, proxy crop binding,
@@ -21,9 +26,11 @@ contract obsolete.
 
 ## Composable workflow modules
 
-The detection path is the first extracted domain module. The
-`fisheye.cluster.clipped_detection` builder accepts typed target, clip, model,
-quality-policy, scheduler, and upstream-gate inputs and returns two things:
+The detection path is the first extracted domain module. Its raw-detection
+fragment accepts a layout-neutral recording target and dispatches either to
+the clipped artifact publisher or the whole-video node-local atomic publisher.
+The clipped postprocessing builder additionally accepts typed quality-policy,
+scheduler, and upstream-gate inputs and returns two things:
 
 - an `LsfWorkflowFragment` containing the detect array, recording-order
   quality-source materialization, collection quality reconciliation,
@@ -39,19 +46,41 @@ module by itself for a detection-only workflow. This keeps workflow scope
 (detection-only versus full analysis) separate from scheduler packaging
 (ordinary job, array, or bounded bundle).
 
-For each target, the full campaign now composes a `detection:<target>` fragment
-with an `analysis:<target>` fragment. The analysis fragment explicitly requires
-the detection module's finalized-collection artifact and provides a validated
-analysis artifact. Cross-recording concurrency gates are also expressed as
-fragment requirements: a later detection fragment may require the earlier
-target's validated-analysis artifact. The campaign finalizer requires every
-target validation artifact before registry reconciliation and cleanup.
+For each target, the full campaign composes raw detection and detection
+postprocessing with five downstream capability fragments:
+
+```text
+detection_postprocess:<target>
+  -> crop_roi_cache:<target>
+       ├─ keypoints:<target>
+       └─ subject_mask_inference:<target>
+              \       /
+       subject_mask_refinement:<target>
+                 -> analysis_validation:<target>
+```
+
+These are logical artifact boundaries over the existing commands, not extra
+scheduler submissions. `crop_roi_cache` provides the stable proxy crop and
+cache binding. Keypoints provides both raw and refined artifacts. Subject-mask
+inference does not require keypoints; its refinement fragment joins raw masks
+with the exact refined-keypoint output. Cross-recording concurrency gates
+remain fragment requirements: a later raw-detection fragment may require the
+earlier target's validated-analysis artifact. The campaign finalizer requires
+every target validation artifact before registry reconciliation and cleanup.
 
 These logical artifact keys validate composition; concrete LSF dependencies
 still enforce execution order. All fragments are resolved into one immutable
 workflow before any `bsub` call, so compute jobs never create more scheduler
-jobs dynamically. Cache, keypoint, and subject-mask extraction can follow the
-same pattern without changing their existing stage-only operator interfaces.
+jobs dynamically. The existing cache, keypoint, and subject-mask stage-only
+operator interfaces remain unchanged and are now visible as separate
+composition capabilities.
+
+Selected arena geometry and registered gating are available as independent
+layout-neutral fragments in `fisheye.cluster.arena_geometry`. They are not yet
+silently inserted into this default recipe. A future required-gating policy
+must wire the exact `analysis/detection_gate_runs/<run>` output into detection
+postprocessing and validate ordered `instance_key` equality before refinement;
+optional or absent geometry must remain an explicit workflow policy.
 
 The target manifest schema is `palette.clipped_inference_targets.v1`. Every
 target must pin its registry `recording_id`, recording directory, and canonical
