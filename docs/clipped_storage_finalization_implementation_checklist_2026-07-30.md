@@ -2,9 +2,9 @@
 
 Date: 2026-07-30
 
-Status: strict selector-ineligible clip evidence, binding, and recording
-finalization implemented as composable DAG fragments; main campaign insertion,
-canary execution, and archive import remain gated.
+Status: strict selector-ineligible clip evidence, binding, recording
+finalization, and a full-duration seven-store handoff are complete; main
+campaign insertion, archive import, and production selection remain gated.
 
 ## Goal
 
@@ -143,8 +143,10 @@ revalidates the live pixel authority before any geometry becomes usable.
       addition.
 - [x] Implement the immutable full-duration plan, LSF composition, commit pin,
       node-local keypoint republish, and final seven-artifact handoff gate.
-- [ ] Run the recording-scale publication/read/peak-RSS benchmark. Record
-      detection, refined, crop, and keypoint phase timings separately.
+- [x] Run the recording-scale publication/peak-RSS benchmark and record
+      detection, refined, crop, and keypoint phases separately. Candidate v8
+      is the immutable Palette handoff; Crimson read measurement remains a
+      separate pending gate.
 - [ ] Add one atomic archive-import transaction for the complete candidate set.
       A partial import must never become selector-visible.
 - [ ] Review the imported candidate in Palette and Crimson before any guarded

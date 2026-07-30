@@ -2,8 +2,8 @@
 
 Date: 2026-07-30
 
-Status: implementation and focused validation complete; immutable deployment,
-LSF submission, and Crimson full-duration measurement remain pending.
+Status: Palette full-duration publication and terminal handoff complete;
+Crimson full-duration measurement remains pending.
 
 ## Why the full run is required
 
@@ -154,6 +154,33 @@ The handoff records server and macOS path translations, manifest and logical
 digests, metadata fingerprints, file/object counts, apparent bytes, Palette
 and Crimson revisions, host, and LSF job identity.
 
+## Completed full-duration handoff
+
+Candidate v8 completed all seven stages and the terminal reopen gate at:
+
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/crimson_storage_candidates/sleepyfish_cam2010095_full_v8_20260730/handoff_manifest.json`
+
+The handoff SHA-256 is
+`86e638ed977f71a69bdd4fd334d7778583226901e7acfc22f790607e8b6fc374`;
+its canonical payload digest is
+`1089386cce3e94ab368203c3e9e70ebb0fee956860405a37f33a7d35dd4c5ec0`.
+It binds clean Palette commit `8fd810fd8f5ba5c7bc9dcc000ee9b4b90b4af342`
+and the frozen Crimson contract commit. All seven outputs are
+selector-ineligible and registry-unregistered, and the receipt reports no
+production-state changes.
+
+The full keypoint adapter completed in 146.8 seconds with 3.36 GiB peak RSS.
+Of that, 121.0 seconds were node-local publication and 2.61 seconds were the
+final shared-storage copy/rename. The local four-store bundle contains 143
+files and 576.7 MB apparent bytes. Ten ROI rows used the bounded one-pixel
+coordinate rebase; the observed source-camera reprojection error after float32
+conversion was 0.000244 pixels against a 0.001-pixel tolerance.
+The persisted LSF receipts separately record 54.3 seconds for canonical
+detection, 37.0 seconds for recording refined detection, 74.3 seconds for
+crop-v2, 148.1 seconds for the keypoint adapter wrapper, and 2.4 seconds for
+the terminal handoff validator. The 22-way strict clip conversion ran between
+the canonical and refined stages and completed all tasks successfully.
+
 ## Execution checklist
 
 - [x] Compose the seven-store DAG and one terminal handoff.
@@ -169,19 +196,20 @@ and Crimson revisions, host, and LSF job identity.
 - [x] Route jobs requesting more than the `short` queue's 61-minute hard limit
       to the normal CPU `local` queue; keep one-hour validation jobs on
       `short`.
-- [ ] Commit and deploy this branch as a unique `/groups` worktree.
-- [ ] Materialize and review `candidate_plan.json` and `lsf_plan.json`.
-- [ ] Submit the full candidate through `login1-citrus-poller`.
-- [ ] Require terminal `handoff_manifest.json` before giving paths to Crimson.
+- [x] Commit and deploy this branch as a unique `/groups` worktree.
+- [x] Materialize and review `candidate_plan.json` and `lsf_plan.json`.
+- [x] Submit the full candidate through `login1-citrus-poller`.
+- [x] Require terminal `handoff_manifest.json` before giving paths to Crimson.
 - [ ] Run Crimson's fresh-process full-duration startup, seek, traversal,
       physical-I/O, cache, and RSS matrix.
-- [ ] Keep every output selector-ineligible regardless of benchmark outcome;
+- [x] Keep every output selector-ineligible regardless of benchmark outcome;
       profile or writer promotion remains a separate explicit decision.
 
 ## Validation completed
 
-Thirty-six focused tests pass, including real Zarr v3 publication/reopen tests,
-the standalone crop/refined split, vectorized multi-row reconciliation, full
-plan pins, native clip binding, node-local guards, receipt rebinding,
-candidate composition, and the terminal handoff. Static compilation, focused
-Ruff checks, and `git diff --check` also pass.
+The focused workflow suite and the latest 22-test adapter/candidate subset
+pass, including real Zarr v3 publication/reopen tests, the standalone
+crop/refined split, vectorized multi-row reconciliation, full plan pins,
+native clip binding, node-local guards, receipt rebinding, bounded coordinate
+rebasing, candidate composition, and the terminal handoff. Static compilation,
+focused Ruff checks, and `git diff --check` also pass.
