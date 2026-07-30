@@ -537,6 +537,33 @@ explicitly models a mask component as a `(1,1,512,512)` access unit
 
 Subject-mask writers do not yet use this machinery.
 
+The first post-census implementation now defines exact raw/refined scientific
+core schemas and generates immutable `StoragePlan` manifests without importing
+Zarr or changing writers (`src/fisheye/shared/zarr/subject_mask_schema.py`,
+`src/fisheye/shared/zarr/subject_mask_storage.py`). At full Sleepyfish scale,
+the current `published_http_v1` profile derives:
+
+| Core payload | Inner chunk | Outer shard | Estimated payload objects |
+| --- | --- | --- | ---: |
+| Raw `uint8 mask_probs_roi` | `[4,1,512,512]` = 1 MiB | `[1144,1,512,512]` = 286 MiB | 4,088 |
+| Raw `float16 mask_probs_roi` | `[2,1,512,512]` = 1 MiB | `[1024,1,512,512]` = 512 MiB | 4,568 |
+| Published refined `uint8 masks_roi` | `[4,1,512,512]` = 1 MiB | `[1144,1,512,512]` = 286 MiB | 4,088 |
+
+The float16 surface transparently exceeds the current per-array 4,096-object
+budget; the planner reports that miss rather than inventing a layout beyond the
+512 MiB shard ceiling. This is a benchmark/profile decision, not a schema
+failure. The uint8 plan satisfies the per-array budget, while the complete raw
+core is estimated at 4,104 payload objects, so manifests now state explicitly
+that the existing budget is per-array and report the stage total separately.
+
+The same byte policy adapts to recording size. A 1,188,001-entry offsets array
+uses 131,072-element (1 MiB) inner chunks inside one indexed shard. A
+200,001-entry offsets array is only about 1.53 MiB and stays one eager,
+unsharded chunk. Mask chunks remain 1 MiB because their bytes per observation,
+not the recording's frame count, determine their row depth
+(`tests/unit/fisheye/test_subject_mask_storage.py`). These plans are candidates,
+not promoted writer defaults.
+
 ### Raw probability writer
 
 The current raw writer creates arrays directly and uses fixed row counts. Its
@@ -938,7 +965,10 @@ This checklist is intentionally not authorization to mutate production.
 
 ### Phase B: storage intents
 
-- [ ] Classify each array as `EAGER`, `WINDOWED`, `PER_ROW`, or `INDEXED`.
+- [x] Classify raw probability and refined dense scientific-core arrays as
+  `EAGER`, `WINDOWED`, or `PER_ROW` and generate immutable byte-derived plans.
+- [ ] Extend the classification to editable audit state, compact caches,
+  variable contours/RLE, and training-artifact arrays.
 - [ ] Classify each output as editable, immutable, or whole-shard-owned append.
 - [ ] Route every mask-family array through `plan_storage`.
 - [ ] Include composite delta, mapping, lineage, and metric arrays in that
