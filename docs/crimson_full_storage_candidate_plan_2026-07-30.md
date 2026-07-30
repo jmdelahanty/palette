@@ -2,8 +2,8 @@
 
 Date: 2026-07-30
 
-Status: Palette full-duration publication and terminal handoff complete;
-Crimson full-duration measurement remains pending.
+Status: Palette full-duration publication and canonical-v3 supplemental handoff
+complete; Crimson canonical-v3 reopen and GUI smoke remain pending.
 
 ## Why the full run is required
 
@@ -181,6 +181,81 @@ crop-v2, 148.1 seconds for the keypoint adapter wrapper, and 2.4 seconds for
 the terminal handoff validator. The 22-way strict clip conversion ran between
 the canonical and refined stages and completed all tasks successfully.
 
+## Crimson measurement and canonical-v3 companion
+
+Crimson commit `ece936c27deebc3da14a82db8b8800a022825e2d` completed the
+first mounted full-candidate pass:
+
+- keypoints passed five fresh processes at 594 ms median readiness, 1.90 ms
+  warm random p95, and 254 MiB peak RSS;
+- crop geometry passed five fresh processes at 570 ms median readiness and
+  0.108 ms warm random p95, with one retained offset read and zero pixel-array
+  opens;
+- refined detections passed complete traversal of all 1,169,010 rows and
+  identities, seeking, cancellation, overlays, and residency;
+- canonical detections correctly failed closed because the v8 companion used
+  native run-manifest v2 while the coordinate-aware Crimson adapter requires
+  canonical v3; and
+- all 67 macOS tests and the isolated Linux portable build/tests passed.
+
+Palette republished only the logically identical canonical companion at:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/
+  crimson_storage_candidates/
+  sleepyfish_cam2010095_full_v8_canonical_v3_20260730_v1/
+```
+
+The exact handoff and canonical paths are:
+
+```text
+server handoff:
+  /groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/crimson_storage_candidates/sleepyfish_cam2010095_full_v8_canonical_v3_20260730_v1/handoff_manifest.json
+
+macOS canonical store:
+  /Volumes/johnsonlab/jeremy/recordings/.palette_benchmarks/crimson_storage_candidates/sleepyfish_cam2010095_full_v8_canonical_v3_20260730_v1/canonical_detection.zarr
+
+canonical run:
+  canonical_sleepyfish_cam2010095_full_v8_coordinate_v3_20260730
+```
+
+The supplemental handoff SHA-256 is
+`5913c8437522a2cf28ea7a2356e1760b7be9b489ee4ad1b4abc2d326a0718c38`;
+its payload digest is
+`4ccbe3caa263831ad12aad66a5bf361a37d1395f970a0e48fd264ef6f732dec6`.
+The canonical-v3 manifest payload digest is
+`133dd7d1869583b4a94dbb5f3b92ae582367c062e931b8e507c8ac40fa743665`,
+and the exact coordinate-catalog digest is
+`337613bd6e5f283eef9d6a89c14766d50c5b6863dea584f7568b90bb1d936733`.
+
+The supplemental gate proved exact equality between v2 and v3 for:
+
+- logical schema;
+- storage plan;
+- every logical array hash and the aggregate logical-content digest
+  `9c0e85d44262578733d285092fc1397a53ca930e69af92005d9d20d036763f4a`;
+- source evidence; and
+- normalized physical metadata declarations.
+
+Only `source_evidence_kind=native_detection` and the persisted coordinate
+catalog were added to the manifest envelope. The other six artifact records in
+the original handoff are byte-for-JSON identical in the supplemental handoff.
+Both handoffs and all seven original stores remain unchanged.
+
+Palette implementation commit
+`3ec2686df61a9f692d54e4ec4463217a356974a5` was deployed in a detached clean
+cluster worktree. LSF job `153234070` completed on `h07u23` in 70 seconds; the
+adapter itself took 61.4 seconds, including 54.4 seconds to reload/bind the 22
+clip sources, 4.9 seconds for node-local publication, and 0.38 seconds for the
+shared copy. Adapter peak RSS was 936.5 MiB. The earlier submission
+`153234069` exited before executing Palette because a shell-stripped LSF
+resource clause became the command; it created no Zarr or handoff and is
+retained only as orchestration evidence.
+
+Crimson should now rerun only the canonical package gate against the new v3
+path, then run the deferred GUI smoke using the existing video reference. The
+other six surfaces do not require rebuild or repeat storage measurement.
+
 ## Execution checklist
 
 - [x] Compose the seven-store DAG and one terminal handoff.
@@ -202,6 +277,14 @@ the canonical and refined stages and completed all tasks successfully.
 - [x] Require terminal `handoff_manifest.json` before giving paths to Crimson.
 - [ ] Run Crimson's fresh-process full-duration startup, seek, traversal,
       physical-I/O, cache, and RSS matrix.
+- [x] Retain the original v2 package after Crimson's correct fail-closed result.
+- [x] Republish only canonical detection with manifest v3 and an exact
+      coordinate catalog.
+- [x] Prove identical logical content, storage plan, source evidence, and
+      normalized physical metadata against the v2 companion.
+- [x] Issue a new seven-surface handoff reusing the other six artifact records
+      exactly.
+- [ ] Run Crimson's canonical-v3 reopen gate and deferred GUI smoke.
 - [x] Keep every output selector-ineligible regardless of benchmark outcome;
       profile or writer promotion remains a separate explicit decision.
 
