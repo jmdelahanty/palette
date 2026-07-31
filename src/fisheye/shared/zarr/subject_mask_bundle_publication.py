@@ -65,7 +65,8 @@ from fisheye.shared.zarr_run_completion import (
 SUBJECT_MASK_BUNDLE_FAMILY = "subject_mask_bundle_runs"
 SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID = "palette.subject_mask.bundle_manifest"
-SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION = 1
+SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION = 2
+SUBJECT_MASK_BUNDLE_MANIFEST_SUPPORTED_VERSIONS = (1, 2)
 SUBJECT_MASK_BUNDLE_PUBLICATION_SCHEMA_ID = "palette.subject_mask.bundle_publication"
 SUBJECT_MASK_BUNDLE_PUBLICATION_SCHEMA_VERSION = 1
 SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR = "subject_mask_authority"
@@ -97,8 +98,8 @@ _IDENTITY_PATHS = (
     "source_acquisition_frame_index",
     "frame_row_offsets",
     "source_crop_xywh",
-    "available_channels",
 )
+_LEGACY_V1_IDENTITY_PATHS = (*_IDENTITY_PATHS, "available_channels")
 _FAMILY_SELECTOR_ATTRS = (
     "latest",
     "latest_complete",
@@ -264,19 +265,35 @@ def _bundle_cross_binding(
     refined_manifest: Mapping[str, Any],
     quality_manifest: Mapping[str, Any],
     refined_run_id: str,
+    schema_version: int = SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION,
 ) -> dict[str, object]:
+    version = int(schema_version)
+    if version not in SUBJECT_MASK_BUNDLE_MANIFEST_SUPPORTED_VERSIONS:
+        raise ValueError(f"Unsupported subject-mask bundle schema version: {version}.")
     raw_dimensions = dict(_manifest_dimensions(raw_manifest))
     refined_dimensions = dict(_manifest_dimensions(refined_manifest))
-    if raw_dimensions != refined_dimensions:
-        raise ValueError("Raw and refined subject-mask dimensions differ.")
     raw_components = dict(_manifest_components(raw_manifest))
     refined_components = dict(_manifest_components(refined_manifest))
-    if raw_components != refined_components:
-        raise ValueError("Raw and refined subject-mask component registries differ.")
+    if version == 1:
+        if raw_dimensions != refined_dimensions:
+            raise ValueError("Raw and refined subject-mask dimensions differ.")
+        if raw_components != refined_components:
+            raise ValueError(
+                "Raw and refined subject-mask component registries differ."
+            )
+        identity_paths = _LEGACY_V1_IDENTITY_PATHS
+    else:
+        for name in ("n_frames", "n_rois", "roi_height", "roi_width"):
+            if raw_dimensions.get(name) != refined_dimensions.get(name):
+                raise ValueError(
+                    "Raw and refined subject-mask row/pixel domains differ for "
+                    f"{name!r}."
+                )
+        identity_paths = _IDENTITY_PATHS
     raw_arrays = _manifest_array_document(raw_manifest)
     refined_arrays = _manifest_array_document(refined_manifest)
     identity: dict[str, str] = {}
-    for path in _IDENTITY_PATHS:
+    for path in identity_paths:
         raw_declaration = raw_arrays.get(path)
         refined_declaration = refined_arrays.get(path)
         if not isinstance(raw_declaration, Mapping) or not isinstance(
@@ -323,7 +340,7 @@ def _bundle_cross_binding(
     for name in ("n_frames", "n_rois", "n_channels", "roi_height", "roi_width"):
         if quality_dimensions.get(name) != refined_dimensions.get(name):
             raise ValueError(f"Quality/refined dimensions differ for {name!r}.")
-    return {
+    cross_binding: dict[str, object] = {
         "dimensions": refined_dimensions,
         "components": refined_components,
         "component_registry_digest": canonical_json_sha256(refined_components),
@@ -332,6 +349,18 @@ def _bundle_cross_binding(
         "quality_source_manifest_digest": canonical_json_sha256(refined_manifest),
         "identity_policy": "exact_logical_array_hash_equality_v1",
     }
+    if version >= 2:
+        cross_binding.update(
+            {
+                "raw_dimensions": raw_dimensions,
+                "raw_components": raw_components,
+                "raw_component_registry_digest": canonical_json_sha256(
+                    raw_components
+                ),
+                "component_registry_policy": "raw_and_refined_bound_independently_v1",
+            }
+        )
+    return cross_binding
 
 
 def _normalized_bundle_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -433,7 +462,8 @@ def validate_subject_mask_bundle_manifest(
     payload = manifest.get("payload")
     if (
         manifest.get("schema_id") != SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID
-        or manifest.get("schema_version") != SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION
+        or manifest.get("schema_version")
+        not in SUBJECT_MASK_BUNDLE_MANIFEST_SUPPORTED_VERSIONS
         or manifest.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
         or not isinstance(payload, Mapping)
     ):
@@ -967,6 +997,7 @@ def _validate_live_bundle(
         refined_manifest=manifests["refined"],
         quality_manifest=manifests["quality"],
         refined_run_id=member_ids["refined"],
+        schema_version=int(manifest["schema_version"]),
     )
     if observed_cross != payload["cross_binding"]:
         raise RuntimeError("Subject-mask bundle cross-binding changed.")
@@ -1241,6 +1272,7 @@ __all__ = [
     "SUBJECT_MASK_BUNDLE_MANIFEST_ATTRIBUTE",
     "SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_ID",
     "SUBJECT_MASK_BUNDLE_MANIFEST_SCHEMA_VERSION",
+    "SUBJECT_MASK_BUNDLE_MANIFEST_SUPPORTED_VERSIONS",
     "SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR",
     "activate_subject_mask_bundle",
     "build_subject_mask_bundle_manifest",

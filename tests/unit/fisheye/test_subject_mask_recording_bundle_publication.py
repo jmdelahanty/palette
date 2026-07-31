@@ -137,6 +137,7 @@ def _draft(
     raw_parent: str,
     raw_slices: dict[str, slice] | None = None,
     refined_slices: dict[str, slice] | None = None,
+    split_eye_registry: bool = False,
 ) -> Path:
     path = tmp_path / "draft.zarr"
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
@@ -154,6 +155,30 @@ def _draft(
     }.items():
         _create_array(crop, name, values)
     raw_values, refined_values = _surfaces()
+    if split_eye_registry:
+        refined_masks = refined_values["masks_roi"]
+        raw_masks = np.stack(
+            (
+                refined_masks[:, 0],
+                np.maximum(refined_masks[:, 1], refined_masks[:, 2]),
+                refined_masks[:, 3],
+            ),
+            axis=1,
+        )
+        raw_metrics = derive_subject_mask_metrics(raw_masks)
+        raw_probabilities = raw_masks * np.uint8(255)
+        raw_values = {
+            "mask_probs_roi": raw_probabilities,
+            "available_channels": np.ones((3,), dtype=bool),
+            "metrics/prob_max": (
+                np.max(raw_probabilities, axis=(2, 3)).astype(np.float32)
+                / np.float32(255.0)
+            ),
+            **{
+                f"metrics/{name}": value
+                for name, value in raw_metrics.items()
+            },
+        }
     row_values = {
         "source_crop_row_ids": np.arange(4, dtype=np.int64),
         "instance_key": np.asarray([101, 102, 201, 301], dtype=np.uint64),
@@ -161,12 +186,19 @@ def _draft(
     }
     raw_parent_group = root.require_group(raw_parent)
     refined_parent = root.require_group("refined_subject_masks_runs")
-    labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    refined_labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    raw_labels = (
+        ["subject_body", "eyes_union", "swim_bladder"]
+        if split_eye_registry
+        else refined_labels
+    )
     for raw_name, row_slice in (
         raw_slices or {"raw_draft": slice(0, len(frames))}
     ).items():
         raw = raw_parent_group.create_group(raw_name)
-        raw.attrs.update({"mask_labels": labels, "mask_probability_threshold": 0.5})
+        raw.attrs.update(
+            {"mask_labels": raw_labels, "mask_probability_threshold": 0.5}
+        )
         for name, values in row_values.items():
             _create_array(raw, name, values[row_slice])
         for name, values in raw_values.items():
@@ -185,7 +217,7 @@ def _draft(
         refined_slices or {"refined_draft": slice(0, len(frames))}
     ).items():
         refined = refined_parent.create_group(refined_name)
-        refined.attrs["mask_labels"] = labels
+        refined.attrs["mask_labels"] = refined_labels
         for name, values in {
             "source_crop_row_ids": row_values["source_crop_row_ids"],
             **refined_values,
@@ -341,6 +373,95 @@ def test_recording_bundle_composes_multiple_refined_clip_shards_without_reorderi
         refined["masks_roi"][:, 0, 1, 1], np.ones(4, dtype=np.uint8)
     )
     assert refined.attrs["stage_selector_eligible"] is False
+    assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
+
+
+def test_recording_bundle_binds_distinct_raw_and_refined_component_registries(
+    tmp_path: Path,
+) -> None:
+    draft = _draft(
+        tmp_path,
+        raw_parent="subject_mask_shard_runs",
+        raw_slices={"raw_clip_a": slice(0, 2), "raw_clip_b": slice(2, 4)},
+        refined_slices={
+            "refined_clip_a": slice(0, 2),
+            "refined_clip_b": slice(2, 4),
+        },
+        split_eye_registry=True,
+    )
+    analysis = tmp_path / "analysis_split_eye_registry.zarr"
+    root = zarr.open_group(str(analysis), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "recording_001"
+
+    result = publish_recording_subject_mask_bundle(
+        analysis_zarr=analysis,
+        draft_zarr=draft,
+        crop_run="crop_001",
+        raw_draft_parent="subject_mask_shard_runs",
+        raw_draft_run="raw_clip_a",
+        raw_draft_runs=("raw_clip_a", "raw_clip_b"),
+        refined_draft_run="refined_clip_a",
+        refined_draft_runs=("refined_clip_a", "refined_clip_b"),
+        raw_run="raw_split_eye_001",
+        refined_run="refined_split_eye_001",
+        quality_run="quality_split_eye_001",
+        bundle_id="bundle_split_eye_001",
+        local_output_root=tmp_path / "local_split_eye_outputs",
+        quality_scratch_root=tmp_path / "quality_split_eye_scratch",
+    )
+
+    assert result["status"] == "complete"
+    published = zarr.open_group(str(analysis), mode="r", use_consolidated=False)
+    raw = published["subject_mask_runs/raw_split_eye_001"]
+    refined = published[
+        "refined_subject_masks_runs/refined_split_eye_001"
+    ]
+    quality = published[
+        "subject_mask_quality_runs/quality_split_eye_001"
+    ]
+    assert raw.attrs["mask_labels"] == [
+        "subject_body",
+        "eyes_union",
+        "swim_bladder",
+    ]
+    assert refined.attrs["mask_labels"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    assert raw["available_channels"].shape == (3,)
+    assert refined["available_channels"].shape == (4,)
+    quality_schema = quality.attrs["run_manifest"]["payload"]["logical_schema"]
+    assert quality_schema["dimensions"]["n_channels"] == 4
+    assert quality_schema["components"]["labels"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    bundle = published["subject_mask_bundle_runs/bundle_split_eye_001"]
+    bundle_manifest = bundle.attrs["run_manifest"]
+    assert bundle_manifest["schema_version"] == 2
+    cross_binding = bundle_manifest["payload"]["cross_binding"]
+    assert (
+        cross_binding["component_registry_policy"]
+        == "raw_and_refined_bound_independently_v1"
+    )
+    assert cross_binding["raw_components"]["labels"] == [
+        "subject_body",
+        "eyes_union",
+        "swim_bladder",
+    ]
+    assert cross_binding["components"]["labels"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    assert "available_channels" not in cross_binding[
+        "raw_refined_identity_array_values_sha256"
+    ]
     assert SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR not in published.attrs
 
 

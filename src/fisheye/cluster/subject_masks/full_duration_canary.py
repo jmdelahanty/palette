@@ -76,7 +76,7 @@ from fisheye.shared.zarr_run_completion import (
 PLAN_SCHEMA_ID = "palette.subject_mask.full_duration_canary_plan"
 PLAN_SCHEMA_VERSION = 1
 RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_result"
-RESULT_SCHEMA_VERSION = 1
+RESULT_SCHEMA_VERSION = 2
 WORKER_RESULT_SCHEMA_ID = "palette.subject_mask.full_duration_canary_worker"
 WORKER_RESULT_SCHEMA_VERSION = 1
 FAMILY = "subject_mask_full_duration_canary"
@@ -1266,6 +1266,7 @@ def finalize_canary(
     keep_scratch: bool = False,
 ) -> dict[str, Any]:
     plan = load_plan(plan_path)
+    publication_repo = _repo_identity(Path(__file__).resolve().parents[4])
     result_path = Path(plan["outputs"]["result_path"])
     if result_path.exists():
         result = _strict_json(result_path)
@@ -1345,7 +1346,9 @@ def finalize_canary(
             "classification": BENCHMARK_CLASSIFICATION,
             "finished_at_utc": _utc_now(),
             "plan_digest": plan["plan_digest"],
-            "palette_commit": plan["repo"]["commit"],
+            "palette_commit": publication_repo["commit"],
+            "worker_palette_commit": plan["repo"]["commit"],
+            "publication_repo": publication_repo,
             "recording": plan["recording"],
             "publication": publication,
             "worker_result_digests": {

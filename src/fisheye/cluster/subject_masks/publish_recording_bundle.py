@@ -522,10 +522,12 @@ def publish_recording_subject_mask_bundle(
     ]
     refined_draft = refined_drafts[0]
     n_frames = int(crop["frame_row_offsets"].shape[0]) - 1
-    labels = tuple(str(value) for value in raw_draft.attrs["mask_labels"])
-    if tuple(str(value) for value in refined_draft.attrs["mask_labels"]) != labels:
-        raise ValueError("Raw and refined component registries differ.")
-    components = SubjectMaskComponentRegistry(labels)
+    raw_labels = tuple(str(value) for value in raw_draft.attrs["mask_labels"])
+    refined_labels = tuple(
+        str(value) for value in refined_draft.attrs["mask_labels"]
+    )
+    raw_components = SubjectMaskComponentRegistry(raw_labels)
+    refined_components = SubjectMaskComponentRegistry(refined_labels)
     if len(raw_drafts) == 1:
         raw_arrays = _raw_arrays(raw_draft, crop, n_frames=n_frames)
         raw_workers = [_worker_evidence(draft_path, raw_draft)]
@@ -566,7 +568,7 @@ def publish_recording_subject_mask_bundle(
         refined_source_path = f"refined_subject_mask_shard_collections/{refined_run}"
         refined_source_attrs = _consistent_refined_source_attrs(
             refined_drafts,
-            labels=labels,
+            labels=refined_labels,
         )
     raw_dimensions = SubjectMaskDimensions(
         n_frames=n_frames,
@@ -582,8 +584,12 @@ def publish_recording_subject_mask_bundle(
         roi_height=int(refined_arrays["masks_roi"].shape[2]),
         roi_width=int(refined_arrays["masks_roi"].shape[3]),
     )
-    if raw_dimensions != refined_dimensions:
-        raise ValueError("Raw and refined subject-mask dimensions differ.")
+    for name in ("n_frames", "n_rois", "roi_height", "roi_width"):
+        if getattr(raw_dimensions, name) != getattr(refined_dimensions, name):
+            raise ValueError(
+                "Raw and refined subject-mask row/pixel domains differ for "
+                f"{name!r}."
+            )
     threshold = float(raw_draft.attrs.get("mask_probability_threshold", 0.5))
     raw_documents = _prebuilt_source_documents(
         draft_path,
@@ -593,7 +599,7 @@ def publish_recording_subject_mask_bundle(
         schema=RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
         arrays=raw_arrays,
         dimensions=raw_dimensions,
-        components=components,
+        components=raw_components,
         threshold=threshold,
     )
     raw_source_manifest, raw_receipt = raw_documents or (
@@ -604,7 +610,7 @@ def publish_recording_subject_mask_bundle(
             schema=RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
             arrays=raw_arrays,
             dimensions=raw_dimensions,
-            components=components,
+            components=raw_components,
             threshold=threshold,
             workers=raw_workers,
         )
@@ -615,7 +621,7 @@ def publish_recording_subject_mask_bundle(
         source_crop_arrays=_crop_arrays(crop),
         source_manifest=raw_source_manifest,
         n_frames=n_frames,
-        components=components,
+        components=raw_components,
         destination=raw_store,
         run_id=raw_run,
         kind="raw_probability_uint8",
@@ -631,7 +637,7 @@ def publish_recording_subject_mask_bundle(
                 ),
             )
             if len(raw_drafts) == 1
-            else {"mask_labels": list(labels)}
+            else {"mask_labels": list(raw_labels)}
         ),
         threshold=threshold,
         validation_mode=SubjectMaskCoreValidationMode.PRODUCTION_STREAMING,
@@ -647,7 +653,7 @@ def publish_recording_subject_mask_bundle(
             schema=REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
             arrays=refined_arrays,
             dimensions=refined_dimensions,
-            components=components,
+            components=refined_components,
             threshold=None,
         )
         if len(refined_drafts) == 1
@@ -661,7 +667,7 @@ def publish_recording_subject_mask_bundle(
             schema=REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
             arrays=refined_arrays,
             dimensions=refined_dimensions,
-            components=components,
+            components=refined_components,
             threshold=None,
             workers=(
                 refined_workers
@@ -681,7 +687,7 @@ def publish_recording_subject_mask_bundle(
         source_crop_arrays=_crop_arrays(crop),
         source_manifest=refined_source_manifest,
         n_frames=n_frames,
-        components=components,
+        components=refined_components,
         destination=refined_store,
         run_id=refined_run,
         kind="refined_dense_core",
@@ -700,7 +706,9 @@ def publish_recording_subject_mask_bundle(
         run_name=refined_run,
         manifest_digest=canonical_json_sha256(refined_publication.manifest),
         dense_array_values_sha256=str(refined_docs["masks_roi"]["sha256"]),
-        component_registry_digest=canonical_json_sha256(components.as_manifest()),
+        component_registry_digest=canonical_json_sha256(
+            refined_components.as_manifest()
+        ),
         source_array_values_sha256={
             path: str(refined_docs[path]["sha256"])
             for path in (
@@ -727,7 +735,7 @@ def publish_recording_subject_mask_bundle(
             )
         },
         n_frames=n_frames,
-        components=components,
+        components=refined_components,
         source=quality_source,
         source_manifest=refined_publication.manifest,
         destination=quality_store,

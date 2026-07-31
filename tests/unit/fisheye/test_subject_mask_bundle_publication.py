@@ -195,6 +195,39 @@ def test_bundle_candidate_is_complete_but_not_authoritative(tmp_path: Path) -> N
             assert root[family].attrs.get(selector) is None
 
 
+def test_v1_cross_binding_remains_read_compatible(tmp_path: Path) -> None:
+    raw, refined, quality = _publish_members(tmp_path)
+    raw_run = zarr.open_group(
+        str(raw.output_path / "subject_mask_runs" / raw.run_id),
+        mode="r",
+        use_consolidated=False,
+    )
+    refined_run = zarr.open_group(
+        str(refined.output_path / "refined_subject_masks_runs" / refined.run_id),
+        mode="r",
+        use_consolidated=False,
+    )
+    quality_run = zarr.open_group(
+        str(quality.output_path / "subject_mask_quality_runs" / quality.run_id),
+        mode="r",
+        use_consolidated=False,
+    )
+
+    legacy = bundle_publication._bundle_cross_binding(
+        raw_manifest=raw_run.attrs["run_manifest"],
+        refined_manifest=refined_run.attrs["run_manifest"],
+        quality_manifest=quality_run.attrs["run_manifest"],
+        refined_run_id=refined.run_id,
+        schema_version=1,
+    )
+
+    assert "available_channels" in legacy[
+        "raw_refined_identity_array_values_sha256"
+    ]
+    assert "raw_components" not in legacy
+    assert "raw_dimensions" not in legacy
+
+
 def test_bundle_activation_commits_one_root_authority(tmp_path: Path) -> None:
     archive, receipt = _publish_bundle(tmp_path)
 

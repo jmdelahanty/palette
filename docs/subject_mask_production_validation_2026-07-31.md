@@ -195,11 +195,26 @@ selection:
 
 The runs are imported from node-local outputs, remain individually
 selector-ineligible, and are cross-bound by exact row identity, frame offsets,
-crop geometry, component availability, source-manifest digests, and quality
-source hashes.  `subject_mask_bundle_runs/<bundle>` is completed only after all
-three direct and consolidated metadata surfaces reopen and validate.  A later
-explicit activation changes one root `subject_mask_authority` envelope; it does
-not advance three independent family selectors.
+crop geometry, source-manifest digests, and quality source hashes. Raw and
+refined component registries and `available_channels` declarations are bound
+independently: the maintained `subject_v1_union` raw profile has
+`eyes_union`, while deterministic refinement expands it into `eye_left` and
+`eye_right`. The bundle requires the same frame, row, and ROI-pixel domain; it
+does not require the raw and refined channel axes to be identical.
+`subject_mask_bundle_runs/<bundle>` is completed only after all three direct
+and consolidated metadata surfaces reopen and validate. A later explicit
+activation changes one root `subject_mask_authority` envelope; it does not
+advance three independent family selectors.
+
+The bundle manifest v2 records raw and refined dimensions and component
+registries independently while retaining exact shared row/frame/crop identity.
+The validator retains read compatibility for v1 bundles, which require equal
+raw and refined registries.
+
+The full-duration result receipt v2 records the immutable worker-plan commit
+separately from the publication implementation commit. This permits a
+fail-closed finalizer correction after worker completion without misattributing
+the code that produced either surface.
 
 Immutable target names are preflighted before the first import.  An interrupted
 pre-commit activation leaves no usable authority: the next lock holder repairs
@@ -316,6 +331,11 @@ real-Zarr single-source whole-recording publication and a two-clip proof import
 that flows through raw/refined/quality publication into one inactive bundle.
 Those fixtures prove lifecycle behavior and exact decoded content on small
 surfaces; they are not full-duration performance or promotion evidence.
+
+After the full-duration canary exposed the raw-union/refined-left-right
+component-registry assumption, the corrected bundle-v2 path passed 326/326
+broader subject-mask, refined-mask, and clipped-inference tests plus 21/21
+focused publication/canary tests.
 
 The first isolated 54,000-frame inference preflight completed successfully and
 published a terminal, selector-ineligible worker bundle. It then exposed that
