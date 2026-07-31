@@ -147,6 +147,29 @@ def _same_cluster_file_identity(
     )
 
 
+def _bind_scratch_window_video(
+    root: Any, *, crop_run: str, window: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Bind a proof-frozen clip to a node-local geometry reference copy."""
+
+    source_path = str(Path(str(window["source_video_path"])).expanduser().resolve())
+    if source_path != window["source_file"].get("path"):
+        raise ValueError("Window source-video path differs from its frozen identity.")
+    crop_group = root[f"crop_runs/{crop_run}"]
+    previous = crop_group.attrs.get("source_video_path")
+    crop_group.attrs["source_video_path"] = source_path
+    return {
+        "schema_id": "palette.subject_mask.scratch_window_video_binding",
+        "schema_version": 1,
+        "scope": "node_local_inference_reference",
+        "declared_source_video_path": source_path,
+        "previous_declared_source_video_path": (
+            None if previous is None else str(previous)
+        ),
+        "source_file": dict(window["source_file"]),
+    }
+
+
 def _copy_file_with_digest(source: Path, destination: Path) -> dict[str, Any]:
     source = source.expanduser().resolve()
     before = _file_identity(source)
@@ -912,6 +935,9 @@ def run_inference_window(
 
         root = open_zarr_root(local_archive, mode="r+")
         crop_run = str(plan["references"]["crop"]["run"])
+        scratch_video_binding = _bind_scratch_window_video(
+            root, crop_run=crop_run, window=window
+        )
         source = CropImageSource.open(
             root,
             crop_run=crop_run,
@@ -1020,6 +1046,7 @@ def run_inference_window(
             "row_stop": int(window["row_stop"]),
             "row_count": int(window["row_count"]),
             "video_copy": video_copy,
+            "scratch_video_binding": scratch_video_binding,
             "model_copy": model_copy,
             "work_package": package,
             "local_proof": {

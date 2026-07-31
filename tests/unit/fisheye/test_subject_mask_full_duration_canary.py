@@ -262,6 +262,26 @@ def test_cluster_file_identity_ignores_mount_local_device_and_inode() -> None:
     )
 
 
+def test_scratch_window_binding_supplies_geometry_video_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _prepare(tmp_path, monkeypatch)
+    root = zarr.open_group(str(plan["references"]["analysis_zarr"]), mode="r+")
+    window = plan["windows"][0]
+
+    binding = canary._bind_scratch_window_video(
+        root,
+        crop_run=str(plan["references"]["crop"]["run"]),
+        window=window,
+    )
+
+    crop = root[f"crop_runs/{plan['references']['crop']['run']}"]
+    assert crop.attrs["source_video_path"] == window["source_video_path"]
+    assert binding["scope"] == "node_local_inference_reference"
+    assert binding["declared_source_video_path"] == window["source_video_path"]
+    assert binding["previous_declared_source_video_path"] is None
+
+
 def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
