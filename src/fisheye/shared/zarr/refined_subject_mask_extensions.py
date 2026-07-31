@@ -17,9 +17,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 import re
+from types import MappingProxyType
 from typing import Any, Mapping
 
 import numpy as np
+
+from fisheye.shared.refined_subject_component_contours import (
+    DEFAULT_BOUNDARY_POLICY,
+    DEFAULT_CONTOUR_COORDINATE_SPACE,
+    DEFAULT_CONTOUR_METHOD,
+    DEFAULT_CONTOUR_METHOD_VERSION,
+    DEFAULT_SAMPLED_CONTOUR_COUNTS,
+    SAMPLED_COMPONENT_CONTOUR_CANONICALIZATION,
+    SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_ID,
+    SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_VERSION,
+)
 
 from fisheye.shared.zarr.array_contracts import (
     REFINED_SUBJECT_MASK_COMPONENT_EDIT_APPLIED_V1,
@@ -66,6 +78,10 @@ SUBJECT_MASK_CACHE_RECEIPT_SCHEMA_ID = (
 SUBJECT_MASK_CACHE_RECEIPT_SCHEMA_VERSION = 1
 SUBJECT_MASK_CACHE_RECEIPT_DIGEST_ALGORITHM = "sha256_canonical_json_v1"
 SUBJECT_MASK_CACHE_VALIDATION_MODE = "full_dense_equivalence"
+SUBJECT_MASK_CONTOUR_CACHE_PROFILE_SCHEMA_ID = (
+    "palette.refined_subject_mask.contour_cache_profile"
+)
+SUBJECT_MASK_CONTOUR_CACHE_PROFILE_SCHEMA_VERSION = 1
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -75,6 +91,89 @@ class SubjectMaskDerivedCacheKind(str, Enum):
     RLE = "mask_rle"
     SAMPLED_CONTOURS = "sampled_contours"
     FULL_CONTOURS = "contours"
+
+
+@dataclass(frozen=True)
+class SubjectMaskSampledContourProfile:
+    """Exact default sampled-contour cache semantics for one component set."""
+
+    sample_counts: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        normalized: dict[str, int] = {}
+        for raw_label, raw_count in self.sample_counts.items():
+            label = str(raw_label).strip()
+            if not label:
+                raise ValueError("Sampled-contour component labels cannot be empty.")
+            if type(raw_count) is not int or raw_count <= 0:
+                raise ValueError(
+                    "Sampled-contour counts must be positive exact integers."
+                )
+            normalized[label] = raw_count
+        if not normalized or len(normalized) != len(self.sample_counts):
+            raise ValueError("Sampled-contour component labels must be unique.")
+        object.__setattr__(
+            self, "sample_counts", MappingProxyType(dict(sorted(normalized.items())))
+        )
+
+    def require_components(self, components: SubjectMaskComponentRegistry) -> None:
+        if set(self.sample_counts) != set(components.labels):
+            raise ValueError(
+                "Sampled-contour counts must exactly cover the component registry."
+            )
+
+    def as_manifest(
+        self, *, components: SubjectMaskComponentRegistry
+    ) -> dict[str, object]:
+        self.require_components(components)
+        return {
+            "schema_id": SUBJECT_MASK_CONTOUR_CACHE_PROFILE_SCHEMA_ID,
+            "schema_version": SUBJECT_MASK_CONTOUR_CACHE_PROFILE_SCHEMA_VERSION,
+            "profile_id": SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_ID,
+            "profile_version": (SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_VERSION),
+            "authority": "derived_from_dense_masks_roi",
+            "default_cache": {
+                "kind": SubjectMaskDerivedCacheKind.SAMPLED_CONTOURS.value,
+                "required_for_profile": True,
+                "component_sample_counts": {
+                    label: self.sample_counts[label] for label in components.labels
+                },
+                "source_contour_method": DEFAULT_CONTOUR_METHOD,
+                "source_contour_method_version": DEFAULT_CONTOUR_METHOD_VERSION,
+                "boundary_policy": DEFAULT_BOUNDARY_POLICY,
+                "coordinate_space": DEFAULT_CONTOUR_COORDINATE_SPACE,
+                "point_order": "xy",
+                "sampling_method": "closed_arc_length_uniform",
+                "sampling_method_version": 2,
+                "point_canonicalization": (SAMPLED_COMPONENT_CONTOUR_CANONICALIZATION),
+                "winding": "clockwise_in_roi_y_down",
+                "start_point": "topmost_then_leftmost_vertex",
+                "duplicate_closing_point": False,
+                "invalid_row_encoding": "all_nan_points_valid_false",
+            },
+            "full_contours": {
+                "kind": SubjectMaskDerivedCacheKind.FULL_CONTOURS.value,
+                "required_for_profile": False,
+                "role": "optional_cold_inspection_or_export_cache",
+            },
+            "freshness": "receipt_bound_full_dense_equivalence",
+        }
+
+
+def default_subject_mask_sampled_contour_profile(
+    components: SubjectMaskComponentRegistry,
+) -> SubjectMaskSampledContourProfile:
+    """Return the exact default profile or fail for an undeclared component."""
+
+    profile = SubjectMaskSampledContourProfile(
+        {
+            label: DEFAULT_SAMPLED_CONTOUR_COUNTS[label]
+            for label in components.labels
+            if label in DEFAULT_SAMPLED_CONTOUR_COUNTS
+        }
+    )
+    profile.require_components(components)
+    return profile
 
 
 def _cache_path_matches_kind(
@@ -89,7 +188,11 @@ def _cache_path_matches_kind(
             len(parts) == 3 and parts[:2] == ("mask_rle", "components")
         )
     if kind is SubjectMaskDerivedCacheKind.SAMPLED_CONTOURS:
-        return len(parts) == 3 and parts[0] == "components" and parts[2] == "sampled_contours"
+        return (
+            len(parts) == 3
+            and parts[0] == "components"
+            and parts[2] == "sampled_contours"
+        )
     return len(parts) == 3 and parts[0] == "components" and parts[2] == "contours"
 
 

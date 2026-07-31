@@ -12,12 +12,18 @@ import zarr
 
 from .mask_store import MaskStoreError, open_mask_store
 
-
 COMPONENT_CONTOUR_SCHEMA_ID = "component_contours_v1"
 SAMPLED_COMPONENT_CONTOUR_SCHEMA_ID = "sampled_component_contours_v1"
+SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_ID = (
+    "palette_subject_mask_sampled_contours_default"
+)
+SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_VERSION = 1
+SAMPLED_COMPONENT_CONTOUR_CANONICALIZATION = (
+    "clockwise_in_roi_y_down_topmost_then_leftmost_v1"
+)
 COMPONENT_ROW_UPDATE_SCHEMA_ID = "refined_subject_component_row_updates_v1"
 DEFAULT_CONTOUR_METHOD = "largest_external_contour"
-DEFAULT_CONTOUR_METHOD_VERSION = 1
+DEFAULT_CONTOUR_METHOD_VERSION = 2
 DEFAULT_BOUNDARY_POLICY = "external_only"
 DEFAULT_CONTOUR_COORDINATE_SPACE = "roi_pixels"
 DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK = 1024
@@ -86,16 +92,28 @@ def extract_largest_external_contour(
     contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return None
-    contour = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float32, copy=False)
+    candidates = tuple(
+        canonicalize_closed_contour(
+            contour.reshape(-1, 2).astype(np.float32, copy=False)
+        )
+        for contour in contours
+    )
+    contour = min(
+        candidates,
+        key=lambda points: (
+            -float(abs(cv2.contourArea(points.reshape(-1, 1, 2)))),
+            tuple(float(value) for value in points.ravel()),
+        ),
+    )
     if int(contour.shape[0]) < int(min_points):
         return None
     return contour
 
 
 def resample_closed_contour(points_xy: np.ndarray, sample_count: int) -> np.ndarray:
-    """Arc-length resample a closed ROI-pixel contour to a fixed point count."""
+    """Canonically order and arc-length sample one closed ROI-pixel contour."""
 
-    points = np.asarray(points_xy, dtype=np.float32).reshape(-1, 2)
+    points = canonicalize_closed_contour(points_xy)
     k = int(sample_count)
     if k <= 0:
         raise ValueError("sample_count must be positive.")
@@ -119,6 +137,70 @@ def resample_closed_contour(points_xy: np.ndarray, sample_count: int) -> np.ndar
     x = np.interp(targets, cumulative, closed[:, 0].astype(np.float64))
     y = np.interp(targets, cumulative, closed[:, 1].astype(np.float64))
     return np.stack([x, y], axis=1).astype(np.float32)
+
+
+def _canonical_rotation(points: np.ndarray) -> np.ndarray:
+    """Rotate a contour to its deterministic topmost-then-leftmost vertex."""
+
+    y_min = np.min(points[:, 1])
+    y_candidates = np.flatnonzero(points[:, 1] == y_min)
+    x_min = np.min(points[y_candidates, 0])
+    candidates = y_candidates[points[y_candidates, 0] == x_min]
+    if candidates.size == 1:
+        start = int(candidates[0])
+        return np.roll(points, -start, axis=0)
+
+    # Repeated identical vertices are unusual, but choosing the smallest full
+    # cyclic sequence keeps cache bytes deterministic even for malformed input.
+    rotations = [np.roll(points, -int(index), axis=0) for index in candidates]
+    start = min(
+        range(len(rotations)),
+        key=lambda index: tuple(float(value) for value in rotations[index].ravel()),
+    )
+    return rotations[start]
+
+
+def canonicalize_closed_contour(points_xy: np.ndarray) -> np.ndarray:
+    """Return one byte-stable ordering for a closed image-coordinate contour.
+
+    ROI image coordinates have ``y`` increasing downward.  Positive shoelace
+    area therefore denotes visual clockwise winding.  The returned sequence
+    starts at the topmost, then leftmost, vertex and omits a duplicate closing
+    point.
+    """
+
+    points = np.asarray(points_xy, dtype=np.float32).reshape(-1, 2)
+    points = points[np.isfinite(points).all(axis=1)]
+    if points.shape[0] > 1:
+        keep = np.ones(points.shape[0], dtype=bool)
+        keep[1:] = np.any(points[1:] != points[:-1], axis=1)
+        points = points[keep]
+    if points.shape[0] > 1 and np.array_equal(points[0], points[-1]):
+        points = points[:-1]
+    if points.shape[0] <= 1:
+        return points.astype(np.float32, copy=False)
+
+    next_points = np.roll(points, -1, axis=0)
+    signed_area_twice = float(
+        np.sum(
+            points[:, 0].astype(np.float64) * next_points[:, 1]
+            - next_points[:, 0].astype(np.float64) * points[:, 1],
+            dtype=np.float64,
+        )
+    )
+    if signed_area_twice < 0.0:
+        points = points[::-1]
+    elif signed_area_twice == 0.0:
+        forward = _canonical_rotation(points)
+        reverse = _canonical_rotation(points[::-1])
+        if tuple(float(value) for value in reverse.ravel()) < tuple(
+            float(value) for value in forward.ravel()
+        ):
+            points = reverse
+        else:
+            points = forward
+        return points.astype(np.float32, copy=False)
+    return _canonical_rotation(points).astype(np.float32, copy=False)
 
 
 def sample_contours_fixed_k(
@@ -213,13 +295,19 @@ def write_sampled_component_contour_arrays(
     valid = np.asarray(valid, dtype=bool).reshape(-1)
     source_point_count = np.asarray(source_point_count, dtype=np.int32).reshape(-1)
     if points_xy.ndim != 3 or int(points_xy.shape[2]) != 2:
-        raise ValueError(f"points_xy must have shape (N,K,2); got {tuple(points_xy.shape)}.")
+        raise ValueError(
+            f"points_xy must have shape (N,K,2); got {tuple(points_xy.shape)}."
+        )
     total_rois = int(points_xy.shape[0])
     sample_count = int(points_xy.shape[1])
     if sample_count <= 0:
         raise ValueError("points_xy sample axis must be non-empty.")
-    if tuple(valid.shape) != (total_rois,) or tuple(source_point_count.shape) != (total_rois,):
-        raise ValueError("valid and source_point_count must have one entry per points_xy row.")
+    if tuple(valid.shape) != (total_rois,) or tuple(source_point_count.shape) != (
+        total_rois,
+    ):
+        raise ValueError(
+            "valid and source_point_count must have one entry per points_xy row."
+        )
     if bool(np.any(valid & ~np.isfinite(points_xy).all(axis=(1, 2)))):
         raise ValueError("valid sampled contour rows must contain only finite points.")
     total_rois = int(points_xy.shape[0])
@@ -237,7 +325,17 @@ def write_sampled_component_contour_arrays(
             "source_contour_method": str(method),
             "source_contour_method_version": int(method_version),
             "sampling_method": "closed_arc_length_uniform",
-            "sampling_method_version": 1,
+            "sampling_method_version": 2,
+            "publication_profile_id": (
+                SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_ID
+            ),
+            "publication_profile_version": (
+                SAMPLED_COMPONENT_CONTOUR_PUBLICATION_PROFILE_VERSION
+            ),
+            "point_canonicalization": (SAMPLED_COMPONENT_CONTOUR_CANONICALIZATION),
+            "winding": "clockwise_in_roi_y_down",
+            "start_point": "topmost_then_leftmost_vertex",
+            "duplicate_closing_point": False,
             "sample_count": sample_count,
             "boundary_policy": str(boundary_policy),
             "min_source_points": int(min_points),
@@ -273,7 +371,12 @@ def write_sampled_component_contour_arrays(
 
 
 def component_contours_exist(component_group: zarr.Group, roi_count: int) -> bool:
-    return summarize_existing_component_contours(component_group, component="", roi_count=roi_count) is not None
+    return (
+        summarize_existing_component_contours(
+            component_group, component="", roi_count=roi_count
+        )
+        is not None
+    )
 
 
 def summarize_existing_component_contours(
@@ -376,8 +479,12 @@ def write_component_contours(
             "cache_coverage": "full_indexed_rows",
         }
     )
-    contours_group.create_array("ptr", data=ptr, chunks=(max(1, int(chunk_rois)),), overwrite=True)
-    contours_group.create_array("len", data=length, chunks=(max(1, int(chunk_rois)),), overwrite=True)
+    contours_group.create_array(
+        "ptr", data=ptr, chunks=(max(1, int(chunk_rois)),), overwrite=True
+    )
+    contours_group.create_array(
+        "len", data=length, chunks=(max(1, int(chunk_rois)),), overwrite=True
+    )
     contours_group.create_array(
         "points_xy",
         data=points_xy,
@@ -405,7 +512,9 @@ def _component_available(refined_group: zarr.Group, component_idx: int) -> bool:
     if available_arr is None:
         return True
     available = np.asarray(available_arr[:], dtype=bool).reshape(-1)
-    return int(component_idx) < int(available.shape[0]) and bool(available[int(component_idx)])
+    return int(component_idx) < int(available.shape[0]) and bool(
+        available[int(component_idx)]
+    )
 
 
 def _metric_chunk(roi_count: int, *, max_chunk: int = 256) -> int:
@@ -424,7 +533,9 @@ def _ensure_array(
     existing = group.get(name)
     if existing is not None:
         if tuple(existing.shape) != tuple(shape):
-            raise ValueError(f"{group.name}/{name} shape mismatch: expected {shape}, got {tuple(existing.shape)}")
+            raise ValueError(
+                f"{group.name}/{name} shape mismatch: expected {shape}, got {tuple(existing.shape)}"
+            )
         return existing
     return group.create_array(
         name,
@@ -435,7 +546,9 @@ def _ensure_array(
     )
 
 
-def _write_ascii_row(array: zarr.Array, row_index: int, value: str, *, width: int) -> None:
+def _write_ascii_row(
+    array: zarr.Array, row_index: int, value: str, *, width: int
+) -> None:
     encoded = str(value).encode("utf-8", errors="replace")[: int(width)]
     row = np.zeros((int(width),), dtype=np.uint8)
     if encoded:
@@ -546,9 +659,12 @@ def _ensure_component_contour_arrays(
             "coordinate_space": coordinate_space,
             "point_order": "xy",
             "source_component": str(component),
-            "source_mask_run": str(source_mask_run or contours_group.attrs.get("source_mask_run", "")),
+            "source_mask_run": str(
+                source_mask_run or contours_group.attrs.get("source_mask_run", "")
+            ),
             "source_mask_label_schema_id": str(
-                source_mask_label_schema_id or contours_group.attrs.get("source_mask_label_schema_id", "")
+                source_mask_label_schema_id
+                or contours_group.attrs.get("source_mask_label_schema_id", "")
             ),
             "method": str(method),
             "method_version": int(method_version),
@@ -585,19 +701,25 @@ def _ensure_component_contour_arrays(
         contours_group.attrs.setdefault("cache_coverage", "partial_row_updates")
     else:
         if len(tuple(points.shape)) != 2 or int(points.shape[1]) != 2:
-            raise ValueError(f"{contours_group.name}/points_xy must have shape (M, 2), got {tuple(points.shape)}")
+            raise ValueError(
+                f"{contours_group.name}/points_xy must have shape (M, 2), got {tuple(points.shape)}"
+            )
         contours_group.attrs.setdefault("cache_coverage", "partial_row_updates")
     return contours_group
 
 
-def _append_points(points_array: zarr.Array, points: np.ndarray, *, placeholder: bool) -> int:
+def _append_points(
+    points_array: zarr.Array, points: np.ndarray, *, placeholder: bool
+) -> int:
     points_xy = np.asarray(points, dtype=np.float32).reshape(-1, 2)
     old_count = int(points_array.shape[0])
     append_offset = 0 if placeholder and old_count == 1 else old_count
     new_count = int(append_offset + points_xy.shape[0])
     resize = getattr(points_array, "resize", None)
     if not callable(resize):
-        raise RuntimeError(f"{points_array.name} does not support resize; cannot append row-local contour points.")
+        raise RuntimeError(
+            f"{points_array.name} does not support resize; cannot append row-local contour points."
+        )
     resize((new_count, 2))
     points_array[append_offset:new_count, :] = points_xy
     return append_offset
@@ -625,7 +747,9 @@ def write_component_contour_row(
 
     row_idx = int(row_index)
     if row_idx < 0 or row_idx >= int(roi_count):
-        raise IndexError(f"row_index {row_idx} outside component contour row count {int(roi_count)}")
+        raise IndexError(
+            f"row_index {row_idx} outside component contour row count {int(roi_count)}"
+        )
     now = str(updated_at_utc or _utc_now())
     contours_group = _ensure_component_contour_arrays(
         component_group,
@@ -656,9 +780,10 @@ def write_component_contour_row(
         points = np.asarray(contour, dtype=np.float32).reshape(-1, 2)
         points_array = contours_group["points_xy"]
         lengths = np.asarray(contours_group["len"][:], dtype=np.int64)
-        placeholder = bool(contours_group.attrs.get("points_placeholder_when_empty")) and int(
-            np.count_nonzero(lengths > 0)
-        ) == 0
+        placeholder = (
+            bool(contours_group.attrs.get("points_placeholder_when_empty"))
+            and int(np.count_nonzero(lengths > 0)) == 0
+        )
         point_offset = _append_points(points_array, points, placeholder=placeholder)
         contours_group["ptr"][row_idx] = np.int64(point_offset)
         contours_group["len"][row_idx] = np.int32(points.shape[0])
@@ -676,7 +801,9 @@ def write_component_contour_row(
     contours_group.attrs["last_row_local_update_at_utc"] = now
     contours_group.attrs["last_row_local_update_reason"] = str(reason)
     contours_group.attrs["last_row_local_update_row"] = row_idx
-    contours_group.attrs["row_local_update_count"] = int(contours_group.attrs.get("row_local_update_count", 0)) + 1
+    contours_group.attrs["row_local_update_count"] = (
+        int(contours_group.attrs.get("row_local_update_count", 0)) + 1
+    )
     contours_group.attrs["orphaned_points_possible"] = True
 
     return ComponentContourRowUpdateSummary(
@@ -705,11 +832,17 @@ def refresh_component_contour_rows_from_masks(
     label_map = _label_index_map(refined_group)
     component_name = str(component)
     if component_name not in label_map:
-        raise KeyError(f"Component {component_name!r} is not present in refined mask labels.")
+        raise KeyError(
+            f"Component {component_name!r} is not present in refined mask labels."
+        )
     try:
-        mask_store = open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense")
+        mask_store = open_mask_store(
+            refined_group, source_path=_group_source_path(refined_group), prefer="dense"
+        )
     except MaskStoreError as exc:
-        raise ValueError("refined_group must contain masks_roi or compact mask_rle storage.") from exc
+        raise ValueError(
+            "refined_group must contain masks_roi or compact mask_rle storage."
+        ) from exc
     roi_count = int(mask_store.n_rows)
     component_idx = int(label_map[component_name])
     if component_idx < 0 or component_idx >= int(mask_store.n_channels):
@@ -718,13 +851,19 @@ def refresh_component_contour_rows_from_masks(
             f"{int(mask_store.n_channels)}."
         )
     if not _component_available(refined_group, component_idx):
-        raise ValueError(f"Component {component_name!r} is marked unavailable in available_channels.")
+        raise ValueError(
+            f"Component {component_name!r} is marked unavailable in available_channels."
+        )
 
-    component_group = refined_group.require_group("components").require_group(component_name)
+    component_group = refined_group.require_group("components").require_group(
+        component_name
+    )
     updated_at = str(updated_at_utc or _utc_now())
     source_label_schema = refined_group.attrs.get("label_schema_id")
     refined_path = _group_source_path(refined_group)
-    source_mask_run = str(refined_group.attrs.get("run_name") or refined_path.rstrip("/").split("/")[-1])
+    source_mask_run = str(
+        refined_group.attrs.get("run_name") or refined_path.rstrip("/").split("/")[-1]
+    )
     summaries: list[ComponentContourRowUpdateSummary] = []
     for row_index in row_indices:
         row_idx = int(row_index)
@@ -758,9 +897,16 @@ def build_component_contours_from_masks(
 
     label_map = _label_index_map(refined_group)
     if component not in label_map:
-        return [], ComponentContourSummary(component=component, status="missing_label", roi_count=0, reason="label absent")
+        return [], ComponentContourSummary(
+            component=component,
+            status="missing_label",
+            roi_count=0,
+            reason="label absent",
+        )
     try:
-        mask_store = open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense")
+        mask_store = open_mask_store(
+            refined_group, source_path=_group_source_path(refined_group), prefer="dense"
+        )
     except MaskStoreError:
         return [], ComponentContourSummary(
             component=component,
@@ -792,7 +938,9 @@ def build_component_contours_from_masks(
     point_count = 0
     for start in range(0, int(roi_count), chunk_size):
         stop = min(int(roi_count), start + chunk_size)
-        masks = mask_store.read_dense(rows=slice(start, stop), channels=component_idx)[:, 0]
+        masks = mask_store.read_dense(rows=slice(start, stop), channels=component_idx)[
+            :, 0
+        ]
         for offset, mask in enumerate(masks):
             row_idx = start + int(offset)
             contour = extract_largest_external_contour(mask, min_points=min_points)
@@ -822,7 +970,9 @@ def write_refined_subject_component_contours(
     """Write component contour caches for selected refined mask components."""
 
     try:
-        mask_store = open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense")
+        mask_store = open_mask_store(
+            refined_group, source_path=_group_source_path(refined_group), prefer="dense"
+        )
         roi_count = int(mask_store.n_rows)
     except MaskStoreError:
         roi_count = 0
@@ -832,10 +982,14 @@ def write_refined_subject_component_contours(
         component_name = str(component)
         components_group_existing = refined_group.get("components")
         component_group = (
-            components_group_existing.get(component_name) if isinstance(components_group_existing, zarr.Group) else None
+            components_group_existing.get(component_name)
+            if isinstance(components_group_existing, zarr.Group)
+            else None
         )
         existing_summary = (
-            summarize_existing_component_contours(component_group, component=component_name, roi_count=roi_count)
+            summarize_existing_component_contours(
+                component_group, component=component_name, roi_count=roi_count
+            )
             if isinstance(component_group, zarr.Group)
             else None
         )
@@ -885,7 +1039,9 @@ def write_refined_subject_sampled_component_contours(
         component_name = str(component)
         sample_count = int(resolved_counts.get(component_name, 64))
         if sample_count <= 0:
-            raise ValueError(f"Sample count for {component_name!r} must be positive; got {sample_count}.")
+            raise ValueError(
+                f"Sample count for {component_name!r} must be positive; got {sample_count}."
+            )
         contours, contour_summary = build_component_contours_from_masks(
             refined_group,
             component_name,
@@ -904,7 +1060,9 @@ def write_refined_subject_sampled_component_contours(
                 )
             )
             continue
-        component_group = refined_group.require_group("components").require_group(component_name)
+        component_group = refined_group.require_group("components").require_group(
+            component_name
+        )
         summaries.append(
             write_sampled_component_contours(
                 component_group,

@@ -13,6 +13,7 @@ from fisheye.shared.zarr.refined_subject_mask_extensions import (
     SUBJECT_MASK_CACHE_VALIDATION_MODE,
     SubjectMaskDerivedCacheKind,
     SubjectMaskDerivedCacheReceipt,
+    default_subject_mask_sampled_contour_profile,
     published_subject_mask_cache_extension_manifest,
     validate_published_subject_mask_cache_extension,
     validate_subject_mask_cache_arrays,
@@ -32,6 +33,26 @@ def _dimensions() -> SubjectMaskDimensions:
         roi_height=4,
         roi_width=5,
     )
+
+
+def test_default_contour_profile_prefers_fixed_samples_and_makes_full_optional() -> (
+    None
+):
+    components = SubjectMaskComponentRegistry(
+        ("subject_body", "eye_left", "eye_right", "swim_bladder")
+    )
+    profile = default_subject_mask_sampled_contour_profile(components)
+    manifest = profile.as_manifest(components=components)
+
+    assert manifest["default_cache"]["component_sample_counts"] == {
+        "subject_body": 128,
+        "eye_left": 64,
+        "eye_right": 64,
+        "swim_bladder": 32,
+    }
+    assert manifest["default_cache"]["winding"] == "clockwise_in_roi_y_down"
+    assert manifest["default_cache"]["start_point"] == ("topmost_then_leftmost_vertex")
+    assert manifest["full_contours"]["required_for_profile"] is False
 
 
 def _fixed_utf8(values: tuple[str, ...], width: int) -> np.ndarray:

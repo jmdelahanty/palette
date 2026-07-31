@@ -1216,6 +1216,94 @@ KEYPOINT_QUALITY_PROPOSED_POSE_USABLE_V1 = ArrayContract(
     ),
 )
 
+SUBJECT_MASK_QUALITY_SOURCE_MASK_ROW_IDS_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.source_mask_row_ids",
+    schema_version=1,
+    dtype=INT64,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Exact row index in the bound immutable refined subject-mask snapshot.",
+    units="subject_mask_row_index",
+)
+
+SUBJECT_MASK_QUALITY_COMPONENT_METRIC_VALUES_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.component_metric_values",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_rois", "n_channels", "n_component_metrics"),
+    axis_names=("roi", "component", "metric"),
+    description=(
+        "Observation-local component diagnostics in the manifest's ordered "
+        "component-metric catalog."
+    ),
+)
+
+SUBJECT_MASK_QUALITY_COMPONENT_METRIC_VALID_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.component_metric_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois", "n_channels", "n_component_metrics"),
+    axis_names=("roi", "component", "metric"),
+    description="Exact validity mask for component_metric_values.",
+)
+
+SUBJECT_MASK_QUALITY_OBSERVATION_METRIC_VALUES_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.observation_metric_values",
+    schema_version=1,
+    dtype=FLOAT32,
+    shape_template=("n_rois", "n_observation_metrics"),
+    axis_names=("roi", "metric"),
+    description=(
+        "Observation-local cross-component diagnostics in the manifest's ordered "
+        "observation-metric catalog."
+    ),
+)
+
+SUBJECT_MASK_QUALITY_OBSERVATION_METRIC_VALID_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.observation_metric_valid",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois", "n_observation_metrics"),
+    axis_names=("roi", "metric"),
+    description="Exact validity mask for observation_metric_values.",
+)
+
+SUBJECT_MASK_QUALITY_COMPONENT_FLAGS_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.component_quality_flags",
+    schema_version=1,
+    dtype=UINT16,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Bitwise component-local findings from the manifest flag registry.",
+)
+
+SUBJECT_MASK_QUALITY_OBSERVATION_FLAGS_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.observation_quality_flags",
+    schema_version=1,
+    dtype=UINT16,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Bitwise cross-component findings from the manifest flag registry.",
+)
+
+SUBJECT_MASK_QUALITY_PROPOSED_COMPONENT_USABLE_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.proposed_component_usable",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois", "n_channels"),
+    axis_names=("roi", "component"),
+    description="Advisory component usability proposed by the declared quality policy.",
+)
+
+SUBJECT_MASK_QUALITY_PROPOSED_OBSERVATION_USABLE_V1 = ArrayContract(
+    schema_id="palette.array.subject_mask_quality.proposed_observation_usable",
+    schema_version=1,
+    dtype=BOOL,
+    shape_template=("n_rois",),
+    axis_names=("roi",),
+    description="Advisory whole-observation usability proposed by the quality policy.",
+)
+
 BODY_FRAME_SOURCE_KEYPOINT_ROW_IDS_V1 = ArrayContract(
     schema_id="palette.array.body_frame.source_keypoint_row_ids",
     schema_version=1,
@@ -1744,6 +1832,24 @@ KEYPOINT_QUALITY_ARRAY_CONTRACTS = ArrayContractCatalog(
 )
 
 
+SUBJECT_MASK_QUALITY_ARRAY_CONTRACTS = ArrayContractCatalog(
+    (
+        DETECTION_INSTANCE_KEY_V1,
+        SUBJECT_MASK_QUALITY_SOURCE_MASK_ROW_IDS_V1,
+        DETECTION_SOURCE_ACQUISITION_FRAME_INDEX_V1,
+        FRAME_ROW_OFFSETS_V1,
+        SUBJECT_MASK_QUALITY_COMPONENT_METRIC_VALUES_V1,
+        SUBJECT_MASK_QUALITY_COMPONENT_METRIC_VALID_V1,
+        SUBJECT_MASK_QUALITY_OBSERVATION_METRIC_VALUES_V1,
+        SUBJECT_MASK_QUALITY_OBSERVATION_METRIC_VALID_V1,
+        SUBJECT_MASK_QUALITY_COMPONENT_FLAGS_V1,
+        SUBJECT_MASK_QUALITY_OBSERVATION_FLAGS_V1,
+        SUBJECT_MASK_QUALITY_PROPOSED_COMPONENT_USABLE_V1,
+        SUBJECT_MASK_QUALITY_PROPOSED_OBSERVATION_USABLE_V1,
+    )
+)
+
+
 BODY_FRAME_ARRAY_CONTRACTS = ArrayContractCatalog(
     (
         KEYPOINT_INSTANCE_KEY_V1,
@@ -1923,6 +2029,15 @@ CORE_ARRAY_CONTRACTS = ArrayContractCatalog(
         KEYPOINT_QUALITY_POSE_FLAGS_V1,
         KEYPOINT_QUALITY_PROPOSED_KEYPOINT_VALID_V1,
         KEYPOINT_QUALITY_PROPOSED_POSE_USABLE_V1,
+        SUBJECT_MASK_QUALITY_SOURCE_MASK_ROW_IDS_V1,
+        SUBJECT_MASK_QUALITY_COMPONENT_METRIC_VALUES_V1,
+        SUBJECT_MASK_QUALITY_COMPONENT_METRIC_VALID_V1,
+        SUBJECT_MASK_QUALITY_OBSERVATION_METRIC_VALUES_V1,
+        SUBJECT_MASK_QUALITY_OBSERVATION_METRIC_VALID_V1,
+        SUBJECT_MASK_QUALITY_COMPONENT_FLAGS_V1,
+        SUBJECT_MASK_QUALITY_OBSERVATION_FLAGS_V1,
+        SUBJECT_MASK_QUALITY_PROPOSED_COMPONENT_USABLE_V1,
+        SUBJECT_MASK_QUALITY_PROPOSED_OBSERVATION_USABLE_V1,
         BODY_FRAME_SOURCE_KEYPOINT_ROW_IDS_V1,
         BODY_FRAME_SOURCE_KEYPOINT_ROW_SIGNATURE_V1,
         BODY_FRAME_ORIGIN_XY_V1,

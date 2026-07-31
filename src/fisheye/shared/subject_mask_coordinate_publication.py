@@ -102,7 +102,6 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STATUS_RUNNING,
 )
 
-
 SUBJECT_MASK_COMPONENT_LABELS_ATTR = "subject_mask_component_labels"
 SUBJECT_MASK_COORDINATE_CONTEXT_ATTR = "subject_mask_coordinate_context"
 SUBJECT_MASK_COORDINATE_DERIVATION_ATTR = "subject_mask_coordinate_derivation"
@@ -117,9 +116,13 @@ SUBJECT_MASK_PUBLICATION_POLICY_ATTR = "publication_policy"
 
 SUBJECT_MASK_COMPONENT_LABELS_SCHEMA_ID = "palette.subject_mask_component_labels"
 SUBJECT_MASK_COORDINATE_CONTEXT_SCHEMA_ID = "palette.subject_mask_coordinate_context"
-SUBJECT_MASK_COORDINATE_DERIVATION_SCHEMA_ID = "palette.subject_mask_coordinate_derivation"
+SUBJECT_MASK_COORDINATE_DERIVATION_SCHEMA_ID = (
+    "palette.subject_mask_coordinate_derivation"
+)
 SUBJECT_MASK_INFERENCE_AUTHORITY_SCHEMA_ID = "palette.subject_mask_inference_authority"
-SUBJECT_MASK_ARRAY_INTERPRETATION_SCHEMA_ID = "palette.subject_mask_array_interpretation"
+SUBJECT_MASK_ARRAY_INTERPRETATION_SCHEMA_ID = (
+    "palette.subject_mask_array_interpretation"
+)
 SUBJECT_MASK_SURFACE_INVENTORY_SCHEMA_ID = "palette.subject_mask_surface_inventory"
 SUBJECT_MASK_REFERENCE_EXTENT_SCHEMA_ID = "palette.subject_mask_reference_extent"
 SUBJECT_MASK_SCHEMA_VERSION = 1
@@ -214,11 +217,7 @@ def _selector_snapshot_value(
     name: str,
 ) -> tuple[bool, Any]:
     value = snapshot.get(name)
-    if (
-        not isinstance(value, tuple)
-        or len(value) != 2
-        or type(value[0]) is not bool
-    ):
+    if not isinstance(value, tuple) or len(value) != 2 or type(value[0]) is not bool:
         _fail(f"Subject-mask selector snapshot lacks exact {name!r} state.")
     return value
 
@@ -345,8 +344,10 @@ def _canonical_path(value: str, *, prefix: str, label: str) -> str:
     if not isinstance(value, str):
         _fail(f"{label} must be one canonical archive-relative path.")
     path = value.strip().strip("/")
-    if path != value or not path.startswith(prefix) or any(
-        item in {"", ".", ".."} for item in path.split("/")
+    if (
+        path != value
+        or not path.startswith(prefix)
+        or any(item in {"", ".", ".."} for item in path.split("/"))
     ):
         _fail(f"{label} path {value!r} is not canonical or uses the wrong parent.")
     return path
@@ -656,7 +657,9 @@ def _delete_created(
             continue
         remaining.append(path)
     if remaining:
-        raise RuntimeError(f"Created coordinate nodes survived rollback: {remaining!r}.")
+        raise RuntimeError(
+            f"Created coordinate nodes survived rollback: {remaining!r}."
+        )
 
 
 def _labels(value: Sequence[str]) -> tuple[str, ...]:
@@ -934,9 +937,8 @@ def _validate_output_selection(
     source: BoundKeypointCropSource,
     run_group: Any,
 ) -> dict[str, np.ndarray]:
-    if (
-        "detection_source" in run_group
-        or "detection_source" in getattr(run_group, "attrs", {})
+    if "detection_source" in run_group or "detection_source" in getattr(
+        run_group, "attrs", {}
     ):
         _fail(
             "Canonical subject-mask rows must explicitly omit detection_source; "
@@ -946,7 +948,13 @@ def _validate_output_selection(
     forbidden = tuple(
         name
         for name in ROW_LINEAGE_ARRAYS
-        if name not in {"instance_key", "source_crop_row_ids"} and name in run_group
+        if name
+        not in {
+            "instance_key",
+            "source_crop_row_ids",
+            "source_acquisition_frame_index",
+        }
+        and name in run_group
     )
     if forbidden:
         _fail(
@@ -955,7 +963,9 @@ def _validate_output_selection(
             f"row aliases are forbidden: {forbidden!r}."
         )
     rows_node = _child(run_group, "source_crop_row_ids", label="subject-mask crop rows")
-    selected = selected_subject_mask_crop_values(source, _array(rows_node, label="crop rows"))
+    selected = selected_subject_mask_crop_values(
+        source, _array(rows_node, label="crop rows")
+    )
     expected_dtypes = {
         "instance_key": np.dtype("<u8"),
         "source_acquisition_frame_index": np.dtype("<i8"),
@@ -1172,7 +1182,9 @@ class BoundSubjectMaskCoordinateContext:
     _run_group: Any = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _BOUND_CONTEXT_SEAL:
             _fail("Subject-mask coordinate contexts cannot be constructed directly.")
         for name, value in values.items():
@@ -1194,7 +1206,9 @@ def prepare_subject_mask_coordinate_context(
 ) -> BoundSubjectMaskCoordinateContext:
     """Bind exact crop selection, identity, frames, and transforms pre-inference."""
 
-    path = _canonical_path(run_path, prefix="subject_mask_runs/", label="subject-mask rowset")
+    path = _canonical_path(
+        run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
+    )
     run = _fresh_owned_ineligible_run(
         root_node,
         path,
@@ -1509,7 +1523,9 @@ def _load_subject_mask_coordinate_context(
     expected_selector_eligible: bool,
     expected_publication_owner: str | None = None,
 ) -> BoundSubjectMaskCoordinateContext:
-    path = _canonical_path(run_path, prefix="subject_mask_runs/", label="subject-mask rowset")
+    path = _canonical_path(
+        run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
+    )
     run = _node(root_node, path, label="subject-mask rowset")
     publication_owner = _publication_owner(
         run,
@@ -1537,7 +1553,9 @@ def _load_subject_mask_coordinate_context(
     )
     raw_labels = labels_record.record
     labels = _labels(raw_labels.get("labels", ()))
-    if raw_labels != _label_record(labels) or list(run.attrs.get("mask_labels", ())) != list(labels):
+    if raw_labels != _label_record(labels) or list(
+        run.attrs.get("mask_labels", ())
+    ) != list(labels):
         _fail("Persisted subject-component labels differ from their exact authority.")
     inference_authority = bind_persisted_coordinate_record(
         run,
@@ -1631,7 +1649,9 @@ def _load_subject_mask_coordinate_context(
             "bound_units_field": "units",
         }
         if extent.authority_record != expected_bound_extent:
-            _fail("Persisted subject-mask ROI extent differs from the exact crop extent.")
+            _fail(
+                "Persisted subject-mask ROI extent differs from the exact crop extent."
+            )
         frame = load_roi_pixel_frame_authority(
             frame_node,
             reference_extent=extent,
@@ -1904,12 +1924,12 @@ def _derive_thresholded_probability_metrics(
         y_coords = np.arange(height, dtype=np.float64).reshape(1, 1, height)
         x_coords = np.arange(width, dtype=np.float64).reshape(1, 1, width)
         denominator = np.maximum(area_int, 1).astype(np.float64)
-        centroid_xy[:, :, 0] = (
-            x_counts.astype(np.float64) * x_coords
-        ).sum(axis=2, dtype=np.float64) / denominator
-        centroid_xy[:, :, 1] = (
-            y_counts.astype(np.float64) * y_coords
-        ).sum(axis=2, dtype=np.float64) / denominator
+        centroid_xy[:, :, 0] = (x_counts.astype(np.float64) * x_coords).sum(
+            axis=2, dtype=np.float64
+        ) / denominator
+        centroid_xy[:, :, 1] = (y_counts.astype(np.float64) * y_coords).sum(
+            axis=2, dtype=np.float64
+        ) / denominator
         centroid_xy[~valid] = 0.0
 
     row_has_mask = binary.any(axis=3)
@@ -1963,8 +1983,7 @@ def _validate_companion_metadata_and_values(
 
     all_nodes = {**dict(geometry_nodes), **nodes}
     digest_states = {
-        name: (*_payload_digest_state(node), node)
-        for name, node in all_nodes.items()
+        name: (*_payload_digest_state(node), node) for name, node in all_nodes.items()
     }
     available = _array(nodes["available_channels"], label="available_channels")
     available_digest, _available_metadata, available_node = digest_states[
@@ -2245,9 +2264,7 @@ def _geometry_interpretation_record(
                 "source_probability_payload": copy.deepcopy(
                     dict(payloads["mask_probs_roi"])
                 ),
-                "validity_payload": copy.deepcopy(
-                    dict(payloads["centroid_valid"])
-                ),
+                "validity_payload": copy.deepcopy(dict(payloads["centroid_valid"])),
                 "valid_value_policy": "finite_within_native_roi",
                 "invalid_value_policy": "exact_zero_xy_sentinel",
                 "nan_policy": "forbidden",
@@ -2408,9 +2425,7 @@ def _derivation_record(
                 else "unit_float16_v1"
             ),
             "threshold": _threshold(
-                context.inference_authority.record.get(
-                    "mask_probability_threshold"
-                )
+                context.inference_authority.record.get("mask_probability_threshold")
             ),
             "threshold_comparison": "greater_than_or_equal",
             "binary_value_domain": [0, 1],
@@ -2445,7 +2460,9 @@ def _derivation_record(
     }
 
 
-def _collection_axis(context: BoundSubjectMaskCoordinateContext) -> CanonicalCollectionAxis:
+def _collection_axis(
+    context: BoundSubjectMaskCoordinateContext,
+) -> CanonicalCollectionAxis:
     return CanonicalCollectionAxis(
         axis=1,
         role="subject_component",
@@ -2549,7 +2566,9 @@ class BoundSubjectMaskCoordinateSurfaces:
     interpretations: Mapping[str, BoundCoordinateRecord] = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _BOUND_SURFACES_SEAL:
             _fail("Subject-mask coordinate surfaces cannot be constructed directly.")
         for name, value in values.items():
@@ -2577,7 +2596,9 @@ class SubjectMaskCoordinatePublicationCheckpoint:
         _verification_seal: object | None = None,
     ) -> None:
         if _verification_seal is not _CHECKPOINT_SEAL:
-            _fail("Subject-mask publication checkpoints cannot be constructed directly.")
+            _fail(
+                "Subject-mask publication checkpoints cannot be constructed directly."
+            )
         object.__setattr__(self, "run_path", run_path)
         object.__setattr__(self, "publication_owner", publication_owner)
         object.__setattr__(self, "_root", root)
@@ -2592,7 +2613,9 @@ def capture_subject_mask_coordinate_publication_checkpoint(
     *,
     expected_publication_owner: str,
 ) -> SubjectMaskCoordinatePublicationCheckpoint:
-    path = _canonical_path(run_path, prefix="subject_mask_runs/", label="subject-mask rowset")
+    path = _canonical_path(
+        run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
+    )
     run = _fresh_owned_ineligible_run(
         root_node,
         path,
@@ -2637,7 +2660,9 @@ def publish_subject_mask_coordinate_surfaces(
     *,
     expected_publication_owner: str,
 ) -> BoundSubjectMaskCoordinateSurfaces:
-    path = _canonical_path(run_path, prefix="subject_mask_runs/", label="subject-mask rowset")
+    path = _canonical_path(
+        run_path, prefix="subject_mask_runs/", label="subject-mask rowset"
+    )
     checkpoint = capture_subject_mask_coordinate_publication_checkpoint(
         root_node,
         path,
@@ -2925,10 +2950,9 @@ def _activate_validated_subject_mask_coordinate_surfaces(
         selector_snapshot,
         names=("latest", "authoritative_run", "authoritative_run_provenance"),
     )
-    if (
-        active_parent.attrs.get("latest_complete") != str(run_name)
-        or active_parent.attrs.get("latest_pending") != str(run_name)
-    ):
+    if active_parent.attrs.get("latest_complete") != str(
+        run_name
+    ) or active_parent.attrs.get("latest_pending") != str(run_name):
         _fail("Subject-mask latest_complete or pending selector changed in activation.")
     active_parent.attrs["latest"] = str(run_name)
     active_parent = fresh_parent()
@@ -2944,10 +2968,9 @@ def _activate_validated_subject_mask_coordinate_surfaces(
     )
     if active_parent.attrs.get("latest_pending") != str(run_name):
         _fail("Subject-mask pending selector changed during activation.")
-    if (
-        active_parent.attrs.get("latest_complete") != str(run_name)
-        or active_parent.attrs.get("latest") != str(run_name)
-    ):
+    if active_parent.attrs.get("latest_complete") != str(
+        run_name
+    ) or active_parent.attrs.get("latest") != str(run_name):
         _fail("Subject-mask latest selectors changed during activation.")
     del active_parent.attrs["latest_pending"]
     active_parent = fresh_parent()

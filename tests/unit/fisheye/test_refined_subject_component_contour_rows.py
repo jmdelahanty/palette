@@ -9,15 +9,50 @@ from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 import fisheye.shared.refined_subject_component_contours as contour_mod
 from fisheye.shared.refined_subject_component_contours import (
     build_component_contours_from_masks,
+    canonicalize_closed_contour,
+    extract_largest_external_contour,
     refresh_component_contour_rows_from_masks,
+    resample_closed_contour,
     write_refined_subject_component_contours,
     write_refined_subject_sampled_component_contours,
 )
 
 
-def _rectangle_mask(height: int, width: int, y0: int, x0: int, y1: int, x1: int) -> np.ndarray:
+def test_sampled_contour_is_invariant_to_start_and_winding() -> None:
+    clockwise_y_down = np.asarray([[1, 1], [5, 1], [5, 4], [1, 4]], dtype=np.float32)
+    rotated = np.roll(clockwise_y_down, 2, axis=0)
+    reversed_rotated = np.roll(clockwise_y_down[::-1], 1, axis=0)
+
+    expected = resample_closed_contour(clockwise_y_down, 12)
+    np.testing.assert_array_equal(resample_closed_contour(rotated, 12), expected)
+    np.testing.assert_array_equal(
+        resample_closed_contour(reversed_rotated, 12), expected
+    )
+    canonical = canonicalize_closed_contour(reversed_rotated)
+    np.testing.assert_array_equal(canonical[0], np.asarray([1, 1], np.float32))
+    signed_area_twice = np.sum(
+        canonical[:, 0] * np.roll(canonical[:, 1], -1)
+        - np.roll(canonical[:, 0], -1) * canonical[:, 1]
+    )
+    assert signed_area_twice > 0  # visual clockwise when image y increases down
+
+
+def test_equal_area_external_contours_use_deterministic_top_left_tie_break() -> None:
+    mask = np.zeros((12, 12), dtype=np.uint8)
+    mask[1:4, 1:4] = 1
+    mask[7:10, 7:10] = 1
+
+    contour = extract_largest_external_contour(mask)
+
+    assert contour is not None
+    np.testing.assert_array_equal(contour[0], np.asarray([1, 1], np.float32))
+
+
+def _rectangle_mask(
+    height: int, width: int, y0: int, x0: int, y1: int, x1: int
+) -> np.ndarray:
     mask = np.zeros((height, width), dtype=np.uint8)
-    mask[int(y0):int(y1), int(x0):int(x1)] = 1
+    mask[int(y0) : int(y1), int(x0) : int(x1)] = 1
     return mask
 
 
@@ -31,7 +66,9 @@ def _build_refined_run(store_path: Path) -> zarr.Group:
             "label_schema_id": "subject_v1_lr",
         }
     )
-    run.create_array("available_channels", data=np.asarray([True, True], dtype=bool), overwrite=True)
+    run.create_array(
+        "available_channels", data=np.asarray([True, True], dtype=bool), overwrite=True
+    )
     masks = np.zeros((2, 2, 16, 16), dtype=np.uint8)
     masks[0, 0] = _rectangle_mask(16, 16, 2, 2, 12, 12)
     masks[1, 0] = _rectangle_mask(16, 16, 4, 4, 10, 10)
@@ -45,7 +82,9 @@ def _decode_bytes_row(values: np.ndarray) -> str:
     return raw.split(b"\x00", 1)[0].decode("utf-8")
 
 
-def test_refresh_component_contour_row_appends_points_and_moves_pointer(tmp_path: Path) -> None:
+def test_refresh_component_contour_row_appends_points_and_moves_pointer(
+    tmp_path: Path,
+) -> None:
     run = _build_refined_run(tmp_path / "contours.zarr")
     write_refined_subject_component_contours(
         run,
@@ -80,13 +119,21 @@ def test_refresh_component_contour_row_appends_points_and_moves_pointer(tmp_path
     refreshed_contours = component["contours"]
     assert int(component["row_revision"][0]) == 1
     assert int(component["row_revision"][1]) == 0
-    assert _decode_bytes_row(component["row_update_reason_bytes"][0]) == "unit_test_manual_edit"
-    assert _decode_bytes_row(component["row_updated_at_utc_bytes"][0]) == "2026-04-29T12:00:00+00:00"
+    assert (
+        _decode_bytes_row(component["row_update_reason_bytes"][0])
+        == "unit_test_manual_edit"
+    )
+    assert (
+        _decode_bytes_row(component["row_updated_at_utc_bytes"][0])
+        == "2026-04-29T12:00:00+00:00"
+    )
     assert refreshed_contours.attrs["cache_coverage"] == "full_indexed_rows"
     assert refreshed_contours.attrs["orphaned_points_possible"] is True
 
 
-def test_write_component_contours_reads_compact_mask_store_without_dense_masks(tmp_path: Path) -> None:
+def test_write_component_contours_reads_compact_mask_store_without_dense_masks(
+    tmp_path: Path,
+) -> None:
     run = _build_refined_run(tmp_path / "compact_contours.zarr")
     dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
     write_component_rle_mask_store_from_dense(
@@ -110,12 +157,20 @@ def test_write_component_contours_reads_compact_mask_store_without_dense_masks(t
         contours = run[f"components/{component}/contours"]
         assert tuple(contours["ptr"].shape) == (2,)
         assert tuple(contours["len"].shape) == (2,)
-        assert int(np.count_nonzero(np.asarray(contours["len"][:], dtype=np.int64) > 0)) == int(
-            np.count_nonzero(dense[:, run.attrs["mask_labels"].index(component)].reshape(2, -1).any(axis=1))
+        assert int(
+            np.count_nonzero(np.asarray(contours["len"][:], dtype=np.int64) > 0)
+        ) == int(
+            np.count_nonzero(
+                dense[:, run.attrs["mask_labels"].index(component)]
+                .reshape(2, -1)
+                .any(axis=1)
+            )
         )
 
 
-def test_write_sampled_component_contours_uses_fixed_k_and_requested_row_chunk(tmp_path: Path) -> None:
+def test_write_sampled_component_contours_uses_fixed_k_and_requested_row_chunk(
+    tmp_path: Path,
+) -> None:
     run = _build_refined_run(tmp_path / "sampled_contours.zarr")
 
     summaries = write_refined_subject_sampled_component_contours(
@@ -132,6 +187,10 @@ def test_write_sampled_component_contours_uses_fixed_k_and_requested_row_chunk(t
     swim = run["components/swim_bladder/sampled_contours"]
     assert body.attrs["schema_id"] == "sampled_component_contours_v1"
     assert body.attrs["sampling_method"] == "closed_arc_length_uniform"
+    assert body.attrs["sampling_method_version"] == 2
+    assert body.attrs["winding"] == "clockwise_in_roi_y_down"
+    assert body.attrs["start_point"] == "topmost_then_leftmost_vertex"
+    assert body.attrs["duplicate_closing_point"] is False
     assert body.attrs["surface_role"] == "derived_display_cache"
     assert body.attrs["authoritative_pixels"] is False
     assert tuple(body["points_xy"].shape) == (2, 8, 2)
@@ -143,10 +202,14 @@ def test_write_sampled_component_contours_uses_fixed_k_and_requested_row_chunk(t
     assert np.all(np.isnan(np.asarray(swim["points_xy"][1], dtype=np.float32)))
 
 
-def test_build_component_contours_reads_masks_in_chunks(monkeypatch, tmp_path: Path) -> None:
+def test_build_component_contours_reads_masks_in_chunks(
+    monkeypatch, tmp_path: Path
+) -> None:
     run = zarr.open_group(str(tmp_path / "chunked_contours.zarr"), mode="w")
     run.attrs["mask_labels"] = ["subject_body", "swim_bladder"]
-    run.create_array("available_channels", data=np.asarray([True, True], dtype=bool), overwrite=True)
+    run.create_array(
+        "available_channels", data=np.asarray([True, True], dtype=bool), overwrite=True
+    )
 
     dense = np.zeros((5, 2, 16, 16), dtype=np.uint8)
     for row_idx in range(5):
@@ -161,11 +224,13 @@ def test_build_component_contours_reads_masks_in_chunks(monkeypatch, tmp_path: P
         def read_dense(self, *, rows=None, channels=None):
             self.calls.append((rows, int(channels)))
             if isinstance(rows, slice):
-                return dense[rows, int(channels): int(channels) + 1]
-            return dense[int(rows): int(rows) + 1, int(channels): int(channels) + 1]
+                return dense[rows, int(channels) : int(channels) + 1]
+            return dense[int(rows) : int(rows) + 1, int(channels) : int(channels) + 1]
 
     fake_store = FakeMaskStore()
-    monkeypatch.setattr(contour_mod, "open_mask_store", lambda *_args, **_kwargs: fake_store)
+    monkeypatch.setattr(
+        contour_mod, "open_mask_store", lambda *_args, **_kwargs: fake_store
+    )
 
     contours, summary = build_component_contours_from_masks(
         run,
@@ -183,7 +248,9 @@ def test_build_component_contours_reads_masks_in_chunks(monkeypatch, tmp_path: P
     ]
 
 
-def test_refresh_component_contour_row_initializes_partial_cache_when_missing(tmp_path: Path) -> None:
+def test_refresh_component_contour_row_initializes_partial_cache_when_missing(
+    tmp_path: Path,
+) -> None:
     run = _build_refined_run(tmp_path / "partial.zarr")
 
     summaries = refresh_component_contour_rows_from_masks(
@@ -209,7 +276,9 @@ def test_refresh_component_contour_row_initializes_partial_cache_when_missing(tm
     assert int(component["row_revision"][1]) == 0
 
 
-def test_refresh_component_contour_row_records_missing_contour_for_empty_mask(tmp_path: Path) -> None:
+def test_refresh_component_contour_row_records_missing_contour_for_empty_mask(
+    tmp_path: Path,
+) -> None:
     run = _build_refined_run(tmp_path / "empty.zarr")
     masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
     masks[0, 1] = 0

@@ -41,8 +41,10 @@ permissive schema or one physical layout.
 ## Implementation Checkpoint
 
 The first exact logical/storage-policy checkpoint is implemented without
-writer or selector adoption. Here, "full-duration Sleepyfish" means all
-1,188,000 camera frames and the 1,169,010 mask-observation rows in Cam2010095:
+storage-profile or selector activation. The maintained sampled-contour writer
+now emits deterministic profile metadata and ordering. Here, "full-duration
+Sleepyfish" means all 1,188,000 camera frames and the 1,169,010
+mask-observation rows in Cam2010095:
 
 - [x] Freeze raw `uint8` and `float16` probability schemas separately.
 - [x] Freeze the refined dense scientific core with exact crop-v2 placement,
@@ -52,20 +54,31 @@ writer or selector adoption. Here, "full-duration Sleepyfish" means all
 - [x] Freeze a separate selector-ineligible editable draft audit extension.
 - [x] Freeze exact bitpacked, component-RLE, sampled-contour, and packed full-
       contour array contracts.
+- [x] Freeze fixed-count sampled contours as the default hot cache: body 128,
+      each eye 64, and swim bladder 32; full ragged contours are optional.
+- [x] Freeze sampled-contour byte reproducibility: visual clockwise winding in
+      ROI image coordinates, topmost-then-leftmost start, uniform closed
+      arc-length sampling, and no repeated closing point.
 - [x] Freeze digest-bound published-cache receipts requiring full dense
       equivalence and `authoritative_pixels=false`.
+- [x] Add an exact immutable, source-bound
+      `subject_mask_quality_runs/<run>` schema and byte-derived storage plan.
 - [x] Prevent dense materialization from clearing existing derivative
       freshness markers.
 - [ ] Adopt the draft audit extension in the maintained draft producer/editor.
 - [ ] Persist cache receipts from cache regeneration writers.
+- [ ] Freeze the persisted subject-mask-quality run manifest, metadata digest,
+      exact producer policy/profile, and direct/consolidated equivalence gate.
+- [ ] Add the selector-ineligible subject-mask-quality producer and lazy
+      inspection consumer; do not make ordinary playback depend on it.
 - [ ] Add accepted-draft-to-new-publication compaction and physical replanning.
 - [ ] Run the full-duration publication/write/read benchmark before profile
       activation.
 
-The contracts live in `src/fisheye/shared/zarr/subject_mask_schema.py` and
-`src/fisheye/shared/zarr/refined_subject_mask_extensions.py`; reusable exact
-array dtypes and shapes live in
-`src/fisheye/shared/zarr/array_contracts.py`.
+The contracts live in `src/fisheye/shared/zarr/subject_mask_schema.py`,
+`src/fisheye/shared/zarr/refined_subject_mask_extensions.py`, and
+`src/fisheye/shared/zarr/subject_mask_quality_schema.py`; reusable exact array
+dtypes and shapes live in `src/fisheye/shared/zarr/array_contracts.py`.
 
 ## Scope And Method
 
@@ -342,6 +355,14 @@ training—but a published cache is trusted only when this proof exists.
 The dense value digest is reused from the core publication scan; issuing a
 cache receipt must not trigger a second full `masks_roi` hash pass.
 
+The contour profile strengthens existing writer behavior rather than adding a
+second hot representation. Fixed-count sampled contours remain the default,
+while full ragged contours remain opt-in. The array layout remains
+`sampled_component_contours_v1` for consumer compatibility, but new writes
+declare a separate deterministic publication profile. Historical v1 groups
+without that profile remain readable legacy caches; they cannot claim its
+stronger byte-reproducibility receipt.
+
 ### Profile 3: refined immutable publication
 
 Publication must create a new run ID from an accepted draft. It must not turn
@@ -391,8 +412,8 @@ selector mutation (`src/fisheye/shared/refined_subject_mask_coordinate_publicati
 | Run metrics | `mask_present`, `area_px`, `centroid_xy/valid`, `bbox_xyxy/valid` | Recompute exactly from destination dense authority |
 | Bitpacked cache | `masks_packed uint8[N,C,H,ceil(W/8)]`, little bit order | Non-authoritative; source dense digest and fresh status; per-frame/component-aligned chunks |
 | RLE cache | Per component `counts uint32[M]`, `indptr int64[N+1]`, `present bool[N]`, `area_px int32[N]`, `bbox_xyxy int32[N,4]` | Non-authoritative; index/value arrays planned independently; fresh source digest |
-| Sampled contour | `points_xy float32[N,K,2]`, `valid bool[N]`, `source_point_count int32[N]` | Bounded display/analysis cache; exact component and dense source binding |
-| Full contour | `ptr int64[N]`, `len int32[N]`, `points_xy float32[P,2]` | Rebuild canonical packed flat values; no append or orphaned points in publication |
+| Sampled contour | `points_xy float32[N,K,2]`, `valid bool[N]`, `source_point_count int32[N]` | Default hot display/analysis cache; deterministic winding/start; exact dense-source binding |
+| Full contour | `ptr int64[N]`, `len int32[N]`, `points_xy float32[P,2]` | Optional cold inspection/export cache; rebuild packed values with no orphaned points |
 | Review state | revisions, manual flags, reasons, timestamps | Draft/audit provenance only; excluded from canonical scientific table unless explicitly modeled |
 
 Current row-local full-contour refresh appends new flat points and can leave
@@ -401,6 +422,31 @@ Publication must repack it. Because full contours dominate the observed
 Sleepyfish object count, their flat values should either be heavily sharded or
 moved to a separately opened derived run. Sampled contours are the better hot
 playback surface.
+
+### Quality companion: `subject_mask_quality_runs`
+
+Mask quality is a separate immutable diagnostic snapshot, following the same
+separation used for keypoints. It binds one exact refined dense-mask manifest
+and dense-value digest and covers every source row once in source order. Its 12
+exact arrays contain row identity and frame offsets; component and
+cross-component `float32` metrics with exact validity arrays; `uint16` finding
+flags; and advisory component/observation usability proposals.
+
+Invalid metrics use canonical NaN. The manifest owns ordered metric catalogs,
+flag registries, component order, policy digest, and immutable source identity.
+It owns no pixels, contours, accepted review state, or track identity. V1 is
+observation-local: temporal area jumps, motion, or persistence require a later
+schema bound to explicit longitudinal lineage, so multi-subject frames can
+never be joined by row ordinal. Crimson may open this companion lazily for
+inspection; ordinary playback does not require it.
+
+The schema intentionally freezes the axes and validity semantics before
+freezing one producer metric catalog. Candidate component-local metrics include
+area fraction, connected-component count, largest-component fraction, hole
+fraction, solidity, perimeter, and ROI-border contact. Candidate
+observation-level metrics include component overlap and body-containment
+failures. The first producer profile must select, define, version, and test an
+exact subset; it must not add anonymous columns to an existing profile.
 
 Every derived cache receipt should freeze its schema/profile, source dense
 logical digest, accepted draft revision, component/row coverage, generator
@@ -993,10 +1039,12 @@ Properties to freeze:
   schema/storage profiles.
 - [ ] Freeze one homogeneous ROI extent per run or define exact padding and
   per-row valid-window arrays for mixed extents.
-- [ ] Decide whether full variable contours remain in the core refined run or
-  become a separately opened derived run/cache.
-- [ ] Freeze dense, bitpacked, RLE, metric, sampled-contour, and full-contour
-  freshness/digest relationships.
+- [x] Make fixed-count sampled contours the default hot cache and full variable
+  contours an optional cold inspection/export cache.
+- [x] Freeze dense, bitpacked, RLE, sampled-contour, and full-contour
+  freshness/digest relationships through dense-bound cache receipts.
+- [x] Keep mask QC in a separate immutable `subject_mask_quality_runs` stage;
+  proposals are advisory and cannot replace accepted refined-mask review.
 - [ ] Freeze direct/consolidated metadata normalization and equivalence.
 - [ ] Define selector and compatibility boundaries for historical compact-only
   refined runs.
@@ -1015,10 +1063,15 @@ This checklist is intentionally not authorization to mutate production.
   `uint8`/`float16` logical schema variants, without writer adoption.
 - [x] Add the exact refined dense scientific-core array contracts and logical
   validator, without yet freezing draft audit or optional cache layouts.
-- [ ] Add exact editable-draft audit/revision arrays and published derived-cache
+- [x] Add exact editable-draft audit/revision arrays and published derived-cache
   extension schemas.
+- [x] Add an exact source-bound subject-mask quality schema with multi-row,
+  empty-frame, source-binding, NaN-validity, and flag-registry tests.
+- [ ] Add the closed subject-mask-quality run-manifest envelope, array/content
+  digests, metadata normalizer, persisted attribute, producer policy, and
+  selector-ineligible writer.
 - [ ] Add exact component/reason registries and decoded-array validation.
-- [ ] Add standard frame lookup and multi-observation tests.
+- [x] Add standard frame lookup and multi-observation tests.
 - [ ] Bind both schemas to exact crop identity, manifest, coordinate contract,
   and source-pixel authority.
 - [ ] Put all legacy aliases and compact-only inputs behind explicit adapters.
