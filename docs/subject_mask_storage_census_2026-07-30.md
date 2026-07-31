@@ -78,6 +78,66 @@ mask-observation rows in Cam2010095:
 - [ ] Run the full-duration publication/write/read benchmark before profile
       activation.
 
+### 22,926-row cache-pipeline checkpoint
+
+The first executable integration candidate deliberately uses the existing
+22,926-row crop-v2/keypoint-v2 fixture rather than the 1,169,010-row full
+Sleepyfish mask surface. It is an integration and publication benchmark, not
+full-duration promotion evidence.
+
+The frozen stage order is:
+
+1. stage the 5.60 GiB flat ROI cache, crop-v2 archive, refined-keypoint-v2
+   lineage, and pinned U-Net model onto one node-local scratch root;
+2. run probability-first inference into one complete
+   `subject_mask_shard_runs/<work-unit>` local intermediate;
+3. rematerialize an immutable, access-aware, selector-ineligible
+   `subject_mask_runs/<run>` raw snapshot;
+4. finalize the local inference shard into a dense four-component refined
+   draft, with `eyes_union` assigned to `eye_left`/`eye_right` by the pinned
+   refined keypoints;
+5. rematerialize that draft into an immutable, access-aware,
+   selector-ineligible `refined_subject_masks_runs/<run>` scientific core;
+6. derive and publish `subject_mask_quality_runs/<run>` from the completed
+   refined dense authority; and
+7. copy only the three completed stores plus a strict terminal handoff to the
+   benchmark namespace using hidden-path copy followed by atomic rename.
+
+Quality intentionally follows refinement. It describes the exact refined
+authority that a reviewer or consumer will inspect; computing it from raw
+three-channel probabilities would bind the flags to the wrong component set
+and omit the effects of eye assignment and refinement.
+
+The raw/refined publication adapter is
+`src/fisheye/shared/zarr/subject_mask_core_publication.py`. It validates exact
+schemas and crop identity, derives storage from uncompressed byte size and
+access intent, writes complete outer shards (or unsharded chunks), records
+logical hashes and physical write counts, consolidates metadata, proves
+normalized direct/consolidated equivalence, and reopens the completed run
+before handoff. The node-local orchestration is
+`src/fisheye/diagnostics/benchmark_subject_mask_cache_pipeline.py`.
+
+Safety and evidence checklist:
+
+- [x] Require the destination below `.palette_benchmarks/subject_mask_storage`.
+- [x] Reject `/groups`, `/nrs`, and `/Volumes` as compute scratch roots.
+- [x] Recompute the staged flat-cache payload SHA-256 before inference.
+- [x] Verify the cache, crop, and refined-keypoint runs have the same exact
+      22,926-row identity and 23,287-frame CSR index before copying large data.
+- [x] Bind the persisted crop and refined-keypoint run manifests into output
+      provenance.
+- [x] Keep inference shards node-local and omit them from the public handoff.
+- [x] Keep all three output parents free of selectors and registry mutations.
+- [x] Use dense `uint8 masks_roi` as the refined scientific/edit authority.
+- [x] Publish QC only after the exact refined dense snapshot completes.
+- [x] Unit-test guards, cache hashing, crop-row rebinding, physical planning,
+      consolidation, and selector absence.
+- [ ] Run the commit-pinned GPU allocation and retain phase timing, peak RSS,
+      object counts, apparent bytes, logical digests, and read timings.
+- [ ] Reopen all three shared stores and compare their handoff digests with the
+      node-local receipts.
+- [ ] Hand the immutable paths to Crimson for exact-schema consumer testing.
+
 The contracts live in `src/fisheye/shared/zarr/subject_mask_schema.py`,
 `src/fisheye/shared/zarr/refined_subject_mask_extensions.py`,
 `src/fisheye/shared/zarr/subject_mask_quality_schema.py`, and
@@ -1097,21 +1157,22 @@ Properties to freeze:
 - [x] Require `source_crop_xywh : float32[N,4]` in the new canonical raw,
   refined, and training source-index schemas, matching crop-v2. Preserve
   arbitrary source dtypes only behind a legacy conversion boundary.
-- [ ] Freeze exact raw and refined schema IDs and exact array sets.
-- [ ] Decide whether every mask run owns an exact
-  `frame_row_offsets : int64[F+1]`, or binds to and validates the crop
+- [x] Freeze exact raw and refined schema IDs and exact scientific-core array
+  sets.
+- [x] Require every new canonical mask core to own an exact
+  `frame_row_offsets : int64[F+1]` and validate it against the bound crop
   snapshot's offset index. Do not retain `frame_counts` as the lookup
   authority.
 - [ ] For merged training artifacts, preserve source dataset plus acquisition
   frame and bind each source run's offset-index digest; do not synthesize one
   cross-recording frame axis.
-- [ ] Freeze stable observation ordering and allow zero, one, or multiple
+- [x] Freeze stable observation ordering and allow zero, one, or multiple
   observations per frame through repeated CSR offsets.
-- [ ] Freeze `instance_key` as observation/edit-lineage identity, not subject or
+- [x] Freeze `instance_key` as observation/edit-lineage identity, not subject or
   longitudinal track identity.
 - [ ] Freeze component order, component IDs, empty-mask semantics, fill values,
   and reason/validity registries.
-- [ ] Decide whether raw `uint8` and `float16` probabilities are separate
+- [x] Freeze raw `uint8` and `float16` probabilities as separate
   schema/storage profiles.
 - [ ] Freeze one homogeneous ROI extent per run or define exact padding and
   per-row valid-window arrays for mixed extents.
@@ -1121,7 +1182,8 @@ Properties to freeze:
   freshness/digest relationships through dense-bound cache receipts.
 - [x] Keep mask QC in a separate immutable `subject_mask_quality_runs` stage;
   proposals are advisory and cannot replace accepted refined-mask review.
-- [ ] Freeze direct/consolidated metadata normalization and equivalence.
+- [x] Freeze direct/consolidated metadata normalization and equivalence for
+  the new raw/refined core and quality snapshot publishers.
 - [ ] Define selector and compatibility boundaries for historical compact-only
   refined runs.
 - [ ] Freeze the refined state machine so drafts never update normal selectors
@@ -1172,7 +1234,8 @@ This checklist is intentionally not authorization to mutate production.
 
 ### Phase C: publication lifecycle
 
-- [ ] Add exact raw and refined run-manifest envelopes.
+- [x] Add exact raw and refined core run-manifest envelopes for
+  selector-ineligible publication.
 - [ ] Route standalone and composite raw snapshots through one fail-closed
   activation transaction with eligibility as the final mutation.
 - [ ] Implement draft-to-published logical copy with physical replanning.
@@ -1181,7 +1244,7 @@ This checklist is intentionally not authorization to mutate production.
 - [ ] Make dense compatibility materialization preserve all derivative stale
   flags until each surface has a successful regeneration/validation receipt.
 - [ ] Verify decoded equality, cache digests, CRCs, and stale-state closure.
-- [ ] Consolidate metadata and prove normalized direct/consolidated equality
+- [x] Consolidate metadata and prove normalized direct/consolidated equality
   before selector eligibility.
 - [ ] Preserve failed candidates as selector-ineligible evidence.
 
