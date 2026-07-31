@@ -312,6 +312,32 @@ class PreparedSubjectMaskQualitySnapshot:
     source_arrays: Mapping[str, np.ndarray]
 
 
+@dataclass(frozen=True)
+class SubjectMaskQualityPayload:
+    """QC payload for one contiguous source-row block."""
+
+    component_metric_values: np.ndarray
+    component_metric_valid: np.ndarray
+    observation_metric_values: np.ndarray
+    observation_metric_valid: np.ndarray
+    component_quality_flags: np.ndarray
+    observation_quality_flags: np.ndarray
+    proposed_component_usable: np.ndarray
+    proposed_observation_usable: np.ndarray
+
+    def as_arrays(self) -> dict[str, np.ndarray]:
+        return {
+            "component_metric_values": self.component_metric_values,
+            "component_metric_valid": self.component_metric_valid,
+            "observation_metric_values": self.observation_metric_values,
+            "observation_metric_valid": self.observation_metric_valid,
+            "component_quality_flags": self.component_quality_flags,
+            "observation_quality_flags": self.observation_quality_flags,
+            "proposed_component_usable": self.proposed_component_usable,
+            "proposed_observation_usable": self.proposed_observation_usable,
+        }
+
+
 def _array_values(value: Any) -> np.ndarray:
     if isinstance(value, np.ndarray):
         return value
@@ -387,76 +413,31 @@ def _intersection_over_smaller_area(left: np.ndarray, right: np.ndarray) -> floa
     return float(np.count_nonzero(left & right) / float(smaller))
 
 
-def prepare_in_memory_observation_local_subject_mask_quality(
-    source_mask_arrays: Mapping[str, Any],
+def compute_subject_mask_quality_block(
+    masks_roi: np.ndarray,
     *,
-    n_frames: int,
+    available_channels: np.ndarray,
     components: SubjectMaskComponentRegistry,
-    source: SubjectMaskQualitySourceReference,
     policy: SubjectV1LrObservationQualityPolicy = (
         SubjectV1LrObservationQualityPolicy()
     ),
-) -> PreparedSubjectMaskQualitySnapshot:
-    """Derive one small complete QC snapshot from already materialized masks.
-
-    This is the deterministic reference kernel and fixture path. It refuses a
-    lazy/persisted dense array so callers cannot accidentally materialize a
-    full-duration mask run. The future publication writer must invoke the same
-    policy over bounded, whole-output-shard row blocks.
-    """
+) -> SubjectMaskQualityPayload:
+    """Compute QC values for one bounded, contiguous source-row block."""
 
     if tuple(components.labels) != SUBJECT_V1_LR_COMPONENTS:
         raise ValueError(
             "The first QC profile requires canonical subject_v1_lr component order."
         )
-    required_paths = {
-        "masks_roi",
-        "instance_key",
-        "source_acquisition_frame_index",
-        "available_channels",
-    }
-    if not required_paths <= set(source_mask_arrays):
-        missing = sorted(required_paths - set(source_mask_arrays))
-        raise ValueError(f"Source mask evidence is missing arrays: {missing!r}.")
-
-    if not isinstance(source_mask_arrays["masks_roi"], np.ndarray):
-        raise TypeError(
-            "The in-memory QC reference producer requires a NumPy masks_roi; "
-            "the persisted writer must stream bounded row blocks."
-        )
-    masks = source_mask_arrays["masks_roi"]
-    keys = _array_values(source_mask_arrays["instance_key"])
-    frames = _array_values(source_mask_arrays["source_acquisition_frame_index"])
-    available = _array_values(source_mask_arrays["available_channels"])
+    masks = np.asarray(masks_roi)
+    available = np.asarray(available_channels)
     if masks.ndim != 4 or int(masks.shape[1]) != len(components.labels):
         raise ValueError("masks_roi must have shape (N,4,H,W).")
     if masks.dtype != np.dtype(np.uint8) or np.any((masks != 0) & (masks != 1)):
         raise ValueError("masks_roi must contain exact binary uint8 values.")
-    n_rois, n_channels, height, width = (int(value) for value in masks.shape)
-    if keys.shape != (n_rois,) or keys.dtype != np.dtype(np.uint64):
-        raise ValueError("instance_key must be uint64[N].")
-    if frames.shape != (n_rois,) or frames.dtype != np.dtype(np.int64):
-        raise ValueError("source_acquisition_frame_index must be int64[N].")
+    n_rois, n_channels = (int(masks.shape[0]), int(masks.shape[1]))
     if available.shape != (n_channels,) or available.dtype != np.dtype(bool):
         raise ValueError("available_channels must be bool[C].")
-    if source.component_registry_digest != canonical_json_sha256(
-        components.as_manifest()
-    ):
-        raise ValueError(
-            "Source component-registry digest differs from the declared registry."
-        )
-    offsets = derive_subject_mask_frame_row_offsets(frames, n_frames=int(n_frames))
 
-    profile = quality_profile_for_policy(policy)
-    dimensions = SubjectMaskQualityDimensions(
-        n_frames=int(n_frames),
-        n_rois=n_rois,
-        n_channels=n_channels,
-        roi_height=height,
-        roi_width=width,
-        n_component_metrics=len(profile.component_metrics),
-        n_observation_metrics=len(profile.observation_metrics),
-    )
     component_values = np.full((n_rois, n_channels, 8), np.nan, dtype=np.float32)
     component_valid = np.zeros(component_values.shape, dtype=bool)
     component_flags = np.zeros((n_rois, n_channels), dtype=np.uint16)
@@ -568,19 +549,101 @@ def prepare_in_memory_observation_local_subject_mask_quality(
             ):
                 observation_flags[row] |= np.uint16(flag)
 
+    return SubjectMaskQualityPayload(
+        component_metric_values=component_values,
+        component_metric_valid=component_valid,
+        observation_metric_values=observation_values,
+        observation_metric_valid=observation_valid,
+        component_quality_flags=component_flags,
+        observation_quality_flags=observation_flags,
+        proposed_component_usable=proposed_component_usable,
+        proposed_observation_usable=observation_flags == 0,
+    )
+
+
+def prepare_in_memory_observation_local_subject_mask_quality(
+    source_mask_arrays: Mapping[str, Any],
+    *,
+    n_frames: int,
+    components: SubjectMaskComponentRegistry,
+    source: SubjectMaskQualitySourceReference,
+    policy: SubjectV1LrObservationQualityPolicy = (
+        SubjectV1LrObservationQualityPolicy()
+    ),
+) -> PreparedSubjectMaskQualitySnapshot:
+    """Derive one small complete QC snapshot from already materialized masks.
+
+    This is the deterministic reference kernel and fixture path. It refuses a
+    lazy/persisted dense array so callers cannot accidentally materialize a
+    full-duration mask run. The future publication writer must invoke the same
+    policy over bounded, whole-output-shard row blocks.
+    """
+
+    if tuple(components.labels) != SUBJECT_V1_LR_COMPONENTS:
+        raise ValueError(
+            "The first QC profile requires canonical subject_v1_lr component order."
+        )
+    required_paths = {
+        "masks_roi",
+        "instance_key",
+        "source_acquisition_frame_index",
+        "available_channels",
+    }
+    if not required_paths <= set(source_mask_arrays):
+        missing = sorted(required_paths - set(source_mask_arrays))
+        raise ValueError(f"Source mask evidence is missing arrays: {missing!r}.")
+
+    if not isinstance(source_mask_arrays["masks_roi"], np.ndarray):
+        raise TypeError(
+            "The in-memory QC reference producer requires a NumPy masks_roi; "
+            "the persisted writer must stream bounded row blocks."
+        )
+    masks = source_mask_arrays["masks_roi"]
+    keys = _array_values(source_mask_arrays["instance_key"])
+    frames = _array_values(source_mask_arrays["source_acquisition_frame_index"])
+    available = _array_values(source_mask_arrays["available_channels"])
+    if masks.ndim != 4 or int(masks.shape[1]) != len(components.labels):
+        raise ValueError("masks_roi must have shape (N,4,H,W).")
+    if masks.dtype != np.dtype(np.uint8) or np.any((masks != 0) & (masks != 1)):
+        raise ValueError("masks_roi must contain exact binary uint8 values.")
+    n_rois, n_channels, height, width = (int(value) for value in masks.shape)
+    if keys.shape != (n_rois,) or keys.dtype != np.dtype(np.uint64):
+        raise ValueError("instance_key must be uint64[N].")
+    if frames.shape != (n_rois,) or frames.dtype != np.dtype(np.int64):
+        raise ValueError("source_acquisition_frame_index must be int64[N].")
+    if available.shape != (n_channels,) or available.dtype != np.dtype(bool):
+        raise ValueError("available_channels must be bool[C].")
+    if source.component_registry_digest != canonical_json_sha256(
+        components.as_manifest()
+    ):
+        raise ValueError(
+            "Source component-registry digest differs from the declared registry."
+        )
+    offsets = derive_subject_mask_frame_row_offsets(frames, n_frames=int(n_frames))
+
+    profile = quality_profile_for_policy(policy)
+    dimensions = SubjectMaskQualityDimensions(
+        n_frames=int(n_frames),
+        n_rois=n_rois,
+        n_channels=n_channels,
+        roi_height=height,
+        roi_width=width,
+        n_component_metrics=len(profile.component_metrics),
+        n_observation_metrics=len(profile.observation_metrics),
+    )
+    payload = compute_subject_mask_quality_block(
+        masks,
+        available_channels=available,
+        components=components,
+        policy=policy,
+    )
+
     arrays = {
         "instance_key": keys.copy(),
         "source_mask_row_ids": np.arange(n_rois, dtype=np.int64),
         "source_acquisition_frame_index": frames.copy(),
         "frame_row_offsets": offsets,
-        "component_metric_values": component_values,
-        "component_metric_valid": component_valid,
-        "observation_metric_values": observation_values,
-        "observation_metric_valid": observation_valid,
-        "component_quality_flags": component_flags,
-        "observation_quality_flags": observation_flags,
-        "proposed_component_usable": proposed_component_usable,
-        "proposed_observation_usable": observation_flags == 0,
+        **payload.as_arrays(),
     }
     source_evidence = {
         "instance_key": keys.copy(),
@@ -624,6 +687,8 @@ __all__ = [
     "SUBJECT_V1_LR_COMPONENTS",
     "SUBJECT_V1_LR_QUALITY_PROFILE_ID",
     "SubjectV1LrObservationQualityPolicy",
+    "SubjectMaskQualityPayload",
+    "compute_subject_mask_quality_block",
     "prepare_in_memory_observation_local_subject_mask_quality",
     "quality_profile_for_policy",
 ]

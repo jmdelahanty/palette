@@ -69,19 +69,20 @@ mask-observation rows in Cam2010095:
       freshness markers.
 - [ ] Adopt the draft audit extension in the maintained draft producer/editor.
 - [ ] Persist cache receipts from cache regeneration writers.
-- [ ] Freeze the persisted subject-mask-quality run manifest, metadata digest,
-      and direct/consolidated equivalence gate. The first exact producer
-      policy/profile is frozen but is not yet a persisted run.
-- [ ] Add the bounded selector-ineligible subject-mask-quality writer and lazy
-      inspection consumer; do not make ordinary playback depend on it.
+- [x] Freeze the persisted subject-mask-quality run manifest, metadata digest,
+      and direct/consolidated equivalence gate.
+- [x] Add the bounded selector-ineligible subject-mask-quality writer.
+- [ ] Add a lazy inspection consumer; do not make ordinary playback depend on
+      the quality companion.
 - [ ] Add accepted-draft-to-new-publication compaction and physical replanning.
 - [ ] Run the full-duration publication/write/read benchmark before profile
       activation.
 
 The contracts live in `src/fisheye/shared/zarr/subject_mask_schema.py`,
-`src/fisheye/shared/zarr/refined_subject_mask_extensions.py`, and
-`src/fisheye/shared/zarr/subject_mask_quality_schema.py`; reusable exact array
-dtypes and shapes live in `src/fisheye/shared/zarr/array_contracts.py`.
+`src/fisheye/shared/zarr/refined_subject_mask_extensions.py`,
+`src/fisheye/shared/zarr/subject_mask_quality_schema.py`, and
+`src/fisheye/shared/zarr/subject_mask_quality_manifest.py`; reusable exact
+array dtypes and shapes live in `src/fisheye/shared/zarr/array_contracts.py`.
 
 ## Scope And Method
 
@@ -492,6 +493,36 @@ Boundary noise, curvature variance, skeleton topology, probability confidence,
 and temporal discontinuity remain outside the first profile because they need
 additional method parameters, raw probabilities, component-specific policy,
 or longitudinal identity.
+
+The selector-ineligible writer persists the exact manifest at
+`subject_mask_quality_runs/<run>/zarr.json.attributes.run_manifest`. The
+envelope binds the source refined-mask manifest, dense decoded-value digest,
+component registry, metric and flag catalogs, policy, byte-derived storage
+plan, decoded QC array digests, normalized direct/consolidated declarations,
+and a physical-write receipt. Runs also receive the standard
+`palette.zarr_run_completion.v1` markers while remaining selector-ineligible.
+Nested fields are reconstructed through the frozen builders during validation
+rather than trusted because the outer digest was recomputed.
+
+Dense input is read once in row blocks derived from uncompressed bytes, with a
+64 MiB default budget rather than a fixed frame count. The dense digest is
+updated during that pass. Only the much smaller QC columns are staged as
+node-local `.npy` memmaps; they are deleted after publication. Final Zarr
+writes follow each array's exact complete outer-shard shape, or its complete
+inner-chunk shape when the concrete array is too small to shard. V1 uses one
+writer. Future parallelization is permitted only by assigning disjoint whole
+physical shards, never arbitrary logical row slices. The API rejects shared
+mounts such as `/groups` as scratch roots; callers must use `/tmp`, `$TMPDIR`,
+`/nvme1`, or another recognized node-local scratch mount.
+
+For the frozen full-duration dimensions (`1,169,010` mask rows, four
+components, eight component metrics, and seven observation metrics), the
+current `published_http_v1` plan estimates about 270 MiB logical QC payload,
+17 payload objects, and 31 total stage objects including array/group metadata.
+The largest column, `component_metric_values`, uses 8,192-row inner chunks and
+262,144-row outer shards, producing five payload objects. Narrow columns derive
+larger row counts from the same byte budget; they do not inherit the metric
+tensor's row constant.
 
 Every derived cache receipt should freeze its schema/profile, source dense
 logical digest, accepted draft revision, component/row coverage, generator
@@ -1114,9 +1145,9 @@ This checklist is intentionally not authorization to mutate production.
       empty-frame, source-binding, NaN-validity, and flag-registry tests.
 - [x] Add the first exact four-component QC producer policy/profile and
       in-memory containment, exclusivity, validity, and no-mutation tests.
-- [ ] Add the closed subject-mask-quality run-manifest envelope, array/content
+- [x] Add the closed subject-mask-quality run-manifest envelope, array/content
       digests, metadata normalizer, persisted attribute, and selector-ineligible
-      writer.
+      bounded writer.
 - [ ] Add exact component/reason registries and decoded-array validation.
 - [x] Add standard frame lookup and multi-observation tests.
 - [ ] Bind both schemas to exact crop identity, manifest, coordinate contract,
