@@ -116,6 +116,10 @@ logical hashes and physical write counts, consolidates metadata, proves
 normalized direct/consolidated equivalence, and reopens the completed run
 before handoff. The node-local orchestration is
 `src/fisheye/diagnostics/benchmark_subject_mask_cache_pipeline.py`.
+The commit-pinned LSF boundary is
+`scripts/submit_subject_mask_cache_pipeline_bsub.sh`; it verifies a clean exact
+checkout, refuses non-LSF execution of its payload, retains failed scratch for
+diagnosis, and removes only its exact job-owned scratch after success.
 
 Safety and evidence checklist:
 
