@@ -258,6 +258,8 @@ def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     assert inference.resources.gpus == 1
     assert refinement.dependency is not None
     assert refinement.dependency.upstream_job_keys == ("subject_mask_inference_array",)
+    assert refinement.resources.queue == "short"
+    assert refinement.resources.walltime == "1:00"
     assert publication.dependency is not None
     assert publication.dependency.upstream_job_keys == (
         "subject_mask_refinement_array",

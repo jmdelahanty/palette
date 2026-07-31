@@ -1422,7 +1422,7 @@ def build_lsf_workflow(
         tasks=refinement_tasks,
         mode=LsfExecutionMode.ARRAY,
         max_concurrent=int(cpu_concurrency),
-        resources=LsfResources(queue="short", ncores=16, mem_gb=64, walltime="4:00"),
+        resources=LsfResources(queue="short", ncores=16, mem_gb=64, walltime="1:00"),
         upstream=("subject_mask_inference_array",),
     )
     final_scratch = (
