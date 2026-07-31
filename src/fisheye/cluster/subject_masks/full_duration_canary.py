@@ -924,9 +924,7 @@ def run_inference_window(
         video_copy = _copy_file_with_digest(
             Path(window["source_video_path"]), staged_video
         )
-        if not _same_cluster_file_identity(
-            video_copy["source"], window["source_file"]
-        ):
+        if not _same_cluster_file_identity(video_copy["source"], window["source_file"]):
             raise RuntimeError("Window source-video identity changed after planning.")
         staged_model = work / Path(plan["model"]["path"]).name
         model_copy = _copy_file_with_digest(Path(plan["model"]["path"]), staged_model)
@@ -1007,6 +1005,8 @@ def run_inference_window(
             str(window["window_id"]),
             "--roi-work-package-manifest",
             str(package_manifest),
+            "--roi-work-package-role",
+            "complete_collection_partition",
             "--roi-cache-policy",
             "never",
             "--batch-size",

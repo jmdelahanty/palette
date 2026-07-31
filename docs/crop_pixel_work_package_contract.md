@@ -128,9 +128,32 @@ subject_mask_shard_runs/<run>
 
 It may not directly write `keypoints_runs` or `subject_mask_runs`, update latest
 pointers, or publish registry success. These runs are stamped
-`incremental_materialization_role=delta_replacement_rows`. Ordinary collection
-finalizers reject that role because a subset is not a complete collection
-partition.
+`incremental_materialization_role=delta_replacement_rows` by default. Ordinary
+collection finalizers reject that role because a keyed edit/inference subset is
+not a complete collection partition.
+
+There is one explicit maintained exception for clipped or whole-recording
+parallelization. A video-window package may be passed with
+`--roi-work-package-role complete_collection_partition` only when the writer
+can prove, before inference, that:
+
+- the package uses
+  `global_crop_rows_from_authenticated_acquisition_video_window_v1` semantics;
+- its acquisition frame-window binding is exact and matches the declared clip;
+- its selected global crop rows are one contiguous interval;
+- that interval is exactly
+  `frame_row_offsets[start_frame:end_frame_exclusive]` from the authoritative
+  recording-level crop run;
+- every selected acquisition frame lies within the bound window; and
+- collection, clip, work-unit, and shard identities are all present.
+
+The writer persists a digest-bound
+`palette.subject_mask.complete_collection_partition` contract and stamps
+`canonical_finalization_policy=collection_shard_finalization_allowed`. The
+collection finalizer independently recomputes the contract digest, compares all
+collection attributes, and verifies the persisted row and frame arrays. A role
+label without this proof is rejected. This exception supports complete
+recording partitioning; it does not weaken the default delta/compaction path.
 
 A keyed incremental compactor combines compatible rows from the exact prior
 complete base with replacement rows from these shards, order the result on the

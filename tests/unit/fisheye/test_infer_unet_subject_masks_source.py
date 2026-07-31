@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -25,6 +26,143 @@ def test_parser_defaults_to_probability_shards_and_accepts_regular_override() ->
 
     assert default_args.mask_probs_shard_rois == mod.DEFAULT_MASK_PROBS_SHARD_ROIS
     assert regular_args.mask_probs_shard_rois is None
+
+
+def _complete_partition_contract_fixture() -> tuple[object, object, object]:
+    crop = _FakeGroup()
+    crop.create_array(
+        "frame_indices",
+        data=np.asarray([0, 0, 2, 3], dtype=np.int64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 2, 2, 3, 4], dtype=np.int64),
+        overwrite=True,
+    )
+    binding = {
+        "schema_id": "palette.acquisition_video_frame_window",
+        "schema_version": 1,
+        "recording_identity": "recording-1",
+        "camera_identity": "camera-1",
+        "clip_id": "clip-0",
+        "actual_start_frame": 0,
+        "end_frame_exclusive": 2,
+        "frame_count": 2,
+        "clip_index_document_sha256": "1" * 64,
+        "clip_video_sha256": "2" * 64,
+    }
+    manifest = {
+        "schema_id": "palette.crop_pixel_work_package",
+        "schema_version": 1,
+        "status": "complete",
+        "package_id": "3" * 64,
+        "selection": {
+            "identity_mode": "instance_key",
+            "ordering": "ascending_source_crop_row",
+            "row_count": 2,
+            "source_crop_total_rows": 4,
+        },
+        "materialization_binding": binding,
+        "builder": {
+            "semantics": "global_crop_rows_from_authenticated_acquisition_video_window_v1"
+        },
+    }
+    source = SimpleNamespace(
+        pixel_materialization_id="3" * 64,
+        pixel_materialization_manifest="/scratch/work-package.json",
+        source_crop_row_ids=np.asarray([0, 1], dtype=np.int64),
+        frame_indices=np.asarray([0, 0], dtype=np.int64),
+        _roi_images=SimpleNamespace(manifest=manifest),
+    )
+    args = SimpleNamespace(
+        roi_work_package_role=mod.ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION,
+        source_collection_id="collection-1",
+        source_collection_path="/groups/benchmark/plan.json",
+        source_clip_id="clip-0",
+        source_clip_index=0,
+        source_work_unit_id="collection-1:clip-0",
+        source_shard_id="clip-0",
+    )
+    return crop, source, args
+
+
+def test_complete_partition_role_requires_and_records_exact_frame_offset_coverage() -> (
+    None
+):
+    crop, source, args = _complete_partition_contract_fixture()
+
+    attrs = mod._roi_work_package_publication_attrs(
+        crop_group=crop,
+        crop_source=source,
+        selected_crop_rows=source.source_crop_row_ids,
+        total_rois=2,
+        args=args,
+    )
+
+    assert attrs["roi_work_package_role"] == "complete_collection_partition"
+    assert attrs["canonical_finalization_policy"] == (
+        "collection_shard_finalization_allowed"
+    )
+    contract = attrs["collection_partition_contract"]
+    assert contract["payload"]["crop_rows"] == {
+        "start": 0,
+        "stop": 2,
+        "count": 2,
+        "source_crop_total_rows": 4,
+    }
+    assert contract["payload_digest"] == mod._canonical_document_sha256(
+        contract["payload"]
+    )
+
+
+def test_work_package_role_defaults_to_delta_and_cannot_enter_collection_finalizer() -> (
+    None
+):
+    crop, source, args = _complete_partition_contract_fixture()
+    args.roi_work_package_role = None
+
+    attrs = mod._roi_work_package_publication_attrs(
+        crop_group=crop,
+        crop_source=source,
+        selected_crop_rows=source.source_crop_row_ids,
+        total_rois=2,
+        args=args,
+    )
+
+    assert attrs["incremental_materialization_role"] == "delta_replacement_rows"
+    assert attrs["canonical_finalization_policy"] == ("incremental_compaction_required")
+    assert "collection_partition_contract" not in attrs
+
+
+def test_complete_partition_role_rejects_missing_collection_identity() -> None:
+    crop, source, args = _complete_partition_contract_fixture()
+    args.source_work_unit_id = None
+
+    with pytest.raises(ValueError, match="missing.*source_work_unit_id"):
+        mod._roi_work_package_publication_attrs(
+            crop_group=crop,
+            crop_source=source,
+            selected_crop_rows=source.source_crop_row_ids,
+            total_rois=2,
+            args=args,
+        )
+
+
+def test_complete_partition_role_rejects_partial_frame_window_rows() -> None:
+    crop, source, args = _complete_partition_contract_fixture()
+    source.source_crop_row_ids = np.asarray([0], dtype=np.int64)
+    source.frame_indices = np.asarray([0], dtype=np.int64)
+    source._roi_images.manifest["selection"]["row_count"] = 1
+
+    with pytest.raises(ValueError, match="do not exactly cover"):
+        mod._roi_work_package_publication_attrs(
+            crop_group=crop,
+            crop_source=source,
+            selected_crop_rows=source.source_crop_row_ids,
+            total_rois=1,
+            args=args,
+        )
 
 
 class _FakeArray:
@@ -98,7 +236,11 @@ class _FakeGroup:
         if data is None:
             if shape is None:
                 raise ValueError("shape required when data is omitted")
-            arr = np.full(shape, 0 if fill_value is None else fill_value, dtype=dtype or np.float32)
+            arr = np.full(
+                shape,
+                0 if fill_value is None else fill_value,
+                dtype=dtype or np.float32,
+            )
         else:
             arr = np.asarray(data, dtype=dtype)
         fake = _FakeArray(arr, chunks=chunks, shards=shards, fill_value=fill_value)
@@ -118,7 +260,11 @@ class _FakeGroup:
         del self._children[name]
 
     def group_keys(self):
-        return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
+        return [
+            name
+            for name, value in self._children.items()
+            if isinstance(value, _FakeGroup)
+        ]
 
     def keys(self):
         return self._children.keys()
@@ -133,11 +279,15 @@ def _build_fake_root() -> _FakeGroup:
     crop.attrs["crop_storage_mode"] = "geometry_only"
     crop.attrs["crop_signature"] = "sig-001"
     crop.attrs["crop_revision"] = 4
-    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_001/review_status"
+    crop.attrs["detect_review_status_ref"] = (
+        "refined_detect_runs/refined_001/review_status"
+    )
     crop.attrs["source_detect_run"] = "detect_001"
     crop.attrs["detection_source_path"] = "detect_runs/detect_001"
     crop.attrs["video_source_path"] = "/tmp/source-video.mp4"
-    crop.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
+    crop.create_array(
+        "frame_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True
+    )
     crop.create_array(
         "source_acquisition_frame_index",
         data=np.array([0, 1], dtype=np.int64),
@@ -153,8 +303,12 @@ def _build_fake_root() -> _FakeGroup:
         data=np.array([[0, 0], [1, 1]], dtype=np.int32),
         overwrite=True,
     )
-    crop.create_array("detection_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
-    crop.create_array("detection_source", data=np.array([0, 0], dtype=np.int8), overwrite=True)
+    crop.create_array(
+        "detection_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True
+    )
+    crop.create_array(
+        "detection_source", data=np.array([0, 0], dtype=np.int8), overwrite=True
+    )
     keypoint_parent = root.create_group("refined_keypoints_runs")
     keypoint_parent.attrs["latest"] = "refined_kp_001"
     keypoint = keypoint_parent.create_group("refined_kp_001")
@@ -170,8 +324,12 @@ def _build_fake_root() -> _FakeGroup:
         ),
         overwrite=True,
     )
-    keypoint.create_array("refined_success", data=np.array([True, True], dtype=bool), overwrite=True)
-    keypoint.create_array("usable_keypoints", data=np.array([True, True], dtype=bool), overwrite=True)
+    keypoint.create_array(
+        "refined_success", data=np.array([True, True], dtype=bool), overwrite=True
+    )
+    keypoint.create_array(
+        "usable_keypoints", data=np.array([True, True], dtype=bool), overwrite=True
+    )
     return root
 
 
@@ -200,9 +358,7 @@ def _write_fake_raw_outputs(
         "bbox_xyxy": np.zeros((row_count, channel_count, 4), dtype=np.float32),
         "bbox_valid": np.zeros((row_count, channel_count), dtype=bool),
     }
-    run_group.create_array(
-        "mask_probs_roi", data=probabilities, overwrite=True
-    )
+    run_group.create_array("mask_probs_roi", data=probabilities, overwrite=True)
     if write_masks_roi:
         run_group.create_array("masks_roi", data=binary, overwrite=True)
     run_group.create_array(
@@ -238,7 +394,9 @@ def test_normalize_checkpoint_state_dict_strips_torch_compile_prefix() -> None:
     assert normalized["inc.block.0.weight"] is state["_orig_mod.inc.block.0.weight"]
 
 
-def test_postprocess_logits_on_device_returns_storage_outputs_and_compact_metrics() -> None:
+def test_postprocess_logits_on_device_returns_storage_outputs_and_compact_metrics() -> (
+    None
+):
     logits = torch.tensor(
         [
             [
@@ -263,23 +421,44 @@ def test_postprocess_logits_on_device_returns_storage_outputs_and_compact_metric
     expected_binary = (expected_probs >= 128).astype(np.uint8)
     np.testing.assert_array_equal(probs, expected_probs)
     np.testing.assert_array_equal(binary, expected_binary)
-    np.testing.assert_allclose(metrics["prob_max"], expected_probs.max(axis=(2, 3)).astype(np.float32) / 255.0)
-    np.testing.assert_array_equal(metrics["mask_present"], expected_binary.sum(axis=(2, 3)) > 0)
-    np.testing.assert_allclose(metrics["area_px"], expected_binary.sum(axis=(2, 3)).astype(np.float32))
+    np.testing.assert_allclose(
+        metrics["prob_max"], expected_probs.max(axis=(2, 3)).astype(np.float32) / 255.0
+    )
+    np.testing.assert_array_equal(
+        metrics["mask_present"], expected_binary.sum(axis=(2, 3)) > 0
+    )
+    np.testing.assert_allclose(
+        metrics["area_px"], expected_binary.sum(axis=(2, 3)).astype(np.float32)
+    )
     for channel_idx in range(expected_binary.shape[1]):
-        expected_spatial = mod._compute_channel_spatial_metrics(expected_binary[:, channel_idx])
-        np.testing.assert_allclose(metrics["centroid_xy"][:, channel_idx, :], expected_spatial["centroid_xy"])
-        np.testing.assert_array_equal(metrics["centroid_valid"][:, channel_idx], expected_spatial["centroid_valid"])
-        np.testing.assert_allclose(metrics["bbox_xyxy"][:, channel_idx, :], expected_spatial["bbox_xyxy"])
-        np.testing.assert_array_equal(metrics["bbox_valid"][:, channel_idx], expected_spatial["bbox_valid"])
+        expected_spatial = mod._compute_channel_spatial_metrics(
+            expected_binary[:, channel_idx]
+        )
+        np.testing.assert_allclose(
+            metrics["centroid_xy"][:, channel_idx, :], expected_spatial["centroid_xy"]
+        )
+        np.testing.assert_array_equal(
+            metrics["centroid_valid"][:, channel_idx],
+            expected_spatial["centroid_valid"],
+        )
+        np.testing.assert_allclose(
+            metrics["bbox_xyxy"][:, channel_idx, :], expected_spatial["bbox_xyxy"]
+        )
+        np.testing.assert_array_equal(
+            metrics["bbox_valid"][:, channel_idx], expected_spatial["bbox_valid"]
+        )
 
-    _probs_without_binary, skipped_binary, skipped_metrics = mod._postprocess_logits_on_device(
-        logits,
-        mask_probs_dtype="uint8",
-        return_binary=False,
+    _probs_without_binary, skipped_binary, skipped_metrics = (
+        mod._postprocess_logits_on_device(
+            logits,
+            mask_probs_dtype="uint8",
+            return_binary=False,
+        )
     )
     assert skipped_binary is None
-    np.testing.assert_array_equal(skipped_metrics["mask_present"], metrics["mask_present"])
+    np.testing.assert_array_equal(
+        skipped_metrics["mask_present"], metrics["mask_present"]
+    )
     np.testing.assert_allclose(skipped_metrics["centroid_xy"], metrics["centroid_xy"])
 
 
@@ -313,7 +492,9 @@ def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:
     class _FakeModel(torch.nn.Module):
         def forward(self, imgs: torch.Tensor) -> torch.Tensor:
             batch, _channels, height, width = imgs.shape
-            return torch.zeros((batch, 3, height, width), device=imgs.device, dtype=torch.float32)
+            return torch.zeros(
+                (batch, 3, height, width), device=imgs.device, dtype=torch.float32
+            )
 
     run_group = _FakeGroup()
 
@@ -370,10 +551,14 @@ def test_write_subject_mask_outputs_pads_model_input_and_writes_native_shape() -
         def forward(self, imgs: torch.Tensor) -> torch.Tensor:
             seen["input_shape"] = tuple(imgs.shape)
             batch, _channels, height, width = imgs.shape
-            return torch.zeros((batch, 3, height, width), device=imgs.device, dtype=torch.float32)
+            return torch.zeros(
+                (batch, 3, height, width), device=imgs.device, dtype=torch.float32
+            )
 
     run_group = _FakeGroup()
-    transform = mod.resolve_model_input_transform((2, 2), mode="pad_to_size", model_hw=(4, 4))
+    transform = mod.resolve_model_input_transform(
+        (2, 2), mode="pad_to_size", model_hw=(4, 4)
+    )
 
     mod._write_subject_mask_outputs(
         run_group,
@@ -411,7 +596,9 @@ def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
     class _FakeModel(torch.nn.Module):
         def forward(self, imgs: torch.Tensor) -> torch.Tensor:
             batch, _channels, height, width = imgs.shape
-            return torch.full((batch, 3, height, width), 2.0, device=imgs.device, dtype=torch.float32)
+            return torch.full(
+                (batch, 3, height, width), 2.0, device=imgs.device, dtype=torch.float32
+            )
 
     serial_group = _FakeGroup()
     async_group = _FakeGroup()
@@ -549,7 +736,9 @@ def test_postpack_probability_shards_preserves_working_array_on_digest_mismatch(
         overwrite=True,
     )
     digests = iter(("source-digest", "destination-digest"))
-    monkeypatch.setattr(mod, "_probability_array_digest", lambda *_args, **_kwargs: next(digests))
+    monkeypatch.setattr(
+        mod, "_probability_array_digest", lambda *_args, **_kwargs: next(digests)
+    )
 
     with pytest.raises(RuntimeError, match="digest mismatch"):
         mod._postpack_probability_shards(
@@ -563,8 +752,9 @@ def test_postpack_probability_shards_preserves_working_array_on_digest_mismatch(
     assert mod.MASK_PROBS_CANONICAL_ARRAY in run_group
 
 
-def test_double_buffered_probability_writer_handles_crossing_batches_and_partial_shard(
-) -> None:
+def test_double_buffered_probability_writer_handles_crossing_batches_and_partial_shard() -> (
+    None
+):
     run_group = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
     values = np.arange(17 * 2 * 3 * 3, dtype=np.uint8).reshape(17, 2, 3, 3)
     destination = run_group.create_array(
@@ -593,7 +783,9 @@ def test_double_buffered_probability_writer_handles_crossing_batches_and_partial
     assert summary["full_row_shards_written"] == 2
     assert summary["partial_row_shards_written"] == 1
     assert summary["source_working_array_created"] is False
-    assert summary["source_sha256_by_channel"] == summary["destination_sha256_by_channel"]
+    assert (
+        summary["source_sha256_by_channel"] == summary["destination_sha256_by_channel"]
+    )
     assert summary["source_sha256"] == summary["destination_sha256"]
     assert summary["exact_match"] is True
 
@@ -656,7 +848,9 @@ def test_write_subject_mask_outputs_writes_double_buffered_probability_shards() 
     class _FakeModel(torch.nn.Module):
         def forward(self, imgs: torch.Tensor) -> torch.Tensor:
             batch, _channels, height, width = imgs.shape
-            return torch.full((batch, 3, height, width), 2.0, device=imgs.device, dtype=torch.float32)
+            return torch.full(
+                (batch, 3, height, width), 2.0, device=imgs.device, dtype=torch.float32
+            )
 
     run_group = _FakeGroup()
     mod._write_subject_mask_outputs(
@@ -713,7 +907,9 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
             self.roi_cache_used = True
             self.roi_cache_key = "cache-key-001"
             self.roi_cache_path = str(cache_dir)
-            self.roi_cache_canonical_path = "/groups/cache/fake-cache.flat_roi_cache.json"
+            self.roi_cache_canonical_path = (
+                "/groups/cache/fake-cache.flat_roi_cache.json"
+            )
             self.roi_live_acceleration_requested = "cpu"
             self.roi_live_acceleration_effective = "cpu"
             self.roi_live_acceleration_fallback_reason = None
@@ -787,7 +983,9 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
         return 0.25
 
     monkeypatch.setattr(mod, "_load_checkpoint", _fake_load_checkpoint)
-    monkeypatch.setattr(mod, "_write_subject_mask_outputs", _fake_write_subject_mask_outputs)
+    monkeypatch.setattr(
+        mod, "_write_subject_mask_outputs", _fake_write_subject_mask_outputs
+    )
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
     monkeypatch.setattr(
         mod.CropImageSource,
@@ -857,7 +1055,10 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
     assert seen["roi_read_mode"] == "temporary_cache"
     assert seen["roi_cache_used"] is True
     assert Path(str(seen["roi_cache_path"])).exists()
-    assert seen["roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
+    assert (
+        seen["roi_cache_canonical_path"]
+        == "/groups/cache/fake-cache.flat_roi_cache.json"
+    )
     assert seen["mask_probs_chunk_rois"] == 2
     assert seen["mask_probs_shard_rois"] == 4
     assert seen["mask_probs_dtype"] == "uint8"
@@ -870,24 +1071,40 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
     assert run_group.attrs["source_crop_storage_mode"] == "geometry_only"
     assert run_group.attrs["source_crop_signature"] == "sig-001"
     assert run_group.attrs["source_crop_revision"] == 4
-    assert run_group.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
+    assert (
+        run_group.attrs["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_001/review_status"
+    )
     assert run_group.attrs["source_roi_read_mode"] == "temporary_cache"
     assert run_group.attrs["roi_cache_policy"] == "always"
     assert run_group.attrs["source_roi_cache_used"] is True
     assert run_group.attrs["source_roi_cache_path"]
-    assert run_group.attrs["source_roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
+    assert (
+        run_group.attrs["source_roi_cache_canonical_path"]
+        == "/groups/cache/fake-cache.flat_roi_cache.json"
+    )
     assert run_group.attrs["source_roi_live_acceleration_requested"] == "cpu"
     assert run_group.attrs["source_roi_live_acceleration_effective"] == "cpu"
     assert run_group.attrs["source_roi_live_gpu_chunk_frames"] == 11
     assert run_group.attrs["label_schema_id"] == "subject_v1_union"
-    assert list(run_group.attrs["mask_labels"]) == ["subject_body", "eyes_union", "swim_bladder"]
+    assert list(run_group.attrs["mask_labels"]) == [
+        "subject_body",
+        "eyes_union",
+        "swim_bladder",
+    ]
     assert run_group.attrs["assignment_keypoint_group"] == "refined_keypoints_runs"
     assert run_group.attrs["assignment_keypoints_run"] == "refined_kp_001"
-    assert run_group.attrs["assignment_keypoint_contract"] == "subject_eyes_union_assignment_keypoints_v1"
+    assert (
+        run_group.attrs["assignment_keypoint_contract"]
+        == "subject_eyes_union_assignment_keypoints_v1"
+    )
     assert run_group.attrs["assignment_keypoint_role"] == "eyes_union_lr_assignment"
     assert run_group.attrs["assignment_keypoint_selection"] == "cli_explicit"
     assert run_group.attrs["assignment_keypoint_success_dataset"] == "usable_keypoints"
-    assert run_group.attrs["assignment_keypoint_eye_indices"] == {"eye_left": 0, "eye_right": 1}
+    assert run_group.attrs["assignment_keypoint_eye_indices"] == {
+        "eye_left": 0,
+        "eye_right": 1,
+    }
     assert run_group.attrs["method"] == "unet_subject_mask_segmenter"
     assert run_group.attrs["run_semantics"] == "unet_subject_mask_inference"
     assert run_group.attrs["mask_probs_shard_rois"] == 4
@@ -898,8 +1115,14 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
     provenance_inputs = run_group.attrs["provenance"]["inputs"]
     assert provenance_inputs["source_crop_signature"] == "sig-001"
     assert provenance_inputs["source_crop_revision"] == 4
-    assert provenance_inputs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
-    assert provenance_inputs["roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
+    assert (
+        provenance_inputs["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_001/review_status"
+    )
+    assert (
+        provenance_inputs["roi_cache_canonical_path"]
+        == "/groups/cache/fake-cache.flat_roi_cache.json"
+    )
     assert provenance_inputs["assignment_keypoint_group"] == "refined_keypoints_runs"
     assert provenance_inputs["assignment_keypoints_run"] == "refined_kp_001"
     assert run_group.attrs["provenance"]["parameters"]["mask_probs_shard_rois"] == 4
@@ -1125,7 +1348,9 @@ def test_canonical_writer_omits_legacy_detection_source_through_publication(
     monkeypatch.setattr(
         mod,
         "selected_subject_mask_crop_values",
-        lambda *_args, **_kwargs: {name: value.copy() for name, value in selected.items()},
+        lambda *_args, **_kwargs: {
+            name: value.copy() for name, value in selected.items()
+        },
     )
     monkeypatch.setattr(mod, "prepare_subject_mask_coordinate_context", _fake_prepare)
     monkeypatch.setattr(
@@ -1241,12 +1466,24 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         input_pixels_sha256,
         validation_accumulators,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, async_output, output_queue_size, model_input_transform, show_progress, console, timing_profiler
+        del (
+            model,
+            batch_size,
+            device,
+            mask_probs_chunk_rois,
+            mask_probs_shard_rois,
+            async_output,
+            output_queue_size,
+            model_input_transform,
+            show_progress,
+            console,
+            timing_profiler,
+        )
         seen["mask_labels"] = tuple(mask_labels)
         input_pixels_sha256.update(
-            np.ascontiguousarray(
-                roi_source.read_slice(0, roi_source.total_rois)
-            ).view(np.uint8)
+            np.ascontiguousarray(roi_source.read_slice(0, roi_source.total_rois)).view(
+                np.uint8
+            )
         )
         channel_count = len(mask_labels)
         _write_fake_raw_outputs(
@@ -1262,7 +1499,9 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         return 0.25
 
     monkeypatch.setattr(mod, "_load_checkpoint", _fake_load_checkpoint)
-    monkeypatch.setattr(mod, "_write_subject_mask_outputs", _fake_write_subject_mask_outputs)
+    monkeypatch.setattr(
+        mod, "_write_subject_mask_outputs", _fake_write_subject_mask_outputs
+    )
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
     monkeypatch.setattr(
         mod.CropImageSource,
@@ -1295,21 +1534,28 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         },
     )
 
-    mod.main([
-        str(zarr_path),
-        "--checkpoint",
-        str(checkpoint_path),
-        "--crop-run",
-        "crop_geometry",
-        "--output-parent",
-        "subject_mask_shard_runs",
-        "--write-masks-roi",
-    ])
+    mod.main(
+        [
+            str(zarr_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--crop-run",
+            "crop_geometry",
+            "--output-parent",
+            "subject_mask_shard_runs",
+            "--write-masks-roi",
+        ]
+    )
 
     subject_parent = fake_root["subject_mask_shard_runs"]
     run_group = subject_parent[subject_parent.group_keys()[0]]
 
-    assert seen["mask_labels"] == ("subject_body", "eye_left", "eye_right", "swim_bladder")
+    assert seen["mask_labels"] == (
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    )
     assert run_group.attrs["label_schema_id"] == "subject_v1_lr"
     assert list(run_group.attrs["mask_labels"]) == [
         "subject_body",
@@ -1414,13 +1660,23 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         input_pixels_sha256,
         validation_accumulators,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, output_queue_size, model_input_transform, console, timing_profiler
+        del (
+            model,
+            batch_size,
+            device,
+            mask_probs_chunk_rois,
+            mask_probs_shard_rois,
+            output_queue_size,
+            model_input_transform,
+            console,
+            timing_profiler,
+        )
         seen["async_output"] = async_output
         seen["show_progress"] = show_progress
         input_pixels_sha256.update(
-            np.ascontiguousarray(
-                roi_source.read_slice(0, roi_source.total_rois)
-            ).view(np.uint8)
+            np.ascontiguousarray(roi_source.read_slice(0, roi_source.total_rois)).view(
+                np.uint8
+            )
         )
         channel_count = len(mask_labels)
         _write_fake_raw_outputs(
@@ -1435,9 +1691,13 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         )
         return 0.25
 
-    monkeypatch.setattr(mod, "_resolve_registry_checkpoint", _fake_resolve_registry_checkpoint)
+    monkeypatch.setattr(
+        mod, "_resolve_registry_checkpoint", _fake_resolve_registry_checkpoint
+    )
     monkeypatch.setattr(mod, "_load_checkpoint", _fake_load_checkpoint)
-    monkeypatch.setattr(mod, "_write_subject_mask_outputs", _fake_write_subject_mask_outputs)
+    monkeypatch.setattr(
+        mod, "_write_subject_mask_outputs", _fake_write_subject_mask_outputs
+    )
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
     monkeypatch.setattr(
         mod.CropImageSource,
@@ -1495,9 +1755,18 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
     assert run_group.attrs["source_checkpoint"] == str(checkpoint_path)
     assert run_group.attrs["model_resolution_mode"] == "registry"
     assert run_group.attrs["model_resolution_task"] == "subject_masks"
-    assert run_group.attrs["model_resolution_selected_run_id"] == "subject_masks_union_all_components_v001"
-    assert run_group.attrs["model_resolution_selected_coverage_class"] == "dense_all_components"
-    assert run_group.attrs["model_resolution_selected_component_coverage_key"] == "body+eyes+swim_bladder"
+    assert (
+        run_group.attrs["model_resolution_selected_run_id"]
+        == "subject_masks_union_all_components_v001"
+    )
+    assert (
+        run_group.attrs["model_resolution_selected_coverage_class"]
+        == "dense_all_components"
+    )
+    assert (
+        run_group.attrs["model_resolution_selected_component_coverage_key"]
+        == "body+eyes+swim_bladder"
+    )
     assert run_group.attrs["model_resolution_selected_metric_value"] == 0.947
     provenance = run_group.attrs["provenance"]
     assert provenance["inputs"]["model_resolution"]["selected"]["run_id"] == (

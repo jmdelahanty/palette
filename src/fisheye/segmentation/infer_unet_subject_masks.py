@@ -128,6 +128,16 @@ EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
 SUBJECT_MASK_OUTPUT_PARENTS = ("subject_mask_runs", "subject_mask_shard_runs")
 SUBJECT_MASK_CANONICAL_OUTPUT_PARENT = "subject_mask_runs"
 SUBJECT_MASK_SHARD_OUTPUT_PARENT = "subject_mask_shard_runs"
+ROI_WORK_PACKAGE_ROLE_DELTA = "delta_replacement_rows"
+ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION = "complete_collection_partition"
+ROI_WORK_PACKAGE_ROLES = (
+    ROI_WORK_PACKAGE_ROLE_DELTA,
+    ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION,
+)
+COLLECTION_PARTITION_CONTRACT_SCHEMA_ID = (
+    "palette.subject_mask.complete_collection_partition"
+)
+COLLECTION_PARTITION_CONTRACT_SCHEMA_VERSION = 1
 MASK_PROBS_WORKING_ARRAY = "_mask_probs_roi_working"
 MASK_PROBS_CANONICAL_ARRAY = "mask_probs_roi"
 MASK_PROBS_SHARDING_SCHEMA = "palette.subject_mask_probability_postpack.v1"
@@ -1143,6 +1153,247 @@ def _source_pixel_manifest(crop_source: CropImageSource) -> Mapping[str, Any] | 
     return loaded
 
 
+def _canonical_document_sha256(value: object) -> str:
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _require_complete_collection_partition_attrs(
+    *,
+    crop_group: zarr.Group,
+    crop_source: CropImageSource,
+    selected_crop_rows: np.ndarray | None,
+    total_rois: int,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Prove one work package is the exact crop-row partition for its window."""
+
+    required_arguments = {
+        "source_collection_id": args.source_collection_id,
+        "source_collection_path": args.source_collection_path,
+        "source_clip_id": args.source_clip_id,
+        "source_clip_index": args.source_clip_index,
+        "source_work_unit_id": args.source_work_unit_id,
+        "source_shard_id": args.source_shard_id,
+    }
+    missing = [
+        name
+        for name, value in required_arguments.items()
+        if value is None or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        raise ValueError(
+            "Complete collection-partition inference requires exact collection, "
+            f"clip, work-unit, and shard identities; missing {missing!r}."
+        )
+    if int(args.source_clip_index) < 0:
+        raise ValueError(
+            "Complete collection-partition source_clip_index must be nonnegative."
+        )
+    if selected_crop_rows is None:
+        raise ValueError(
+            "Complete collection-partition inference requires selected work-package crop rows."
+        )
+    rows = np.asarray(selected_crop_rows, dtype=np.int64).reshape(-1)
+    if rows.shape != (int(total_rois),) or rows.size == 0:
+        raise ValueError(
+            "Complete collection-partition work-package rows do not match the inference row count."
+        )
+    if not np.array_equal(rows, np.arange(int(rows[0]), int(rows[0]) + rows.size)):
+        raise ValueError(
+            "Complete collection-partition crop rows must be one contiguous ascending interval."
+        )
+
+    manifest = _source_pixel_manifest(crop_source)
+    if not isinstance(manifest, Mapping):
+        raise ValueError(
+            "Complete collection-partition inference requires its authenticated work-package manifest."
+        )
+    if (
+        manifest.get("schema_id") != "palette.crop_pixel_work_package"
+        or manifest.get("schema_version") != 1
+        or manifest.get("status") != "complete"
+    ):
+        raise ValueError(
+            "Complete collection-partition inference requires a complete crop pixel work-package v1 manifest."
+        )
+    builder = manifest.get("builder")
+    if (
+        not isinstance(builder, Mapping)
+        or builder.get("semantics")
+        != "global_crop_rows_from_authenticated_acquisition_video_window_v1"
+    ):
+        raise ValueError(
+            "Complete collection partitions require authenticated acquisition-video-window materialization semantics."
+        )
+    binding = manifest.get("materialization_binding")
+    expected_binding_fields = {
+        "schema_id",
+        "schema_version",
+        "recording_identity",
+        "camera_identity",
+        "clip_id",
+        "actual_start_frame",
+        "end_frame_exclusive",
+        "frame_count",
+        "clip_index_document_sha256",
+        "clip_video_sha256",
+    }
+    if not isinstance(binding, Mapping) or set(binding) != expected_binding_fields:
+        raise ValueError(
+            "Complete collection-partition materialization binding fields are not exact."
+        )
+    start_frame = binding.get("actual_start_frame")
+    end_frame = binding.get("end_frame_exclusive")
+    frame_count = binding.get("frame_count")
+    if (
+        binding.get("schema_id") != "palette.acquisition_video_frame_window"
+        or binding.get("schema_version") != 1
+        or type(start_frame) is not int
+        or type(end_frame) is not int
+        or type(frame_count) is not int
+        or start_frame < 0
+        or frame_count <= 0
+        or end_frame != start_frame + frame_count
+    ):
+        raise ValueError(
+            "Complete collection-partition materialization interval is invalid."
+        )
+    if str(binding.get("clip_id")) != str(args.source_clip_id):
+        raise ValueError(
+            "Complete collection-partition clip identity differs from --source-clip-id."
+        )
+
+    selection = manifest.get("selection")
+    crop_row_count = int(crop_group["frame_indices"].shape[0])
+    if (
+        not isinstance(selection, Mapping)
+        or selection.get("identity_mode") != "instance_key"
+        or selection.get("ordering") != "ascending_source_crop_row"
+        or selection.get("row_count") != int(total_rois)
+        or selection.get("source_crop_total_rows") != crop_row_count
+    ):
+        raise ValueError(
+            "Complete collection-partition work-package selection is not the exact crop-row contract."
+        )
+    if "frame_row_offsets" not in crop_group:
+        raise ValueError(
+            "Complete collection-partition inference requires crop frame_row_offsets."
+        )
+    offsets = np.asarray(crop_group["frame_row_offsets"][:], dtype=np.int64).reshape(-1)
+    if (
+        offsets.ndim != 1
+        or offsets.size <= int(end_frame)
+        or offsets[0] != 0
+        or offsets[-1] != crop_row_count
+        or np.any(offsets[1:] < offsets[:-1])
+    ):
+        raise ValueError(
+            "Complete collection-partition crop frame_row_offsets are invalid for the bound window."
+        )
+    expected_start = int(offsets[int(start_frame)])
+    expected_stop = int(offsets[int(end_frame)])
+    expected_rows = np.arange(expected_start, expected_stop, dtype=np.int64)
+    if not np.array_equal(rows, expected_rows):
+        raise ValueError(
+            "Complete collection-partition rows do not exactly cover the crop rows in the bound frame window."
+        )
+    active_frames = np.asarray(crop_source.frame_indices, dtype=np.int64).reshape(-1)
+    if (
+        active_frames.shape != rows.shape
+        or np.any(active_frames < int(start_frame))
+        or np.any(active_frames >= int(end_frame))
+    ):
+        raise ValueError(
+            "Complete collection-partition acquisition frames fall outside the bound frame window."
+        )
+
+    package_id = str(manifest.get("package_id") or "")
+    if len(package_id) != 64 or any(
+        character not in "0123456789abcdef" for character in package_id
+    ):
+        raise ValueError(
+            "Complete collection-partition work package lacks a lowercase SHA-256 package_id."
+        )
+    payload = {
+        "role": ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION,
+        "coverage_semantics": "exact_complete_crop_rows_for_acquisition_frame_window_v1",
+        "work_package_id": package_id,
+        "collection": {
+            "source_collection_id": str(args.source_collection_id),
+            "source_collection_path": str(args.source_collection_path),
+            "source_clip_id": str(args.source_clip_id),
+            "source_clip_index": int(args.source_clip_index),
+            "source_work_unit_id": str(args.source_work_unit_id),
+            "source_shard_id": str(args.source_shard_id),
+        },
+        "frame_window": dict(binding),
+        "crop_rows": {
+            "start": expected_start,
+            "stop": expected_stop,
+            "count": int(rows.size),
+            "source_crop_total_rows": crop_row_count,
+        },
+        "validation": {
+            "work_package_opened_and_content_verified": True,
+            "row_interval_contiguous": True,
+            "frame_offset_coverage_exact": True,
+            "acquisition_frames_within_window": True,
+        },
+    }
+    return {
+        "schema_id": COLLECTION_PARTITION_CONTRACT_SCHEMA_ID,
+        "schema_version": COLLECTION_PARTITION_CONTRACT_SCHEMA_VERSION,
+        "payload": payload,
+        "payload_digest": _canonical_document_sha256(payload),
+    }
+
+
+def _roi_work_package_publication_attrs(
+    *,
+    crop_group: zarr.Group,
+    crop_source: CropImageSource,
+    selected_crop_rows: np.ndarray | None,
+    total_rois: int,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    package_id = getattr(crop_source, "pixel_materialization_id", None)
+    if package_id is None:
+        if args.roi_work_package_role is not None:
+            raise ValueError(
+                "--roi-work-package-role requires --roi-work-package-manifest."
+            )
+        return {}
+    role = str(args.roi_work_package_role or ROI_WORK_PACKAGE_ROLE_DELTA)
+    attrs: dict[str, object] = {
+        "source_crop_pixel_work_package_id": str(package_id),
+        "source_crop_pixel_work_package_manifest": str(
+            getattr(crop_source, "pixel_materialization_manifest", "")
+        ),
+        "source_crop_pixel_work_package_rows": int(total_rois),
+        "roi_work_package_role": role,
+        "incremental_materialization_role": role,
+    }
+    if role == ROI_WORK_PACKAGE_ROLE_DELTA:
+        attrs["canonical_finalization_policy"] = "incremental_compaction_required"
+        return attrs
+    if role != ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION:
+        raise ValueError(f"Unsupported ROI work-package role {role!r}.")
+    contract = _require_complete_collection_partition_attrs(
+        crop_group=crop_group,
+        crop_source=crop_source,
+        selected_crop_rows=selected_crop_rows,
+        total_rois=total_rois,
+        args=args,
+    )
+    attrs.update(
+        {
+            "canonical_finalization_policy": "collection_shard_finalization_allowed",
+            "collection_partition_contract": contract,
+        }
+    )
+    return attrs
+
+
 def _subject_mask_scientific_documents(
     *,
     run_group: zarr.Group,
@@ -1156,6 +1407,7 @@ def _subject_mask_scientific_documents(
     model_input_transform: ModelInputTransform,
     mask_probs_dtype: str,
     observed_pixels_sha256: str,
+    work_package_attrs: Mapping[str, object],
     args: argparse.Namespace,
 ) -> dict[str, object]:
     """Build exact science-facing inputs while excluding runtime/storage knobs."""
@@ -1280,6 +1532,7 @@ def _subject_mask_scientific_documents(
             crop_source, "pixel_materialization_id", None
         ),
         "pixel_contract": getattr(crop_source, "roi_pixel_contract", None),
+        "work_package_role": work_package_attrs.get("roi_work_package_role"),
     }
     row_identity = {
         "row_count": int(crop_source.total_rois),
@@ -2374,8 +2627,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Keyed subset ROI package for delta inference. Requires "
-            "--output-parent subject_mask_shard_runs."
+            "Keyed subset ROI package for delta or proven complete-partition "
+            "inference. Requires --output-parent subject_mask_shard_runs."
+        ),
+    )
+    parser.add_argument(
+        "--roi-work-package-role",
+        choices=ROI_WORK_PACKAGE_ROLES,
+        default=None,
+        help=(
+            "Publication role for --roi-work-package-manifest. Defaults to "
+            "delta_replacement_rows. complete_collection_partition additionally "
+            "proves exact frame-offset coverage before inference."
         ),
     )
     parser.add_argument(
@@ -2545,6 +2808,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "Crop pixel work packages may write only to subject_mask_shard_runs; "
             "finalize shards before publishing a canonical subject-mask run."
         )
+    if (
+        args.roi_work_package_role is not None
+        and args.roi_work_package_manifest is None
+    ):
+        raise ValueError(
+            "--roi-work-package-role requires --roi-work-package-manifest."
+        )
     if args.roi_work_package_manifest is not None and (
         args.assignment_keypoint_group or args.assignment_keypoint_run
     ):
@@ -2663,6 +2933,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         else:  # pragma: no cover - public writer is boundary-decorated
             crop_source.close()
         raise ValueError("ROI image array is empty; nothing to segment.")
+    work_package_attrs = _roi_work_package_publication_attrs(
+        crop_group=crop_group,
+        crop_source=crop_source,
+        selected_crop_rows=selected_crop_rows,
+        total_rois=total_rois,
+        args=args,
+    )
     canonical_crop_source = None
     canonical_selected: dict[str, np.ndarray] | None = None
     if canonical_output:
@@ -2901,6 +3178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         model_input_transform=model_input_transform,
         mask_probs_dtype=str(args.mask_probs_dtype),
         observed_pixels_sha256=observed_pixels_sha256,
+        work_package_attrs=work_package_attrs,
         args=args,
     )
     attempt = build_subject_mask_attempt(
@@ -2956,26 +3234,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         source_crop_storage_mode=crop_source.storage_mode,
     )
     crop_pixel_attrs = build_source_roi_pixel_attrs(crop_source)
-    work_package_attrs = {
-        "source_crop_pixel_work_package_id": getattr(
-            crop_source, "pixel_materialization_id", None
-        ),
-        "source_crop_pixel_work_package_manifest": (
-            getattr(crop_source, "pixel_materialization_manifest", None)
-        ),
-        "source_crop_pixel_work_package_rows": (
-            int(total_rois)
-            if getattr(crop_source, "pixel_materialization_id", None) is not None
-            else None
-        ),
-    }
-    if getattr(crop_source, "pixel_materialization_id", None) is not None:
-        work_package_attrs.update(
-            {
-                "incremental_materialization_role": "delta_replacement_rows",
-                "canonical_finalization_policy": "incremental_compaction_required",
-            }
-        )
     run_group.attrs.update(
         {
             "method": "unet_subject_mask_segmenter",
@@ -3248,6 +3506,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "roi_work_package_manifest": (
                 str(args.roi_work_package_manifest)
                 if args.roi_work_package_manifest
+                else None
+            ),
+            "roi_work_package_role": work_package_attrs.get("roi_work_package_role"),
+            "collection_partition_contract_digest": (
+                work_package_attrs.get("collection_partition_contract", {}).get(
+                    "payload_digest"
+                )
+                if isinstance(
+                    work_package_attrs.get("collection_partition_contract"), Mapping
+                )
                 else None
             ),
             "source_roi_cache_alias_manifest": (

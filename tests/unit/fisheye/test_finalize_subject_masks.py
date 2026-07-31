@@ -1022,6 +1022,158 @@ def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Grou
     return root
 
 
+def _stamp_complete_partition_contract(
+    root: zarr.Group,
+    run: zarr.Group,
+    *,
+    clip_id: str,
+    clip_index: int,
+    frame_index: int,
+) -> None:
+    package_id = hashlib.sha256(clip_id.encode("utf-8")).hexdigest()
+    collection = {
+        "source_collection_id": "collection-1",
+        "source_collection_path": "/groups/benchmark/plan.json",
+        "source_clip_id": clip_id,
+        "source_clip_index": clip_index,
+        "source_work_unit_id": f"collection-1:{clip_id}",
+        "source_shard_id": clip_id,
+    }
+    frame_window = {
+        "schema_id": "palette.acquisition_video_frame_window",
+        "schema_version": 1,
+        "recording_identity": "recording-1",
+        "camera_identity": "camera-1",
+        "clip_id": clip_id,
+        "actual_start_frame": frame_index,
+        "end_frame_exclusive": frame_index + 1,
+        "frame_count": 1,
+        "clip_index_document_sha256": "1" * 64,
+        "clip_video_sha256": "2" * 64,
+    }
+    payload = {
+        "role": "complete_collection_partition",
+        "coverage_semantics": "exact_complete_crop_rows_for_acquisition_frame_window_v1",
+        "work_package_id": package_id,
+        "collection": collection,
+        "frame_window": frame_window,
+        "crop_rows": {
+            "start": 0,
+            "stop": 1,
+            "count": 1,
+            "source_crop_total_rows": 1,
+        },
+        "validation": {
+            "work_package_opened_and_content_verified": True,
+            "row_interval_contiguous": True,
+            "frame_offset_coverage_exact": True,
+            "acquisition_frames_within_window": True,
+        },
+    }
+    run.attrs.update(
+        {
+            "source_crop_pixel_work_package_id": package_id,
+            "roi_work_package_role": "complete_collection_partition",
+            "incremental_materialization_role": "complete_collection_partition",
+            "canonical_finalization_policy": "collection_shard_finalization_allowed",
+            **collection,
+            "collection_partition_contract": {
+                "schema_id": "palette.subject_mask.complete_collection_partition",
+                "schema_version": 1,
+                "payload": payload,
+                "payload_digest": mod.canonical_json_sha256(payload),
+            },
+        }
+    )
+    if "source_acquisition_frame_index" not in run:
+        run.create_array(
+            "source_acquisition_frame_index",
+            data=np.asarray([frame_index], dtype=np.int64),
+            overwrite=True,
+        )
+    crop = root[f"crop_runs/{run.attrs['source_crop_run']}"]
+    crop.create_array(
+        "frame_row_offsets",
+        data=np.asarray([0, 1], dtype=np.int64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([frame_index], dtype=np.int64),
+        overwrite=True,
+    )
+
+
+def test_collection_finalizer_accepts_exact_complete_partition_contract() -> None:
+    root = _build_sharded_subject_mask_root()
+    run = root["subject_mask_shard_runs/subject_masks_clip_a"]
+    _stamp_complete_partition_contract(
+        root,
+        run,
+        clip_id="clip-a",
+        clip_index=0,
+        frame_index=0,
+    )
+
+    sources = mod._load_subject_mask_shard_sources(root, ["subject_masks_clip_a"])
+
+    assert len(sources) == 1
+    assert sources[0].name == "subject_masks_clip_a"
+
+
+def test_collection_finalizer_rejects_delta_work_package_rows() -> None:
+    root = _build_sharded_subject_mask_root()
+    run = root["subject_mask_shard_runs/subject_masks_clip_a"]
+    run.attrs["source_crop_pixel_work_package_id"] = "3" * 64
+    run.attrs["incremental_materialization_role"] = "delta_replacement_rows"
+
+    with pytest.raises(ValueError, match="incremental delta rows"):
+        mod._load_subject_mask_shard_sources(root, ["subject_masks_clip_a"])
+
+
+def test_collection_finalizer_rejects_recomputed_partition_tampering() -> None:
+    root = _build_sharded_subject_mask_root()
+    run = root["subject_mask_shard_runs/subject_masks_clip_a"]
+    _stamp_complete_partition_contract(
+        root,
+        run,
+        clip_id="clip-a",
+        clip_index=0,
+        frame_index=0,
+    )
+    contract = dict(run.attrs["collection_partition_contract"])
+    payload = dict(contract["payload"])
+    crop_rows = dict(payload["crop_rows"])
+    crop_rows["start"] = 1
+    crop_rows["stop"] = 2
+    crop_rows["source_crop_total_rows"] = 2
+    payload["crop_rows"] = crop_rows
+    contract["payload"] = payload
+    contract["payload_digest"] = mod.canonical_json_sha256(payload)
+    run.attrs["collection_partition_contract"] = contract
+
+    with pytest.raises(ValueError, match="rows differ"):
+        mod._load_subject_mask_shard_sources(root, ["subject_masks_clip_a"])
+
+
+def test_collection_finalizer_rechecks_authoritative_crop_offsets() -> None:
+    root = _build_sharded_subject_mask_root()
+    run = root["subject_mask_shard_runs/subject_masks_clip_a"]
+    _stamp_complete_partition_contract(
+        root,
+        run,
+        clip_id="clip-a",
+        clip_index=0,
+        frame_index=0,
+    )
+    root["crop_runs/crop_clip_a/frame_row_offsets"][:] = np.asarray(
+        [0, 0], dtype=np.int64
+    )
+
+    with pytest.raises(ValueError, match="authoritative crop frame_row_offsets"):
+        mod._load_subject_mask_shard_sources(root, ["subject_masks_clip_a"])
+
+
 def test_finalize_subject_mask_run_from_shard_collection_rebases_to_target_crop(
     monkeypatch,
 ) -> None:

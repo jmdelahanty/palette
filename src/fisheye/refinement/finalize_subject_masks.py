@@ -359,6 +359,12 @@ class _SubjectMaskShardCollection:
 
 
 _COLLECTION_WORKER_INDEX_PLAN_SCHEMA = "subject_mask_collection_worker_index_plan_v1"
+_ROI_WORK_PACKAGE_ROLE_DELTA = "delta_replacement_rows"
+_ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION = "complete_collection_partition"
+_COLLECTION_PARTITION_CONTRACT_SCHEMA_ID = (
+    "palette.subject_mask.complete_collection_partition"
+)
+_COLLECTION_PARTITION_CONTRACT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -734,6 +740,228 @@ def _row_identity_from_group(
     return identities
 
 
+def _validate_subject_mask_shard_partition_role(
+    root: zarr.Group,
+    group: zarr.Group,
+    *,
+    run_name: str,
+) -> None:
+    """Reject deltas and prove any package-backed shard is a complete partition."""
+
+    package_id_value = group.attrs.get("source_crop_pixel_work_package_id")
+    package_id = str(package_id_value or "")
+    role = str(
+        group.attrs.get("roi_work_package_role")
+        or group.attrs.get("incremental_materialization_role")
+        or ""
+    )
+    path = f"{SUBJECT_MASK_SHARD_PARENT}/{run_name}"
+    if role == _ROI_WORK_PACKAGE_ROLE_DELTA:
+        raise ValueError(
+            f"{path} contains incremental delta rows, not a complete collection "
+            "partition. Publish it through the keyed base-plus-delta compactor "
+            "instead of the collection shard finalizer."
+        )
+    if not package_id:
+        if role:
+            raise ValueError(
+                f"{path} declares work-package role {role!r} without a work-package identity."
+            )
+        # Historical collection shards predate explicit work packages. Their
+        # ordinary compatibility and row-union checks remain below.
+        return
+    if role != _ROI_WORK_PACKAGE_ROLE_COMPLETE_PARTITION:
+        raise ValueError(
+            f"{path} is package-backed but lacks the exact complete collection-partition role."
+        )
+    if (
+        group.attrs.get("incremental_materialization_role") != role
+        or group.attrs.get("canonical_finalization_policy")
+        != "collection_shard_finalization_allowed"
+    ):
+        raise ValueError(
+            f"{path} has inconsistent complete collection-partition policy metadata."
+        )
+
+    contract = group.attrs.get("collection_partition_contract")
+    if not isinstance(contract, Mapping) or set(contract) != {
+        "schema_id",
+        "schema_version",
+        "payload",
+        "payload_digest",
+    }:
+        raise ValueError(f"{path} lacks an exact collection-partition contract.")
+    payload = contract.get("payload")
+    if (
+        contract.get("schema_id") != _COLLECTION_PARTITION_CONTRACT_SCHEMA_ID
+        or contract.get("schema_version")
+        != _COLLECTION_PARTITION_CONTRACT_SCHEMA_VERSION
+        or not isinstance(payload, Mapping)
+        or contract.get("payload_digest") != canonical_json_sha256(payload)
+    ):
+        raise ValueError(f"{path} has an invalid collection-partition contract digest.")
+    if set(payload) != {
+        "role",
+        "coverage_semantics",
+        "work_package_id",
+        "collection",
+        "frame_window",
+        "crop_rows",
+        "validation",
+    }:
+        raise ValueError(f"{path} collection-partition payload fields are not exact.")
+    if (
+        payload.get("role") != role
+        or payload.get("coverage_semantics")
+        != "exact_complete_crop_rows_for_acquisition_frame_window_v1"
+        or payload.get("work_package_id") != package_id
+    ):
+        raise ValueError(
+            f"{path} collection-partition identity does not match the run."
+        )
+
+    collection = payload.get("collection")
+    collection_fields = {
+        "source_collection_id",
+        "source_collection_path",
+        "source_clip_id",
+        "source_clip_index",
+        "source_work_unit_id",
+        "source_shard_id",
+    }
+    if not isinstance(collection, Mapping) or set(collection) != collection_fields:
+        raise ValueError(f"{path} collection identity fields are not exact.")
+    for field in collection_fields:
+        if collection.get(field) != group.attrs.get(field):
+            raise ValueError(
+                f"{path} collection-partition {field} differs from the run attribute."
+            )
+
+    frame_window = payload.get("frame_window")
+    frame_window_fields = {
+        "schema_id",
+        "schema_version",
+        "recording_identity",
+        "camera_identity",
+        "clip_id",
+        "actual_start_frame",
+        "end_frame_exclusive",
+        "frame_count",
+        "clip_index_document_sha256",
+        "clip_video_sha256",
+    }
+    if (
+        not isinstance(frame_window, Mapping)
+        or set(frame_window) != frame_window_fields
+    ):
+        raise ValueError(f"{path} frame-window binding fields are not exact.")
+    start_frame = frame_window.get("actual_start_frame")
+    end_frame = frame_window.get("end_frame_exclusive")
+    frame_count = frame_window.get("frame_count")
+    if (
+        frame_window.get("schema_id") != "palette.acquisition_video_frame_window"
+        or frame_window.get("schema_version") != 1
+        or frame_window.get("clip_id") != collection.get("source_clip_id")
+        or type(start_frame) is not int
+        or type(end_frame) is not int
+        or type(frame_count) is not int
+        or start_frame < 0
+        or frame_count <= 0
+        or end_frame != start_frame + frame_count
+    ):
+        raise ValueError(f"{path} frame-window binding is invalid.")
+
+    crop_rows = payload.get("crop_rows")
+    if not isinstance(crop_rows, Mapping) or set(crop_rows) != {
+        "start",
+        "stop",
+        "count",
+        "source_crop_total_rows",
+    }:
+        raise ValueError(f"{path} crop-row interval fields are not exact.")
+    row_start = crop_rows.get("start")
+    row_stop = crop_rows.get("stop")
+    row_count = crop_rows.get("count")
+    source_total = crop_rows.get("source_crop_total_rows")
+    if (
+        type(row_start) is not int
+        or type(row_stop) is not int
+        or type(row_count) is not int
+        or type(source_total) is not int
+        or row_start < 0
+        or row_stop != row_start + row_count
+        or row_stop > source_total
+    ):
+        raise ValueError(f"{path} crop-row interval is invalid.")
+    validation = payload.get("validation")
+    if (
+        not isinstance(validation, Mapping)
+        or set(validation)
+        != {
+            "work_package_opened_and_content_verified",
+            "row_interval_contiguous",
+            "frame_offset_coverage_exact",
+            "acquisition_frames_within_window",
+        }
+        or any(value is not True for value in validation.values())
+    ):
+        raise ValueError(
+            f"{path} collection-partition validation evidence is incomplete."
+        )
+    if (
+        "source_crop_row_ids" not in group
+        or "source_acquisition_frame_index" not in group
+    ):
+        raise ValueError(f"{path} lacks complete partition row/frame lineage arrays.")
+    source_rows = np.asarray(group["source_crop_row_ids"][:], dtype=np.int64).reshape(
+        -1
+    )
+    expected_rows = np.arange(row_start, row_stop, dtype=np.int64)
+    source_frames = np.asarray(
+        group["source_acquisition_frame_index"][:], dtype=np.int64
+    ).reshape(-1)
+    if not np.array_equal(source_rows, expected_rows):
+        raise ValueError(f"{path} rows differ from its complete partition contract.")
+    if (
+        source_frames.shape != source_rows.shape
+        or np.any(source_frames < start_frame)
+        or np.any(source_frames >= end_frame)
+    ):
+        raise ValueError(f"{path} acquisition frames differ from its frame window.")
+    crop_run = str(group.attrs.get("source_crop_run") or "")
+    crop = root.get(f"crop_runs/{crop_run}") if crop_run else None
+    if (
+        crop is None
+        or "frame_indices" not in crop
+        or "frame_row_offsets" not in crop
+        or "source_acquisition_frame_index" not in crop
+    ):
+        raise ValueError(
+            f"{path} complete partition lacks its authoritative crop frame index."
+        )
+    crop_total = int(crop["frame_indices"].shape[0])
+    offsets = np.asarray(crop["frame_row_offsets"][:], dtype=np.int64).reshape(-1)
+    if (
+        crop_total != source_total
+        or offsets.size <= end_frame
+        or offsets[0] != 0
+        or offsets[-1] != crop_total
+        or np.any(offsets[1:] < offsets[:-1])
+        or int(offsets[start_frame]) != row_start
+        or int(offsets[end_frame]) != row_stop
+    ):
+        raise ValueError(
+            f"{path} contract does not match authoritative crop frame_row_offsets."
+        )
+    crop_frames = np.asarray(
+        crop["source_acquisition_frame_index"][source_rows], dtype=np.int64
+    ).reshape(-1)
+    if not np.array_equal(crop_frames, source_frames):
+        raise ValueError(
+            f"{path} acquisition frames differ from authoritative crop lineage."
+        )
+
+
 def _load_subject_mask_shard_sources(
     root: zarr.Group,
     shard_runs: Sequence[str],
@@ -757,15 +985,7 @@ def _load_subject_mask_shard_sources(
             raise ValueError(
                 f"{SUBJECT_MASK_SHARD_PARENT}/{name} is not complete (status={status!r})."
             )
-        if (
-            str(group.attrs.get("incremental_materialization_role") or "")
-            == "delta_replacement_rows"
-        ):
-            raise ValueError(
-                f"{SUBJECT_MASK_SHARD_PARENT}/{name} contains incremental delta rows, "
-                "not a complete collection partition. Publish it through the keyed "
-                "base-plus-delta compactor instead of the collection shard finalizer."
-            )
+        _validate_subject_mask_shard_partition_role(root, group, run_name=name)
         source = _load_source_subject_mask_run(alias_root, name)  # type: ignore[arg-type]
         if source.source_crop_row_ids is None:
             raise ValueError(

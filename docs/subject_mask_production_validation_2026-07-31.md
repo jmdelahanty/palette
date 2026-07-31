@@ -298,6 +298,10 @@ plan produced by the final clean deployed commit.
 - [x] Implement the isolated clipped/whole-video full-duration driver, exact
       reference/clip preflight, node-local staging, atomic worker bundles, and
       dependency-barriered LSF plan.
+- [x] Distinguish keyed delta packages from proven complete frame-window
+      partitions. Complete partitions now require exact crop-offset coverage,
+      digest-bound collection/clip identities, and independent finalizer
+      validation; the ordinary work-package default remains delta-only.
 - [ ] Benchmark full-duration phase time, decoded bytes, peak RSS, and bounded
       reopen reads.
 - [ ] Run one selector-ineligible full-duration production-streaming canary.
@@ -313,11 +317,15 @@ that flows through raw/refined/quality publication into one inactive bundle.
 Those fixtures prove lifecycle behavior and exact decoded content on small
 surfaces; they are not full-duration performance or promotion evidence.
 
-The current cluster job remains pinned to its deployed Palette commit.  This
-change does not alter that process and does not authorize a full-duration run
-yet.  The two validation modes must still agree on the completed 22,926-row
-fixture, followed by one selector-ineligible full-duration canary and Palette /
-Crimson review before profile activation.
+The first isolated 54,000-frame inference preflight completed successfully and
+published a terminal, selector-ineligible worker bundle. It then exposed that
+the inference writer had labeled every work package as a delta even when the
+driver had supplied the exact complete crop-row partition for one authenticated
+clip. The refinement finalizer correctly failed closed. The writer and
+finalizer now share the explicit complete-partition proof above. A fresh
+single-clip inference/refinement preflight is still required before launching
+all 22 windows; no production selector, registry authority, or archive has been
+changed.
 
 The shared inference hardware/runtime contract is documented in
 `docs/inference_accelerator_provenance_2026-07-31.md`. Subject-mask publication
