@@ -57,6 +57,7 @@ gpu = [
   "onnxsim",
 ]
 dev = [
+  "black>=26.5,<27",
   "import-linter>=2,<3",
   "pytest>=8.4,<9",
   "plotly",
@@ -75,6 +76,12 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 fisheye = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.html", "**/*.css", "**/*.js"]
+
+[tool.black]
+# Keep formatter grammar aligned with scripts/py and the supported runtime.
+# Revisit this together with requires-python and environment.yml during a
+# deliberate interpreter upgrade.
+target-version = ["py311"]
 
 [tool.importlinter]
 root_package = "fisheye"
