@@ -60,6 +60,8 @@ SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
 SUBJECT_MASK_CORE_METADATA_DIGEST_SCOPE = (
     "exact_run_group_and_array_declarations_redacting_only_run_manifest"
 )
+SUBJECT_MASK_PROB_MAX_CANONICALIZATION = "cpu_max_encoded_then_decode_float32_v1"
+SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE = float(np.finfo(np.float32).eps)
 
 
 @dataclass(frozen=True)
@@ -243,6 +245,54 @@ def _array_document(
     }
 
 
+def _canonical_probability_max(probabilities: Any) -> np.ndarray:
+    shape, dtype = _shape_dtype(probabilities)
+    if len(shape) != 4:
+        raise ValueError("mask_probs_roi must have shape (N,C,H,W).")
+    result = np.empty((shape[0], shape[1]), dtype=np.float32)
+    row_bytes = max(1, int(dtype.itemsize) * int(np.prod(shape[1:])))
+    block_rows = max(1, (64 * 1024 * 1024) // row_bytes)
+    for start in range(0, shape[0], block_rows):
+        stop = min(shape[0], start + block_rows)
+        values = np.asarray(probabilities[start:stop])
+        maxima = np.max(values, axis=(2, 3)).astype(np.float32, copy=False)
+        if dtype == np.dtype(np.uint8):
+            maxima = maxima / np.float32(255.0)
+        result[start:stop] = maxima
+    return result
+
+
+def _canonicalize_raw_probability_max(
+    arrays: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, object]]:
+    canonical = _canonical_probability_max(arrays["mask_probs_roi"])
+    source = np.asarray(arrays["metrics/prob_max"][...])
+    if source.dtype != np.dtype(np.float32) or source.shape != canonical.shape:
+        raise ValueError("Source metrics/prob_max must be exact float32[N,C].")
+    if not np.all(np.isfinite(source)):
+        raise ValueError("Source metrics/prob_max contains non-finite values.")
+    differences = np.abs(source - canonical)
+    mismatch_count = int(np.count_nonzero(source != canonical))
+    max_abs = float(np.max(differences)) if differences.size else 0.0
+    if max_abs > SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE:
+        raise ValueError(
+            "Source metrics/prob_max differs materially from the canonical "
+            f"stored-probability derivation (max_abs={max_abs!r})."
+        )
+    normalized = dict(arrays)
+    normalized["metrics/prob_max"] = canonical
+    return normalized, {
+        "schema_id": "palette.subject_mask.prob_max_canonicalization",
+        "schema_version": 1,
+        "policy": SUBJECT_MASK_PROB_MAX_CANONICALIZATION,
+        "source_mismatch_count": mismatch_count,
+        "source_max_abs_difference": max_abs,
+        "source_max_abs_tolerance": (SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE),
+        "canonical_dtype": "float32",
+        "canonical_shape": list(canonical.shape),
+    }
+
+
 def publish_selector_ineligible_subject_mask_core_snapshot(
     source_arrays: Mapping[str, Any],
     *,
@@ -290,7 +340,9 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     )
     paths = tuple(entry.rule.path for entry in plans.entries)
     arrays = {path: source_arrays[path] for path in paths}
+    canonicalization: dict[str, object] | None = None
     if isinstance(schema, RawSubjectMaskSchema):
+        arrays, canonicalization = _canonicalize_raw_probability_max(arrays)
         schema.require(
             arrays,
             dimensions=dimensions,
@@ -350,6 +402,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "logical_schema": logical_schema,
             "storage_plan": plans.as_manifest(),
             "component_registry": components.as_manifest(),
+            "derived_metric_canonicalization": canonicalization,
         }
     )
     destination_arrays: dict[str, Any] = {}
@@ -427,6 +480,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "parallel_write_policy": (
                 "single_writer_v1_future_workers_require_disjoint_whole_shards"
             ),
+            "derived_metric_canonicalization": canonicalization,
         },
         "logical_content": {
             "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,

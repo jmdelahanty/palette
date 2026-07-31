@@ -11,7 +11,9 @@ from fisheye.diagnostics.benchmark_subject_mask_cache_pipeline import (
     _bound_run_manifest,
     _refined_arrays,
     _require_destination,
+    _require_existing_node_local,
     _require_node_local,
+    _resume_cache,
     _stage_cache,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -24,6 +26,9 @@ def test_pipeline_path_guards(tmp_path: Path) -> None:
         _require_node_local(scratch)
     with pytest.raises(ValueError, match="node-local"):
         _require_node_local(Path("/groups/example/scratch"))
+    assert _require_existing_node_local(scratch) == scratch
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        _require_existing_node_local(tmp_path / "absent")
 
     root = tmp_path / "benchmarks"
     destination = _require_destination(root / "candidate", benchmark_root=root)
@@ -66,6 +71,10 @@ def test_stage_cache_rewrites_and_verifies_local_payload(tmp_path: Path) -> None
         local_manifest.parent / staged["array"]["bin_path"]
     ).read_bytes() == payload_path.read_bytes()
     assert receipt["payload_sha256"] == payload_sha
+    resumed_manifest, resumed = _resume_cache(local_manifest)
+    assert resumed_manifest == local_manifest
+    assert resumed["resumed"] is True
+    assert resumed["payload_sha256"] == payload_sha
 
 
 def test_refined_adapter_binds_authoritative_crop_identity() -> None:

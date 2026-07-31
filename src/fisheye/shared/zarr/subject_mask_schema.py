@@ -603,8 +603,16 @@ class RawSubjectMaskSchema:
             encoded = _rows(probabilities, start, stop)
             if self.encoding is SubjectMaskProbabilityEncoding.LINEAR_UINT8_0_255:
                 decoded = encoded.astype(np.float32) / np.float32(255.0)
+                expected_prob_max = (
+                    np.max(encoded, axis=(2, 3)).astype(np.float32, copy=False)
+                    / np.float32(255.0)
+                )
             else:
                 decoded = encoded.astype(np.float32)
+                expected_prob_max = np.max(decoded, axis=(2, 3)).astype(
+                    np.float32,
+                    copy=False,
+                )
                 if (
                     not np.all(np.isfinite(decoded))
                     or np.any(decoded < 0.0)
@@ -620,10 +628,7 @@ class RawSubjectMaskSchema:
                     break
             binary = (decoded >= threshold32).astype(np.uint8)
             expected = derive_subject_mask_metrics(binary)
-            expected["prob_max"] = np.max(decoded, axis=(2, 3)).astype(
-                np.float32,
-                copy=False,
-            )
+            expected["prob_max"] = expected_prob_max
             for name in (
                 "prob_max",
                 "mask_present",

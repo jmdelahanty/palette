@@ -483,8 +483,19 @@ def _postprocess_logits_on_device(
     area_px = binary.sum(dim=(2, 3), dtype=torch.float32)
     prob_max = probs_for_metrics.amax(dim=(2, 3))
     spatial_metrics = _compute_spatial_metrics_from_binary_tensor(binary, area_px=area_px)
+    probs_out_cpu = probs_out.cpu().numpy()
+    if mask_probs_dtype == "uint8":
+        # Canonical uint8 metrics use max-then-decode on the CPU. Computing
+        # divide-then-max on the GPU can differ by one float32 ULP for the same
+        # persisted bytes, which defeats cross-backend logical digests.
+        prob_max_cpu = (
+            np.max(probs_out_cpu, axis=(2, 3)).astype(np.float32, copy=False)
+            / np.float32(255.0)
+        )
+    else:
+        prob_max_cpu = prob_max.cpu().numpy().astype(np.float32, copy=False)
     metrics = {
-        "prob_max": prob_max.cpu().numpy().astype(np.float32, copy=False),
+        "prob_max": prob_max_cpu,
         "mask_present": (area_px > 0.0).cpu().numpy().astype(bool, copy=False),
         "area_px": area_px.cpu().numpy().astype(np.float32, copy=False),
         "centroid_xy": spatial_metrics["centroid_xy"].cpu().numpy().astype(np.float32, copy=False),
@@ -493,7 +504,7 @@ def _postprocess_logits_on_device(
         "bbox_valid": spatial_metrics["bbox_valid"].cpu().numpy().astype(bool, copy=False),
     }
     binary_out = binary.cpu().numpy() if return_binary else None
-    return probs_out.cpu().numpy(), binary_out, metrics
+    return probs_out_cpu, binary_out, metrics
 
 
 def _compute_spatial_metrics_from_binary_tensor(

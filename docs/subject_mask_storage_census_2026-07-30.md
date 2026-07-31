@@ -142,6 +142,21 @@ Safety and evidence checklist:
       node-local receipts.
 - [ ] Hand the immutable paths to Crimson for exact-schema consumer testing.
 
+The first GPU allocation (`153236718`, Palette `19c5728d`) completed all
+22,926 inference rows but was correctly rejected before raw publication. Of
+68,778 persisted `prob_max` values, 35 differed from the CPU recomputation by
+exactly `5.960464477539063e-08` and the other 68,743 were bit-identical. The
+cause was GPU divide-then-max versus CPU decode-then-max float32 evaluation of
+the same persisted `uint8` probabilities; mask pixels, binary metrics, row
+identity, and offsets did not fail.
+
+The canonical rule is now `CPU max(encoded_uint8) / float32(255)`. Future
+inference uses that formula directly. Publication also canonicalizes a source
+`prob_max` within one float32 epsilon, records mismatch count and maximum
+difference, and rejects larger drift. The continuation path requires the
+source job ID and Palette commit and re-verifies the retained cache/model/raw
+completion before resuming; it does not rerun successful GPU inference.
+
 The contracts live in `src/fisheye/shared/zarr/subject_mask_schema.py`,
 `src/fisheye/shared/zarr/refined_subject_mask_extensions.py`,
 `src/fisheye/shared/zarr/subject_mask_quality_schema.py`, and

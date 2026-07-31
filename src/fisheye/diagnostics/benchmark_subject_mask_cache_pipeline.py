@@ -101,6 +101,16 @@ def _require_node_local(path: Path) -> Path:
     return resolved
 
 
+def _require_existing_node_local(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    forbidden = (Path("/groups"), Path("/nrs"), Path("/Volumes"))
+    if any(resolved == prefix or prefix in resolved.parents for prefix in forbidden):
+        raise ValueError(f"Resume scratch must be node-local, got {resolved}.")
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"Resume scratch does not exist: {resolved}")
+    return resolved
+
+
 def _require_destination(path: Path, *, benchmark_root: Path) -> Path:
     destination = path.expanduser().resolve()
     root = benchmark_root.expanduser().resolve()
@@ -171,6 +181,30 @@ def _stage_cache(
         ),
         "source_manifest_sha256": _sha256_file(source_manifest),
         "payload_sha256": local_payload_sha256,
+    }
+
+
+def _resume_cache(local_manifest: Path) -> tuple[Path, dict[str, Any]]:
+    payload = load_flat_roi_cache_manifest(local_manifest)
+    array = payload.get("array")
+    if not isinstance(array, Mapping):
+        raise ValueError("Resumed flat ROI cache lacks array metadata.")
+    local_bin = Path(str(array.get("bin_path") or ""))
+    if not local_bin.is_absolute():
+        local_bin = local_manifest.parent / local_bin
+    local_bin = local_bin.resolve()
+    declared = str(array.get("sha256") or "")
+    if len(declared) != 64 or not local_bin.is_file():
+        raise ValueError("Resumed flat ROI cache is incomplete.")
+    started = time.perf_counter()
+    observed = _sha256_file(local_bin)
+    if observed != declared:
+        raise RuntimeError("Resumed flat ROI cache payload hash mismatch.")
+    return local_manifest, {
+        "resumed": True,
+        "verification_seconds": time.perf_counter() - started,
+        "bytes": int(local_bin.stat().st_size),
+        "payload_sha256": observed,
     }
 
 
@@ -481,65 +515,94 @@ def _run_pipeline(
     }
 
     local_archive = scratch / "working_analysis.zarr"
-    phases["stage_crop_archive_seconds"] = _copytree(crop_source, local_archive)
-    phases["stage_refined_keypoints_seconds"] = _copy_keypoint_family(
-        keypoint_source, local_archive
-    )
-    local_cache, cache_staging = _stage_cache(cache_source, scratch / "roi_cache")
-    phases["stage_roi_cache"] = cache_staging
+    local_cache = scratch / "roi_cache" / cache_source.name
     local_model = scratch / "model" / model_source.name
-    local_model.parent.mkdir()
-    started = time.perf_counter()
-    shutil.copy2(model_source, local_model)
-    phases["stage_model_seconds"] = time.perf_counter() - started
-    if _sha256_file(local_model) != source_hashes_before["model"]:
-        raise RuntimeError("Staged subject-mask model hash mismatch.")
-
     raw_shard_run = args.raw_shard_run
     inference_log = scratch / "raw_inference.log"
-    inference_command = [
-        sys.executable,
-        "-m",
-        "fisheye.segmentation.infer_unet_subject_masks",
-        str(local_archive),
-        str(local_model),
-        "--run-name",
-        raw_shard_run,
-        "--output-parent",
-        "subject_mask_shard_runs",
-        "--crop-run",
-        args.crop_run,
-        "--roi-cache-manifest",
-        str(local_cache),
-        "--roi-cache-expected-archive-path",
-        str(crop_source),
-        "--roi-cache-policy",
-        "never",
-        "--source-shard-id",
-        "complete_recording_rowset",
-        "--batch-size",
-        str(args.batch_size),
-        "--device",
-        args.device,
-        "--model-input-size",
-        "512",
-        "--model-input-transform",
-        "auto",
-        "--mask-probs-dtype",
-        "uint8",
-        "--mask-probs-chunk-rois",
-        "32",
-        "--mask-probs-shard-rois",
-        "2048",
-        "--no-write-masks-roi",
-        "--async-output",
-        "--output-queue-size",
-        "2",
-        "--profile-timings",
-        "--defer-registry-status",
-        "--no-progress",
-    ]
-    phases["raw_inference"] = _run_logged(inference_command, log_path=inference_log)
+    if args.resume_after_raw_inference:
+        for path in (
+            local_archive / "zarr.json",
+            local_cache,
+            local_model,
+            inference_log,
+        ):
+            if not path.is_file():
+                raise FileNotFoundError(f"Resume input is absent: {path}")
+        local_cache, cache_staging = _resume_cache(local_cache)
+        phases["stage_crop_archive"] = {"resumed": True}
+        phases["stage_refined_keypoints"] = {"resumed": True}
+        phases["stage_roi_cache"] = cache_staging
+        local_model_hash = _sha256_file(local_model)
+        if local_model_hash != source_hashes_before["model"]:
+            raise RuntimeError("Resumed subject-mask model hash mismatch.")
+        phases["stage_model"] = {
+            "resumed": True,
+            "sha256": local_model_hash,
+        }
+        phases["raw_inference"] = {
+            "resumed": True,
+            "source_job_id": args.resume_source_job_id,
+            "source_palette_commit": args.resume_source_palette_commit,
+            "log_path": str(inference_log),
+            "log_sha256": _sha256_file(inference_log),
+        }
+    else:
+        phases["stage_crop_archive_seconds"] = _copytree(crop_source, local_archive)
+        phases["stage_refined_keypoints_seconds"] = _copy_keypoint_family(
+            keypoint_source, local_archive
+        )
+        local_cache, cache_staging = _stage_cache(cache_source, scratch / "roi_cache")
+        phases["stage_roi_cache"] = cache_staging
+        local_model.parent.mkdir()
+        started = time.perf_counter()
+        shutil.copy2(model_source, local_model)
+        phases["stage_model_seconds"] = time.perf_counter() - started
+        if _sha256_file(local_model) != source_hashes_before["model"]:
+            raise RuntimeError("Staged subject-mask model hash mismatch.")
+
+        inference_command = [
+            sys.executable,
+            "-m",
+            "fisheye.segmentation.infer_unet_subject_masks",
+            str(local_archive),
+            str(local_model),
+            "--run-name",
+            raw_shard_run,
+            "--output-parent",
+            "subject_mask_shard_runs",
+            "--crop-run",
+            args.crop_run,
+            "--roi-cache-manifest",
+            str(local_cache),
+            "--roi-cache-expected-archive-path",
+            str(crop_source),
+            "--roi-cache-policy",
+            "never",
+            "--source-shard-id",
+            "complete_recording_rowset",
+            "--batch-size",
+            str(args.batch_size),
+            "--device",
+            args.device,
+            "--model-input-size",
+            "512",
+            "--model-input-transform",
+            "auto",
+            "--mask-probs-dtype",
+            "uint8",
+            "--mask-probs-chunk-rois",
+            "32",
+            "--mask-probs-shard-rois",
+            "2048",
+            "--no-write-masks-roi",
+            "--async-output",
+            "--output-queue-size",
+            "2",
+            "--profile-timings",
+            "--defer-registry-status",
+            "--no-progress",
+        ]
+        phases["raw_inference"] = _run_logged(inference_command, log_path=inference_log)
 
     local_root = zarr.open_group(str(local_archive), mode="r", use_consolidated=False)
     crop = local_root[f"crop_runs/{args.crop_run}"]
@@ -554,6 +617,8 @@ def _run_pipeline(
     )
     n_frames = int(crop["frame_row_offsets"].shape[0]) - 1
     shard = local_root[f"subject_mask_shard_runs/{raw_shard_run}"]
+    if shard.attrs.get("palette_run_completion_status") != "complete":
+        raise ValueError("Raw subject-mask shard is not complete.")
     if (
         tuple(str(value) for value in shard.attrs.get("mask_labels", []))
         != DEFAULT_RAW_LABELS
@@ -855,9 +920,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     destination = _require_destination(
         args.destination, benchmark_root=args.benchmark_root
     )
-    scratch = _require_node_local(args.scratch_root)
+    scratch = (
+        _require_existing_node_local(args.scratch_root)
+        if args.resume_after_raw_inference
+        else _require_node_local(args.scratch_root)
+    )
     local_output = scratch / "completed"
-    local_output.mkdir()
+    if args.resume_after_raw_inference:
+        if not local_output.is_dir() or any(local_output.iterdir()):
+            raise ValueError(
+                "Resume requires an existing empty completed output directory."
+            )
+    else:
+        local_output.mkdir()
     hidden: Path | None = None
     published = False
     try:
@@ -892,6 +967,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "subject_mask_model": str(
                     args.subject_mask_model.expanduser().resolve()
                 ),
+                "resume_after_raw_inference": bool(args.resume_after_raw_inference),
+                "resume_source_job_id": args.resume_source_job_id,
+                "resume_source_palette_commit": (args.resume_source_palette_commit),
             },
             "outputs": result,
             "publication": {
@@ -960,6 +1038,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="0")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--finalize-workers", type=int, default=8)
+    parser.add_argument("--resume-after-raw-inference", action="store_true")
+    parser.add_argument("--resume-source-job-id")
+    parser.add_argument("--resume-source-palette-commit")
     parser.add_argument("--keep-scratch", action="store_true")
     return parser
 
@@ -968,6 +1049,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.batch_size <= 0 or args.finalize_workers <= 0:
         raise SystemExit("--batch-size and --finalize-workers must be positive")
+    if args.resume_after_raw_inference and (
+        not args.resume_source_job_id or not args.resume_source_palette_commit
+    ):
+        raise SystemExit(
+            "Resume requires --resume-source-job-id and "
+            "--resume-source-palette-commit."
+        )
     try:
         result = run(args)
     except Exception as exc:

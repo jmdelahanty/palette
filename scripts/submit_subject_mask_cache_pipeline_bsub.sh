@@ -20,6 +20,10 @@ WALLTIME="2:00"
 BATCH_SIZE=128
 FINALIZE_WORKERS=8
 DEVICE="0"
+HOST=""
+RESUME_SCRATCH=""
+RESUME_SOURCE_JOB_ID=""
+RESUME_SOURCE_PALETTE_COMMIT=""
 SUBMIT=0
 
 usage() {
@@ -51,6 +55,10 @@ Options:
   --batch-size N            Default: 128
   --finalize-workers N      Default: 8
   --device DEVICE           Default: 0
+  --host HOST               Optional exact compute host
+  --resume-scratch PATH     Resume a complete retained raw-inference scratch
+  --resume-source-job-id ID Required with --resume-scratch
+  --resume-source-commit ID Required with --resume-scratch
   --submit                  Submit; otherwise render only
   -h, --help
 EOF
@@ -79,6 +87,10 @@ while [[ $# -gt 0 ]]; do
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --finalize-workers) FINALIZE_WORKERS="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
+    --resume-scratch) RESUME_SCRATCH="$2"; shift 2 ;;
+    --resume-source-job-id) RESUME_SOURCE_JOB_ID="$2"; shift 2 ;;
+    --resume-source-commit) RESUME_SOURCE_PALETTE_COMMIT="$2"; shift 2 ;;
     --submit) SUBMIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -98,6 +110,13 @@ positive "$MEM_GB" || fail "--mem-gb must be positive"
 positive "$BATCH_SIZE" || fail "--batch-size must be positive"
 positive "$FINALIZE_WORKERS" || fail "--finalize-workers must be positive"
 [[ ! -e "$DESTINATION" ]] || fail "destination already exists: $DESTINATION"
+if [[ -n "$RESUME_SCRATCH" ]]; then
+  [[ -n "$HOST" ]] || fail "--resume-scratch requires --host"
+  [[ -n "$RESUME_SOURCE_JOB_ID" && -n "$RESUME_SOURCE_PALETTE_COMMIT" ]] || \
+    fail "resume source job ID and commit are required"
+  [[ "$RESUME_SCRATCH" == /scratch/*/[0-9]*/subject_mask_cache_pipeline_* ]] || \
+    fail "unsafe resume scratch path"
+fi
 
 PALETTE_REPO="$(realpath "$PALETTE_REPO")"
 SOURCE_CROP_ZARR="$(realpath "$SOURCE_CROP_ZARR")"
@@ -137,6 +156,13 @@ printf -v DRIVER_ARGS '%q ' \
   --finalize-workers "$FINALIZE_WORKERS" \
   --device "$DEVICE" \
   --keep-scratch
+if [[ -n "$RESUME_SCRATCH" ]]; then
+  printf -v RESUME_ARGS '%q ' \
+    --resume-after-raw-inference \
+    --resume-source-job-id "$RESUME_SOURCE_JOB_ID" \
+    --resume-source-palette-commit "$RESUME_SOURCE_PALETTE_COMMIT"
+  DRIVER_ARGS+="$RESUME_ARGS"
+fi
 
 cat >"$JOB_SCRIPT" <<EOF
 #!/usr/bin/env bash
@@ -153,9 +179,18 @@ ACTUAL_COMMIT="\$(git -C "\$PALETTE_REPO" rev-parse HEAD)"
   printf 'Palette worktree is dirty.\n' >&2; exit 2;
 }
 scratch_user="\${USER:-\$(id -un)}"
-scratch_root="/scratch/\$scratch_user/\${LSB_JOBID}/subject_mask_cache_pipeline_$(printf '%q' "$RUN_ID")"
-[[ ! -e "\$scratch_root" ]] || { printf 'Scratch root exists.\n' >&2; exit 2; }
-mkdir -p "\$(dirname "\$scratch_root")"
+resume_scratch=$(printf '%q' "$RESUME_SCRATCH")
+if [[ -n "\$resume_scratch" ]]; then
+  scratch_root="\$resume_scratch"
+  [[ "\$scratch_root" == /scratch/*/[0-9]*/subject_mask_cache_pipeline_* ]] || {
+    printf 'Unsafe resume scratch.\n' >&2; exit 2;
+  }
+  [[ -d "\$scratch_root" ]] || { printf 'Resume scratch is absent.\n' >&2; exit 2; }
+else
+  scratch_root="/scratch/\$scratch_user/\${LSB_JOBID}/subject_mask_cache_pipeline_$(printf '%q' "$RUN_ID")"
+  [[ ! -e "\$scratch_root" ]] || { printf 'Scratch root exists.\n' >&2; exit 2; }
+  mkdir -p "\$(dirname "\$scratch_root")"
+fi
 export PYTHONPYCACHEPREFIX="\$scratch_root.pycache"
 export MPLBACKEND=Agg
 export PALETTE_DISABLE_REGISTRY_WRITES=1
@@ -190,6 +225,9 @@ BSUB_COMMAND=(
   -M "$((MEM_GB * 1024))" -R "span[hosts=1] rusage[mem=${MEM_GB}G]"
   -gpu "num=1" -oo "$STDOUT_LOG" -eo "$STDERR_LOG" bash "$JOB_SCRIPT"
 )
+if [[ -n "$HOST" ]]; then
+  BSUB_COMMAND=("${BSUB_COMMAND[@]:0:1}" -m "$HOST" "${BSUB_COMMAND[@]:1}")
+fi
 
 printf 'mode=%s\n' "$([[ "$SUBMIT" == 1 ]] && printf submit || printf render-only)"
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"

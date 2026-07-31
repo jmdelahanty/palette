@@ -140,3 +140,65 @@ def test_subject_mask_core_publication_rejects_crop_identity_mismatch(
         )
 
     assert not (tmp_path / "raw.zarr").exists()  # type: ignore[operator]
+
+
+def test_raw_publication_canonicalizes_one_ulp_probability_max(
+    tmp_path: object,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    crop = refined_with_crop.pop("_crop")
+    source_prob_max = raw["metrics/prob_max"].copy()
+    source_prob_max[0, 0] = np.nextafter(
+        source_prob_max[0, 0],
+        np.float32(np.inf),
+        dtype=np.float32,
+    )
+    raw["metrics/prob_max"] = source_prob_max
+
+    publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        raw,
+        source_crop_arrays=crop,  # type: ignore[arg-type]
+        source_manifest={"schema_id": "fixture", "schema_version": 1},
+        n_frames=4,
+        components=_components(),
+        destination=tmp_path / "raw.zarr",  # type: ignore[operator]
+        run_id="raw_001",
+        kind="raw_probability_uint8",
+        source_run_path="subject_mask_shard_runs/source_001",
+        created_by="pytest",
+    )
+
+    run = zarr.open_group(
+        str(publication.output_path), mode="r", use_consolidated=True
+    )["subject_mask_runs/raw_001"]
+    canonical = np.max(raw["mask_probs_roi"], axis=(2, 3)).astype(
+        np.float32
+    ) / np.float32(255.0)
+    np.testing.assert_array_equal(run["metrics/prob_max"][...], canonical)
+    receipt = publication.manifest["payload"]["write_receipt"][
+        "derived_metric_canonicalization"
+    ]
+    assert receipt["source_mismatch_count"] == 1
+
+
+def test_raw_publication_rejects_material_probability_max_drift(
+    tmp_path: object,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    crop = refined_with_crop.pop("_crop")
+    raw["metrics/prob_max"] = raw["metrics/prob_max"].copy()
+    raw["metrics/prob_max"][0, 0] += np.float32(0.01)
+
+    with pytest.raises(ValueError, match="differs materially"):
+        publish_selector_ineligible_subject_mask_core_snapshot(
+            raw,
+            source_crop_arrays=crop,  # type: ignore[arg-type]
+            source_manifest={"schema_id": "fixture", "schema_version": 1},
+            n_frames=4,
+            components=_components(),
+            destination=tmp_path / "raw.zarr",  # type: ignore[operator]
+            run_id="raw_001",
+            kind="raw_probability_uint8",
+            source_run_path="subject_mask_shard_runs/source_001",
+            created_by="pytest",
+        )
