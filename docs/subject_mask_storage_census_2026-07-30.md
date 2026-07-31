@@ -63,13 +63,16 @@ mask-observation rows in Cam2010095:
       equivalence and `authoritative_pixels=false`.
 - [x] Add an exact immutable, source-bound
       `subject_mask_quality_runs/<run>` schema and byte-derived storage plan.
+- [x] Freeze the first four-component observation-local QC policy and metric
+      catalog, including whole-body containment and organ mutual exclusion.
 - [x] Prevent dense materialization from clearing existing derivative
       freshness markers.
 - [ ] Adopt the draft audit extension in the maintained draft producer/editor.
 - [ ] Persist cache receipts from cache regeneration writers.
 - [ ] Freeze the persisted subject-mask-quality run manifest, metadata digest,
-      exact producer policy/profile, and direct/consolidated equivalence gate.
-- [ ] Add the selector-ineligible subject-mask-quality producer and lazy
+      and direct/consolidated equivalence gate. The first exact producer
+      policy/profile is frozen but is not yet a persisted run.
+- [ ] Add the bounded selector-ineligible subject-mask-quality writer and lazy
       inspection consumer; do not make ordinary playback depend on it.
 - [ ] Add accepted-draft-to-new-publication compaction and physical replanning.
 - [ ] Run the full-duration publication/write/read benchmark before profile
@@ -440,13 +443,55 @@ schema bound to explicit longitudinal lineage, so multi-subject frames can
 never be joined by row ordinal. Crimson may open this companion lazily for
 inspection; ordinary playback does not require it.
 
-The schema intentionally freezes the axes and validity semantics before
-freezing one producer metric catalog. Candidate component-local metrics include
-area fraction, connected-component count, largest-component fraction, hole
-fraction, solidity, perimeter, and ROI-border contact. Candidate
-observation-level metrics include component overlap and body-containment
-failures. The first producer profile must select, define, version, and test an
-exact subset; it must not add anonymous columns to an existing profile.
+The first producer policy is
+`subject_v1_lr_observation_local` v1. It applies to the exact component order
+`[subject_body, eye_left, eye_right, swim_bladder]`. `subject_body` is the
+whole-fish silhouette and therefore may and should overlap all three organ
+masks. Each organ must be contained by the body. The three organ pairs are
+mutually exclusive: the two eyes cannot overlap, and neither eye can overlap
+the swim bladder. The producer records violations but never changes pixels.
+
+Its ordered component metric axis is:
+
+1. foreground area divided by ROI area;
+2. 8-connected component count;
+3. largest-component fraction of foreground;
+4. 8-connected hole count;
+5. hole area divided by foreground plus hole area;
+6. largest canonical external-contour solidity;
+7. foreground ROI-border fraction; and
+8. largest canonical external-contour isoperimetric ratio.
+
+Its ordered observation metric axis is required-component present fraction;
+the fraction of each organ outside `subject_body`; and the intersection of each
+exclusive organ pair divided by the smaller component area. This denominator
+makes a small organ completely covered by a larger one report `1.0` rather
+than hiding the violation behind ROI area or union area. Relation metrics are
+invalid when either required operand is absent; the separate presence metric
+and missing-required-component flag preserve that evidence.
+
+The exact v1 relation tolerance is zero pixels after conversion to a fraction.
+Any containment or exclusion violation makes
+`proposed_observation_usable=false`, but remains an advisory finding rather
+than an accepted review decision or selector action. Missing or unavailable
+components make only their component proposal false. Multiple components,
+holes, and ROI-border contact are initially review findings, not automatic
+rejections. Solidity, area, and boundary-irregularity thresholds remain
+deliberately uncalibrated; changing thresholds produces a new policy digest.
+
+Empty masks retain valid zero area, component count, and hole count. Ratios
+whose denominator is zero use canonical NaN and `valid=false`. Area fraction
+is explicitly non-monotonic because both unusually small and unusually large
+masks may be suspicious. The v1 policy and deterministic in-memory reference
+kernel are in `src/fisheye/shared/zarr/subject_mask_quality_producer.py`; they
+reuse the canonical largest-contour selection and do not mutate the dense
+authority. The reference entry point explicitly rejects lazy Zarr mask arrays
+so it cannot accidentally load a full-duration dense authority. The future
+writer must run the same policy in bounded, whole-output-shard row blocks.
+Boundary noise, curvature variance, skeleton topology, probability confidence,
+and temporal discontinuity remain outside the first profile because they need
+additional method parameters, raw probabilities, component-specific policy,
+or longitudinal identity.
 
 Every derived cache receipt should freeze its schema/profile, source dense
 logical digest, accepted draft revision, component/row coverage, generator
@@ -1066,10 +1111,12 @@ This checklist is intentionally not authorization to mutate production.
 - [x] Add exact editable-draft audit/revision arrays and published derived-cache
   extension schemas.
 - [x] Add an exact source-bound subject-mask quality schema with multi-row,
-  empty-frame, source-binding, NaN-validity, and flag-registry tests.
+      empty-frame, source-binding, NaN-validity, and flag-registry tests.
+- [x] Add the first exact four-component QC producer policy/profile and
+      in-memory containment, exclusivity, validity, and no-mutation tests.
 - [ ] Add the closed subject-mask-quality run-manifest envelope, array/content
-  digests, metadata normalizer, persisted attribute, producer policy, and
-  selector-ineligible writer.
+      digests, metadata normalizer, persisted attribute, and selector-ineligible
+      writer.
 - [ ] Add exact component/reason registries and decoded-array validation.
 - [x] Add standard frame lookup and multi-observation tests.
 - [ ] Bind both schemas to exact crop identity, manifest, coordinate contract,

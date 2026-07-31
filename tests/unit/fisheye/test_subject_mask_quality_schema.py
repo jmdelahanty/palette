@@ -197,6 +197,18 @@ def test_subject_mask_quality_rejects_temporal_metrics_without_track_lineage() -
         )
 
 
+def test_subject_mask_quality_metric_can_declare_nonmonotonic_direction() -> None:
+    metric = SubjectMaskQualityMetricDefinition(
+        metric_id="area_fraction_roi",
+        metric_version=1,
+        units="fraction",
+        higher_is_worse=None,
+        description="Diagnostic with both low and high failure modes.",
+    )
+
+    assert metric.as_manifest()["higher_is_worse"] is None
+
+
 def test_subject_mask_quality_storage_is_byte_planned_and_immutable() -> None:
     plans = plan_subject_mask_quality_storage(_dimensions())
     assert tuple(entry.rule.path for entry in plans.entries) == (

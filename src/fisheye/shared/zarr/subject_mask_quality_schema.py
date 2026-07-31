@@ -71,7 +71,7 @@ class SubjectMaskQualityMetricDefinition:
     metric_id: str
     metric_version: int
     units: str
-    higher_is_worse: bool
+    higher_is_worse: bool | None
     description: str
 
     def __post_init__(self) -> None:
@@ -91,8 +91,8 @@ class SubjectMaskQualityMetricDefinition:
             raise ValueError("units must be one nonempty line.")
         if not description:
             raise ValueError("description cannot be empty.")
-        if type(self.higher_is_worse) is not bool:
-            raise TypeError("higher_is_worse must be an exact bool.")
+        if self.higher_is_worse is not None and type(self.higher_is_worse) is not bool:
+            raise TypeError("higher_is_worse must be an exact bool or None.")
         object.__setattr__(self, "metric_id", metric_id)
         object.__setattr__(self, "units", units)
         object.__setattr__(self, "description", description)
