@@ -908,6 +908,27 @@ def test_finalize_subject_mask_run_from_mixed_shards_requires_target_crop(monkey
         )
 
 
+def test_collection_same_crop_target_does_not_require_clipped_rebase_identity() -> None:
+    root = _build_sharded_subject_mask_root()
+    crop = root["crop_runs/crop_clip_a"]
+    del crop["source_clip_indices"]
+    del crop["source_clip_local_frame_indices"]
+    del crop["source_detect_row_index"]
+
+    source, collection = mod._load_subject_mask_source(
+        root,
+        subject_run=None,
+        subject_shard_runs=["subject_masks_clip_a"],
+        target_crop_run="crop_clip_a",
+    )
+
+    assert collection is not None
+    assert collection.source_crop_run == "crop_clip_a"
+    assert collection.source_crop_rebased_from_shards is False
+    np.testing.assert_array_equal(collection.source_crop_row_ids, np.asarray([0]))
+    np.testing.assert_array_equal(source.source_crop_row_ids[:], np.asarray([0]))
+
+
 def test_collection_worker_plan_reuses_parent_rebase_without_identity_map(monkeypatch) -> None:
     root = _build_sharded_subject_mask_root()
     source, collection = mod._load_subject_mask_source(

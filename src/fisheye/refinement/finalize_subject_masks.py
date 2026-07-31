@@ -741,6 +741,19 @@ def _resolve_subject_mask_crop_rebase(
     crop_parent = root.get("crop_runs")
     if crop_parent is None or target_crop_run not in crop_parent:
         raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
+
+    if unique_crop_runs == (str(target_crop_run),):
+        row_ids = np.concatenate(
+            [
+                np.asarray(
+                    shard.source.source_crop_row_ids[:], dtype=np.int64
+                ).reshape(-1)
+                for shard in shards
+            ],
+            axis=0,
+        )
+        return str(target_crop_run), row_ids, unique_crop_runs, False
+
     target_group = crop_parent[target_crop_run]
     missing_target = [name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in target_group]
     if missing_target:
