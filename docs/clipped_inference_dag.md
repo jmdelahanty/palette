@@ -127,7 +127,7 @@ detect array[22] -> sharded recording-order quality source
                  -> keyed detect-refine CPU bundle[22, max 4]
                  -> finalized detection collection
                                       |
-                         cache array[6 four-clip bundles]
+                    cache array[3 bounded bundles: 8 + 8 + 6]
                                       |
                              proxy crop binding
                                /              \
@@ -162,9 +162,11 @@ also include `LSB_JOBINDEX`, preventing two elements of the same array on one
 host from sharing a work directory.
 
 The cache is the physical crop materialization. Each cache array element owns
-up to four clips and keeps the cache builder's bounded parallel workers within
-one node. The proxy crop runs bind its
-rows to the canonical Zarr; there is no redundant standalone crop-image write.
+up to eight clips under the measured L4 default and keeps the cache builder's
+bounded parallel workers within one shared-mode GPU allocation. A 22-clip
+recording therefore uses three cache elements (`8 + 8 + 6`). The proxy crop
+runs bind its rows to the canonical Zarr; there is no redundant standalone
+crop-image write.
 Proxy creation remains one serial recording-level job because the clip proxies
 share the same `crop_runs` parent metadata; parallelizing those writes would
 need an explicit parent-metadata transaction. Mask-package finalizers remain
