@@ -9,6 +9,7 @@ publishes a closed-world Zarr v3 store with consolidated metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import json
 from pathlib import Path
@@ -41,6 +42,11 @@ from fisheye.shared.zarr.subject_mask_storage import (
     plan_raw_subject_mask_storage,
     plan_refined_subject_mask_publication_storage,
 )
+from fisheye.shared.zarr.subject_mask_validation_receipt import (
+    SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM,
+    SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM,
+    validate_subject_mask_source_validation_receipt,
+)
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
@@ -52,16 +58,24 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID = "palette.subject_mask_core.run_manifest"
-SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION = 1
+SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION = 2
 SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
+SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR = "source_validation_receipt.json"
 SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_ID = "palette.subject_mask_core.shadow_publication"
 SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_VERSION = 1
-SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
+SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM = SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM
 SUBJECT_MASK_CORE_METADATA_DIGEST_SCOPE = (
     "exact_run_group_and_array_declarations_redacting_only_run_manifest"
 )
 SUBJECT_MASK_PROB_MAX_CANONICALIZATION = "cpu_max_encoded_then_decode_float32_v1"
 SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE = float(np.finfo(np.float32).eps)
+
+
+class SubjectMaskCoreValidationMode(str, Enum):
+    """Publication-time validation cost and evidence boundary."""
+
+    REFERENCE_FULL = "reference_full_v1"
+    PRODUCTION_STREAMING = "production_streaming_v1"
 
 
 @dataclass(frozen=True)
@@ -73,6 +87,7 @@ class SubjectMaskCorePublication:
     dimensions: SubjectMaskDimensions
     components: SubjectMaskComponentRegistry
     plans: SubjectMaskStoragePlanSet
+    validation_mode: SubjectMaskCoreValidationMode
     source_manifest: Mapping[str, Any]
     manifest: Mapping[str, Any]
     phase_seconds: Mapping[str, float]
@@ -216,19 +231,165 @@ def _group_for_path(group: Any, path: str) -> tuple[Any, str]:
     return target, parts[-1]
 
 
-def _write_physical_units(destination: Any, source: Any, plan: Any) -> int:
+def _write_physical_units(
+    destination: Any,
+    source: Any,
+    plan: Any,
+    *,
+    source_validation_record: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    """Write whole physical units and hash the exact source bytes once."""
+
     unit = plan.shard_shape or plan.chunk_shape
     if unit is None:
         raise ValueError("Subject-mask core arrays cannot be scalar.")
-    shape, _dtype = _shape_dtype(source)
+    shape, dtype = _shape_dtype(source)
     trailing = (slice(None),) * (len(shape) - 1)
     writes = 0
-    for start in range(0, shape[0], max(1, int(unit[0]))):
+    logical_digest = hashlib.sha256()
+    samples: list[dict[str, object]] = []
+    expected_units: list[Mapping[str, Any]] | None = None
+    expected_unit_index = 0
+    expected_unit_digest = hashlib.sha256()
+    if source_validation_record is not None:
+        algorithm = source_validation_record.get("digest_algorithm")
+        if algorithm == SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM:
+            raw_units = source_validation_record.get("units")
+            if not isinstance(raw_units, list) or not raw_units:
+                raise ValueError("Source-validation row units are absent.")
+            expected_units = list(raw_units)
+        elif algorithm != SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM:
+            raise ValueError("Source-validation array digest algorithm is unsupported.")
+    starts = tuple(range(0, shape[0], max(1, int(unit[0]))))
+    for index, start in enumerate(starts):
         stop = min(shape[0], start + max(1, int(unit[0])))
         selection = (slice(start, stop), *trailing)
-        destination[selection] = np.asarray(source[selection])
+        values = np.ascontiguousarray(np.asarray(source[selection]))
+        if values.dtype.hasobject:
+            raise TypeError("Subject-mask core arrays cannot use object dtype.")
+        unit_bytes = values.view(np.uint8)
+        logical_digest.update(unit_bytes)
+        if expected_units is not None:
+            cursor = int(start)
+            while cursor < int(stop):
+                if expected_unit_index >= len(expected_units):
+                    raise RuntimeError(
+                        "Bytes streamed into the subject-mask publication differ "
+                        "from the validated source receipt."
+                    )
+                expected = expected_units[expected_unit_index]
+                expected_start = int(expected["start_row"])
+                expected_stop = int(expected["stop_row"])
+                if not (expected_start <= cursor < expected_stop):
+                    raise RuntimeError(
+                        "Bytes streamed into the subject-mask publication differ "
+                        "from the validated source receipt."
+                    )
+                segment_stop = min(int(stop), expected_stop)
+                local_start = cursor - int(start)
+                local_stop = segment_stop - int(start)
+                segment = np.ascontiguousarray(values[local_start:local_stop])
+                expected_unit_digest.update(segment.view(np.uint8))
+                if segment_stop == expected_stop:
+                    if expected_unit_digest.hexdigest() != expected.get("sha256"):
+                        raise RuntimeError(
+                            "Bytes streamed into the subject-mask publication differ "
+                            "from the validated source receipt."
+                        )
+                    expected_unit_index += 1
+                    expected_unit_digest = hashlib.sha256()
+                cursor = segment_stop
+        destination[selection] = values
+        if index == 0 or index == len(starts) - 1:
+            samples.append(
+                {
+                    "start_row": int(start),
+                    "stop_row": int(stop),
+                    "sha256": hashlib.sha256(unit_bytes).hexdigest(),
+                }
+            )
         writes += 1
-    return writes
+    logical_sha256 = logical_digest.hexdigest()
+    if source_validation_record is not None:
+        if expected_units is not None:
+            if expected_unit_index != len(expected_units):
+                raise RuntimeError(
+                    "Bytes streamed into the subject-mask publication differ from "
+                    "the validated source receipt."
+                )
+        elif logical_sha256 != source_validation_record.get("sha256"):
+            raise RuntimeError(
+                "Bytes streamed into the subject-mask publication differ from "
+                "the validated source receipt."
+            )
+    return {
+        "shape": list(shape),
+        "dtype": str(dtype),
+        "digest_algorithm": SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM,
+        "sha256": logical_sha256,
+        "physical_write_count": writes,
+        "bounded_reopen_samples": samples,
+    }
+
+
+def _streamed_array_document(
+    write_receipts: Mapping[str, Mapping[str, object]], paths: tuple[str, ...]
+) -> dict[str, object]:
+    return {
+        path: {
+            "shape": list(write_receipts[path]["shape"]),
+            "dtype": str(write_receipts[path]["dtype"]),
+            "digest_algorithm": str(write_receipts[path]["digest_algorithm"]),
+            "sha256": str(write_receipts[path]["sha256"]),
+        }
+        for path in paths
+    }
+
+
+def _validate_reopened_metadata_and_samples(
+    *,
+    reopened_arrays: Mapping[str, Any],
+    paths: tuple[str, ...],
+    schema: RawSubjectMaskSchema | RefinedSubjectMaskCoreSchema,
+    dimensions: SubjectMaskDimensions,
+    write_receipts: Mapping[str, Mapping[str, object]],
+) -> None:
+    bindings = {binding.path: binding for binding in schema.bindings}
+    for path in paths:
+        binding = bindings[path]
+        contract = schema.contracts.resolve(
+            binding.contract_id, binding.contract_version
+        )
+        errors = contract.validate_observation(
+            reopened_arrays[path], dimensions=dimensions.contract_dimensions
+        )
+        if errors:
+            raise RuntimeError(
+                f"Reopened subject-mask array {path!r} violates its contract: "
+                + "; ".join(errors)
+            )
+        shape, _dtype = _shape_dtype(reopened_arrays[path])
+        trailing = (slice(None),) * (len(shape) - 1)
+        samples = write_receipts[path].get("bounded_reopen_samples")
+        if not isinstance(samples, list) or not samples:
+            raise RuntimeError(
+                f"Subject-mask write receipt lacks samples for {path!r}."
+            )
+        for sample in samples:
+            if not isinstance(sample, Mapping):
+                raise RuntimeError(f"Subject-mask sample for {path!r} is malformed.")
+            start = int(sample["start_row"])
+            stop = int(sample["stop_row"])
+            values = np.ascontiguousarray(
+                np.asarray(reopened_arrays[path][(slice(start, stop), *trailing)])
+            )
+            if hashlib.sha256(values.view(np.uint8)).hexdigest() != sample.get(
+                "sha256"
+            ):
+                raise RuntimeError(
+                    f"Reopened subject-mask boundary sample differs for {path!r} "
+                    f"rows {start}:{stop}."
+                )
 
 
 def _array_document(
@@ -309,9 +470,14 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     include_threshold_cache: bool = False,
     profile: StorageProfile = PUBLISHED_HTTP_V1,
     created_by: str = "subject_mask_core_shadow",
+    validation_mode: SubjectMaskCoreValidationMode | str = (
+        SubjectMaskCoreValidationMode.REFERENCE_FULL
+    ),
+    source_validation_receipt: Mapping[str, Any] | None = None,
 ) -> SubjectMaskCorePublication:
     """Validate and rematerialize one complete raw or refined core."""
 
+    validation_mode = SubjectMaskCoreValidationMode(validation_mode)
     output_path = destination.expanduser().resolve()
     if output_path.exists():
         raise FileExistsError(f"Subject-mask core destination exists: {output_path}")
@@ -341,27 +507,58 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     paths = tuple(entry.rule.path for entry in plans.entries)
     arrays = {path: source_arrays[path] for path in paths}
     canonicalization: dict[str, object] | None = None
-    if isinstance(schema, RawSubjectMaskSchema):
-        arrays, canonicalization = _canonicalize_raw_probability_max(arrays)
-        schema.require(
-            arrays,
+    if validation_mode is SubjectMaskCoreValidationMode.REFERENCE_FULL:
+        if source_validation_receipt is not None:
+            raise ValueError(
+                "Reference-full publication does not consume a source receipt."
+            )
+        if isinstance(schema, RawSubjectMaskSchema):
+            arrays, canonicalization = _canonicalize_raw_probability_max(arrays)
+            schema.require(
+                arrays,
+                dimensions=dimensions,
+                components=components,
+                threshold=float(threshold),
+                source_crop_arrays=source_crop_arrays,
+            )
+        else:
+            schema.require(
+                arrays,
+                dimensions=dimensions,
+                components=components,
+                source_crop_arrays=source_crop_arrays,
+            )
+    else:
+        if source_validation_receipt is None:
+            raise ValueError(
+                "Production-streaming publication requires a source-validation receipt."
+            )
+        source_validation_receipt = validate_subject_mask_source_validation_receipt(
+            source_validation_receipt,
+            kind=kind,
+            source_run_path=source_run_path,
+            source_manifest=source_manifest,
+            schema=schema,
+            arrays=arrays,
             dimensions=dimensions,
             components=components,
-            threshold=float(threshold),
-            source_crop_arrays=source_crop_arrays,
+            threshold=(
+                float(threshold) if isinstance(schema, RawSubjectMaskSchema) else None
+            ),
         )
+        canonicalization = {
+            "policy": "upstream_validated_exact_source_receipt_v1",
+            "source_receipt_payload_digest": source_validation_receipt[
+                "payload_digest"
+            ],
+        }
+    if isinstance(schema, RawSubjectMaskSchema):
         logical_schema = schema.as_manifest(
             dimensions=dimensions,
             components=components,
             threshold=float(threshold),
         )
     else:
-        schema.require(
-            arrays,
-            dimensions=dimensions,
-            components=components,
-            source_crop_arrays=source_crop_arrays,
-        )
         logical_schema = schema.as_manifest(
             dimensions=dimensions,
             components=components,
@@ -402,11 +599,17 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "logical_schema": logical_schema,
             "storage_plan": plans.as_manifest(),
             "component_registry": components.as_manifest(),
+            "validation_mode": validation_mode.value,
             "derived_metric_canonicalization": canonicalization,
         }
     )
     destination_arrays: dict[str, Any] = {}
     write_counts: dict[str, int] = {}
+    write_receipts: dict[str, dict[str, object]] = {}
+    source_array_validation: Mapping[str, Any] = {}
+    if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_STREAMING:
+        assert source_validation_receipt is not None
+        source_array_validation = source_validation_receipt["payload"]["arrays"]
     phase = time.perf_counter()
     bindings = {binding.path: binding for binding in schema.bindings}
     for entry in plans.entries:
@@ -428,11 +631,30 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
                 "artifact_class": "subject_mask_scientific_core",
             },
         )
-        write_counts[path] = _write_physical_units(
-            destination_array, arrays[path], entry.plan
-        )
+        try:
+            write_receipt = _write_physical_units(
+                destination_array,
+                arrays[path],
+                entry.plan,
+                source_validation_record=source_array_validation.get(path),
+            )
+        except Exception as exc:
+            run.attrs["status"] = "failed"
+            run.attrs["validation_failure"] = "physical_write_or_receipt_mismatch"
+            mark_run_failed(
+                run,
+                run_name=str(run_id),
+                error=f"Subject-mask physical publication failed: {exc}",
+            )
+            raise
+        write_receipts[path] = write_receipt
+        write_counts[path] = int(write_receipt["physical_write_count"])
         destination_arrays[path] = destination_array
     phases["physical_unit_publication"] = time.perf_counter() - phase
+    streamed_array_document: dict[str, object] | None = None
+    if validation_mode is SubjectMaskCoreValidationMode.PRODUCTION_STREAMING:
+        assert source_validation_receipt is not None
+        streamed_array_document = _streamed_array_document(write_receipts, paths)
     run.attrs["physical_write_counts"] = write_counts
     run.attrs["status"] = "complete"
     mark_run_complete(run, run_name=str(run_id))
@@ -446,7 +668,11 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     phases["first_consolidation"] = time.perf_counter() - phase
 
     phase = time.perf_counter()
-    array_document = _array_document(destination_arrays, paths)
+    if validation_mode is SubjectMaskCoreValidationMode.REFERENCE_FULL:
+        array_document = _array_document(destination_arrays, paths)
+    else:
+        assert streamed_array_document is not None
+        array_document = streamed_array_document
     content = {
         "schema_id": "palette.subject_mask_core.logical_content",
         "schema_version": 1,
@@ -455,6 +681,26 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         "components": components.as_manifest(),
         "arrays": array_document,
     }
+    source_validation_binding: dict[str, object] | None = None
+    source_validation_receipt_bytes: bytes | None = None
+    if source_validation_receipt is not None:
+        source_validation_receipt_bytes = canonical_json_bytes(
+            source_validation_receipt
+        )
+        coverage = source_validation_receipt["payload"]["semantic_coverage"]
+        receipt_arrays = source_validation_receipt["payload"]["arrays"]
+        source_validation_binding = {
+            "schema_id": source_validation_receipt["schema_id"],
+            "schema_version": source_validation_receipt["schema_version"],
+            "payload_digest": source_validation_receipt["payload_digest"],
+            "storage": "strict_json_sidecar_v1",
+            "relative_path": SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR,
+            "document_sha256": hashlib.sha256(
+                source_validation_receipt_bytes
+            ).hexdigest(),
+            "semantic_unit_count": coverage["unit_count"],
+            "array_count": len(receipt_arrays),
+        }
     manifest_payload: dict[str, object] = {
         "run_id": str(run_id),
         "stage_family": family,
@@ -473,10 +719,25 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "run_path": str(source_run_path),
             "manifest_digest": canonical_json_sha256(source_manifest),
             "manifest": dict(source_manifest),
+            "validation_receipt": source_validation_binding,
         },
         "write_receipt": {
+            "validation_mode": validation_mode.value,
             "output_write_unit": "complete_outer_shard_or_unsharded_chunk",
             "physical_write_counts": write_counts,
+            "logical_hash_timing": (
+                "separate_postwrite_full_read_v1"
+                if validation_mode is SubjectMaskCoreValidationMode.REFERENCE_FULL
+                else "computed_during_required_publication_read_v1"
+            ),
+            "reopen_validation": (
+                "full_schema_and_full_logical_hash_v1"
+                if validation_mode is SubjectMaskCoreValidationMode.REFERENCE_FULL
+                else "metadata_plus_first_last_physical_row_band_samples_v1"
+            ),
+            "bounded_reopen_samples": {
+                path: write_receipts[path]["bounded_reopen_samples"] for path in paths
+            },
             "parallel_write_policy": (
                 "single_writer_v1_future_workers_require_disjoint_whole_shards"
             ),
@@ -508,35 +769,56 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         raise RuntimeError(
             "Subject-mask metadata digest changed after manifest insertion."
         )
+    if source_validation_receipt_bytes is not None:
+        (output_path / SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR).write_bytes(
+            source_validation_receipt_bytes
+        )
     reopened = zarr.open_group(
         str(output_path / family / str(run_id)),
         mode="r",
         use_consolidated=False,
     )
     reopened_arrays = {path: reopened[path] for path in paths}
-    if isinstance(schema, RawSubjectMaskSchema):
-        schema.require(
-            reopened_arrays,
-            dimensions=dimensions,
-            components=components,
-            threshold=float(threshold),
-            source_crop_arrays=source_crop_arrays,
-        )
+    if validation_mode is SubjectMaskCoreValidationMode.REFERENCE_FULL:
+        if isinstance(schema, RawSubjectMaskSchema):
+            schema.require(
+                reopened_arrays,
+                dimensions=dimensions,
+                components=components,
+                threshold=float(threshold),
+                source_crop_arrays=source_crop_arrays,
+            )
+        else:
+            schema.require(
+                reopened_arrays,
+                dimensions=dimensions,
+                components=components,
+                source_crop_arrays=source_crop_arrays,
+            )
+        if _array_document(reopened_arrays, paths) != array_document:
+            raise RuntimeError("Reopened subject-mask logical content differs.")
     else:
-        schema.require(
-            reopened_arrays,
+        _validate_reopened_metadata_and_samples(
+            reopened_arrays=reopened_arrays,
+            paths=paths,
+            schema=schema,
             dimensions=dimensions,
-            components=components,
-            source_crop_arrays=source_crop_arrays,
+            write_receipts=write_receipts,
         )
-    if _array_document(reopened_arrays, paths) != array_document:
-        raise RuntimeError("Reopened subject-mask logical content differs.")
+        assert source_validation_receipt is not None
+        persisted_receipt = _strict_json(
+            output_path / SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR
+        )
+        if persisted_receipt != source_validation_receipt:
+            raise RuntimeError("Persisted source-validation receipt differs.")
     if reopened.attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT:
         raise RuntimeError("Subject-mask completion contract is absent.")
     if reopened.attrs.get(RUN_COMPLETION_STATUS_ATTR) != "complete":
         raise RuntimeError("Subject-mask completion status is not complete.")
     if reopened.attrs.get("stage_selector_eligible") is not False:
         raise RuntimeError("Subject-mask core publication is selector eligible.")
+    if reopened.attrs.get("validation_mode") != validation_mode.value:
+        raise RuntimeError("Subject-mask publication validation mode changed.")
     if reopened.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE) != manifest:
         raise RuntimeError("Persisted subject-mask manifest differs.")
     phases["final_consolidation_and_reopen_gate"] = time.perf_counter() - phase
@@ -548,6 +830,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         dimensions=dimensions,
         components=components,
         plans=plans,
+        validation_mode=validation_mode,
         source_manifest=dict(source_manifest),
         manifest=manifest,
         phase_seconds=phases,
@@ -562,6 +845,8 @@ __all__ = [
     "SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE",
     "SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID",
     "SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION",
+    "SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR",
     "SubjectMaskCorePublication",
+    "SubjectMaskCoreValidationMode",
     "publish_selector_ineligible_subject_mask_core_snapshot",
 ]

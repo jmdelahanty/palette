@@ -455,8 +455,17 @@ def _read_benchmark(
     rng = np.random.default_rng(20260730)
     for name, (path, run_path, payload_path) in stores.items():
         opened = time.perf_counter()
-        root = zarr.open_group(str(path), mode="r", use_consolidated=True)
-        run = root[run_path]
+        # These stores were created earlier in this process.  Their publishers
+        # have already gated direct/consolidated declaration equivalence, while
+        # this phase is intended to measure payload reads rather than metadata
+        # traversal.  Open the exact mutable-local run through direct metadata:
+        # nested Zarr v3 group envelopes may otherwise retain an empty inline
+        # consolidated map and hide arrays that are present in direct metadata.
+        run = zarr.open_group(
+            str(path / run_path),
+            mode="r",
+            use_consolidated=False,
+        )
         open_seconds = time.perf_counter() - opened
         started = time.perf_counter()
         offsets = np.asarray(run["frame_row_offsets"][...], dtype=np.int64)

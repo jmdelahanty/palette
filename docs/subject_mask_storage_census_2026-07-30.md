@@ -77,6 +77,11 @@ mask-observation rows in Cam2010095:
 - [ ] Add accepted-draft-to-new-publication compaction and physical replanning.
 - [ ] Run the full-duration publication/write/read benchmark before profile
       activation.
+- [x] Freeze explicit reference-full and production-streaming publication
+      validation modes plus a digest-bound incremental source receipt; see
+      `docs/subject_mask_production_validation_2026-07-31.md`.
+- [ ] Adopt incremental validation-receipt emission in maintained inference and
+      refinement before attempting the full-duration mask surface.
 
 ### 22,926-row cache-pipeline checkpoint
 

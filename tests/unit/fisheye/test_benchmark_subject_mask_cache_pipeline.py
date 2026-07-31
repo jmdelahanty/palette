@@ -9,6 +9,7 @@ import pytest
 
 from fisheye.diagnostics.benchmark_subject_mask_cache_pipeline import (
     _bound_run_manifest,
+    _read_benchmark,
     _refined_arrays,
     _require_destination,
     _require_existing_node_local,
@@ -148,3 +149,64 @@ def test_bound_run_manifest_recomputes_payload_digest() -> None:
     _Group.attrs["run_manifest"]["payload"]["stage"] = "tampered"
     with pytest.raises(ValueError, match="payload digest is invalid"):
         _bound_run_manifest(_Group(), label="fixture")
+
+
+def test_read_benchmark_opens_exact_local_runs_without_consolidated_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    offsets = np.asarray([0, 2, 2, 3], dtype=np.int64)
+    payloads = {
+        "mask_probs_roi": np.zeros((3, 4, 2, 2), dtype=np.float32),
+        "masks_roi": np.zeros((3, 4, 2, 2), dtype=np.uint8),
+        "observation_flags": np.zeros((3,), dtype=np.uint16),
+    }
+    opened: list[tuple[Path, str, bool]] = []
+
+    def fake_open_group(
+        path: str, *, mode: str, use_consolidated: bool
+    ) -> dict[str, np.ndarray]:
+        resolved = Path(path)
+        opened.append((resolved, mode, use_consolidated))
+        if "subject_mask_quality_runs" in resolved.parts:
+            payload_name = "observation_flags"
+        elif "refined_subject_masks_runs" in resolved.parts:
+            payload_name = "masks_roi"
+        else:
+            payload_name = "mask_probs_roi"
+        return {
+            "frame_row_offsets": offsets,
+            payload_name: payloads[payload_name],
+        }
+
+    monkeypatch.setattr(
+        "fisheye.diagnostics.benchmark_subject_mask_cache_pipeline.zarr.open_group",
+        fake_open_group,
+    )
+
+    result = _read_benchmark(
+        raw_store=tmp_path / "raw.zarr",
+        raw_run="raw",
+        refined_store=tmp_path / "refined.zarr",
+        refined_run="refined",
+        quality_store=tmp_path / "quality.zarr",
+        quality_run="quality",
+    )
+
+    assert set(result) == {"raw", "refined", "quality"}
+    assert opened == [
+        (
+            tmp_path / "raw.zarr" / "subject_mask_runs" / "raw",
+            "r",
+            False,
+        ),
+        (
+            tmp_path / "refined.zarr" / "refined_subject_masks_runs" / "refined",
+            "r",
+            False,
+        ),
+        (
+            tmp_path / "quality.zarr" / "subject_mask_quality_runs" / "quality",
+            "r",
+            False,
+        ),
+    ]
