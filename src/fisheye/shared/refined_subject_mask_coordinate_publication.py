@@ -122,28 +122,17 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STATUS_RUNNING,
 )
 
-
-REFINED_SUBJECT_MASK_COMPONENT_LABELS_ATTR = (
-    "refined_subject_mask_component_labels"
-)
-REFINED_SUBJECT_MASK_SOURCE_AUTHORITY_ATTR = (
-    "refined_subject_mask_source_authority"
-)
+REFINED_SUBJECT_MASK_COMPONENT_LABELS_ATTR = "refined_subject_mask_component_labels"
+REFINED_SUBJECT_MASK_SOURCE_AUTHORITY_ATTR = "refined_subject_mask_source_authority"
 REFINED_SUBJECT_MASK_REFINEMENT_AUTHORITY_ATTR = (
     "refined_subject_mask_refinement_authority"
 )
-REFINED_SUBJECT_MASK_COORDINATE_CONTEXT_ATTR = (
-    "refined_subject_mask_coordinate_context"
-)
-REFINED_SUBJECT_MASK_SURFACE_INVENTORY_ATTR = (
-    "refined_subject_mask_surface_inventory"
-)
+REFINED_SUBJECT_MASK_COORDINATE_CONTEXT_ATTR = "refined_subject_mask_coordinate_context"
+REFINED_SUBJECT_MASK_SURFACE_INVENTORY_ATTR = "refined_subject_mask_surface_inventory"
 REFINED_SUBJECT_MASK_ARRAY_INTERPRETATION_ATTR = (
     "refined_subject_mask_array_interpretation"
 )
-REFINED_SUBJECT_MASK_RAGGED_GEOMETRY_ATTR = (
-    "refined_subject_mask_ragged_geometry"
-)
+REFINED_SUBJECT_MASK_RAGGED_GEOMETRY_ATTR = "refined_subject_mask_ragged_geometry"
 REFINED_SUBJECT_MASK_ROI_REFERENCE_EXTENT_ATTR = (
     "refined_subject_mask_roi_reference_extent"
 )
@@ -153,18 +142,14 @@ REFINED_SUBJECT_MASK_ASSIGNMENT_KEYPOINT_AUTHORITY_ATTR = (
 REFINED_SUBJECT_MASK_COMPONENT_QC_INVENTORY_ATTR = (
     "refined_subject_mask_component_qc_inventory"
 )
-REFINED_SUBJECT_MASK_ACTIVATION_RECEIPT_ATTR = (
-    "refined_subject_mask_activation_receipt"
-)
+REFINED_SUBJECT_MASK_ACTIVATION_RECEIPT_ATTR = "refined_subject_mask_activation_receipt"
 REFINED_SUBJECT_MASK_SCIENTIFIC_MANIFEST_ATTR = (
     "refined_subject_mask_scientific_manifest"
 )
 REFINED_SUBJECT_MASK_MEASUREMENT_AUTHORITY_ATTR = (
     "refined_subject_mask_measurement_authority"
 )
-REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR = (
-    "refined_subject_mask_publication_owner"
-)
+REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR = "refined_subject_mask_publication_owner"
 REFINED_SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR = (
     "refined_subject_mask_publication_lease"
 )
@@ -294,27 +279,132 @@ _COMPONENT_METRIC_DEFINITIONS: Mapping[str, tuple[str, str, str, str]] = {
     ),
 }
 _FINALIZATION_METRIC_DEFINITIONS: Mapping[str, tuple[str, str, str, str]] = {
-    "added_area_px": ("added_foreground_area", "px^2", "smart_finalizer_added_pixel_count_v1", "area"),
-    "area_px_after": ("foreground_area_after", "px^2", "smart_finalizer_output_pixel_count_v1", "area"),
-    "area_px_before": ("foreground_area_before", "px^2", "smart_finalizer_input_pixel_count_v1", "area"),
-    "changed_area_fraction": ("changed_area_fraction", "1", "smart_finalizer_changed_area_fraction_v1", "fraction"),
-    "changed_area_px": ("changed_foreground_area", "px^2", "smart_finalizer_changed_pixel_count_v1", "area"),
-    "component_count_after": ("connected_component_count_after", "1", "smart_finalizer_output_component_count_v1", "count"),
-    "component_count_before": ("connected_component_count_before", "1", "smart_finalizer_input_component_count_v1", "count"),
-    "hole_area_fraction_after": ("hole_area_fraction_after", "1", "smart_finalizer_output_hole_area_fraction_v1", "fraction"),
-    "hole_area_fraction_before": ("hole_area_fraction_before", "1", "smart_finalizer_input_hole_area_fraction_v1", "fraction"),
-    "hole_count_after": ("hole_count_after", "1", "smart_finalizer_output_hole_count_v1", "count"),
-    "hole_count_before": ("hole_count_before", "1", "smart_finalizer_input_hole_count_v1", "count"),
-    "largest_component_fraction_after": ("largest_component_fraction_after", "1", "smart_finalizer_output_largest_component_fraction_v1", "fraction"),
-    "largest_component_fraction_before": ("largest_component_fraction_before", "1", "smart_finalizer_input_largest_component_fraction_v1", "fraction"),
-    "removed_area_fraction": ("removed_area_fraction", "1", "smart_finalizer_removed_area_fraction_v1", "fraction"),
-    "removed_area_px": ("removed_foreground_area", "px^2", "smart_finalizer_removed_pixel_count_v1", "area"),
-    "removed_component_count": ("removed_component_count", "1", "smart_finalizer_removed_component_count_v1", "count"),
-    "removed_high_prob_area_px": ("removed_high_probability_area", "px^2", "smart_finalizer_removed_high_probability_pixel_count_v1", "area"),
-    "removed_prob_mass": ("removed_probability_mass", "px^2", "smart_finalizer_removed_probability_mass_v1", "area"),
-    "removed_prob_mass_fraction": ("removed_probability_mass_fraction", "1", "smart_finalizer_removed_probability_mass_fraction_v1", "fraction"),
-    "quality_code": ("review_quality_code", "1", "smart_finalizer_review_routing_code_v1", "categorical"),
-    "quality_score": ("review_quality_score", "1", "smart_finalizer_review_routing_score_v1", "score"),
+    "added_area_px": (
+        "added_foreground_area",
+        "px^2",
+        "smart_finalizer_added_pixel_count_v1",
+        "area",
+    ),
+    "area_px_after": (
+        "foreground_area_after",
+        "px^2",
+        "smart_finalizer_output_pixel_count_v1",
+        "area",
+    ),
+    "area_px_before": (
+        "foreground_area_before",
+        "px^2",
+        "smart_finalizer_input_pixel_count_v1",
+        "area",
+    ),
+    "changed_area_fraction": (
+        "changed_area_fraction",
+        "1",
+        "smart_finalizer_changed_area_fraction_v1",
+        "fraction",
+    ),
+    "changed_area_px": (
+        "changed_foreground_area",
+        "px^2",
+        "smart_finalizer_changed_pixel_count_v1",
+        "area",
+    ),
+    "component_count_after": (
+        "connected_component_count_after",
+        "1",
+        "smart_finalizer_output_component_count_v1",
+        "count",
+    ),
+    "component_count_before": (
+        "connected_component_count_before",
+        "1",
+        "smart_finalizer_input_component_count_v1",
+        "count",
+    ),
+    "hole_area_fraction_after": (
+        "hole_area_fraction_after",
+        "1",
+        "smart_finalizer_output_hole_area_fraction_v1",
+        "fraction",
+    ),
+    "hole_area_fraction_before": (
+        "hole_area_fraction_before",
+        "1",
+        "smart_finalizer_input_hole_area_fraction_v1",
+        "fraction",
+    ),
+    "hole_count_after": (
+        "hole_count_after",
+        "1",
+        "smart_finalizer_output_hole_count_v1",
+        "count",
+    ),
+    "hole_count_before": (
+        "hole_count_before",
+        "1",
+        "smart_finalizer_input_hole_count_v1",
+        "count",
+    ),
+    "largest_component_fraction_after": (
+        "largest_component_fraction_after",
+        "1",
+        "smart_finalizer_output_largest_component_fraction_v1",
+        "fraction",
+    ),
+    "largest_component_fraction_before": (
+        "largest_component_fraction_before",
+        "1",
+        "smart_finalizer_input_largest_component_fraction_v1",
+        "fraction",
+    ),
+    "removed_area_fraction": (
+        "removed_area_fraction",
+        "1",
+        "smart_finalizer_removed_area_fraction_v1",
+        "fraction",
+    ),
+    "removed_area_px": (
+        "removed_foreground_area",
+        "px^2",
+        "smart_finalizer_removed_pixel_count_v1",
+        "area",
+    ),
+    "removed_component_count": (
+        "removed_component_count",
+        "1",
+        "smart_finalizer_removed_component_count_v1",
+        "count",
+    ),
+    "removed_high_prob_area_px": (
+        "removed_high_probability_area",
+        "px^2",
+        "smart_finalizer_removed_high_probability_pixel_count_v1",
+        "area",
+    ),
+    "removed_prob_mass": (
+        "removed_probability_mass",
+        "px^2",
+        "smart_finalizer_removed_probability_mass_v1",
+        "area",
+    ),
+    "removed_prob_mass_fraction": (
+        "removed_probability_mass_fraction",
+        "1",
+        "smart_finalizer_removed_probability_mass_fraction_v1",
+        "fraction",
+    ),
+    "quality_code": (
+        "review_quality_code",
+        "1",
+        "smart_finalizer_review_routing_code_v1",
+        "categorical",
+    ),
+    "quality_score": (
+        "review_quality_score",
+        "1",
+        "smart_finalizer_review_routing_score_v1",
+        "score",
+    ),
 }
 
 
@@ -343,8 +433,10 @@ def _canonical_path(value: str, *, prefix: str, label: str) -> str:
     if not isinstance(value, str):
         _fail(f"{label} must be one canonical archive-relative path.")
     path = value.strip().strip("/")
-    if path != value or not path.startswith(prefix) or any(
-        part in {"", ".", ".."} for part in path.split("/")
+    if (
+        path != value
+        or not path.startswith(prefix)
+        or any(part in {"", ".", ".."} for part in path.split("/"))
     ):
         _fail(f"{label} path {value!r} is not canonical or uses the wrong parent.")
     return path
@@ -551,11 +643,11 @@ def _record_pointer(value: BoundCoordinateRecord) -> dict[str, str]:
 
 
 def _publication_owner(run: Any, *, expected: str | None = None) -> str:
-    value = getattr(run, "attrs", {}).get(
-        REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR
-    )
+    value = getattr(run, "attrs", {}).get(REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR)
     if not isinstance(value, str) or _PUBLICATION_OWNER_RE.fullmatch(value) is None:
-        _fail("Canonical refined subject-mask run lacks one unguessable publication owner.")
+        _fail(
+            "Canonical refined subject-mask run lacks one unguessable publication owner."
+        )
     if expected is not None and value != expected:
         _fail("Canonical refined subject-mask run was replaced by another owner.")
     return value
@@ -659,7 +751,9 @@ def _restore_attrs(
         except BaseException as exc:  # pragma: no cover - hostile store
             failures.append(f"{path}: {exc}")
     if failures:
-        raise RuntimeError(f"Refined coordinate attrs rollback was incomplete: {failures!r}.")
+        raise RuntimeError(
+            f"Refined coordinate attrs rollback was incomplete: {failures!r}."
+        )
 
 
 def _delete_created(
@@ -689,7 +783,9 @@ def _delete_created(
             continue
         survivors.append(path)
     if survivors:
-        raise RuntimeError(f"Created coordinate nodes survived rollback: {survivors!r}.")
+        raise RuntimeError(
+            f"Created coordinate nodes survived rollback: {survivors!r}."
+        )
 
 
 def _labels(value: Sequence[str]) -> tuple[str, ...]:
@@ -803,16 +899,22 @@ def _assignment_keypoint_record(
     if not context.run_path.startswith("keypoints_runs/"):
         _fail("Canonical refined eye assignment accepts raw keypoints_runs only.")
     if assignment_contract != "canonical_v2_exact":
-        _fail("Refined eye assignment lacks exact canonical keypoint contract metadata.")
+        _fail(
+            "Refined eye assignment lacks exact canonical keypoint contract metadata."
+        )
     for name, expected in (
         ("assignment_keypoint_coordinate_run_path", context.run_path),
         ("assignment_keypoint_group", "keypoints_runs"),
         ("assignment_keypoints_run", context.run_path.split("/", 1)[1]),
     ):
         if run.attrs.get(name) != expected:
-            _fail(f"Refined eye assignment {name} differs from its sealed keypoint source.")
+            _fail(
+                f"Refined eye assignment {name} differs from its sealed keypoint source."
+            )
     if context.source.crop_path != source.source.crop_path:
-        _fail("Assignment keypoints and raw subject masks use different exact crop runs.")
+        _fail(
+            "Assignment keypoints and raw subject masks use different exact crop runs."
+        )
     source_run = source._run_group
     keypoint_run = context._run_group
     source_attrs = source_run.attrs
@@ -827,9 +929,13 @@ def _assignment_keypoint_record(
     if bool(assignment_pair[0]) != bool(assignment_pair[1]):
         _fail("Canonical raw subject-mask source has incomplete assignment_* lineage.")
     if bool(source_pair[0]) != bool(source_pair[1]):
-        _fail("Canonical raw subject-mask source has incomplete source_* keypoint lineage.")
-    if all(assignment_pair) and all(source_pair) and tuple(map(str, assignment_pair)) != tuple(
-        map(str, source_pair)
+        _fail(
+            "Canonical raw subject-mask source has incomplete source_* keypoint lineage."
+        )
+    if (
+        all(assignment_pair)
+        and all(source_pair)
+        and tuple(map(str, assignment_pair)) != tuple(map(str, source_pair))
     ):
         _fail(
             "Canonical raw subject-mask source has conflicting complete assignment_* "
@@ -851,9 +957,7 @@ def _assignment_keypoint_record(
             or mask_values.shape != keypoint_values.shape
             or not np.array_equal(mask_values, keypoint_values)
         ):
-            _fail(
-                f"Assignment keypoints do not exactly match raw subject-mask {name}."
-            )
+            _fail(f"Assignment keypoints do not exactly match raw subject-mask {name}.")
         selection_payloads[name] = {
             "subject_mask": _payload(mask_node),
             "keypoints": _payload(keypoint_node),
@@ -867,7 +971,9 @@ def _assignment_keypoint_record(
         int(context.roi_frame.endpoint.width),
     )
     if source_extent != keypoint_extent:
-        _fail("Assignment keypoints and raw subject masks use different exact ROI extents.")
+        _fail(
+            "Assignment keypoints and raw subject masks use different exact ROI extents."
+        )
 
     success_name = run.attrs.get("assignment_keypoint_success_dataset")
     if success_name != "detection_success":
@@ -880,11 +986,9 @@ def _assignment_keypoint_record(
         success_name,
         label="assignment keypoint success",
     )
-    if (
-        tuple(int(value) for value in success_node.shape)
-        != (context.row_identity.leading_dimension,)
-        or np.dtype(success_node.dtype) != np.dtype("bool")
-    ):
+    if tuple(int(value) for value in success_node.shape) != (
+        context.row_identity.leading_dimension,
+    ) or np.dtype(success_node.dtype) != np.dtype("bool"):
         _fail("Canonical keypoint success must be exact bool shape (N,).")
     labels_raw = keypoint_run.attrs.get("keypoint_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
@@ -937,8 +1041,12 @@ def _assignment_keypoint_record(
         _fail("Canonical raw subject-mask inventory lacks geometry surfaces.")
     raw_surface_name = "masks_roi" if "masks_roi" in raw_geometry else "mask_probs_roi"
     raw_surface = raw_geometry.get(raw_surface_name)
-    if not isinstance(raw_surface, dict) or not isinstance(raw_surface.get("payload"), dict):
-        _fail("Canonical raw subject-mask inventory lacks an authoritative mask payload.")
+    if not isinstance(raw_surface, dict) or not isinstance(
+        raw_surface.get("payload"), dict
+    ):
+        _fail(
+            "Canonical raw subject-mask inventory lacks an authoritative mask payload."
+        )
     return {
         "schema_id": REFINED_SUBJECT_MASK_ASSIGNMENT_KEYPOINT_AUTHORITY_SCHEMA_ID,
         "schema_version": REFINED_SUBJECT_MASK_SCHEMA_VERSION,
@@ -1082,7 +1190,9 @@ def _component_source_selection_records(
                 f"Refined component {component!r} source surface is absent from the raw inventory."
             )
         source_kind = attrs.get("source_surface_kind")
-        expected_kind = "probability" if source_surface_name == "mask_probs_roi" else "binary"
+        expected_kind = (
+            "probability" if source_surface_name == "mask_probs_roi" else "binary"
+        )
         if source_kind != expected_kind:
             _fail(
                 f"Refined component {component!r} source kind contradicts its exact surface."
@@ -1132,9 +1242,7 @@ def _component_source_selection_records(
             selection["probability_encoding"] = encoding
             selection["probability_threshold"] = threshold
         elif attrs.get("source_binary_derivation") != "smart_finalize(masks_roi)":
-            _fail(
-                f"Refined component {component!r} binary derivation is not exact."
-            )
+            _fail(f"Refined component {component!r} binary derivation is not exact.")
         result[component] = selection
     return result
 
@@ -1205,11 +1313,14 @@ def _refinement_authority_record(
     method = attrs.get("method")
     refinement_semantics = attrs.get("refinement_semantics")
     finalization_semantics = attrs.get("finalization_semantics")
-    if not all(isinstance(item, str) and item.strip() == item and item for item in (
-        method,
-        refinement_semantics,
-        finalization_semantics,
-    )):
+    if not all(
+        isinstance(item, str) and item.strip() == item and item
+        for item in (
+            method,
+            refinement_semantics,
+            finalization_semantics,
+        )
+    ):
         _fail("Canonical refined runs require explicit method/refinement semantics.")
     return {
         "schema_id": REFINED_SUBJECT_MASK_REFINEMENT_AUTHORITY_SCHEMA_ID,
@@ -1264,10 +1375,7 @@ def _activation_receipt_record(
             + "; ".join(validation.errors)
         )
     normalized = validation.normalized
-    expected_command = str(
-        stage_provenance.get("command")
-        or "finalize_subject_masks"
-    )
+    expected_command = str(stage_provenance.get("command") or "finalize_subject_masks")
     expected_params = (
         dict(stage_provenance["parameters"])
         if isinstance(stage_provenance.get("parameters"), Mapping)
@@ -1337,7 +1445,9 @@ def _stamp_refined_subject_mask_activation_receipt(
     if RUN_PROVENANCE_ATTR not in run.attrs:
         stage_provenance = refinement_authority.record.get("stage_provenance")
         if not isinstance(stage_provenance, dict):
-            _fail("Cannot derive refined run provenance without sealed stage provenance.")
+            _fail(
+                "Cannot derive refined run provenance without sealed stage provenance."
+            )
         run.attrs[RUN_PROVENANCE_ATTR] = build_run_provenance_from_stage_record(
             stage_provenance,
             fallback_command="finalize_subject_masks",
@@ -1449,9 +1559,7 @@ def _context_record(
         ),
         "source_authority": _record_pointer(source_authority),
         "refinement_authority": _record_pointer(refinement_authority),
-        "selection": {
-            name: _payload(node) for name, node in selection.items()
-        },
+        "selection": {name: _payload(node) for name, node in selection.items()},
         "roi_frames": {
             "continuous": {
                 "record_ref": continuous_frame.record_ref,
@@ -1526,7 +1634,9 @@ class BoundRefinedSubjectMaskCoordinateContext:
     _run_group: Any = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _BOUND_CONTEXT_SEAL:
             _fail("Refined coordinate contexts cannot be constructed directly.")
         for name, value in values.items():
@@ -1567,7 +1677,9 @@ def prepare_refined_subject_mask_coordinate_context(
     source = _source_metadata_context(root, source_path)
     expected_source_name = source_path.split("/", 1)[1]
     if run.attrs.get("source_subject_mask_run") != expected_source_name:
-        _fail("Refined source_subject_mask_run does not name the exact selected raw run.")
+        _fail(
+            "Refined source_subject_mask_run does not name the exact selected raw run."
+        )
     labels = _labels(mask_labels)
     if list(run.attrs.get("mask_labels", ())) != list(labels):
         _fail("Refined run mask_labels differ from the exact publication labels.")
@@ -1675,7 +1787,9 @@ def prepare_refined_subject_mask_coordinate_context(
             height,
             width,
         ):
-            _fail("Refined masks_roi extent differs from the exact selected raw ROI extent.")
+            _fail(
+                "Refined masks_roi extent differs from the exact selected raw ROI extent."
+            )
         rows_node = selection["source_crop_row_ids"]
         token = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
 
@@ -1904,7 +2018,9 @@ def _load_refined_subject_mask_coordinate_context(
         run,
         assignment_keypoint_surfaces,
     ):
-        _fail("Persisted assignment keypoint authority differs from exact live evidence.")
+        _fail(
+            "Persisted assignment keypoint authority differs from exact live evidence."
+        )
     source_authority = bind_persisted_coordinate_record(
         run,
         attr_name=REFINED_SUBJECT_MASK_SOURCE_AUTHORITY_ATTR,
@@ -2128,7 +2244,10 @@ def _require_shape_dtype(
     dtype: np.dtype[Any],
     label: str,
 ) -> None:
-    if tuple(int(item) for item in node.shape) != shape or np.dtype(node.dtype) != dtype:
+    if (
+        tuple(int(item) for item in node.shape) != shape
+        or np.dtype(node.dtype) != dtype
+    ):
         _fail(
             f"{label} must have exact shape {shape!r} and dtype {dtype.str!r}; "
             f"got {tuple(node.shape)!r}/{np.dtype(node.dtype).str!r}."
@@ -2139,7 +2258,11 @@ def _derive_mask_metrics(masks: np.ndarray) -> dict[str, np.ndarray]:
     binary = np.asarray(masks, dtype=np.uint8) != 0
     rows, components, height, width = map(int, binary.shape)
     flat = binary.reshape(rows * components, height, width)
-    area = flat.reshape(rows * components, -1).sum(axis=1, dtype=np.int64).astype(np.float32)
+    area = (
+        flat.reshape(rows * components, -1)
+        .sum(axis=1, dtype=np.int64)
+        .astype(np.float32)
+    )
     valid = area > 0.0
     centroid = np.zeros((rows * components, 2), dtype=np.float32)
     bbox = np.zeros((rows * components, 4), dtype=np.float32)
@@ -2204,9 +2327,10 @@ def _scan_required_surfaces(
                 f"Future refined publication requires explicit fresh {attr_name}=False."
             )
     for cache_name in ("mask_bitpacked", "mask_rle"):
-        if _optional_child(run, cache_name) is not None and run.attrs.get(
-            f"{cache_name}_stale"
-        ) is not False:
+        if (
+            _optional_child(run, cache_name) is not None
+            and run.attrs.get(f"{cache_name}_stale") is not False
+        ):
             _fail(f"Published {cache_name} must explicitly be a fresh derived cache.")
     nodes = {
         "masks_roi": masks,
@@ -2223,7 +2347,9 @@ def _scan_required_surfaces(
         _fail("Refined masks_roi must have nonempty shape (N,C,H,W).")
     rows, components, height, width = shape
     if rows != context.row_identity.leading_dimension:
-        _fail("Refined masks_roi leading dimension differs from instance_key authority.")
+        _fail(
+            "Refined masks_roi leading dimension differs from instance_key authority."
+        )
     if components != len(context.labels):
         _fail("Refined masks_roi channel count differs from ordered labels.")
     if (height, width) != (
@@ -2255,7 +2381,10 @@ def _scan_required_surfaces(
         )
     if run.attrs.get("bbox_xyxy_convention") != "pixel_edge_half_open":
         _fail("Refined bbox_xyxy requires explicit pixel_edge_half_open convention.")
-    if run.attrs.get("bbox_xyxy_derivation") != "foreground_half_open_pixel_edges_xyxy_v1":
+    if (
+        run.attrs.get("bbox_xyxy_derivation")
+        != "foreground_half_open_pixel_edges_xyxy_v1"
+    ):
         _fail("Refined bbox_xyxy lacks the exact half-open derivation label.")
 
     states = {name: _payload_digest_state(node) for name, node in nodes.items()}
@@ -2267,7 +2396,9 @@ def _scan_required_surfaces(
         label="available_channels",
     )
     if not bool(np.all(available_values)):
-        _fail("Future refined outputs must not publish unavailable declared components.")
+        _fail(
+            "Future refined outputs must not publish unavailable declared components."
+        )
 
     chunk_rows = _payload_row_chunk(masks)
     for start in range(0, rows, chunk_rows):
@@ -2346,7 +2477,9 @@ def _validate_optional_geometry(
                 label=f"{component} geometry",
             )
             ellipse = _child(geometry, "ellipse_params", label=f"{component} ellipse")
-            success = _child(geometry, "ellipse_success", label=f"{component} ellipse validity")
+            success = _child(
+                geometry, "ellipse_success", label=f"{component} ellipse validity"
+            )
             _require_shape_dtype(
                 ellipse,
                 shape=(rows, 5),
@@ -2371,9 +2504,13 @@ def _validate_optional_geometry(
                     or bool(np.any(selected[:, 1] >= height))
                     or bool(np.any(selected[:, 2:4] <= 0.0))
                 ):
-                    _fail(f"{component} valid ellipse geometry is outside the exact ROI extent.")
+                    _fail(
+                        f"{component} valid ellipse geometry is outside the exact ROI extent."
+                    )
             if bool(np.any(~valid)) and not bool(np.isnan(values[~valid]).all()):
-                _fail(f"{component} invalid ellipse geometry must use an all-NaN sentinel.")
+                _fail(
+                    f"{component} invalid ellipse geometry must use an all-NaN sentinel."
+                )
             key = f"components/{component}/geometry/ellipse_params"
             canonical[key] = {
                 "node": ellipse,
@@ -2397,7 +2534,9 @@ def _validate_optional_geometry(
                 label=f"{component} sampled_contours",
             )
             points = _child(sampled, "points_xy", label=f"{component} sampled contour")
-            valid_node = _child(sampled, "valid", label=f"{component} sampled contour validity")
+            valid_node = _child(
+                sampled, "valid", label=f"{component} sampled contour validity"
+            )
             source_point_count = _child(
                 sampled,
                 "source_point_count",
@@ -2443,7 +2582,9 @@ def _validate_optional_geometry(
                 ):
                     _fail(f"{component} sampled contour leaves the exact ROI extent.")
             if bool(np.any(~valid)) and not bool(np.isnan(values[~valid]).all()):
-                _fail(f"{component} invalid sampled contours must use an all-NaN sentinel.")
+                _fail(
+                    f"{component} invalid sampled contours must use an all-NaN sentinel."
+                )
             key = f"components/{component}/sampled_contours/points_xy"
             canonical[key] = {
                 "node": points,
@@ -2492,27 +2633,41 @@ def _validate_optional_geometry(
                 label=f"{component} contour len",
             )
             points_values = _array(points, label=f"{component} contour points")
-            ptr_values = _array(ptr, label=f"{component} contour ptr").astype(np.int64, copy=False)
-            len_values = _array(length, label=f"{component} contour len").astype(np.int64, copy=False)
+            ptr_values = _array(ptr, label=f"{component} contour ptr").astype(
+                np.int64, copy=False
+            )
+            len_values = _array(length, label=f"{component} contour len").astype(
+                np.int64, copy=False
+            )
             invalid = len_values == 0
             if (
                 bool(np.any(len_values < 0))
                 or bool(np.any(ptr_values[invalid] != -1))
                 or bool(np.any(ptr_values[~invalid] < 0))
-                or bool(np.any(ptr_values[~invalid] + len_values[~invalid] > point_shape[0]))
+                or bool(
+                    np.any(ptr_values[~invalid] + len_values[~invalid] > point_shape[0])
+                )
             ):
                 _fail(f"{component} packed contour row mapping is invalid.")
             expected_offset = 0
-            for offset, count in zip(ptr_values[~invalid], len_values[~invalid], strict=True):
+            for offset, count in zip(
+                ptr_values[~invalid], len_values[~invalid], strict=True
+            ):
                 if int(offset) != expected_offset:
-                    _fail(f"{component} packed contour row segments are not canonical/contiguous.")
+                    _fail(
+                        f"{component} packed contour row segments are not canonical/contiguous."
+                    )
                 expected_offset += int(count)
             placeholder = bool(contours.attrs.get("points_placeholder_when_empty"))
             if expected_offset == 0:
                 if not placeholder or point_shape[0] != 1:
-                    _fail(f"{component} empty contour store lacks its exact placeholder policy.")
+                    _fail(
+                        f"{component} empty contour store lacks its exact placeholder policy."
+                    )
             elif expected_offset != point_shape[0]:
-                _fail(f"{component} contour points are not fully owned by observation rows.")
+                _fail(
+                    f"{component} contour points are not fully owned by observation rows."
+                )
             if expected_offset > 0:
                 owned = points_values[:expected_offset]
                 if (
@@ -2534,7 +2689,9 @@ def _validate_optional_geometry(
             }
     relations = _optional_child(context._run_group, "relations")
     eye_pair = _optional_child(relations, "eye_pair") if relations is not None else None
-    relation_metrics = _optional_child(eye_pair, "metrics") if eye_pair is not None else None
+    relation_metrics = (
+        _optional_child(eye_pair, "metrics") if eye_pair is not None else None
+    )
     if relation_metrics is not None:
         if eye_pair is None:
             _fail("Eye-pair relation metrics lack their exact relation container.")
@@ -2791,16 +2948,18 @@ def _measurement_specs(
     for path, spec in sorted(coordinate_specs.items()):
         if path.endswith("/ellipse_params"):
             component = str(spec["component"])
-            result[path.removesuffix("ellipse_params") + "ellipse_success"] = _scalar_spec(
-                spec["validity_node"],
-                quantity="ellipse_fit_validity",
-                units="1",
-                operation="cv2_fit_ellipse_success_v1",
-                axes=("observation",),
-                coordinate_input_paths=(path,),
-                row_axis_name="observation",
-                selected_collection_members=(component,),
-                semantic_kind="validity",
+            result[path.removesuffix("ellipse_params") + "ellipse_success"] = (
+                _scalar_spec(
+                    spec["validity_node"],
+                    quantity="ellipse_fit_validity",
+                    units="1",
+                    operation="cv2_fit_ellipse_success_v1",
+                    axes=("observation",),
+                    coordinate_input_paths=(path,),
+                    row_axis_name="observation",
+                    selected_collection_members=(component,),
+                    semantic_kind="validity",
+                )
             )
         elif path.endswith("/sampled_contours/points_xy"):
             component = str(spec["component"])
@@ -2857,11 +3016,15 @@ def _measurement_specs(
 
     components = _child(context._run_group, "components", label="refined components")
     run_area = _array(required["area_px"], label="run-level area_px aliases")
-    run_present = _array(required["mask_present"], label="run-level mask_present aliases")
+    run_present = _array(
+        required["mask_present"], label="run-level mask_present aliases"
+    )
     for component_index, component in enumerate(context.labels):
         group = _child(components, component, label=f"refined component {component}")
         root_area = _child(group, "area_px", label=f"{component} area_px alias")
-        root_present = _child(group, "mask_present", label=f"{component} mask_present alias")
+        root_present = _child(
+            group, "mask_present", label=f"{component} mask_present alias"
+        )
         _require_shape_dtype(
             root_area,
             shape=(rows,),
@@ -2930,7 +3093,9 @@ def _measurement_specs(
                     label=f"{component} {group_name}/{metric_name}",
                 )
                 if not hasattr(node, "shape"):
-                    _fail(f"Component scalar leaf {component}/{group_name}/{metric_name} is not an array.")
+                    _fail(
+                        f"Component scalar leaf {component}/{group_name}/{metric_name} is not an array."
+                    )
                 shape = tuple(int(value) for value in node.shape)
                 dtype = np.dtype(node.dtype)
                 if shape != (rows,) or dtype.hasobject:
@@ -2939,18 +3104,20 @@ def _measurement_specs(
                         "must be non-object and observation aligned."
                     )
                 quantity, units, operation, semantic_kind = definitions[metric_name]
-                result[f"components/{component}/{group_name}/{metric_name}"] = _scalar_spec(
-                    node,
-                    quantity=quantity,
-                    units=units,
-                    operation=operation,
-                    axes=("observation",),
-                    coordinate_input_paths=("masks_roi",),
-                    row_axis_name="observation",
-                    selected_collection_members=(component,),
-                    semantic_kind=semantic_kind,
-                    validity_node=root_present,
-                    validity_policy="zero_or_nan_when_mask_absent_per_metric_v1",
+                result[f"components/{component}/{group_name}/{metric_name}"] = (
+                    _scalar_spec(
+                        node,
+                        quantity=quantity,
+                        units=units,
+                        operation=operation,
+                        axes=("observation",),
+                        coordinate_input_paths=("masks_roi",),
+                        row_axis_name="observation",
+                        selected_collection_members=(component,),
+                        semantic_kind=semantic_kind,
+                        validity_node=root_present,
+                        validity_policy="zero_or_nan_when_mask_absent_per_metric_v1",
+                    )
                 )
     return result
 
@@ -2984,7 +3151,9 @@ def _interpretation_record(
         "array_path": canonical_node_path(spec["node"]),
         "array_payload": copy.deepcopy(dict(payload)),
         "surface_role": (
-            "authoritative_pixels" if logical_path == "masks_roi" else "sealed_derived_geometry"
+            "authoritative_pixels"
+            if logical_path == "masks_roi"
+            else "sealed_derived_geometry"
         ),
         "geometry_type": geometry,
         "coordinate_space": "roi_local_px",
@@ -3059,12 +3228,8 @@ def _ragged_record(
         },
         "ragged_row_mapping": {
             "policy": "ptr_len_indexed_by_observation_row_v1",
-            "ptr_payload": copy.deepcopy(
-                dict(payloads[f"{logical_path}@ptr"])
-            ),
-            "len_payload": copy.deepcopy(
-                dict(payloads[f"{logical_path}@len"])
-            ),
+            "ptr_payload": copy.deepcopy(dict(payloads[f"{logical_path}@ptr"])),
+            "len_payload": copy.deepcopy(dict(payloads[f"{logical_path}@len"])),
             "point_count": int(spec["point_count"]),
             "ptr_path": canonical_node_path(ptr),
             "len_path": canonical_node_path(length),
@@ -3185,11 +3350,15 @@ def _cache_inventory(run: Any, masks_payload: Mapping[str, Any]) -> dict[str, An
         if hasattr(node, "shape"):
             _fail(f"{name} must be a derived cache group, not an authoritative array.")
         attrs = getattr(node, "attrs", {})
-        if attrs.get("surface_role") not in {
-            "derived_display_cache",
-            "derived_archive_cache",
-            "derived_display_archive_cache",
-        } or attrs.get("authoritative_pixels") is not False:
+        if (
+            attrs.get("surface_role")
+            not in {
+                "derived_display_cache",
+                "derived_archive_cache",
+                "derived_display_archive_cache",
+            }
+            or attrs.get("authoritative_pixels") is not False
+        ):
             _fail(
                 f"{name} must explicitly declare derived/non-authoritative cache semantics."
             )
@@ -3216,6 +3385,8 @@ _KNOWN_COMPONENT_ROOT_ARRAYS = frozenset(
         "source_row_fingerprint",
         "source_row_stale",
         "row_revision",
+        "row_updated_at_utc_bytes",
+        "row_update_reason_bytes",
         "source_seed_masks_roi",
     }
 )
@@ -3322,7 +3493,10 @@ def _closed_world_structure_inventory(
         for name in _member_names(group):
             node = _child(group, name, label=f"{component} root member {name}")
             if hasattr(node, "shape"):
-                if name not in _KNOWN_COMPONENT_ROOT_ARRAYS and not _is_explicit_non_geometry(node):
+                if (
+                    name not in _KNOWN_COMPONENT_ROOT_ARRAYS
+                    and not _is_explicit_non_geometry(node)
+                ):
                     _fail(
                         f"Refined component {component!r} contains undocumented root "
                         f"array {name!r}; coordinate/geometry semantics cannot be inferred."
@@ -3337,9 +3511,11 @@ def _closed_world_structure_inventory(
                     "classification": (
                         "retained_source_seed_diagnostic_raster"
                         if name == "source_seed_masks_roi"
-                        else "known_non_coordinate_component_state"
-                        if name in _KNOWN_COMPONENT_ROOT_ARRAYS
-                        else "explicit_non_geometry"
+                        else (
+                            "known_non_coordinate_component_state"
+                            if name in _KNOWN_COMPONENT_ROOT_ARRAYS
+                            else "explicit_non_geometry"
+                        )
                     ),
                     "payload": _payload(node),
                     "attrs": _scientific_attrs(
@@ -3452,7 +3628,11 @@ def _component_qc_inventory_record(
             if components_parent is not None
             else None
         )
-        qc = _optional_child(component_group, "qc") if component_group is not None else None
+        qc = (
+            _optional_child(component_group, "qc")
+            if component_group is not None
+            else None
+        )
         if qc is None:
             components[component] = {
                 "status": "absent",
@@ -3727,15 +3907,21 @@ def _scientific_manifest_record(
 ) -> dict[str, Any]:
     run = context._run_group
     table_nodes = {
-        "available_channels": _child(run, "available_channels", label="available channels"),
-        "source_crop_row_ids": _child(run, "source_crop_row_ids", label="source crop row ids"),
+        "available_channels": _child(
+            run, "available_channels", label="available channels"
+        ),
+        "source_crop_row_ids": _child(
+            run, "source_crop_row_ids", label="source crop row ids"
+        ),
         "instance_key": _child(run, "instance_key", label="instance key"),
         "source_acquisition_frame_index": _child(
             run,
             "source_acquisition_frame_index",
             label="source acquisition frame index",
         ),
-        "source_crop_xywh": _child(run, "source_crop_xywh", label="source crop placement"),
+        "source_crop_xywh": _child(
+            run, "source_crop_xywh", label="source crop placement"
+        ),
     }
     table_payloads = {name: _payload(node) for name, node in table_nodes.items()}
     for logical_path in (
@@ -3862,7 +4048,9 @@ class BoundRefinedSubjectMaskCoordinateSurfaces:
     ragged_geometry: Mapping[str, BoundCoordinateRecord] = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _BOUND_SURFACES_SEAL:
             _fail("Refined coordinate surfaces cannot be constructed directly.")
         for name, value in values.items():
@@ -4219,12 +4407,15 @@ def _load_refined_subject_mask_coordinate_surfaces(
             raise RefinedSubjectMaskCoordinatePublicationError(
                 f"Selected raw subject-mask payload is stale or invalid: {exc}"
             ) from exc
-        if _source_authority_record(
-            raw.context,
-            context._run_group,
-            context.labels,
-            assignment_keypoints=context.assignment_keypoint_authority,
-        ) != context.source_authority.record:
+        if (
+            _source_authority_record(
+                raw.context,
+                context._run_group,
+                context.labels,
+                assignment_keypoints=context.assignment_keypoint_authority,
+            )
+            != context.source_authority.record
+        ):
             _fail("Selected raw subject-mask authority changed after refinement.")
     (
         _required,
@@ -4305,7 +4496,9 @@ def _load_refined_subject_mask_coordinate_surfaces(
         measurement_authority=measurement_authority,
         measurements=measurements,
     ):
-        _fail("Persisted refined scientific manifest differs from live sealed surfaces.")
+        _fail(
+            "Persisted refined scientific manifest differs from live sealed surfaces."
+        )
     return BoundRefinedSubjectMaskCoordinateSurfaces(
         descriptors=descriptors,
         context=context,
@@ -4395,7 +4588,9 @@ def _require_snapshot_unchanged(
         if (name in parent.attrs) is not present or (
             present and parent.attrs.get(name) != value
         ):
-            _fail(f"Refined activation observed concurrent selector mutation of {name!r}.")
+            _fail(
+                f"Refined activation observed concurrent selector mutation of {name!r}."
+            )
 
 
 def _attr_state(attrs: Mapping[str, Any], name: str) -> tuple[bool, Any]:
@@ -4570,7 +4765,9 @@ def _activate_validated_refined_subject_mask_coordinate_surfaces(
                 or old_lease.get("next_generation") != base
                 or old_lease.get("base_generation") != base - 1
             ):
-                _fail("Refined parent already has an active or invalid publication lease.")
+                _fail(
+                    "Refined parent already has an active or invalid publication lease."
+                )
         lease = {
             "schema_id": "palette.refined_subject_mask_publication_lease",
             "schema_version": 1,

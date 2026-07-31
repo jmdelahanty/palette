@@ -25,7 +25,10 @@ from fisheye.shared.crop_roi_layout import (
     build_scratch_roi_cache_layout,
     crop_roi_layout_attrs,
 )
-from fisheye.shared.flat_roi_cache import crop_run_name_from_manifest, open_flat_roi_cache
+from fisheye.shared.flat_roi_cache import (
+    crop_run_name_from_manifest,
+    open_flat_roi_cache,
+)
 from fisheye.shared.grayscale import rgb_to_gray_bt601_cv2_uint8
 from fisheye.shared.roi_pixel_contract import (
     ROI_IMAGE_REPRESENTATION,
@@ -163,7 +166,9 @@ def resolve_crop_run(
             ):
                 return crop_parent, run_group, candidate
 
-    raise ValueError("No crop run found; cannot resolve latest_any/latest/latest_materialized")
+    raise ValueError(
+        "No crop run found; cannot resolve latest_any/latest/latest_materialized"
+    )
 
 
 def resolve_materialized_crop_run(
@@ -215,7 +220,10 @@ def resolve_materialized_crop_run(
                 run_group,
             ):
                 continue
-            if _resolve_storage_mode(run_group) == "materialized" and "roi_images" in run_group:
+            if (
+                _resolve_storage_mode(run_group) == "materialized"
+                and "roi_images" in run_group
+            ):
                 return crop_parent, run_group, candidate
 
     latest_any = _normalize_run_name(crop_parent.attrs.get("latest_any"))
@@ -292,26 +300,36 @@ def _resolve_roi_shape(
             raise ValueError("crop_runs/<run>/roi_images must be at least 3D")
         return int(roi_images.shape[1]), int(roi_images.shape[2])
     if "roi_sizes_full" in crop_group:
-        return _resolve_fixed_roi_shape_from_wh(np.asarray(crop_group["roi_sizes_full"][:]))
+        return _resolve_fixed_roi_shape_from_wh(
+            np.asarray(crop_group["roi_sizes_full"][:])
+        )
     if "source_crop_xywh" in crop_group:
         source_crop_xywh = np.asarray(crop_group["source_crop_xywh"][:])
         if source_crop_xywh.ndim != 2 or source_crop_xywh.shape[1] < 4:
             raise ValueError("crop_runs/<run>/source_crop_xywh must have shape [N,4].")
         return _resolve_fixed_roi_shape_from_wh(source_crop_xywh[:, 2:4])
-    raise ValueError("Unable to determine ROI size for crop run (need roi_size or roi_images).")
+    raise ValueError(
+        "Unable to determine ROI size for crop run (need roi_size or roi_images)."
+    )
 
 
 def _resolve_fixed_roi_shape_from_wh(width_height_rows: np.ndarray) -> tuple[int, int]:
     rows = np.asarray(width_height_rows)
     if rows.ndim != 2 or rows.shape[1] < 2:
-        raise ValueError("ROI size rows must have shape [N,2] with width,height columns.")
+        raise ValueError(
+            "ROI size rows must have shape [N,2] with width,height columns."
+        )
     if rows.shape[0] == 0:
-        raise ValueError("Unable to determine ROI size from an empty geometry-only crop run.")
+        raise ValueError(
+            "Unable to determine ROI size from an empty geometry-only crop run."
+        )
     finite = np.isfinite(rows[:, :2]).all(axis=1)
     positive = np.logical_and(rows[:, 0] > 0, rows[:, 1] > 0)
     valid = np.logical_and(finite, positive)
     if not np.any(valid):
-        raise ValueError("Unable to determine ROI size: no positive finite width/height rows.")
+        raise ValueError(
+            "Unable to determine ROI size: no positive finite width/height rows."
+        )
     rounded = np.rint(rows[valid, :2]).astype(np.int64, copy=False)
     unique = np.unique(rounded, axis=0)
     if unique.shape[0] != 1:
@@ -328,7 +346,9 @@ def _normalize_roi_cache_policy(value: object) -> str:
     text = _normalize_run_name(value) or "never"
     if text not in _ROI_CACHE_POLICIES:
         choices = ", ".join(sorted(_ROI_CACHE_POLICIES))
-        raise ValueError(f"Invalid roi_cache_policy '{text}'. Expected one of: {choices}")
+        raise ValueError(
+            f"Invalid roi_cache_policy '{text}'. Expected one of: {choices}"
+        )
     return text
 
 
@@ -336,7 +356,9 @@ def _normalize_roi_live_acceleration(value: object) -> str:
     text = _normalize_run_name(value) or "auto"
     if text not in _ROI_LIVE_ACCELERATION_CHOICES:
         choices = ", ".join(sorted(_ROI_LIVE_ACCELERATION_CHOICES))
-        raise ValueError(f"Invalid roi_live_acceleration '{text}'. Expected one of: {choices}")
+        raise ValueError(
+            f"Invalid roi_live_acceleration '{text}'. Expected one of: {choices}"
+        )
     return text
 
 
@@ -387,12 +409,17 @@ def _resolve_roi_cache_root(roi_cache_dir: str | Path | None) -> Path:
 
 
 def _cache_component(text: str, *, default: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text.strip())
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text.strip()
+    )
     return cleaned or default
 
 
 def _cache_runtime_summary(cache_group: zarr.Group) -> str:
-    backend = normalize_attr(cache_group.attrs.get("cache_write_backend_effective")) or "standard_zarr"
+    backend = (
+        normalize_attr(cache_group.attrs.get("cache_write_backend_effective"))
+        or "standard_zarr"
+    )
     acceleration = normalize_attr(cache_group.attrs.get("cache_acceleration")) or "cpu"
     fallback_reason = normalize_attr(cache_group.attrs.get("cache_fallback_reason"))
     summary = f"acceleration={acceleration}, backend={backend}"
@@ -441,10 +468,9 @@ def _resolve_crop_group_pixel_contract(
     frame_source_kind: str,
     roi_live_acceleration_effective: str | None,
 ) -> dict[str, Any]:
-    stored = (
-        normalize_pixel_contract(crop_group.attrs.get("roi_pixel_contract"))
-        or normalize_pixel_contract(crop_group.attrs.get("crop_pixel_contract"))
-    )
+    stored = normalize_pixel_contract(
+        crop_group.attrs.get("roi_pixel_contract")
+    ) or normalize_pixel_contract(crop_group.attrs.get("crop_pixel_contract"))
     pixel_stored_modes = {"materialized", COMPOSITE_CROP_STORAGE_MODE}
     if stored is not None and (
         crop_storage_mode in pixel_stored_modes
@@ -483,7 +509,14 @@ def _crop_from_top_left(
     if vy1 >= vy2 or vx1 >= vx2:
         return np.zeros((roi_h, roi_w), dtype=np.uint8)
 
-    if vy2 - vy1 == roi_h and vx2 - vx1 == roi_w and 0 <= y1 and 0 <= x1 and y2 <= height and x2 <= width:
+    if (
+        vy2 - vy1 == roi_h
+        and vx2 - vx1 == roi_w
+        and 0 <= y1
+        and 0 <= x1
+        and y2 <= height
+        and x2 <= width
+    ):
         return frame[vy1:vy2, vx1:vx2].astype(np.uint8, copy=False)
 
     roi = np.zeros((roi_h, roi_w), dtype=np.uint8)
@@ -524,7 +557,11 @@ def _read_external_video_live_gpu_batch(
 
     from fisheye.tracking import crop as tracking_crop
 
-    if tracking_crop.VideoReader is None or tracking_crop.gpu is None or tracking_crop.decord is None:
+    if (
+        tracking_crop.VideoReader is None
+        or tracking_crop.gpu is None
+        or tracking_crop.decord is None
+    ):
         raise RuntimeError("GPU live ROI reads require Decord GPU video support.")
     if not getattr(tracking_crop, "_TORCH_AVAILABLE", False):
         raise RuntimeError("GPU live ROI reads require PyTorch.")
@@ -538,21 +575,25 @@ def _read_external_video_live_gpu_batch(
     video_reader = None
     try:
         tracking_crop.decord.bridge.set_bridge("torch")
-        video_reader = tracking_crop.VideoReader(str(video_path), ctx=tracking_crop.gpu(0))
+        video_reader = tracking_crop.VideoReader(
+            str(video_path), ctx=tracking_crop.gpu(0)
+        )
         for chunk_idx, start in enumerate(range(0, len(unique_frames), chunk_len)):
             chunk_frames = unique_frames[start : start + chunk_len]
             if not chunk_frames:
                 continue
             frames_gpu = video_reader.get_batch(chunk_frames)
-            _, roi_ids, crops_cpu, _coords_cpu, _chunk_time = tracking_crop._process_chunk_gpu_from_top_left(
-                chunk_idx,
-                chunk_frames,
-                frames_gpu,
-                frame_to_roi,
-                roi_coordinates_np,
-                roi_shape,
-                video_shape,
-                return_device=False,
+            _, roi_ids, crops_cpu, _coords_cpu, _chunk_time = (
+                tracking_crop._process_chunk_gpu_from_top_left(
+                    chunk_idx,
+                    chunk_frames,
+                    frames_gpu,
+                    frame_to_roi,
+                    roi_coordinates_np,
+                    roi_shape,
+                    video_shape,
+                    return_device=False,
+                )
             )
             if roi_ids.size > 0:
                 batch[roi_ids] = crops_cpu
@@ -623,7 +664,9 @@ class _ExternalFrameReader:
                 "Unable to open source video for live ROI reads. "
                 f"OpenCV import failed: {_CV2_IMPORT_ERROR}"
             )
-        raise RuntimeError(f"Unable to open source video for live ROI reads: {self.video_path}")
+        raise RuntimeError(
+            f"Unable to open source video for live ROI reads: {self.video_path}"
+        )
 
     def read_frame(self, frame_idx: int) -> np.ndarray:
         self._ensure_reader()
@@ -639,7 +682,9 @@ class _ExternalFrameReader:
         self._capture.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
         ok, frame = self._capture.read()
         if not ok or frame is None:
-            raise RuntimeError(f"Failed to read frame {frame_idx} from {self.video_path}")
+            raise RuntimeError(
+                f"Failed to read frame {frame_idx} from {self.video_path}"
+            )
         if frame.ndim == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return _to_grayscale_uint8(frame)
@@ -673,13 +718,17 @@ class _AcquisitionCropVideoFrameReader:
         if self._reader is not None and self._frame_iter is not None:
             return
         if not self.video_path.exists():
-            raise FileNotFoundError(f"Acquisition crop video not found: {self.video_path}")
+            raise FileNotFoundError(
+                f"Acquisition crop video not found: {self.video_path}"
+            )
         if PynvvcLumaRgbReader is None:
             raise RuntimeError(
                 "PyNvVideoCodec luma reader is unavailable; cannot read acquisition crop video "
                 f"{self.video_path}: {_PYNVVC_IMPORT_ERROR}"
             )
-        self._reader = PynvvcLumaRgbReader(self.video_path, start_frame=0, gpu_id=self.gpu_id)
+        self._reader = PynvvcLumaRgbReader(
+            self.video_path, start_frame=0, gpu_id=self.gpu_id
+        )
         self._frame_iter = iter(self._reader.iter_frames())
         self._next_frame_index = 0
         self._source_height = int(self._reader.source_height)
@@ -746,6 +795,8 @@ class CropImageSource:
     frame_source_path: str | None
     frame_source_declared_path: str | None = None
     frame_source_path_override_used: bool = False
+    source_video_frame_offset: int = 0
+    source_video_frame_count: int | None = None
     frame_shape: tuple[int, int] | None = None
     roi_read_mode: str = "materialized_crop_run"
     roi_cache_policy: str = "never"
@@ -787,17 +838,46 @@ class CropImageSource:
         roi_cache_manifest: str | Path | None = None,
         roi_cache_expected_archive_path: str | Path | None = None,
         source_video_path_override: str | Path | None = None,
+        source_video_frame_offset: int = 0,
+        source_video_frame_count: int | None = None,
         console: Any | None = None,
     ) -> "CropImageSource":
         normalized_cache_policy = _normalize_roi_cache_policy(roi_cache_policy)
-        normalized_live_acceleration = _normalize_roi_live_acceleration(roi_live_acceleration)
+        normalized_live_acceleration = _normalize_roi_live_acceleration(
+            roi_live_acceleration
+        )
         live_gpu_chunk_frames = max(1, int(roi_live_gpu_chunk_frames))
-        manifest_path = Path(roi_cache_manifest).expanduser() if roi_cache_manifest is not None else None
+        manifest_path = (
+            Path(roi_cache_manifest).expanduser()
+            if roi_cache_manifest is not None
+            else None
+        )
         video_override = (
             Path(source_video_path_override).expanduser().resolve()
             if source_video_path_override is not None
             else None
         )
+        video_frame_offset = int(source_video_frame_offset)
+        video_frame_count = (
+            int(source_video_frame_count)
+            if source_video_frame_count is not None
+            else None
+        )
+        if video_frame_offset < 0:
+            raise ValueError("source_video_frame_offset must be nonnegative.")
+        if video_frame_count is not None and video_frame_count <= 0:
+            raise ValueError("source_video_frame_count must be positive when provided.")
+        if video_frame_offset != 0 and video_frame_count is None:
+            raise ValueError(
+                "A nonzero source_video_frame_offset requires "
+                "source_video_frame_count."
+            )
+        if (
+            video_frame_offset != 0 or video_frame_count is not None
+        ) and video_override is None:
+            raise ValueError(
+                "A source-video frame window requires source_video_path_override."
+            )
         if video_override is not None and not video_override.is_file():
             raise FileNotFoundError(
                 f"Source-video path override does not exist: {video_override}"
@@ -817,7 +897,9 @@ class CropImageSource:
 
         if "roi_coordinates_full" not in crop_group:
             raise ValueError("Crop run missing 'roi_coordinates_full'.")
-        roi_coordinates_full = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32)
+        roi_coordinates_full = np.asarray(
+            crop_group["roi_coordinates_full"][:], dtype=np.int32
+        )
         total_rois = int(roi_coordinates_full.shape[0])
 
         frame_indices_arr = crop_group.get("frame_indices")
@@ -826,9 +908,7 @@ class CropImageSource:
         elif storage_mode == "materialized":
             frame_indices = np.zeros(total_rois, dtype=np.int64)
         else:
-            raise ValueError(
-                f"{storage_mode!r} crop run is missing 'frame_indices'."
-            )
+            raise ValueError(f"{storage_mode!r} crop run is missing 'frame_indices'.")
 
         if frame_indices.shape[0] != total_rois:
             raise ValueError(
@@ -879,7 +959,9 @@ class CropImageSource:
             live_acceleration_fallback_reason = None
         else:
             raw_video = root.get("raw_video")
-            images_full = raw_video.get("images_full") if raw_video is not None else None
+            images_full = (
+                raw_video.get("images_full") if raw_video is not None else None
+            )
             acquisition_crop_video = _is_acquisition_crop_video_source(crop_group)
             if acquisition_crop_video:
                 if video_override is not None:
@@ -896,12 +978,16 @@ class CropImageSource:
                     raise ValueError(
                         "Acquisition crop-video crop run requires source_crop_video_path provenance."
                     )
-                crop_video_frame_indices_arr = crop_group.get("source_crop_video_frame_indices")
+                crop_video_frame_indices_arr = crop_group.get(
+                    "source_crop_video_frame_indices"
+                )
                 if crop_video_frame_indices_arr is None:
                     raise ValueError(
                         "Acquisition crop-video crop run is missing source_crop_video_frame_indices."
                     )
-                crop_video_frame_indices = np.asarray(crop_video_frame_indices_arr[:], dtype=np.int64)
+                crop_video_frame_indices = np.asarray(
+                    crop_video_frame_indices_arr[:], dtype=np.int64
+                )
                 if crop_video_frame_indices.shape[0] != total_rois:
                     raise ValueError(
                         "source_crop_video_frame_indices length "
@@ -951,9 +1037,10 @@ class CropImageSource:
                                 "supplemental_cache_row_indices length "
                                 f"{supplemental_cache_row_indices.shape[0]} does not match roi count {total_rois}"
                             )
-                        supplemental_manifest = (
-                            crop_group.attrs.get("supplemental_roi_cache_manifest")
-                            or crop_group.attrs.get("supplemental_flat_roi_cache_manifest")
+                        supplemental_manifest = crop_group.attrs.get(
+                            "supplemental_roi_cache_manifest"
+                        ) or crop_group.attrs.get(
+                            "supplemental_flat_roi_cache_manifest"
                         )
                         if not supplemental_manifest:
                             raise ValueError(
@@ -991,7 +1078,9 @@ class CropImageSource:
                 frame_shape = roi_shape
                 images_full = None
                 external_reader = None
-                acquisition_crop_reader = _AcquisitionCropVideoFrameReader(Path(frame_source_path))
+                acquisition_crop_reader = _AcquisitionCropVideoFrameReader(
+                    Path(frame_source_path)
+                )
                 live_acceleration_effective = "pynvvc_luma"
                 live_acceleration_fallback_reason = None
             elif manifest_path is not None:
@@ -1030,10 +1119,9 @@ class CropImageSource:
                     live_acceleration_effective = "cpu"
                     live_acceleration_fallback_reason = None
                 else:
-                    source_video_path = (
-                        crop_group.attrs.get("source_video_path")
-                        or crop_group.attrs.get("video_source_path")
-                    )
+                    source_video_path = crop_group.attrs.get(
+                        "source_video_path"
+                    ) or crop_group.attrs.get("video_source_path")
                     if not source_video_path:
                         try:
                             source_video_path = str(
@@ -1073,6 +1161,7 @@ class CropImageSource:
                         )
                         if (
                             expected_size is not None
+                            and video_frame_count is None
                             and int(video_override.stat().st_size) != int(expected_size)
                         ):
                             raise ValueError(
@@ -1084,7 +1173,9 @@ class CropImageSource:
                         live_acceleration_effective = "cpu"
                         live_acceleration_fallback_reason = None
                     else:
-                        gpu_available, gpu_reason = _check_external_video_live_gpu_available()
+                        gpu_available, gpu_reason = (
+                            _check_external_video_live_gpu_available()
+                        )
                         if normalized_live_acceleration == "gpu":
                             if not gpu_available:
                                 raise _gpu_decode_unavailable(
@@ -1142,24 +1233,38 @@ class CropImageSource:
                 and storage_mode == "geometry_only"
                 and frame_source_kind == "source_video_path"
             ),
+            source_video_frame_offset=(
+                video_frame_offset if frame_source_kind == "source_video_path" else 0
+            ),
+            source_video_frame_count=(
+                video_frame_count if frame_source_kind == "source_video_path" else None
+            ),
             frame_shape=frame_shape,
             roi_read_mode=roi_read_mode,
             roi_cache_policy=normalized_cache_policy,
-            roi_image_representation=_image_representation_from_contract(roi_pixel_contract),
+            roi_image_representation=_image_representation_from_contract(
+                roi_pixel_contract
+            ),
             roi_pixel_contract=roi_pixel_contract,
             roi_live_acceleration_requested=(
-                normalized_live_acceleration if storage_mode == "geometry_only" else None
+                normalized_live_acceleration
+                if storage_mode == "geometry_only"
+                else None
             ),
             roi_live_acceleration_effective=(
                 live_acceleration_effective if storage_mode == "geometry_only" else None
             ),
             roi_live_acceleration_fallback_reason=(
-                live_acceleration_fallback_reason if storage_mode == "geometry_only" else None
+                live_acceleration_fallback_reason
+                if storage_mode == "geometry_only"
+                else None
             ),
             roi_live_gpu_chunk_frames=live_gpu_chunk_frames,
             _roi_images=roi_images,
             _images_full=images_full if storage_mode == "geometry_only" else None,
-            _external_reader=external_reader if storage_mode == "geometry_only" else None,
+            _external_reader=(
+                external_reader if storage_mode == "geometry_only" else None
+            ),
             crop_video_frame_indices=crop_video_frame_indices,
             source_pixel_kind_codes=source_pixel_kind_codes,
             supplemental_cache_row_indices=supplemental_cache_row_indices,
@@ -1293,12 +1398,16 @@ class CropImageSource:
         if index < 0:
             index += self.total_rois
         if index < 0 or index >= self.total_rois:
-            raise IndexError(f"ROI index {index} out of range for total_rois={self.total_rois}")
+            raise IndexError(
+                f"ROI index {index} out of range for total_rois={self.total_rois}"
+            )
         return self.read_slice(index, index + 1)[0]
 
     def read_slice(self, start: int, end: int) -> np.ndarray:
         if start < 0 or end < start or end > self.total_rois:
-            raise IndexError(f"Invalid ROI slice [{start}:{end}] for total_rois={self.total_rois}")
+            raise IndexError(
+                f"Invalid ROI slice [{start}:{end}] for total_rois={self.total_rois}"
+            )
         if self._roi_images is not None:
             assert self._roi_images is not None
             return _normalize_roi_batch(np.asarray(self._roi_images[start:end]))
@@ -1310,7 +1419,10 @@ class CropImageSource:
         if roi_indices.size == 0:
             roi_h, roi_w = self.roi_shape
             return np.zeros((0, roi_h, roi_w), dtype=np.uint8)
-        if roi_indices.min(initial=0) < 0 or roi_indices.max(initial=0) >= self.total_rois:
+        if (
+            roi_indices.min(initial=0) < 0
+            or roi_indices.max(initial=0) >= self.total_rois
+        ):
             raise IndexError("ROI indices out of range for crop run.")
         if self._roi_images is not None:
             assert self._roi_images is not None
@@ -1344,10 +1456,21 @@ class CropImageSource:
             and self.roi_live_acceleration_effective == "gpu"
             and self.frame_shape is not None
         ):
+            local_frames = self.frame_indices[roi_indices] - int(
+                self.source_video_frame_offset
+            )
+            if np.any(local_frames < 0) or (
+                self.source_video_frame_count is not None
+                and np.any(local_frames >= int(self.source_video_frame_count))
+            ):
+                raise IndexError(
+                    "Requested crop rows fall outside the bound source-video "
+                    "acquisition-frame window."
+                )
             try:
                 return _read_external_video_live_gpu_batch(
                     video_path=Path(self.frame_source_path),
-                    frame_indices=self.frame_indices[roi_indices],
+                    frame_indices=local_frames,
                     roi_coordinates_full=self.roi_coordinates_full[roi_indices],
                     roi_shape=self.roi_shape,
                     video_shape=self.frame_shape,
@@ -1359,9 +1482,16 @@ class CropImageSource:
                 ) from exc
         return self._read_live_indices_cpu(roi_indices)
 
-    def _read_acquisition_crop_video_indices(self, roi_indices: np.ndarray) -> np.ndarray:
-        if self._acquisition_crop_reader is None or self.crop_video_frame_indices is None:
-            raise RuntimeError("No acquisition crop-video reader available for crop run.")
+    def _read_acquisition_crop_video_indices(
+        self, roi_indices: np.ndarray
+    ) -> np.ndarray:
+        if (
+            self._acquisition_crop_reader is None
+            or self.crop_video_frame_indices is None
+        ):
+            raise RuntimeError(
+                "No acquisition crop-video reader available for crop run."
+            )
         roi_h, roi_w = self.roi_shape
         batch = np.zeros((roi_indices.size, roi_h, roi_w), dtype=np.uint8)
 
@@ -1375,7 +1505,9 @@ class CropImageSource:
 
         frame_cache: dict[int, np.ndarray] = {}
         for batch_idx in video_positions:
-            video_frame_idx = self.crop_video_frame_indices[int(roi_indices[int(batch_idx)])]
+            video_frame_idx = self.crop_video_frame_indices[
+                int(roi_indices[int(batch_idx)])
+            ]
             video_frame_idx_int = int(video_frame_idx)
             if video_frame_idx_int < 0:
                 raise ValueError(
@@ -1395,16 +1527,29 @@ class CropImageSource:
             batch[batch_idx] = frame
 
         if supplemental_positions.size:
-            if self._supplemental_flat_cache is None or self.supplemental_cache_row_indices is None:
-                raise RuntimeError("Hybrid acquisition crop run has supplemental rows but no flat cache.")
-            cache_rows = self.supplemental_cache_row_indices[roi_indices[supplemental_positions]]
+            if (
+                self._supplemental_flat_cache is None
+                or self.supplemental_cache_row_indices is None
+            ):
+                raise RuntimeError(
+                    "Hybrid acquisition crop run has supplemental rows but no flat cache."
+                )
+            cache_rows = self.supplemental_cache_row_indices[
+                roi_indices[supplemental_positions]
+            ]
             if np.any(cache_rows < 0):
-                bad_crop_row = int(roi_indices[supplemental_positions[np.flatnonzero(cache_rows < 0)[0]]])
+                bad_crop_row = int(
+                    roi_indices[
+                        supplemental_positions[np.flatnonzero(cache_rows < 0)[0]]
+                    ]
+                )
                 raise ValueError(
                     "Supplemental source row points at a negative supplemental_cache_row_indices "
                     f"value for crop row {bad_crop_row}."
                 )
-            supplemental = _normalize_roi_batch(np.asarray(self._supplemental_flat_cache[cache_rows]))
+            supplemental = _normalize_roi_batch(
+                np.asarray(self._supplemental_flat_cache[cache_rows])
+            )
             if supplemental.shape[1:] != (roi_h, roi_w):
                 raise ValueError(
                     "Supplemental flat-cache ROI shape "
@@ -1435,8 +1580,14 @@ class CropImageSource:
         manifest_path: Path,
         zarr_path: str | Path | None,
     ) -> None:
-        archive_path = Path(zarr_path).expanduser().resolve() if zarr_path is not None else None
-        expected_shape = (self.total_rois, int(self.roi_shape[0]), int(self.roi_shape[1]))
+        archive_path = (
+            Path(zarr_path).expanduser().resolve() if zarr_path is not None else None
+        )
+        expected_shape = (
+            self.total_rois,
+            int(self.roi_shape[0]),
+            int(self.roi_shape[1]),
+        )
         cache_arr = open_flat_roi_cache(
             manifest_path,
             expected_archive_path=archive_path,
@@ -1468,7 +1619,11 @@ class CropImageSource:
         staging = cache_arr.manifest.get("staging")
         if isinstance(staging, dict):
             requested_manifest = staging.get("requested_manifest_path")
-            self.roi_cache_canonical_path = str(requested_manifest) if requested_manifest else str(cache_arr.manifest_path)
+            self.roi_cache_canonical_path = (
+                str(requested_manifest)
+                if requested_manifest
+                else str(cache_arr.manifest_path)
+            )
         else:
             self.roi_cache_canonical_path = str(cache_arr.manifest_path)
         self.roi_cache_backend = "flat_bin_v1"
@@ -1477,7 +1632,9 @@ class CropImageSource:
             contract = stored_contract
             if contract is not None:
                 self.roi_pixel_contract = contract
-                self.roi_image_representation = _image_representation_from_contract(contract)
+                self.roi_image_representation = _image_representation_from_contract(
+                    contract
+                )
 
     def _should_use_roi_cache(self) -> bool:
         if self.storage_mode != "geometry_only":
@@ -1529,7 +1686,11 @@ class CropImageSource:
         cache_path = cache_root / cache_name
         cache_group = zarr.open_group(str(cache_path), mode="a")
 
-        expected_shape = (self.total_rois, int(self.roi_shape[0]), int(self.roi_shape[1]))
+        expected_shape = (
+            self.total_rois,
+            int(self.roi_shape[0]),
+            int(self.roi_shape[1]),
+        )
         cache_complete = bool(cache_group.attrs.get("cache_complete"))
         cache_key_before = _normalize_run_name(cache_group.attrs.get("cache_key"))
         cache_arr = cache_group.get("roi_images")
@@ -1568,7 +1729,9 @@ class CropImageSource:
                 )
                 console.print(f"[dim]{cache_path}[/dim]")
             if self.frame_source_kind == "source_video_path" and self.frame_source_path:
-                from fisheye.tracking.crop import materialize_external_roi_cache_for_crop_run
+                from fisheye.tracking.crop import (
+                    materialize_external_roi_cache_for_crop_run,
+                )
 
                 cache_result = materialize_external_roi_cache_for_crop_run(
                     cache_path=cache_path,
@@ -1588,8 +1751,12 @@ class CropImageSource:
                 cache_arr = cache_group.get("roi_images")
                 cache_group.attrs.update(
                     {
-                        "cache_write_backend_requested": cache_result.get("write_backend_requested"),
-                        "cache_write_backend_effective": cache_result.get("write_backend_effective"),
+                        "cache_write_backend_requested": cache_result.get(
+                            "write_backend_requested"
+                        ),
+                        "cache_write_backend_effective": cache_result.get(
+                            "write_backend_effective"
+                        ),
                         "cache_acceleration": cache_result.get("acceleration"),
                         "cache_fallback_reason": cache_result.get("fallback_reason"),
                         "cache_decode_seconds": cache_result.get("decode_seconds"),
@@ -1600,14 +1767,20 @@ class CropImageSource:
                         "cache_roi_shard_len": cache_result.get("roi_shard_len"),
                         "cache_roi_storage": cache_result.get("roi_storage"),
                         "cache_roi_use_sharding": cache_result.get("roi_use_sharding"),
-                        "cache_layout_profile": cache_result.get("roi_layout_profile", SCRATCH_ROI_CACHE_LAYOUT_PROFILE),
+                        "cache_layout_profile": cache_result.get(
+                            "roi_layout_profile", SCRATCH_ROI_CACHE_LAYOUT_PROFILE
+                        ),
                         "cache_gpu_chunk_frames": cache_result.get("gpu_chunk_frames"),
-                        "roi_image_representation": cache_result.get("roi_image_representation"),
+                        "roi_image_representation": cache_result.get(
+                            "roi_image_representation"
+                        ),
                         "roi_pixel_contract": cache_result.get("roi_pixel_contract"),
                     }
                 )
             else:
-                cache_layout = build_scratch_roi_cache_layout(total_rois=self.total_rois)
+                cache_layout = build_scratch_roi_cache_layout(
+                    total_rois=self.total_rois
+                )
                 cache_arr = cache_group.create_array(
                     "roi_images",
                     **build_crop_roi_create_kwargs(
@@ -1622,28 +1795,53 @@ class CropImageSource:
                         "[dim]Temporary ROI cache materialization: "
                         "backend=standard_zarr, acceleration=cpu, source=raw_video/images_full[/dim]"
                     )
-                total_batches = max(1, (self.total_rois + _ROI_CACHE_BUILD_BATCH - 1) // _ROI_CACHE_BUILD_BATCH)
+                total_batches = max(
+                    1,
+                    (self.total_rois + _ROI_CACHE_BUILD_BATCH - 1)
+                    // _ROI_CACHE_BUILD_BATCH,
+                )
                 progress_every = max(1, total_batches // 20)
-                for batch_idx, start in enumerate(range(0, self.total_rois, _ROI_CACHE_BUILD_BATCH)):
+                for batch_idx, start in enumerate(
+                    range(0, self.total_rois, _ROI_CACHE_BUILD_BATCH)
+                ):
                     end = min(start + _ROI_CACHE_BUILD_BATCH, self.total_rois)
-                    cache_arr[start:end] = self._read_live_indices(np.arange(start, end, dtype=np.int64))
-                    if console is not None and hasattr(console, "print") and (
-                        end == self.total_rois or (batch_idx + 1) % progress_every == 0
+                    cache_arr[start:end] = self._read_live_indices(
+                        np.arange(start, end, dtype=np.int64)
+                    )
+                    if (
+                        console is not None
+                        and hasattr(console, "print")
+                        and (
+                            end == self.total_rois
+                            or (batch_idx + 1) % progress_every == 0
+                        )
                     ):
-                        pct = (end / self.total_rois) * 100 if self.total_rois > 0 else 100.0
+                        pct = (
+                            (end / self.total_rois) * 100
+                            if self.total_rois > 0
+                            else 100.0
+                        )
                         console.print(
                             f"[dim]  Cache progress: {end:,}/{self.total_rois:,} ROIs ({pct:.1f}%)[/dim]"
                         )
                 cache_group.attrs["cache_write_backend_requested"] = "standard"
                 cache_group.attrs["cache_write_backend_effective"] = "standard_zarr"
                 cache_group.attrs["cache_acceleration"] = "cpu"
-                cache_group.attrs["cache_roi_chunk_len"] = int(cache_layout.roi_chunk_len)
+                cache_group.attrs["cache_roi_chunk_len"] = int(
+                    cache_layout.roi_chunk_len
+                )
                 cache_group.attrs["cache_roi_shard_len"] = (
-                    int(cache_layout.roi_shard_len) if cache_layout.roi_shard_len is not None else int(cache_layout.roi_chunk_len)
+                    int(cache_layout.roi_shard_len)
+                    if cache_layout.roi_shard_len is not None
+                    else int(cache_layout.roi_chunk_len)
                 )
                 cache_group.attrs["cache_roi_storage"] = cache_layout.roi_storage
-                cache_group.attrs["cache_roi_use_sharding"] = bool(cache_layout.roi_use_sharding)
-                cache_group.attrs["cache_layout_profile"] = SCRATCH_ROI_CACHE_LAYOUT_PROFILE
+                cache_group.attrs["cache_roi_use_sharding"] = bool(
+                    cache_layout.roi_use_sharding
+                )
+                cache_group.attrs["cache_layout_profile"] = (
+                    SCRATCH_ROI_CACHE_LAYOUT_PROFILE
+                )
                 cache_group.attrs.update(crop_roi_layout_attrs(cache_layout))
             cache_group.attrs["cache_complete"] = True
             if console is not None and hasattr(console, "print"):
@@ -1669,7 +1867,9 @@ class CropImageSource:
         contract = normalize_pixel_contract(cache_group.attrs.get("roi_pixel_contract"))
         if contract is not None:
             self.roi_pixel_contract = contract
-            self.roi_image_representation = _image_representation_from_contract(contract)
+            self.roi_image_representation = _image_representation_from_contract(
+                contract
+            )
 
     def _build_roi_cache_key(self, archive_path: Path) -> str:
         payload = {
@@ -1686,26 +1886,38 @@ class CropImageSource:
             "roi_shape": [int(self.roi_shape[0]), int(self.roi_shape[1])],
             "total_rois": int(self.total_rois),
         }
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         return hashlib.sha256(encoded).hexdigest()
 
     def _build_frame_source_identity(self) -> dict[str, object]:
         identity: dict[str, object] = {
             "frame_source_path": self.frame_source_path,
-            "frame_shape": list(self.frame_shape) if self.frame_shape is not None else None,
+            "frame_shape": (
+                list(self.frame_shape) if self.frame_shape is not None else None
+            ),
         }
         if self.frame_source_path_override_used:
+            windowed = self.source_video_frame_count is not None
             identity.update(
                 {
                     "frame_source_declared_path": self.frame_source_declared_path,
                     "frame_source_path_override_used": True,
                     "override_semantics": (
-                        "byte-identical_relocation_for_cache_materialization"
+                        "acquisition_frame_window_relocation_v1"
+                        if windowed
+                        else "byte-identical_relocation_for_cache_materialization"
                     ),
+                    "source_video_frame_offset": int(self.source_video_frame_offset),
+                    "source_video_frame_count": self.source_video_frame_count,
                 }
             )
 
-        if self.frame_source_kind in {"source_video_path", "acquisition_crop_video"} and self.frame_source_path:
+        if (
+            self.frame_source_kind in {"source_video_path", "acquisition_crop_video"}
+            and self.frame_source_path
+        ):
             source_path = Path(self.frame_source_path)
             try:
                 stat = source_path.stat()
@@ -1738,7 +1950,21 @@ class CropImageSource:
                 )
             return _to_grayscale_uint8(np.asarray(self._images_full[frame_idx]))
         if self._external_reader is not None:
-            return self._external_reader.read_frame(frame_idx)
+            local_frame = int(frame_idx) - int(self.source_video_frame_offset)
+            if local_frame < 0:
+                raise IndexError(
+                    f"Acquisition frame {frame_idx} precedes source-video window "
+                    f"offset {self.source_video_frame_offset}."
+                )
+            if self.source_video_frame_count is not None and local_frame >= int(
+                self.source_video_frame_count
+            ):
+                raise IndexError(
+                    f"Acquisition frame {frame_idx} exceeds source-video window "
+                    f"[{self.source_video_frame_offset}, "
+                    f"{self.source_video_frame_offset + self.source_video_frame_count})."
+                )
+            return self._external_reader.read_frame(local_frame)
         if self._acquisition_crop_reader is not None:
             return self._acquisition_crop_reader.read_frame(frame_idx)
         raise RuntimeError("No frame source available for geometry-only crop read.")

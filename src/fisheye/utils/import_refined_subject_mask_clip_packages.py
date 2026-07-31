@@ -7,7 +7,9 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import tarfile
@@ -30,6 +32,22 @@ from fisheye.shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
 )
+from fisheye.shared.subject_mask_attempt import (
+    validate_subject_mask_attempt,
+    validate_subject_mask_scientific_identity,
+)
+from fisheye.shared.subject_mask_worker_receipt import (
+    REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    build_recording_subject_mask_source_receipt,
+    validate_subject_mask_worker_semantic_receipt,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
+from fisheye.shared.zarr.subject_mask_schema import (
+    REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
+    SubjectMaskComponentRegistry,
+    SubjectMaskDimensions,
+    derive_subject_mask_frame_row_offsets,
+)
 from fisheye.shared.refined_subject_mask_encoded_chunks import (
     ENCODED_MASK_PAYLOAD_NAME,
     ENCODED_PACKAGE_SCHEMA_ID,
@@ -37,13 +55,17 @@ from fisheye.shared.refined_subject_mask_encoded_chunks import (
     sha256_file,
 )
 from fisheye.shared.zarr_run_completion import mark_run_complete, require_runs_parent
-from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID as CLIP_PACKAGE_SCHEMA_ID
-
+from fisheye.utils.finalize_subject_mask_clip_package import (
+    PACKAGE_SCHEMA_ID as CLIP_PACKAGE_SCHEMA_ID,
+)
 
 IMPORT_SCHEMA_ID = "palette_refined_subject_mask_clip_package_import_v1"
+RECORDING_SOURCE_RECEIPT_ATTR = "subject_mask_recording_source_receipt_binding"
+RECORDING_SOURCE_RECEIPT_SIDECAR = "source_validation_receipt.json"
 SKIPPED_DERIVED_GROUPS = {"mask_bitpacked", "mask_rle"}
 SKIPPED_REGENERATED_ARRAY_NAMES = {"reason_bytes"}
 SKIPPED_REGENERATED_ARRAY_PATHS = {"frame_counts"}
+NON_ROW_ALIGNED_ARRAY_PATHS = {"available_channels"}
 FRAME_COUNTS_INNER_ROWS = 16_384
 FRAME_COUNTS_SHARD_ROWS = 131_072
 COLLECTION_INHERITED_ATTR_DROP_EXACT = {
@@ -56,6 +78,10 @@ COLLECTION_INHERITED_ATTR_DROP_EXACT = {
     "source_roi_cache_canonical_path",
     "source_roi_cache_key",
     "source_roi_cache_path",
+    "subject_mask_scientific_identity",
+    "subject_mask_attempt",
+    "subject_mask_attempt_lineage_evidence",
+    "subject_mask_worker_semantic_receipt_binding",
 }
 COLLECTION_LIST_ATTRS = {
     "clip_package_host": "clip_package_hosts",
@@ -77,6 +103,9 @@ class ClipPackage:
     run_name: str
     group: zarr.Group
     source_crop_row_ids: np.ndarray
+    scientific_identity: Mapping[str, Any] | None = None
+    attempt: Mapping[str, Any] | None = None
+    worker_receipt: Mapping[str, Any] | None = None
     encoded_mask_path: Path | None = None
     encoded_mask_summary: Mapping[str, Any] | None = None
 
@@ -111,13 +140,17 @@ def _safe_extract_package_tar(tar: tarfile.TarFile, target: Path) -> None:
     for member in members:
         member_path = (target_root / member.name).resolve()
         if member_path != target_root and target_root not in member_path.parents:
-            raise ValueError(f"Unsafe package member path escapes extraction root: {member.name!r}")
+            raise ValueError(
+                f"Unsafe package member path escapes extraction root: {member.name!r}"
+            )
         if member.issym() or member.islnk():
             raise ValueError(f"Refusing package link member: {member.name!r}")
     tar.extractall(target, members=members)
 
 
-def _extract_package(package_path: Path, extract_root: Path) -> tuple[Path, Mapping[str, Any]]:
+def _extract_package(
+    package_path: Path, extract_root: Path
+) -> tuple[Path, Mapping[str, Any]]:
     package_path = package_path.expanduser().resolve()
     if not package_path.is_file():
         raise ValueError(f"Package path is not a file: {package_path}")
@@ -129,34 +162,100 @@ def _extract_package(package_path: Path, extract_root: Path) -> tuple[Path, Mapp
     if not manifest_path.is_file():
         raise ValueError(f"Package {package_path} is missing package.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_id") not in {CLIP_PACKAGE_SCHEMA_ID, ENCODED_PACKAGE_SCHEMA_ID}:
+    if manifest.get("schema_id") not in {
+        CLIP_PACKAGE_SCHEMA_ID,
+        ENCODED_PACKAGE_SCHEMA_ID,
+    }:
         raise ValueError(
             f"Package {package_path} has schema_id={manifest.get('schema_id')!r}; "
             f"expected {CLIP_PACKAGE_SCHEMA_ID!r} or {ENCODED_PACKAGE_SCHEMA_ID!r}."
         )
-    if (
-        manifest.get("schema_id") == ENCODED_PACKAGE_SCHEMA_ID
-        and manifest.get("package_completion_status") != "complete"
-    ):
-        raise ValueError(f"Encoded package {package_path} is not sealed complete.")
+    if manifest.get("package_completion_status") != "complete":
+        raise ValueError(f"Package {package_path} is not sealed complete.")
     return target, manifest
 
 
-def _load_package(package_path: Path, extract_root: Path) -> ClipPackage:
+def _load_package(
+    package_path: Path,
+    extract_root: Path,
+    *,
+    require_production_proof: bool,
+) -> ClipPackage:
     extract_dir, manifest = _extract_package(package_path, extract_root)
     run_group_path = PurePosixPath(str(manifest.get("run_group_path") or ""))
-    if len(run_group_path.parts) != 2 or run_group_path.parts[0] != "refined_subject_masks_runs":
-        raise ValueError(f"Package {package_path} has invalid run_group_path={str(run_group_path)!r}.")
+    if (
+        len(run_group_path.parts) != 2
+        or run_group_path.parts[0] != "refined_subject_masks_runs"
+    ):
+        raise ValueError(
+            f"Package {package_path} has invalid run_group_path={str(run_group_path)!r}."
+        )
     run_name = run_group_path.parts[1]
     group_path = extract_dir / run_group_path.parts[0] / run_name
     if not group_path.is_dir():
-        raise ValueError(f"Package {package_path} is missing run group {run_group_path}.")
+        raise ValueError(
+            f"Package {package_path} is missing run group {run_group_path}."
+        )
     group = zarr.open_group(str(group_path), mode="r", use_consolidated=False)
+    if group.attrs.get("palette_run_completion_status") != "complete":
+        raise ValueError(f"Package {package_path} refined run is not complete.")
+    science: Mapping[str, Any] | None = None
+    attempt: Mapping[str, Any] | None = None
+    worker_receipt: Mapping[str, Any] | None = None
+    declared_proof = manifest.get("worker_proof")
+    if require_production_proof or declared_proof is not None:
+        if group.attrs.get("stage_selector_eligible") is not False:
+            raise ValueError(
+                f"Package {package_path} refined worker is selector-eligible."
+            )
+        science = group.attrs.get("subject_mask_scientific_identity")
+        attempt = group.attrs.get("subject_mask_attempt")
+        binding = group.attrs.get("subject_mask_worker_semantic_receipt_binding")
+        if not isinstance(
+            science, Mapping
+        ) or validate_subject_mask_scientific_identity(science):
+            raise ValueError(f"Package {package_path} has invalid scientific identity.")
+        if not isinstance(attempt, Mapping) or validate_subject_mask_attempt(attempt):
+            raise ValueError(f"Package {package_path} has invalid attempt identity.")
+        if not isinstance(binding, Mapping):
+            raise ValueError(f"Package {package_path} has no worker receipt binding.")
+        relative = PurePosixPath(str(binding.get("relative_path") or ""))
+        if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Package {package_path} worker receipt path is unsafe.")
+        receipt_path = extract_dir.joinpath(*relative.parts)
+        receipt_bytes = receipt_path.read_bytes()
+        if hashlib.sha256(receipt_bytes).hexdigest() != binding.get("document_sha256"):
+            raise ValueError(f"Package {package_path} worker receipt document changed.")
+        worker_receipt = json.loads(receipt_bytes)
+        validate_subject_mask_worker_semantic_receipt(
+            worker_receipt,
+            scientific_identity=science,
+            attempt=attempt,
+            required_paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+        )
+        if worker_receipt.get("payload_digest") != binding.get("payload_digest"):
+            raise ValueError(f"Package {package_path} worker receipt payload changed.")
+        expected_proof = {
+            "scientific_identity_digest": science["digest"],
+            "attempt_id": attempt["payload"]["attempt_id"],
+            "attempt_payload_digest": attempt["payload_digest"],
+            "semantic_receipt_payload_digest": worker_receipt["payload_digest"],
+            "semantic_receipt_document_sha256": binding["document_sha256"],
+            "semantic_receipt_relative_path": str(relative),
+        }
+        if declared_proof != expected_proof:
+            raise ValueError(f"Package {package_path} worker proof binding changed.")
     if "masks_roi" not in group:
-        raise ValueError(f"Package {package_path} run {run_group_path} is missing dense masks_roi.")
+        raise ValueError(
+            f"Package {package_path} run {run_group_path} is missing dense masks_roi."
+        )
     if "source_crop_row_ids" not in group:
-        raise ValueError(f"Package {package_path} run {run_group_path} is missing source_crop_row_ids.")
-    source_crop_row_ids = np.asarray(group["source_crop_row_ids"][:], dtype=np.int64).reshape(-1)
+        raise ValueError(
+            f"Package {package_path} run {run_group_path} is missing source_crop_row_ids."
+        )
+    source_crop_row_ids = np.asarray(
+        group["source_crop_row_ids"][:], dtype=np.int64
+    ).reshape(-1)
     row_count = int(group["masks_roi"].shape[0])
     if int(source_crop_row_ids.shape[0]) != row_count:
         raise ValueError(
@@ -168,11 +267,17 @@ def _load_package(package_path: Path, extract_root: Path) -> ClipPackage:
     if manifest.get("schema_id") == ENCODED_PACKAGE_SCHEMA_ID:
         summary = manifest.get("encoded_global_masks_roi")
         if not isinstance(summary, Mapping):
-            raise ValueError(f"Encoded package {package_path} is missing encoded_global_masks_roi metadata.")
+            raise ValueError(
+                f"Encoded package {package_path} is missing encoded_global_masks_roi metadata."
+            )
         encoded_mask_path = extract_dir / ENCODED_MASK_PAYLOAD_NAME
         if not (encoded_mask_path / "zarr.json").is_file():
-            raise ValueError(f"Encoded package {package_path} is missing {ENCODED_MASK_PAYLOAD_NAME}/zarr.json.")
-        encoded_metadata = json.loads((encoded_mask_path / "zarr.json").read_text(encoding="utf-8"))
+            raise ValueError(
+                f"Encoded package {package_path} is missing {ENCODED_MASK_PAYLOAD_NAME}/zarr.json."
+            )
+        encoded_metadata = json.loads(
+            (encoded_mask_path / "zarr.json").read_text(encoding="utf-8")
+        )
         expected_fingerprint = str(summary.get("array_contract_fingerprint") or "")
         actual_fingerprint = array_contract_fingerprint(encoded_metadata)
         if not expected_fingerprint or actual_fingerprint != expected_fingerprint:
@@ -188,6 +293,9 @@ def _load_package(package_path: Path, extract_root: Path) -> ClipPackage:
         run_name=run_name,
         group=group,
         source_crop_row_ids=source_crop_row_ids,
+        scientific_identity=(dict(science) if science is not None else None),
+        attempt=(dict(attempt) if attempt is not None else None),
+        worker_receipt=(dict(worker_receipt) if worker_receipt is not None else None),
         encoded_mask_path=encoded_mask_path,
         encoded_mask_summary=encoded_mask_summary,
     )
@@ -286,7 +394,9 @@ def _dedupe_preserving_order(values: Sequence[str]) -> list[str]:
     return out
 
 
-def sanitize_collection_run_attrs(dest_run: zarr.Group, packages: Sequence[ClipPackage]) -> None:
+def sanitize_collection_run_attrs(
+    dest_run: zarr.Group, packages: Sequence[ClipPackage]
+) -> None:
     """Remove singleton shard attrs and replace useful ones with collection lists."""
 
     for key in list(dest_run.attrs.keys()):
@@ -301,17 +411,23 @@ def sanitize_collection_run_attrs(dest_run: zarr.Group, packages: Sequence[ClipP
         if values:
             dest_run.attrs[collection_attr] = values
 
-    roi_cache_used = [bool(package.group.attrs.get("source_roi_cache_used")) for package in packages]
+    roi_cache_used = [
+        bool(package.group.attrs.get("source_roi_cache_used")) for package in packages
+    ]
     if any(roi_cache_used):
         dest_run.attrs["source_roi_cache_used"] = bool(all(roi_cache_used))
-        dest_run.attrs["source_roi_cache_package_count"] = int(sum(1 for value in roi_cache_used if value))
+        dest_run.attrs["source_roi_cache_package_count"] = int(
+            sum(1 for value in roi_cache_used if value)
+        )
 
 
 def _array_chunks(array: Any, shape: tuple[int, ...]) -> tuple[int, ...] | None:
     chunks = getattr(array, "chunks", None)
     if chunks is None:
         return None
-    normalized = tuple(max(1, min(int(chunk), int(dim))) for chunk, dim in zip(tuple(chunks), shape))
+    normalized = tuple(
+        max(1, min(int(chunk), int(dim))) for chunk, dim in zip(tuple(chunks), shape)
+    )
     return normalized if len(normalized) == len(shape) else None
 
 
@@ -358,10 +474,14 @@ def _recording_frame_count_candidates(
 
     crop = root.get(f"crop_runs/{source_crop_run}")
     if not isinstance(crop, zarr.Group):
-        raise ValueError(f"Missing canonical source crop run crop_runs/{source_crop_run}.")
+        raise ValueError(
+            f"Missing canonical source crop run crop_runs/{source_crop_run}."
+        )
     crop_count = _positive_int(crop.attrs.get("recording_frame_index_row_count"))
     if crop_count is not None:
-        candidates[f"crop_runs/{source_crop_run}.recording_frame_index_row_count"] = crop_count
+        candidates[f"crop_runs/{source_crop_run}.recording_frame_index_row_count"] = (
+            crop_count
+        )
     crop_frame_counts = crop.get("frame_counts")
     if crop_frame_counts is not None:
         shape = tuple(int(value) for value in crop_frame_counts.shape)
@@ -477,7 +597,9 @@ def write_recording_frame_counts(
             "frame_counts_semantics": "recording_parent_frame_index_0_based",
             "frame_counts_generation": "bincount_of_assembled_frame_indices_v1",
             "palette_physical_layout": (
-                "indexed_sharding_v1" if shard_rows > inner_rows else "regular_chunks_v1"
+                "indexed_sharding_v1"
+                if shard_rows > inner_rows
+                else "regular_chunks_v1"
             ),
             "palette_logical_chunk_shape": [int(inner_rows)],
             "palette_shard_rows_requested": int(FRAME_COUNTS_SHARD_ROWS),
@@ -520,7 +642,9 @@ def _write_runs_by_mapping(
         start = stop
 
 
-def _contiguous_runs(local_rows: np.ndarray, dest_rows: np.ndarray) -> list[tuple[int, int, int, int]]:
+def _contiguous_runs(
+    local_rows: np.ndarray, dest_rows: np.ndarray
+) -> list[tuple[int, int, int, int]]:
     if int(local_rows.shape[0]) == 0:
         return []
     runs: list[tuple[int, int, int, int]] = []
@@ -563,7 +687,9 @@ def _build_row_chunk_copy_plan(
     runs_by_chunk: list[list[RowCopyRun]] = [[] for _ in chunk_bounds]
     for package in packages:
         local_rows, dest_rows = row_maps[package.package_path]
-        for src_start, src_stop, dst_start, dst_stop in _contiguous_runs(local_rows, dest_rows):
+        for src_start, src_stop, dst_start, dst_stop in _contiguous_runs(
+            local_rows, dest_rows
+        ):
             current_src = int(src_start)
             current_dst = int(dst_start)
             while current_dst < int(dst_stop):
@@ -599,7 +725,9 @@ def _numpy_block_dtype(dtype: Any) -> Any:
         return object
 
 
-def _empty_chunk_block(shape: tuple[int, ...], dtype: Any, fill_value: Any) -> np.ndarray:
+def _empty_chunk_block(
+    shape: tuple[int, ...], dtype: Any, fill_value: Any
+) -> np.ndarray:
     block_dtype = _numpy_block_dtype(dtype)
     block = np.empty(shape, dtype=block_dtype)
     if fill_value is None:
@@ -655,14 +783,19 @@ def _copy_row_aligned_array_by_chunk(
     def write_dest_chunk(plan: RowChunkCopyPlan) -> None:
         dst_start = int(plan.dst_start)
         dst_stop = int(plan.dst_stop)
-        block_shape = (int(dst_stop) - int(dst_start), *tuple(int(value) for value in dest.shape[1:]))
+        block_shape = (
+            int(dst_stop) - int(dst_start),
+            *tuple(int(value) for value in dest.shape[1:]),
+        )
         block = _empty_chunk_block(block_shape, dtype, fill_value)
         if not plan.runs:
             return
         for run in plan.runs:
             rel_start = int(run.dst_start) - dst_start
             rel_stop = int(run.dst_stop) - dst_start
-            block[rel_start:rel_stop] = package_arrays[run.package_path][run.src_start : run.src_stop]
+            block[rel_start:rel_stop] = package_arrays[run.package_path][
+                run.src_start : run.src_stop
+            ]
         dest[dst_start:dst_stop] = block
 
     workers = max(1, int(array_copy_workers))
@@ -678,10 +811,16 @@ def _copy_row_aligned_array_by_chunk(
 
 def _is_contour_array_path(path: str) -> bool:
     parts = PurePosixPath(path).parts
-    return len(parts) >= 4 and parts[-2] == "contours" and parts[-1] in {"ptr", "len", "points_xy"}
+    return (
+        len(parts) >= 4
+        and parts[-2] == "contours"
+        and parts[-1] in {"ptr", "len", "points_xy"}
+    )
 
 
-def _dense_masks_roi_chunks(array_path: str, dest_shape: tuple[int, ...]) -> tuple[int, ...] | None:
+def _dense_masks_roi_chunks(
+    array_path: str, dest_shape: tuple[int, ...]
+) -> tuple[int, ...] | None:
     if array_path != "masks_roi" or len(dest_shape) != 4:
         return None
     return refined_subject_mask_storage_chunks(
@@ -701,7 +840,9 @@ def _contour_components(group: zarr.Group) -> list[str]:
         if not isinstance(comp, zarr.Group):
             continue
         contours = comp.get("contours")
-        if isinstance(contours, zarr.Group) and all(key in contours for key in ("ptr", "len", "points_xy")):
+        if isinstance(contours, zarr.Group) and all(
+            key in contours for key in ("ptr", "len", "points_xy")
+        ):
             out.append(str(name))
     return out
 
@@ -728,8 +869,12 @@ def _merge_contours(
         local_rows, dest_rows = row_maps[package.package_path]
         local_ptr = np.asarray(contours["ptr"][:], dtype=np.int64)
         local_len = np.asarray(contours["len"][:], dtype=np.int32)
-        local_points = np.asarray(contours["points_xy"][:], dtype=np.float32).reshape(-1, 2)
-        for src_row, dst_row in zip(local_rows.tolist(), dest_rows.tolist(), strict=True):
+        local_points = np.asarray(contours["points_xy"][:], dtype=np.float32).reshape(
+            -1, 2
+        )
+        for src_row, dst_row in zip(
+            local_rows.tolist(), dest_rows.tolist(), strict=True
+        ):
             n_points = int(local_len[int(src_row)])
             if n_points <= 0:
                 continue
@@ -739,7 +884,9 @@ def _merge_contours(
                     f"{package.package_path} component {component_name} has len={n_points} "
                     f"but ptr={src_offset} at local row {int(src_row)}."
                 )
-            segment = np.asarray(local_points[src_offset : src_offset + n_points], dtype=np.float32)
+            segment = np.asarray(
+                local_points[src_offset : src_offset + n_points], dtype=np.float32
+            )
             segments_by_row[int(dst_row)] = segment
 
     offset = 0
@@ -782,23 +929,198 @@ def _merge_contours(
     }
 
 
-def _build_row_maps(packages: Sequence[ClipPackage]) -> tuple[np.ndarray, dict[Path, tuple[np.ndarray, np.ndarray]]]:
-    all_ids = np.concatenate([package.source_crop_row_ids for package in packages], axis=0)
+def _build_row_maps(
+    packages: Sequence[ClipPackage],
+) -> tuple[np.ndarray, dict[Path, tuple[np.ndarray, np.ndarray]]]:
+    all_ids = np.concatenate(
+        [package.source_crop_row_ids for package in packages], axis=0
+    )
     unique_ids, counts = np.unique(all_ids, return_counts=True)
     if int(unique_ids.shape[0]) != int(all_ids.shape[0]):
         duplicate = int(unique_ids[np.flatnonzero(counts > 1)[0]])
-        raise ValueError(f"Duplicate source_crop_row_ids across clip packages: {duplicate}")
+        raise ValueError(
+            f"Duplicate source_crop_row_ids across clip packages: {duplicate}"
+        )
     sorted_ids = np.sort(all_ids, kind="stable")
-    dest_by_crop_row = {int(crop_row_id): int(row_idx) for row_idx, crop_row_id in enumerate(sorted_ids.tolist())}
+    dest_by_crop_row = {
+        int(crop_row_id): int(row_idx)
+        for row_idx, crop_row_id in enumerate(sorted_ids.tolist())
+    }
     row_maps: dict[Path, tuple[np.ndarray, np.ndarray]] = {}
     for package in packages:
-        local_order = np.argsort(package.source_crop_row_ids, kind="stable").astype(np.int64, copy=False)
+        local_order = np.argsort(package.source_crop_row_ids, kind="stable").astype(
+            np.int64, copy=False
+        )
         dest_rows = np.asarray(
-            [dest_by_crop_row[int(package.source_crop_row_ids[int(local_row)])] for local_row in local_order.tolist()],
+            [
+                dest_by_crop_row[int(package.source_crop_row_ids[int(local_row)])]
+                for local_row in local_order.tolist()
+            ],
             dtype=np.int64,
         )
         row_maps[package.package_path] = (local_order, dest_rows)
     return sorted_ids.astype(np.int64, copy=False), row_maps
+
+
+def _ordered_worker_evidence(
+    packages: Sequence[ClipPackage],
+    *,
+    row_maps: Mapping[Path, tuple[np.ndarray, np.ndarray]],
+) -> list[dict[str, object]]:
+    """Bind package receipts to contiguous global recording intervals."""
+
+    evidence: list[dict[str, object]] = []
+    for package in packages:
+        if (
+            package.scientific_identity is None
+            or package.attempt is None
+            or package.worker_receipt is None
+        ):
+            raise ValueError(
+                f"Package {package.package_path} lacks production worker proof."
+            )
+        local_rows, dest_rows = row_maps[package.package_path]
+        expected_local = np.arange(package.row_count, dtype=np.int64)
+        if not np.array_equal(local_rows, expected_local):
+            raise ValueError(
+                f"Package {package.package_path} rows are not already in canonical "
+                "source_crop_row_ids order."
+            )
+        if dest_rows.size == 0:
+            raise ValueError(f"Package {package.package_path} has no rows.")
+        start = int(dest_rows[0])
+        if not np.array_equal(
+            dest_rows,
+            np.arange(start, start + package.row_count, dtype=np.int64),
+        ):
+            raise ValueError(
+                f"Package {package.package_path} is interleaved in recording row order."
+            )
+        evidence.append(
+            {
+                "global_start_row": start,
+                "scientific_identity": dict(package.scientific_identity),
+                "attempt": dict(package.attempt),
+                "receipt": dict(package.worker_receipt),
+            }
+        )
+    return sorted(evidence, key=lambda item: int(item["global_start_row"]))
+
+
+def _recording_core_arrays(
+    root: zarr.Group,
+    run: zarr.Group,
+    *,
+    crop_run: str,
+    n_frames: int,
+) -> dict[str, Any]:
+    crop = root.get(f"crop_runs/{crop_run}")
+    if not isinstance(crop, zarr.Group):
+        raise ValueError(f"Missing canonical crop run crop_runs/{crop_run}.")
+    rows = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64)
+    expected_rows = np.arange(int(crop["instance_key"].shape[0]), dtype=np.int64)
+    if not np.array_equal(rows, expected_rows):
+        raise ValueError(
+            "Refined package union must equal the complete canonical crop rowset."
+        )
+    required_crop = (
+        "instance_key",
+        "source_acquisition_frame_index",
+        "source_crop_xywh",
+    )
+    missing = [path for path in required_crop if path not in crop]
+    if missing:
+        raise ValueError(
+            f"Canonical crop run lacks recording publication arrays: {missing!r}."
+        )
+    frames = np.asarray(crop["source_acquisition_frame_index"][:], dtype=np.int64)
+    arrays: dict[str, Any] = {
+        "source_crop_row_ids": run["source_crop_row_ids"],
+        "instance_key": crop["instance_key"],
+        "source_acquisition_frame_index": crop["source_acquisition_frame_index"],
+        "frame_row_offsets": derive_subject_mask_frame_row_offsets(
+            frames, n_frames=int(n_frames)
+        ),
+        "source_crop_xywh": crop["source_crop_xywh"],
+        "masks_roi": run["masks_roi"],
+        "available_channels": run["available_channels"],
+    }
+    for path in (
+        "metrics/mask_present",
+        "metrics/area_px",
+        "metrics/centroid_xy",
+        "metrics/centroid_valid",
+        "metrics/bbox_xyxy",
+        "metrics/bbox_valid",
+    ):
+        arrays[path] = run[path]
+    return arrays
+
+
+def _seal_recording_source_receipt(
+    *,
+    zarr_path: Path,
+    root: zarr.Group,
+    run: zarr.Group,
+    output_run: str,
+    crop_run: str,
+    n_frames: int,
+    packages: Sequence[ClipPackage],
+    row_maps: Mapping[Path, tuple[np.ndarray, np.ndarray]],
+) -> tuple[dict[str, object], dict[str, object]]:
+    arrays = _recording_core_arrays(
+        root,
+        run,
+        crop_run=crop_run,
+        n_frames=n_frames,
+    )
+    masks = arrays["masks_roi"]
+    labels = tuple(str(value) for value in run.attrs.get("mask_labels") or ())
+    dimensions = SubjectMaskDimensions(
+        n_frames=int(n_frames),
+        n_rois=int(masks.shape[0]),
+        n_channels=int(masks.shape[1]),
+        roi_height=int(masks.shape[2]),
+        roi_width=int(masks.shape[3]),
+    )
+    components = SubjectMaskComponentRegistry(labels)
+    manifest, receipt = build_recording_subject_mask_source_receipt(
+        kind="refined_dense_core",
+        stage_kind="refined_subject_mask",
+        source_run_path=f"refined_subject_masks_runs/{output_run}",
+        schema=REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
+        arrays=arrays,
+        dimensions=dimensions,
+        components=components,
+        threshold=None,
+        workers=_ordered_worker_evidence(packages, row_maps=row_maps),
+        assembly_context={
+            "source_crop_run": crop_run,
+            "package_count": int(len(packages)),
+            "package_paths": [str(package.package_path) for package in packages],
+        },
+    )
+    receipt_bytes = canonical_json_bytes(receipt)
+    relative = (
+        f"refined_subject_masks_runs/{output_run}/"
+        f"{RECORDING_SOURCE_RECEIPT_SIDECAR}"
+    )
+    target = zarr_path / relative
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(receipt_bytes)
+    with temporary.open("rb") as handle:
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    run.attrs["run_manifest"] = manifest
+    run.attrs[RECORDING_SOURCE_RECEIPT_ATTR] = {
+        "schema_id": receipt["schema_id"],
+        "schema_version": receipt["schema_version"],
+        "payload_digest": receipt["payload_digest"],
+        "relative_path": relative,
+        "document_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "storage": "strict_json_sidecar_v1",
+    }
+    return manifest, receipt
 
 
 def _merge_component_reason_columns(
@@ -809,13 +1131,19 @@ def _merge_component_reason_columns(
     total_rows: int,
 ) -> None:
     """Decode package-local widths and publish one canonical collection column."""
-    component_names = [str(value) for value in list(dest_run.attrs.get("mask_labels") or [])]
+    component_names = [
+        str(value) for value in list(dest_run.attrs.get("mask_labels") or [])
+    ]
     for component_name in component_names:
         merged = np.full(int(total_rows), "", dtype=object)
         found_count = 0
         for package in packages:
             component = package.group.get(f"components/{component_name}")
-            labels = read_reason_labels(component) if isinstance(component, zarr.Group) else None
+            labels = (
+                read_reason_labels(component)
+                if isinstance(component, zarr.Group)
+                else None
+            )
             if labels is None:
                 continue
             labels = np.asarray(labels, dtype=object).reshape(-1)
@@ -853,9 +1181,13 @@ def _validate_package_schema(packages: Sequence[ClipPackage]) -> None:
     reference_schema = str(reference.attrs.get("label_schema_id") or "")
     reference_shape = tuple(int(value) for value in reference["masks_roi"].shape[1:])
     reference_paths = set(_iter_array_paths(reference))
-    encoded_count = sum(package.encoded_mask_summary is not None for package in packages)
+    encoded_count = sum(
+        package.encoded_mask_summary is not None for package in packages
+    )
     if encoded_count not in {0, len(packages)}:
-        raise ValueError("Cannot mix v1 decoded and v2 encoded refined-mask packages in one import.")
+        raise ValueError(
+            "Cannot mix v1 decoded and v2 encoded refined-mask packages in one import."
+        )
     reference_grid_fingerprint = (
         str(packages[0].encoded_mask_summary.get("grid_fingerprint") or "")
         if packages[0].encoded_mask_summary is not None
@@ -881,7 +1213,9 @@ def _validate_package_schema(packages: Sequence[ClipPackage]) -> None:
             )
         shape = tuple(int(value) for value in package.group["masks_roi"].shape[1:])
         if shape != reference_shape:
-            raise ValueError(f"Package {package.package_path} masks_roi row shape {shape} != {reference_shape}.")
+            raise ValueError(
+                f"Package {package.package_path} masks_roi row shape {shape} != {reference_shape}."
+            )
         paths = set(_iter_array_paths(package.group))
         if paths != reference_paths:
             missing = sorted(reference_paths - paths)
@@ -891,7 +1225,9 @@ def _validate_package_schema(packages: Sequence[ClipPackage]) -> None:
                 f"missing={missing[:5]!r}, extra={extra[:5]!r}."
             )
         if package.encoded_mask_summary is not None:
-            grid_fingerprint = str(package.encoded_mask_summary.get("grid_fingerprint") or "")
+            grid_fingerprint = str(
+                package.encoded_mask_summary.get("grid_fingerprint") or ""
+            )
             contract_fingerprint = str(
                 package.encoded_mask_summary.get("array_contract_fingerprint") or ""
             )
@@ -920,7 +1256,9 @@ def _merge_row_ranges(values: Sequence[Sequence[int]]) -> list[list[int]]:
             raise ValueError(f"Invalid encoded mask row range [{start}, {stop}).")
         if out and start <= out[-1][1]:
             if start < out[-1][1]:
-                raise ValueError(f"Overlapping encoded mask row ranges end at {out[-1][1]} and start at {start}.")
+                raise ValueError(
+                    f"Overlapping encoded mask row ranges end at {out[-1][1]} and start at {start}."
+                )
             out[-1][1] = stop
         else:
             out.append([start, stop])
@@ -932,15 +1270,23 @@ def _encoded_chunk_records(package: ClipPackage) -> dict[int, Mapping[str, Any]]
     if summary is None:
         return {}
     records = summary.get("chunks")
-    if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
-        raise ValueError(f"Encoded package {package.package_path} has invalid chunk records.")
+    if not isinstance(records, Sequence) or isinstance(
+        records, (str, bytes, bytearray)
+    ):
+        raise ValueError(
+            f"Encoded package {package.package_path} has invalid chunk records."
+        )
     out: dict[int, Mapping[str, Any]] = {}
     for record in records:
         if not isinstance(record, Mapping):
-            raise ValueError(f"Encoded package {package.package_path} contains a non-object chunk record.")
+            raise ValueError(
+                f"Encoded package {package.package_path} contains a non-object chunk record."
+            )
         chunk_idx = int(record["row_chunk_index"])
         if chunk_idx in out:
-            raise ValueError(f"Encoded package {package.package_path} repeats row chunk {chunk_idx}.")
+            raise ValueError(
+                f"Encoded package {package.package_path} repeats row chunk {chunk_idx}."
+            )
         out[chunk_idx] = record
     return out
 
@@ -952,12 +1298,18 @@ def _preflight_encoded_mask_objects(packages: Sequence[ClipPackage]) -> dict[str
     stored_bytes = 0
     for package in packages:
         if package.encoded_mask_path is None:
-            raise ValueError(f"Encoded package has no extracted payload: {package.package_path}")
+            raise ValueError(
+                f"Encoded package has no extracted payload: {package.package_path}"
+            )
         seen_paths: set[str] = set()
         for chunk_idx, record in _encoded_chunk_records(package).items():
             objects = record.get("objects") or []
-            if not isinstance(objects, Sequence) or isinstance(objects, (str, bytes, bytearray)):
-                raise ValueError(f"Encoded package {package.package_path} row chunk {chunk_idx} has invalid objects.")
+            if not isinstance(objects, Sequence) or isinstance(
+                objects, (str, bytes, bytearray)
+            ):
+                raise ValueError(
+                    f"Encoded package {package.package_path} row chunk {chunk_idx} has invalid objects."
+                )
             for item in objects:
                 if not isinstance(item, Mapping):
                     raise ValueError(
@@ -965,8 +1317,14 @@ def _preflight_encoded_mask_objects(packages: Sequence[ClipPackage]) -> dict[str
                         "has invalid object metadata."
                     )
                 relative = PurePosixPath(str(item.get("path") or ""))
-                if not relative.parts or relative.parts[:2] != ("c", str(chunk_idx)) or ".." in relative.parts:
-                    raise ValueError(f"Unsafe or misplaced encoded object path: {str(relative)!r}")
+                if (
+                    not relative.parts
+                    or relative.parts[:2] != ("c", str(chunk_idx))
+                    or ".." in relative.parts
+                ):
+                    raise ValueError(
+                        f"Unsafe or misplaced encoded object path: {str(relative)!r}"
+                    )
                 relative_text = relative.as_posix()
                 if relative_text in seen_paths:
                     raise ValueError(
@@ -976,10 +1334,17 @@ def _preflight_encoded_mask_objects(packages: Sequence[ClipPackage]) -> dict[str
                 source_path = package.encoded_mask_path.joinpath(*relative.parts)
                 expected_size = int(item["size_bytes"])
                 expected_sha256 = str(item["sha256"])
-                if not source_path.is_file() or int(source_path.stat().st_size) != expected_size:
-                    raise ValueError(f"Encoded source object size mismatch: {source_path}")
+                if (
+                    not source_path.is_file()
+                    or int(source_path.stat().st_size) != expected_size
+                ):
+                    raise ValueError(
+                        f"Encoded source object size mismatch: {source_path}"
+                    )
                 if sha256_file(source_path) != expected_sha256:
-                    raise ValueError(f"Encoded source object digest mismatch: {source_path}")
+                    raise ValueError(
+                        f"Encoded source object digest mismatch: {source_path}"
+                    )
                 object_count += 1
                 stored_bytes += expected_size
     return {
@@ -999,11 +1364,15 @@ def _publish_encoded_masks_roi(
 ) -> dict[str, Any]:
     """Byte-copy complete global chunks and decode only cross-package boundaries."""
 
-    if not packages or any(package.encoded_mask_summary is None for package in packages):
+    if not packages or any(
+        package.encoded_mask_summary is None for package in packages
+    ):
         raise ValueError("Encoded mask publication requires only v2 packages.")
     dest_metadata = json.loads((dest_path / "zarr.json").read_text(encoding="utf-8"))
     dest_fingerprint = array_contract_fingerprint(dest_metadata)
-    expected_fingerprint = str(packages[0].encoded_mask_summary.get("array_contract_fingerprint") or "")
+    expected_fingerprint = str(
+        packages[0].encoded_mask_summary.get("array_contract_fingerprint") or ""
+    )
     if dest_fingerprint != expected_fingerprint:
         raise ValueError(
             f"Canonical masks_roi contract {dest_fingerprint} does not match encoded packages "
@@ -1011,13 +1380,11 @@ def _publish_encoded_masks_roi(
         )
 
     records_by_package = {
-        package.package_path: _encoded_chunk_records(package)
-        for package in packages
+        package.package_path: _encoded_chunk_records(package) for package in packages
     }
     package_by_path = {package.package_path: package for package in packages}
     package_arrays = {
-        package.package_path: package.group["masks_roi"]
-        for package in packages
+        package.package_path: package.group["masks_roi"] for package in packages
     }
     copy_tasks: list[tuple[Path, Path, int, str]] = []
     boundary_plans: list[RowChunkCopyPlan] = []
@@ -1027,10 +1394,11 @@ def _publish_encoded_masks_roi(
     for chunk_idx, plan in enumerate(chunk_copy_plan):
         expected_ranges: dict[Path, list[list[int]]] = {}
         for run in plan.runs:
-            expected_ranges.setdefault(run.package_path, []).append([int(run.dst_start), int(run.dst_stop)])
+            expected_ranges.setdefault(run.package_path, []).append(
+                [int(run.dst_start), int(run.dst_stop)]
+            )
         expected_ranges = {
-            path: _merge_row_ranges(ranges)
-            for path, ranges in expected_ranges.items()
+            path: _merge_row_ranges(ranges) for path, ranges in expected_ranges.items()
         }
         declared_paths = {
             package.package_path
@@ -1056,7 +1424,9 @@ def _publish_encoded_masks_roi(
         if len(expected_ranges) == 1:
             package_path, ranges = next(iter(expected_ranges.items()))
             record = records_by_package[package_path][chunk_idx]
-            if ranges == [[int(plan.dst_start), int(plan.dst_stop)]] and bool(record.get("complete")):
+            if ranges == [[int(plan.dst_start), int(plan.dst_stop)]] and bool(
+                record.get("complete")
+            ):
                 full_owner = package_path
         if full_owner is None:
             boundary_plans.append(plan)
@@ -1067,15 +1437,27 @@ def _publish_encoded_masks_roi(
         assert package.encoded_mask_path is not None
         record = records_by_package[full_owner][chunk_idx]
         objects = record.get("objects") or []
-        if not isinstance(objects, Sequence) or isinstance(objects, (str, bytes, bytearray)):
-            raise ValueError(f"Encoded package {full_owner} row chunk {chunk_idx} has invalid objects.")
+        if not isinstance(objects, Sequence) or isinstance(
+            objects, (str, bytes, bytearray)
+        ):
+            raise ValueError(
+                f"Encoded package {full_owner} row chunk {chunk_idx} has invalid objects."
+            )
         seen_paths: set[str] = set()
         for item in objects:
             if not isinstance(item, Mapping):
-                raise ValueError(f"Encoded package {full_owner} row chunk {chunk_idx} has invalid object metadata.")
+                raise ValueError(
+                    f"Encoded package {full_owner} row chunk {chunk_idx} has invalid object metadata."
+                )
             relative = PurePosixPath(str(item.get("path") or ""))
-            if not relative.parts or relative.parts[:2] != ("c", str(chunk_idx)) or ".." in relative.parts:
-                raise ValueError(f"Unsafe or misplaced encoded object path: {str(relative)!r}")
+            if (
+                not relative.parts
+                or relative.parts[:2] != ("c", str(chunk_idx))
+                or ".." in relative.parts
+            ):
+                raise ValueError(
+                    f"Unsafe or misplaced encoded object path: {str(relative)!r}"
+                )
             relative_text = relative.as_posix()
             if relative_text in seen_paths:
                 raise ValueError(f"Duplicate encoded object path: {relative_text}")
@@ -1090,17 +1472,32 @@ def _publish_encoded_masks_roi(
                     str(item["sha256"]),
                 )
             )
-        physical_chunks_per_row = int(np.prod([int(np.ceil(dim / chunk)) for dim, chunk in zip(dest.shape[1:], dest.chunks[1:])]))
+        physical_chunks_per_row = int(
+            np.prod(
+                [
+                    int(np.ceil(dim / chunk))
+                    for dim, chunk in zip(dest.shape[1:], dest.chunks[1:])
+                ]
+            )
+        )
         omitted_fill_objects += max(0, physical_chunks_per_row - len(seen_paths))
 
     def copy_object(task: tuple[Path, Path, int, str]) -> int:
         source_path, target_path, expected_size, expected_sha256 = task
-        if not source_path.is_file() or int(source_path.stat().st_size) != expected_size:
+        if (
+            not source_path.is_file()
+            or int(source_path.stat().st_size) != expected_size
+        ):
             raise ValueError(f"Encoded source object size mismatch: {source_path}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_path, target_path)
-        if int(target_path.stat().st_size) != expected_size or sha256_file(target_path) != expected_sha256:
-            raise ValueError(f"Published encoded object verification failed: {target_path}")
+        if (
+            int(target_path.stat().st_size) != expected_size
+            or sha256_file(target_path) != expected_sha256
+        ):
+            raise ValueError(
+                f"Published encoded object verification failed: {target_path}"
+            )
         return expected_size
 
     copied_bytes = 0
@@ -1115,11 +1512,15 @@ def _publish_encoded_masks_roi(
             int(plan.dst_stop) - int(plan.dst_start),
             *tuple(int(value) for value in dest.shape[1:]),
         )
-        block = _empty_chunk_block(block_shape, dest.dtype, getattr(dest, "fill_value", None))
+        block = _empty_chunk_block(
+            block_shape, dest.dtype, getattr(dest, "fill_value", None)
+        )
         for run in plan.runs:
             rel_start = int(run.dst_start) - int(plan.dst_start)
             rel_stop = int(run.dst_stop) - int(plan.dst_start)
-            block[rel_start:rel_stop] = package_arrays[run.package_path][run.src_start : run.src_stop]
+            block[rel_start:rel_stop] = package_arrays[run.package_path][
+                run.src_start : run.src_stop
+            ]
         dest[int(plan.dst_start) : int(plan.dst_stop)] = block
         observed = np.asarray(dest[int(plan.dst_start) : int(plan.dst_stop)])
         if not np.array_equal(observed, block):
@@ -1138,8 +1539,7 @@ def _publish_encoded_masks_roi(
             sum(int(plan.dst_stop) - int(plan.dst_start) for plan in boundary_plans)
         ),
         "boundary_row_chunk_indices": [
-            int(plan.dst_start) // int(dest.chunks[0])
-            for plan in boundary_plans
+            int(plan.dst_start) // int(dest.chunks[0]) for plan in boundary_plans
         ],
         "copied_object_count": int(len(copy_tasks)),
         "omitted_fill_object_count": int(omitted_fill_objects),
@@ -1158,19 +1558,29 @@ def import_refined_subject_mask_clip_packages(
     expected_target_crop_run: str | None = None,
     array_copy_workers: int = 1,
     encoded_copy_workers: int = 32,
+    require_production_proof: bool = False,
 ) -> dict[str, Any]:
     zarr_path = zarr_path.expanduser().resolve()
     started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="palette_refined_subject_mask_package_import_") as tmp:
+    with tempfile.TemporaryDirectory(
+        prefix="palette_refined_subject_mask_package_import_"
+    ) as tmp:
         extract_root = Path(tmp)
-        packages = [_load_package(path, extract_root) for path in package_paths]
+        packages = [
+            _load_package(
+                path,
+                extract_root,
+                require_production_proof=bool(require_production_proof),
+            )
+            for path in package_paths
+        ]
         _validate_package_schema(packages)
         sorted_crop_rows, row_maps = _build_row_maps(packages)
-        use_encoded_masks = all(package.encoded_mask_summary is not None for package in packages)
+        use_encoded_masks = all(
+            package.encoded_mask_summary is not None for package in packages
+        )
         encoded_object_preflight = (
-            _preflight_encoded_mask_objects(packages)
-            if use_encoded_masks
-            else None
+            _preflight_encoded_mask_objects(packages) if use_encoded_masks else None
         )
 
         root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
@@ -1182,7 +1592,9 @@ def import_refined_subject_mask_clip_packages(
                     f"Refusing to overwrite complete refined_subject_masks_runs/{output_run}."
                 )
             if not overwrite:
-                raise ValueError(f"refined_subject_masks_runs/{output_run} already exists. Pass --overwrite.")
+                raise ValueError(
+                    f"refined_subject_masks_runs/{output_run} already exists. Pass --overwrite."
+                )
             del parent[output_run]
         dest_run = parent.create_group(output_run)
         try:
@@ -1190,12 +1602,21 @@ def import_refined_subject_mask_clip_packages(
             _copy_group_tree_attrs(reference, dest_run)
             sanitize_collection_run_attrs(dest_run, packages)
             dest_run.attrs["palette_run_completion_status"] = "running"
+            if require_production_proof:
+                dest_run.attrs["stage_selector_eligible"] = False
 
             total_rows = int(sorted_crop_rows.shape[0])
             row_chunk_copy_plans: dict[int, tuple[RowChunkCopyPlan, ...]] = {}
             encoded_mask_publication: dict[str, Any] | None = None
-            target_crop_runs = sorted({str(package.group.attrs.get("source_crop_run") or "") for package in packages})
-            if expected_target_crop_run and target_crop_runs != [str(expected_target_crop_run)]:
+            target_crop_runs = sorted(
+                {
+                    str(package.group.attrs.get("source_crop_run") or "")
+                    for package in packages
+                }
+            )
+            if expected_target_crop_run and target_crop_runs != [
+                str(expected_target_crop_run)
+            ]:
                 raise ValueError(
                     f"Package source_crop_run values {target_crop_runs!r} do not match expected "
                     f"{expected_target_crop_run!r}."
@@ -1205,10 +1626,12 @@ def import_refined_subject_mask_clip_packages(
                     "Refined-mask collection packages must bind exactly one canonical source_crop_run; "
                     f"observed {target_crop_runs!r}."
                 )
-            recording_frame_count, frame_count_authorities = resolve_recording_frame_count(
-                root,
-                reference,
-                source_crop_run=target_crop_runs[0],
+            recording_frame_count, frame_count_authorities = (
+                resolve_recording_frame_count(
+                    root,
+                    reference,
+                    source_crop_run=target_crop_runs[0],
+                )
             )
 
             for array_path in _iter_array_paths(reference):
@@ -1221,13 +1644,21 @@ def import_refined_subject_mask_clip_packages(
                 array_name = PurePosixPath(array_path).name
                 dest_parent = _require_group(dest_run, parent_path)
                 source_shape = tuple(int(value) for value in source_array.shape)
-                if source_shape and source_shape[0] == packages[0].row_count:
+                if (
+                    array_path not in NON_ROW_ALIGNED_ARRAY_PATHS
+                    and source_shape
+                    and source_shape[0] == packages[0].row_count
+                ):
                     dest_shape = (total_rows, *source_shape[1:])
                     dest_chunks = _dense_masks_roi_chunks(array_path, dest_shape)
                     if array_path == "masks_roi" and use_encoded_masks:
-                        encoded_contract = packages[0].encoded_mask_summary.get("array_contract")
+                        encoded_contract = packages[0].encoded_mask_summary.get(
+                            "array_contract"
+                        )
                         if not isinstance(encoded_contract, Mapping):
-                            raise ValueError("Encoded mask package is missing its array contract.")
+                            raise ValueError(
+                                "Encoded mask package is missing its array contract."
+                            )
                         chunk_grid = encoded_contract.get("chunk_grid")
                         configuration = (
                             chunk_grid.get("configuration")
@@ -1242,7 +1673,9 @@ def import_refined_subject_mask_clip_packages(
                         if not isinstance(chunk_shape, Sequence) or isinstance(
                             chunk_shape, (str, bytes, bytearray)
                         ):
-                            raise ValueError("Encoded mask array contract has no regular chunk_shape.")
+                            raise ValueError(
+                                "Encoded mask array contract has no regular chunk_shape."
+                            )
                         dest_chunks = tuple(int(value) for value in chunk_shape)
                     dest_array = _create_array_like(
                         dest_parent,
@@ -1258,7 +1691,11 @@ def import_refined_subject_mask_clip_packages(
                                 f"{package.package_path}:{array_path} has first dimension "
                                 f"{int(package_array.shape[0])}, expected {package.row_count}."
                             )
-                    dest_row_chunk = int(getattr(dest_array, "chunks", (total_rows,))[0] or total_rows or 1)
+                    dest_row_chunk = int(
+                        getattr(dest_array, "chunks", (total_rows,))[0]
+                        or total_rows
+                        or 1
+                    )
                     chunk_copy_plan = row_chunk_copy_plans.get(dest_row_chunk)
                     if chunk_copy_plan is None:
                         chunk_copy_plan = _build_row_chunk_copy_plan(
@@ -1293,8 +1730,23 @@ def import_refined_subject_mask_clip_packages(
                         )
                 else:
                     data = np.asarray(source_array[:])
+                    for package in packages[1:]:
+                        candidate = _get_node(package.group, array_path)
+                        candidate_data = np.asarray(candidate[:])
+                        if (
+                            tuple(int(value) for value in candidate.shape)
+                            != tuple(int(value) for value in source_array.shape)
+                            or np.dtype(candidate.dtype) != np.dtype(source_array.dtype)
+                            or not np.array_equal(candidate_data, data)
+                        ):
+                            raise ValueError(
+                                f"Package {package.package_path}:{array_path} differs "
+                                "from the collection-global declaration."
+                            )
                     kwargs: dict[str, Any] = {"data": data, "overwrite": True}
-                    chunks = _array_chunks(source_array, tuple(int(value) for value in data.shape))
+                    chunks = _array_chunks(
+                        source_array, tuple(int(value) for value in data.shape)
+                    )
                     if chunks is not None:
                         kwargs["chunks"] = chunks
                     dest_parent.create_array(array_name, **kwargs)
@@ -1325,7 +1777,11 @@ def import_refined_subject_mask_clip_packages(
                 del parent[output_run]
             raise
 
-        contour_components = sorted(set.intersection(*[set(_contour_components(package.group)) for package in packages]))
+        contour_components = sorted(
+            set.intersection(
+                *[set(_contour_components(package.group)) for package in packages]
+            )
+        )
         contour_summaries = [
             _merge_contours(
                 packages,
@@ -1339,23 +1795,47 @@ def import_refined_subject_mask_clip_packages(
         ]
         if contour_summaries:
             dest_run.attrs["component_contours_status"] = "computed"
-            dest_run.attrs["component_contours_components"] = [item["component"] for item in contour_summaries]
-            dest_run.attrs["component_contours_summary"] = list(json_ready(contour_summaries))
+            dest_run.attrs["component_contours_components"] = [
+                item["component"] for item in contour_summaries
+            ]
+            dest_run.attrs["component_contours_summary"] = list(
+                json_ready(contour_summaries)
+            )
 
-        update_mask_storage_attrs(dest_run, has_dense=True, has_rle=False, has_bitpacked=False)
+        update_mask_storage_attrs(
+            dest_run,
+            has_dense=True,
+            has_rle=False,
+            has_bitpacked=False,
+            reset_stale_flags=True,
+        )
         dest_run.attrs["method"] = "refined_subject_mask_clip_package_import_v1"
-        dest_run.attrs["source_refined_subject_mask_clip_package_runs"] = [package.run_name for package in packages]
-        dest_run.attrs["source_refined_subject_mask_clip_package_paths"] = [str(package.package_path) for package in packages]
-        dest_run.attrs["source_crop_run"] = target_crop_runs[0] if len(target_crop_runs) == 1 else ""
+        dest_run.attrs["source_refined_subject_mask_clip_package_runs"] = [
+            package.run_name for package in packages
+        ]
+        dest_run.attrs["source_refined_subject_mask_clip_package_paths"] = [
+            str(package.package_path) for package in packages
+        ]
+        dest_run.attrs["source_crop_run"] = (
+            target_crop_runs[0] if len(target_crop_runs) == 1 else ""
+        )
         dest_run.attrs["source_crop_run_values"] = target_crop_runs
         dest_run.attrs["row_merge_key"] = "source_crop_row_ids"
         dest_run.attrs["row_merge_order"] = "ascending_source_crop_row_ids"
         dest_run.attrs["array_copy_workers"] = int(max(1, array_copy_workers))
-        dest_run.attrs["array_copy_strategy"] = "chunk_owned_parallel" if int(array_copy_workers) > 1 else "chunk_owned_serial"
+        dest_run.attrs["array_copy_strategy"] = (
+            "chunk_owned_parallel"
+            if int(array_copy_workers) > 1
+            else "chunk_owned_serial"
+        )
         dest_run.attrs["row_copy_index_strategy"] = "precomputed_chunk_placements_v1"
-        dest_run.attrs["row_copy_index_row_chunks"] = sorted(int(value) for value in row_chunk_copy_plans)
+        dest_run.attrs["row_copy_index_row_chunks"] = sorted(
+            int(value) for value in row_chunk_copy_plans
+        )
         dest_run.attrs["recording_frame_count"] = int(recording_frame_count)
-        dest_run.attrs["frame_counts_generation"] = "bincount_of_assembled_frame_indices_v1"
+        dest_run.attrs["frame_counts_generation"] = (
+            "bincount_of_assembled_frame_indices_v1"
+        )
         dest_run.attrs["frame_counts_authorities"] = dict(frame_count_authorities)
         dest_run.attrs["masks_roi_publication_strategy"] = (
             "encoded_global_chunk_copy_v1"
@@ -1363,8 +1843,12 @@ def import_refined_subject_mask_clip_packages(
             else "decoded_chunk_copy_v1"
         )
         if encoded_mask_publication is not None:
-            encoded_mask_publication["source_object_preflight"] = encoded_object_preflight
-            dest_run.attrs["encoded_mask_publication"] = dict(json_ready(encoded_mask_publication))
+            encoded_mask_publication["source_object_preflight"] = (
+                encoded_object_preflight
+            )
+            dest_run.attrs["encoded_mask_publication"] = dict(
+                json_ready(encoded_mask_publication)
+            )
         dest_run.attrs["import_schema_id"] = IMPORT_SCHEMA_ID
         dest_run.attrs["created_at_utc"] = _utc_now()
         dest_run.attrs["created_utc"] = dest_run.attrs["created_at_utc"]
@@ -1402,16 +1886,41 @@ def import_refined_subject_mask_clip_packages(
                 "encoded_copy_workers": int(max(1, encoded_copy_workers)),
             },
             input_run_ids={
-                "refined_subject_mask_clip_packages": [package.run_name for package in packages],
-                "target_crop_run": target_crop_runs[0] if len(target_crop_runs) == 1 else target_crop_runs,
+                "refined_subject_mask_clip_packages": [
+                    package.run_name for package in packages
+                ],
+                "target_crop_run": (
+                    target_crop_runs[0]
+                    if len(target_crop_runs) == 1
+                    else target_crop_runs
+                ),
             },
             input_artifacts=package_artifacts,
             cwd=Path.cwd(),
         )
         dest_run.attrs[RUN_PROVENANCE_ATTR] = dict(run_provenance)
         dest_run.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(run_provenance)
-        mark_run_complete(dest_run, parent_group=parent, run_name=output_run, run_provenance=run_provenance)
-        parent.attrs["refined_subject_mask_review_status_latest"] = output_run
+        source_manifest = None
+        source_receipt = None
+        if require_production_proof:
+            source_manifest, source_receipt = _seal_recording_source_receipt(
+                zarr_path=zarr_path,
+                root=root,
+                run=dest_run,
+                output_run=output_run,
+                crop_run=target_crop_runs[0],
+                n_frames=int(recording_frame_count),
+                packages=packages,
+                row_maps=row_maps,
+            )
+        mark_run_complete(
+            dest_run,
+            parent_group=parent,
+            run_name=output_run,
+            run_provenance=run_provenance,
+        )
+        if not require_production_proof:
+            parent.attrs["refined_subject_mask_review_status_latest"] = output_run
 
         return {
             "schema_id": IMPORT_SCHEMA_ID,
@@ -1419,12 +1928,25 @@ def import_refined_subject_mask_clip_packages(
             "zarr_path": str(zarr_path),
             "output_run": str(output_run),
             "row_count": total_rows,
-            "source_crop_row_min": int(sorted_crop_rows.min()) if sorted_crop_rows.size else None,
-            "source_crop_row_max": int(sorted_crop_rows.max()) if sorted_crop_rows.size else None,
+            "source_crop_row_min": (
+                int(sorted_crop_rows.min()) if sorted_crop_rows.size else None
+            ),
+            "source_crop_row_max": (
+                int(sorted_crop_rows.max()) if sorted_crop_rows.size else None
+            ),
             "package_count": int(len(packages)),
             "packages": package_artifacts,
             "component_contours": contour_summaries,
             "encoded_mask_publication": encoded_mask_publication,
+            "source_manifest_payload_digest": (
+                source_manifest["payload_digest"]
+                if source_manifest is not None
+                else None
+            ),
+            "source_validation_receipt_payload_digest": (
+                source_receipt["payload_digest"] if source_receipt is not None else None
+            ),
+            "selector_eligible": not bool(require_production_proof),
             "duration_seconds": float(dest_run.attrs["duration_seconds"]),
         }
 
@@ -1432,7 +1954,9 @@ def import_refined_subject_mask_clip_packages(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zarr", required=True, type=Path)
-    parser.add_argument("--package", dest="packages", action="append", required=True, type=Path)
+    parser.add_argument(
+        "--package", dest="packages", action="append", required=True, type=Path
+    )
     parser.add_argument("--output-run", required=True)
     parser.add_argument("--expected-target-crop-run")
     parser.add_argument("--overwrite", action="store_true")
@@ -1452,6 +1976,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Parallel verified file-copy workers for v2 globally aligned encoded mask chunks.",
     )
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--require-production-proof", action="store_true")
     return parser
 
 
@@ -1465,6 +1990,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_target_crop_run=args.expected_target_crop_run,
         array_copy_workers=max(1, int(args.array_copy_workers)),
         encoded_copy_workers=max(1, int(args.encoded_copy_workers)),
+        require_production_proof=bool(args.require_production_proof),
     )
     if args.json:
         print(json.dumps(json_ready(result), indent=2, sort_keys=True))

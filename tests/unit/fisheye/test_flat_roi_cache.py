@@ -10,13 +10,16 @@ import zarr
 
 from fisheye.shared import flat_roi_cache as flat_cache_mod
 import fisheye.shared.crop_image_source as crop_source_mod
-from fisheye.diagnostics.check_flat_roi_cache_pixel_parity import check_flat_roi_cache_pixel_parity
+from fisheye.diagnostics.check_flat_roi_cache_pixel_parity import (
+    check_flat_roi_cache_pixel_parity,
+)
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.flat_roi_cache import (
     FLAT_ROI_CACHE_LAYOUT,
     FLAT_ROI_CACHE_SCHEMA,
     build_flat_roi_cache,
     open_flat_roi_cache,
+    write_pynvvc_luma_roi_payload,
 )
 
 
@@ -40,7 +43,9 @@ def _make_materialized_crop_archive(tmp_path: Path) -> tuple[Path, np.ndarray]:
         data=np.array([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4]], dtype=np.int32),
         overwrite=True,
     )
-    crop.create_array("frame_indices", data=np.arange(5, dtype=np.int64), overwrite=True)
+    crop.create_array(
+        "frame_indices", data=np.arange(5, dtype=np.int64), overwrite=True
+    )
     return zarr_path, roi_images
 
 
@@ -147,7 +152,10 @@ class _FakePynvvcReader:
                 np.vstack(
                     [
                         frame,
-                        np.zeros((max(1, frame.shape[0] // 2), frame.shape[1]), dtype=np.uint8),
+                        np.zeros(
+                            (max(1, frame.shape[0] // 2), frame.shape[1]),
+                            dtype=np.uint8,
+                        ),
                     ]
                 )
             )
@@ -156,7 +164,9 @@ class _FakePynvvcReader:
         self._offset = 0
 
     def decode_next(self, count: int):
-        raise AssertionError("flat ROI cache writers must not retain decode_next() decoder surfaces")
+        raise AssertionError(
+            "flat ROI cache writers must not retain decode_next() decoder surfaces"
+        )
 
     def iter_frames(self):
         while self._offset < len(self._frames):
@@ -198,7 +208,9 @@ class _FakeOrangeMonoPynvvcReader:
         pass
 
 
-def _make_orange_full_range_contract_crop_archive(tmp_path: Path) -> tuple[Path, list[np.ndarray], np.ndarray]:
+def _make_orange_full_range_contract_crop_archive(
+    tmp_path: Path,
+) -> tuple[Path, list[np.ndarray], np.ndarray]:
     zarr_path = tmp_path / "recording_orange_contract_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
     root.attrs["width"] = 8
@@ -223,7 +235,9 @@ def _make_orange_full_range_contract_crop_archive(tmp_path: Path) -> tuple[Path,
     crop.attrs["container_color_range_observed"] = "tv"
     crop.attrs["crop_signature"] = "sig-orange-full-range-contract"
     crop.attrs["crop_revision"] = "rev-orange-full-range-contract-001"
-    crop.create_array("frame_indices", data=np.array([0, 0, 1, 1], dtype=np.int64), overwrite=True)
+    crop.create_array(
+        "frame_indices", data=np.array([0, 0, 1, 1], dtype=np.int64), overwrite=True
+    )
     crop.create_array(
         "roi_coordinates_full",
         data=np.array([[0, 0], [4, 0], [0, 2], [4, 2]], dtype=np.int32),
@@ -261,7 +275,9 @@ def _make_orange_full_range_contract_crop_archive(tmp_path: Path) -> tuple[Path,
     return zarr_path, frames, expected
 
 
-def _write_tv_flagged_full_range_yuv420_video(tmp_path: Path, frames: list[np.ndarray]) -> Path:
+def _write_tv_flagged_full_range_yuv420_video(
+    tmp_path: Path, frames: list[np.ndarray]
+) -> Path:
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required to synthesize the tv-flagged full-range video")
     if not frames:
@@ -315,11 +331,15 @@ def _write_tv_flagged_full_range_yuv420_video(tmp_path: Path, frames: list[np.nd
     ]
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     if completed.returncode != 0:
-        pytest.skip(f"ffmpeg could not synthesize lossless h264/yuv420p test video: {completed.stderr.strip()}")
+        pytest.skip(
+            f"ffmpeg could not synthesize lossless h264/yuv420p test video: {completed.stderr.strip()}"
+        )
     return video_path
 
 
-def test_write_owned_roi_payload_batch_fast_path_writes_contiguous_rows(tmp_path: Path) -> None:
+def test_write_owned_roi_payload_batch_fast_path_writes_contiguous_rows(
+    tmp_path: Path,
+) -> None:
     payload_path = tmp_path / "payload.bin"
     row_stride = 4
     crops = np.arange(3 * 2 * 2, dtype=np.uint8).reshape(3, 2, 2)
@@ -389,8 +409,14 @@ def test_build_flat_roi_cache_roundtrips_through_manifest(tmp_path: Path) -> Non
     assert manifest["builder"]["timing"]["bytes"] == int(roi_images.size)
     assert manifest["builder"]["timing"]["read_seconds_total"] >= 0
     assert manifest["builder"]["timing"]["write_seconds_total"] >= 0
-    assert manifest["builder"]["pixel_contract"]["name"] == "crop_image_source_uint8_grayscale"
-    assert manifest["builder"]["pixel_contract_name"] == "crop_image_source_uint8_grayscale"
+    assert (
+        manifest["builder"]["pixel_contract"]["name"]
+        == "crop_image_source_uint8_grayscale"
+    )
+    assert (
+        manifest["builder"]["pixel_contract_name"]
+        == "crop_image_source_uint8_grayscale"
+    )
 
     assert progress_events[0]["event"] == "start"
     assert progress_events[-1]["event"] == "complete"
@@ -436,7 +462,9 @@ def test_crop_image_source_reads_flat_roi_cache_manifest(tmp_path: Path) -> None
         assert source.roi_image_representation == "uint8_grayscale_roi_v1"
         assert source.roi_pixel_contract is not None
         assert source.roi_pixel_contract["name"] == "crop_image_source_uint8_grayscale"
-        np.testing.assert_array_equal(source.read_indices([4, 0, 2]), roi_images[[4, 0, 2]])
+        np.testing.assert_array_equal(
+            source.read_indices([4, 0, 2]), roi_images[[4, 0, 2]]
+        )
     finally:
         source.close()
 
@@ -537,11 +565,50 @@ def test_build_flat_roi_cache_pynvvc_luma_streams_rows_in_source_order(
         and event.get("batch", {}).get("decode_backend") == "pynvvc_luma"
         for event in progress_events
     )
-    cache = open_flat_roi_cache(manifest["manifest_path"], expected_shape=expected.shape)
+    cache = open_flat_roi_cache(
+        manifest["manifest_path"], expected_shape=expected.shape
+    )
     try:
         np.testing.assert_array_equal(cache[:], expected)
     finally:
         cache.close()
+
+
+def test_write_pynvvc_luma_roi_payload_materializes_subset_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    frames = [
+        np.arange(4 * 5, dtype=np.uint8).reshape(4, 5) + np.uint8(frame_idx * 20)
+        for frame_idx in range(3)
+    ]
+    monkeypatch.setattr(
+        flat_cache_mod,
+        "_open_pynvvc_luma_reader",
+        lambda _video_path: _FakePynvvcReader(frames),
+    )
+    output = tmp_path / "subset.bin"
+
+    result = write_pynvvc_luma_roi_payload(
+        video_path=video,
+        frame_indices=[0, 2],
+        roi_coordinates_full=[[1, 1], [2, 0]],
+        roi_shape=(2, 2),
+        video_shape=(4, 5),
+        output_path=output,
+        batch_size=2,
+    )
+
+    expected = np.stack([frames[0][1:3, 1:3], frames[2][0:2, 2:4]])
+    np.testing.assert_array_equal(
+        np.fromfile(output, dtype=np.uint8).reshape(2, 2, 2), expected
+    )
+    assert result["shape"] == [2, 2, 2]
+    assert result["total_bytes"] == 8
+    assert result["decode_backend"] == "pynvvc_luma"
+    assert len(result["sha256"]) == 64
 
 
 def test_build_flat_roi_cache_accepts_current_acquisition_crop_video(
@@ -605,7 +672,9 @@ def test_build_flat_roi_cache_pynvvc_luma_preserves_orange_full_range_y_plane(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    zarr_path, frames, expected = _make_orange_full_range_contract_crop_archive(tmp_path)
+    zarr_path, frames, expected = _make_orange_full_range_contract_crop_archive(
+        tmp_path
+    )
 
     monkeypatch.setattr(
         flat_cache_mod,
@@ -628,8 +697,12 @@ def test_build_flat_roi_cache_pynvvc_luma_preserves_orange_full_range_y_plane(
         compute_sha256=True,
     )
 
-    cache_a = open_flat_roi_cache(manifest_a["manifest_path"], expected_shape=expected.shape)
-    cache_b = open_flat_roi_cache(manifest_b["manifest_path"], expected_shape=expected.shape)
+    cache_a = open_flat_roi_cache(
+        manifest_a["manifest_path"], expected_shape=expected.shape
+    )
+    cache_b = open_flat_roi_cache(
+        manifest_b["manifest_path"], expected_shape=expected.shape
+    )
     try:
         payload_a = np.asarray(cache_a[:], dtype=np.uint8).copy()
         payload_b = np.asarray(cache_b[:], dtype=np.uint8).copy()
@@ -641,7 +714,9 @@ def test_build_flat_roi_cache_pynvvc_luma_preserves_orange_full_range_y_plane(
     np.testing.assert_array_equal(payload_b, expected)
     np.testing.assert_array_equal(payload_b, payload_a)
     assert set(np.unique(payload_a).tolist()) >= {0, 16, 235, 255}
-    limited_expanded = np.clip((expected.astype(np.float32) - 16.0) * (255.0 / 219.0), 0.0, 255.0)
+    limited_expanded = np.clip(
+        (expected.astype(np.float32) - 16.0) * (255.0 / 219.0), 0.0, 255.0
+    )
     limited_expanded = limited_expanded.round().astype(np.uint8)
     assert not np.array_equal(payload_a, limited_expanded)
     assert manifest_a["array"]["sha256"] == manifest_b["array"]["sha256"]
@@ -650,8 +725,12 @@ def test_build_flat_roi_cache_pynvvc_luma_preserves_orange_full_range_y_plane(
 
 
 @pytest.mark.gpu
-def test_pynvvc_luma_reader_decodes_tv_flagged_full_range_y_plane_exactly(tmp_path: Path) -> None:
-    _zarr_path, frames, _expected = _make_orange_full_range_contract_crop_archive(tmp_path)
+def test_pynvvc_luma_reader_decodes_tv_flagged_full_range_y_plane_exactly(
+    tmp_path: Path,
+) -> None:
+    _zarr_path, frames, _expected = _make_orange_full_range_contract_crop_archive(
+        tmp_path
+    )
     video_path = _write_tv_flagged_full_range_yuv420_video(tmp_path, frames)
     height, width = frames[0].shape
 
@@ -665,7 +744,9 @@ def test_pynvvc_luma_reader_decodes_tv_flagged_full_range_y_plane_exactly(tmp_pa
     decoded: list[np.ndarray] = []
     try:
         for frame in reader.iter_frames():
-            decoded.append(np.asarray(frame[:height, :width].cpu().numpy(), dtype=np.uint8).copy())
+            decoded.append(
+                np.asarray(frame[:height, :width].cpu().numpy(), dtype=np.uint8).copy()
+            )
             if len(decoded) == len(frames):
                 break
     finally:
@@ -703,7 +784,9 @@ def test_build_flat_roi_cache_auto_prefers_pynvvc_luma_for_geometry_only(
     assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
     assert manifest["builder"]["pixel_contract"]["name"] == "nv12_luma_plane_uint8"
     assert manifest["builder"]["pixel_contract_name"] == "nv12_luma_plane_uint8"
-    cache = open_flat_roi_cache(manifest["manifest_path"], expected_shape=expected.shape)
+    cache = open_flat_roi_cache(
+        manifest["manifest_path"], expected_shape=expected.shape
+    )
     try:
         np.testing.assert_array_equal(cache[:], expected)
     finally:

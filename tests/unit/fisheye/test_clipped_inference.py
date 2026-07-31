@@ -324,7 +324,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     )
     clip_id = "clip_000000"
 
-    assert len(plan.lsf_workflow.jobs) == 16
+    assert len(plan.lsf_workflow.jobs) == 17
     keypoint_array = jobs[f"keypoints_array:{target_safe}"]
     subject_mask_array = jobs[f"subject_masks_array:{target_safe}"]
     package_array = jobs[f"mask_package_array:{target_safe}"]
@@ -338,14 +338,33 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(
     assert f"subject_masks:{target_safe}:{clip_id}" in _execution_tasks(
         subject_mask_array
     )
+    subject_mask_task = _execution_tasks(subject_mask_array)[
+        f"subject_masks:{target_safe}:{clip_id}"
+    ]
+    subject_mask_command = list(subject_mask_task.command)
+    assert "fisheye.cluster.subject_masks.staged_inference" in subject_mask_command
+    assert "--roi-cache-staging-dir" in subject_mask_command
+    assert "--worker-receipt-json" in subject_mask_command
+    assert any(
+        str(path).endswith(f"subject_masks_{target_safe}_{clip_id}.json")
+        for path in subject_mask_task.expected_outputs
+    )
     assert f"mask_package:{target_safe}:{clip_id}" in _execution_tasks(package_array)
     cache_job = jobs[f"cache_array:{target_safe}"]
     cache_tasks = _execution_tasks(cache_job)
     import_job = jobs[f"mask_import:{target_safe}"]
+    publish_job = jobs[f"mask_publish:{target_safe}"]
+    validation_job = jobs[f"validate:{target_safe}"]
     assert "--run-direct" in cache_tasks[f"cache:{target_safe}:00"].command
     assert "bsub" not in cache_job.command
     assert import_job.resources.queue == "local"
     assert import_job.resources.walltime == "3:00"
+    assert "--require-production-proof" in import_job.command
+    assert publish_job.dependency.upstream_job_keys == (import_job.job_key,)
+    assert publish_job.command.count("--raw-draft-run") == len(target["clips"])
+    assert "--raw-draft-parent" in publish_job.command
+    assert "subject_mask_shard_runs" in publish_job.command
+    assert validation_job.dependency.upstream_job_keys == (publish_job.job_key,)
     assert all(
         job.command[:2]
         == (
@@ -792,7 +811,7 @@ def test_encoded_mask_packages_add_global_grid_and_join(
     import_key = f"mask_import:{target_safe}"
 
     assert plan.encoded_mask_packages is True
-    assert len(plan.lsf_workflow.jobs) == 17
+    assert len(plan.lsf_workflow.jobs) == 18
     assert jobs[grid_key].dependency.upstream_job_keys == (
         f"keypoint_finalize:{target_safe}",
     )
@@ -805,6 +824,7 @@ def test_encoded_mask_packages_add_global_grid_and_join(
         f"mask_package:{target_safe}:clip_000000"
     ]
     assert "--global-mask-grid-manifest" in package_task.command
+    assert "--require-production-proof" in package_task.command
     assert "--encoded-copy-workers" in jobs[import_key].command
 
 
@@ -885,7 +905,7 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
     )
 
     assert len(plan.targets) == 2
-    assert len(plan.lsf_workflow.jobs) == 30
+    assert len(plan.lsf_workflow.jobs) == 32
     assert jobs[f"detect_array:{first_safe}"].dependency is None
     assert jobs[f"detect_array:{second_safe}"].dependency.upstream_job_keys == (
         f"validate:{first_safe}",

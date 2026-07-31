@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ def _write_cache(tmp_path: Path) -> Path:
                     "shape": [2, 2, 2],
                     "order": "C",
                     "total_bytes": 8,
+                    "sha256": hashlib.sha256(bytes(range(8))).hexdigest(),
                 },
             }
         ),
@@ -77,6 +79,25 @@ def test_stage_flat_roi_cache_copies_payload_and_publishes_manifest_last(
     assert source_manifest.exists()
 
 
+def test_stage_flat_roi_cache_rejects_same_size_payload_corruption(
+    tmp_path: Path,
+) -> None:
+    source_manifest = _write_cache(tmp_path)
+    manifest = json.loads(source_manifest.read_text(encoding="utf-8"))
+    payload_path = source_manifest.parent / manifest["array"]["bin_path"]
+    payload_path.write_bytes(bytes(reversed(range(8))))
+
+    try:
+        mod._stage_flat_roi_cache_manifest(
+            source_manifest,
+            staging_dir=tmp_path / "scratch",
+        )
+    except ValueError as exc:
+        assert "SHA-256 mismatch" in str(exc)
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("same-size ROI-cache corruption was accepted")
+
+
 def test_inference_pipeline_has_no_keypoint_dependency(tmp_path: Path) -> None:
     command = mod._pipeline_args(
         _args(tmp_path, stage="inference"),
@@ -86,6 +107,10 @@ def test_inference_pipeline_has_no_keypoint_dependency(tmp_path: Path) -> None:
     assert "--no-assignment-keypoints" in command
     assert "--assignment-keypoints-run" not in command
     assert "--defer-registry-status" in command
+    assert command[command.index("--subject-output-parent") + 1] == (
+        "subject_mask_shard_runs"
+    )
+    assert "--require-production-proof" in command
     assert command[command.index("--mask-probs-shard-rois") + 1] == "2048"
 
 
@@ -106,3 +131,7 @@ def test_finalization_pipeline_binds_exact_keypoints_and_sampled_contours(
     assert "--write-sampled-component-contours" in command
     assert "--no-write-component-contours" in command
     assert "--defer-registry-status" in command
+    assert command[command.index("--subject-output-parent") + 1] == (
+        "subject_mask_shard_runs"
+    )
+    assert "--require-production-proof" in command

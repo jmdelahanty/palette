@@ -479,6 +479,7 @@ def build_flat_roi_cache_bundle_job(
             str(progress_path),
             "--output-json",
             str(report_path),
+            "--sha256",
         )
         tasks.append(
             build_execution_task(
@@ -583,6 +584,7 @@ def build_flat_roi_cache_job(
         str(progress_path),
         "--output-json",
         str(report_path),
+        "--sha256",
     )
     command = build_runtime_command(
         worker,

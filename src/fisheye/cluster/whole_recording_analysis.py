@@ -43,7 +43,6 @@ from fisheye.cluster.whole_recording_analysis_cache_cleanup import (
     DEFAULT_ALLOWED_ROOT as DEFAULT_ROI_CACHE_CLEANUP_ROOT,
 )
 
-
 PLAN_SCHEMA = "palette.whole_recording_analysis_bsub_plan.v1"
 
 
@@ -51,11 +50,17 @@ PLAN_SCHEMA = "palette.whole_recording_analysis_bsub_plan.v1"
 class SubjectMaskRunNames:
     subject_mask_run: str
     refined_subject_mask_run: str
+    refined_subject_mask_draft_run: str
+    subject_mask_quality_run: str
+    subject_mask_bundle_id: str
 
     def to_json(self) -> dict[str, str]:
         return {
             "subject_mask_run": self.subject_mask_run,
             "refined_subject_mask_run": self.refined_subject_mask_run,
+            "refined_subject_mask_draft_run": self.refined_subject_mask_draft_run,
+            "subject_mask_quality_run": self.subject_mask_quality_run,
+            "subject_mask_bundle_id": self.subject_mask_bundle_id,
         }
 
 
@@ -77,6 +82,7 @@ class PlannedAnalysisTarget:
     keypoint_refinement_job_key: str
     subject_mask_inference_job_key: str
     subject_mask_finalization_job_key: str
+    subject_mask_publication_job_key: str
     target_concurrency_gate_job_key: str | None
 
     def to_json(self) -> dict[str, Any]:
@@ -98,6 +104,7 @@ class PlannedAnalysisTarget:
                 "keypoint_refinement": self.keypoint_refinement_job_key,
                 "subject_mask_inference": self.subject_mask_inference_job_key,
                 "subject_mask_finalization": self.subject_mask_finalization_job_key,
+                "subject_mask_publication": self.subject_mask_publication_job_key,
             },
             "target_concurrency_gate_job_key": self.target_concurrency_gate_job_key,
         }
@@ -139,9 +146,13 @@ class WholeRecordingAnalysisPlan:
 
 def build_subject_mask_run_names(run_label: str) -> SubjectMaskRunNames:
     label = safe_component(run_label, default="subject_masks")
+    refined = f"refined_subject_masks_smart_finalizer_{label}"
     return SubjectMaskRunNames(
         subject_mask_run=f"subject_masks_unet_registry_{label}",
-        refined_subject_mask_run=f"refined_subject_masks_smart_finalizer_{label}",
+        refined_subject_mask_run=refined,
+        refined_subject_mask_draft_run=f"{refined}__worker_draft",
+        subject_mask_quality_run=f"subject_mask_quality_{label}",
+        subject_mask_bundle_id=f"subject_mask_bundle_{label}",
     )
 
 
@@ -150,10 +161,18 @@ def _refuse_mask_output_collisions(
     run_names: SubjectMaskRunNames,
 ) -> None:
     outputs = (
+        analysis_zarr / "subject_mask_shard_runs" / run_names.subject_mask_run,
+        analysis_zarr
+        / "refined_subject_masks_runs"
+        / run_names.refined_subject_mask_draft_run,
         analysis_zarr / "subject_mask_runs" / run_names.subject_mask_run,
         analysis_zarr
         / "refined_subject_masks_runs"
         / run_names.refined_subject_mask_run,
+        analysis_zarr
+        / "subject_mask_quality_runs"
+        / run_names.subject_mask_quality_run,
+        analysis_zarr / "subject_mask_bundle_runs" / run_names.subject_mask_bundle_id,
     )
     collisions = [path for path in outputs if path.exists()]
     if collisions:
@@ -202,6 +221,10 @@ def _build_subject_mask_inference_job(
         str(registry),
         "--run-label",
         run_names.subject_mask_run.removeprefix("subject_masks_unet_registry_"),
+        "--raw-worker-run",
+        run_names.subject_mask_run,
+        "--refined-draft-run",
+        run_names.refined_subject_mask_draft_run,
         "--crop-run",
         target.cache.crop_run,
         "--roi-cache-manifest",
@@ -240,7 +263,7 @@ def _build_subject_mask_inference_job(
         expected_output_templates=(
             str(
                 target.target.analysis_zarr
-                / "subject_mask_runs"
+                / "subject_mask_shard_runs"
                 / run_names.subject_mask_run
             ),
         ),
@@ -300,6 +323,10 @@ def _build_subject_mask_finalization_job(
         str(registry),
         "--run-label",
         run_names.subject_mask_run.removeprefix("subject_masks_unet_registry_"),
+        "--raw-worker-run",
+        run_names.subject_mask_run,
+        "--refined-draft-run",
+        run_names.refined_subject_mask_draft_run,
         "--crop-run",
         target.cache.crop_run,
         "--refined-keypoint-run",
@@ -326,7 +353,7 @@ def _build_subject_mask_finalization_job(
             str(
                 target.target.analysis_zarr
                 / "refined_subject_masks_runs"
-                / run_names.refined_subject_mask_run
+                / run_names.refined_subject_mask_draft_run
             ),
         ),
         python_launcher=(str(repo / "scripts" / "py"),),
@@ -343,11 +370,114 @@ def _build_subject_mask_finalization_job(
             "target_id": target_id,
             "analysis_zarr": str(target.target.analysis_zarr),
             "source_subject_mask_run": run_names.subject_mask_run,
-            "refined_subject_mask_run": run_names.refined_subject_mask_run,
+            "refined_subject_mask_draft_run": run_names.refined_subject_mask_draft_run,
             "assignment_keypoint_group": "refined_keypoints_runs",
             "assignment_keypoint_run": target.run_names.refined_keypoint_run,
             "component_contours_requested": False,
             "sampled_component_contours_requested": True,
+        },
+    )
+
+
+def _build_subject_mask_publication_job(
+    *,
+    workflow_id: str,
+    target: keypoints.PlannedWholeRecordingTarget,
+    run_names: SubjectMaskRunNames,
+    repo: Path,
+    run_root: Path,
+    resources: LsfResources,
+    finalization_job: LsfJob,
+) -> LsfJob:
+    """Build the one recording-level, selector-ineligible bundle publication."""
+
+    target_id = target.target.target_id
+    safe_target = safe_component(target_id, default="target", max_length=56)
+    job_key = f"mask_publish:{target_id}"
+    job_name = safe_component(
+        f"sm_publish_{workflow_id}_{safe_target}",
+        default="subject_mask_publication",
+        max_length=120,
+    )
+    local_output = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "palette_subject_mask_bundle_outputs"
+    )
+    quality_scratch = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "palette_subject_mask_quality"
+    )
+    worker = (
+        str(repo / "scripts" / "py"),
+        "-m",
+        "fisheye.cluster.subject_masks.publish_recording_bundle",
+        "--analysis-zarr",
+        str(target.target.analysis_zarr),
+        "--draft-zarr",
+        str(target.target.analysis_zarr),
+        "--crop-run",
+        target.cache.crop_run,
+        "--raw-draft-parent",
+        "subject_mask_shard_runs",
+        "--raw-draft-run",
+        run_names.subject_mask_run,
+        "--refined-draft-run",
+        run_names.refined_subject_mask_draft_run,
+        "--raw-run",
+        run_names.subject_mask_run,
+        "--refined-run",
+        run_names.refined_subject_mask_run,
+        "--quality-run",
+        run_names.subject_mask_quality_run,
+        "--bundle-id",
+        run_names.subject_mask_bundle_id,
+        "--local-output-root",
+        local_output,
+        "--quality-scratch-root",
+        quality_scratch,
+        "--json",
+    )
+    command = build_runtime_command(
+        worker,
+        status_path_template=(
+            run_root
+            / "status"
+            / f"{safe_target}.subject_mask_publication.{RUNTIME_JOB_ID_TOKEN}.json"
+        ),
+        workflow_id=workflow_id,
+        family="analysis.whole_recording",
+        job_key=job_key,
+        stage="subject_mask_publication",
+        cwd=repo,
+        cleanup_path_templates=(local_output, quality_scratch),
+        expected_output_templates=(
+            str(
+                target.target.analysis_zarr
+                / "subject_mask_bundle_runs"
+                / run_names.subject_mask_bundle_id
+            ),
+        ),
+        python_launcher=(str(repo / "scripts" / "py"),),
+    )
+    return LsfJob(
+        job_key=job_key,
+        job_name=job_name,
+        command=command,
+        resources=resources,
+        stdout_path=run_root / "logs" / f"{job_name}.%J.out",
+        stderr_path=run_root / "logs" / f"{job_name}.%J.err",
+        dependency=LsfDependency((finalization_job.job_key,)),
+        metadata={
+            "target_id": target_id,
+            "analysis_zarr": str(target.target.analysis_zarr),
+            "raw_worker_run": run_names.subject_mask_run,
+            "refined_worker_draft_run": run_names.refined_subject_mask_draft_run,
+            "raw_run": run_names.subject_mask_run,
+            "refined_run": run_names.refined_subject_mask_run,
+            "quality_run": run_names.subject_mask_quality_run,
+            "bundle_id": run_names.subject_mask_bundle_id,
+            "selector_activation": False,
+            "publication_contract": "atomic_inactive_subject_mask_bundle_v1",
         },
     )
 
@@ -380,8 +510,7 @@ def _gate_target_entry_jobs(
 
     entry_keys = (
         (target.cache.producer_job_key,)
-        if target.cache.producer_job_key is not None
-        and not cache_producer_is_shared
+        if target.cache.producer_job_key is not None and not cache_producer_is_shared
         else (target.prediction_job_key, mask_inference_job_key)
     )
     entry_key_set = set(entry_keys)
@@ -454,6 +583,7 @@ def build_plan(
         )
     planned_targets: list[PlannedAnalysisTarget] = []
     mask_finalizer_keys: list[str] = []
+    mask_publication_keys: list[str] = []
 
     for target_index, target in enumerate(keypoint_plan.targets):
         _refuse_mask_output_collisions(target.target.analysis_zarr, mask_names)
@@ -485,8 +615,19 @@ def build_plan(
             inference_job=inference_job,
             refinement_job=refinement_job,
         )
-        jobs.extend((inference_job, finalization_job))
+        publication_job = _build_subject_mask_publication_job(
+            workflow_id=run_label,
+            target=target,
+            run_names=mask_names,
+            repo=keypoint_plan.repo,
+            run_root=run_root,
+            resources=validation_resources
+            or LsfResources(queue="short", ncores=4, mem_gb=32, walltime="2:00"),
+            finalization_job=finalization_job,
+        )
+        jobs.extend((inference_job, finalization_job, publication_job))
         mask_finalizer_keys.append(finalization_job.job_key)
+        mask_publication_keys.append(publication_job.job_key)
         concurrency_gate_job_key = None
         if (
             resolved_max_active_targets is not None
@@ -494,7 +635,7 @@ def build_plan(
         ):
             concurrency_gate_job_key = planned_targets[
                 target_index - resolved_max_active_targets
-            ].subject_mask_finalization_job_key
+            ].subject_mask_publication_job_key
             _gate_target_entry_jobs(
                 jobs,
                 target=target,
@@ -531,6 +672,7 @@ def build_plan(
                 keypoint_refinement_job_key=target.refinement_job_key,
                 subject_mask_inference_job_key=inference_job.job_key,
                 subject_mask_finalization_job_key=finalization_job.job_key,
+                subject_mask_publication_job_key=publication_job.job_key,
                 target_concurrency_gate_job_key=concurrency_gate_job_key,
             )
         )
@@ -578,7 +720,7 @@ def build_plan(
                 or LsfResources(queue="short", ncores=1, mem_gb=16, walltime="1:00"),
                 stdout_path=run_root / "logs" / f"{validation_job_name}.%J.out",
                 stderr_path=run_root / "logs" / f"{validation_job_name}.%J.err",
-                dependency=LsfDependency(tuple(mask_finalizer_keys)),
+                dependency=LsfDependency(tuple(mask_publication_keys)),
                 metadata={
                     "independent_output_validation": True,
                     "target_count": len(planned_targets),
@@ -632,12 +774,13 @@ def build_plan(
             dependency=LsfDependency(
                 (analysis_validation_job_key,)
                 if analysis_validation_job_key is not None
-                else tuple(mask_finalizer_keys)
+                else tuple(mask_publication_keys)
             ),
             metadata={
                 "whole_recording_analysis_join": True,
                 "target_count": len(planned_targets),
                 "subject_mask_finalizer_job_keys": list(mask_finalizer_keys),
+                "subject_mask_publication_job_keys": list(mask_publication_keys),
                 "registry": str(keypoint_plan.registry),
             },
         )
@@ -698,9 +841,7 @@ def build_plan(
             )
         )
     cache_jobs = tuple(
-        job
-        for job in jobs
-        if job.job_key.startswith(("cache:", "cache_bundle:"))
+        job for job in jobs if job.job_key.startswith(("cache:", "cache_bundle:"))
     )
     keypoint_jobs = tuple(
         job
@@ -712,14 +853,19 @@ def build_plan(
         for job in jobs
         if job.job_key.startswith("mask_infer:")
         or job.job_key.startswith("mask_finalize:")
+        or job.job_key.startswith("mask_publish:")
     )
-    validation_jobs = tuple(
-        job for job in jobs if job.job_key == analysis_validation_job_key
-    ) if analysis_validation_job_key is not None else ()
+    validation_jobs = (
+        tuple(job for job in jobs if job.job_key == analysis_validation_job_key)
+        if analysis_validation_job_key is not None
+        else ()
+    )
     registry_jobs = tuple(job for job in jobs if job.job_key == registry_job_key)
-    cleanup_jobs = tuple(
-        job for job in jobs if job.job_key == cleanup_job_key
-    ) if cleanup_job_key is not None else ()
+    cleanup_jobs = (
+        tuple(job for job in jobs if job.job_key == cleanup_job_key)
+        if cleanup_job_key is not None
+        else ()
+    )
     fragments = tuple(
         fragment
         for fragment in (
@@ -1045,9 +1191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     batch_size=int(args.cache_batch_size),
                     decode_backend=args.cache_decode_backend,
                     roi_live_acceleration=args.cache_roi_live_acceleration,
-                    roi_live_gpu_chunk_frames=int(
-                        args.cache_roi_live_gpu_chunk_frames
-                    ),
+                    roi_live_gpu_chunk_frames=int(args.cache_roi_live_gpu_chunk_frames),
                 )
             )
         cache_jobs = tuple(planned_cache_jobs)
@@ -1066,12 +1210,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         input_mode="tensor",
         progress_every_batches=1,
         prediction_resources=LsfResources(queue="gpu_l4", ncores=4, mem_gb=32, gpus=1),
-        refinement_resources=LsfResources(queue="short", ncores=4, mem_gb=16, walltime="1:00"),
+        refinement_resources=LsfResources(
+            queue="short", ncores=4, mem_gb=16, walltime="1:00"
+        ),
         refine_chunk_size=2048,
         refine_scheduler="threads",
         refine_num_workers=4,
         refine_memory_limit=None,
-        finalizer_resources=LsfResources(queue="short", ncores=1, mem_gb=8, walltime="1:00"),
+        finalizer_resources=LsfResources(
+            queue="short", ncores=1, mem_gb=8, walltime="1:00"
+        ),
         cache_bindings=cache_bindings,
         upstream_jobs=cache_jobs,
     )
@@ -1079,7 +1227,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         keypoint_plan=keypoint_plan,
         run_root=run_root,
         mask_run_label=args.mask_run_label or f"{args.run_label}_subject_masks",
-        mask_inference_resources=LsfResources(queue="gpu_l4", ncores=8, mem_gb=48, gpus=1),
+        mask_inference_resources=LsfResources(
+            queue="gpu_l4", ncores=8, mem_gb=48, gpus=1
+        ),
         mask_finalization_resources=LsfResources(queue="short", ncores=16, mem_gb=32),
         mask_batch_size=args.batch_size_sm,
         mask_finalize_num_workers=16,
@@ -1103,7 +1253,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.apply:
         result = apply_plan(plan)
-        print(json.dumps(result, indent=2, sort_keys=True) if args.json else result["status"])
+        print(
+            json.dumps(result, indent=2, sort_keys=True)
+            if args.json
+            else result["status"]
+        )
         return 0
     materialize_plan_bundle(plan)
     if args.json:

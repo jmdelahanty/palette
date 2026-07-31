@@ -18,10 +18,12 @@ from fisheye.shared.composite_subject_mask import (
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    validate_subject_mask_bundle_candidate,
+)
 from fisheye.utils.validate_refined_subject_mask_contract import (
     validate_refined_subject_mask_contract,
 )
-
 
 REPORT_SCHEMA = "palette.whole_recording_analysis_validation.v1"
 RAW_LABELS = ("subject_body", "eyes_union", "swim_bladder")
@@ -41,9 +43,7 @@ def _uniform_indices(total_rows: int, sample_rows: int) -> np.ndarray:
         return np.zeros((0,), dtype=np.int64)
     if total_rows <= sample_rows:
         return np.arange(total_rows, dtype=np.int64)
-    return np.unique(
-        np.linspace(0, total_rows - 1, num=sample_rows, dtype=np.int64)
-    )
+    return np.unique(np.linspace(0, total_rows - 1, num=sample_rows, dtype=np.int64))
 
 
 def _read_rows(array: Any, row_indices: np.ndarray) -> np.ndarray:
@@ -65,7 +65,9 @@ def _require_complete_run(root: Any, parent_name: str, run_name: str) -> Any:
     return run
 
 
-def _validate_raw_masks(root: Any, run: Any, *, run_name: str, sample_rows: int) -> dict[str, Any]:
+def _validate_raw_masks(
+    root: Any, run: Any, *, run_name: str, sample_rows: int
+) -> dict[str, Any]:
     labels = _labels(run.attrs.get("mask_labels"))
     if labels != RAW_LABELS:
         raise RuntimeError(
@@ -154,9 +156,9 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
         raise RuntimeError(
             f"Refined masks_roi sample is not binary: {unique_values.tolist()!r}."
         )
-    sampled_present = sampled.reshape(
-        sampled.shape[0], sampled.shape[1], -1
-    ).any(axis=(0, 2))
+    sampled_present = sampled.reshape(sampled.shape[0], sampled.shape[1], -1).any(
+        axis=(0, 2)
+    )
     if not np.all(sampled_present):
         raise RuntimeError(
             "Sampled refined masks are empty for components: "
@@ -178,17 +180,6 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
     present_counts = present.sum(axis=0, dtype=np.int64)
     if np.any(present_counts <= 0):
         raise RuntimeError("At least one refined component has no present masks.")
-    if normalize_attr(run.attrs.get("sampled_component_contours_status")) != "computed":
-        raise RuntimeError("Refined sampled component contours are not marked computed.")
-    if bool(run.attrs.get("component_contours_requested")):
-        raise RuntimeError("Full ragged component contours were unexpectedly requested.")
-    if not bool(run.attrs.get("sampled_component_contours_requested")):
-        raise RuntimeError("Sampled component contours were not requested.")
-    for label in labels:
-        if run.get(f"components/{label}/sampled_contours") is None:
-            raise RuntimeError(f"Missing sampled contours for {label}.")
-        if run.get(f"components/{label}/contours") is not None:
-            raise RuntimeError(f"Unexpected full ragged contours for {label}.")
     return {
         "shape": list(shape),
         "dtype": str(np.dtype(masks.dtype)),
@@ -202,8 +193,7 @@ def _validate_refined_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
             label: int(value)
             for label, value in zip(labels, present_counts, strict=True)
         },
-        "sampled_component_contours": "computed",
-        "full_component_contours": "absent",
+        "authoritative_surface": "masks_roi",
     }
 
 
@@ -213,6 +203,7 @@ def _validate_target(
     sample_rows: int,
     open_root_fn: Callable[..., Any],
     contract_validator_fn: Callable[..., Mapping[str, Any]],
+    bundle_validator_fn: Callable[..., Mapping[str, Any]],
 ) -> dict[str, Any]:
     zarr_path = Path(str(raw["analysis_zarr"])).expanduser().resolve()
     subject_names = raw.get("subject_masks")
@@ -220,6 +211,8 @@ def _validate_target(
         raise ValueError("Combined target lacks subject_masks run names.")
     subject_run_name = str(subject_names["subject_mask_run"])
     refined_run_name = str(subject_names["refined_subject_mask_run"])
+    quality_run_name = str(subject_names.get("subject_mask_quality_run") or "")
+    bundle_id = str(subject_names.get("subject_mask_bundle_id") or "")
     keypoint_run_name = str(raw["keypoint_run"])
     refined_keypoint_run_name = str(raw["refined_keypoint_run"])
     root = open_root_fn(zarr_path, mode="r")
@@ -235,6 +228,12 @@ def _validate_target(
         "refined_subject_masks_runs",
         refined_run_name,
     )
+    if quality_run_name:
+        _require_complete_run(
+            root,
+            "subject_mask_quality_runs",
+            quality_run_name,
+        )
     actual_assignment = (
         normalize_attr(refined_run.attrs.get("assignment_keypoint_group")),
         normalize_attr(
@@ -248,12 +247,17 @@ def _validate_target(
             "Refined subject-mask assignment lineage mismatch: "
             f"{actual_assignment!r} versus {expected_assignment!r}."
         )
-    contract = dict(contract_validator_fn(zarr_path, run_name=refined_run_name))
-    if not bool(contract.get("valid")):
-        raise RuntimeError(
-            "Refined subject-mask contract validation failed: "
-            + json.dumps(contract.get("errors") or [], sort_keys=True)
-        )
+    bundle = None
+    if bundle_id:
+        bundle = dict(bundle_validator_fn(analysis_zarr=zarr_path, bundle_id=bundle_id))
+        contract = {"valid": True, "source": "subject_mask_bundle_v1"}
+    else:
+        contract = dict(contract_validator_fn(zarr_path, run_name=refined_run_name))
+        if not bool(contract.get("valid")):
+            raise RuntimeError(
+                "Refined subject-mask contract validation failed: "
+                + json.dumps(contract.get("errors") or [], sort_keys=True)
+            )
     return {
         "target_id": str(raw.get("target_id") or ""),
         "analysis_zarr": str(zarr_path),
@@ -261,6 +265,8 @@ def _validate_target(
         "refined_keypoint_run": refined_keypoint_run_name,
         "subject_mask_run": subject_run_name,
         "refined_subject_mask_run": refined_run_name,
+        "subject_mask_quality_run": quality_run_name or None,
+        "subject_mask_bundle_id": bundle_id or None,
         "assignment_keypoint_group": actual_assignment[0],
         "assignment_keypoint_run": actual_assignment[1],
         "raw_masks": _validate_raw_masks(
@@ -274,6 +280,7 @@ def _validate_target(
             sample_rows=sample_rows,
         ),
         "refined_contract": contract,
+        "subject_mask_bundle": bundle,
         "status": "ok",
     }
 
@@ -285,6 +292,9 @@ def validate_analysis_plan(
     open_root_fn: Callable[..., Any] = open_zarr_group_direct,
     contract_validator_fn: Callable[..., Mapping[str, Any]] = (
         validate_refined_subject_mask_contract
+    ),
+    bundle_validator_fn: Callable[..., Mapping[str, Any]] = (
+        validate_subject_mask_bundle_candidate
     ),
 ) -> dict[str, Any]:
     if int(sample_rows) <= 0:
@@ -307,6 +317,7 @@ def validate_analysis_plan(
                     sample_rows=int(sample_rows),
                     open_root_fn=open_root_fn,
                     contract_validator_fn=contract_validator_fn,
+                    bundle_validator_fn=bundle_validator_fn,
                 )
             )
         except Exception as exc:

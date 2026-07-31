@@ -4,103 +4,37 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
-import socket
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-from fisheye.shared.flat_roi_cache import load_flat_roi_cache_manifest
+from fisheye.shared.flat_roi_cache import (
+    cleanup_staged_flat_roi_cache,
+    stage_flat_roi_cache_manifest,
+)
 from fisheye.utils import run_subject_mask_batch_pipeline as pipeline
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def _stage_flat_roi_cache_manifest(
     manifest_path: Path,
     *,
     staging_dir: Path | None,
 ) -> tuple[Path, dict[str, object]]:
-    """Copy one complete flat cache to a private node-local directory."""
-
-    source_manifest = manifest_path.expanduser().resolve()
-    payload = load_flat_roi_cache_manifest(source_manifest)
-    array = payload.get("array")
-    if not isinstance(array, dict):
-        raise ValueError(f"Flat ROI cache manifest lacks array metadata: {source_manifest}")
-    raw_bin = str(array.get("bin_path") or "").strip()
-    if not raw_bin:
-        raise ValueError(f"Flat ROI cache manifest lacks array.bin_path: {source_manifest}")
-    source_bin = Path(raw_bin).expanduser()
-    if not source_bin.is_absolute():
-        source_bin = source_manifest.parent / source_bin
-    source_bin = source_bin.resolve()
-    if not source_bin.is_file():
-        raise FileNotFoundError(f"Flat ROI cache payload not found: {source_bin}")
-    expected_bytes = int(array.get("total_bytes") or 0)
-    actual_bytes = int(source_bin.stat().st_size)
-    if expected_bytes and actual_bytes != expected_bytes:
-        raise ValueError(
-            f"Flat ROI cache size mismatch: expected {expected_bytes}, got {actual_bytes}."
-        )
     if staging_dir is None:
         raise ValueError("Subject-mask cache staging requires --roi-cache-staging-dir.")
-    target_dir = staging_dir.expanduser().resolve()
-    target_dir.mkdir(parents=True, exist_ok=True)
-    local_manifest = target_dir / source_manifest.name
-    local_bin = target_dir / source_bin.name
-    if local_manifest == source_manifest or local_bin == source_bin:
-        raise ValueError("ROI-cache staging directory must differ from the source directory.")
-
-    started_at = _utc_now()
-    started = time.perf_counter()
-    tmp_bin = local_bin.with_name(f"{local_bin.name}.tmp.{os.getpid()}")
-    shutil.copy2(source_bin, tmp_bin)
-    os.replace(tmp_bin, local_bin)
-    duration = float(time.perf_counter() - started)
-    details: dict[str, object] = {
-        "schema": "palette_roi_cache_staging_v1",
-        "policy": "node_scratch_staged_flat_cache",
-        "staged": True,
-        "requested_manifest_path": str(source_manifest),
-        "effective_manifest_path": str(local_manifest),
-        "source_bin_path": str(source_bin),
-        "effective_bin_path": str(local_bin),
-        "staging_dir": str(target_dir),
-        "host": socket.gethostname(),
-        "lsb_jobid": os.environ.get("LSB_JOBID"),
-        "copy": {
-            "started_at_utc": started_at,
-            "finished_at_utc": _utc_now(),
-            "duration_seconds": duration,
-            "size_bytes": actual_bytes,
-            "mib_per_second": (
-                (actual_bytes / (1024 * 1024)) / duration if duration > 0 else None
-            ),
-        },
-    }
-    staged = dict(payload)
-    staged_array = dict(array)
-    staged_array["bin_path"] = local_bin.name
-    staged["array"] = staged_array
-    staged["manifest_path"] = str(local_manifest)
-    staged["staging"] = details
-    tmp_manifest = local_manifest.with_name(
-        f"{local_manifest.name}.tmp.{os.getpid()}"
+    return stage_flat_roi_cache_manifest(
+        manifest_path,
+        staging_dir=staging_dir,
     )
-    tmp_manifest.write_text(
-        json.dumps(staged, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp_manifest, local_manifest)
-    return local_manifest, details
 
 
 def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> list[str]:
+    raw_worker_run = str(
+        getattr(args, "raw_worker_run", None)
+        or f"subject_masks_unet_registry_{args.run_label}"
+    )
+    refined_draft_run = str(
+        getattr(args, "refined_draft_run", None)
+        or f"refined_subject_masks_smart_finalizer_{args.run_label}"
+    )
     command = [
         str(args.analysis_zarr),
         "--apply",
@@ -108,8 +42,14 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
         str(args.registry),
         "--run-label",
         args.run_label,
+        "--subject-run-name",
+        raw_worker_run,
+        "--refined-run-name",
+        refined_draft_run,
         "--workflow-stage",
         args.stage,
+        "--subject-output-parent",
+        "subject_mask_shard_runs",
         "--crop-run",
         args.crop_run,
         "--device",
@@ -138,6 +78,7 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
         "--profile-timings",
         "--stage-output-to-scratch",
         "--defer-registry-status",
+        "--require-production-proof",
         "--metric-level",
         "cheap",
         "--mask-storage",
@@ -181,21 +122,7 @@ def _pipeline_args(args: argparse.Namespace, *, cache_manifest: Path | None) -> 
 
 
 def _cleanup_staged_cache(staged_manifest: Path) -> None:
-    """Remove only the manifest and payload created by this process."""
-
-    try:
-        payload = json.loads(staged_manifest.read_text(encoding="utf-8"))
-        array = payload.get("array")
-        raw_bin = str(array.get("bin_path") or "") if isinstance(array, dict) else ""
-        if raw_bin:
-            payload_path = Path(raw_bin)
-            if not payload_path.is_absolute():
-                payload_path = staged_manifest.parent / payload_path
-            payload_path.unlink(missing_ok=True)
-        staged_manifest.unlink(missing_ok=True)
-        staged_manifest.parent.rmdir()
-    except OSError:
-        pass
+    cleanup_staged_flat_roi_cache(staged_manifest)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -204,6 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-zarr", required=True, type=Path)
     parser.add_argument("--registry", required=True, type=Path)
     parser.add_argument("--run-label", required=True)
+    parser.add_argument("--raw-worker-run")
+    parser.add_argument("--refined-draft-run")
     parser.add_argument("--crop-run", required=True)
     parser.add_argument("--refined-keypoint-run")
     parser.add_argument("--roi-cache-manifest", type=Path)

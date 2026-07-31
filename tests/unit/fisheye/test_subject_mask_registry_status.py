@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fisheye.shared import subject_mask_registry_status as mod
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
+    SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR,
+)
+from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 
 
 class _FakeGroup(dict[str, object]):
@@ -146,3 +153,75 @@ def test_emit_refined_subject_mask_stage_completion_includes_stale_payload_detai
         "stale_reason": "source_subject_mask_rows_changed",
         "duration_seconds": 5.0,
     }
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    (
+        {RUN_COMPLETION_STATUS_ATTR: "running", "stage_selector_eligible": True},
+        {RUN_COMPLETION_STATUS_ATTR: "failed", "stage_selector_eligible": True},
+        {RUN_COMPLETION_STATUS_ATTR: "complete", "stage_selector_eligible": False},
+        {RUN_COMPLETION_STATUS_ATTR: "complete", "stage_selector_eligible": "true"},
+    ),
+)
+def test_registry_completion_rejects_nonterminal_or_ineligible_modern_runs(
+    monkeypatch,
+    attrs: dict[str, object],
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "emit_stage_completion",
+        lambda *_args, **_kwargs: pytest.fail("registry emission must not occur"),
+    )
+
+    assert (
+        mod.emit_subject_mask_stage_completion(
+            _FakeGroup(),
+            Path("/tmp/example_analysis.zarr"),
+            run_group=_FakeGroup(attrs=attrs),
+            run_name="raw_candidate",
+            source="pytest",
+        )
+        is False
+    )
+
+
+def test_registry_completion_accepts_exact_authoritative_bundle_member(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "emit_stage_completion",
+        lambda *_args, **_kwargs: captured.setdefault("called", True),
+    )
+    run_name = "refined_001"
+    root = _FakeGroup(
+        attrs={
+            SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR: {
+                "members": {
+                    "refined": {
+                        "family": "refined_subject_masks_runs",
+                        "run_id": run_name,
+                        "run_path": f"refined_subject_masks_runs/{run_name}",
+                    }
+                }
+            }
+        }
+    )
+    run = _FakeGroup(
+        attrs={
+            RUN_COMPLETION_STATUS_ATTR: "complete",
+            "stage_selector_eligible": False,
+            SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR: True,
+        }
+    )
+
+    assert mod.emit_refined_subject_mask_stage_completion(
+        root,
+        Path("/tmp/example_analysis.zarr"),
+        run_group=run,
+        run_name=run_name,
+        source="pytest",
+    )
+    assert captured == {"called": True}

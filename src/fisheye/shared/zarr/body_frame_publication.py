@@ -28,6 +28,10 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_intent import StoragePlan
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 
 BODY_FRAME_SHADOW_SCHEMA_ID = "palette.body_frame.shadow_publication"
@@ -231,7 +235,9 @@ def publish_selector_ineligible_body_frame_snapshot(
         }
     )
     analysis = root.create_group("analysis")
-    family = analysis.create_group("body_frame_runs")
+    family = require_runs_parent(
+        analysis, "body_frame_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+    )
     family.attrs.update(
         {
             "benchmark_only": True,

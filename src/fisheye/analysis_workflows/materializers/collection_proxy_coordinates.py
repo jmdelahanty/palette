@@ -303,7 +303,7 @@ def _stage_local_run(
         }
 
     local_root = open_zarr_root(plan.local_zarr, mode="w")
-    parent = local_root.require_group("crop_runs")
+    parent = require_runs_parent(local_root, "crop_runs")
     run = parent.require_group(plan.run_name)
     run.attrs.update(
         {

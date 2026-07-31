@@ -67,7 +67,9 @@ mask-observation rows in Cam2010095:
       catalog, including whole-body containment and organ mutual exclusion.
 - [x] Prevent dense materialization from clearing existing derivative
       freshness markers.
-- [ ] Adopt the draft audit extension in the maintained draft producer/editor.
+- [x] Adopt the draft audit extension in the maintained proof-required draft
+      finalizer. Historical compatibility writers remain intentionally
+      unlabeled; interactive editor/compactor receipts remain separate work.
 - [ ] Persist cache receipts from cache regeneration writers.
 - [x] Freeze the persisted subject-mask-quality run manifest, metadata digest,
       and direct/consolidated equivalence gate.
@@ -80,7 +82,7 @@ mask-observation rows in Cam2010095:
 - [x] Freeze explicit reference-full and production-streaming publication
       validation modes plus a digest-bound incremental source receipt; see
       `docs/subject_mask_production_validation_2026-07-31.md`.
-- [ ] Adopt incremental validation-receipt emission in maintained inference and
+- [x] Adopt incremental validation-receipt emission in maintained inference and
       refinement before attempting the full-duration mask surface.
 
 ### 22,926-row cache-pipeline checkpoint

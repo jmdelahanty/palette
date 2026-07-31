@@ -39,6 +39,10 @@ from fisheye.shared.zarr.storage_profiles import (
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 
 DEFAULT_CANONICAL_DETECTION_SHADOW_ROOT = Path(
@@ -347,7 +351,9 @@ def publish_legacy_canonical_detection_shadow(
             "created_at_utc": utc_now(),
         }
     )
-    family = root.create_group("detect_runs")
+    family = require_runs_parent(
+        root, "detect_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+    )
     family.attrs.update(
         {
             "benchmark_only": True,

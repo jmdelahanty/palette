@@ -38,28 +38,21 @@ from fisheye.shared.zarr.refined_keypoint_storage import (
 )
 from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 
-
 REFINED_KEYPOINT_RUN_MANIFEST_SCHEMA_ID = "palette.refined_keypoint.run_manifest"
 REFINED_KEYPOINT_RUN_MANIFEST_SCHEMA_VERSION = 1
 REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 REFINED_KEYPOINT_RUN_MANIFEST_PERSISTED_PATH = (
     "refined_keypoints_runs/<run>/zarr.json.attributes.run_manifest"
 )
-REFINED_KEYPOINT_LOGICAL_CONTENT_SCHEMA_ID = (
-    "palette.refined_keypoint.logical_content"
-)
+REFINED_KEYPOINT_LOGICAL_CONTENT_SCHEMA_ID = "palette.refined_keypoint.logical_content"
 REFINED_KEYPOINT_LOGICAL_CONTENT_SCHEMA_VERSION = 1
-REFINED_KEYPOINT_SOURCE_BINDINGS_SCHEMA_ID = (
-    "palette.refined_keypoint.source_bindings"
-)
+REFINED_KEYPOINT_SOURCE_BINDINGS_SCHEMA_ID = "palette.refined_keypoint.source_bindings"
 REFINED_KEYPOINT_SOURCE_BINDINGS_SCHEMA_VERSION = 2
 REFINED_KEYPOINT_SNAPSHOT_IDENTITY_SCHEMA_ID = (
     "palette.refined_keypoint.snapshot_identity"
 )
 REFINED_KEYPOINT_SNAPSHOT_IDENTITY_SCHEMA_VERSION = 1
-REFINED_KEYPOINT_CODE_REGISTRIES_SCHEMA_ID = (
-    "palette.refined_keypoint.code_registries"
-)
+REFINED_KEYPOINT_CODE_REGISTRIES_SCHEMA_ID = "palette.refined_keypoint.code_registries"
 REFINED_KEYPOINT_CODE_REGISTRIES_SCHEMA_VERSION = 1
 REFINED_KEYPOINT_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
 REFINED_KEYPOINT_RETIRED_KEYS_DIGEST_ALGORITHM = (
@@ -264,7 +257,9 @@ class RefinedKeypointSourceBindings:
 
     def __post_init__(self) -> None:
         for name in ("recording_identity", "skeleton_id"):
-            object.__setattr__(self, name, _require_text(getattr(self, name), name=name))
+            object.__setattr__(
+                self, name, _require_text(getattr(self, name), name=name)
+            )
         for name in ("raw_run_id", "quality_run_id", "crop_run_id"):
             object.__setattr__(
                 self, name, _require_run_id(getattr(self, name), name=name)
@@ -363,7 +358,9 @@ class RefinedKeypointSnapshotIdentity:
             "recording_identity",
             _require_text(self.recording_identity, name="recording_identity"),
         )
-        object.__setattr__(self, "lineage_id", _require_uuid(self.lineage_id, name="lineage_id"))
+        object.__setattr__(
+            self, "lineage_id", _require_uuid(self.lineage_id, name="lineage_id")
+        )
         object.__setattr__(
             self, "snapshot_id", _require_uuid(self.snapshot_id, name="snapshot_id")
         )
@@ -375,7 +372,9 @@ class RefinedKeypointSnapshotIdentity:
         if any(value is None for value in parents) and not all(
             value is None for value in parents
         ):
-            raise ValueError("Parent identity fields must be all present or all absent.")
+            raise ValueError(
+                "Parent identity fields must be all present or all absent."
+            )
         if self.parent_run_id is not None:
             object.__setattr__(
                 self,
@@ -408,7 +407,10 @@ class RefinedKeypointSnapshotIdentity:
         elif not ancestry or ancestry[-1] != self.parent_snapshot_id:
             raise ValueError("Successor ancestry must end with parent_snapshot_id.")
         object.__setattr__(self, "ancestry_snapshot_ids", ancestry)
-        if type(self.retired_instance_key_count) is not int or self.retired_instance_key_count < 0:
+        if (
+            type(self.retired_instance_key_count) is not int
+            or self.retired_instance_key_count < 0
+        ):
             raise ValueError("retired_instance_key_count must be nonnegative.")
         object.__setattr__(
             self,
@@ -462,7 +464,9 @@ def initial_refined_keypoint_snapshot_identity(
     )
 
 
-def _source_bindings_from_manifest(value: Mapping[str, Any]) -> RefinedKeypointSourceBindings:
+def _source_bindings_from_manifest(
+    value: Mapping[str, Any],
+) -> RefinedKeypointSourceBindings:
     expected = {
         "schema_id",
         "schema_version",
@@ -517,7 +521,21 @@ def refined_keypoint_source_bindings_from_manifest(
     return _source_bindings_from_manifest(value)
 
 
-def _identity_from_manifest(value: Mapping[str, Any]) -> RefinedKeypointSnapshotIdentity:
+def refined_keypoint_snapshot_identity_from_manifest(
+    manifest: Mapping[str, Any],
+) -> RefinedKeypointSnapshotIdentity:
+    """Parse the exact snapshot identity from one persisted run manifest."""
+
+    payload = _manifest_payload(manifest, name="refined keypoint manifest")
+    value = payload.get("snapshot_identity")
+    if not isinstance(value, Mapping):
+        raise TypeError("Refined-keypoint snapshot identity must be an object.")
+    return _identity_from_manifest(value)
+
+
+def _identity_from_manifest(
+    value: Mapping[str, Any],
+) -> RefinedKeypointSnapshotIdentity:
     expected = {
         "schema_id",
         "schema_version",
@@ -549,8 +567,7 @@ def _identity_from_manifest(value: Mapping[str, Any]) -> RefinedKeypointSnapshot
         value.get("schema_id") != REFINED_KEYPOINT_SNAPSHOT_IDENTITY_SCHEMA_ID
         or value.get("schema_version")
         != REFINED_KEYPOINT_SNAPSHOT_IDENTITY_SCHEMA_VERSION
-        or value.get("instance_key_policy")
-        != "preserve_raw_observation_identity_v1"
+        or value.get("instance_key_policy") != "preserve_raw_observation_identity_v1"
         or retired.get("digest_algorithm")
         != REFINED_KEYPOINT_RETIRED_KEYS_DIGEST_ALGORITHM
         or retired.get("nonreuse") is not True
@@ -653,12 +670,28 @@ def _code_registries_from_manifest(
             parsed[code] = str(label)
         return _code_map(parsed, name=name, maximum=maximum)
 
-    review = parse(document.get("review_state_map"), name="review_state_map", maximum=255)
-    reason = parse(document.get("reason_code_map"), name="reason_code_map", maximum=65535)
+    review = parse(
+        document.get("review_state_map"), name="review_state_map", maximum=255
+    )
+    reason = parse(
+        document.get("reason_code_map"), name="reason_code_map", maximum=65535
+    )
     expected = _code_registry_document(review, reason)
     if dict(value) != expected:
         raise ValueError("Refined-keypoint code registries differ from frozen builder.")
     return review, reason
+
+
+def refined_keypoint_code_maps_from_manifest(
+    manifest: Mapping[str, Any],
+) -> tuple[dict[int, str], dict[int, str]]:
+    """Parse both exact code maps from one persisted run manifest."""
+
+    payload = _manifest_payload(manifest, name="refined keypoint manifest")
+    value = payload.get("code_registries")
+    if not isinstance(value, Mapping):
+        raise TypeError("Refined-keypoint code registries must be an object.")
+    return _code_registries_from_manifest(value)
 
 
 def build_refined_keypoint_source_bindings(
@@ -740,7 +773,9 @@ def build_refined_keypoint_source_bindings(
         raw_run_id=raw_payload.get("run_id"),
         raw_manifest_digest=raw_digest,
         raw_logical_content_digest=raw_payload["logical_content"]["digest"],
-        raw_row_signatures_digest=raw_content["arrays"]["keypoint_row_signature"]["sha256"],
+        raw_row_signatures_digest=raw_content["arrays"]["keypoint_row_signature"][
+            "sha256"
+        ],
         quality_run_id=quality_payload.get("run_id"),
         quality_manifest_digest=quality_digest,
         quality_logical_content_digest=quality_payload["logical_content"]["digest"],
@@ -874,10 +909,9 @@ def build_refined_keypoint_run_manifest(
     if identity.recording_identity != source.recording_identity:
         raise ValueError("Refined snapshot recording identity differs from its source.")
     retired = normalized_retired_instance_keys(retired_instance_keys)
-    if (
-        identity.retired_instance_key_count != int(retired.size)
-        or identity.retired_instance_keys_digest != sha256_array(retired)
-    ):
+    if identity.retired_instance_key_count != int(
+        retired.size
+    ) or identity.retired_instance_keys_digest != sha256_array(retired):
         raise ValueError("Refined retired-key evidence differs from snapshot identity.")
     keys = _array_values(arrays["instance_key"])
     if np.intersect1d(keys, retired).size:
@@ -909,9 +943,7 @@ def build_refined_keypoint_run_manifest(
             "metadata_declarations_digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
             "metadata_declarations_digest": metadata_digest,
         },
-        "logical_schema": REFINED_KEYPOINT_SCHEMA_V2.as_manifest(
-            dimensions=dimensions
-        ),
+        "logical_schema": REFINED_KEYPOINT_SCHEMA_V2.as_manifest(dimensions=dimensions),
         "storage_plan": storage_plan.as_manifest(),
         "source_bindings": source.as_manifest(),
         "snapshot_identity": identity.as_manifest(),
@@ -961,7 +993,15 @@ def _parse_manifest_components(manifest: Mapping[str, Any]):  # type: ignore[no-
         errors.append("refined-keypoint manifest envelope identity mismatch")
     payload = manifest.get("payload")
     if not isinstance(payload, Mapping):
-        return [*errors, "refined-keypoint payload must be an object"], None, None, None, None, None, None
+        return (
+            [*errors, "refined-keypoint payload must be an object"],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     try:
         digest = canonical_json_sha256(payload)
     except (TypeError, ValueError) as exc:
@@ -1053,9 +1093,17 @@ def _parse_manifest_components(manifest: Mapping[str, Any]):  # type: ignore[no-
             errors.append(str(exc))
     else:
         errors.append("refined-keypoint code_registries must be an object")
-    if source is not None and dimensions is not None and source.dimensions != dimensions:
+    if (
+        source is not None
+        and dimensions is not None
+        and source.dimensions != dimensions
+    ):
         errors.append("refined-keypoint source dimensions mismatch")
-    if source is not None and identity is not None and source.recording_identity != identity.recording_identity:
+    if (
+        source is not None
+        and identity is not None
+        and source.recording_identity != identity.recording_identity
+    ):
         errors.append("refined-keypoint recording identities mismatch")
     return errors, payload, dimensions, source, identity, review, reason
 
@@ -1098,9 +1146,12 @@ def validate_refined_keypoint_run_manifest(
     if not isinstance(document, Mapping):
         errors.append("refined-keypoint logical_content document must be an object")
         return tuple(errors)
-    if (
-        logical_content.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
-        or logical_content.get("digest") != canonical_json_sha256(document)
+    if logical_content.get(
+        "digest_algorithm"
+    ) != CANONICAL_JSON_DIGEST_ALGORITHM or logical_content.get(
+        "digest"
+    ) != canonical_json_sha256(
+        document
     ):
         errors.append("refined-keypoint logical_content digest mismatch")
     expected_document_fields = {
@@ -1127,7 +1178,10 @@ def validate_refined_keypoint_run_manifest(
         }
     ):
         errors.append("refined-keypoint logical_content identity mismatch")
-    if dimensions is not None and document.get("dimensions") != dimensions.as_manifest():
+    if (
+        dimensions is not None
+        and document.get("dimensions") != dimensions.as_manifest()
+    ):
         errors.append("refined-keypoint logical_content dimensions mismatch")
     if source is not None:
         if document.get("source_manifest_digests") != {
@@ -1136,7 +1190,10 @@ def validate_refined_keypoint_run_manifest(
             "crop": source.crop_manifest_digest,
         }:
             errors.append("refined-keypoint logical source digests mismatch")
-        if document.get("source_row_signatures_digest") != source.raw_row_signatures_digest:
+        if (
+            document.get("source_row_signatures_digest")
+            != source.raw_row_signatures_digest
+        ):
             errors.append("refined-keypoint logical source row digest mismatch")
     if identity is not None and (
         document.get("lineage_id") != identity.lineage_id
@@ -1167,9 +1224,11 @@ def validate_refined_keypoint_run_manifest(
                     binding.contract_id, binding.contract_version
                 )
                 expected_shape = [
-                    axis
-                    if isinstance(axis, int)
-                    else dimensions.contract_dimensions[axis]
+                    (
+                        axis
+                        if isinstance(axis, int)
+                        else dimensions.contract_dimensions[axis]
+                    )
                     for axis in contract.shape_template
                 ]
                 if item.get("shape") != expected_shape:
@@ -1210,7 +1269,9 @@ def validate_refined_keypoint_snapshot_identity(
     if np.intersect1d(keys, retired).size:
         errors.append("live and retired instance keys overlap")
     if identity.parent_run_id is not None:
-        errors.append("successor identity validation is deferred to the delta compactor")
+        errors.append(
+            "successor identity validation is deferred to the delta compactor"
+        )
     return tuple(errors)
 
 
@@ -1239,7 +1300,10 @@ def validate_refined_keypoint_publication(
         for value in (payload, dimensions, source, identity, review, reason)
     ):
         return (*errors, "refined-keypoint manifest components are invalid")
-    if any(value is not None for value in (parent_manifest, parent_arrays, parent_retired_instance_keys)):
+    if any(
+        value is not None
+        for value in (parent_manifest, parent_arrays, parent_retired_instance_keys)
+    ):
         errors.append("successor publication is deferred to the delta compactor")
     try:
         observed_source = build_refined_keypoint_source_bindings(
@@ -1287,20 +1351,32 @@ def validate_refined_keypoint_publication(
         "pose_bbox_xyxy_img",
     )
     for path in preserved_paths:
-        if path in arrays and path in raw_arrays and not np.array_equal(
-            _array_values(arrays[path]),
-            _array_values(raw_arrays[path]),
-            equal_nan=True,
+        if (
+            path in arrays
+            and path in raw_arrays
+            and not np.array_equal(
+                _array_values(arrays[path]),
+                _array_values(raw_arrays[path]),
+                equal_nan=True,
+            )
         ):
             errors.append(f"refined-keypoint source fact differs at {path}")
-    if "source_success" in arrays and "pose_success" in raw_arrays and not np.array_equal(
-        _array_values(arrays["source_success"]),
-        _array_values(raw_arrays["pose_success"]),
+    if (
+        "source_success" in arrays
+        and "pose_success" in raw_arrays
+        and not np.array_equal(
+            _array_values(arrays["source_success"]),
+            _array_values(raw_arrays["pose_success"]),
+        )
     ):
         errors.append("refined source_success differs from raw pose_success")
     for path in ("instance_key", "frame_indices", "frame_row_offsets"):
-        if path in quality_arrays and path in raw_arrays and not np.array_equal(
-            _array_values(quality_arrays[path]), _array_values(raw_arrays[path])
+        if (
+            path in quality_arrays
+            and path in raw_arrays
+            and not np.array_equal(
+                _array_values(quality_arrays[path]), _array_values(raw_arrays[path])
+            )
         ):
             errors.append(f"quality/raw row identity differs at {path}")
     try:
@@ -1316,7 +1392,9 @@ def validate_refined_keypoint_publication(
         ):
             errors.append("refined-keypoint metadata digest mismatch")
     storage = payload.get("storage_plan")
-    raw_profile = storage.get("storage_profile") if isinstance(storage, Mapping) else None
+    raw_profile = (
+        storage.get("storage_profile") if isinstance(storage, Mapping) else None
+    )
     try:
         if not isinstance(raw_profile, Mapping):
             raise ValueError("refined-keypoint storage profile is missing")
@@ -1363,8 +1441,10 @@ __all__ = [
     "build_refined_keypoint_source_bindings",
     "initial_refined_keypoint_snapshot_identity",
     "normalized_retired_instance_keys",
+    "refined_keypoint_code_maps_from_manifest",
     "refined_keypoint_logical_content_document",
     "refined_keypoint_metadata_declarations_digest",
+    "refined_keypoint_snapshot_identity_from_manifest",
     "refined_keypoint_source_bindings_from_manifest",
     "retired_instance_keys_digest",
     "validate_refined_keypoint_publication",

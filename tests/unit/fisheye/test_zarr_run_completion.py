@@ -181,6 +181,27 @@ def _add_valid_refined_keypoints_arrays(run: FakeGroup) -> None:
         run[name] = FakeArray((2,), "bool")
 
 
+def test_mark_run_failed_removes_prior_completion_timestamp() -> None:
+    run = FakeGroup()
+    mark_run_started(run, run_name="candidate", stage="subject_masks")
+    mark_run_complete(
+        run,
+        run_name="candidate",
+        completed_at_utc="2026-07-31T12:00:00+00:00",
+    )
+
+    mark_run_failed(
+        run,
+        run_name="candidate",
+        failed_at_utc="2026-07-31T12:01:00+00:00",
+        error="seal failed",
+    )
+
+    assert run.attrs[RUN_COMPLETION_STATUS_ATTR] == RUN_STATUS_FAILED
+    assert RUN_COMPLETED_AT_ATTR not in run.attrs
+    assert run.attrs["palette_run_error"] == "seal failed"
+
+
 def _add_valid_arena_assignment_arrays(run: FakeGroup) -> None:
     run["arena_ids"] = FakeArray((2,), "int32")
     run["n_detections_per_arena"] = FakeArray((3, 2), "int32")

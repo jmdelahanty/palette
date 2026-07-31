@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from fisheye.cluster.keypoints.registry_finalize import finalize_registry as finalize_keypoints
+from fisheye.cluster.keypoints.registry_finalize import (
+    finalize_registry as finalize_keypoints,
+)
 from fisheye.cluster.lsf import write_json_snapshot
 from fisheye.cluster.whole_recording_analysis import PLAN_SCHEMA
 from fisheye.registry.db import Registry
@@ -18,7 +20,10 @@ from fisheye.shared.subject_mask_registry_status import (
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
-
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
+    validate_subject_mask_bundle_candidate,
+)
 
 REPORT_SCHEMA = "palette.whole_recording_analysis_registry_finalizer.v1"
 
@@ -63,6 +68,7 @@ def finalize_registry(
             raise ValueError("Combined target lacks subject_masks run names.")
         subject_run_name = str(subject_names["subject_mask_run"])
         refined_run_name = str(subject_names["refined_subject_mask_run"])
+        bundle_id = str(subject_names.get("subject_mask_bundle_id") or "")
         refined_keypoint_run = str(raw["refined_keypoint_run"])
         root = open_zarr_group_direct(zarr_path, mode="r")
         subject_run = _require_complete(root, "subject_mask_runs", subject_run_name)
@@ -95,7 +101,26 @@ def finalize_registry(
             "assignment_keypoint_run": actual_keypoint_run,
             "status": "validated",
         }
-        if apply:
+        bundle_validation = None
+        bundle_authoritative = False
+        if bundle_id:
+            bundle_validation = validate_subject_mask_bundle_candidate(
+                analysis_zarr=zarr_path,
+                bundle_id=bundle_id,
+            )
+            authority = root.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR)
+            bundle_authoritative = bool(
+                isinstance(authority, Mapping)
+                and normalize_attr(authority.get("bundle_id")) == bundle_id
+            )
+            report.update(
+                {
+                    "subject_mask_bundle_id": bundle_id,
+                    "subject_mask_bundle": bundle_validation,
+                    "bundle_authoritative": bundle_authoritative,
+                }
+            )
+        if apply and (not bundle_id or bundle_authoritative):
             if not emit_subject_mask_stage_completion(
                 root,
                 zarr_path,
@@ -115,7 +140,9 @@ def finalize_registry(
                 registry=registry_path,
                 invalidate_on_ok=True,
             ):
-                raise RuntimeError("Refined subject-mask reconciliation returned false.")
+                raise RuntimeError(
+                    "Refined subject-mask reconciliation returned false."
+                )
             registry = Registry(registry_path)
             try:
                 row = registry.conn.execute(
@@ -144,6 +171,9 @@ def finalize_registry(
             finally:
                 registry.close()
             report["status"] = "reconciled"
+        elif apply and bundle_id:
+            report["status"] = "candidate_validated"
+            report["registry_reconciliation"] = "deferred_until_bundle_activation"
         mask_reports.append(report)
 
     registry = Registry(registry_path)

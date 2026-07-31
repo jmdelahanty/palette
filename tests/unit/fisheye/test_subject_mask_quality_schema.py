@@ -129,6 +129,14 @@ def test_subject_mask_quality_accepts_multirow_and_empty_frames() -> None:
         manifest_digest="11" * 32,
         dense_array_values_sha256="22" * 32,
         component_registry_digest=canonical_json_sha256(components.as_manifest()),
+        source_array_values_sha256={
+            "masks_roi": "22" * 32,
+            "instance_key": "23" * 32,
+            "source_crop_row_ids": "24" * 32,
+            "source_acquisition_frame_index": "25" * 32,
+            "frame_row_offsets": "26" * 32,
+            "available_channels": "27" * 32,
+        },
     )
     manifest = SUBJECT_MASK_QUALITY_SCHEMA_V1.as_manifest(
         dimensions=dimensions,

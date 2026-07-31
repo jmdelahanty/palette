@@ -43,9 +43,17 @@ from fisheye.shared.zarr.subject_mask_schema import (
 )
 
 SUBJECT_MASK_QUALITY_SCHEMA_ID = "palette.stage.subject_mask_quality"
-SUBJECT_MASK_QUALITY_SCHEMA_VERSION = 1
+SUBJECT_MASK_QUALITY_SCHEMA_VERSION = 2
 SUBJECT_MASK_QUALITY_LAYOUT = "immutable_source_bound_observation_diagnostics_v1"
 SUBJECT_MASK_QUALITY_BASE_PATH = "subject_mask_quality_runs/<run>"
+SUBJECT_MASK_QUALITY_SOURCE_ARRAY_PATHS = (
+    "masks_roi",
+    "instance_key",
+    "source_crop_row_ids",
+    "source_acquisition_frame_index",
+    "frame_row_offsets",
+    "available_channels",
+)
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -220,6 +228,7 @@ class SubjectMaskQualitySourceReference:
     manifest_digest: str
     dense_array_values_sha256: str
     component_registry_digest: str
+    source_array_values_sha256: Mapping[str, str]
 
     def __post_init__(self) -> None:
         run_name = str(self.run_name).strip()
@@ -235,6 +244,27 @@ class SubjectMaskQualitySourceReference:
             if not _SHA256.fullmatch(value):
                 raise ValueError(f"{name} must be lowercase hexadecimal SHA-256.")
             object.__setattr__(self, name, value)
+        source_digests = dict(self.source_array_values_sha256)
+        if set(source_digests) != set(SUBJECT_MASK_QUALITY_SOURCE_ARRAY_PATHS):
+            raise ValueError(
+                "source_array_values_sha256 must bind every exact refined "
+                "identity and dense-authority array."
+            )
+        for path, value in source_digests.items():
+            if not _SHA256.fullmatch(str(value)):
+                raise ValueError(
+                    f"source_array_values_sha256[{path!r}] must be lowercase "
+                    "hexadecimal SHA-256."
+                )
+        if source_digests["masks_roi"] != self.dense_array_values_sha256:
+            raise ValueError(
+                "masks_roi source-array digest must equal " "dense_array_values_sha256."
+            )
+        object.__setattr__(
+            self,
+            "source_array_values_sha256",
+            MappingProxyType(dict(sorted(source_digests.items()))),
+        )
 
     def as_manifest(self) -> dict[str, object]:
         return {
@@ -246,6 +276,7 @@ class SubjectMaskQualitySourceReference:
             "manifest_digest": self.manifest_digest,
             "dense_array_values_sha256": self.dense_array_values_sha256,
             "component_registry_digest": self.component_registry_digest,
+            "source_array_values_sha256": dict(self.source_array_values_sha256),
             "coverage": "every_source_row_exactly_once_in_source_order",
         }
 

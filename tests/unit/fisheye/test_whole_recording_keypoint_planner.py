@@ -378,9 +378,12 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
         "mask_infer:target_0",
         "refine:target_0",
     )
-    assert jobs["analysis_validate"].dependency.upstream_job_keys == (
+    assert jobs["mask_publish:target_0"].dependency.upstream_job_keys == (
         "mask_finalize:target_0",
-        "mask_finalize:target_1",
+    )
+    assert jobs["analysis_validate"].dependency.upstream_job_keys == (
+        "mask_publish:target_0",
+        "mask_publish:target_1",
     )
     assert jobs["registry_finalize"].dependency.upstream_job_keys == (
         "analysis_validate",
@@ -411,6 +414,7 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     assert "--refined-keypoint-run" not in inference_command
     assert "--roi-cache-manifest" in inference_command
     assert "--roi-cache-staging-dir" in inference_command
+    assert "--raw-worker-run" in inference_command
 
     finalization_command = jobs["mask_finalize:target_0"].command
     assert "finalization" in finalization_command
@@ -426,6 +430,12 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     assert jobs["mask_finalize:target_0"].metadata[
         "component_contours_requested"
     ] is False
+    publication_command = jobs["mask_publish:target_0"].command
+    assert "fisheye.cluster.subject_masks.publish_recording_bundle" in (
+        publication_command
+    )
+    assert "--activate" not in publication_command
+    assert jobs["mask_publish:target_0"].metadata["selector_activation"] is False
 
 
 def test_whole_recording_analysis_composes_cache_builds_into_both_inference_branches(
@@ -465,6 +475,9 @@ def test_whole_recording_analysis_composes_cache_builds_into_both_inference_bran
     assert jobs["mask_finalize:target_0"].dependency.upstream_job_keys == (
         "mask_infer:target_0",
         "refine:target_0",
+    )
+    assert jobs["mask_publish:target_0"].dependency.upstream_job_keys == (
+        "mask_finalize:target_0",
     )
     assert [
         fragment["fragment_id"]
@@ -514,13 +527,13 @@ def test_whole_recording_analysis_limits_active_targets_with_rolling_gate(
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
     assert plan.max_active_targets == 8
     assert plan.targets[7].target_concurrency_gate_job_key is None
-    assert plan.targets[8].target_concurrency_gate_job_key == "mask_finalize:target_0"
-    assert plan.targets[9].target_concurrency_gate_job_key == "mask_finalize:target_1"
+    assert plan.targets[8].target_concurrency_gate_job_key == "mask_publish:target_0"
+    assert plan.targets[9].target_concurrency_gate_job_key == "mask_publish:target_1"
     assert jobs["cache:target_8"].dependency.upstream_job_keys == (
-        "mask_finalize:target_0",
+        "mask_publish:target_0",
     )
     assert jobs["cache:target_9"].dependency.upstream_job_keys == (
-        "mask_finalize:target_1",
+        "mask_publish:target_1",
     )
     assert jobs["predict:target_8"].dependency.upstream_job_keys == (
         "cache:target_8",
@@ -529,7 +542,7 @@ def test_whole_recording_analysis_limits_active_targets_with_rolling_gate(
         "cache:target_8",
     )
     assert jobs["cache:target_8"].metadata["target_concurrency_gate_job_key"] == (
-        "mask_finalize:target_0"
+        "mask_publish:target_0"
     )
     assert plan.lsf_workflow.metadata["target_concurrency_contract"] == (
         "rolling_finalization_gate_v1"
@@ -564,11 +577,11 @@ def test_rolling_gate_applies_after_shared_cache_bundle_without_cycle(
     assert jobs["cache_bundle:000"].dependency is None
     assert jobs["predict:target_1"].dependency.upstream_job_keys == (
         "cache_bundle:000",
-        "mask_finalize:target_0",
+        "mask_publish:target_0",
     )
     assert jobs["mask_infer:target_1"].dependency.upstream_job_keys == (
         "cache_bundle:000",
-        "mask_finalize:target_0",
+        "mask_publish:target_0",
     )
     assert [job.job_key for job in plan.lsf_workflow.topological_jobs()].index(
         "cache_bundle:000"

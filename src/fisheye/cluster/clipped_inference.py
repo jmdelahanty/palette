@@ -41,6 +41,11 @@ from fisheye.cluster.lsf import (
     submit_lsf_workflow,
     write_json_snapshot,
 )
+from fisheye.cluster.lsf.runtime import (
+    RUNTIME_JOB_ID_TOKEN,
+    RUNTIME_JOB_INDEX_TOKEN,
+    RUNTIME_USER_TOKEN,
+)
 from fisheye.cluster.recording_layout import clipped_recording_target
 from fisheye.registry.db import Registry
 from fisheye.registry.model_resolution import (
@@ -50,17 +55,22 @@ from fisheye.registry.model_resolution import (
     resolve_recording_id,
     verify_deployment_artifact_content,
 )
-from fisheye.utils.plan_clipped_detect_refine_workflow import build_plan as build_detection_plan
+from fisheye.utils.plan_clipped_detect_refine_workflow import (
+    build_plan as build_detection_plan,
+)
 from fisheye.utils.validate_imported_run_group import validate_imported_run_group
-
 
 PLAN_SCHEMA = "palette.clipped_inference_bsub_plan.v1"
 TARGET_MANIFEST_SCHEMA = "palette.clipped_inference_targets.v1"
 FAMILY = "clipped_inference"
 DEFAULT_REPO = Path("/groups/johnson/johnsonlab/jeremy/gitrepos/palette")
-DEFAULT_REGISTRY = Path("/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite")
+DEFAULT_REGISTRY = Path(
+    "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
+)
 DEFAULT_CACHE_ROOT = Path("/nrs/johnson/palette_staging/flat_roi_cache")
-DEFAULT_PACKAGE_ROOT = Path("/nrs/johnson/palette_staging/refined_subject_mask_clip_packages")
+DEFAULT_PACKAGE_ROOT = Path(
+    "/nrs/johnson/palette_staging/refined_subject_mask_clip_packages"
+)
 
 
 @dataclass(frozen=True)
@@ -182,7 +192,9 @@ def load_target_manifest(path: Path) -> tuple[CampaignTarget, ...]:
                 f"Target {target_id!r} has no recording_clip_index.json: {recording_dir}"
             )
         if not (analysis_zarr / "zarr.json").is_file():
-            raise FileNotFoundError(f"Target {target_id!r} is not a Zarr v3 root: {analysis_zarr}")
+            raise FileNotFoundError(
+                f"Target {target_id!r} is not a Zarr v3 root: {analysis_zarr}"
+            )
         targets.append(
             CampaignTarget(
                 target_id=target_id,
@@ -305,7 +317,9 @@ def _resolve_subject_binding(
         )
     candidate = candidates[0]
     if not candidate.model_sha256:
-        raise ValueError(f"Registered subject-mask model {run_id!r} has no model_sha256.")
+        raise ValueError(
+            f"Registered subject-mask model {run_id!r} has no model_sha256."
+        )
     binding = ModelBinding(
         task="subject_masks",
         set_id=str(candidate.set_id),
@@ -320,9 +334,13 @@ def _resolve_subject_binding(
 def _assert_same_binding(name: str, bindings: Sequence[ModelBinding]) -> ModelBinding:
     if not bindings:
         raise ValueError(f"No {name} model bindings were resolved.")
-    identities = {(item.set_id, item.run_id, item.path, item.sha256) for item in bindings}
+    identities = {
+        (item.set_id, item.run_id, item.path, item.sha256) for item in bindings
+    }
     if len(identities) != 1:
-        raise ValueError(f"The target cohort does not resolve one common {name} model: {identities}")
+        raise ValueError(
+            f"The target cohort does not resolve one common {name} model: {identities}"
+        )
     return bindings[0]
 
 
@@ -346,13 +364,30 @@ def _refuse_output_collisions(
         )
     outputs.extend(
         [
-            zarr / "experiment_index" / "finalized_runs" / str(target_plan["collection_id"]),
-            zarr / "detect_collection_sources" / str(target_plan["detect_quality_source_run"]),
+            zarr
+            / "experiment_index"
+            / "finalized_runs"
+            / str(target_plan["collection_id"]),
+            zarr
+            / "detect_collection_sources"
+            / str(target_plan["detect_quality_source_run"]),
             zarr / "detect_quality_runs" / str(target_plan["detect_quality_run"]),
             zarr / "crop_runs" / str(target_plan["merged_proxy_crop_run"]),
             zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
             zarr / "refined_keypoints_runs" / str(target_plan["refined_keypoint_run"]),
-            zarr / "refined_subject_masks_runs" / str(target_plan["refined_subject_mask_run"]),
+            zarr / "subject_mask_runs" / str(target_plan["subject_mask_run"]),
+            zarr
+            / "refined_subject_masks_runs"
+            / str(target_plan["refined_subject_mask_draft_run"]),
+            zarr
+            / "refined_subject_masks_runs"
+            / str(target_plan["refined_subject_mask_run"]),
+            zarr
+            / "subject_mask_quality_runs"
+            / str(target_plan["subject_mask_quality_run"]),
+            zarr
+            / "subject_mask_bundle_runs"
+            / str(target_plan["subject_mask_bundle_id"]),
             Path(str(target_plan["cache_dir"])),
             Path(str(target_plan["package_dir"])),
         ]
@@ -360,7 +395,8 @@ def _refuse_output_collisions(
     collisions = [path for path in outputs if path.exists()]
     if collisions:
         raise FileExistsError(
-            "Planned immutable outputs already exist: " + ", ".join(str(path) for path in collisions)
+            "Planned immutable outputs already exist: "
+            + ", ".join(str(path) for path in collisions)
         )
 
 
@@ -396,7 +432,9 @@ def _validate_existing_detection_for_resume(
     payload = _read_strict_json(metadata_path)
     attrs = payload.get("attributes") if isinstance(payload, Mapping) else None
     if not isinstance(attrs, Mapping):
-        raise ValueError(f"Existing detection has no attributes object: {metadata_path}")
+        raise ValueError(
+            f"Existing detection has no attributes object: {metadata_path}"
+        )
     if attrs.get("palette_run_completion_status") != "complete":
         raise ValueError(f"Existing detection is not complete: {metadata_path}")
     provenance = attrs.get("run_provenance")
@@ -406,7 +444,9 @@ def _validate_existing_detection_for_resume(
     input_run_ids = provenance.get("input_run_ids")
     clip_context = params.get("clip_context") if isinstance(params, Mapping) else None
     if not isinstance(params, Mapping) or not isinstance(input_run_ids, Mapping):
-        raise ValueError(f"Existing detection has incomplete run provenance: {metadata_path}")
+        raise ValueError(
+            f"Existing detection has incomplete run provenance: {metadata_path}"
+        )
     if not isinstance(clip_context, Mapping):
         raise ValueError(f"Existing detection has no clip context: {metadata_path}")
 
@@ -441,8 +481,12 @@ def _validate_existing_detection_for_resume(
         "params.clip_context.clip_id": clip_context.get("clip_id"),
         "params.clip_context.clip_index": clip_context.get("clip_index"),
         "params.clip_context.camera_serial": clip_context.get("camera_serial"),
-        "input_run_ids.model_registry_set_id": input_run_ids.get("model_registry_set_id"),
-        "input_run_ids.model_registry_run_id": input_run_ids.get("model_registry_run_id"),
+        "input_run_ids.model_registry_set_id": input_run_ids.get(
+            "model_registry_set_id"
+        ),
+        "input_run_ids.model_registry_run_id": input_run_ids.get(
+            "model_registry_run_id"
+        ),
     }
     mismatches = {
         key: {"expected": value, "observed": observed.get(key)}
@@ -450,14 +494,18 @@ def _validate_existing_detection_for_resume(
         if observed.get(key) != value
     }
     artifacts = provenance.get("input_artifacts")
-    matching_artifacts = [
-        artifact
-        for artifact in artifacts
-        if isinstance(artifact, Mapping)
-        and artifact.get("role") == "detect_model"
-        and artifact.get("path") == str(binding.path)
-        and artifact.get("sha256") == binding.sha256
-    ] if isinstance(artifacts, list) else []
+    matching_artifacts = (
+        [
+            artifact
+            for artifact in artifacts
+            if isinstance(artifact, Mapping)
+            and artifact.get("role") == "detect_model"
+            and artifact.get("path") == str(binding.path)
+            and artifact.get("sha256") == binding.sha256
+        ]
+        if isinstance(artifacts, list)
+        else []
+    )
     if not matching_artifacts:
         mismatches["input_artifacts.detect_model"] = {
             "expected": {"path": str(binding.path), "sha256": binding.sha256},
@@ -599,8 +647,12 @@ def build_plan(
     target_validation_keys: list[str] = []
 
     for target_index, target in enumerate(targets):
-        target_safe = safe_component(target.target_id, default=f"target_{target_index}", max_length=56)
-        target_label = safe_component(f"{label}_{target_safe}", default=target_safe, max_length=90)
+        target_safe = safe_component(
+            target.target_id, default=f"target_{target_index}", max_length=56
+        )
+        target_label = safe_component(
+            f"{label}_{target_safe}", default=target_safe, max_length=90
+        )
         collection_id = f"refined_detect_collection_{target_label}"
         detect_quality_source_run = f"detect_quality_source_{target_label}"
         detect_quality_run = f"detect_quality_{target_label}"
@@ -626,11 +678,17 @@ def build_plan(
         merged_proxy = f"crop_proxy_{target_label}_collection"
         keypoint_run = f"keypoints_registry_{target_label}"
         refined_keypoint_run = f"refined_keypoints_{target_label}"
+        subject_mask_run = f"subject_masks_{target_label}"
         refined_subject_mask_run = f"refined_subject_masks_{target_label}"
+        refined_subject_mask_draft_run = f"{refined_subject_mask_run}__worker_draft"
+        subject_mask_quality_run = f"subject_mask_quality_{target_label}"
+        subject_mask_bundle_id = f"subject_mask_bundle_{target_label}"
         clips: list[dict[str, Any]] = []
         for unit in work_units:
             clip = str(unit["clip_id"])
-            manifest = cache_dir / f"roi_cache_{target_label}__{clip}.flat_roi_cache.json"
+            manifest = (
+                cache_dir / f"roi_cache_{target_label}__{clip}.flat_roi_cache.json"
+            )
             alias = manifest.with_name(
                 f"{manifest.stem}__crop_proxy_{target_label}_{clip}.alias.json"
             )
@@ -642,12 +700,20 @@ def build_plan(
                     "work_unit_id": str(unit["work_unit_id"]),
                     "video_path": str(unit["source"]["video_path"]),
                     "detect_run": str(unit["run_names"]["detect"]),
-                    "detect_group_path": str(unit["zarr_paths"]["detect_target_group_path"]),
+                    "detect_group_path": str(
+                        unit["zarr_paths"]["detect_target_group_path"]
+                    ),
                     "quality_run": str(unit["run_names"]["detect_quality"]),
                     "refined_detect_run": str(unit["run_names"]["refined_detect"]),
-                    "refined_detect_group_path": str(unit["zarr_paths"]["refined_group_path"]),
+                    "refined_detect_group_path": str(
+                        unit["zarr_paths"]["refined_group_path"]
+                    ),
                     "cache_manifest": str(manifest),
-                    "cache_row_index": str(manifest.with_suffix("").with_suffix(".flat_roi_cache.rows.parquet")),
+                    "cache_row_index": str(
+                        manifest.with_suffix("").with_suffix(
+                            ".flat_roi_cache.rows.parquet"
+                        )
+                    ),
                     "proxy_crop_run": f"crop_proxy_{target_label}_{clip}",
                     "alias_manifest": str(alias),
                     "keypoint_shard_run": f"keypoint_shard_{target_label}_{clip}",
@@ -684,7 +750,11 @@ def build_plan(
             "merged_proxy_crop_run": merged_proxy,
             "keypoint_run": keypoint_run,
             "refined_keypoint_run": refined_keypoint_run,
+            "subject_mask_run": subject_mask_run,
             "refined_subject_mask_run": refined_subject_mask_run,
+            "refined_subject_mask_draft_run": refined_subject_mask_draft_run,
+            "subject_mask_quality_run": subject_mask_quality_run,
+            "subject_mask_bundle_id": subject_mask_bundle_id,
             "clips": clips,
         }
         _refuse_output_collisions(
@@ -756,13 +826,28 @@ def build_plan(
             bundle_clips = clips[start : start + cache_bundle_size]
             cache_key = f"cache:{target_safe}:{bundle_index:02d}"
             cache_command = [
-                "bash", "scripts/submit_clipped_collection_flat_roi_cache_bundle_bsub.sh",
-                "--zarr", str(target.analysis_zarr),
-                "--collection-id", detection_outputs.collection_id,
-                "--recording-frame-index", str(target.recording_dir / "recording_frame_index.parquet"),
-                "--public-cache-dir", str(cache_dir), "--run-id", f"{target_label}_{bundle_index:02d}",
-                "--run-label", f"roi_cache_{target_label}", "--log-dir", str(run_root / "cache_jobs" / target_safe),
-                "--max-workers", str(len(bundle_clips)), "--gpus", "0", "--run-direct",
+                "bash",
+                "scripts/submit_clipped_collection_flat_roi_cache_bundle_bsub.sh",
+                "--zarr",
+                str(target.analysis_zarr),
+                "--collection-id",
+                detection_outputs.collection_id,
+                "--recording-frame-index",
+                str(target.recording_dir / "recording_frame_index.parquet"),
+                "--public-cache-dir",
+                str(cache_dir),
+                "--run-id",
+                f"{target_label}_{bundle_index:02d}",
+                "--run-label",
+                f"roi_cache_{target_label}",
+                "--log-dir",
+                str(run_root / "cache_jobs" / target_safe),
+                "--max-workers",
+                str(len(bundle_clips)),
+                "--gpus",
+                "0",
+                "--run-direct",
+                "--sha256",
             ]
             for clip in bundle_clips:
                 cache_command.extend(["--clip-id", str(clip["clip_id"])])
@@ -772,7 +857,9 @@ def build_plan(
                     task_key=cache_key,
                     stage="roi_cache",
                     command=cache_command,
-                    expected_outputs=tuple(Path(str(clip["cache_manifest"])) for clip in bundle_clips),
+                    expected_outputs=tuple(
+                        Path(str(clip["cache_manifest"])) for clip in bundle_clips
+                    ),
                     array_indexed=True,
                 )
             )
@@ -796,18 +883,31 @@ def build_plan(
         for clip in clips:
             proxy_commands.append(
                 [
-                    "scripts/py", "-m", "fisheye.utils.create_clipped_collection_proxy_crop_run",
-                    str(target.analysis_zarr), str(clip["cache_manifest"]),
-                    "--proxy-run", str(clip["proxy_crop_run"]),
-                    "--alias-manifest", str(clip["alias_manifest"]), "--json",
+                    "scripts/py",
+                    "-m",
+                    "fisheye.utils.create_clipped_collection_proxy_crop_run",
+                    str(target.analysis_zarr),
+                    str(clip["cache_manifest"]),
+                    "--proxy-run",
+                    str(clip["proxy_crop_run"]),
+                    "--alias-manifest",
+                    str(clip["alias_manifest"]),
+                    "--json",
                 ]
             )
         jobs.append(
             _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=proxy_key, stage="proxy_crop", command=_chain(proxy_commands),
-                resources=cpu, upstream=(cache_array_key,),
-                expected_outputs=tuple(Path(str(clip["alias_manifest"])) for clip in clips),
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=proxy_key,
+                stage="proxy_crop",
+                command=_chain(proxy_commands),
+                resources=cpu,
+                upstream=(cache_array_key,),
+                expected_outputs=tuple(
+                    Path(str(clip["alias_manifest"])) for clip in clips
+                ),
             )
         )
 
@@ -819,16 +919,41 @@ def build_plan(
             clip_id = str(clip["clip_id"])
             keypoint_key = f"keypoints:{target_safe}:{clip_id}"
             keypoint_command = [
-                "scripts/py", "-m", "fisheye.utils.run_keypoints_with_registry_model",
-                "--recording-dir", str(target.recording_dir), "--output", str(target.analysis_zarr),
-                "--registry", str(registry_path), "--set-id", pose_binding.set_id,
-                "--model-run-id", pose_binding.run_id, "--require-unique",
-                "--run-name", str(clip["keypoint_shard_run"]), "--output-parent", "keypoint_shard_runs",
-                "--crop-run", str(clip["proxy_crop_run"]), "--pose-schema", "traditional_v2",
-                "--batch-size", "256", "--device", "0", "--roi-cache-manifest", str(clip["alias_manifest"]),
-                "--stage-roi-cache-to-scratch", "--keypoint-roi-shard-rows", "131072",
-                "--keypoint-frame-shard-rows", "131072",
-                "--progress-jsonl", str(run_root / "progress" / f"keypoints_{target_safe}_{clip_id}.jsonl"),
+                "scripts/py",
+                "-m",
+                "fisheye.utils.run_keypoints_with_registry_model",
+                "--recording-dir",
+                str(target.recording_dir),
+                "--output",
+                str(target.analysis_zarr),
+                "--registry",
+                str(registry_path),
+                "--set-id",
+                pose_binding.set_id,
+                "--model-run-id",
+                pose_binding.run_id,
+                "--require-unique",
+                "--run-name",
+                str(clip["keypoint_shard_run"]),
+                "--output-parent",
+                "keypoint_shard_runs",
+                "--crop-run",
+                str(clip["proxy_crop_run"]),
+                "--pose-schema",
+                "traditional_v2",
+                "--batch-size",
+                "256",
+                "--device",
+                "0",
+                "--roi-cache-manifest",
+                str(clip["alias_manifest"]),
+                "--stage-roi-cache-to-scratch",
+                "--keypoint-roi-shard-rows",
+                "131072",
+                "--keypoint-frame-shard-rows",
+                "131072",
+                "--progress-jsonl",
+                str(run_root / "progress" / f"keypoints_{target_safe}_{clip_id}.jsonl"),
             ]
             keypoint_tasks.append(
                 _execution_task(
@@ -836,32 +961,87 @@ def build_plan(
                     task_key=keypoint_key,
                     stage="keypoints",
                     command=keypoint_command,
-                    expected_outputs=(target.analysis_zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"]) / "zarr.json",),
+                    expected_outputs=(
+                        target.analysis_zarr
+                        / "keypoint_shard_runs"
+                        / str(clip["keypoint_shard_run"])
+                        / "zarr.json",
+                    ),
                     array_indexed=True,
                 )
             )
 
             mask_key = f"subject_masks:{target_safe}:{clip_id}"
+            mask_staging_dir = (
+                f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}_"
+                f"{RUNTIME_JOB_INDEX_TOKEN}/palette_subject_mask_roi_cache"
+            )
+            mask_worker_receipt = (
+                run_root / "receipts" / f"subject_masks_{target_safe}_{clip_id}.json"
+            )
             mask_command = [
-                "scripts/py", "-m", "fisheye.segmentation.infer_unet_subject_masks",
-                str(target.analysis_zarr), "--resolve-model-from-registry", "--registry", str(registry_path),
-                "--model-set-id", subject_binding.set_id, "--model-run-id", subject_binding.run_id,
-                "--model-coverage-class", subject_mask_coverage_class,
-                "--model-component-coverage-key", subject_mask_component_coverage_key,
-                "--model-label-schema-id", subject_mask_label_schema_id, "--model-require-unique",
-                "--run-name", str(clip["subject_mask_shard_run"]), "--output-parent", "subject_mask_shard_runs",
-                "--crop-run", str(clip["proxy_crop_run"]),
-                "--source-collection-id", detection_outputs.collection_id,
-                "--source-collection-path", detection_outputs.finalized_collection_group_path,
-                "--source-clip-id", clip_id, "--source-clip-index", str(clip["clip_index"]),
-                "--source-work-unit-id", str(clip["work_unit_id"]),
-                "--source-roi-cache-alias-manifest", str(clip["alias_manifest"]),
-                "--source-roi-cache-row-index-path", str(clip["cache_row_index"]),
-                "--roi-cache-manifest", str(clip["alias_manifest"]), "--roi-cache-policy", "never",
-                "--batch-size", "128", "--device", "0", "--mask-probs-dtype", "uint8",
-                "--mask-probs-chunk-rois", "32", "--mask-probs-shard-rois", "2048",
-                "--no-write-masks-roi", "--async-output", "--output-queue-size", "2",
-                "--no-progress", "--defer-registry-status",
+                "scripts/py",
+                "-m",
+                "fisheye.cluster.subject_masks.staged_inference",
+                "--roi-cache-staging-dir",
+                mask_staging_dir,
+                "--worker-receipt-json",
+                str(mask_worker_receipt),
+                str(target.analysis_zarr),
+                "--resolve-model-from-registry",
+                "--registry",
+                str(registry_path),
+                "--model-set-id",
+                subject_binding.set_id,
+                "--model-run-id",
+                subject_binding.run_id,
+                "--model-coverage-class",
+                subject_mask_coverage_class,
+                "--model-component-coverage-key",
+                subject_mask_component_coverage_key,
+                "--model-label-schema-id",
+                subject_mask_label_schema_id,
+                "--model-require-unique",
+                "--run-name",
+                str(clip["subject_mask_shard_run"]),
+                "--output-parent",
+                "subject_mask_shard_runs",
+                "--crop-run",
+                str(clip["proxy_crop_run"]),
+                "--source-collection-id",
+                detection_outputs.collection_id,
+                "--source-collection-path",
+                detection_outputs.finalized_collection_group_path,
+                "--source-clip-id",
+                clip_id,
+                "--source-clip-index",
+                str(clip["clip_index"]),
+                "--source-work-unit-id",
+                str(clip["work_unit_id"]),
+                "--source-roi-cache-alias-manifest",
+                str(clip["alias_manifest"]),
+                "--source-roi-cache-row-index-path",
+                str(clip["cache_row_index"]),
+                "--roi-cache-manifest",
+                str(clip["alias_manifest"]),
+                "--roi-cache-policy",
+                "never",
+                "--batch-size",
+                "128",
+                "--device",
+                "0",
+                "--mask-probs-dtype",
+                "uint8",
+                "--mask-probs-chunk-rois",
+                "32",
+                "--mask-probs-shard-rois",
+                "2048",
+                "--no-write-masks-roi",
+                "--async-output",
+                "--output-queue-size",
+                "2",
+                "--no-progress",
+                "--defer-registry-status",
             ]
             mask_tasks.append(
                 _execution_task(
@@ -869,7 +1049,13 @@ def build_plan(
                     task_key=mask_key,
                     stage="subject_mask_inference",
                     command=mask_command,
-                    expected_outputs=(target.analysis_zarr / "subject_mask_shard_runs" / str(clip["subject_mask_shard_run"]) / "zarr.json",),
+                    expected_outputs=(
+                        target.analysis_zarr
+                        / "subject_mask_shard_runs"
+                        / str(clip["subject_mask_shard_run"])
+                        / "zarr.json",
+                        mask_worker_receipt,
+                    ),
                     array_indexed=True,
                 )
             )
@@ -904,43 +1090,82 @@ def build_plan(
 
         keypoint_finalize_key = f"keypoint_finalize:{target_safe}"
         merge_proxy = [
-            "scripts/py", "-m", "fisheye.utils.merge_clipped_proxy_crop_runs",
-            str(target.analysis_zarr), "--output-run", merged_proxy, "--json",
+            "scripts/py",
+            "-m",
+            "fisheye.utils.merge_clipped_proxy_crop_runs",
+            str(target.analysis_zarr),
+            "--output-run",
+            merged_proxy,
+            "--json",
         ]
         for clip in clips:
             merge_proxy.extend(["--source-crop-run", str(clip["proxy_crop_run"])])
         finalize_keypoints = [
-            "scripts/py", "-m", "fisheye.utils.finalize_keypoint_shards",
-            str(target.analysis_zarr), "--target-crop-run", merged_proxy,
-            "--output-run", keypoint_run, "--json",
+            "scripts/py",
+            "-m",
+            "fisheye.utils.finalize_keypoint_shards",
+            str(target.analysis_zarr),
+            "--target-crop-run",
+            merged_proxy,
+            "--output-run",
+            keypoint_run,
+            "--json",
         ]
         for clip in clips:
             finalize_keypoints.extend(["--shard-run", str(clip["keypoint_shard_run"])])
         jobs.append(
             _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=keypoint_finalize_key, stage="keypoint_finalize",
-                command=_chain((merge_proxy, finalize_keypoints)), resources=final_cpu,
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=keypoint_finalize_key,
+                stage="keypoint_finalize",
+                command=_chain((merge_proxy, finalize_keypoints)),
+                resources=final_cpu,
                 upstream=(keypoint_array_key,),
                 expected_outputs=(
                     target.analysis_zarr / "crop_runs" / merged_proxy / "zarr.json",
-                    target.analysis_zarr / "keypoints_runs" / keypoint_run / "zarr.json",
+                    target.analysis_zarr
+                    / "keypoints_runs"
+                    / keypoint_run
+                    / "zarr.json",
                 ),
             )
         )
         keypoint_refine_key = f"keypoint_refine:{target_safe}"
         keypoint_refine = [
-            "scripts/py", "-m", "fisheye.refinement.refine_keypoints",
-            str(target.analysis_zarr), "--keypoint-run", keypoint_run,
-            "--run-name", refined_keypoint_run, "--chunk-size", "2048",
-            "--scheduler", "threads", "--num-workers", "4", "--no-post-audit",
+            "scripts/py",
+            "-m",
+            "fisheye.refinement.refine_keypoints",
+            str(target.analysis_zarr),
+            "--keypoint-run",
+            keypoint_run,
+            "--run-name",
+            refined_keypoint_run,
+            "--chunk-size",
+            "2048",
+            "--scheduler",
+            "threads",
+            "--num-workers",
+            "4",
+            "--no-post-audit",
         ]
         jobs.append(
             _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=keypoint_refine_key, stage="keypoint_refine", command=keypoint_refine,
-                resources=cpu, upstream=(keypoint_finalize_key,),
-                expected_outputs=(target.analysis_zarr / "refined_keypoints_runs" / refined_keypoint_run / "zarr.json",),
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=keypoint_refine_key,
+                stage="keypoint_refine",
+                command=keypoint_refine,
+                resources=cpu,
+                upstream=(keypoint_finalize_key,),
+                expected_outputs=(
+                    target.analysis_zarr
+                    / "refined_keypoints_runs"
+                    / refined_keypoint_run
+                    / "zarr.json",
+                ),
             )
         )
 
@@ -948,16 +1173,30 @@ def build_plan(
         if encoded_mask_packages:
             mask_grid_key = f"mask_grid:{target_safe}"
             mask_grid_command = [
-                "scripts/py", "-m", "fisheye.utils.prepare_refined_subject_mask_chunk_grid",
-                "--zarr", str(target.analysis_zarr),
-                "--crop-run", merged_proxy,
-                "--output-manifest", str(global_mask_grid_manifest),
-                "--mask-label", "subject_body",
-                "--mask-label", "eye_left",
-                "--mask-label", "eye_right",
-                "--mask-label", "swim_bladder",
-                "--mask-height", "512", "--mask-width", "512",
-                "--dense-mask-row-chunk", "128", "--json",
+                "scripts/py",
+                "-m",
+                "fisheye.utils.prepare_refined_subject_mask_chunk_grid",
+                "--zarr",
+                str(target.analysis_zarr),
+                "--crop-run",
+                merged_proxy,
+                "--output-manifest",
+                str(global_mask_grid_manifest),
+                "--mask-label",
+                "subject_body",
+                "--mask-label",
+                "eye_left",
+                "--mask-label",
+                "eye_right",
+                "--mask-label",
+                "swim_bladder",
+                "--mask-height",
+                "512",
+                "--mask-width",
+                "512",
+                "--dense-mask-row-chunk",
+                "128",
+                "--json",
             ]
             jobs.append(
                 _job(
@@ -979,27 +1218,58 @@ def build_plan(
             clip_id = str(clip["clip_id"])
             package_key = f"mask_package:{target_safe}:{clip_id}"
             package_command = [
-                "scripts/py", "-m", "fisheye.utils.finalize_subject_mask_clip_package",
-                "--source-zarr", str(target.analysis_zarr),
-                "--subject-shard-run", str(clip["subject_mask_shard_run"]),
-                "--target-crop-run", merged_proxy,
-                "--refined-run", str(clip["refined_mask_package_run"]),
-                "--package-path", str(clip["package_path"]),
-                "--component", "subject_body", "--component", "eyes_union", "--component", "swim_bladder",
-                "--chunk-size", "256", "--metric-level", "cheap",
-                "--mask-storage", "dense_and_bitpacked", "--dense-mask-row-chunk", "128",
-                "--execution-backend", "process_shards", "--num-workers", "8",
-                "--postcompute-backend", "process_shards", "--postcompute-num-workers", "8",
-                "--postcompute-chunk-size", "256",
-                "--assignment-keypoint-group", "refined_keypoints_runs",
-                "--assignment-keypoints-run", refined_keypoint_run,
-                "--no-write-component-contours", "--json",
+                "scripts/py",
+                "-m",
+                "fisheye.utils.finalize_subject_mask_clip_package",
+                "--source-zarr",
+                str(target.analysis_zarr),
+                "--subject-shard-run",
+                str(clip["subject_mask_shard_run"]),
+                "--target-crop-run",
+                merged_proxy,
+                "--refined-run",
+                str(clip["refined_mask_package_run"]),
+                "--package-path",
+                str(clip["package_path"]),
+                "--component",
+                "subject_body",
+                "--component",
+                "eyes_union",
+                "--component",
+                "swim_bladder",
+                "--chunk-size",
+                "256",
+                "--metric-level",
+                "cheap",
+                "--mask-storage",
+                "dense_and_bitpacked",
+                "--dense-mask-row-chunk",
+                "128",
+                "--execution-backend",
+                "process_shards",
+                "--num-workers",
+                "8",
+                "--postcompute-backend",
+                "process_shards",
+                "--postcompute-num-workers",
+                "8",
+                "--postcompute-chunk-size",
+                "256",
+                "--assignment-keypoint-group",
+                "refined_keypoints_runs",
+                "--assignment-keypoints-run",
+                refined_keypoint_run,
+                "--no-write-component-contours",
+                "--require-production-proof",
+                "--json",
             ]
             if encoded_mask_packages:
                 package_command.extend(
                     [
-                        "--global-mask-grid-manifest", str(global_mask_grid_manifest),
-                        "--encoded-mask-copy-workers", "8",
+                        "--global-mask-grid-manifest",
+                        str(global_mask_grid_manifest),
+                        "--encoded-mask-copy-workers",
+                        "8",
                     ]
                 )
             package_tasks.append(
@@ -1032,34 +1302,128 @@ def build_plan(
 
         mask_import_key = f"mask_import:{target_safe}"
         mask_import = [
-            "scripts/py", "-m", "fisheye.utils.import_refined_subject_mask_clip_packages",
-            "--zarr", str(target.analysis_zarr), "--output-run", refined_subject_mask_run,
-            "--expected-target-crop-run", merged_proxy, "--array-copy-workers", "8",
-            "--encoded-copy-workers", "32", "--json",
+            "scripts/py",
+            "-m",
+            "fisheye.utils.import_refined_subject_mask_clip_packages",
+            "--zarr",
+            str(target.analysis_zarr),
+            "--output-run",
+            refined_subject_mask_draft_run,
+            "--expected-target-crop-run",
+            merged_proxy,
+            "--array-copy-workers",
+            "8",
+            "--encoded-copy-workers",
+            "32",
+            "--require-production-proof",
+            "--json",
         ]
         for clip in clips:
             mask_import.extend(["--package", str(clip["package_path"])])
         jobs.append(
             _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=mask_import_key, stage="subject_mask_collection_import",
-                command=mask_import, resources=import_cpu, upstream=(package_array_key,),
-                expected_outputs=(target.analysis_zarr / "refined_subject_masks_runs" / refined_subject_mask_run / "zarr.json",),
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=mask_import_key,
+                stage="subject_mask_collection_import",
+                command=mask_import,
+                resources=import_cpu,
+                upstream=(package_array_key,),
+                expected_outputs=(
+                    target.analysis_zarr
+                    / "refined_subject_masks_runs"
+                    / refined_subject_mask_draft_run
+                    / "zarr.json",
+                ),
+            )
+        )
+
+        mask_publish_key = f"mask_publish:{target_safe}"
+        mask_publish_output = (
+            f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+            "palette_subject_mask_bundle_outputs"
+        )
+        mask_quality_scratch = (
+            f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+            "palette_subject_mask_quality"
+        )
+        mask_publish = [
+            "scripts/py",
+            "-m",
+            "fisheye.cluster.subject_masks.publish_recording_bundle",
+            "--analysis-zarr",
+            str(target.analysis_zarr),
+            "--draft-zarr",
+            str(target.analysis_zarr),
+            "--crop-run",
+            merged_proxy,
+            "--raw-draft-parent",
+            "subject_mask_shard_runs",
+            "--refined-draft-run",
+            refined_subject_mask_draft_run,
+            "--raw-run",
+            subject_mask_run,
+            "--refined-run",
+            refined_subject_mask_run,
+            "--quality-run",
+            subject_mask_quality_run,
+            "--bundle-id",
+            subject_mask_bundle_id,
+            "--local-output-root",
+            mask_publish_output,
+            "--quality-scratch-root",
+            mask_quality_scratch,
+            "--json",
+        ]
+        for clip in clips:
+            mask_publish.extend(
+                ["--raw-draft-run", str(clip["subject_mask_shard_run"])]
+            )
+        jobs.append(
+            _job(
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=mask_publish_key,
+                stage="subject_mask_collection_publication",
+                command=mask_publish,
+                resources=import_cpu,
+                upstream=(mask_import_key,),
+                cleanup_paths=(mask_publish_output, mask_quality_scratch),
+                expected_outputs=(
+                    target.analysis_zarr
+                    / "subject_mask_bundle_runs"
+                    / subject_mask_bundle_id
+                    / "zarr.json",
+                ),
             )
         )
 
         validation_key = f"validate:{target_safe}"
         validation_report = run_root / "validation" / f"{target_safe}.json"
         validation_command = [
-            "scripts/py", "-m", "fisheye.cluster.clipped_inference_validate",
-            "--plan", str(run_root / "plan.json"), "--target-id", target.target_id,
-            "--output-json", str(validation_report),
+            "scripts/py",
+            "-m",
+            "fisheye.cluster.clipped_inference_validate",
+            "--plan",
+            str(run_root / "plan.json"),
+            "--target-id",
+            target.target_id,
+            "--output-json",
+            str(validation_report),
         ]
         jobs.append(
             _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=validation_key, stage="validation", command=validation_command,
-                resources=final_cpu, upstream=(mask_import_key,), expected_outputs=(validation_report,),
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=validation_key,
+                stage="validation",
+                command=validation_command,
+                resources=final_cpu,
+                upstream=(mask_publish_key,),
+                expected_outputs=(validation_report,),
             )
         )
         target_validation_keys.append(validation_key)
@@ -1070,7 +1434,7 @@ def build_plan(
         refined_masks_artifact = f"refined_subject_masks:{target_safe}"
         validated_artifact = f"validated_analysis:{target_safe}"
         job_by_key = {job.job_key: job for job in jobs}
-        mask_finalize_keys = [package_array_key, mask_import_key]
+        mask_finalize_keys = [package_array_key, mask_import_key, mask_publish_key]
         if mask_grid_key is not None:
             mask_finalize_keys.insert(0, mask_grid_key)
         fragments.extend(
@@ -1148,31 +1512,55 @@ def build_plan(
     registry_key = "registry_finalize"
     registry_report = run_root / "registry" / "reconcile.json"
     registry_command = [
-        "scripts/py", "-m", "fisheye.cluster.clipped_inference_registry_finalize",
-        "--plan", str(run_root / "plan.json"), "--output-json", str(registry_report),
+        "scripts/py",
+        "-m",
+        "fisheye.cluster.clipped_inference_registry_finalize",
+        "--plan",
+        str(run_root / "plan.json"),
+        "--output-json",
+        str(registry_report),
     ]
     jobs.append(
         _job(
-            workflow_id=workflow_id, repo=repo, run_root=run_root,
-            job_key=registry_key, stage="registry_finalize", command=registry_command,
-            resources=cpu, upstream=tuple(target_validation_keys), expected_outputs=(registry_report,),
+            workflow_id=workflow_id,
+            repo=repo,
+            run_root=run_root,
+            job_key=registry_key,
+            stage="registry_finalize",
+            command=registry_command,
+            resources=cpu,
+            upstream=tuple(target_validation_keys),
+            expected_outputs=(registry_report,),
         )
     )
     if cleanup_nrs_after_success:
         cleanup_report = run_root / "cleanup" / "nrs_cleanup.json"
         jobs.append(
             _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key="nrs_cleanup", stage="nrs_cleanup",
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key="nrs_cleanup",
+                stage="nrs_cleanup",
                 command=(
-                    "scripts/py", "-m", "fisheye.cluster.clipped_inference_cleanup",
-                    "--plan", str(run_root / "plan.json"),
-                    "--cache-root", str(cache_root.expanduser().resolve()),
-                    "--package-root", str(package_root.expanduser().resolve()),
-                    "--apply", "--output-json", str(cleanup_report),
+                    "scripts/py",
+                    "-m",
+                    "fisheye.cluster.clipped_inference_cleanup",
+                    "--plan",
+                    str(run_root / "plan.json"),
+                    "--cache-root",
+                    str(cache_root.expanduser().resolve()),
+                    "--package-root",
+                    str(package_root.expanduser().resolve()),
+                    "--apply",
+                    "--output-json",
+                    str(cleanup_report),
                 ),
-                resources=LsfResources(queue="short", ncores=1, mem_gb=4, walltime="1:00"),
-                upstream=(registry_key,), expected_outputs=(cleanup_report,),
+                resources=LsfResources(
+                    queue="short", ncores=1, mem_gb=4, walltime="1:00"
+                ),
+                upstream=(registry_key,),
+                expected_outputs=(cleanup_report,),
             )
         )
     fragments.append(
@@ -1258,10 +1646,17 @@ def materialize_plan_bundle(plan: ClippedInferencePlan) -> dict[str, Any]:
     if plan_path.exists():
         existing = json.loads(plan_path.read_text(encoding="utf-8"))
         if existing != payload:
-            raise FileExistsError(f"Run root contains a different immutable plan: {plan_path}")
+            raise FileExistsError(
+                f"Run root contains a different immutable plan: {plan_path}"
+            )
         expected_lsf = plan.lsf_workflow.to_json()
-        if not lsf_path.is_file() or json.loads(lsf_path.read_text(encoding="utf-8")) != expected_lsf:
-            raise FileExistsError(f"Run root has mismatched LSF plan evidence: {lsf_path}")
+        if (
+            not lsf_path.is_file()
+            or json.loads(lsf_path.read_text(encoding="utf-8")) != expected_lsf
+        ):
+            raise FileExistsError(
+                f"Run root has mismatched LSF plan evidence: {lsf_path}"
+            )
         for target_payload in plan.target_plans:
             detection_plan_path = Path(str(target_payload["detection_plan_path"]))
             if not detection_plan_path.is_file():
@@ -1269,13 +1664,28 @@ def materialize_plan_bundle(plan: ClippedInferencePlan) -> dict[str, Any]:
                     f"Run root is missing immutable detection-plan evidence: {detection_plan_path}"
                 )
         return existing
-    for name in ("logs", "status", "progress", "targets", "cache_jobs", "validation", "registry", "cleanup"):
+    for name in (
+        "logs",
+        "status",
+        "progress",
+        "targets",
+        "cache_jobs",
+        "validation",
+        "registry",
+        "cleanup",
+    ):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
     for target_payload in plan.target_plans:
-        target_safe = safe_component(str(target_payload["target_id"]), default="target", max_length=56)
+        target_safe = safe_component(
+            str(target_payload["target_id"]), default="target", max_length=56
+        )
         target_dir = plan.run_root / "targets" / target_safe
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = next(item for item in plan.targets if item.target_id == target_payload["target_id"])
+        target = next(
+            item
+            for item in plan.targets
+            if item.target_id == target_payload["target_id"]
+        )
         detection_binding = plan.model_bindings["detection"]
         detection_plan = build_detection_plan(
             target.recording_dir,
@@ -1352,7 +1762,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--subject-mask-set-id", required=True)
     parser.add_argument("--subject-mask-run-id", required=True)
     parser.add_argument("--subject-mask-coverage-class", default="dense_all_components")
-    parser.add_argument("--subject-mask-component-coverage-key", default="body+eyes+swim_bladder")
+    parser.add_argument(
+        "--subject-mask-component-coverage-key", default="body+eyes+swim_bladder"
+    )
     parser.add_argument("--subject-mask-label-schema-id", default="subject_v1_union")
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--package-root", type=Path, default=DEFAULT_PACKAGE_ROOT)
@@ -1453,7 +1865,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if plan.lsf_workflow.metadata is not None
             else len(plan.lsf_workflow.jobs)
         ),
-        "models": {name: binding.to_json() for name, binding in plan.model_bindings.items()},
+        "models": {
+            name: binding.to_json() for name, binding in plan.model_bindings.items()
+        },
         "result": result if args.apply else None,
     }
     if args.json:

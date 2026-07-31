@@ -6,9 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import socket
-import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +22,10 @@ from fisheye.detection.detect_keypoints_yolo import (
 )
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.run_provenance import build_run_provenance
-from fisheye.shared.flat_roi_cache import open_flat_roi_cache
+from fisheye.shared.flat_roi_cache import (
+    open_flat_roi_cache,
+    stage_flat_roi_cache_manifest,
+)
 from fisheye.shared.pose_model_schema_binding import (
     resolve_registered_pose_model_schema_binding,
 )
@@ -136,92 +136,51 @@ def _staging_recommendation_payload(
     }
 
 
-def _copy_file_with_timing(source: Path, destination: Path) -> dict[str, Any]:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    started_utc = _now_utc()
-    started = time.perf_counter()
-    shutil.copy2(source, destination)
-    seconds = float(time.perf_counter() - started)
-    size_bytes = int(destination.stat().st_size)
-    return {
-        "source_path": str(source),
-        "destination_path": str(destination),
-        "started_at_utc": started_utc,
-        "finished_at_utc": _now_utc(),
-        "duration_seconds": seconds,
-        "size_bytes": size_bytes,
-        "mib_per_second": (size_bytes / (1024 * 1024)) / seconds if seconds > 0 else None,
-    }
-
-
 def _stage_flat_roi_cache_manifest(
     manifest_path: Path,
     *,
     staging_dir: Optional[Path] = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Copy a flat ROI cache manifest and payload to node-local scratch."""
+    """Copy and authenticate a flat ROI cache to node-local scratch once."""
 
     source_manifest = manifest_path.expanduser().resolve()
-    payload = json.loads(source_manifest.read_text(encoding="utf-8"))
-    array = payload.get("array")
-    if not isinstance(array, dict):
-        raise ValueError(f"Flat ROI cache manifest is missing array metadata: {source_manifest}")
-    source_bin = _resolve_manifest_payload_path(source_manifest, array.get("bin_path")).resolve()
-    if not source_bin.exists():
-        raise FileNotFoundError(f"Flat ROI cache payload not found: {source_bin}")
     source_tier = _infer_roi_cache_source_tier(source_manifest)
-    payload_size_bytes = int(source_bin.stat().st_size)
-
-    target_dir = (staging_dir.expanduser() if staging_dir is not None else _default_roi_cache_staging_dir()).resolve()
-    target_dir.mkdir(parents=True, exist_ok=True)
-    local_manifest = target_dir / source_manifest.name
-    local_bin = target_dir / source_bin.name
-    if local_manifest == source_manifest or local_bin == source_bin:
-        raise ValueError(
-            "ROI cache staging directory resolves to the source cache directory; "
-            "choose a distinct node-local scratch directory."
-        )
-
-    tmp_bin = local_bin.with_name(f"{local_bin.name}.tmp.{os.getpid()}")
-    tmp_manifest = local_manifest.with_name(f"{local_manifest.name}.tmp.{os.getpid()}")
-
-    bin_copy = _copy_file_with_timing(source_bin, tmp_bin)
-    os.replace(tmp_bin, local_bin)
-
-    staged_payload = dict(payload)
-    staged_array = dict(array)
-    staged_payload["manifest_path"] = str(local_manifest)
-    staged_array["bin_path"] = local_bin.name
-    staged_payload["array"] = staged_array
-    staging_details: dict[str, Any] = {
-        "schema": "palette_roi_cache_staging_v1",
-        "policy": "node_scratch_staged_flat_cache",
-        "staged": True,
-        "stage_to_scratch_requested": True,
-        "requested_manifest_path": str(source_manifest),
-        "effective_manifest_path": str(local_manifest),
-        "source_bin_path": str(source_bin),
-        "effective_bin_path": str(local_bin),
-        "source_tier": source_tier,
-        "effective_source_tier": "node_scratch",
-        "payload_size_bytes": payload_size_bytes,
-        "staging_dir": str(target_dir),
-        "host": socket.gethostname(),
-        "lsb_jobid": os.environ.get("LSB_JOBID"),
-        "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
-        "payload_copy": {
-            **bin_copy,
-            "destination_path": str(local_bin),
-        },
-        "manifest_publish_policy": "payload_first_manifest_last",
-        **_staging_recommendation_payload(
-            manifest_path=source_manifest,
-            source_tier=source_tier,
-            payload_size_bytes=payload_size_bytes,
-        ),
-    }
+    target_dir = (
+        staging_dir.expanduser()
+        if staging_dir is not None
+        else _default_roi_cache_staging_dir()
+    ).resolve()
+    local_manifest, shared_details = stage_flat_roi_cache_manifest(
+        source_manifest,
+        staging_dir=target_dir,
+    )
+    staging_details = dict(shared_details)
+    payload_size_bytes = int(staging_details["copy"]["size_bytes"])
+    staging_details.update(
+        {
+            "stage_to_scratch_requested": True,
+            "source_tier": source_tier,
+            "effective_source_tier": "node_scratch",
+            "payload_size_bytes": payload_size_bytes,
+            **_staging_recommendation_payload(
+                manifest_path=source_manifest,
+                source_tier=source_tier,
+                payload_size_bytes=payload_size_bytes,
+            ),
+        }
+    )
+    # Preserve the historical field name for downstream timing reports while
+    # the shared helper owns the exact copy/hash semantics.
+    staging_details["payload_copy"] = dict(staging_details["copy"])
+    staged_payload = json.loads(local_manifest.read_text(encoding="utf-8"))
     staged_payload["staging"] = staging_details
-    tmp_manifest.write_text(json.dumps(staged_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_manifest = local_manifest.with_name(
+        f"{local_manifest.name}.tmp.{os.getpid()}"
+    )
+    tmp_manifest.write_text(
+        json.dumps(staged_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     os.replace(tmp_manifest, local_manifest)
 
     cache = open_flat_roi_cache(local_manifest)

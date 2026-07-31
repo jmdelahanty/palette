@@ -20,25 +20,35 @@ from fisheye.cluster.whole_recording_analysis_validate import (
 from fisheye.shared.flat_roi_cache import load_flat_roi_cache_manifest
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
-from fisheye.utils.validate_refined_subject_mask_contract import (
-    validate_refined_subject_mask_contract,
+from fisheye.shared.zarr.subject_mask_bundle_publication import (
+    validate_subject_mask_bundle_candidate,
 )
-
+from fisheye.shared.zarr.subject_mask_schema import (
+    derive_subject_mask_frame_row_offsets,
+)
 
 REPORT_SCHEMA = "palette.clipped_inference_target_validation.v1"
 VALIDATION_ROW_CHUNK = 131_072
 
 
-def _read_plan_target(plan_path: Path, target_id: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+def _read_plan_target(
+    plan_path: Path, target_id: str
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping) or payload.get("schema") != PLAN_SCHEMA:
         raise ValueError(f"Unsupported clipped inference plan: {plan_path}")
     targets = payload.get("targets")
     if not isinstance(targets, list):
         raise ValueError("Clipped inference plan has no targets list.")
-    exact = [row for row in targets if isinstance(row, Mapping) and str(row.get("target_id")) == target_id]
+    exact = [
+        row
+        for row in targets
+        if isinstance(row, Mapping) and str(row.get("target_id")) == target_id
+    ]
     if len(exact) != 1:
-        raise ValueError(f"Expected exactly one plan target {target_id!r}; found {len(exact)}.")
+        raise ValueError(
+            f"Expected exactly one plan target {target_id!r}; found {len(exact)}."
+        )
     return payload, exact[0]
 
 
@@ -125,7 +135,9 @@ def _require_exact_vector(
         if not np.array_equal(observed, expected[start:stop]):
             mismatch = np.flatnonzero(observed != expected[start:stop])
             first = start + int(mismatch[0]) if mismatch.size else start
-            raise RuntimeError(f"{label} differs from its canonical lineage at row {first}.")
+            raise RuntimeError(
+                f"{label} differs from its canonical lineage at row {first}."
+            )
 
 
 def _validate_run_frame_counts(
@@ -161,7 +173,9 @@ def _validate_run_frame_counts(
             f"{label}/frame_counts does not equal bincount(frame_indices); first mismatch at frame {first}."
         )
     if expected_counts is not None and not np.array_equal(observed, expected_counts):
-        raise RuntimeError(f"{label}/frame_counts does not match the canonical crop frame universe.")
+        raise RuntimeError(
+            f"{label}/frame_counts does not match the canonical crop frame universe."
+        )
     return {
         "frame_count": total_frames,
         "row_count": int(expected_row_count),
@@ -174,7 +188,9 @@ def _validate_run_frame_counts(
 def _refined_instance_keys(run: Any, *, label: str) -> dict[str, Any]:
     instances = run.get("instances")
     if instances is None:
-        raise RuntimeError(f"Modern refined detection run is missing instances: {label}")
+        raise RuntimeError(
+            f"Modern refined detection run is missing instances: {label}"
+        )
     return _instance_keys(instances, label=f"{label}/instances")
 
 
@@ -185,7 +201,9 @@ def _refined_instance_key_values(
 ) -> tuple[dict[str, Any], np.ndarray]:
     instances = run.get("instances")
     if instances is None:
-        raise RuntimeError(f"Modern refined detection run is missing instances: {label}")
+        raise RuntimeError(
+            f"Modern refined detection run is missing instances: {label}"
+        )
     return _instance_key_values(instances, label=f"{label}/instances")
 
 
@@ -204,7 +222,9 @@ def _cache_manifest_report(
         raise RuntimeError(f"Cache manifest has no source object: {path}")
     source_archive = Path(str(source.get("archive_path") or "")).expanduser().resolve()
     if source_archive != zarr_path:
-        raise RuntimeError(f"Cache archive mismatch for {clip_id}: {source_archive} != {zarr_path}")
+        raise RuntimeError(
+            f"Cache archive mismatch for {clip_id}: {source_archive} != {zarr_path}"
+        )
     if str(source.get("collection_id") or "") != collection_id:
         raise RuntimeError(f"Cache collection mismatch for {clip_id}.")
     selection = source.get("selection")
@@ -313,12 +333,18 @@ def validate_target(
             "Collection quality instance_key order does not exactly match its source."
         )
     expected_quality_source = str(target["detect_quality_source_group_path"])
-    if normalize_attr(quality.attrs.get("source_detection_group_path")) != expected_quality_source:
-        raise RuntimeError("Collection quality source group path does not match the plan.")
+    if (
+        normalize_attr(quality.attrs.get("source_detection_group_path"))
+        != expected_quality_source
+    ):
+        raise RuntimeError(
+            "Collection quality source group path does not match the plan."
+        )
     quality_validation = quality.attrs.get("collection_quality_validation")
-    if not isinstance(quality_validation, Mapping) or str(
-        quality_validation.get("status")
-    ) != "complete":
+    if (
+        not isinstance(quality_validation, Mapping)
+        or str(quality_validation.get("status")) != "complete"
+    ):
         raise RuntimeError("Collection quality validation contract is incomplete.")
     collection = root["experiment_index"]["finalized_runs"][collection_id]
     selected = collection.attrs.get("selected_runs")
@@ -343,7 +369,9 @@ def validate_target(
         identity, keys = _refined_instance_key_values(refined, label=refined_path)
         detection_rows += int(identity["row_count"])
         detection_key_parts.append(keys)
-        detection_reports.append({"clip_id": str(clip["clip_id"]), "instance_key": identity})
+        detection_reports.append(
+            {"clip_id": str(clip["clip_id"]), "instance_key": identity}
+        )
 
         cache_path = Path(str(clip["cache_manifest"])).expanduser().resolve()
         if not cache_path.is_file() and allow_cleaned_caches:
@@ -430,7 +458,9 @@ def validate_target(
             "Merged crop proxy instance_key order does not exactly match selected refined detections."
         )
 
-    keypoints = _require_complete_run(root, "keypoints_runs", str(target["keypoint_run"]))
+    keypoints = _require_complete_run(
+        root, "keypoints_runs", str(target["keypoint_run"])
+    )
     refined_keypoints = _require_complete_run(
         root, "refined_keypoints_runs", str(target["refined_keypoint_run"])
     )
@@ -456,7 +486,9 @@ def validate_target(
         row_counts_to_check.append(("flat ROI caches", cache_rows))
     for label, count in row_counts_to_check:
         if count != expected_rows:
-            raise RuntimeError(f"{label} row count {count} != keypoint row count {expected_rows}.")
+            raise RuntimeError(
+                f"{label} row count {count} != keypoint row count {expected_rows}."
+            )
     for label, values in (
         ("keypoints", keypoint_keys),
         ("refined keypoints", refined_keypoint_keys),
@@ -471,8 +503,18 @@ def validate_target(
         raise RuntimeError(
             "Root recording_frame_index_row_count is required for clipped collection validation."
         )
-    crop_frames_array = _required_vector(crop, "frame_indices", label=f"crop_runs/{crop_run}")
+    crop_frames_array = _required_vector(
+        crop, "frame_indices", label=f"crop_runs/{crop_run}"
+    )
     crop_frames = np.asarray(crop_frames_array[:], dtype=np.int64).reshape(-1)
+    crop_acquisition_frames = np.asarray(
+        _required_vector(
+            crop,
+            "source_acquisition_frame_index",
+            label=f"crop_runs/{crop_run}",
+        )[:],
+        dtype=np.int64,
+    ).reshape(-1)
     if int(crop_frames.size) != expected_rows:
         raise RuntimeError(
             f"Merged crop proxy frame_indices row count {int(crop_frames.size)} != {expected_rows}."
@@ -484,7 +526,7 @@ def validate_target(
             "Merged crop proxy frame_indices fall outside the canonical recording frame universe."
         )
     canonical_frame_counts = np.bincount(
-        crop_frames,
+        crop_acquisition_frames,
         minlength=recording_frame_count,
     ).astype(np.int64, copy=False)
     for label, run in (
@@ -510,7 +552,10 @@ def validate_target(
             or refined_masks.attrs.get("assignment_keypoint_run")
         ),
     )
-    expected_assignment = ("refined_keypoints_runs", str(target["refined_keypoint_run"]))
+    expected_assignment = (
+        "refined_keypoints_runs",
+        str(target["refined_keypoint_run"]),
+    )
     if assignment != expected_assignment:
         raise RuntimeError(
             f"Refined-mask keypoint assignment mismatch: {assignment!r} != {expected_assignment!r}."
@@ -525,16 +570,19 @@ def validate_target(
         )
     mask_label = f"refined_subject_masks_runs/{target['refined_subject_mask_run']}"
     _require_exact_vector(
-        _required_vector(refined_masks, "frame_indices", label=mask_label),
+        _required_vector(
+            refined_masks,
+            "source_acquisition_frame_index",
+            label=mask_label,
+        ),
         crop_frames,
-        label=f"{mask_label}/frame_indices",
+        label=f"{mask_label}/source_acquisition_frame_index",
         dtype=np.int64,
     )
     frame_count_reports: dict[str, Any] = {}
     for label, run in (
         (f"keypoints_runs/{target['keypoint_run']}", keypoints),
         (f"refined_keypoints_runs/{target['refined_keypoint_run']}", refined_keypoints),
-        (mask_label, refined_masks),
     ):
         report, _counts = _validate_run_frame_counts(
             run,
@@ -543,20 +591,39 @@ def validate_target(
             expected_counts=canonical_frame_counts,
         )
         frame_count_reports[label] = report
-    refined_report = _validate_refined_masks(refined_masks, sample_rows=max(32, sample_rows))
+    expected_offsets = derive_subject_mask_frame_row_offsets(
+        crop_acquisition_frames,
+        n_frames=recording_frame_count,
+    )
+    refined_offsets = np.asarray(
+        _required_vector(refined_masks, "frame_row_offsets", label=mask_label)[:],
+        dtype=np.int64,
+    )
+    if not np.array_equal(refined_offsets, expected_offsets):
+        raise RuntimeError(
+            f"{mask_label}/frame_row_offsets does not exactly index crop frames."
+        )
+    frame_count_reports[mask_label] = {
+        "frame_count": recording_frame_count,
+        "row_count": expected_rows,
+        "sum": int(refined_offsets[-1]),
+        "exact_csr_match": True,
+    }
+    refined_report = _validate_refined_masks(
+        refined_masks, sample_rows=max(32, sample_rows)
+    )
     if int(refined_report["shape"][0]) != expected_rows:
         raise RuntimeError(
             f"Refined-mask row count {refined_report['shape'][0]} != keypoint row count {expected_rows}."
         )
-    contract = validate_refined_subject_mask_contract(
-        zarr_path,
-        run_name=str(target["refined_subject_mask_run"]),
+    quality_run_name = str(target["subject_mask_quality_run"])
+    _require_complete_run(root, "subject_mask_quality_runs", quality_run_name)
+    bundle_id = str(target["subject_mask_bundle_id"])
+    bundle = validate_subject_mask_bundle_candidate(
+        analysis_zarr=zarr_path,
+        bundle_id=bundle_id,
     )
-    if not bool(contract.get("valid")):
-        raise RuntimeError(
-            "Refined subject-mask contract validation failed: "
-            + json.dumps(contract.get("errors") or [], sort_keys=True)
-        )
+    contract = {"valid": True, "source": "subject_mask_bundle_v1"}
     return {
         "schema": REPORT_SCHEMA,
         "status": "ok",
@@ -584,6 +651,9 @@ def validate_target(
         "refined_subject_mask_identity": refined_mask_identity,
         "frame_counts": frame_count_reports,
         "refined_subject_mask_contract": contract,
+        "subject_mask_quality_run": quality_run_name,
+        "subject_mask_bundle_id": bundle_id,
+        "subject_mask_bundle": bundle,
         "assignment_keypoint_group": assignment[0],
         "assignment_keypoint_run": assignment[1],
     }

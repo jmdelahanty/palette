@@ -1,0 +1,43 @@
+{
+  "evidence_class": "development_canary_dirty_worktree",
+  "palette_base_commit": "a9e47db16ede1f8a96a30e905c852983b2514ebe",
+  "production_state_changes": [],
+  "reference": {
+    "handoff_manifest_sha256": "6c87c30e5970b56aa5791d7b3343894dfcf324b1cf31ba9a0349239304e15b4f",
+    "handoff_payload_digest": "dbc958d2be32f530b1deffafb99e84d2150d8948171d05a2e4992fa89d07c6eb",
+    "path": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/subject_mask_storage/integration/20260128_cropv2_subject_mask_cache_pipeline_20260731_v2",
+    "source_palette_commit": "0c4f39624a62ce97c06afb4aec7bce238f91bc2f"
+  },
+  "result": "pass",
+  "result_file_sha256": "46516c4cf38ec926ddce6e33e2102666c14a908c69eb08a9b2dfcc69f57cbec9",
+  "result_payload_digest": "5b89af1a5f34cdb022ccf05cca1e785187f22599ba7b80433d63c7a485474f20",
+  "schema_id": "palette.subject_mask.validation_mode_canary.summary",
+  "schema_version": 1,
+  "surfaces": {
+    "raw": {
+      "array_count": 14,
+      "exact_array_metadata": true,
+      "exact_logical_content": true,
+      "exact_logical_schema": true,
+      "exact_storage_plan": true,
+      "logical_content_digest": "e0292091f7bc9ee2b1942b750404abf1da6da683c5dee848b7c5d400bef4408b",
+      "production_streaming_seconds": 41.78947135666385,
+      "reference_full_seconds": 322.51229218626395,
+      "source_receipt_payload_digest": "81fe08801fe4819de540067534c4992045cc19a48e05ff98f840cc3f87bd3584",
+      "source_receipt_scan_seconds": 135.453165973071
+    },
+    "refined": {
+      "array_count": 13,
+      "exact_array_metadata": true,
+      "exact_logical_content": true,
+      "exact_logical_schema": true,
+      "exact_storage_plan": true,
+      "logical_content_digest": "7a10d0b1a5446f578fcda02b9d3460a7ad95074d64d28ec6ead45f2435a301e4",
+      "production_streaming_seconds": 55.08895160537213,
+      "reference_full_seconds": 382.436592109967,
+      "source_receipt_payload_digest": "1af7d894b0d3191ae7d12ff4dd9cde1f57f7fb8fcbc41f6531d49f4d65410ae3",
+      "source_receipt_scan_seconds": 163.1670626043342
+    }
+  },
+  "worktree_dirty": true
+}

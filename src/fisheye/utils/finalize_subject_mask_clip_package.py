@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from io import BytesIO
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,13 +19,25 @@ from typing import Any, Sequence
 import zarr
 
 from fisheye.refinement.finalize_subject_masks import finalize_subject_mask_run
+from fisheye.refinement.finalize_subject_masks import (
+    REFINED_SUBJECT_MASK_ATTEMPT_ATTR,
+    REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR,
+    REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR,
+)
+from fisheye.shared.subject_mask_attempt import (
+    validate_subject_mask_attempt,
+    validate_subject_mask_scientific_identity,
+)
+from fisheye.shared.subject_mask_worker_receipt import (
+    REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    validate_subject_mask_worker_semantic_receipt,
+)
 from fisheye.shared.refined_subject_mask_encoded_chunks import (
     ENCODED_MASK_PAYLOAD_NAME,
     ENCODED_PACKAGE_SCHEMA_ID,
     build_global_encoded_mask_payload,
 )
 from fisheye.shared.run_provenance import json_ready
-
 
 PACKAGE_SCHEMA_ID = "palette_refined_subject_mask_clip_package_v1"
 
@@ -46,6 +59,44 @@ def _remove_path(path: Path) -> None:
         path.unlink()
     elif path.exists():
         shutil.rmtree(path)
+
+
+def _refined_worker_proof(staged_zarr: Path, run: zarr.Group) -> dict[str, Any]:
+    science = run.attrs.get(REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR)
+    attempt = run.attrs.get(REFINED_SUBJECT_MASK_ATTEMPT_ATTR)
+    binding = run.attrs.get(REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR)
+    if not isinstance(science, dict) or validate_subject_mask_scientific_identity(
+        science
+    ):
+        raise RuntimeError("Refined clip output lacks valid scientific identity.")
+    if not isinstance(attempt, dict) or validate_subject_mask_attempt(attempt):
+        raise RuntimeError("Refined clip output lacks valid attempt identity.")
+    if not isinstance(binding, dict):
+        raise RuntimeError("Refined clip output lacks semantic receipt binding.")
+    relative = str(binding.get("relative_path") or "")
+    if Path(relative).is_absolute() or ".." in Path(relative).parts:
+        raise RuntimeError("Refined clip semantic receipt path is unsafe.")
+    receipt_bytes = (staged_zarr / relative).read_bytes()
+    document_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+    if document_sha256 != binding.get("document_sha256"):
+        raise RuntimeError("Refined clip semantic receipt document changed.")
+    receipt = json.loads(receipt_bytes)
+    validate_subject_mask_worker_semantic_receipt(
+        receipt,
+        scientific_identity=science,
+        attempt=attempt,
+        required_paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    )
+    if receipt.get("payload_digest") != binding.get("payload_digest"):
+        raise RuntimeError("Refined clip semantic receipt payload changed.")
+    return {
+        "scientific_identity_digest": science["digest"],
+        "attempt_id": attempt["payload"]["attempt_id"],
+        "attempt_payload_digest": attempt["payload_digest"],
+        "semantic_receipt_payload_digest": receipt["payload_digest"],
+        "semantic_receipt_document_sha256": document_sha256,
+        "semantic_receipt_relative_path": relative,
+    }
 
 
 def _stage_zarr_with_local_refined_parent(
@@ -107,13 +158,17 @@ def _write_package(
         "package_path": str(package_path),
         "run_group_path": f"refined_subject_masks_runs/{refined_run}",
     }
-    manifest_bytes = (json.dumps(json_ready(manifest), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    manifest_bytes = (
+        json.dumps(json_ready(manifest), indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
     try:
         with tarfile.open(tmp_path, "w:gz") as tar:
             tar.add(run_path, arcname=f"refined_subject_masks_runs/{refined_run}")
             if encoded_payload_path is not None:
                 if not encoded_payload_path.is_dir():
-                    raise ValueError(f"Encoded mask payload is missing: {encoded_payload_path}")
+                    raise ValueError(
+                        f"Encoded mask payload is missing: {encoded_payload_path}"
+                    )
                 tar.add(encoded_payload_path, arcname=ENCODED_MASK_PAYLOAD_NAME)
             info = tarfile.TarInfo("package.json")
             info.size = len(manifest_bytes)
@@ -160,12 +215,18 @@ def finalize_subject_mask_clip_package(
     retain_source_seeds: bool = False,
     global_mask_grid_manifest: Path | None = None,
     encoded_mask_copy_workers: int = 8,
+    require_production_proof: bool = False,
     overwrite: bool = False,
     cleanup: bool = True,
 ) -> dict[str, Any]:
     source_zarr = source_zarr.expanduser().resolve()
     staging_root = staging_root or _default_staging_root()
-    safe_run = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in refined_run).strip("_") or "refined"
+    safe_run = (
+        "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in refined_run).strip(
+            "_"
+        )
+        or "refined"
+    )
     staged_zarr = _stage_zarr_with_local_refined_parent(
         source_zarr=source_zarr,
         staging_root=staging_root,
@@ -199,8 +260,16 @@ def finalize_subject_mask_clip_package(
             write_sampled_component_contours=bool(write_sampled_component_contours),
             retain_source_seeds=bool(retain_source_seeds),
             overwrite=bool(overwrite),
+            require_production_proof=bool(require_production_proof),
         )
         run = root["refined_subject_masks_runs"][refined_run]
+        worker_proof = None
+        if require_production_proof:
+            if run.attrs.get("stage_selector_eligible") is not False:
+                raise RuntimeError(
+                    "Refined clip package output must be selector-ineligible."
+                )
+            worker_proof = _refined_worker_proof(staged_zarr, run)
         run.attrs["clip_package_source_zarr_path"] = str(source_zarr)
         run.attrs["clip_package_staged_zarr_path"] = str(staged_zarr)
         run.attrs["clip_package_subject_shard_run"] = str(subject_shard_run)
@@ -220,7 +289,9 @@ def finalize_subject_mask_clip_package(
                 copy_workers=int(encoded_mask_copy_workers),
             )
             package_schema_id = ENCODED_PACKAGE_SCHEMA_ID
-            run.attrs["encoded_global_masks_roi"] = dict(json_ready(encoded_payload_summary))
+            run.attrs["encoded_global_masks_roi"] = dict(
+                json_ready(encoded_payload_summary)
+            )
         package = _write_package(
             staged_zarr=staged_zarr,
             refined_run=refined_run,
@@ -234,6 +305,7 @@ def finalize_subject_mask_clip_package(
                 "lsb_jobid": os.environ.get("LSB_JOBID"),
                 "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
                 "summary": summary,
+                "worker_proof": worker_proof,
                 "encoded_global_masks_roi": encoded_payload_summary,
             },
             overwrite=bool(overwrite),
@@ -253,6 +325,7 @@ def finalize_subject_mask_clip_package(
             "package": package,
             "duration_seconds": duration_seconds,
             "summary": summary,
+            "worker_proof": worker_proof,
             "encoded_global_masks_roi": encoded_payload_summary,
             "cleanup": bool(cleanup),
         }
@@ -279,7 +352,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-storage", default="dense_and_bitpacked")
     parser.add_argument("--mask-rle-validation-mode", default="invariants")
     parser.add_argument("--dense-mask-row-chunk", type=int)
-    parser.add_argument("--execution-backend", choices=("serial_driver", "process_shards"), default="process_shards")
+    parser.add_argument(
+        "--execution-backend",
+        choices=("serial_driver", "process_shards"),
+        default="process_shards",
+    )
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--postcompute-backend", default="process_shards")
     parser.add_argument("--postcompute-num-workers", type=int)
@@ -288,11 +365,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-keypoints-run")
     parser.add_argument("--no-write-eye-geometry", action="store_true")
     parser.add_argument("--no-write-component-contours", action="store_true")
-    parser.add_argument("--write-sampled-component-contours", action="store_true", default=True)
+    parser.add_argument(
+        "--write-sampled-component-contours", action="store_true", default=True
+    )
     parser.add_argument("--no-write-sampled-component-contours", action="store_true")
     parser.add_argument("--retain-source-seeds", action="store_true")
     parser.add_argument("--global-mask-grid-manifest", type=Path)
     parser.add_argument("--encoded-mask-copy-workers", type=int, default=8)
+    parser.add_argument("--require-production-proof", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-cleanup", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -328,13 +408,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         retain_source_seeds=bool(args.retain_source_seeds),
         global_mask_grid_manifest=args.global_mask_grid_manifest,
         encoded_mask_copy_workers=int(args.encoded_mask_copy_workers),
+        require_production_proof=bool(args.require_production_proof),
         overwrite=bool(args.overwrite),
         cleanup=not bool(args.no_cleanup),
     )
     if args.json:
         print(json.dumps(json_ready(result), indent=2, sort_keys=True))
     else:
-        print(f"Finalized {result['refined_run']} -> {result['package']['artifact_path']}")
+        print(
+            f"Finalized {result['refined_run']} -> {result['package']['artifact_path']}"
+        )
     return 0
 
 

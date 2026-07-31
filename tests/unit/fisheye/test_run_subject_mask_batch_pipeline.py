@@ -917,10 +917,57 @@ def test_validate_outputs_can_target_subject_mask_shard_parent(tmp_path: Path) -
     assert "subject_mask_labels" in detail
 
 
-def test_main_rejects_shard_output_parent_with_finalization() -> None:
+def test_main_accepts_shard_output_parent_for_recording_composition() -> None:
     rc = mod.main(["/recordings", "--subject-output-parent", "subject_mask_shard_runs", "--workflow-stage", "all"])
 
-    assert rc == 2
+    assert rc == 0
+
+
+def test_finalization_command_uses_proof_bound_shard_source(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.require_group("subject_mask_shard_runs").create_group("subject_run")
+    args = SimpleNamespace(
+        finalize_chunk_size=256,
+        metric_level="cheap",
+        finalize_execution_backend="process_shards",
+        finalize_num_workers=2,
+        finalize_dense_mask_row_chunk=128,
+        finalize_postcompute_backend="process_shards",
+        finalize_postcompute_chunk_size=None,
+        finalize_postcompute_num_workers=None,
+        mask_storage="dense_uint8",
+        mask_rle_validation_mode="invariants",
+        write_eye_geometry=True,
+        write_component_contours=False,
+        write_sampled_component_contours=True,
+        sampled_contour_row_chunk=1024,
+        sampled_contour_k=[],
+        retain_source_seeds=False,
+        progress_dir=None,
+        overwrite=False,
+        require_production_proof=True,
+    )
+    plan = mod.ArchivePlan(
+        zarr_path=str(zarr_path),
+        subject_run="subject_run",
+        refined_run="refined_draft",
+        crop_run="crop_run",
+        assignment_keypoint_group="refined_keypoints_runs",
+        assignment_keypoint_run="refined_keypoints",
+        has_subject_runs=True,
+        has_refined_subject_runs=False,
+        run_inference=False,
+        run_finalization=True,
+        subject_output_parent=mod.SUBJECT_MASK_SHARD_OUTPUT_PARENT,
+    )
+
+    cmd = mod._finalization_command(args, plan)
+
+    assert "--subject-run" not in cmd
+    assert cmd[cmd.index("--subject-shard-run") + 1] == "subject_run"
+    assert cmd[cmd.index("--target-crop-run") + 1] == "crop_run"
+    assert "--require-production-proof" in cmd
 
 
 def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None:

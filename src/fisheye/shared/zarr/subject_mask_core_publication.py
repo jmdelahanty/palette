@@ -27,7 +27,11 @@ from fisheye.shared.zarr.manifest_digest import (
     canonical_json_sha256,
     metadata_without_empty_group_consolidation,
 )
-from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
+from fisheye.shared.zarr.storage_profiles import (
+    PUBLISHED_HTTP_V1,
+    StorageProfile,
+    storage_profile_from_manifest,
+)
 from fisheye.shared.zarr.subject_mask_schema import (
     RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
     REFINED_SUBJECT_MASK_CORE_SCHEMA_V1,
@@ -52,6 +56,7 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
+    RUN_COMPLETED_AT_ATTR,
     mark_run_complete,
     mark_run_failed,
     mark_run_started,
@@ -65,7 +70,15 @@ SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_ID = "palette.subject_mask_core.shadow_publ
 SUBJECT_MASK_CORE_PUBLICATION_SCHEMA_VERSION = 1
 SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM = SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM
 SUBJECT_MASK_CORE_METADATA_DIGEST_SCOPE = (
-    "exact_run_group_and_array_declarations_redacting_only_run_manifest"
+    "exact_run_group_and_array_declarations_redacting_manifest_lifecycle_"
+    "and_transport_publication_attrs"
+)
+_TRANSPORT_PUBLICATION_ATTRS = (
+    "atomic_publication_owner_uuid",
+    "atomic_publication_tombstone",
+    "cluster_output_staging",
+    "publication_status",
+    "subject_mask_bundle_selector_eligible",
 )
 SUBJECT_MASK_PROB_MAX_CANONICALIZATION = "cpu_max_encoded_then_decode_float32_v1"
 SUBJECT_MASK_PROB_MAX_SOURCE_MAX_ABS_TOLERANCE = float(np.finfo(np.float32).eps)
@@ -167,7 +180,14 @@ def _normalized_metadata_document(
         attributes = value.get("attributes")
         if isinstance(attributes, Mapping):
             attrs = dict(attributes)
-            attrs.pop(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE, None)
+            for name in (
+                SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE,
+                "status",
+                RUN_COMPLETION_STATUS_ATTR,
+                RUN_COMPLETED_AT_ATTR,
+                *_TRANSPORT_PUBLICATION_ATTRS,
+            ):
+                attrs.pop(name, None)
             value["attributes"] = attrs
         result[path] = value
     return result
@@ -182,6 +202,148 @@ def _metadata_digest(
     if direct_doc != consolidated_doc:
         raise ValueError("Direct and consolidated subject-mask metadata differ.")
     return canonical_json_sha256(direct_doc)
+
+
+def subject_mask_core_metadata_declaration_maps(
+    output_path: Path,
+    *,
+    family: str,
+    run_id: str,
+    manifest: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Load the exact direct/consolidated declaration inventory for one core."""
+
+    payload = manifest.get("payload")
+    logical_content = (
+        payload.get("logical_content") if isinstance(payload, Mapping) else None
+    )
+    document = (
+        logical_content.get("document")
+        if isinstance(logical_content, Mapping)
+        else None
+    )
+    arrays = document.get("arrays") if isinstance(document, Mapping) else None
+    if not isinstance(arrays, Mapping) or not arrays:
+        raise ValueError("Subject-mask core manifest lacks its array inventory.")
+    return _metadata_maps(
+        output_path.expanduser().resolve(),
+        family=str(family),
+        run_id=str(run_id),
+        paths=tuple(str(path) for path in arrays),
+    )
+
+
+def validate_persisted_subject_mask_core_publication(
+    output_path: Path,
+    *,
+    family: str,
+    run_id: str,
+) -> tuple[str, ...]:
+    """Boundedly revalidate one persisted core after transport/import.
+
+    Logical array hashes were computed while the source was written and the
+    atomic importer separately verifies every physical file.  This gate
+    therefore checks exact metadata plus the manifest's bounded first/last
+    physical row-band samples without another full decoded scan.
+    """
+
+    errors: list[str] = []
+    archive = output_path.expanduser().resolve()
+    try:
+        run = zarr.open_group(
+            str(archive / str(family) / str(run_id)),
+            mode="r",
+            use_consolidated=False,
+        )
+        manifest = run.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE)
+        if not isinstance(manifest, Mapping):
+            return ("subject-mask core run_manifest is absent",)
+        errors.extend(validate_subject_mask_core_run_manifest(manifest))
+        payload = manifest.get("payload")
+        if not isinstance(payload, Mapping):
+            return tuple(errors)
+        if payload.get("run_id") != str(run_id) or payload.get("stage_family") != str(
+            family
+        ):
+            errors.append("subject-mask core persisted path differs from manifest")
+        if run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != "complete":
+            errors.append("subject-mask core completion status is not complete")
+        if run.attrs.get("stage_selector_eligible") is not False:
+            errors.append("subject-mask core is not selector-ineligible")
+        logical = payload.get("logical_content")
+        document = logical.get("document") if isinstance(logical, Mapping) else None
+        arrays = document.get("arrays") if isinstance(document, Mapping) else None
+        samples = payload.get("write_receipt")
+        samples = (
+            samples.get("bounded_reopen_samples")
+            if isinstance(samples, Mapping)
+            else None
+        )
+        if not isinstance(arrays, Mapping) or not isinstance(samples, Mapping):
+            errors.append("subject-mask core validation inventory is absent")
+        else:
+            for path, declaration in arrays.items():
+                if not isinstance(declaration, Mapping) or str(path) not in run:
+                    errors.append(f"subject-mask core array is absent at {path}")
+                    continue
+                array = run[str(path)]
+                if list(array.shape) != declaration.get("shape") or str(
+                    np.dtype(array.dtype)
+                ) != declaration.get("dtype"):
+                    errors.append(f"subject-mask core array metadata differs at {path}")
+                    continue
+                path_samples = samples.get(path)
+                if not isinstance(path_samples, list):
+                    errors.append(
+                        f"subject-mask core bounded samples are absent at {path}"
+                    )
+                    continue
+                trailing = (slice(None),) * (len(array.shape) - 1)
+                for sample in path_samples:
+                    if not isinstance(sample, Mapping):
+                        errors.append(
+                            f"subject-mask core bounded sample is invalid at {path}"
+                        )
+                        continue
+                    start = sample.get("start_row")
+                    stop = sample.get("stop_row")
+                    if (
+                        type(start) is not int
+                        or type(stop) is not int
+                        or not 0 <= start < stop <= int(array.shape[0])
+                    ):
+                        errors.append(
+                            f"subject-mask core bounded sample range is invalid at {path}"
+                        )
+                        continue
+                    values = np.ascontiguousarray(
+                        np.asarray(array[(slice(start, stop), *trailing)])
+                    )
+                    if hashlib.sha256(values.view(np.uint8)).hexdigest() != sample.get(
+                        "sha256"
+                    ):
+                        errors.append(
+                            f"subject-mask core bounded sample differs at {path}"
+                        )
+        if not errors:
+            direct, consolidated = subject_mask_core_metadata_declaration_maps(
+                archive,
+                family=str(family),
+                run_id=str(run_id),
+                manifest=manifest,
+            )
+            observed_digest = _metadata_digest(direct, consolidated)
+            publication = payload.get("publication")
+            expected_digest = (
+                publication.get("metadata_digest")
+                if isinstance(publication, Mapping)
+                else None
+            )
+            if observed_digest != expected_digest:
+                errors.append("subject-mask core metadata digest differs")
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+    return tuple(errors)
 
 
 def _resolve_kind(
@@ -454,6 +616,362 @@ def _canonicalize_raw_probability_max(
     }
 
 
+def _manifest_dimensions(value: object) -> SubjectMaskDimensions:
+    if not isinstance(value, Mapping):
+        raise ValueError("Subject-mask manifest dimensions must be an object.")
+    dimensions = SubjectMaskDimensions(
+        n_frames=value.get("n_frames"),
+        n_rois=value.get("n_rois"),
+        n_channels=value.get("n_channels"),
+        roi_height=value.get("roi_height"),
+        roi_width=value.get("roi_width"),
+    )
+    if dict(value) != dimensions.as_manifest():
+        raise ValueError("Subject-mask manifest dimensions are not canonical.")
+    return dimensions
+
+
+def _manifest_components(value: object) -> SubjectMaskComponentRegistry:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_id",
+        "schema_version",
+        "labels",
+        "channel_axis",
+        "ordering",
+    }:
+        raise ValueError("Subject-mask component registry is not exact.")
+    labels = value.get("labels")
+    if not isinstance(labels, list):
+        raise ValueError("Subject-mask component labels must be an array.")
+    components = SubjectMaskComponentRegistry(tuple(labels))
+    if dict(value) != components.as_manifest():
+        raise ValueError("Subject-mask component registry is not canonical.")
+    return components
+
+
+def _require_sha256(value: object, *, name: str) -> str:
+    text = str(value or "")
+    if len(text) != 64 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
+        raise ValueError(f"{name} must be lowercase hexadecimal SHA-256.")
+    return text
+
+
+def validate_subject_mask_core_run_manifest(
+    manifest: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Deeply reconstruct and validate one persisted core manifest."""
+
+    errors: list[str] = []
+    expected_envelope = {
+        "schema_id",
+        "schema_version",
+        "digest_algorithm",
+        "payload_digest",
+        "payload",
+    }
+    if set(manifest) != expected_envelope:
+        errors.append("subject-mask core manifest envelope has unexpected fields")
+    if (
+        manifest.get("schema_id") != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_ID
+        or manifest.get("schema_version")
+        != SUBJECT_MASK_CORE_RUN_MANIFEST_SCHEMA_VERSION
+        or manifest.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
+    ):
+        errors.append("subject-mask core manifest envelope identity mismatch")
+    payload = manifest.get("payload")
+    if not isinstance(payload, Mapping):
+        return (*errors, "subject-mask core manifest payload must be an object")
+    try:
+        expected_payload_digest = canonical_json_sha256(payload)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"subject-mask core manifest is not strict JSON: {exc}")
+    else:
+        if manifest.get("payload_digest") != expected_payload_digest:
+            errors.append("subject-mask core manifest payload_digest mismatch")
+    expected_payload = {
+        "run_id",
+        "stage_family",
+        "kind",
+        "publication",
+        "logical_schema",
+        "storage_plan",
+        "source",
+        "write_receipt",
+        "logical_content",
+    }
+    if set(payload) != expected_payload:
+        errors.append("subject-mask core manifest payload has unexpected fields")
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id or "/" in run_id:
+        errors.append("subject-mask core run_id is invalid")
+    kind = payload.get("kind")
+    expected_family = {
+        "raw_probability_uint8": "subject_mask_runs",
+        "refined_dense_core": "refined_subject_masks_runs",
+    }.get(kind)
+    if expected_family is None or payload.get("stage_family") != expected_family:
+        errors.append("subject-mask core kind/stage family mismatch")
+
+    publication = payload.get("publication")
+    if not isinstance(publication, Mapping):
+        errors.append("subject-mask core publication must be an object")
+    else:
+        expected_publication = {
+            "completion_contract": RUN_COMPLETION_CONTRACT,
+            "completion_status": "complete",
+            "stage_selector_eligible": False,
+            "metadata_state": "direct_and_consolidated_validated",
+            "metadata_digest_scope": SUBJECT_MASK_CORE_METADATA_DIGEST_SCOPE,
+            "metadata_digest": publication.get("metadata_digest"),
+        }
+        if dict(publication) != expected_publication:
+            errors.append("subject-mask core publication is not exact")
+        try:
+            _require_sha256(publication.get("metadata_digest"), name="metadata_digest")
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    dimensions: SubjectMaskDimensions | None = None
+    components: SubjectMaskComponentRegistry | None = None
+    logical = payload.get("logical_schema")
+    schema: RawSubjectMaskSchema | RefinedSubjectMaskCoreSchema | None = None
+    plans: SubjectMaskStoragePlanSet | None = None
+    if not isinstance(logical, Mapping):
+        errors.append("subject-mask core logical_schema must be an object")
+    else:
+        try:
+            dimensions = _manifest_dimensions(logical.get("dimensions"))
+            components = _manifest_components(logical.get("components"))
+            storage = payload.get("storage_plan")
+            if not isinstance(storage, Mapping):
+                raise ValueError("Subject-mask storage_plan must be an object.")
+            storage_profile_value = storage.get("storage_profile")
+            if not isinstance(storage_profile_value, Mapping):
+                raise ValueError("Subject-mask storage profile must be an object.")
+            profile = storage_profile_from_manifest(storage_profile_value)
+            if kind == "raw_probability_uint8":
+                schema = RAW_SUBJECT_MASK_UINT8_SCHEMA_V1
+                threshold = logical.get("threshold")
+                if type(threshold) not in (int, float):
+                    raise ValueError("Raw subject-mask threshold is invalid.")
+                storage_arrays = storage.get("arrays")
+                include_threshold_cache = bool(
+                    isinstance(storage_arrays, list)
+                    and any(
+                        isinstance(item, Mapping) and item.get("path") == "masks_roi"
+                        for item in storage_arrays
+                    )
+                )
+                plans = plan_raw_subject_mask_storage(
+                    dimensions,
+                    encoding=SubjectMaskProbabilityEncoding.LINEAR_UINT8_0_255,
+                    include_threshold_cache=include_threshold_cache,
+                    profile=profile,
+                )
+                expected_logical = schema.as_manifest(
+                    dimensions=dimensions,
+                    components=components,
+                    threshold=float(threshold),
+                )
+            elif kind == "refined_dense_core":
+                schema = REFINED_SUBJECT_MASK_CORE_SCHEMA_V1
+                plans = plan_refined_subject_mask_publication_storage(
+                    dimensions,
+                    profile=profile,
+                )
+                expected_logical = schema.as_manifest(
+                    dimensions=dimensions,
+                    components=components,
+                )
+            else:
+                raise ValueError("Unsupported subject-mask core kind.")
+            if dict(logical) != expected_logical:
+                errors.append("subject-mask core logical_schema differs from builder")
+            if dict(storage) != plans.as_manifest():
+                errors.append(
+                    "subject-mask core storage plan differs from planner output"
+                )
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
+
+    source = payload.get("source")
+    if not isinstance(source, Mapping) or set(source) != {
+        "run_path",
+        "manifest_digest",
+        "manifest",
+        "validation_receipt",
+    }:
+        errors.append("subject-mask core source binding is not exact")
+    else:
+        if not isinstance(source.get("run_path"), str) or not source.get("run_path"):
+            errors.append("subject-mask core source run_path is invalid")
+        try:
+            source_manifest = source.get("manifest")
+            if not isinstance(source_manifest, Mapping):
+                raise ValueError("source manifest must be an object")
+            if canonical_json_sha256(source_manifest) != _require_sha256(
+                source.get("manifest_digest"), name="source manifest digest"
+            ):
+                errors.append("subject-mask core source manifest digest mismatch")
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
+        receipt_binding = source.get("validation_receipt")
+        if receipt_binding is not None:
+            expected_receipt_fields = {
+                "schema_id",
+                "schema_version",
+                "payload_digest",
+                "storage",
+                "relative_path",
+                "document_sha256",
+                "semantic_unit_count",
+                "array_count",
+            }
+            if (
+                not isinstance(receipt_binding, Mapping)
+                or set(receipt_binding) != expected_receipt_fields
+                or receipt_binding.get("storage") != "strict_json_sidecar_v1"
+            ):
+                errors.append("subject-mask source-validation binding is not exact")
+            else:
+                for name in ("payload_digest", "document_sha256"):
+                    try:
+                        _require_sha256(receipt_binding.get(name), name=name)
+                    except ValueError as exc:
+                        errors.append(str(exc))
+                expected_relative = (
+                    f"{expected_family}/{run_id}/"
+                    f"{SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR}"
+                )
+                if receipt_binding.get("relative_path") != expected_relative:
+                    errors.append(
+                        "subject-mask source-validation receipt path mismatch"
+                    )
+                for name in ("semantic_unit_count", "array_count"):
+                    if (
+                        type(receipt_binding.get(name)) is not int
+                        or int(receipt_binding[name]) <= 0
+                    ):
+                        errors.append(
+                            f"subject-mask source-validation {name} is invalid"
+                        )
+
+    receipt = payload.get("write_receipt")
+    expected_receipt_fields = {
+        "validation_mode",
+        "output_write_unit",
+        "physical_write_counts",
+        "logical_hash_timing",
+        "reopen_validation",
+        "bounded_reopen_samples",
+        "parallel_write_policy",
+        "derived_metric_canonicalization",
+    }
+    if not isinstance(receipt, Mapping) or set(receipt) != expected_receipt_fields:
+        errors.append("subject-mask core write_receipt is not exact")
+    elif plans is not None:
+        paths = tuple(entry.rule.path for entry in plans.entries)
+        counts = receipt.get("physical_write_counts")
+        samples = receipt.get("bounded_reopen_samples")
+        if not isinstance(counts, Mapping) or set(counts) != set(paths):
+            errors.append("subject-mask core physical write counts are incomplete")
+        elif any(
+            type(counts[path]) is not int or int(counts[path]) <= 0 for path in paths
+        ):
+            errors.append("subject-mask core physical write count is invalid")
+        if not isinstance(samples, Mapping) or set(samples) != set(paths):
+            errors.append("subject-mask core reopen samples are incomplete")
+
+    logical_content = payload.get("logical_content")
+    if not isinstance(logical_content, Mapping) or set(logical_content) != {
+        "digest_algorithm",
+        "digest",
+        "document",
+    }:
+        errors.append("subject-mask core logical_content envelope is invalid")
+    else:
+        document = logical_content.get("document")
+        if logical_content.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM:
+            errors.append("subject-mask core logical_content algorithm mismatch")
+        if not isinstance(document, Mapping):
+            errors.append(
+                "subject-mask core logical_content document must be an object"
+            )
+        else:
+            try:
+                if logical_content.get("digest") != canonical_json_sha256(document):
+                    errors.append("subject-mask core logical_content digest mismatch")
+            except (TypeError, ValueError) as exc:
+                errors.append(
+                    f"subject-mask core logical_content is not strict JSON: {exc}"
+                )
+            if set(document) != {
+                "schema_id",
+                "schema_version",
+                "kind",
+                "dimensions",
+                "components",
+                "arrays",
+            }:
+                errors.append("subject-mask core logical_content has unexpected fields")
+            if (
+                document.get("schema_id") != "palette.subject_mask_core.logical_content"
+                or document.get("schema_version") != 1
+                or document.get("kind") != kind
+            ):
+                errors.append("subject-mask core logical_content identity mismatch")
+            if (
+                dimensions is not None
+                and document.get("dimensions") != dimensions.as_manifest()
+            ):
+                errors.append("subject-mask core logical_content dimensions mismatch")
+            if (
+                components is not None
+                and document.get("components") != components.as_manifest()
+            ):
+                errors.append("subject-mask core logical_content components mismatch")
+            array_documents = document.get("arrays")
+            if plans is not None:
+                plan_by_path = {entry.rule.path: entry.plan for entry in plans.entries}
+                if not isinstance(array_documents, Mapping) or set(
+                    array_documents
+                ) != set(plan_by_path):
+                    errors.append(
+                        "subject-mask core logical array declarations mismatch"
+                    )
+                else:
+                    for path, item in array_documents.items():
+                        if not isinstance(item, Mapping) or set(item) != {
+                            "shape",
+                            "dtype",
+                            "digest_algorithm",
+                            "sha256",
+                        }:
+                            errors.append(
+                                f"subject-mask core logical declaration invalid at {path}"
+                            )
+                            continue
+                        plan = plan_by_path[path]
+                        if item.get("shape") != list(plan.logical_shape):
+                            errors.append(f"subject-mask core shape mismatch at {path}")
+                        if item.get("dtype") != plan.logical_dtype:
+                            errors.append(f"subject-mask core dtype mismatch at {path}")
+                        if (
+                            item.get("digest_algorithm")
+                            != SUBJECT_MASK_CORE_ARRAY_DIGEST_ALGORITHM
+                        ):
+                            errors.append(
+                                f"subject-mask core digest algorithm mismatch at {path}"
+                            )
+                        try:
+                            _require_sha256(item.get("sha256"), name=f"{path} sha256")
+                        except ValueError as exc:
+                            errors.append(str(exc))
+    return tuple(errors)
+
+
 def publish_selector_ineligible_subject_mask_core_snapshot(
     source_arrays: Mapping[str, Any],
     *,
@@ -646,7 +1164,9 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
                 run_name=str(run_id),
                 error=f"Subject-mask physical publication failed: {exc}",
             )
-            raise
+            raise RuntimeError(
+                f"Subject-mask physical publication failed for {path!r}: {exc}"
+            ) from exc
         write_receipts[path] = write_receipt
         write_counts[path] = int(write_receipt["physical_write_count"])
         destination_arrays[path] = destination_array
@@ -656,8 +1176,6 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         assert source_validation_receipt is not None
         streamed_array_document = _streamed_array_document(write_receipts, paths)
     run.attrs["physical_write_counts"] = write_counts
-    run.attrs["status"] = "complete"
-    mark_run_complete(run, run_name=str(run_id))
 
     phase = time.perf_counter()
     consolidate_metadata_capture_expected_warnings(output_path)
@@ -683,6 +1201,9 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
     }
     source_validation_binding: dict[str, object] | None = None
     source_validation_receipt_bytes: bytes | None = None
+    source_validation_receipt_relative_path = (
+        f"{family}/{run_id}/{SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR}"
+    )
     if source_validation_receipt is not None:
         source_validation_receipt_bytes = canonical_json_bytes(
             source_validation_receipt
@@ -694,7 +1215,7 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "schema_version": source_validation_receipt["schema_version"],
             "payload_digest": source_validation_receipt["payload_digest"],
             "storage": "strict_json_sidecar_v1",
-            "relative_path": SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR,
+            "relative_path": source_validation_receipt_relative_path,
             "document_sha256": hashlib.sha256(
                 source_validation_receipt_bytes
             ).hexdigest(),
@@ -757,6 +1278,17 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         "payload": manifest_payload,
     }
     canonical_json_bytes(manifest)
+    manifest_errors = validate_subject_mask_core_run_manifest(manifest)
+    if manifest_errors:
+        mark_run_failed(
+            run,
+            run_name=str(run_id),
+            error="; ".join(manifest_errors),
+        )
+        raise RuntimeError(
+            "Subject-mask core manifest failed deep validation: "
+            + "; ".join(manifest_errors)
+        )
     run.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE] = manifest
     phases["build_manifest"] = time.perf_counter() - phase
 
@@ -770,9 +1302,8 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
             "Subject-mask metadata digest changed after manifest insertion."
         )
     if source_validation_receipt_bytes is not None:
-        (output_path / SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR).write_bytes(
-            source_validation_receipt_bytes
-        )
+        receipt_path = output_path / source_validation_receipt_relative_path
+        receipt_path.write_bytes(source_validation_receipt_bytes)
     reopened = zarr.open_group(
         str(output_path / family / str(run_id)),
         mode="r",
@@ -807,10 +1338,34 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         )
         assert source_validation_receipt is not None
         persisted_receipt = _strict_json(
-            output_path / SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR
+            output_path / source_validation_receipt_relative_path
         )
         if persisted_receipt != source_validation_receipt:
             raise RuntimeError("Persisted source-validation receipt differs.")
+    # Completion is the last scientific-publication mutation.  Everything
+    # above, including consolidation, manifest reconstruction, source receipt
+    # persistence, and logical/sample validation, ran while the child remained
+    # explicitly incomplete and selector-ineligible.
+    writable_run = zarr.open_group(
+        str(output_path / family / str(run_id)),
+        mode="a",
+        use_consolidated=False,
+    )
+    writable_run.attrs["status"] = "complete"
+    mark_run_complete(writable_run, run_name=str(run_id))
+    consolidate_metadata_capture_expected_warnings(output_path)
+    final_direct, final_consolidated = _metadata_maps(
+        output_path, family=family, run_id=str(run_id), paths=paths
+    )
+    if _metadata_digest(final_direct, final_consolidated) != metadata_digest:
+        raise RuntimeError(
+            "Subject-mask metadata declarations changed during completion."
+        )
+    reopened = zarr.open_group(
+        str(output_path / family / str(run_id)),
+        mode="r",
+        use_consolidated=False,
+    )
     if reopened.attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT:
         raise RuntimeError("Subject-mask completion contract is absent.")
     if reopened.attrs.get(RUN_COMPLETION_STATUS_ATTR) != "complete":
@@ -821,6 +1376,14 @@ def publish_selector_ineligible_subject_mask_core_snapshot(
         raise RuntimeError("Subject-mask publication validation mode changed.")
     if reopened.attrs.get(SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE) != manifest:
         raise RuntimeError("Persisted subject-mask manifest differs.")
+    persisted_manifest_errors = validate_subject_mask_core_run_manifest(
+        reopened.attrs[SUBJECT_MASK_CORE_RUN_MANIFEST_ATTRIBUTE]
+    )
+    if persisted_manifest_errors:
+        raise RuntimeError(
+            "Persisted subject-mask core manifest failed deep validation: "
+            + "; ".join(persisted_manifest_errors)
+        )
     phases["final_consolidation_and_reopen_gate"] = time.perf_counter() - phase
     return SubjectMaskCorePublication(
         output_path=output_path,
@@ -849,4 +1412,7 @@ __all__ = [
     "SubjectMaskCorePublication",
     "SubjectMaskCoreValidationMode",
     "publish_selector_ineligible_subject_mask_core_snapshot",
+    "subject_mask_core_metadata_declaration_maps",
+    "validate_persisted_subject_mask_core_publication",
+    "validate_subject_mask_core_run_manifest",
 ]

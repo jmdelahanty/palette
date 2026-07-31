@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from inspect import signature
@@ -218,6 +219,8 @@ def test_stage_flat_roi_cache_manifest_copies_payload_and_rewrites_manifest(tmp_
                     "dtype": "uint8",
                     "shape": [2, 2, 2],
                     "order": "C",
+                    "total_bytes": 8,
+                    "sha256": hashlib.sha256(bytes(range(8))).hexdigest(),
                 },
             }
         ),
@@ -239,13 +242,18 @@ def test_stage_flat_roi_cache_manifest_copies_payload_and_rewrites_manifest(tmp_
     assert details["effective_manifest_path"] == str(local_manifest)
     assert details["payload_size_bytes"] == 8
     assert details["payload_copy"]["size_bytes"] == 8
+    assert details["payload_copy"]["verification"] == (
+        "single_pass_copy_stream_sha256_v1"
+    )
     assert details["validation_status"] == "ok"
     assert details["staging_recommendation_min_bytes"] == mod.ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES
 
     staged_payload = json.loads(local_manifest.read_text(encoding="utf-8"))
     assert staged_payload["array"]["bin_path"] == local_bin.name
     assert staged_payload["staging"]["policy"] == "node_scratch_staged_flat_cache"
-    assert staged_payload["staging"]["manifest_publish_policy"] == "payload_first_manifest_last"
+    assert staged_payload["staging"]["manifest_publish_policy"] == (
+        "payload_fsync_then_manifest_atomic_rename"
+    )
 
 
 def test_prepare_roi_cache_manifest_requires_manifest_for_staging() -> None:

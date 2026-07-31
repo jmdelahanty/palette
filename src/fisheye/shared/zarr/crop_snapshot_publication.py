@@ -60,7 +60,13 @@ from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_ATTR,
+    COMPLETION_EPOCH_STRICT,
+    mark_run_complete,
+    mark_run_failed,
+    require_runs_parent,
+)
 
 
 CROP_SNAPSHOT_PUBLICATION_SCHEMA_ID = "palette.crop_geometry.production_publication"
@@ -279,7 +285,11 @@ def _validate_candidate(
 
 
 def _prepare_parent(root: Any) -> tuple[Any, ...]:
-    return (root.require_group("crop_runs"),)
+    return (
+        require_runs_parent(
+            root, "crop_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+        ),
+    )
 
 
 def _require_unselected(root: Any, *, run_id: str) -> None:
@@ -363,6 +373,10 @@ def publish_crop_geometry_production_candidate(
     crop_parent_before = root_before.get("crop_runs")
     crop_parent_attrs_before = (
         {} if crop_parent_before is None else dict(crop_parent_before.attrs)
+    )
+    expected_crop_parent_attrs = dict(crop_parent_attrs_before)
+    expected_crop_parent_attrs.setdefault(
+        COMPLETION_EPOCH_ATTR, COMPLETION_EPOCH_STRICT
     )
 
     session = scratch / f"palette_crop_candidate_{uuid.uuid4().hex}"
@@ -511,7 +525,7 @@ def publish_crop_geometry_production_candidate(
         if dict(final_root.attrs) != root_attrs_before:
             raise RuntimeError("Crop publication changed root archive attributes.")
         final_parent = final_root["crop_runs"]
-        if dict(final_parent.attrs) != crop_parent_attrs_before:
+        if dict(final_parent.attrs) != expected_crop_parent_attrs:
             raise RuntimeError("Crop publication changed crop selector attributes.")
 
         result = {

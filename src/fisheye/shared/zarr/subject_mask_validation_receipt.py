@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -42,6 +43,276 @@ SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_ID = "palette.subject_mask.source_semantics
 SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_VERSION = 1
 SUBJECT_MASK_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
 SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM = "sha256_c_contiguous_row_units_v1"
+SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_ID = "palette.subject_mask.source_run_manifest"
+SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_VERSION = 1
+
+
+@dataclass
+class SubjectMaskArrayUnitAccumulator:
+    """Incrementally hash one logical array without rereading its output store.
+
+    Appends must arrive in exact first-axis order.  Incoming blocks may use any
+    row count; the accumulator splits them at the frozen ``unit_rows``
+    boundaries so execution batch size does not become scientific identity.
+    """
+
+    shape: tuple[int, ...]
+    dtype: np.dtype[Any]
+    unit_rows: int
+    _cursor: int = 0
+    _unit_start: int = 0
+    _unit_rows_written: int = 0
+    _unit_bytes: int = 0
+    _digest: Any = field(default_factory=hashlib.sha256)
+    _units: list[dict[str, object]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.shape = tuple(int(value) for value in self.shape)
+        self.dtype = np.dtype(self.dtype)
+        if not self.shape or self.shape[0] <= 0:
+            raise ValueError("Incremental array hashing requires a nonempty row axis.")
+        if type(self.unit_rows) is not int or self.unit_rows <= 0:
+            raise ValueError("unit_rows must be one positive exact integer.")
+
+    @property
+    def cursor(self) -> int:
+        return int(self._cursor)
+
+    def append(self, start_row: int, values: Any) -> None:
+        start = int(start_row)
+        block = np.asarray(values)
+        if start != self._cursor:
+            raise ValueError(
+                f"Incremental array rows are not contiguous: expected {self._cursor}, "
+                f"got {start}."
+            )
+        if block.dtype != self.dtype:
+            raise ValueError(
+                f"Incremental array dtype differs: expected {self.dtype}, got {block.dtype}."
+            )
+        if block.ndim != len(self.shape) or tuple(block.shape[1:]) != self.shape[1:]:
+            raise ValueError(
+                "Incremental array trailing shape differs: "
+                f"expected {self.shape[1:]}, got {tuple(block.shape[1:])}."
+            )
+        stop = start + int(block.shape[0])
+        if stop > self.shape[0]:
+            raise ValueError("Incremental array append exceeds its declared shape.")
+        offset = 0
+        while offset < block.shape[0]:
+            capacity = min(self.unit_rows, self.shape[0] - self._unit_start)
+            take = min(capacity - self._unit_rows_written, block.shape[0] - offset)
+            part = np.ascontiguousarray(block[offset : offset + take])
+            self._digest.update(part.view(np.uint8))
+            self._unit_rows_written += int(take)
+            self._unit_bytes += int(part.nbytes)
+            self._cursor += int(take)
+            offset += int(take)
+            if self._unit_rows_written == capacity:
+                self._units.append(
+                    {
+                        "start_row": int(self._unit_start),
+                        "stop_row": int(self._cursor),
+                        "decoded_bytes": int(self._unit_bytes),
+                        "sha256": self._digest.hexdigest(),
+                    }
+                )
+                self._unit_start = int(self._cursor)
+                self._unit_rows_written = 0
+                self._unit_bytes = 0
+                self._digest = hashlib.sha256()
+
+    def as_document(self) -> dict[str, object]:
+        if self._cursor != self.shape[0] or self._unit_rows_written != 0:
+            raise ValueError(
+                f"Incremental array hashing covered {self._cursor} of {self.shape[0]} rows."
+            )
+        units = [dict(unit) for unit in self._units]
+        return {
+            "shape": list(self.shape),
+            "dtype": str(self.dtype),
+            "digest_algorithm": SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM,
+            "unit_count": len(units),
+            "units_digest": canonical_json_sha256(units),
+            "units": units,
+        }
+
+
+def subject_mask_semantic_units_from_array_document(
+    array_document: Mapping[str, Mapping[str, Any]],
+    *,
+    n_rois: int,
+    paths: Sequence[str],
+) -> tuple[dict[str, object], ...]:
+    """Derive exact semantic coverage evidence from aligned ROI-row hashes."""
+
+    resolved_paths = tuple(str(path) for path in paths)
+    if not resolved_paths or len(set(resolved_paths)) != len(resolved_paths):
+        raise ValueError("Semantic evidence paths must be unique and nonempty.")
+    records = [array_document.get(path) for path in resolved_paths]
+    if any(not isinstance(record, Mapping) for record in records):
+        raise ValueError("Semantic evidence array document is incomplete.")
+    first_units = records[0].get("units")  # type: ignore[union-attr]
+    if not isinstance(first_units, list) or not first_units:
+        raise ValueError("Semantic evidence requires row-unit array hashes.")
+    result: list[dict[str, object]] = []
+    for index, first in enumerate(first_units):
+        if not isinstance(first, Mapping):
+            raise ValueError("Semantic evidence row unit is invalid.")
+        start = first.get("start_row")
+        stop = first.get("stop_row")
+        evidence_arrays: dict[str, object] = {}
+        for path, record in zip(resolved_paths, records, strict=True):
+            assert isinstance(record, Mapping)
+            units = record.get("units")
+            if not isinstance(units, list) or len(units) != len(first_units):
+                raise ValueError("Semantic evidence unit grids differ.")
+            unit = units[index]
+            if (
+                not isinstance(unit, Mapping)
+                or unit.get("start_row") != start
+                or unit.get("stop_row") != stop
+            ):
+                raise ValueError("Semantic evidence row boundaries differ.")
+            evidence_arrays[path] = {
+                "decoded_bytes": unit.get("decoded_bytes"),
+                "sha256": unit.get("sha256"),
+            }
+        result.append(
+            {
+                "start_row": start,
+                "stop_row": stop,
+                "result": "valid",
+                "validator_schema_id": SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_ID,
+                "validator_schema_version": SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_VERSION,
+                "evidence_digest": canonical_json_sha256(
+                    {
+                        "start_row": start,
+                        "stop_row": stop,
+                        "arrays": evidence_arrays,
+                    }
+                ),
+            }
+        )
+    _canonical_semantic_units(result, n_rois=int(n_rois))
+    return tuple(result)
+
+
+def build_subject_mask_source_run_manifest(
+    *,
+    kind: str,
+    run_path: str,
+    schema: RawSubjectMaskSchema | RefinedSubjectMaskCoreSchema,
+    dimensions: SubjectMaskDimensions,
+    components: SubjectMaskComponentRegistry,
+    threshold: float | None,
+    producer_identity_schema_id: str,
+    producer_identity_digest: str,
+    attempt_payload_digest: str | None,
+    array_document: Mapping[str, Any],
+) -> dict[str, object]:
+    """Build the immutable identity document consumed by source receipts."""
+
+    resolved_path = str(run_path).strip().strip("/")
+    producer_schema = str(producer_identity_schema_id).strip()
+    if not resolved_path or not producer_schema:
+        raise ValueError("Source run path and producer identity schema are required.")
+    producer_digest = _require_sha256(
+        producer_identity_digest, name="producer identity digest"
+    )
+    attempt_digest = (
+        None
+        if attempt_payload_digest is None
+        else _require_sha256(attempt_payload_digest, name="attempt payload digest")
+    )
+    arrays = _strict_copy(array_document, name="source run array document")
+    if not isinstance(arrays, dict) or not arrays:
+        raise ValueError("Source run array document cannot be empty.")
+    payload = {
+        "kind": str(kind),
+        "run_path": resolved_path,
+        "logical_schema": {
+            "schema_id": schema.schema_id,
+            "schema_version": schema.schema_version,
+        },
+        "dimensions": dimensions.as_manifest(),
+        "components": components.as_manifest(),
+        "threshold": None if threshold is None else float(threshold),
+        "producer_identity": {
+            "schema_id": producer_schema,
+            "digest": producer_digest,
+        },
+        "attempt_payload_digest": attempt_digest,
+        "array_document_digest": canonical_json_sha256(arrays),
+    }
+    envelope = {
+        "schema_id": SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_ID,
+        "schema_version": SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_VERSION,
+        "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
+        "payload_digest": canonical_json_sha256(payload),
+        "payload": payload,
+    }
+    validate_subject_mask_source_run_manifest(envelope)
+    return envelope
+
+
+def validate_subject_mask_source_run_manifest(
+    manifest: Mapping[str, Any],
+) -> dict[str, object]:
+    canonical = _strict_copy(manifest, name="subject-mask source run manifest")
+    if not isinstance(canonical, dict) or set(canonical) != {
+        "schema_id",
+        "schema_version",
+        "digest_algorithm",
+        "payload_digest",
+        "payload",
+    }:
+        raise ValueError("Subject-mask source run manifest fields are not exact.")
+    payload = canonical.get("payload")
+    if (
+        canonical.get("schema_id") != SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_ID
+        or canonical.get("schema_version")
+        != SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_VERSION
+        or canonical.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM
+        or not isinstance(payload, dict)
+        or canonical.get("payload_digest") != canonical_json_sha256(payload)
+    ):
+        raise ValueError("Subject-mask source run manifest is unsupported or stale.")
+    if set(payload) != {
+        "kind",
+        "run_path",
+        "logical_schema",
+        "dimensions",
+        "components",
+        "threshold",
+        "producer_identity",
+        "attempt_payload_digest",
+        "array_document_digest",
+    }:
+        raise ValueError(
+            "Subject-mask source run manifest payload fields are not exact."
+        )
+    if not str(payload.get("run_path") or "").strip().strip("/"):
+        raise ValueError("Subject-mask source run path is absent.")
+    logical = payload.get("logical_schema")
+    if not isinstance(logical, dict) or set(logical) != {
+        "schema_id",
+        "schema_version",
+    }:
+        raise ValueError("Subject-mask source logical schema is invalid.")
+    producer = payload.get("producer_identity")
+    if (
+        not isinstance(producer, dict)
+        or set(producer) != {"schema_id", "digest"}
+        or not str(producer.get("schema_id") or "").strip()
+    ):
+        raise ValueError("Subject-mask producer identity is invalid.")
+    _require_sha256(producer.get("digest"), name="producer identity digest")
+    attempt = payload.get("attempt_payload_digest")
+    if attempt is not None:
+        _require_sha256(attempt, name="attempt payload digest")
+    _require_sha256(payload.get("array_document_digest"), name="array document digest")
+    return canonical
 
 
 def _strict_copy(value: Any, *, name: str) -> Any:
@@ -536,10 +807,16 @@ __all__ = [
     "SUBJECT_MASK_SOURCE_VALIDATION_RECEIPT_SCHEMA_VERSION",
     "SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_ID",
     "SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_VERSION",
+    "SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_ID",
+    "SUBJECT_MASK_SOURCE_RUN_MANIFEST_SCHEMA_VERSION",
+    "SubjectMaskArrayUnitAccumulator",
     "build_reference_subject_mask_validation_receipt",
+    "build_subject_mask_source_run_manifest",
     "build_subject_mask_source_validation_receipt",
     "streaming_array_sha256",
     "subject_mask_array_document",
     "subject_mask_array_unit_document",
+    "subject_mask_semantic_units_from_array_document",
+    "validate_subject_mask_source_run_manifest",
     "validate_subject_mask_source_validation_receipt",
 ]

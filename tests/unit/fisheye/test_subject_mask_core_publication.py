@@ -13,6 +13,7 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
     SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR,
     SubjectMaskCoreValidationMode,
     publish_selector_ineligible_subject_mask_core_snapshot,
+    validate_subject_mask_core_run_manifest,
 )
 from fisheye.shared.zarr.subject_mask_schema import (
     RAW_SUBJECT_MASK_UINT8_SCHEMA_V1,
@@ -25,11 +26,50 @@ from fisheye.shared.zarr.subject_mask_schema import (
 from fisheye.shared.zarr.subject_mask_validation_receipt import (
     SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_ID,
     SUBJECT_MASK_SOURCE_VALIDATOR_SCHEMA_VERSION,
+    SubjectMaskArrayUnitAccumulator,
     build_reference_subject_mask_validation_receipt,
     build_subject_mask_source_validation_receipt,
     subject_mask_array_unit_document,
+    subject_mask_semantic_units_from_array_document,
     validate_subject_mask_source_validation_receipt,
 )
+
+
+def test_incremental_row_hashes_ignore_execution_batch_boundaries() -> None:
+    values = np.arange(7 * 2, dtype=np.uint16).reshape(7, 2)
+    accumulator = SubjectMaskArrayUnitAccumulator(
+        shape=values.shape,
+        dtype=values.dtype,
+        unit_rows=3,
+    )
+    accumulator.append(0, values[:2])
+    accumulator.append(2, values[2:6])
+    accumulator.append(6, values[6:])
+
+    document = accumulator.as_document()
+    expected = subject_mask_array_unit_document(
+        {"values": values}, ("values",), unit_rows=3
+    )["values"]
+
+    assert document == expected
+    semantic = subject_mask_semantic_units_from_array_document(
+        {"values": document}, n_rois=7, paths=("values",)
+    )
+    assert [(unit["start_row"], unit["stop_row"]) for unit in semantic] == [
+        (0, 3),
+        (3, 6),
+        (6, 7),
+    ]
+
+
+def test_incremental_row_hashes_reject_gaps_and_dtype_changes() -> None:
+    accumulator = SubjectMaskArrayUnitAccumulator(
+        shape=(3, 2), dtype=np.uint16, unit_rows=2
+    )
+    with pytest.raises(ValueError, match="not contiguous"):
+        accumulator.append(1, np.zeros((1, 2), dtype=np.uint16))
+    with pytest.raises(ValueError, match="dtype differs"):
+        accumulator.append(0, np.zeros((1, 2), dtype=np.uint8))
 
 
 def _components() -> SubjectMaskComponentRegistry:
@@ -313,7 +353,10 @@ def test_subject_mask_production_streaming_publication_uses_validated_receipt(
         "metadata_plus_first_last_physical_row_band_samples_v1"
     )
     assert (
-        publication.output_path / SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR
+        publication.output_path
+        / family
+        / "streaming_001"
+        / SUBJECT_MASK_CORE_SOURCE_VALIDATION_SIDECAR
     ).is_file()
     assert (
         publication.manifest["payload"]["source"]["validation_receipt"]["storage"]
@@ -323,6 +366,35 @@ def test_subject_mask_production_streaming_publication_uses_validated_receipt(
         str(publication.output_path), mode="r", use_consolidated=True
     )[f"{family}/streaming_001"]
     np.testing.assert_array_equal(run[payload][...], arrays[payload])
+
+
+def test_subject_mask_core_manifest_rejects_recomputed_nested_tampering(
+    tmp_path: object,
+) -> None:
+    raw, refined_with_crop = _fixture()
+    crop = refined_with_crop.pop("_crop")
+    publication = publish_selector_ineligible_subject_mask_core_snapshot(
+        raw,
+        source_crop_arrays=crop,
+        source_manifest=_source_manifest(),
+        n_frames=4,
+        components=_components(),
+        destination=tmp_path / "tamper.zarr",  # type: ignore[operator]
+        run_id="raw_001",
+        kind="raw_probability_uint8",
+        source_run_path="subject_mask_shard_runs/source_001",
+    )
+    tampered = deepcopy(publication.manifest)
+    tampered["payload"]["storage_plan"]["arrays"][0][
+        "access_unit_semantics"
+    ] = "tampered"
+    tampered["payload"]["source"]["unexpected"] = True
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+
+    errors = validate_subject_mask_core_run_manifest(tampered)
+
+    assert "subject-mask core storage plan differs from planner output" in errors
+    assert "subject-mask core source binding is not exact" in errors
 
 
 def test_subject_mask_production_streaming_requires_receipt(tmp_path: object) -> None:

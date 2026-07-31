@@ -9,11 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -35,7 +37,13 @@ FLAT_ROI_CACHE_DECODE_BACKENDS = ("auto", "read_slice", "pynvvc_luma")
 class FlatRoiCacheArray:
     """Read-only array-like wrapper around a flat ROI binary payload."""
 
-    def __init__(self, *, manifest_path: Path, manifest: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        *,
+        manifest_path: Path,
+        manifest: Mapping[str, Any],
+        require_payload_sha256: bool = False,
+    ) -> None:
         self.manifest_path = manifest_path.expanduser().resolve()
         self.manifest = dict(manifest)
         array = _require_mapping(self.manifest, "array")
@@ -46,13 +54,19 @@ class FlatRoiCacheArray:
         self.ndim = 3
         dtype_name = str(array.get("dtype") or "")
         if dtype_name != "uint8":
-            raise ValueError(f"Unsupported flat ROI cache dtype '{dtype_name}'. Expected uint8.")
+            raise ValueError(
+                f"Unsupported flat ROI cache dtype '{dtype_name}'. Expected uint8."
+            )
         self.dtype = np.dtype(np.uint8)
         order = str(array.get("order") or "C")
         if order != "C":
             raise ValueError(f"Unsupported flat ROI cache order '{order}'. Expected C.")
-        bin_path = _resolve_payload_path(self.manifest_path, str(array.get("bin_path") or ""))
-        expected_bytes = int(np.prod(self.shape, dtype=np.int64)) * int(self.dtype.itemsize)
+        bin_path = _resolve_payload_path(
+            self.manifest_path, str(array.get("bin_path") or "")
+        )
+        expected_bytes = int(np.prod(self.shape, dtype=np.int64)) * int(
+            self.dtype.itemsize
+        )
         if not bin_path.exists():
             raise FileNotFoundError(f"Flat ROI cache payload not found: {bin_path}")
         actual_bytes = bin_path.stat().st_size
@@ -60,8 +74,12 @@ class FlatRoiCacheArray:
             raise ValueError(
                 f"Flat ROI cache payload size mismatch: expected {expected_bytes} bytes, got {actual_bytes}."
             )
+        if require_payload_sha256:
+            _verify_payload_sha256(bin_path, array)
         self.bin_path = bin_path
-        self._memmap = np.memmap(bin_path, dtype=self.dtype, mode="r", shape=self.shape, order="C")
+        self._memmap = np.memmap(
+            bin_path, dtype=self.dtype, mode="r", shape=self.shape, order="C"
+        )
 
     def __getitem__(self, key):  # noqa: ANN001
         return self._memmap[key]
@@ -85,7 +103,9 @@ def load_flat_roi_cache_manifest(path: str | Path) -> dict[str, Any]:
             f"Unsupported ROI cache layout {manifest.get('layout')!r}; expected {FLAT_ROI_CACHE_LAYOUT!r}."
         )
     if not bool(manifest.get("cache_complete")):
-        raise ValueError(f"Flat ROI cache manifest is not marked complete: {manifest_path}")
+        raise ValueError(
+            f"Flat ROI cache manifest is not marked complete: {manifest_path}"
+        )
     return manifest
 
 
@@ -95,6 +115,7 @@ def open_flat_roi_cache(
     expected_archive_path: str | Path | None = None,
     expected_crop_run: str | None = None,
     expected_shape: Sequence[int] | None = None,
+    require_payload_sha256: bool = False,
 ) -> FlatRoiCacheArray:
     path = Path(manifest_path).expanduser()
     manifest = load_flat_roi_cache_manifest(path)
@@ -104,7 +125,216 @@ def open_flat_roi_cache(
         expected_crop_run=expected_crop_run,
         expected_shape=expected_shape,
     )
-    return FlatRoiCacheArray(manifest_path=path, manifest=manifest)
+    return FlatRoiCacheArray(
+        manifest_path=path,
+        manifest=manifest,
+        require_payload_sha256=bool(require_payload_sha256),
+    )
+
+
+def _verify_payload_sha256(
+    payload_path: Path,
+    array_manifest: Mapping[str, Any],
+) -> str:
+    expected = array_manifest.get("sha256")
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise ValueError(
+            "Flat ROI cache requires array.sha256 as lowercase hexadecimal SHA-256."
+        )
+    actual = _sha256_file(payload_path)
+    if actual != expected:
+        raise ValueError(
+            "Flat ROI cache payload SHA-256 mismatch: "
+            f"expected {expected}, observed {actual}."
+        )
+    return actual
+
+
+def verify_flat_roi_cache_payload(
+    manifest_path: str | Path,
+) -> dict[str, Any]:
+    """Require and verify the exact payload bytes bound by one cache manifest."""
+
+    path = Path(manifest_path).expanduser().resolve()
+    manifest = load_flat_roi_cache_manifest(path)
+    array = _require_mapping(manifest, "array")
+    payload_path = _resolve_payload_path(path, str(array.get("bin_path") or ""))
+    if not payload_path.is_file():
+        raise FileNotFoundError(f"Flat ROI cache payload not found: {payload_path}")
+    expected_bytes = int(np.prod(array.get("shape"), dtype=np.int64))
+    actual_bytes = int(payload_path.stat().st_size)
+    if actual_bytes != expected_bytes:
+        raise ValueError(
+            "Flat ROI cache payload size mismatch: "
+            f"expected {expected_bytes} bytes, got {actual_bytes}."
+        )
+    digest = _verify_payload_sha256(payload_path, array)
+    return {
+        "manifest_path": str(path),
+        "payload_path": str(payload_path),
+        "size_bytes": actual_bytes,
+        "sha256": digest,
+        "verification": "direct_sha256_before_use_v1",
+    }
+
+
+def stage_flat_roi_cache_manifest(
+    manifest_path: str | Path,
+    *,
+    staging_dir: str | Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Copy and authenticate one flat cache in a single sequential pass.
+
+    Maintained inference jobs stage shared caches to private node-local scratch.
+    The payload digest is calculated while those bytes are already being copied;
+    this deliberately avoids a source pre-read or a destination readback pass.
+    The cache manifest is published only after the complete payload has been
+    fsynced, authenticated against ``array.sha256``, and atomically renamed.
+    """
+
+    source_manifest = Path(manifest_path).expanduser().resolve()
+    manifest = load_flat_roi_cache_manifest(source_manifest)
+    array = _require_mapping(manifest, "array")
+    source_payload = _resolve_payload_path(
+        source_manifest,
+        str(array.get("bin_path") or ""),
+    ).resolve()
+    if not source_payload.is_file():
+        raise FileNotFoundError(f"Flat ROI cache payload not found: {source_payload}")
+
+    shape = array.get("shape")
+    if not isinstance(shape, list) or len(shape) != 3:
+        raise ValueError("Flat ROI cache manifest array.shape must be [N, H, W].")
+    if str(array.get("dtype") or "") != "uint8":
+        raise ValueError("Flat ROI cache staging requires array.dtype='uint8'.")
+    if str(array.get("order") or "C") != "C":
+        raise ValueError("Flat ROI cache staging requires array.order='C'.")
+    expected_bytes = int(np.prod(shape, dtype=np.int64))
+    declared_bytes = int(array.get("total_bytes") or expected_bytes)
+    actual_bytes = int(source_payload.stat().st_size)
+    if declared_bytes != expected_bytes or actual_bytes != expected_bytes:
+        raise ValueError(
+            "Flat ROI cache byte-size mismatch: "
+            f"shape implies {expected_bytes}, manifest declares {declared_bytes}, "
+            f"payload contains {actual_bytes}."
+        )
+    expected_sha256 = array.get("sha256")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise ValueError(
+            "Maintained flat ROI-cache staging requires array.sha256 as "
+            "lowercase hexadecimal SHA-256."
+        )
+
+    target_dir = Path(staging_dir).expanduser().resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    local_manifest = target_dir / source_manifest.name
+    local_payload = target_dir / source_payload.name
+    if local_manifest == source_manifest or local_payload == source_payload:
+        raise ValueError(
+            "ROI-cache staging directory must differ from the source directory."
+        )
+    temporary_payload = _temporary_path(local_payload, suffix=".copying")
+    temporary_manifest = _temporary_path(local_manifest, suffix=".tmp.json")
+    started_at_utc = datetime.now(timezone.utc).isoformat()
+    started = time.perf_counter()
+    digest = hashlib.sha256()
+    try:
+        with (
+            source_payload.open("rb") as source,
+            temporary_payload.open("xb") as destination,
+        ):
+            for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
+                digest.update(block)
+                destination.write(block)
+            destination.flush()
+            os.fsync(destination.fileno())
+        observed_sha256 = digest.hexdigest()
+        if observed_sha256 != expected_sha256:
+            raise ValueError(
+                "Flat ROI cache payload SHA-256 mismatch during node-local "
+                f"staging: expected {expected_sha256}, observed "
+                f"{observed_sha256}."
+            )
+        os.replace(temporary_payload, local_payload)
+        elapsed = float(time.perf_counter() - started)
+        details: dict[str, Any] = {
+            "schema": "palette_roi_cache_staging_v1",
+            "policy": "node_scratch_staged_flat_cache",
+            "verification": "single_pass_copy_stream_sha256_v1",
+            "staged": True,
+            "requested_manifest_path": str(source_manifest),
+            "effective_manifest_path": str(local_manifest),
+            "source_bin_path": str(source_payload),
+            "effective_bin_path": str(local_payload),
+            "staging_dir": str(target_dir),
+            "host": socket.gethostname(),
+            "lsb_jobid": os.environ.get("LSB_JOBID"),
+            "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
+            "copy": {
+                "started_at_utc": started_at_utc,
+                "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                "duration_seconds": elapsed,
+                "size_bytes": actual_bytes,
+                "mib_per_second": (
+                    (actual_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else None
+                ),
+                "source_sha256": expected_sha256,
+                "staged_sha256": observed_sha256,
+                "verification": "single_pass_copy_stream_sha256_v1",
+            },
+            "manifest_publish_policy": "payload_fsync_then_manifest_atomic_rename",
+        }
+        staged_manifest = dict(manifest)
+        staged_array = dict(array)
+        staged_array["bin_path"] = local_payload.name
+        staged_manifest["array"] = staged_array
+        staged_manifest["manifest_path"] = str(local_manifest)
+        staged_manifest["staging"] = details
+        temporary_manifest.write_text(
+            json.dumps(staged_manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_manifest, local_manifest)
+        return local_manifest, details
+    except BaseException:
+        temporary_payload.unlink(missing_ok=True)
+        temporary_manifest.unlink(missing_ok=True)
+        raise
+
+
+def cleanup_staged_flat_roi_cache(manifest_path: str | Path) -> None:
+    """Remove only the payload and manifest named by a staged cache manifest."""
+
+    path = Path(manifest_path).expanduser().resolve()
+    try:
+        manifest = load_flat_roi_cache_manifest(path)
+        array = _require_mapping(manifest, "array")
+        payload = _resolve_payload_path(
+            path,
+            str(array.get("bin_path") or ""),
+        ).resolve()
+        if payload.parent != path.parent:
+            raise ValueError(
+                "Refusing staged-cache cleanup outside the manifest directory."
+            )
+        payload.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        try:
+            path.parent.rmdir()
+        except OSError:
+            # The staging directory may contain an unrelated worker artifact;
+            # cleanup owns only the exact manifest and payload above.
+            pass
+    except FileNotFoundError:
+        return
 
 
 def crop_run_name_from_manifest(manifest_path: str | Path) -> str:
@@ -176,7 +406,9 @@ def build_flat_roi_cache(
                 "Strict crop flat caches require roi_decode_backend='pynvvc_luma' "
                 "or 'auto'; read_slice is not authoritative."
             )
-        cache_key = source._build_roi_cache_key(archive_path)  # Internal shared cache identity.
+        cache_key = source._build_roi_cache_key(
+            archive_path
+        )  # Internal shared cache identity.
         resolved_manifest_path = _default_manifest_path(
             archive_path=archive_path,
             crop_run_name=source.crop_run_name,
@@ -224,17 +456,19 @@ def build_flat_roi_cache(
         )
 
         try:
-            timing, payload_sha256, decode_backend_effective = _write_flat_cache_payload(
-                source=source,
-                bin_tmp=bin_tmp,
-                total_bytes=total_bytes,
-                batch_size=effective_batch_size,
-                compute_sha256=bool(compute_sha256),
-                decode_backend_requested=decode_backend_requested,
-                progress_callback=progress_callback,
-                progress_interval_seconds=float(progress_interval_seconds),
-                progress_every_batches=int(progress_every_batches),
-                started=started,
+            timing, payload_sha256, decode_backend_effective = (
+                _write_flat_cache_payload(
+                    source=source,
+                    bin_tmp=bin_tmp,
+                    total_bytes=total_bytes,
+                    batch_size=effective_batch_size,
+                    compute_sha256=bool(compute_sha256),
+                    decode_backend_requested=decode_backend_requested,
+                    progress_callback=progress_callback,
+                    progress_interval_seconds=float(progress_interval_seconds),
+                    progress_every_batches=int(progress_every_batches),
+                    started=started,
+                )
             )
         except Exception:
             try:
@@ -265,7 +499,9 @@ def build_flat_roi_cache(
             decode_backend_requested=decode_backend_requested,
             decode_backend_effective=decode_backend_effective,
         )
-        manifest_tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        manifest_tmp.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         os.replace(manifest_tmp, resolved_manifest_path)
         _emit_progress(
             progress_callback,
@@ -368,6 +604,7 @@ def _build_manifest(
         },
     }
 
+
 def _write_flat_cache_payload(
     *,
     source: Any,
@@ -381,10 +618,10 @@ def _write_flat_cache_payload(
     progress_every_batches: int,
     started: float,
 ) -> tuple[dict[str, Any], str | None, str]:
-    if (
-        decode_backend_requested in {"auto", "pynvvc_luma"}
-        and _source_is_pure_acquisition_crop_video(source)
-    ):
+    if decode_backend_requested in {
+        "auto",
+        "pynvvc_luma",
+    } and _source_is_pure_acquisition_crop_video(source):
         timing, payload_sha256, _ = _write_flat_cache_payload_read_slice(
             source=source,
             bin_tmp=bin_tmp,
@@ -397,7 +634,10 @@ def _write_flat_cache_payload(
             started=started,
         )
         return timing, payload_sha256, "pynvvc_luma"
-    if decode_backend_requested in {"auto", "pynvvc_luma"} and _source_supports_pynvvc_luma(source):
+    if decode_backend_requested in {
+        "auto",
+        "pynvvc_luma",
+    } and _source_supports_pynvvc_luma(source):
         try:
             return _write_flat_cache_payload_pynvvc_luma(
                 source=source,
@@ -524,7 +764,9 @@ def _write_flat_cache_payload_read_slice(
                     "write_seconds": float(write_seconds),
                     "sha256_seconds": float(sha_seconds),
                     "read_rows_per_second": _rate(batch_rows, read_seconds),
-                    "write_mib_per_second": _rate(batch_bytes / (1024 * 1024), write_seconds),
+                    "write_mib_per_second": _rate(
+                        batch_bytes / (1024 * 1024), write_seconds
+                    ),
                     "decode_backend": "read_slice",
                 },
                 timing=timing,
@@ -555,7 +797,9 @@ def _write_flat_cache_payload_pynvvc_luma(
         source_height = int(reader.source_height)
         source_width = int(reader.source_width)
         if source.frame_shape is not None:
-            expected_h, expected_w = int(source.frame_shape[0]), int(source.frame_shape[1])
+            expected_h, expected_w = int(source.frame_shape[0]), int(
+                source.frame_shape[1]
+            )
             if expected_h != source_height or expected_w != source_width:
                 raise ValueError(
                     "PyNvVideoCodec source dimensions do not match crop metadata: "
@@ -607,6 +851,103 @@ def _write_flat_cache_payload_pynvvc_luma(
         reader.close()
 
 
+def write_pynvvc_luma_roi_payload(
+    *,
+    video_path: str | Path,
+    frame_indices: Sequence[int] | np.ndarray,
+    roi_coordinates_full: Sequence[Sequence[int]] | np.ndarray,
+    roi_shape: Sequence[int],
+    video_shape: Sequence[int],
+    output_path: str | Path,
+    batch_size: int = 1024,
+    overwrite: bool = False,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    progress_interval_seconds: float = 30.0,
+    progress_every_batches: int = 0,
+) -> dict[str, Any]:
+    """Materialize one exact PyNvVC-luma ROI subset into a flat payload.
+
+    The row axis is the caller-provided subset order.  Frame indices are local
+    to ``video_path``; acquisition/global-frame mapping belongs in the
+    higher-level crop work-package contract.  A single process owns the whole
+    payload and the destination is atomically replaced only after every row
+    and the complete SHA-256 have been produced.
+    """
+
+    video = Path(video_path).expanduser().resolve()
+    if not video.is_file():
+        raise FileNotFoundError(f"PyNvVC ROI source video is missing: {video}")
+    frames = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    coordinates = np.asarray(roi_coordinates_full, dtype=np.int32)
+    if frames.size == 0:
+        raise ValueError("PyNvVC ROI payload requires at least one row.")
+    if np.any(frames < 0):
+        raise ValueError("PyNvVC ROI payload frame indices must be nonnegative.")
+    if coordinates.shape != (frames.shape[0], 2):
+        raise ValueError("PyNvVC ROI coordinates must have exact shape [n_rows, 2].")
+    roi_hw = tuple(int(value) for value in roi_shape)
+    video_hw = tuple(int(value) for value in video_shape)
+    if len(roi_hw) != 2 or min(roi_hw) <= 0:
+        raise ValueError("PyNvVC ROI shape must contain two positive values.")
+    if len(video_hw) != 2 or min(video_hw) <= 0:
+        raise ValueError("PyNvVC video shape must contain two positive values.")
+    output = Path(output_path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"PyNvVC ROI payload already exists: {output}")
+    temporary = _temporary_path(output, suffix=".tmp.bin")
+    total_bytes = int(frames.shape[0] * roi_hw[0] * roi_hw[1])
+    source = SimpleNamespace(
+        total_rois=int(frames.shape[0]),
+        roi_shape=roi_hw,
+        frame_shape=video_hw,
+        frame_source_path=str(video),
+        frame_indices=frames,
+        roi_coordinates_full=coordinates,
+    )
+    started = time.perf_counter()
+    try:
+        timing, payload_sha256, backend = _write_flat_cache_payload_pynvvc_luma(
+            source=source,
+            bin_tmp=temporary,
+            total_bytes=total_bytes,
+            batch_size=max(1, int(batch_size)),
+            compute_sha256=True,
+            progress_callback=progress_callback,
+            progress_interval_seconds=float(progress_interval_seconds),
+            progress_every_batches=int(progress_every_batches),
+            started=started,
+        )
+        if backend != "pynvvc_luma" or payload_sha256 is None:
+            raise RuntimeError("PyNvVC ROI payload did not produce exact identity.")
+        os.replace(temporary, output)
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    duration = float(time.perf_counter() - started)
+    return {
+        "schema_id": "palette.pynvvc_luma_roi_payload",
+        "schema_version": 1,
+        "path": str(output),
+        "shape": [int(frames.shape[0]), int(roi_hw[0]), int(roi_hw[1])],
+        "dtype": "uint8",
+        "order": "C",
+        "total_bytes": total_bytes,
+        "sha256": payload_sha256,
+        "decode_backend": backend,
+        "duration_seconds": duration,
+        "timing": _timing_summary(
+            timing=timing,
+            total_rois=int(frames.shape[0]),
+            total_bytes=total_bytes,
+            duration_seconds=duration,
+        ),
+    }
+
+
 def _source_supports_pynvvc_luma(source: Any) -> bool:
     return (
         str(getattr(source, "storage_mode", "")) == "geometry_only"
@@ -633,7 +974,9 @@ def _open_pynvvc_luma_reader(video_path: Path) -> Any:
 
 def _frame_to_roi_indices(frame_indices: np.ndarray) -> dict[int, list[int]]:
     mapping: dict[int, list[int]] = {}
-    for roi_idx, frame_idx in enumerate(np.asarray(frame_indices, dtype=np.int64).reshape(-1)):
+    for roi_idx, frame_idx in enumerate(
+        np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    ):
         mapping.setdefault(int(frame_idx), []).append(int(roi_idx))
     return mapping
 
@@ -659,17 +1002,23 @@ class _AsyncRoiPayloadWriter:
         self._pending: list[Future[float] | None] = [None] * self._pinned_buffer_count
         self._next_pinned = 0
         self._owned_pending: list[Future[float]] = []
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="flat-roi-cache-writer")
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="flat-roi-cache-writer"
+        )
         self.write_seconds_total = 0.0
         self.write_wait_seconds_total = 0.0
         self.pinned_buffer_wait_seconds_total = 0.0
         self.writer_submit_seconds_total = 0.0
         self.flush_count = 0
 
-    def submit_tensor_batch(self, tensor: Any, roi_ids: Sequence[int]) -> tuple[float, str]:
+    def submit_tensor_batch(
+        self, tensor: Any, roi_ids: Sequence[int]
+    ) -> tuple[float, str]:
         ids = np.ascontiguousarray(np.asarray(roi_ids, dtype=np.int64).reshape(-1))
         if int(tensor.shape[0]) != ids.shape[0]:
-            raise ValueError(f"ROI id/crop count mismatch: {ids.shape[0]} ids, {int(tensor.shape[0])} crops")
+            raise ValueError(
+                f"ROI id/crop count mismatch: {ids.shape[0]} ids, {int(tensor.shape[0])} crops"
+            )
         if not bool(getattr(tensor, "is_cuda", False)):
             transfer_started = time.perf_counter()
             crops = np.ascontiguousarray(tensor.cpu().numpy(), dtype=np.uint8)
@@ -724,7 +1073,9 @@ class _AsyncRoiPayloadWriter:
         index = self._next_pinned
         wait_before = float(self.write_wait_seconds_total)
         self._wait_for_pinned_buffer(index)
-        self.pinned_buffer_wait_seconds_total += float(self.write_wait_seconds_total - wait_before)
+        self.pinned_buffer_wait_seconds_total += float(
+            self.write_wait_seconds_total - wait_before
+        )
         self._next_pinned = (self._next_pinned + 1) % self._pinned_buffer_count
         return index
 
@@ -739,7 +1090,9 @@ class _AsyncRoiPayloadWriter:
             or tuple(int(v) for v in buffer.shape) != expected_shape
             or buffer.dtype != dtype
         ):
-            buffer = torch.empty(expected_shape, dtype=dtype, device="cpu", pin_memory=True)
+            buffer = torch.empty(
+                expected_shape, dtype=dtype, device="cpu", pin_memory=True
+            )
             self._pinned_buffers[index] = buffer
         return buffer
 
@@ -778,7 +1131,10 @@ def _write_owned_roi_payload_batch(
     run_start = 0
     while run_start < ids_sorted.size:
         run_end = run_start + 1
-        while run_end < ids_sorted.size and int(ids_sorted[run_end]) == int(ids_sorted[run_end - 1]) + 1:
+        while (
+            run_end < ids_sorted.size
+            and int(ids_sorted[run_end]) == int(ids_sorted[run_end - 1]) + 1
+        ):
             run_end += 1
         handle.seek(int(ids_sorted[run_start]) * int(row_stride))
         _write_contiguous_payload(handle, crops_sorted[run_start:run_end])
@@ -846,7 +1202,9 @@ def _write_pynvvc_luma_streamed_rois(
         serialize_seconds = time.perf_counter() - serialize_started
 
         transfer_started = time.perf_counter()
-        transfer_copy_seconds, transfer_mode = writer.submit_tensor_batch(gpu_batch, roi_ids_cpu)
+        transfer_copy_seconds, transfer_mode = writer.submit_tensor_batch(
+            gpu_batch, roi_ids_cpu
+        )
         transfer_seconds = time.perf_counter() - transfer_started
         contiguous_seconds = float(cat_seconds + transfer_seconds)
 
@@ -877,7 +1235,9 @@ def _write_pynvvc_luma_streamed_rois(
             frame_idx = int(decoded_frame_index)
             lookup_started = time.perf_counter()
             roi_ids = frame_to_roi.get(frame_idx)
-            timing["frame_lookup_seconds_total"] += float(time.perf_counter() - lookup_started)
+            timing["frame_lookup_seconds_total"] += float(
+                time.perf_counter() - lookup_started
+            )
             if not roi_ids:
                 timing["read_seconds_total"] += float(read_seconds)
                 timing["decode_seconds_total"] += float(read_seconds)
@@ -900,13 +1260,17 @@ def _write_pynvvc_luma_streamed_rois(
             gpu_crop_batches.append(crops.detach())
             gpu_roi_id_batches.append(np.asarray(roi_ids, dtype=np.int64))
             gpu_staged_rows += int(len(roi_ids))
-            timing["staging_append_seconds_total"] += float(time.perf_counter() - staging_started)
+            timing["staging_append_seconds_total"] += float(
+                time.perf_counter() - staging_started
+            )
             if gpu_staged_rows >= int(staging_row_capacity):
                 flush_gpu_staging()
             mask_started = time.perf_counter()
             for roi_id in roi_ids:
                 rows_written_mask[int(roi_id)] = True
-            timing["rows_mask_seconds_total"] += float(time.perf_counter() - mask_started)
+            timing["rows_mask_seconds_total"] += float(
+                time.perf_counter() - mask_started
+            )
 
             batch_rows = int(len(roi_ids))
             batch_bytes = int(batch_rows * row_stride)
@@ -957,7 +1321,9 @@ def _write_pynvvc_luma_streamed_rois(
                 progress_interval_seconds=progress_interval_seconds,
                 progress_every_batches=progress_every_batches,
             )
-            timing["progress_emit_seconds_total"] += float(time.perf_counter() - progress_started)
+            timing["progress_emit_seconds_total"] += float(
+                time.perf_counter() - progress_started
+            )
             decoded_frame_index += 1
             del crops, frame_tensor
     finally:
@@ -966,7 +1332,9 @@ def _write_pynvvc_luma_streamed_rois(
 
     timing["write_seconds_total"] += float(writer.write_seconds_total)
     timing["write_wait_seconds_total"] += float(writer.write_wait_seconds_total)
-    timing["pinned_buffer_wait_seconds_total"] += float(writer.pinned_buffer_wait_seconds_total)
+    timing["pinned_buffer_wait_seconds_total"] += float(
+        writer.pinned_buffer_wait_seconds_total
+    )
     timing["writer_submit_seconds_total"] += float(writer.writer_submit_seconds_total)
     timing["write_flushes"] += int(writer.flush_count)
     return int(batch_index), float(last_progress)
@@ -1118,7 +1486,9 @@ def _normalize_decode_backend(value: str) -> str:
     backend = str(value or "auto").strip().lower()
     if backend not in FLAT_ROI_CACHE_DECODE_BACKENDS:
         choices = ", ".join(FLAT_ROI_CACHE_DECODE_BACKENDS)
-        raise ValueError(f"Invalid flat ROI cache decode backend '{value}'. Expected one of: {choices}")
+        raise ValueError(
+            f"Invalid flat ROI cache decode backend '{value}'. Expected one of: {choices}"
+        )
     return backend
 
 
@@ -1154,10 +1524,16 @@ def _progress_source_payload(source: Any) -> dict[str, Any]:
         "roi_shape": [int(source.roi_shape[0]), int(source.roi_shape[1])],
         "total_rois": int(source.total_rois),
         "frame_source_kind": source.frame_source_kind,
-        "frame_source_path": None if source.frame_source_path is None else str(source.frame_source_path),
+        "frame_source_path": (
+            None if source.frame_source_path is None else str(source.frame_source_path)
+        ),
         "roi_read_mode": getattr(source, "roi_read_mode", None),
-        "roi_live_acceleration_requested": getattr(source, "roi_live_acceleration_requested", None),
-        "roi_live_acceleration_effective": getattr(source, "roi_live_acceleration_effective", None),
+        "roi_live_acceleration_requested": getattr(
+            source, "roi_live_acceleration_requested", None
+        ),
+        "roi_live_acceleration_effective": getattr(
+            source, "roi_live_acceleration_effective", None
+        ),
         "roi_live_acceleration_fallback_reason": getattr(
             source, "roi_live_acceleration_fallback_reason", None
         ),
@@ -1178,7 +1554,10 @@ def _should_emit_batch_progress(
         return True
     if progress_every_batches > 0 and batch_index % progress_every_batches == 0:
         return True
-    if progress_interval_seconds > 0 and now - last_progress >= progress_interval_seconds:
+    if (
+        progress_interval_seconds > 0
+        and now - last_progress >= progress_interval_seconds
+    ):
         return True
     return False
 
@@ -1212,7 +1591,10 @@ def _progress_totals(
             _rate(rows_written, float(timing.get("read_seconds_total", 0.0)))
         ),
         "write_mib_per_second": float(
-            _rate(bytes_written / (1024 * 1024), float(timing.get("write_seconds_total", 0.0)))
+            _rate(
+                bytes_written / (1024 * 1024),
+                float(timing.get("write_seconds_total", 0.0)),
+            )
         ),
         "batches": int(timing.get("batches", 0)),
     }
@@ -1233,19 +1615,31 @@ def _timing_summary(
         "read_seconds_total": float(timing.get("read_seconds_total", 0.0)),
         "contiguous_seconds_total": float(timing.get("contiguous_seconds_total", 0.0)),
         "gpu_cat_seconds_total": float(timing.get("gpu_cat_seconds_total", 0.0)),
-        "gpu_to_host_seconds_total": float(timing.get("gpu_to_host_seconds_total", 0.0)),
-        "transfer_submit_seconds_total": float(timing.get("transfer_submit_seconds_total", 0.0)),
+        "gpu_to_host_seconds_total": float(
+            timing.get("gpu_to_host_seconds_total", 0.0)
+        ),
+        "transfer_submit_seconds_total": float(
+            timing.get("transfer_submit_seconds_total", 0.0)
+        ),
         "serialize_seconds_total": float(timing.get("serialize_seconds_total", 0.0)),
         "write_seconds_total": float(timing.get("write_seconds_total", 0.0)),
         "write_wait_seconds_total": float(timing.get("write_wait_seconds_total", 0.0)),
         "pinned_buffer_wait_seconds_total": float(
             timing.get("pinned_buffer_wait_seconds_total", 0.0)
         ),
-        "writer_submit_seconds_total": float(timing.get("writer_submit_seconds_total", 0.0)),
-        "frame_lookup_seconds_total": float(timing.get("frame_lookup_seconds_total", 0.0)),
-        "staging_append_seconds_total": float(timing.get("staging_append_seconds_total", 0.0)),
+        "writer_submit_seconds_total": float(
+            timing.get("writer_submit_seconds_total", 0.0)
+        ),
+        "frame_lookup_seconds_total": float(
+            timing.get("frame_lookup_seconds_total", 0.0)
+        ),
+        "staging_append_seconds_total": float(
+            timing.get("staging_append_seconds_total", 0.0)
+        ),
         "rows_mask_seconds_total": float(timing.get("rows_mask_seconds_total", 0.0)),
-        "progress_emit_seconds_total": float(timing.get("progress_emit_seconds_total", 0.0)),
+        "progress_emit_seconds_total": float(
+            timing.get("progress_emit_seconds_total", 0.0)
+        ),
         "sha256_seconds_total": float(timing.get("sha256_seconds_total", 0.0)),
         "decode_seconds_total": float(timing.get("decode_seconds_total", 0.0)),
         "crop_seconds_total": float(timing.get("crop_seconds_total", 0.0)),
@@ -1261,7 +1655,10 @@ def _timing_summary(
             _rate(total_rois, float(timing.get("read_seconds_total", 0.0)))
         ),
         "write_mib_per_second": float(
-            _rate(total_bytes / (1024 * 1024), float(timing.get("write_seconds_total", 0.0)))
+            _rate(
+                total_bytes / (1024 * 1024),
+                float(timing.get("write_seconds_total", 0.0)),
+            )
         ),
     }
 
@@ -1303,7 +1700,12 @@ def _temporary_path(path: Path, *, suffix: str) -> Path:
 
 
 def _safe_component(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value)) or "cache"
+    return (
+        "".join(
+            ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value)
+        )
+        or "cache"
+    )
 
 
 def _relative_or_absolute(path: Path, *, base: Path) -> str:
@@ -1344,7 +1746,10 @@ def _validate_manifest_against_expected(
             raise ValueError(
                 f"Flat ROI cache archive mismatch: manifest has {actual!r}, expected {expected!r}."
             )
-    if expected_crop_run is not None and source.get("crop_run_name") != expected_crop_run:
+    if (
+        expected_crop_run is not None
+        and source.get("crop_run_name") != expected_crop_run
+    ):
         raise ValueError(
             f"Flat ROI cache crop run mismatch: manifest has {source.get('crop_run_name')!r}, "
             f"expected {expected_crop_run!r}."

@@ -68,9 +68,11 @@ def _fixture() -> tuple[
     arrays = {
         "masks_roi": masks,
         "instance_key": np.asarray([101, 102, 201, 301], dtype=np.uint64),
+        "source_crop_row_ids": np.arange(4, dtype=np.int64),
         "source_acquisition_frame_index": np.asarray(
             [0, 0, 2, 3], dtype=np.int64
         ),
+        "frame_row_offsets": np.asarray([0, 2, 2, 3, 4], dtype=np.int64),
         "available_channels": np.ones((4,), dtype=bool),
     }
     source_manifest: dict[str, object] = {
@@ -87,6 +89,17 @@ def _fixture() -> tuple[
         component_registry_digest=canonical_json_sha256(
             _components().as_manifest()
         ),
+        source_array_values_sha256={
+            path: sha256_array(arrays[path])
+            for path in (
+                "masks_roi",
+                "instance_key",
+                "source_crop_row_ids",
+                "source_acquisition_frame_index",
+                "frame_row_offsets",
+                "available_channels",
+            )
+        },
     )
     return arrays, source_manifest, source
 
@@ -198,16 +211,49 @@ def test_publication_rejects_dense_digest_mismatch_before_creating_store(
         manifest_digest=source.manifest_digest,
         dense_array_values_sha256="00" * 32,
         component_registry_digest=source.component_registry_digest,
+        source_array_values_sha256={
+            **dict(source.source_array_values_sha256),
+            "masks_roi": "00" * 32,
+        },
     )
     root = tmp_path / "quality"  # type: ignore[operator]
     destination = root / "fixture.zarr"
 
-    with pytest.raises(ValueError, match="dense source-mask digest mismatch"):
+    with pytest.raises(ValueError, match="source-array digest mismatch"):
         publish_selector_ineligible_subject_mask_quality_snapshot(
             arrays,
             n_frames=4,
             components=_components(),
             source=wrong_source,
+            source_manifest=source_manifest,
+            destination=destination,
+            run_id="quality_v1_001",
+            shadow_root=root,
+            source_compute_block_bytes=512,
+            created_by="pytest",
+        )
+
+    assert not destination.exists()
+
+
+def test_publication_rejects_caller_substituted_identity_column(
+    tmp_path: object,
+) -> None:
+    arrays, source_manifest, source = _fixture()
+    arrays["instance_key"] = arrays["instance_key"].copy()
+    arrays["instance_key"][0] = np.uint64(999)
+    root = tmp_path / "quality"  # type: ignore[operator]
+    destination = root / "fixture.zarr"
+
+    with pytest.raises(
+        ValueError,
+        match="Exact refined source-array digest mismatch for: instance_key",
+    ):
+        publish_selector_ineligible_subject_mask_quality_snapshot(
+            arrays,
+            n_frames=4,
+            components=_components(),
+            source=source,
             source_manifest=source_manifest,
             destination=destination,
             run_id="quality_v1_001",

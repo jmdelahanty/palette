@@ -195,8 +195,15 @@ def update_mask_storage_attrs(
     has_dense: bool,
     has_rle: bool,
     has_bitpacked: bool = False,
-    reset_stale_flags: bool = True,
+    reset_stale_flags: bool,
 ) -> None:
+    """Update storage inventory attributes with an explicit freshness choice.
+
+    Callers must state whether they have validated the complete closed-world
+    derivative set.  Making this argument mandatory prevents a metadata-only
+    inventory refresh from accidentally advertising unrelated caches, metrics,
+    or contours as current.
+    """
     encodings = mask_store_encodings(has_dense=has_dense, has_rle=has_rle, has_bitpacked=has_bitpacked)
     contract_encodings = mask_store_contract_encodings(
         has_dense=has_dense,
@@ -341,6 +348,23 @@ def clear_mask_rle_stale_attrs(run_group: Any) -> None:
         "mask_rle_stale_row_count",
         "mask_rle_stale_row_min",
         "mask_rle_stale_row_max",
+        "mask_rle_stale_row_ids",
+    ):
+        _delete_attr_if_present(run_group.attrs, key)
+
+
+def clear_mask_bitpacked_stale_attrs(run_group: Any) -> None:
+    """Mark bitpacked storage current after exact dense equivalence passes."""
+
+    run_group.attrs["mask_bitpacked_stale"] = False
+    for key in (
+        "mask_bitpacked_stale_at_utc",
+        "mask_bitpacked_stale_reason",
+        "mask_bitpacked_stale_component_names",
+        "mask_bitpacked_stale_row_count",
+        "mask_bitpacked_stale_row_min",
+        "mask_bitpacked_stale_row_max",
+        "mask_bitpacked_stale_row_ids",
     ):
         _delete_attr_if_present(run_group.attrs, key)
 
@@ -374,6 +398,7 @@ def mark_mask_rle_stale_attrs(
         [str(component) for component in updated_components] if updated_components is not None else []
     )
     run_group.attrs["mask_rle_stale_row_count"] = int(len(row_values))
+    run_group.attrs["mask_rle_stale_row_ids"] = row_values
     if row_values:
         run_group.attrs["mask_rle_stale_row_min"] = int(min(row_values))
         run_group.attrs["mask_rle_stale_row_max"] = int(max(row_values))
@@ -398,6 +423,7 @@ def mark_derived_mask_caches_stale_attrs(
     run_group.attrs["derived_mask_caches_stale_reason"] = str(reason)
     run_group.attrs["derived_mask_caches_stale_component_names"] = components
     run_group.attrs["derived_mask_caches_stale_row_count"] = int(len(row_values))
+    run_group.attrs["derived_mask_caches_stale_row_ids"] = row_values
     if row_values:
         run_group.attrs["derived_mask_caches_stale_row_min"] = int(min(row_values))
         run_group.attrs["derived_mask_caches_stale_row_max"] = int(max(row_values))
@@ -414,6 +440,7 @@ def mark_derived_mask_caches_stale_attrs(
         run_group.attrs["mask_bitpacked_stale_reason"] = str(reason)
         run_group.attrs["mask_bitpacked_stale_component_names"] = components
         run_group.attrs["mask_bitpacked_stale_row_count"] = int(len(row_values))
+        run_group.attrs["mask_bitpacked_stale_row_ids"] = row_values
         marked["mask_bitpacked_stale"] = True
     if "mask_rle" in run_group:
         mark_mask_rle_stale_attrs(
@@ -720,6 +747,11 @@ def write_bitpacked_mask_store_from_dense(
         has_dense="masks_roi" in run_group,
         has_rle="mask_rle" in run_group,
         has_bitpacked=True,
+        reset_stale_flags=False,
+    )
+    run_group.attrs["mask_bitpacked_stale"] = True
+    run_group.attrs["mask_bitpacked_stale_reason"] = (
+        "awaiting_exact_dense_equivalence_validation"
     )
     run_group.attrs["mask_bitpacked_schema_id"] = MASK_BITPACKED_SCHEMA_ID
     run_group.attrs["mask_bitpacked_encoding"] = MASK_BITPACKED_ENCODING
@@ -752,6 +784,7 @@ def write_bitpacked_mask_store_from_dense(
         summary["phase_seconds"] = dict(phase_seconds)
         summary["mask_bitpacked_validation"] = {"mode": "full", **validation}
         summary["roundtrip_validation"] = validation
+        clear_mask_bitpacked_stale_attrs(run_group)
     elif validation_mode == "invariants":
         validation_started = time.perf_counter()
         validation = validate_bitpacked_mask_store_invariants(
@@ -891,7 +924,20 @@ def refresh_bitpacked_mask_store_from_dense(
     if selected_row_indices:
         bitpacked_group.attrs["refreshed_row_min"] = int(min(selected_row_indices))
         bitpacked_group.attrs["refreshed_row_max"] = int(max(selected_row_indices))
-    update_mask_storage_attrs(run_group, has_dense=True, has_rle="mask_rle" in run_group, has_bitpacked=True)
+    update_mask_storage_attrs(
+        run_group,
+        has_dense=True,
+        has_rle="mask_rle" in run_group,
+        has_bitpacked=True,
+        reset_stale_flags=False,
+    )
+    _clear_mask_bitpacked_stale_for_refreshed_selection(
+        run_group,
+        refreshed_components=[names[idx] for idx in selected_indices],
+        refreshed_rows=selected_row_indices,
+        all_components=names,
+        all_row_count=int(n_rows),
+    )
     run_group.attrs["mask_bitpacked_refreshed_from"] = "masks_roi"
     run_group.attrs["mask_bitpacked_refreshed_at_utc"] = refreshed_at_utc
     run_group.attrs["mask_bitpacked_refresh_source_path"] = str(source_path)
@@ -1013,11 +1059,15 @@ def write_encoded_component_rle_mask_store(
         has_dense="masks_roi" in run_group,
         has_rle=True,
         has_bitpacked="mask_bitpacked" in run_group,
+        reset_stale_flags=False,
     )
     run_group.attrs["mask_rle_schema_id"] = MASK_RLE_SCHEMA_ID
     run_group.attrs["mask_rle_encoding"] = MASK_RLE_ENCODING
     run_group.attrs["mask_rle_layout"] = "component_groups"
-    clear_mask_rle_stale_attrs(run_group)
+    run_group.attrs["mask_rle_stale"] = True
+    run_group.attrs["mask_rle_stale_reason"] = (
+        "awaiting_exact_dense_equivalence_validation"
+    )
 
     return {
         "status": "written",
@@ -1284,6 +1334,39 @@ def _clear_mask_rle_stale_for_refreshed_components(
     run_group.attrs["mask_rle_stale_component_names"] = remaining
 
 
+def _clear_mask_bitpacked_stale_for_refreshed_selection(
+    run_group: Any,
+    *,
+    refreshed_components: Sequence[str],
+    refreshed_rows: Sequence[int],
+    all_components: Sequence[str],
+    all_row_count: int,
+) -> None:
+    """Clear bitpacked freshness only when the recorded edit scope is covered."""
+
+    if not _attr_truthy(run_group.attrs.get("mask_bitpacked_stale")):
+        return
+    refreshed_component_set = {str(value) for value in refreshed_components}
+    all_component_set = {str(value) for value in all_components}
+    stale_components = run_group.attrs.get("mask_bitpacked_stale_component_names")
+    if isinstance(stale_components, (list, tuple)) and stale_components:
+        components_covered = {
+            str(value) for value in stale_components
+        } <= refreshed_component_set
+    else:
+        components_covered = refreshed_component_set == all_component_set
+
+    refreshed_row_set = {int(value) for value in refreshed_rows}
+    stale_rows = run_group.attrs.get("mask_bitpacked_stale_row_ids")
+    if isinstance(stale_rows, (list, tuple)) and stale_rows:
+        rows_covered = {int(value) for value in stale_rows} <= refreshed_row_set
+    else:
+        rows_covered = len(refreshed_row_set) == int(all_row_count)
+
+    if components_covered and rows_covered:
+        clear_mask_bitpacked_stale_attrs(run_group)
+
+
 def write_component_rle_mask_store_from_dense(
     run_group: Any,
     dense_masks: Any,
@@ -1419,6 +1502,7 @@ def write_component_rle_mask_store_from_dense(
         summary["phase_seconds"] = dict(phase_seconds)
         summary["roundtrip_validation"] = validation
         summary["mask_rle_validation"] = {"mode": "full", **validation}
+        clear_mask_rle_stale_attrs(run_group)
     elif validation_mode == "invariants":
         validation_started = time.perf_counter()
         emit(
@@ -1779,18 +1863,18 @@ def refresh_component_rle_mask_store_from_dense(
         run_group.attrs["mask_rle_refresh_row_count"] = int(n_rows)
         run_group.attrs["mask_rle_refreshed_component_names"] = list(selected_names)
         run_group.attrs["mask_rle_refreshed_component_count"] = int(len(selected_names))
-        if clear_stale:
-            _clear_mask_rle_stale_for_refreshed_components(
-                run_group,
-                refreshed_components=selected_names,
-                all_components=names,
-            )
         validation = validate_component_rle_mask_store_invariants(
             run_group,
             expected_shape=(int(n_rows), int(n_channels), int(height), int(width)),
             component_names=names,
             source_path=str(source_path),
         )
+        if clear_stale:
+            _clear_mask_rle_stale_for_refreshed_components(
+                run_group,
+                refreshed_components=selected_names,
+                all_components=names,
+            )
         return {
             "status": "rle_refreshed",
             "encoding": "component_rle_v1",
@@ -1821,7 +1905,13 @@ def refresh_component_rle_mask_store_from_dense(
             "refreshed_at_utc": _utc_now(),
         },
     )
-    update_mask_storage_attrs(run_group, has_dense=True, has_rle=True, has_bitpacked="mask_bitpacked" in run_group)
+    update_mask_storage_attrs(
+        run_group,
+        has_dense=True,
+        has_rle=True,
+        has_bitpacked="mask_bitpacked" in run_group,
+        reset_stale_flags=False,
+    )
     refreshed_at_utc = _utc_now()
     run_group.attrs["mask_rle_refreshed_from"] = "masks_roi"
     run_group.attrs["mask_rle_refreshed_at_utc"] = refreshed_at_utc
@@ -2185,6 +2275,7 @@ __all__ = [
     "DENSE_MASK_ENCODING_V1",
     "MaskStore",
     "MaskStoreError",
+    "clear_mask_bitpacked_stale_attrs",
     "clear_mask_rle_stale_attrs",
     "is_mask_rle_stale",
     "mark_derived_mask_caches_stale_attrs",

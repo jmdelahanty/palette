@@ -148,7 +148,7 @@ def test_validate_analysis_plan_checks_exact_dense_outputs(tmp_path: Path) -> No
     target = report["targets"][0]
     assert target["raw_masks"]["dtype"] == "uint8"
     assert target["refined_masks"]["sample_unique_values"] == [1]
-    assert target["refined_masks"]["full_component_contours"] == "absent"
+    assert target["refined_masks"]["authoritative_surface"] == "masks_roi"
 
 
 def test_read_rows_uses_explicit_slices_for_zarr_orthogonal_indexing() -> None:

@@ -176,7 +176,13 @@ def materialize_refined_subject_mask_store(
         del run_group["masks_roi"]
         run_group.attrs["masks_roi_deleted_at_utc"] = _utc_now()
         run_group.attrs["masks_roi_deleted_reason"] = "materialize_refined_subject_mask_store --delete-dense"
-        update_mask_storage_attrs(run_group, has_dense=False, has_bitpacked=has_bitpacked, has_rle=has_rle)
+        update_mask_storage_attrs(
+            run_group,
+            has_dense=False,
+            has_bitpacked=has_bitpacked,
+            has_rle=has_rle,
+            reset_stale_flags=False,
+        )
         summary.update({"status": "deleted", "has_dense_after": False})
         return summary
 

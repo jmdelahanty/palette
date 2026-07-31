@@ -35,6 +35,10 @@ from fisheye.shared.zarr.keypoint_storage import (
 from fisheye.shared.zarr.storage_intent import StoragePlan
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 
 KEYPOINT_SHADOW_SCHEMA_ID = "palette.keypoint.shadow_publication"
@@ -454,7 +458,9 @@ def publish_selector_ineligible_keypoint_snapshot(
             "created_by": str(created_by),
         }
     )
-    family = root.create_group("keypoints_runs")
+    family = require_runs_parent(
+        root, "keypoints_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+    )
     family.attrs.update(
         {
             "benchmark_only": True,

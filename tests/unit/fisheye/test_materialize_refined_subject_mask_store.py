@@ -179,6 +179,36 @@ def test_refresh_bitpacked_mask_store_updates_only_selected_rows_and_components(
     np.testing.assert_array_equal(bitpacked_after[1, 2:], bitpacked_before[1, 2:])
 
 
+def test_bitpacked_full_validation_clears_only_bitpacked_freshness(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    run.attrs.update(
+        {
+            "derived_mask_caches_stale": True,
+            "metrics_stale": True,
+            "contours_stale": True,
+            "mask_rle_stale": True,
+        }
+    )
+
+    write_bitpacked_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=tuple(str(value) for value in run.attrs["mask_labels"]),
+        encode_row_chunk_size=1,
+        validation_mode="full",
+    )
+
+    assert run.attrs["mask_bitpacked_stale"] is False
+    assert run.attrs["derived_mask_caches_stale"] is True
+    assert run.attrs["metrics_stale"] is True
+    assert run.attrs["contours_stale"] is True
+    assert run.attrs["mask_rle_stale"] is True
+
+
 def test_materialize_refined_subject_mask_store_refreshes_scoped_bitpacked_from_dense(
     tmp_path: Path,
 ) -> None:
@@ -289,6 +319,9 @@ def test_component_rle_writer_stamps_storage_attrs_and_clears_stale_marker(tmp_p
     run = root["refined_subject_masks_runs/refined_001"]
     run.attrs["mask_rle_stale"] = True
     run.attrs["mask_rle_stale_reason"] = "old_edit"
+    run.attrs["derived_mask_caches_stale"] = True
+    run.attrs["metrics_stale"] = True
+    run.attrs["contours_stale"] = True
 
     summary = write_component_rle_mask_store_from_dense(
         run,
@@ -304,6 +337,9 @@ def test_component_rle_writer_stamps_storage_attrs_and_clears_stale_marker(tmp_p
     assert run.attrs["mask_rle_materialized"] is True
     assert run.attrs["mask_rle_stale"] is False
     assert "mask_rle_stale_reason" not in run.attrs
+    assert run.attrs["derived_mask_caches_stale"] is True
+    assert run.attrs["metrics_stale"] is True
+    assert run.attrs["contours_stale"] is True
 
 
 def test_component_rle_writer_supports_invariant_validation_mode(tmp_path: Path) -> None:
@@ -328,6 +364,10 @@ def test_component_rle_writer_supports_invariant_validation_mode(tmp_path: Path)
         "status": "skipped",
         "reason": "validation_mode=invariants",
     }
+    assert run.attrs["mask_rle_stale"] is True
+    assert run.attrs["mask_rle_stale_reason"] == (
+        "awaiting_exact_dense_equivalence_validation"
+    )
     assert summary["phase_seconds"]["invariant_validation"] >= 0.0
     assert progress_events[-2:] == [
         "component_rle_invariant_validation_start",

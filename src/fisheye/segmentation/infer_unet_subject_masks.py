@@ -6,6 +6,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import sys
 import time
 from contextvars import ContextVar
@@ -16,7 +17,7 @@ from functools import wraps
 from pathlib import Path
 from queue import Queue
 from threading import Thread
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
 import numpy as np
@@ -28,9 +29,13 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.composite_subject_mask import assert_subject_mask_run_unreferenced
-from ..shared.artifact_fingerprint import fingerprint_artifact
+from ..shared.artifact_fingerprint import require_artifact_content_identity
 from ..shared.inference_timing import InferenceTimingProfiler
-from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
+from ..shared.model_input_transform import (
+    MODEL_INPUT_TRANSFORM_CHOICES,
+    ModelInputTransform,
+    resolve_model_input_transform,
+)
 from ..shared.provenance_attrs import (
     build_assignment_keypoint_attrs,
     build_source_crop_snapshot_attrs,
@@ -43,7 +48,10 @@ from ..shared.row_lineage import (
     write_direct_source_crop_row_ids,
 )
 from ..shared.row_source_signature import copy_selected_row_source_signatures
-from ..shared.run_provenance import append_input_artifacts, build_run_provenance_from_stage_record
+from ..shared.run_provenance import (
+    append_input_artifacts,
+    build_run_provenance_from_stage_record,
+)
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import (
@@ -51,7 +59,19 @@ from ..shared.subject_mask_chunks import (
     subject_mask_metric_row_chunk,
     subject_mask_storage_chunks,
 )
-from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
+from ..shared.subject_mask_attempt import (
+    build_subject_mask_attempt,
+    build_subject_mask_scientific_identity,
+    validate_subject_mask_attempt,
+    validate_subject_mask_scientific_identity,
+)
+from ..shared.subject_mask_worker_receipt import (
+    RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    build_subject_mask_worker_semantic_receipt,
+)
+from ..shared.subject_mask_component_provenance import (
+    write_subject_mask_component_provenance,
+)
 from ..shared.subject_mask_coordinate_publication import (
     SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR,
     SUBJECT_MASK_PUBLICATION_GENERATION_ATTR,
@@ -75,6 +95,12 @@ from ..shared.zarr_run_completion import (
     mark_run_started,
     note_pending_latest,
     require_runs_parent,
+)
+from ..shared.zarr.manifest_digest import canonical_json_bytes
+from ..shared.zarr.subject_mask_validation_receipt import (
+    SubjectMaskArrayUnitAccumulator,
+    streaming_array_sha256,
+    subject_mask_array_unit_document,
 )
 from ..registry.db import Registry, RegistryPaths
 from ..registry.model_resolution import (
@@ -108,6 +134,13 @@ MASK_PROBS_SHARDING_SCHEMA = "palette.subject_mask_probability_postpack.v1"
 MASK_PROBS_DIRECT_SHARDING_SCHEMA = (
     "palette.subject_mask_probability_double_buffered_shards.v1"
 )
+SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR = "subject_mask_scientific_identity"
+SUBJECT_MASK_ATTEMPT_ATTR = "subject_mask_attempt"
+SUBJECT_MASK_ATTEMPT_LINEAGE_EVIDENCE_ATTR = "subject_mask_attempt_lineage_evidence"
+SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR = (
+    "subject_mask_worker_semantic_receipt_binding"
+)
+SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_SIDECAR = "worker_semantic_receipt.json"
 _SUBJECT_MASK_SELECTOR_ATTRS = (
     "latest",
     "latest_complete",
@@ -127,10 +160,7 @@ def _snapshot_selected_attrs(
     attrs = getattr(node, "attrs", None)
     if attrs is None or not hasattr(attrs, "keys"):
         raise RuntimeError("Cannot snapshot subject-mask selector attrs.")
-    return {
-        name: (name in attrs, copy.deepcopy(attrs.get(name)))
-        for name in names
-    }
+    return {name: (name in attrs, copy.deepcopy(attrs.get(name))) for name in names}
 
 
 def _restore_owned_subject_mask_selectors(
@@ -152,9 +182,7 @@ def _restore_owned_subject_mask_selectors(
         and lease.get("run_path") == f"subject_mask_runs/{run_name}"
         and lease.get("publication_owner") == owner_token
     )
-    lease_present, lease_snapshot = snapshot[
-        SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR
-    ]
+    lease_present, lease_snapshot = snapshot[SUBJECT_MASK_PARENT_PUBLICATION_LEASE_ATTR]
     if (
         lease is not None
         and not lease_owned
@@ -199,8 +227,7 @@ def _restore_owned_subject_mask_selectors(
                 failures.append(f"{name}: {exc}")
     if failures:
         raise RuntimeError(
-            "Subject-mask owned selector rollback was incomplete: "
-            f"{failures!r}."
+            "Subject-mask owned selector rollback was incomplete: " f"{failures!r}."
         )
 
 
@@ -237,8 +264,7 @@ class _SubjectMaskAttemptFailureBoundary:
             raise RuntimeError("A subject-mask attempt cannot bind more than one run.")
         if (
             self.owner_token is None
-            or run.attrs.get(SUBJECT_MASK_PUBLICATION_OWNER_ATTR)
-            != self.owner_token
+            or run.attrs.get(SUBJECT_MASK_PUBLICATION_OWNER_ATTR) != self.owner_token
         ):
             raise RuntimeError(
                 "Subject-mask child did not persist its atomic publication owner."
@@ -274,18 +300,12 @@ class _SubjectMaskAttemptFailureBoundary:
         return self.parent
 
     def require_owned_run(self) -> Any:
-        if (
-            self.parent is None
-            or self.run_name is None
-            or self.owner_token is None
-        ):
+        if self.parent is None or self.run_name is None or self.owner_token is None:
             raise RuntimeError("Subject-mask publication ownership is not bound.")
         try:
             run = self.fresh_parent()[self.run_name]
         except BaseException as exc:
-            raise RuntimeError(
-                "Subject-mask publication child disappeared."
-            ) from exc
+            raise RuntimeError("Subject-mask publication child disappeared.") from exc
         if run.attrs.get(SUBJECT_MASK_PUBLICATION_OWNER_ATTR) != self.owner_token:
             raise RuntimeError(
                 "Subject-mask publication child was replaced by another owner."
@@ -357,9 +377,9 @@ class _SubjectMaskAttemptFailureBoundary:
             ) from original
 
 
-_ACTIVE_SUBJECT_MASK_ATTEMPT: ContextVar[
-    _SubjectMaskAttemptFailureBoundary | None
-] = ContextVar("active_subject_mask_attempt", default=None)
+_ACTIVE_SUBJECT_MASK_ATTEMPT: ContextVar[_SubjectMaskAttemptFailureBoundary | None] = (
+    ContextVar("active_subject_mask_attempt", default=None)
+)
 
 
 def _fail_closed_subject_mask_attempt(function):
@@ -385,6 +405,112 @@ class _SubjectMaskOutputBatch:
     probs_out: np.ndarray
     binary: Optional[np.ndarray]
     metrics: dict[str, np.ndarray]
+
+
+def _raw_worker_validation_accumulators(
+    *,
+    total_rois: int,
+    n_channels: int,
+    height: int,
+    width: int,
+    probability_dtype: np.dtype[Any],
+    write_masks_roi: bool,
+    unit_rows: int,
+) -> dict[str, SubjectMaskArrayUnitAccumulator]:
+    shapes_dtypes: dict[str, tuple[tuple[int, ...], np.dtype[Any]]] = {
+        "mask_probs_roi": (
+            (total_rois, n_channels, height, width),
+            np.dtype(probability_dtype),
+        ),
+        "metrics/prob_max": ((total_rois, n_channels), np.dtype(np.float32)),
+        "metrics/mask_present": ((total_rois, n_channels), np.dtype(bool)),
+        "metrics/area_px": ((total_rois, n_channels), np.dtype(np.float32)),
+        "metrics/centroid_xy": (
+            (total_rois, n_channels, 2),
+            np.dtype(np.float32),
+        ),
+        "metrics/centroid_valid": ((total_rois, n_channels), np.dtype(bool)),
+        "metrics/bbox_xyxy": (
+            (total_rois, n_channels, 4),
+            np.dtype(np.float32),
+        ),
+        "metrics/bbox_valid": ((total_rois, n_channels), np.dtype(bool)),
+    }
+    if write_masks_roi:
+        shapes_dtypes["masks_roi"] = (
+            (total_rois, n_channels, height, width),
+            np.dtype(np.uint8),
+        )
+    return {
+        path: SubjectMaskArrayUnitAccumulator(
+            shape=shape,
+            dtype=dtype,
+            unit_rows=int(unit_rows),
+        )
+        for path, (shape, dtype) in shapes_dtypes.items()
+    }
+
+
+def _append_raw_worker_validation_batch(
+    accumulators: Mapping[str, SubjectMaskArrayUnitAccumulator],
+    batch: _SubjectMaskOutputBatch,
+) -> None:
+    values: dict[str, np.ndarray] = {
+        "mask_probs_roi": batch.probs_out,
+        **{f"metrics/{name}": value for name, value in batch.metrics.items()},
+    }
+    if "masks_roi" in accumulators:
+        if batch.binary is None:
+            raise ValueError("Raw worker receipt expected materialized binary masks.")
+        values["masks_roi"] = batch.binary
+    if set(values) != set(accumulators):
+        raise ValueError("Raw worker receipt output inventory changed.")
+    for path, accumulator in accumulators.items():
+        accumulator.append(int(batch.start), values[path])
+
+
+def _seal_raw_worker_semantic_receipt(
+    *,
+    run_group: zarr.Group,
+    run_path: str,
+    scientific_identity: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    accumulators: Mapping[str, SubjectMaskArrayUnitAccumulator],
+    unit_rows: int,
+) -> dict[str, object]:
+    output_document = {
+        path: accumulator.as_document() for path, accumulator in accumulators.items()
+    }
+    available_document = subject_mask_array_unit_document(
+        {"available_channels": run_group["available_channels"]},
+        ("available_channels",),
+        unit_rows=max(1, int(unit_rows)),
+    )
+    array_document = {**output_document, **available_document}
+    required_paths = list(RAW_SUBJECT_MASK_WORKER_OUTPUT_PATHS)
+    if "masks_roi" in output_document:
+        required_paths.insert(1, "masks_roi")
+    roi_aligned_paths = tuple(
+        path for path in required_paths if path != "available_channels"
+    )
+    payload = scientific_identity.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("Raw worker scientific identity payload is absent.")
+    return build_subject_mask_worker_semantic_receipt(
+        stage_kind="raw_subject_mask",
+        run_path=run_path,
+        scientific_identity=scientific_identity,
+        attempt=attempt,
+        scope={
+            "crop": payload.get("crop"),
+            "pixels": payload.get("pixels"),
+            "row_identity": payload.get("row_identity"),
+        },
+        row_count=int(run_group["mask_probs_roi"].shape[0]),
+        array_document=array_document,
+        required_paths=required_paths,
+        roi_aligned_paths=roi_aligned_paths,
+    )
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -438,8 +564,12 @@ def _normalise_roi_tensor(batch: torch.Tensor) -> torch.Tensor:
     else:
         batch = batch.to(dtype=torch.float32)
         if batch.numel():
-            max_val = torch.nan_to_num(batch, nan=0.0, posinf=float("inf"), neginf=float("-inf")).amax()
-            batch = batch / torch.maximum(max_val, torch.tensor(1.0, device=batch.device, dtype=torch.float32))
+            max_val = torch.nan_to_num(
+                batch, nan=0.0, posinf=float("inf"), neginf=float("-inf")
+            ).amax()
+            batch = batch / torch.maximum(
+                max_val, torch.tensor(1.0, device=batch.device, dtype=torch.float32)
+            )
 
     batch = torch.nan_to_num(batch, nan=0.0, posinf=1.0, neginf=0.0)
     batch = torch.clamp(batch, 0.0, 1.0)
@@ -448,7 +578,9 @@ def _normalise_roi_tensor(batch: torch.Tensor) -> torch.Tensor:
     return batch
 
 
-def _probabilities_from_logits(logits: torch.Tensor, *, mask_probs_dtype: str) -> np.ndarray:
+def _probabilities_from_logits(
+    logits: torch.Tensor, *, mask_probs_dtype: str
+) -> np.ndarray:
     probs = torch.sigmoid(logits)
     probs = torch.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
     probs = torch.clamp(probs, 0.0, 1.0)
@@ -482,26 +614,39 @@ def _postprocess_logits_on_device(
 
     area_px = binary.sum(dim=(2, 3), dtype=torch.float32)
     prob_max = probs_for_metrics.amax(dim=(2, 3))
-    spatial_metrics = _compute_spatial_metrics_from_binary_tensor(binary, area_px=area_px)
+    spatial_metrics = _compute_spatial_metrics_from_binary_tensor(
+        binary, area_px=area_px
+    )
     probs_out_cpu = probs_out.cpu().numpy()
     if mask_probs_dtype == "uint8":
         # Canonical uint8 metrics use max-then-decode on the CPU. Computing
         # divide-then-max on the GPU can differ by one float32 ULP for the same
         # persisted bytes, which defeats cross-backend logical digests.
-        prob_max_cpu = (
-            np.max(probs_out_cpu, axis=(2, 3)).astype(np.float32, copy=False)
-            / np.float32(255.0)
-        )
+        prob_max_cpu = np.max(probs_out_cpu, axis=(2, 3)).astype(
+            np.float32, copy=False
+        ) / np.float32(255.0)
     else:
         prob_max_cpu = prob_max.cpu().numpy().astype(np.float32, copy=False)
     metrics = {
         "prob_max": prob_max_cpu,
         "mask_present": (area_px > 0.0).cpu().numpy().astype(bool, copy=False),
         "area_px": area_px.cpu().numpy().astype(np.float32, copy=False),
-        "centroid_xy": spatial_metrics["centroid_xy"].cpu().numpy().astype(np.float32, copy=False),
-        "centroid_valid": spatial_metrics["centroid_valid"].cpu().numpy().astype(bool, copy=False),
-        "bbox_xyxy": spatial_metrics["bbox_xyxy"].cpu().numpy().astype(np.float32, copy=False),
-        "bbox_valid": spatial_metrics["bbox_valid"].cpu().numpy().astype(bool, copy=False),
+        "centroid_xy": spatial_metrics["centroid_xy"]
+        .cpu()
+        .numpy()
+        .astype(np.float32, copy=False),
+        "centroid_valid": spatial_metrics["centroid_valid"]
+        .cpu()
+        .numpy()
+        .astype(bool, copy=False),
+        "bbox_xyxy": spatial_metrics["bbox_xyxy"]
+        .cpu()
+        .numpy()
+        .astype(np.float32, copy=False),
+        "bbox_valid": spatial_metrics["bbox_valid"]
+        .cpu()
+        .numpy()
+        .astype(bool, copy=False),
     }
     binary_out = binary.cpu().numpy() if return_binary else None
     return probs_out_cpu, binary_out, metrics
@@ -526,17 +671,25 @@ def _compute_spatial_metrics_from_binary_tensor(
 
     y_counts = mask.sum(dim=3, dtype=torch.float32)
     x_counts = mask.sum(dim=2, dtype=torch.float32)
-    y_float = torch.arange(height, device=mask.device, dtype=torch.float32).view(1, 1, height)
-    x_float = torch.arange(width, device=mask.device, dtype=torch.float32).view(1, 1, width)
+    y_float = torch.arange(height, device=mask.device, dtype=torch.float32).view(
+        1, 1, height
+    )
+    x_float = torch.arange(width, device=mask.device, dtype=torch.float32).view(
+        1, 1, width
+    )
     y_sum = (y_counts * y_float).sum(dim=2)
     x_sum = (x_counts * x_float).sum(dim=2)
 
     centroid_xy = torch.stack((x_sum / denominator, y_sum / denominator), dim=2)
-    centroid_xy = torch.where(valid.unsqueeze(2), centroid_xy, torch.zeros_like(centroid_xy))
+    centroid_xy = torch.where(
+        valid.unsqueeze(2), centroid_xy, torch.zeros_like(centroid_xy)
+    )
 
     row_has_mask = mask.any(dim=3)
     col_has_mask = mask.any(dim=2)
-    y_int = torch.arange(height, device=mask.device, dtype=torch.int32).view(1, 1, height)
+    y_int = torch.arange(height, device=mask.device, dtype=torch.int32).view(
+        1, 1, height
+    )
     x_int = torch.arange(width, device=mask.device, dtype=torch.int32).view(1, 1, width)
     y_min = torch.where(
         row_has_mask,
@@ -572,7 +725,9 @@ def _compute_spatial_metrics_from_binary_tensor(
     }
 
 
-def _compute_channel_metrics(binary_masks: np.ndarray, probs: np.ndarray) -> dict[str, np.ndarray]:
+def _compute_channel_metrics(
+    binary_masks: np.ndarray, probs: np.ndarray
+) -> dict[str, np.ndarray]:
     binary = np.asarray(binary_masks, dtype=np.uint8)
     prob_arr = np.asarray(probs, dtype=np.float32)
     if binary.ndim != 3 or prob_arr.shape != binary.shape:
@@ -581,7 +736,11 @@ def _compute_channel_metrics(binary_masks: np.ndarray, probs: np.ndarray) -> dic
     row_count = int(binary.shape[0])
     area_px = binary.sum(axis=(1, 2), dtype=np.int64).astype(np.float32)
     mask_present = area_px > 0.0
-    prob_max = prob_arr.max(axis=(1, 2)).astype(np.float32, copy=False) if row_count else np.zeros((0,), dtype=np.float32)
+    prob_max = (
+        prob_arr.max(axis=(1, 2)).astype(np.float32, copy=False)
+        if row_count
+        else np.zeros((0,), dtype=np.float32)
+    )
     spatial_metrics = _compute_channel_spatial_metrics(binary)
 
     return {
@@ -630,11 +789,15 @@ def _compute_channel_spatial_metrics(binary_masks: np.ndarray) -> dict[str, np.n
     }
 
 
-def _load_checkpoint(path: Path, device: torch.device) -> Tuple[UNetSmall, Dict[str, object]]:
+def _load_checkpoint(
+    path: Path, device: torch.device
+) -> Tuple[UNetSmall, Dict[str, object]]:
     checkpoint = torch.load(path, map_location=device)
     model_cfg = checkpoint.get("model_config")
     if not model_cfg:
-        raise ValueError("Checkpoint missing 'model_config'; retrain with updated trainer.")
+        raise ValueError(
+            "Checkpoint missing 'model_config'; retrain with updated trainer."
+        )
     model = UNetSmall(**model_cfg)
     state_dict = checkpoint.get("model_state")
     if state_dict is None:
@@ -659,13 +822,20 @@ def _normalize_checkpoint_state_dict(state_dict: object) -> object:
         key_text = str(key)
         normalized_key = key_text[len(prefix) :] if key_text.startswith(prefix) else key
         if normalized_key in normalized:
-            raise ValueError(f"Checkpoint state_dict key collision after removing {prefix!r}.")
+            raise ValueError(
+                f"Checkpoint state_dict key collision after removing {prefix!r}."
+            )
         normalized[normalized_key] = value
     return normalized
 
 
-def _resolve_checkpoint_schema(checkpoint: Dict[str, object]) -> Tuple[str, Tuple[str, ...]]:
-    label_schema_id = str(checkpoint.get("label_schema_id") or "").strip() or SUBJECT_MASK_LABEL_SCHEMA
+def _resolve_checkpoint_schema(
+    checkpoint: Dict[str, object],
+) -> Tuple[str, Tuple[str, ...]]:
+    label_schema_id = (
+        str(checkpoint.get("label_schema_id") or "").strip()
+        or SUBJECT_MASK_LABEL_SCHEMA
+    )
     expected_labels = SUBJECT_MASK_SCHEMAS.get(label_schema_id)
     if expected_labels is None:
         raise ValueError(
@@ -711,12 +881,18 @@ def _resolve_assignment_keypoint_attrs(
     parent = root.get(group_name)
     run_name = str(assignment_keypoints_run)
     if parent is None or run_name not in parent:
-        raise ValueError(f"Assignment keypoint source not found: {group_name}/{run_name}.")
+        raise ValueError(
+            f"Assignment keypoint source not found: {group_name}/{run_name}."
+        )
     kp_group = parent[run_name]
     keypoints_roi = kp_group.get("keypoints_roi")
     if keypoints_roi is None:
-        raise ValueError(f"Assignment keypoint source {group_name}/{run_name} missing keypoints_roi.")
-    success_name = next((name for name in KEYPOINT_SUCCESS_DATASET_CANDIDATES if name in kp_group), None)
+        raise ValueError(
+            f"Assignment keypoint source {group_name}/{run_name} missing keypoints_roi."
+        )
+    success_name = next(
+        (name for name in KEYPOINT_SUCCESS_DATASET_CANDIDATES if name in kp_group), None
+    )
     if success_name is None:
         raise ValueError(
             f"Assignment keypoint source {group_name}/{run_name} missing success dataset "
@@ -744,7 +920,9 @@ def _resolve_assignment_keypoint_attrs(
         selection="cli_explicit",
     )
     payload["assignment_keypoint_success_dataset"] = str(success_name)
-    payload["assignment_keypoint_eye_indices"] = {key: int(value) for key, value in eye_indices.items()}
+    payload["assignment_keypoint_eye_indices"] = {
+        key: int(value) for key, value in eye_indices.items()
+    }
     return payload
 
 
@@ -756,7 +934,9 @@ def _prepare_run_group(
     output_parent: str = SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
 ) -> Tuple[zarr.Group, str]:
     if output_parent not in SUBJECT_MASK_OUTPUT_PARENTS:
-        raise ValueError(f"output_parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {output_parent!r}.")
+        raise ValueError(
+            f"output_parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {output_parent!r}."
+        )
     parent = require_runs_parent(
         root,
         output_parent,
@@ -921,9 +1101,13 @@ def _write_canonical_subject_mask_selection(
 
 
 def _output_parent_from_args(args: argparse.Namespace) -> str:
-    output_parent = str(getattr(args, "output_parent", SUBJECT_MASK_CANONICAL_OUTPUT_PARENT))
+    output_parent = str(
+        getattr(args, "output_parent", SUBJECT_MASK_CANONICAL_OUTPUT_PARENT)
+    )
     if output_parent not in SUBJECT_MASK_OUTPUT_PARENTS:
-        raise ValueError(f"--output-parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {output_parent!r}.")
+        raise ValueError(
+            f"--output-parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {output_parent!r}."
+        )
     return output_parent
 
 
@@ -931,11 +1115,315 @@ def _is_shard_output_parent(output_parent: str) -> bool:
     return str(output_parent) == SUBJECT_MASK_SHARD_OUTPUT_PARENT
 
 
-def _subject_mask_stage_path(output_parent: str, run_name: str, artifact: str = "mask_probs_roi") -> str:
+def _sha256_document(value: Any) -> dict[str, object]:
+    array = np.ascontiguousarray(np.asarray(value))
+    return {
+        "shape": [int(dimension) for dimension in array.shape],
+        "dtype": str(array.dtype),
+        "sha256": hashlib.sha256(array.view(np.uint8)).hexdigest(),
+    }
+
+
+def _source_pixel_manifest(crop_source: CropImageSource) -> Mapping[str, Any] | None:
+    source_array = getattr(crop_source, "_roi_images", None)
+    manifest = getattr(source_array, "manifest", None)
+    if isinstance(manifest, Mapping):
+        return manifest
+    manifest_path = getattr(crop_source, "pixel_materialization_manifest", None)
+    if manifest_path is None:
+        return None
+    try:
+        loaded = json.loads(Path(str(manifest_path)).read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(
+            "Unable to load the consumed crop-pixel materialization manifest."
+        ) from exc
+    if not isinstance(loaded, Mapping):
+        raise ValueError("Crop-pixel materialization manifest must be an object.")
+    return loaded
+
+
+def _subject_mask_scientific_documents(
+    *,
+    run_group: zarr.Group,
+    crop_group: zarr.Group,
+    crop_source: CropImageSource,
+    crop_run_name: str,
+    checkpoint_artifact: Mapping[str, Any],
+    selected_model: Mapping[str, Any],
+    label_schema_id: str,
+    mask_labels: Sequence[str],
+    model_input_transform: ModelInputTransform,
+    mask_probs_dtype: str,
+    observed_pixels_sha256: str,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Build exact science-facing inputs while excluding runtime/storage knobs."""
+
+    pixel_manifest = _source_pixel_manifest(crop_source)
+    declared_pixels_sha256: str | None = None
+    manifest_schema: object = None
+    if pixel_manifest is not None:
+        array = pixel_manifest.get("array")
+        if not isinstance(array, Mapping):
+            raise ValueError("Consumed ROI-pixel manifest lacks its array contract.")
+        declared = array.get("sha256")
+        if (
+            not isinstance(declared, str)
+            or len(declared) != 64
+            or any(character not in "0123456789abcdef" for character in declared)
+        ):
+            raise ValueError(
+                "Consumed ROI-pixel manifests require array.sha256 as lowercase SHA-256."
+            )
+        declared_pixels_sha256 = declared
+        if declared_pixels_sha256 != observed_pixels_sha256:
+            raise RuntimeError(
+                "ROI pixels changed between authenticated staging/open and inference: "
+                f"expected {declared_pixels_sha256}, observed "
+                f"{observed_pixels_sha256}."
+            )
+        manifest_schema = pixel_manifest.get("schema_id") or pixel_manifest.get(
+            "schema"
+        )
+
+    crop_manifest = crop_group.attrs.get("run_manifest")
+    crop_manifest_reference: dict[str, object] | None = None
+    if isinstance(crop_manifest, Mapping):
+        payload_digest = crop_manifest.get("payload_digest")
+        if not isinstance(payload_digest, str) or len(payload_digest) != 64:
+            raise ValueError("Crop run_manifest lacks its exact payload digest.")
+        crop_manifest_reference = {
+            "schema_id": crop_manifest.get("schema_id"),
+            "schema_version": crop_manifest.get("schema_version"),
+            "payload_digest": payload_digest,
+        }
+
+    row_paths = (
+        "source_crop_row_ids",
+        "instance_key",
+        "source_acquisition_frame_index",
+        "frame_indices",
+        "source_frame_indices",
+        "source_clip_indices",
+        "source_clip_local_frame_indices",
+        "source_refined_row_ids",
+        "source_detect_row_index",
+    )
+    row_arrays = {
+        path: {
+            "shape": [int(value) for value in run_group[path].shape],
+            "dtype": str(np.dtype(run_group[path].dtype)),
+            "sha256": streaming_array_sha256(run_group[path]),
+        }
+        for path in row_paths
+        if path in run_group
+    }
+    required_row_paths = {
+        "source_crop_row_ids",
+        "instance_key",
+        "source_acquisition_frame_index",
+    }
+    if not required_row_paths <= set(row_arrays):
+        raise ValueError(
+            "Subject-mask scientific identity requires exact crop-row, instance, "
+            "and acquisition-frame arrays."
+        )
+
+    model = {
+        "artifact_role": checkpoint_artifact.get("role"),
+        "artifact_sha256": checkpoint_artifact.get("sha256"),
+        "artifact_size_bytes": checkpoint_artifact.get("size_bytes"),
+        "registry_set_id": selected_model.get("set_id"),
+        "registry_run_id": selected_model.get("run_id"),
+        "label_schema_id": label_schema_id,
+    }
+    roi_coordinates = getattr(crop_source, "roi_coordinates_full", None)
+    if roi_coordinates is None and "roi_coordinates_full" in crop_group:
+        roi_coordinates = np.asarray(crop_group["roi_coordinates_full"][:])
+    if roi_coordinates is None:
+        raise ValueError(
+            "Subject-mask scientific identity requires exact ROI placement geometry."
+        )
+    crop = {
+        "run_id": str(crop_run_name),
+        "run_group_path": str(getattr(crop_group, "path", "")).strip("/"),
+        "run_manifest": crop_manifest_reference,
+        "storage_mode": str(crop_source.storage_mode),
+        "roi_shape_hw": [int(value) for value in crop_source.roi_shape],
+        "roi_coordinates_full": _sha256_document(
+            np.asarray(roi_coordinates, dtype="<i4")
+        ),
+        "source_collection_id": args.source_collection_id,
+        "source_clip_id": args.source_clip_id,
+        "source_clip_index": args.source_clip_index,
+        "source_work_unit_id": args.source_work_unit_id,
+        "source_shard_id": args.source_shard_id,
+    }
+    pixels = {
+        "profile": (
+            str(manifest_schema)
+            if manifest_schema is not None
+            else str(crop_source.roi_read_mode)
+        ),
+        "decoded_shape": [
+            int(crop_source.total_rois),
+            int(crop_source.roi_shape[0]),
+            int(crop_source.roi_shape[1]),
+        ],
+        "decoded_dtype": "uint8",
+        "decoded_order": "C",
+        "decoded_pixels_sha256": observed_pixels_sha256,
+        "declared_pixels_sha256": declared_pixels_sha256,
+        "cache_key": getattr(crop_source, "roi_cache_key", None),
+        "pixel_materialization_id": getattr(
+            crop_source, "pixel_materialization_id", None
+        ),
+        "pixel_contract": getattr(crop_source, "roi_pixel_contract", None),
+    }
+    row_identity = {
+        "row_count": int(crop_source.total_rois),
+        "arrays": row_arrays,
+    }
+    inference_contract = {
+        "segmenter": "unet",
+        "label_schema_id": label_schema_id,
+        "mask_labels": [str(label) for label in mask_labels],
+        "model_input_transform": model_input_transform.to_attrs(),
+        "probability_semantics": "sigmoid_multilabel_logits",
+        "probability_dtype": str(mask_probs_dtype),
+        "probability_encoding": (
+            "linear_uint8_0_255" if mask_probs_dtype == "uint8" else "unit_float"
+        ),
+        "mask_probability_threshold": 0.5,
+        "overlap_policy": "independent_sigmoid",
+    }
+    return build_subject_mask_scientific_identity(
+        stage_kind="raw_subject_mask",
+        model=model,
+        crop=crop,
+        pixels=pixels,
+        row_identity=row_identity,
+        inference_contract=inference_contract,
+    )
+
+
+def _resolve_subject_mask_attempt_lineage(
+    *,
+    parent: zarr.Group,
+    current_run_name: str,
+    scientific_identity: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    retry_of_attempt_id: str | None,
+    supersedes_run: str | None,
+) -> dict[str, object]:
+    """Resolve requested lineage against immutable terminal siblings."""
+
+    scientific_errors = validate_subject_mask_scientific_identity(scientific_identity)
+    attempt_errors = validate_subject_mask_attempt(attempt)
+    if scientific_errors or attempt_errors:
+        raise ValueError(
+            "Invalid subject-mask attempt records: "
+            f"science={scientific_errors!r}, attempt={attempt_errors!r}."
+        )
+    attempt_id = str(attempt["payload"]["attempt_id"])
+    retry_matches: list[tuple[str, Any, Mapping[str, Any]]] = []
+    for sibling_name in parent.keys():
+        if sibling_name == current_run_name:
+            continue
+        sibling = parent[sibling_name]
+        sibling_attempt = sibling.attrs.get(SUBJECT_MASK_ATTEMPT_ATTR)
+        if not isinstance(sibling_attempt, Mapping):
+            continue
+        errors = validate_subject_mask_attempt(sibling_attempt)
+        if errors:
+            raise ValueError(
+                f"Sibling {sibling_name!r} has malformed subject-mask attempt "
+                f"metadata: {errors!r}."
+            )
+        sibling_attempt_id = str(sibling_attempt["payload"]["attempt_id"])
+        if sibling_attempt_id == attempt_id:
+            raise ValueError(
+                f"Subject-mask attempt_id {attempt_id!r} is already in use by "
+                f"{sibling_name!r}."
+            )
+        if retry_of_attempt_id is not None and sibling_attempt_id == str(
+            retry_of_attempt_id
+        ):
+            retry_matches.append((str(sibling_name), sibling, sibling_attempt))
+
+    retry_evidence: dict[str, object] | None = None
+    if retry_of_attempt_id is not None:
+        if len(retry_matches) != 1:
+            raise ValueError(
+                "--retry-of-attempt-id must identify exactly one sibling attempt; "
+                f"found {len(retry_matches)}."
+            )
+        retry_name, retry_group, retry_attempt = retry_matches[0]
+        retry_science = retry_group.attrs.get(SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR)
+        if (
+            retry_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != "failed"
+            or not isinstance(retry_science, Mapping)
+            or retry_science.get("digest") != scientific_identity.get("digest")
+        ):
+            raise ValueError(
+                "A retry must reference one failed attempt with the exact same "
+                "scientific identity."
+            )
+        retry_evidence = {
+            "run_name": retry_name,
+            "run_path": f"{str(getattr(parent, 'path', '')).strip('/')}/{retry_name}",
+            "attempt_id": str(retry_of_attempt_id),
+            "attempt_payload_digest": retry_attempt.get("payload_digest"),
+            "scientific_identity_digest": retry_science.get("digest"),
+            "completion_status": "failed",
+        }
+
+    supersedes_evidence: dict[str, object] | None = None
+    if supersedes_run is not None:
+        predecessor_name = str(supersedes_run).strip()
+        if predecessor_name == current_run_name or predecessor_name not in parent:
+            raise ValueError(
+                "--supersedes-run must identify a different existing sibling run."
+            )
+        predecessor = parent[predecessor_name]
+        if predecessor.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
+            raise ValueError("A superseded subject-mask run must be complete.")
+        predecessor_attempt = predecessor.attrs.get(SUBJECT_MASK_ATTEMPT_ATTR)
+        predecessor_science = predecessor.attrs.get(
+            SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR
+        )
+        supersedes_evidence = {
+            "run_name": predecessor_name,
+            "run_path": f"{str(getattr(parent, 'path', '')).strip('/')}/{predecessor_name}",
+            "completion_status": RUN_STATUS_COMPLETE,
+            "attempt_payload_digest": (
+                predecessor_attempt.get("payload_digest")
+                if isinstance(predecessor_attempt, Mapping)
+                else None
+            ),
+            "scientific_identity_digest": (
+                predecessor_science.get("digest")
+                if isinstance(predecessor_science, Mapping)
+                else None
+            ),
+        }
+    return {
+        "retry_of": retry_evidence,
+        "supersedes": supersedes_evidence,
+        "lineage_policy": "explicit_terminal_sibling_binding_v1",
+    }
+
+
+def _subject_mask_stage_path(
+    output_parent: str, run_name: str, artifact: str = "mask_probs_roi"
+) -> str:
     return f"{output_parent}/{run_name}/{artifact}"
 
 
-def _shard_attrs_from_args(args: argparse.Namespace, *, output_parent: str) -> dict[str, object]:
+def _shard_attrs_from_args(
+    args: argparse.Namespace, *, output_parent: str
+) -> dict[str, object]:
     if not _is_shard_output_parent(output_parent):
         return {}
     alias_manifest = args.source_roi_cache_alias_manifest or args.roi_cache_manifest
@@ -1013,7 +1501,9 @@ def _write_subject_mask_output_batch(
         probs_arr[start:stop] = batch.probs_out
     if masks_arr is not None:
         if batch.binary is None:
-            raise ValueError("masks_roi materialization requested but binary masks were not returned.")
+            raise ValueError(
+                "masks_roi materialization requested but binary masks were not returned."
+            )
         with profiler.time("output_write_binary", items=batch_count):
             masks_arr[start:stop] = batch.binary
 
@@ -1042,7 +1532,9 @@ def _probability_array_digest(array: zarr.Array, *, row_step: int) -> str:
     return digest.hexdigest()
 
 
-def _probability_array_digests_by_channel(array: zarr.Array, *, row_step: int) -> list[str]:
+def _probability_array_digests_by_channel(
+    array: zarr.Array, *, row_step: int
+) -> list[str]:
     channel_digests: list[str] = []
     total_rows = int(array.shape[0])
     for channel in range(int(array.shape[1])):
@@ -1077,7 +1569,9 @@ class _DoubleBufferedProbabilityShardWriter:
     ) -> None:
         shape = tuple(int(value) for value in destination.shape)
         if len(shape) != 4:
-            raise ValueError(f"Probability destination must have shape (N,C,H,W); got {shape}.")
+            raise ValueError(
+                f"Probability destination must have shape (N,C,H,W); got {shape}."
+            )
         resolved_buffer_count = int(buffer_count)
         if resolved_buffer_count != 2:
             raise ValueError(
@@ -1120,7 +1614,9 @@ class _DoubleBufferedProbabilityShardWriter:
 
     def _raise_error(self) -> None:
         if self._errors:
-            raise RuntimeError("Double-buffered probability shard writer failed.") from self._errors[0]
+            raise RuntimeError(
+                "Double-buffered probability shard writer failed."
+            ) from self._errors[0]
 
     def _acquire_buffer(self, *, start: int) -> None:
         self._raise_error()
@@ -1141,7 +1637,9 @@ class _DoubleBufferedProbabilityShardWriter:
 
     def __setitem__(self, key: slice, values: np.ndarray) -> None:
         if not isinstance(key, slice) or key.step not in (None, 1):
-            raise TypeError("Probability shard writer accepts contiguous row slices only.")
+            raise TypeError(
+                "Probability shard writer accepts contiguous row slices only."
+            )
         start = int(0 if key.start is None else key.start)
         stop = int(self.total_rows if key.stop is None else key.stop)
         if start != self._next_row:
@@ -1151,7 +1649,9 @@ class _DoubleBufferedProbabilityShardWriter:
         batch = np.asarray(values, dtype=self.destination.dtype)
         expected_shape = (stop - start, self.channel_count, self.height, self.width)
         if tuple(int(value) for value in batch.shape) != expected_shape:
-            raise ValueError(f"Probability batch shape {batch.shape} does not match {expected_shape}.")
+            raise ValueError(
+                f"Probability batch shape {batch.shape} does not match {expected_shape}."
+            )
 
         source_offset = 0
         while source_offset < int(batch.shape[0]):
@@ -1193,7 +1693,9 @@ class _DoubleBufferedProbabilityShardWriter:
                 with self.profiler.time("output_shard_write", items=row_count):
                     for channel in range(self.channel_count):
                         channel_values = self.buffers[index][channel, :row_count, :, :]
-                        self._source_digests[channel].update(channel_values.view(np.uint8))
+                        self._source_digests[channel].update(
+                            channel_values.view(np.uint8)
+                        )
                         self.destination[
                             start:stop,
                             channel : channel + 1,
@@ -1205,7 +1707,9 @@ class _DoubleBufferedProbabilityShardWriter:
                     self._full_shards_written += 1
                 else:
                     self._partial_shards_written += 1
-            except BaseException as exc:  # pragma: no cover - exercised through caller failure
+            except (
+                BaseException
+            ) as exc:  # pragma: no cover - exercised through caller failure
                 self._errors.append(exc)
                 failed = True
             finally:
@@ -1251,7 +1755,9 @@ class _DoubleBufferedProbabilityShardWriter:
             "channel_count": self.channel_count,
             "inner_chunk_shape": [int(value) for value in self.destination.chunks],
             "outer_shard_shape": [int(value) for value in self.destination.shards],
-            "inner_chunks_per_shard": int(self.shard_rows // int(self.destination.chunks[0])),
+            "inner_chunks_per_shard": int(
+                self.shard_rows // int(self.destination.chunks[0])
+            ),
             "buffer_count": self.buffer_count,
             "buffer_shape_channel_first": list(self.buffers[0].shape),
             "buffer_bytes_each": buffer_bytes_each,
@@ -1278,7 +1784,9 @@ def _postpack_probability_shards(
 ) -> dict[str, object]:
     source = run_group[source_name]
     if int(source.ndim) != 4:
-        raise ValueError(f"{source_name} must have shape (N,C,H,W); got {source.shape}.")
+        raise ValueError(
+            f"{source_name} must have shape (N,C,H,W); got {source.shape}."
+        )
     chunks = tuple(int(value) for value in source.chunks)
     inner_rows = int(chunks[0])
     resolved_shard_rows = int(shard_rows)
@@ -1378,16 +1886,28 @@ def _write_subject_mask_outputs(
     show_progress: bool,
     console: Console,
     timing_profiler: Optional[InferenceTimingProfiler],
+    input_pixels_sha256: Any | None = None,
+    validation_accumulators: (
+        Mapping[str, SubjectMaskArrayUnitAccumulator] | None
+    ) = None,
 ) -> float:
     total_rois = int(roi_source.total_rois)
     height, width = map(int, roi_source.roi_shape)
     n_channels = int(len(mask_labels))
     storage_chunks = subject_mask_storage_chunks(total_rois, height, width)
     if mask_probs_chunk_rois is not None:
-        storage_chunks = (max(1, min(int(mask_probs_chunk_rois), max(1, total_rois))), storage_chunks[1], storage_chunks[2], storage_chunks[3])
+        storage_chunks = (
+            max(1, min(int(mask_probs_chunk_rois), max(1, total_rois))),
+            storage_chunks[1],
+            storage_chunks[2],
+            storage_chunks[3],
+        )
     if mask_probs_shard_rois is not None:
         shard_rows = int(mask_probs_shard_rois)
-        if shard_rows <= int(storage_chunks[0]) or shard_rows % int(storage_chunks[0]) != 0:
+        if (
+            shard_rows <= int(storage_chunks[0])
+            or shard_rows % int(storage_chunks[0]) != 0
+        ):
             raise ValueError(
                 "--mask-probs-shard-rois must exceed and be an integer multiple of "
                 f"the effective inner chunk rows ({int(storage_chunks[0])}); got {shard_rows}."
@@ -1396,7 +1916,9 @@ def _write_subject_mask_outputs(
 
     roi_array = roi_source.roi_array
     compression_kwargs = _compression_kwargs(roi_array) if roi_array is not None else {}
-    stored_prob_dtype = np.dtype(np.uint8 if mask_probs_dtype == "uint8" else np.float16)
+    stored_prob_dtype = np.dtype(
+        np.uint8 if mask_probs_dtype == "uint8" else np.float16
+    )
     profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
 
     masks_arr: Optional[zarr.Array] = None
@@ -1511,7 +2033,9 @@ def _write_subject_mask_outputs(
                         task=task,
                         profiler=profiler,
                     )
-                except BaseException as exc:  # pragma: no cover - exercised through caller failure
+                except (
+                    BaseException
+                ) as exc:  # pragma: no cover - exercised through caller failure
                     output_errors.append(exc)
                     failed = True
                 finally:
@@ -1535,6 +2059,13 @@ def _write_subject_mask_outputs(
                 _raise_async_writer_error(output_errors)
                 with profiler.time("roi_read", items=batch_count):
                     roi_np = roi_source.read_slice(start, stop)
+                if input_pixels_sha256 is not None:
+                    roi_bytes = np.ascontiguousarray(roi_np)
+                    if roi_bytes.dtype != np.dtype(np.uint8):
+                        raise ValueError(
+                            "Subject-mask ROI pixel identity requires decoded uint8 inputs."
+                        )
+                    input_pixels_sha256.update(roi_bytes.view(np.uint8))
 
                 _sync_cuda("sync_before_h2d", items=batch_count)
                 with profiler.time("h2d_copy", items=batch_count):
@@ -1547,7 +2078,11 @@ def _write_subject_mask_outputs(
                 _sync_cuda("sync_after_normalize", items=batch_count)
 
                 amp_module = getattr(torch, "amp", None)
-                if device.type == "cuda" and amp_module is not None and hasattr(amp_module, "autocast"):
+                if (
+                    device.type == "cuda"
+                    and amp_module is not None
+                    and hasattr(amp_module, "autocast")
+                ):
                     autocast_cm = amp_module.autocast("cuda")
                 elif device.type == "cuda" and hasattr(torch.cuda, "amp"):
                     autocast_cm = torch.cuda.amp.autocast()
@@ -1594,6 +2129,11 @@ def _write_subject_mask_outputs(
                     binary=binary,
                     metrics=output_metrics,
                 )
+                if validation_accumulators is not None:
+                    _append_raw_worker_validation_batch(
+                        validation_accumulators,
+                        output_batch,
+                    )
                 if output_queue is None:
                     _write_subject_mask_output_batch(
                         output_batch,
@@ -1623,13 +2163,42 @@ def _write_subject_mask_outputs(
                 output_worker.join()
         _raise_async_writer_error(output_errors)
 
-    metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, n_channels), overwrite=True)
-    metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, n_channels), overwrite=True)
-    metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, n_channels), overwrite=True)
-    metrics_group.create_array("centroid_xy", data=centroid_xy, chunks=(metric_row_chunk, n_channels, 2), overwrite=True)
-    metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
-    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, n_channels, 4), overwrite=True)
-    metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
+    metrics_group.create_array(
+        "prob_max", data=prob_max, chunks=(metric_row_chunk, n_channels), overwrite=True
+    )
+    metrics_group.create_array(
+        "mask_present",
+        data=mask_present,
+        chunks=(metric_row_chunk, n_channels),
+        overwrite=True,
+    )
+    metrics_group.create_array(
+        "area_px", data=area_px, chunks=(metric_row_chunk, n_channels), overwrite=True
+    )
+    metrics_group.create_array(
+        "centroid_xy",
+        data=centroid_xy,
+        chunks=(metric_row_chunk, n_channels, 2),
+        overwrite=True,
+    )
+    metrics_group.create_array(
+        "centroid_valid",
+        data=centroid_valid,
+        chunks=(metric_row_chunk, n_channels),
+        overwrite=True,
+    )
+    metrics_group.create_array(
+        "bbox_xyxy",
+        data=bbox_xyxy,
+        chunks=(metric_row_chunk, n_channels, 4),
+        overwrite=True,
+    )
+    metrics_group.create_array(
+        "bbox_valid",
+        data=bbox_valid,
+        chunks=(metric_row_chunk, n_channels),
+        overwrite=True,
+    )
     if probability_shard_writer is not None:
         run_group.attrs["mask_probs_shard_write"] = probability_shard_writer.finish(
             validation_row_step=int(storage_chunks[0]),
@@ -1642,14 +2211,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description="Infer unified subject-mask probabilities using a trained U-Net segmenter."
     )
     parser.add_argument("zarr_path", help="Path to Palette Zarr archive.")
-    parser.add_argument("checkpoint", nargs="?", help="Path to trained U-Net checkpoint (.pt).")
-    parser.add_argument("--checkpoint", dest="checkpoint_option", help="Path to trained U-Net checkpoint (.pt).")
+    parser.add_argument(
+        "checkpoint", nargs="?", help="Path to trained U-Net checkpoint (.pt)."
+    )
+    parser.add_argument(
+        "--checkpoint",
+        dest="checkpoint_option",
+        help="Path to trained U-Net checkpoint (.pt).",
+    )
     parser.add_argument(
         "--resolve-model-from-registry",
         action="store_true",
         help="Resolve the checkpoint from subject_mask_training_models instead of passing a path.",
     )
-    parser.add_argument("--registry", type=Path, help="Registry SQLite path for --resolve-model-from-registry.")
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Registry SQLite path for --resolve-model-from-registry.",
+    )
     parser.add_argument(
         "--model-set-id",
         help="Require one exact subject-mask registry set id.",
@@ -1692,8 +2271,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=5,
         help="Number of registry candidates to retain in model-resolution provenance.",
     )
-    parser.add_argument("--crop-run", help="Explicit crop run providing ROI images (default: latest/auto).")
+    parser.add_argument(
+        "--crop-run",
+        help="Explicit crop run providing ROI images (default: latest/auto).",
+    )
     parser.add_argument("--run-name", help="Optional name for the output run.")
+    parser.add_argument(
+        "--attempt-id",
+        help="Optional UUID for this execution attempt; generated when omitted.",
+    )
+    parser.add_argument(
+        "--retry-of-attempt-id",
+        help="Optional prior failed attempt UUID with the same scientific identity.",
+    )
+    parser.add_argument(
+        "--supersedes-run",
+        help="Optional explicit predecessor run name; latest is never inferred.",
+    )
     parser.add_argument(
         "--output-parent",
         choices=SUBJECT_MASK_OUTPUT_PARENTS,
@@ -1703,12 +2297,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "shards that must not publish ordinary subject_mask_runs selectors."
         ),
     )
-    parser.add_argument("--source-collection-id", help="Optional clipped collection id for shard outputs.")
-    parser.add_argument("--source-collection-path", help="Optional clipped collection path for shard outputs.")
+    parser.add_argument(
+        "--source-collection-id",
+        help="Optional clipped collection id for shard outputs.",
+    )
+    parser.add_argument(
+        "--source-collection-path",
+        help="Optional clipped collection path for shard outputs.",
+    )
     parser.add_argument("--source-clip-id", help="Optional clip id for shard outputs.")
-    parser.add_argument("--source-clip-index", type=int, help="Optional clip index for shard outputs.")
-    parser.add_argument("--source-work-unit-id", help="Optional work-unit id for shard outputs.")
-    parser.add_argument("--source-shard-id", help="Optional shard id for non-clip collection shards.")
+    parser.add_argument(
+        "--source-clip-index", type=int, help="Optional clip index for shard outputs."
+    )
+    parser.add_argument(
+        "--source-work-unit-id", help="Optional work-unit id for shard outputs."
+    )
+    parser.add_argument(
+        "--source-shard-id", help="Optional shard id for non-clip collection shards."
+    )
     parser.add_argument(
         "--source-roi-cache-alias-manifest",
         type=Path,
@@ -1722,7 +2328,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional row-index parquet path for the clipped collection flat ROI cache shard.",
     )
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size used during inference (default: 256).")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=256,
+        help="Batch size used during inference (default: 256).",
+    )
     parser.add_argument("--device", help="Torch device to use (e.g. 'cuda:0', 'cpu').")
     parser.add_argument(
         "--model-input-size",
@@ -1745,7 +2356,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
     )
-    parser.add_argument("--roi-cache-dir", type=Path, default=None, help="Optional scratch directory for temporary ROI caches.")
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
     roi_manifest_group = parser.add_mutually_exclusive_group()
     roi_manifest_group.add_argument(
         "--roi-cache-manifest",
@@ -1850,7 +2466,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--assignment-keypoint-run",
         help="Keypoint run to use later when splitting eyes_union into anatomical LR eyes.",
     )
-    parser.add_argument("--profile-timings", action="store_true", help="Collect per-stage timing diagnostics.")
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Collect per-stage timing diagnostics.",
+    )
     parser.add_argument(
         "--defer-registry-status",
         action="store_true",
@@ -1860,7 +2480,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "the canonical archive before status is emitted."
         ),
     )
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite the requested output run if it exists.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite the requested output run if it exists.",
+    )
     return parser
 
 
@@ -1914,9 +2538,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     output_parent = _output_parent_from_args(args)
     canonical_output = output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
-    if (
-        args.roi_work_package_manifest is not None
-        and not _is_shard_output_parent(output_parent)
+    if args.roi_work_package_manifest is not None and not _is_shard_output_parent(
+        output_parent
     ):
         raise ValueError(
             "Crop pixel work packages may write only to subject_mask_shard_runs; "
@@ -1937,7 +2560,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     checkpoint_value = args.checkpoint_option or args.checkpoint
     if checkpoint_value and args.resolve_model_from_registry:
-        raise ValueError("Pass either a checkpoint path or --resolve-model-from-registry, not both.")
+        raise ValueError(
+            "Pass either a checkpoint path or --resolve-model-from-registry, not both."
+        )
     model_resolution_payload: Optional[dict[str, Any]] = None
     if checkpoint_value:
         checkpoint_path = Path(checkpoint_value).expanduser().resolve()
@@ -1964,19 +2589,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if isinstance(selected_model.get("model_sha256"), str)
         else None
     )
-    checkpoint_artifact_before_load = fingerprint_artifact(
+    if model_resolution_payload is not None and registry_checkpoint_hash is None:
+        raise ValueError(
+            "Registry-selected subject-mask models require an exact model_sha256."
+        )
+    checkpoint_artifact_before_load = require_artifact_content_identity(
         checkpoint_path,
         role="subject_mask_unet_checkpoint",
-        registry_hash=registry_checkpoint_hash,
+        expected_sha256=registry_checkpoint_hash,
     )
     device = _resolve_device(args.device)
     model, checkpoint = _load_checkpoint(checkpoint_path, device)
-    checkpoint_artifact_after_load = fingerprint_artifact(
+    checkpoint_artifact_after_load = require_artifact_content_identity(
         checkpoint_path,
         role="subject_mask_unet_checkpoint",
-        registry_hash=registry_checkpoint_hash,
+        expected_sha256=registry_checkpoint_hash,
     )
-    artifact_identity_fields = ("path", "fingerprint_scheme", "sha256", "size_bytes", "mtime_ns")
+    artifact_identity_fields = (
+        "path",
+        "fingerprint_scheme",
+        "sha256",
+        "size_bytes",
+        "mtime_ns",
+    )
     if any(
         checkpoint_artifact_before_load.get(name)
         != checkpoint_artifact_after_load.get(name)
@@ -2091,7 +2726,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "crop selection, placement, ROI extent, and acquisition mapping."
             )
     roi_height, roi_width = map(int, crop_source.roi_shape)
-    model_input_size = int(args.model_input_size) if args.model_input_size is not None else max(roi_height, roi_width)
+    model_input_size = (
+        int(args.model_input_size)
+        if args.model_input_size is not None
+        else max(roi_height, roi_width)
+    )
     model_input_transform = resolve_model_input_transform(
         (roi_height, roi_width),
         mode=str(args.model_input_transform),
@@ -2143,7 +2782,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "source_acquisition_frame_index",
                 "source_crop_xywh",
             ):
-                if not np.array_equal(written_selection[name], canonical_selected[name]):
+                if not np.array_equal(
+                    written_selection[name], canonical_selected[name]
+                ):
                     raise RuntimeError(
                         f"Canonical subject-mask selection changed while writing {name}."
                     )
@@ -2179,12 +2820,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
         if getattr(crop_source, "pixel_materialization_id", None) is not None:
             if selected_crop_rows is None:
-                raise ValueError("Package-backed subject-mask inference lacks selected crop rows.")
+                raise ValueError(
+                    "Package-backed subject-mask inference lacks selected crop rows."
+                )
             copy_selected_row_source_signatures(
                 run_group,
                 crop_group,
                 selected_crop_rows,
-                shard_rows=int(args.mask_probs_shard_rois or DEFAULT_MASK_PROBS_SHARD_ROIS),
+                shard_rows=int(
+                    args.mask_probs_shard_rois or DEFAULT_MASK_PROBS_SHARD_ROIS
+                ),
                 root=root,
             )
         if not canonical_output:
@@ -2200,6 +2845,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     overwrite=True,
                 )
 
+        validation_unit_rows = int(
+            args.mask_probs_shard_rois
+            if args.mask_probs_shard_rois is not None
+            else args.mask_probs_chunk_rois
+        )
+        validation_accumulators = _raw_worker_validation_accumulators(
+            total_rois=total_rois,
+            n_channels=len(mask_labels),
+            height=roi_height,
+            width=roi_width,
+            probability_dtype=np.dtype(
+                np.uint8 if args.mask_probs_dtype == "uint8" else np.float16
+            ),
+            write_masks_roi=bool(args.write_masks_roi),
+            unit_rows=validation_unit_rows,
+        )
+        input_pixels_sha256 = hashlib.sha256()
         duration = _write_subject_mask_outputs(
             run_group,
             model,
@@ -2217,12 +2879,76 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             show_progress=bool(args.progress),
             console=console,
             timing_profiler=timing_profiler,
+            input_pixels_sha256=input_pixels_sha256,
+            validation_accumulators=validation_accumulators,
         )
     finally:
         if boundary is not None:
             boundary.close_crop_source()
         else:  # pragma: no cover - public writer is boundary-decorated
             crop_source.close()
+
+    observed_pixels_sha256 = input_pixels_sha256.hexdigest()
+    scientific_identity = _subject_mask_scientific_documents(
+        run_group=run_group,
+        crop_group=crop_group,
+        crop_source=crop_source,
+        crop_run_name=str(crop_run_name),
+        checkpoint_artifact=checkpoint_artifact,
+        selected_model=selected_model,
+        label_schema_id=label_schema_id,
+        mask_labels=mask_labels,
+        model_input_transform=model_input_transform,
+        mask_probs_dtype=str(args.mask_probs_dtype),
+        observed_pixels_sha256=observed_pixels_sha256,
+        args=args,
+    )
+    attempt = build_subject_mask_attempt(
+        scientific_identity=scientific_identity,
+        run_path=f"{output_parent}/{resolved_run_name}",
+        attempt_id=args.attempt_id,
+        retry_of_attempt_id=args.retry_of_attempt_id,
+        supersedes_run=args.supersedes_run,
+    )
+    lineage_evidence = _resolve_subject_mask_attempt_lineage(
+        parent=root[output_parent],
+        current_run_name=resolved_run_name,
+        scientific_identity=scientific_identity,
+        attempt=attempt,
+        retry_of_attempt_id=args.retry_of_attempt_id,
+        supersedes_run=args.supersedes_run,
+    )
+    run_group.attrs[SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR] = scientific_identity
+    run_group.attrs[SUBJECT_MASK_ATTEMPT_ATTR] = attempt
+    run_group.attrs[SUBJECT_MASK_ATTEMPT_LINEAGE_EVIDENCE_ATTR] = lineage_evidence
+    run_path = f"{output_parent}/{resolved_run_name}"
+    worker_receipt = _seal_raw_worker_semantic_receipt(
+        run_group=run_group,
+        run_path=run_path,
+        scientific_identity=scientific_identity,
+        attempt=attempt,
+        accumulators=validation_accumulators,
+        unit_rows=validation_unit_rows,
+    )
+    receipt_bytes = canonical_json_bytes(worker_receipt)
+    receipt_relative_path = f"{run_path}/{SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_SIDECAR}"
+    receipt_path = Path(zarr_path) / receipt_relative_path
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_receipt_path = receipt_path.with_name(
+        f".{receipt_path.name}.{uuid4().hex}.tmp"
+    )
+    temporary_receipt_path.write_bytes(receipt_bytes)
+    with temporary_receipt_path.open("rb") as handle:
+        os.fsync(handle.fileno())
+    os.replace(temporary_receipt_path, receipt_path)
+    run_group.attrs[SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR] = {
+        "schema_id": worker_receipt["schema_id"],
+        "schema_version": worker_receipt["schema_version"],
+        "payload_digest": worker_receipt["payload_digest"],
+        "relative_path": receipt_relative_path,
+        "document_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "storage": "strict_json_sidecar_v1",
+    }
 
     created_at = datetime.now(timezone.utc).isoformat()
     crop_snapshot_attrs = build_source_crop_snapshot_attrs(
@@ -2263,7 +2989,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
             "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
-            "source_roi_cache_canonical_path": getattr(crop_source, "roi_cache_canonical_path", None),
+            "source_roi_cache_canonical_path": getattr(
+                crop_source, "roi_cache_canonical_path", None
+            ),
             "source_roi_cache_expected_archive_path": (
                 str(args.roi_cache_expected_archive_path)
                 if args.roi_cache_expected_archive_path is not None
@@ -2272,19 +3000,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
-            "source_roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+            "source_roi_live_gpu_chunk_frames": int(
+                crop_source.roi_live_gpu_chunk_frames
+            ),
             "label_schema_id": label_schema_id,
             "mask_labels": list(mask_labels),
             "output_semantics": "multilabel",
             "overlap_policy": "independent_sigmoid",
             "probability_semantics": "sigmoid_multilabel_logits",
             "probabilities_dtype": str(args.mask_probs_dtype),
-            "probabilities_encoding": "linear_uint8_0_255" if args.mask_probs_dtype == "uint8" else "unit_float",
+            "probabilities_encoding": (
+                "linear_uint8_0_255"
+                if args.mask_probs_dtype == "uint8"
+                else "unit_float"
+            ),
             "mask_probability_threshold": 0.5,
             "masks_roi_materialized": bool(args.write_masks_roi),
             "binary_masks_materialized": bool(args.write_masks_roi),
             "binary_masks_source": (
-                "threshold(mask_probs_roi, threshold=0.5)" if args.write_masks_roi else "not_materialized"
+                "threshold(mask_probs_roi, threshold=0.5)"
+                if args.write_masks_roi
+                else "not_materialized"
             ),
             "bbox_xyxy_convention": "pixel_edge_half_open",
             "bbox_xyxy_derivation": "foreground_half_open_pixel_edges_xyxy_v1",
@@ -2294,7 +3030,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "model_input_shape_hw": list(model_input_transform.model_shape),
             "native_roi_shape_hw": list(model_input_transform.native_shape),
             "source_checkpoint": str(checkpoint_path),
-            "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
+            "source_checkpoint_best_val_dice": float(
+                checkpoint.get("best_val_dice", float("nan"))
+            ),
+            "source_roi_pixels_sha256": observed_pixels_sha256,
+            SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR: scientific_identity,
+            SUBJECT_MASK_ATTEMPT_ATTR: attempt,
+            SUBJECT_MASK_ATTEMPT_LINEAGE_EVIDENCE_ATTR: lineage_evidence,
             "inference_device": str(device),
             "inference_batch_size": int(args.batch_size),
             "async_output": bool(args.async_output),
@@ -2320,23 +3062,41 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_group.attrs["mask_probs_storage_policy"] = "default_indexed_sharding_v1"
     else:
         run_group.attrs["mask_probs_storage_layout"] = "regular_chunks_v1"
-        run_group.attrs["mask_probs_storage_policy"] = "explicit_regular_chunks_override"
-    run_group.attrs["mask_probs_default_shard_rois"] = int(DEFAULT_MASK_PROBS_SHARD_ROIS)
+        run_group.attrs["mask_probs_storage_policy"] = (
+            "explicit_regular_chunks_override"
+        )
+    run_group.attrs["mask_probs_default_shard_rois"] = int(
+        DEFAULT_MASK_PROBS_SHARD_ROIS
+    )
     if model_resolution_payload is not None:
         selected = model_resolution_payload.get("selected", {})
         if not isinstance(selected, dict):
             selected = {}
         run_group.attrs["model_resolution_mode"] = "registry"
         run_group.attrs["model_resolution_task"] = "subject_masks"
-        run_group.attrs["model_resolution_registry_path"] = model_resolution_payload.get("registry_path")
-        run_group.attrs["model_resolution_resolved_at_utc"] = model_resolution_payload.get("resolved_at_utc")
+        run_group.attrs["model_resolution_registry_path"] = (
+            model_resolution_payload.get("registry_path")
+        )
+        run_group.attrs["model_resolution_resolved_at_utc"] = (
+            model_resolution_payload.get("resolved_at_utc")
+        )
         run_group.attrs["model_resolution_selected_run_id"] = selected.get("run_id")
         run_group.attrs["model_resolution_selected_set_id"] = selected.get("set_id")
-        run_group.attrs["model_resolution_selected_model_path"] = selected.get("model_path")
-        run_group.attrs["model_resolution_selected_coverage_class"] = selected.get("coverage_class")
-        run_group.attrs["model_resolution_selected_component_coverage_key"] = selected.get("component_coverage_key")
-        run_group.attrs["model_resolution_selected_metric_name"] = selected.get("best_metric_name")
-        run_group.attrs["model_resolution_selected_metric_value"] = selected.get("best_metric_value")
+        run_group.attrs["model_resolution_selected_model_path"] = selected.get(
+            "model_path"
+        )
+        run_group.attrs["model_resolution_selected_coverage_class"] = selected.get(
+            "coverage_class"
+        )
+        run_group.attrs["model_resolution_selected_component_coverage_key"] = (
+            selected.get("component_coverage_key")
+        )
+        run_group.attrs["model_resolution_selected_metric_name"] = selected.get(
+            "best_metric_name"
+        )
+        run_group.attrs["model_resolution_selected_metric_value"] = selected.get(
+            "best_metric_value"
+        )
         run_group.attrs["model_resolution_candidates_json"] = json.dumps(
             model_resolution_payload.get("candidates", []),
             sort_keys=True,
@@ -2345,10 +3105,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         selected = {}
 
     metrics_group = run_group.get("metrics")
-    mask_present_array = metrics_group.get("mask_present") if metrics_group is not None else None
+    mask_present_array = (
+        metrics_group.get("mask_present") if metrics_group is not None else None
+    )
     if mask_present_array is not None:
         mask_present_values = np.asarray(mask_present_array[:], dtype=bool)
-        nonempty_rows = np.any(mask_present_values, axis=1) if mask_present_values.ndim == 2 else np.zeros((total_rois,), dtype=bool)
+        nonempty_rows = (
+            np.any(mask_present_values, axis=1)
+            if mask_present_values.ndim == 2
+            else np.zeros((total_rois,), dtype=bool)
+        )
     elif "masks_roi" in run_group:
         masks_array = np.asarray(run_group["masks_roi"][:], dtype=np.uint8)
         nonempty_rows = np.any(masks_array > 0, axis=(1, 2, 3))
@@ -2408,13 +3174,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
         "roi_cache_key": crop_source.roi_cache_key,
         "roi_cache_path": crop_source.roi_cache_path,
-        "roi_cache_canonical_path": getattr(crop_source, "roi_cache_canonical_path", None),
+        "roi_cache_canonical_path": getattr(
+            crop_source, "roi_cache_canonical_path", None
+        ),
         "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
         "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
         "frame_source": crop_source.frame_source_kind,
-        "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
+        "source_video_path": crop_source.frame_source_path
+        or crop_group.attrs.get("video_source_path"),
+        "source_roi_pixels_sha256": observed_pixels_sha256,
+        SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR: scientific_identity,
+        SUBJECT_MASK_ATTEMPT_ATTR: attempt,
+        SUBJECT_MASK_ATTEMPT_LINEAGE_EVIDENCE_ATTR: lineage_evidence,
     }
     provenance_inputs.update(shard_attrs)
     provenance_inputs.update(assignment_keypoint_attrs)
@@ -2423,7 +3196,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if crop_source.roi_cache_path is not None:
         provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
     if getattr(crop_source, "roi_cache_canonical_path", None) is not None:
-        provenance_inputs["roi_cache_canonical_path"] = crop_source.roi_cache_canonical_path
+        provenance_inputs["roi_cache_canonical_path"] = (
+            crop_source.roi_cache_canonical_path
+        )
     provenance = build_stage_provenance(
         stage="subject_masks",
         command=" ".join(sys.argv),
@@ -2454,7 +3229,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "mask_labels": list(mask_labels),
             "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),
             "mask_probs_shard_rois": (
-                int(args.mask_probs_shard_rois) if args.mask_probs_shard_rois is not None else None
+                int(args.mask_probs_shard_rois)
+                if args.mask_probs_shard_rois is not None
+                else None
             ),
             "mask_probs_storage_layout": run_group.attrs["mask_probs_storage_layout"],
             "mask_probs_storage_policy": run_group.attrs["mask_probs_storage_policy"],
@@ -2465,7 +3242,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "output_queue_size": int(args.output_queue_size),
             "progress": bool(args.progress),
             "roi_cache_policy": crop_source.roi_cache_policy,
-            "roi_cache_manifest": str(args.roi_cache_manifest) if args.roi_cache_manifest else None,
+            "roi_cache_manifest": (
+                str(args.roi_cache_manifest) if args.roi_cache_manifest else None
+            ),
             "roi_work_package_manifest": (
                 str(args.roi_work_package_manifest)
                 if args.roi_work_package_manifest
@@ -2485,6 +3264,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
             "mask_probs_shard_write": run_group.attrs.get("mask_probs_shard_write"),
             "mask_probs_postpack": run_group.attrs.get("mask_probs_postpack"),
+            "scientific_identity_digest": scientific_identity["digest"],
+            "attempt_payload_digest": attempt["payload_digest"],
         },
         inputs=provenance_inputs,
         artifacts={
@@ -2508,14 +3289,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     published_coordinate_surfaces = None
     if canonical_coordinate_context is not None:
         if boundary is None:
-            raise RuntimeError("Canonical subject-mask publication lacks its failure boundary.")
-        run_group = boundary.require_owned_run()
-        coordinate_checkpoint = (
-            capture_subject_mask_coordinate_publication_checkpoint(
-                root,
-                run_path,
-                expected_publication_owner=boundary.owner_token,
+            raise RuntimeError(
+                "Canonical subject-mask publication lacks its failure boundary."
             )
+        run_group = boundary.require_owned_run()
+        coordinate_checkpoint = capture_subject_mask_coordinate_publication_checkpoint(
+            root,
+            run_path,
+            expected_publication_owner=boundary.owner_token,
         )
         if boundary is not None:
             boundary.bind_coordinate_checkpoint(coordinate_checkpoint)
@@ -2536,7 +3317,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_provenance=run_provenance,
     )
     if shard_output:
-        run_group.attrs["registry_status_deferred_reason"] = "collection_shard_not_canonical_stage_output"
+        run_group.attrs["registry_status_deferred_reason"] = (
+            "collection_shard_not_canonical_stage_output"
+        )
     if canonical_coordinate_context is not None:
         assert boundary is not None
         assert published_coordinate_surfaces is not None
@@ -2579,7 +3362,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     if timing_profiler.enabled:
         console.print("[bold]Timing Profile:[/bold]")
-        for line in timing_profiler.render_lines(total_items=total_rois, wall_seconds=duration, limit=8):
+        for line in timing_profiler.render_lines(
+            total_items=total_rois, wall_seconds=duration, limit=8
+        ):
             console.print(f"[dim]{line}[/dim]")
 
 

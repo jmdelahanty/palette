@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from fisheye.shared.crop_pixel_work_package import (
     SIGNED_SOURCE_BINDING_PROFILE,
     STRICT_SOURCE_BINDING_PROFILE,
     build_crop_pixel_work_package_from_source,
+    build_crop_pixel_work_package_from_video_window,
     cleanup_unreferenced_crop_pixel_work_package_generations,
     open_crop_pixel_work_package,
 )
@@ -155,17 +157,13 @@ def test_acquisition_crop_video_pixels_are_a_current_package_source(
 
     manifest, manifest_path = _build(root, tmp_path)
 
-    assert manifest["pixel_contract"]["source_pixels"] == (
-        "acquisition_crop_video"
-    )
+    assert manifest["pixel_contract"]["source_pixels"] == ("acquisition_crop_video")
     assert manifest["source"]["source_binding_profile"] == (
         SIGNED_SOURCE_BINDING_PROFILE
     )
     package = open_crop_pixel_work_package(manifest_path, root=root)
     try:
-        assert package.pixel_contract["source_pixels"] == (
-            "acquisition_crop_video"
-        )
+        assert package.pixel_contract["source_pixels"] == ("acquisition_crop_video")
     finally:
         package.close()
 
@@ -251,6 +249,137 @@ def test_strict_full_frame_crop_package_rejects_acquisition_video_contract(
             target_crop_rows=[0],
             manifest_path=tmp_path / "wrong.json",
             archive_path=tmp_path / "strict_crop.zarr",
+        )
+
+
+def test_strict_video_window_package_preserves_global_crop_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crop = _strict_crop(tmp_path)
+    archive = Path(str(crop.store.root)).parent.parent
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    expected_pixels = np.arange(3 * 8 * 8, dtype=np.uint8).reshape(3, 8, 8)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"authenticated-stream-copy-window")
+
+    class _StrictSource:
+        crop_group = crop
+        crop_run_name = "strict_crop"
+        total_rois = 4
+        roi_shape = (8, 8)
+        frame_shape = (80, 100)
+        frame_indices = np.asarray(crop["frame_indices"][:], dtype=np.int64)
+        roi_coordinates_full = np.asarray(
+            crop["roi_coordinates_full"][:], dtype=np.int32
+        )
+        storage_mode = "geometry_only"
+
+        def __init__(self) -> None:
+            self.root = root
+
+    def _fake_materialize(**kwargs: Any) -> dict[str, Any]:
+        np.testing.assert_array_equal(kwargs["frame_indices"], [0, 0, 2])
+        output = Path(kwargs["output_path"])
+        output.write_bytes(expected_pixels.tobytes(order="C"))
+        return {
+            "schema_id": "palette.pynvvc_luma_roi_payload",
+            "schema_version": 1,
+            "path": str(output),
+            "shape": [3, 8, 8],
+            "dtype": "uint8",
+            "order": "C",
+            "total_bytes": int(expected_pixels.nbytes),
+            "sha256": hashlib.sha256(expected_pixels.tobytes()).hexdigest(),
+            "decode_backend": "pynvvc_luma",
+            "duration_seconds": 0.01,
+            "timing": {"rows": 3},
+        }
+
+    monkeypatch.setattr(
+        "fisheye.shared.crop_pixel_work_package.write_pynvvc_luma_roi_payload",
+        _fake_materialize,
+    )
+    clip_index_digest = "1" * 64
+    binding = {
+        "schema_id": "palette.acquisition_video_frame_window",
+        "schema_version": 1,
+        "recording_identity": "recording-001",
+        "camera_identity": "camera-001",
+        "clip_id": "clip_000000",
+        "actual_start_frame": 0,
+        "end_frame_exclusive": 3,
+        "frame_count": 3,
+        "clip_index_document_sha256": clip_index_digest,
+        "clip_video_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+    }
+    manifest_path = tmp_path / "window-package.json"
+    manifest = build_crop_pixel_work_package_from_video_window(
+        _StrictSource(),
+        target_crop_rows=[0, 1, 2],
+        video_path=video,
+        source_video_frame_offset=0,
+        source_video_frame_count=3,
+        frame_window_binding=binding,
+        manifest_path=manifest_path,
+        archive_path=archive,
+        batch_rows=2,
+    )
+
+    assert manifest["materialization_binding"] == binding
+    assert manifest["builder"]["decode_backend"] == "pynvvc_luma"
+    package = open_crop_pixel_work_package(manifest_path, root=root)
+    try:
+        np.testing.assert_array_equal(package.crop_row_indices, [0, 1, 2])
+        np.testing.assert_array_equal(package.frame_indices, [0, 0, 2])
+        np.testing.assert_array_equal(package.pixels[:], expected_pixels)
+    finally:
+        package.close()
+
+
+def test_video_window_package_rejects_changed_clip_bytes(tmp_path: Path) -> None:
+    crop = _strict_crop(tmp_path)
+    archive = Path(str(crop.store.root)).parent.parent
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"changed")
+
+    class _StrictSource:
+        crop_group = crop
+        crop_run_name = "strict_crop"
+        total_rois = 4
+        roi_shape = (8, 8)
+        frame_shape = (80, 100)
+        frame_indices = np.asarray(crop["frame_indices"][:], dtype=np.int64)
+        roi_coordinates_full = np.asarray(
+            crop["roi_coordinates_full"][:], dtype=np.int32
+        )
+        storage_mode = "geometry_only"
+
+        def __init__(self) -> None:
+            self.root = root
+
+    with pytest.raises(CropPixelWorkPackageError, match="digest differs"):
+        build_crop_pixel_work_package_from_video_window(
+            _StrictSource(),
+            target_crop_rows=[0],
+            video_path=video,
+            source_video_frame_offset=0,
+            source_video_frame_count=1,
+            frame_window_binding={
+                "schema_id": "palette.acquisition_video_frame_window",
+                "schema_version": 1,
+                "recording_identity": "recording-001",
+                "camera_identity": "camera-001",
+                "clip_id": "clip_000000",
+                "actual_start_frame": 0,
+                "end_frame_exclusive": 1,
+                "frame_count": 1,
+                "clip_index_document_sha256": "1" * 64,
+                "clip_video_sha256": "0" * 64,
+            },
+            manifest_path=tmp_path / "bad-window.json",
+            archive_path=archive,
         )
 
 

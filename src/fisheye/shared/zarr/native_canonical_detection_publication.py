@@ -52,6 +52,10 @@ from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 
 NATIVE_CANONICAL_DETECTION_PUBLICATION_SCHEMA_ID = (
@@ -302,7 +306,11 @@ def _validate_standalone_run(
 
 
 def _prepare_parent(root: Any) -> tuple[Any, ...]:
-    return (root.require_group("detect_runs"),)
+    return (
+        require_runs_parent(
+            root, "detect_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+        ),
+    )
 
 
 def _require_unselected(root: Any, *, run_id: str) -> None:

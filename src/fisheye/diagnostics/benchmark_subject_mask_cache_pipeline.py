@@ -1075,12 +1075,26 @@ def _run_pipeline(
             "arrays"
         ]["masks_roi"]["sha256"]
     )
+    refined_array_documents = refined_publication.manifest["payload"][
+        "logical_content"
+    ]["document"]["arrays"]
     components = SubjectMaskComponentRegistry(DEFAULT_COMPONENTS)
     quality_source = SubjectMaskQualitySourceReference(
         run_name=args.refined_run,
         manifest_digest=canonical_json_sha256(refined_publication.manifest),
         dense_array_values_sha256=dense_sha,
         component_registry_digest=canonical_json_sha256(components.as_manifest()),
+        source_array_values_sha256={
+            path: str(refined_array_documents[path]["sha256"])
+            for path in (
+                "masks_roi",
+                "instance_key",
+                "source_crop_row_ids",
+                "source_acquisition_frame_index",
+                "frame_row_offsets",
+                "available_channels",
+            )
+        },
     )
     quality_store = local_output / "quality.zarr"
     started = time.perf_counter()
@@ -1088,9 +1102,11 @@ def _run_pipeline(
         {
             "masks_roi": refined_run["masks_roi"],
             "instance_key": refined_run["instance_key"],
+            "source_crop_row_ids": refined_run["source_crop_row_ids"],
             "source_acquisition_frame_index": refined_run[
                 "source_acquisition_frame_index"
             ],
+            "frame_row_offsets": refined_run["frame_row_offsets"],
             "available_channels": refined_run["available_channels"],
         },
         n_frames=n_frames,

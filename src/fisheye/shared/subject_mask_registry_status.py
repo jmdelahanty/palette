@@ -10,11 +10,60 @@ import zarr
 from ..registry.stage_complete import emit_stage_completion
 from ..registry.stage_complete import RegistryInput
 from .type_conversions import clean_mapping, normalize_attr
+from .zarr.subject_mask_bundle_publication import (
+    SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR,
+    SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR,
+)
+from .zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_COMPLETE,
+)
 
 try:
     from rich.console import Console
 except Exception:  # pragma: no cover - rich is optional at runtime
     Console = None  # type: ignore
+
+
+def _registry_completion_is_selectable(
+    root: Any,
+    run_group: Any,
+    *,
+    family: str,
+    role: str,
+    run_name: str,
+) -> bool:
+    """Reject explicit non-terminal/inactive runs before emitting ``ok``.
+
+    Historical runs with no lifecycle marker retain the existing compatibility
+    behavior.  Modern bundle members remain individually ineligible and are
+    accepted only after the root authority atomically selects their exact
+    bundle and marks that member bundle-ready.
+    """
+
+    attrs = getattr(run_group, "attrs", {})
+    status = attrs.get(RUN_COMPLETION_STATUS_ATTR)
+    if status is not None and str(status).lower() != RUN_STATUS_COMPLETE:
+        return False
+    if "stage_selector_eligible" not in attrs:
+        return True
+    eligible = attrs.get("stage_selector_eligible")
+    if eligible is True:
+        return True
+    if (
+        eligible is not False
+        or attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR) is not True
+    ):
+        return False
+    authority = getattr(root, "attrs", {}).get(SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR)
+    members = authority.get("members") if isinstance(authority, Mapping) else None
+    member = members.get(role) if isinstance(members, Mapping) else None
+    return bool(
+        isinstance(member, Mapping)
+        and member.get("family") == family
+        and member.get("run_id") == run_name
+        and member.get("run_path") == f"{family}/{run_name}"
+    )
 
 
 def emit_subject_mask_stage_completion(
@@ -28,6 +77,14 @@ def emit_subject_mask_stage_completion(
     console: Optional[Console] = None,
     invalidate_on_ok: bool = True,
 ) -> bool:
+    if not _registry_completion_is_selectable(
+        root,
+        run_group,
+        family="subject_mask_runs",
+        role="raw",
+        run_name=run_name,
+    ):
+        return False
     attrs = dict(run_group.attrs)
     summary = attrs.get("summary_statistics")
     summary_map = dict(summary) if isinstance(summary, Mapping) else {}
@@ -47,7 +104,8 @@ def emit_subject_mask_stage_completion(
             "run_semantics": normalize_attr(attrs.get("run_semantics")),
             "rows_total": summary_map.get("rows_total"),
             "rows_with_nonempty_masks": summary_map.get("rows_with_nonempty_masks"),
-            "duration_seconds": summary_map.get("duration_seconds") or attrs.get("duration_seconds"),
+            "duration_seconds": summary_map.get("duration_seconds")
+            or attrs.get("duration_seconds"),
         }
     )
     return emit_stage_completion(
@@ -79,6 +137,14 @@ def emit_refined_subject_mask_stage_completion(
     console: Optional[Console] = None,
     invalidate_on_ok: bool = True,
 ) -> bool:
+    if not _registry_completion_is_selectable(
+        root,
+        run_group,
+        family="refined_subject_masks_runs",
+        role="refined",
+        run_name=run_name,
+    ):
+        return False
     attrs = dict(run_group.attrs)
     summary = attrs.get("summary_statistics")
     summary_map = dict(summary) if isinstance(summary, Mapping) else {}
@@ -91,12 +157,15 @@ def emit_refined_subject_mask_stage_completion(
         {
             "reason": "present",
             "latest_selector": "runtime_refined_subject_mask_write",
-            "source_subject_mask_run": normalize_attr(attrs.get("source_subject_mask_run")),
+            "source_subject_mask_run": normalize_attr(
+                attrs.get("source_subject_mask_run")
+            ),
             "label_schema_id": normalize_attr(attrs.get("label_schema_id")),
             "component_names": attrs.get("mask_labels"),
             "stale_state": normalize_attr(stale_map.get("state")),
             "stale_reason": normalize_attr(stale_map.get("reason")),
-            "duration_seconds": summary_map.get("duration_seconds") or attrs.get("duration_seconds"),
+            "duration_seconds": summary_map.get("duration_seconds")
+            or attrs.get("duration_seconds"),
         }
     )
     return emit_stage_completion(

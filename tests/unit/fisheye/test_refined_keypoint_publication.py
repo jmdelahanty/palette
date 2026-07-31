@@ -65,9 +65,9 @@ from fisheye.shared.zarr.refined_keypoint_producer import (
 )
 from fisheye.shared.zarr.refined_keypoint_publication import (
     publish_selector_ineligible_refined_keypoint_snapshot,
+    republish_selector_ineligible_refined_keypoint_snapshot,
     validate_refined_keypoint_shadow_publication,
 )
-
 
 REVIEW_STATE_MAP = {0: "unreviewed", 1: "accepted", 2: "rejected"}
 REASON_CODE_MAP = {0: "none", 1: "manual_reject", 2: "manual_correction"}
@@ -234,21 +234,15 @@ def _raw_fixture():  # type: ignore[no-untyped-def]
     arrays = {
         "instance_key": crop["instance_key"].copy(),
         "source_crop_row_ids": np.arange(4, dtype=np.int64),
-        "source_acquisition_frame_index": crop[
-            "source_acquisition_frame_index"
-        ].copy(),
+        "source_acquisition_frame_index": crop["source_acquisition_frame_index"].copy(),
         "frame_indices": crop["frame_indices"].copy(),
         "frame_row_offsets": crop["frame_row_offsets"].copy(),
         "source_crop_row_signature": crop["source_row_signature"].copy(),
         "keypoints_roi": points_roi,
         "keypoints_img": points_roi + origins.astype(np.float32)[:, None, :],
-        "keypoint_confidences": np.where(
-            valid, np.float32(0.9), np.float32(np.nan)
-        ),
+        "keypoint_confidences": np.where(valid, np.float32(0.9), np.float32(np.nan)),
         "keypoint_valid": valid,
-        "pose_confidence": np.where(
-            success, np.float32(0.95), np.float32(np.nan)
-        ),
+        "pose_confidence": np.where(success, np.float32(0.95), np.float32(np.nan)),
         "pose_bbox_xyxy_roi": bbox_roi,
         "pose_bbox_xyxy_img": bbox_roi
         + np.column_stack((origins, origins)).astype(np.float32),
@@ -420,6 +414,48 @@ def test_refined_publication_round_trip_is_exact_and_selector_ineligible(
     assert _resolve_eye_keypoint_indices(run, publication.run_id) == (1, 2)
     assert np.asarray(run["keypoint_edit_flags"][:])[2, 0]
     assert not np.asarray(run["refined_success"][:])[3]
+
+
+def test_republication_adds_only_missing_skeleton_semantics(
+    tmp_path: object,
+) -> None:
+    source_publication, _, _, _ = _publish_refined(tmp_path)
+    legacy_manifest = copy.deepcopy(source_publication.manifest)
+    legacy_manifest["payload"]["source_bindings"]["schema_version"] = 1
+    legacy_manifest["payload"]["source_bindings"]["skeleton"].pop("semantics")
+    legacy_manifest["payload_digest"] = canonical_json_sha256(
+        legacy_manifest["payload"]
+    )
+
+    destination_root = tmp_path / "republished_root"  # type: ignore[operator]
+    republished = republish_selector_ineligible_refined_keypoint_snapshot(
+        source_refined_manifest=legacy_manifest,
+        source_refined_arrays=source_publication.prepared.arrays,
+        raw_manifest=source_publication.raw_manifest,
+        quality_manifest=source_publication.quality_manifest,
+        crop_manifest=source_publication.crop_manifest,
+        raw_arrays=source_publication.raw_arrays,
+        quality_arrays=source_publication.quality_arrays,
+        source_crop_arrays=source_publication.source_crop_arrays,
+        destination=destination_root / "refined.zarr",
+        run_id="refined_v2_republished",
+        shadow_root=destination_root,
+        created_by="pytest",
+    )
+
+    assert validate_refined_keypoint_shadow_publication(republished) == ()
+    assert (
+        republished.manifest["payload"]["logical_content"]
+        == source_publication.manifest["payload"]["logical_content"]
+    )
+    assert republished.identity == source_publication.identity
+    assert republished.source.skeleton_semantics
+    for path in REFINED_KEYPOINT_SCHEMA_V2.binding_paths:
+        assert np.array_equal(
+            np.asarray(republished.prepared.arrays[path]),
+            np.asarray(source_publication.prepared.arrays[path]),
+            equal_nan=True,
+        )
 
 
 def test_refined_manifest_rejects_recomputed_nested_tampering(tmp_path: object) -> None:

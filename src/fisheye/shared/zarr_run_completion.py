@@ -253,6 +253,15 @@ def mark_run_failed(
     attrs = run_group.attrs
     attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
     attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_FAILED
+    # A run may fail during a fallible seal/reopen step after a provisional
+    # completion write.  Never leave a failed run carrying a completion
+    # timestamp: readers and registry extractors must not be able to mistake
+    # that mixed lifecycle state for a successfully committed run.
+    if RUN_COMPLETED_AT_ATTR in attrs:
+        try:
+            del attrs[RUN_COMPLETED_AT_ATTR]
+        except Exception:
+            attrs[RUN_COMPLETED_AT_ATTR] = None
     attrs["palette_run_failed_at_utc"] = failed_at_utc or utc_now_iso()
     if run_name is not None:
         attrs[RUN_NAME_ATTR] = str(run_name)

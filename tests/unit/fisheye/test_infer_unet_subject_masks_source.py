@@ -120,6 +120,9 @@ class _FakeGroup:
     def group_keys(self):
         return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
 
+    def keys(self):
+        return self._children.keys()
+
 
 def _build_fake_root() -> _FakeGroup:
     root = _FakeGroup()
@@ -135,6 +138,21 @@ def _build_fake_root() -> _FakeGroup:
     crop.attrs["detection_source_path"] = "detect_runs/detect_001"
     crop.attrs["video_source_path"] = "/tmp/source-video.mp4"
     crop.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
+    crop.create_array(
+        "source_acquisition_frame_index",
+        data=np.array([0, 1], dtype=np.int64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "instance_key",
+        data=np.array([101, 102], dtype=np.uint64),
+        overwrite=True,
+    )
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.array([[0, 0], [1, 1]], dtype=np.int32),
+        overwrite=True,
+    )
     crop.create_array("detection_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
     crop.create_array("detection_source", data=np.array([0, 0], dtype=np.int8), overwrite=True)
     keypoint_parent = root.create_group("refined_keypoints_runs")
@@ -155,6 +173,57 @@ def _build_fake_root() -> _FakeGroup:
     keypoint.create_array("refined_success", data=np.array([True, True], dtype=bool), overwrite=True)
     keypoint.create_array("usable_keypoints", data=np.array([True, True], dtype=bool), overwrite=True)
     return root
+
+
+def _write_fake_raw_outputs(
+    run_group: _FakeGroup,
+    *,
+    row_count: int,
+    channel_count: int,
+    height: int,
+    width: int,
+    mask_probs_dtype: str,
+    write_masks_roi: bool,
+    validation_accumulators=None,
+) -> None:
+    probability_dtype = np.uint8 if mask_probs_dtype == "uint8" else np.float16
+    probabilities = np.zeros(
+        (row_count, channel_count, height, width), dtype=probability_dtype
+    )
+    binary = np.zeros_like(probabilities, dtype=np.uint8)
+    metrics_values = {
+        "prob_max": np.zeros((row_count, channel_count), dtype=np.float32),
+        "mask_present": np.zeros((row_count, channel_count), dtype=bool),
+        "area_px": np.zeros((row_count, channel_count), dtype=np.float32),
+        "centroid_xy": np.zeros((row_count, channel_count, 2), dtype=np.float32),
+        "centroid_valid": np.zeros((row_count, channel_count), dtype=bool),
+        "bbox_xyxy": np.zeros((row_count, channel_count, 4), dtype=np.float32),
+        "bbox_valid": np.zeros((row_count, channel_count), dtype=bool),
+    }
+    run_group.create_array(
+        "mask_probs_roi", data=probabilities, overwrite=True
+    )
+    if write_masks_roi:
+        run_group.create_array("masks_roi", data=binary, overwrite=True)
+    run_group.create_array(
+        "available_channels",
+        data=np.ones((channel_count,), dtype=bool),
+        overwrite=True,
+    )
+    metrics = run_group.require_group("metrics")
+    for name, values in metrics_values.items():
+        metrics.create_array(name, data=values, overwrite=True)
+    if validation_accumulators is not None:
+        mod._append_raw_worker_validation_batch(
+            validation_accumulators,
+            mod._SubjectMaskOutputBatch(
+                start=0,
+                stop=row_count,
+                probs_out=probabilities,
+                binary=binary if write_masks_roi else None,
+                metrics=metrics_values,
+            ),
+        )
 
 
 def test_normalize_checkpoint_state_dict_strips_torch_compile_prefix() -> None:
@@ -683,6 +752,8 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
         show_progress,
         console,
         timing_profiler,
+        input_pixels_sha256,
+        validation_accumulators,
     ) -> float:
         del model, batch_size, device, console
         seen["mask_labels"] = tuple(mask_labels)
@@ -695,31 +766,22 @@ def test_subject_mask_shard_inference_supports_geometry_only_crop_with_temporary
         seen["model_input_transform"] = model_input_transform.to_attrs()
         seen["show_progress"] = show_progress
         batch = roi_source.read_slice(0, roi_source.total_rois)
+        input_pixels_sha256.update(np.ascontiguousarray(batch).view(np.uint8))
         seen["batch_shape"] = batch.shape
         seen["roi_read_mode"] = roi_source.roi_read_mode
         seen["roi_cache_used"] = roi_source.roi_cache_used
         seen["roi_cache_path"] = roi_source.roi_cache_path
         seen["roi_cache_canonical_path"] = roi_source.roi_cache_canonical_path
-        if write_masks_roi:
-            run_group.create_array(
-                "masks_roi",
-                data=np.zeros((roi_source.total_rois, 3, roi_source.roi_shape[0], roi_source.roi_shape[1]), dtype=np.uint8),
-                overwrite=True,
-            )
-        run_group.create_array(
-            "mask_probs_roi",
-            data=np.zeros((roi_source.total_rois, 3, roi_source.roi_shape[0], roi_source.roi_shape[1]), dtype=np.float16),
-            overwrite=True,
+        _write_fake_raw_outputs(
+            run_group,
+            row_count=roi_source.total_rois,
+            channel_count=3,
+            height=roi_source.roi_shape[0],
+            width=roi_source.roi_shape[1],
+            mask_probs_dtype=mask_probs_dtype,
+            write_masks_roi=write_masks_roi,
+            validation_accumulators=validation_accumulators,
         )
-        run_group.create_array("available_channels", data=np.array([True, True, True], dtype=np.bool_), overwrite=True)
-        metrics = run_group.require_group("metrics")
-        metrics.create_array("prob_max", data=np.zeros((roi_source.total_rois, 3), dtype=np.float32), overwrite=True)
-        metrics.create_array("mask_present", data=np.zeros((roi_source.total_rois, 3), dtype=np.bool_), overwrite=True)
-        metrics.create_array("area_px", data=np.zeros((roi_source.total_rois, 3), dtype=np.float32), overwrite=True)
-        metrics.create_array("centroid_xy", data=np.zeros((roi_source.total_rois, 3, 2), dtype=np.float32), overwrite=True)
-        metrics.create_array("centroid_valid", data=np.zeros((roi_source.total_rois, 3), dtype=np.bool_), overwrite=True)
-        metrics.create_array("bbox_xyxy", data=np.zeros((roi_source.total_rois, 3, 4), dtype=np.float32), overwrite=True)
-        metrics.create_array("bbox_valid", data=np.zeros((roi_source.total_rois, 3), dtype=np.bool_), overwrite=True)
         if timing_profiler is not None:
             timing_profiler.record("roi_read", 0.01, items=roi_source.total_rois)
         return 0.25
@@ -954,9 +1016,19 @@ def test_canonical_writer_omits_legacy_detection_source_through_publication(
 
     def _fake_write_outputs(run_group, _model, roi_source, **_kwargs) -> float:
         shape = (roi_source.total_rois, 3, *roi_source.roi_shape)
+        output_values = {
+            "mask_probs_roi": np.zeros(shape, dtype=np.uint8),
+            "metrics/prob_max": np.zeros((2, 3), dtype=np.float32),
+            "metrics/mask_present": np.zeros((2, 3), dtype=bool),
+            "metrics/area_px": np.zeros((2, 3), dtype=np.float32),
+            "metrics/centroid_xy": np.zeros((2, 3, 2), dtype=np.float32),
+            "metrics/centroid_valid": np.zeros((2, 3), dtype=bool),
+            "metrics/bbox_xyxy": np.zeros((2, 3, 4), dtype=np.float32),
+            "metrics/bbox_valid": np.zeros((2, 3), dtype=bool),
+        }
         run_group.create_array(
             "mask_probs_roi",
-            data=np.zeros(shape, dtype=np.uint8),
+            data=output_values["mask_probs_roi"],
             overwrite=True,
         )
         run_group.create_array(
@@ -967,39 +1039,41 @@ def test_canonical_writer_omits_legacy_detection_source_through_publication(
         metrics = run_group.require_group("metrics")
         metrics.create_array(
             "prob_max",
-            data=np.zeros((2, 3), dtype=np.float32),
+            data=output_values["metrics/prob_max"],
             overwrite=True,
         )
         metrics.create_array(
             "mask_present",
-            data=np.zeros((2, 3), dtype=bool),
+            data=output_values["metrics/mask_present"],
             overwrite=True,
         )
         metrics.create_array(
             "area_px",
-            data=np.zeros((2, 3), dtype=np.float32),
+            data=output_values["metrics/area_px"],
             overwrite=True,
         )
         metrics.create_array(
             "centroid_xy",
-            data=np.zeros((2, 3, 2), dtype=np.float32),
+            data=output_values["metrics/centroid_xy"],
             overwrite=True,
         )
         metrics.create_array(
             "centroid_valid",
-            data=np.zeros((2, 3), dtype=bool),
+            data=output_values["metrics/centroid_valid"],
             overwrite=True,
         )
         metrics.create_array(
             "bbox_xyxy",
-            data=np.zeros((2, 3, 4), dtype=np.float32),
+            data=output_values["metrics/bbox_xyxy"],
             overwrite=True,
         )
         metrics.create_array(
             "bbox_valid",
-            data=np.zeros((2, 3), dtype=bool),
+            data=output_values["metrics/bbox_valid"],
             overwrite=True,
         )
+        for path, accumulator in _kwargs["validation_accumulators"].items():
+            accumulator.append(0, output_values[path])
         return 0.01
 
     observed: dict[str, bool] = {}
@@ -1164,30 +1238,26 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         show_progress,
         console,
         timing_profiler,
+        input_pixels_sha256,
+        validation_accumulators,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, mask_probs_dtype, write_masks_roi, async_output, output_queue_size, model_input_transform, show_progress, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, async_output, output_queue_size, model_input_transform, show_progress, console, timing_profiler
         seen["mask_labels"] = tuple(mask_labels)
+        input_pixels_sha256.update(
+            np.ascontiguousarray(
+                roi_source.read_slice(0, roi_source.total_rois)
+            ).view(np.uint8)
+        )
         channel_count = len(mask_labels)
-        run_group.create_array(
-            "masks_roi",
-            data=np.zeros(
-                (roi_source.total_rois, channel_count, roi_source.roi_shape[0], roi_source.roi_shape[1]),
-                dtype=np.uint8,
-            ),
-            overwrite=True,
-        )
-        run_group.create_array(
-            "mask_probs_roi",
-            data=np.zeros(
-                (roi_source.total_rois, channel_count, roi_source.roi_shape[0], roi_source.roi_shape[1]),
-                dtype=np.float16,
-            ),
-            overwrite=True,
-        )
-        run_group.create_array(
-            "available_channels",
-            data=np.ones((channel_count,), dtype=np.bool_),
-            overwrite=True,
+        _write_fake_raw_outputs(
+            run_group,
+            row_count=roi_source.total_rois,
+            channel_count=channel_count,
+            height=roi_source.roi_shape[0],
+            width=roi_source.roi_shape[1],
+            mask_probs_dtype=mask_probs_dtype,
+            write_masks_roi=write_masks_roi,
+            validation_accumulators=validation_accumulators,
         )
         return 0.25
 
@@ -1341,31 +1411,27 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         show_progress,
         console,
         timing_profiler,
+        input_pixels_sha256,
+        validation_accumulators,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, mask_probs_dtype, write_masks_roi, output_queue_size, model_input_transform, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, output_queue_size, model_input_transform, console, timing_profiler
         seen["async_output"] = async_output
         seen["show_progress"] = show_progress
+        input_pixels_sha256.update(
+            np.ascontiguousarray(
+                roi_source.read_slice(0, roi_source.total_rois)
+            ).view(np.uint8)
+        )
         channel_count = len(mask_labels)
-        run_group.create_array(
-            "masks_roi",
-            data=np.zeros(
-                (roi_source.total_rois, channel_count, roi_source.roi_shape[0], roi_source.roi_shape[1]),
-                dtype=np.uint8,
-            ),
-            overwrite=True,
-        )
-        run_group.create_array(
-            "mask_probs_roi",
-            data=np.zeros(
-                (roi_source.total_rois, channel_count, roi_source.roi_shape[0], roi_source.roi_shape[1]),
-                dtype=np.float16,
-            ),
-            overwrite=True,
-        )
-        run_group.create_array(
-            "available_channels",
-            data=np.ones((channel_count,), dtype=np.bool_),
-            overwrite=True,
+        _write_fake_raw_outputs(
+            run_group,
+            row_count=roi_source.total_rois,
+            channel_count=channel_count,
+            height=roi_source.roi_shape[0],
+            width=roi_source.roi_shape[1],
+            mask_probs_dtype=mask_probs_dtype,
+            write_masks_roi=write_masks_roi,
+            validation_accumulators=validation_accumulators,
         )
         return 0.25
 
@@ -1447,6 +1513,6 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
             "sha256": checkpoint_sha,
             "size_bytes": len(checkpoint_bytes),
             "mtime_ns": checkpoint_path.stat().st_mtime_ns,
-            "source": "computed",
+            "source": "direct_scientific_commit_rehash",
         }
     ]

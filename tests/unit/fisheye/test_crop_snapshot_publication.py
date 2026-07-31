@@ -21,6 +21,10 @@ from fisheye.shared.zarr.crop_shadow import (
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_ATTR,
+    COMPLETION_EPOCH_STRICT,
+)
 from tests.unit.fisheye.test_crop_shadow import _pixel, _policy, _refined_source
 
 
@@ -123,6 +127,7 @@ def test_candidate_is_atomically_imported_consolidated_and_unselected(
         assert dict(family.attrs) == {
             "latest": "existing_crop",
             "purpose_selectors": {"inspection": "existing_crop"},
+            COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
         }
         run = family["crop_candidate_v2"]
         assert run.attrs["status"] == "complete"

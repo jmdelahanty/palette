@@ -1,19 +1,39 @@
 from __future__ import annotations
 
 from io import BytesIO
+import hashlib
 import json
 from pathlib import Path
 import tarfile
 import time
+from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
 import pytest
 import zarr
 
 from fisheye.shared.subject_mask_chunks import refined_subject_mask_storage_chunks
+from fisheye.shared.subject_mask_attempt import (
+    build_subject_mask_attempt,
+    build_subject_mask_scientific_identity,
+)
+from fisheye.shared.subject_mask_worker_receipt import (
+    REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    build_subject_mask_worker_semantic_receipt,
+)
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
-from fisheye.shared.refined_subject_mask_encoded_chunks import prepare_global_mask_chunk_grid
-from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
+from fisheye.shared.refined_subject_mask_encoded_chunks import (
+    prepare_global_mask_chunk_grid,
+)
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_STATUS_ATTR,
+    mark_run_complete,
+)
+from fisheye.shared.zarr.manifest_digest import canonical_json_bytes
+from fisheye.shared.zarr.subject_mask_validation_receipt import (
+    subject_mask_array_unit_document,
+)
+from fisheye.shared.zarr.subject_mask_schema import derive_subject_mask_metrics
 from fisheye.utils.convert_refined_subject_mask_clip_package_v2 import convert_package
 from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID
 from fisheye.utils.import_refined_subject_mask_clip_packages import (
@@ -47,6 +67,9 @@ def _write_package(
     labels: list[str] | None = None,
     body_reason_labels: list[str] | None = None,
     mask_row_chunk: int | None = None,
+    frame_indices: list[int] | None = None,
+    production_proof: bool = False,
+    roi_shape: tuple[int, int] = (2, 3),
 ) -> Path:
     labels = labels or ["subject_body", "eye_left"]
     package_root = tmp_path / f"{package_name}_src"
@@ -60,31 +83,65 @@ def _write_package(
     run.attrs["clip_package_lsb_jobid"] = f"{package_name}_job"
     run.attrs["source_roi_cache_used"] = True
     run.attrs["source_roi_cache_path"] = f"/tmp/{package_name}.flat_roi_cache.json"
-    run.attrs["source_roi_cache_canonical_path"] = f"/nrs/{package_name}.flat_roi_cache.json"
+    run.attrs["source_roi_cache_canonical_path"] = (
+        f"/nrs/{package_name}.flat_roi_cache.json"
+    )
     run.attrs["source_roi_cache_key"] = f"{package_name}_cache_key"
     run.attrs["source_subject_mask_shard_runs"] = [f"subject_masks_{run_name}"]
-    run.attrs["source_subject_mask_shard_run_paths"] = [f"subject_mask_shard_runs/subject_masks_{run_name}"]
+    run.attrs["source_subject_mask_shard_run_paths"] = [
+        f"subject_mask_shard_runs/subject_masks_{run_name}"
+    ]
     run.attrs["source_subject_mask_shard_crop_runs"] = [f"crop_{run_name}"]
 
     row_count = len(crop_row_ids)
-    masks = np.zeros((row_count, len(labels), 2, 3), dtype=np.uint8)
+    roi_height, roi_width = (int(roi_shape[0]), int(roi_shape[1]))
+    masks = np.zeros((row_count, len(labels), roi_height, roi_width), dtype=np.uint8)
     for row_idx, crop_row_id in enumerate(crop_row_ids):
-        masks[row_idx, :, :, :] = np.uint8(crop_row_id)
+        if production_proof:
+            masks[
+                row_idx,
+                :,
+                row_idx % roi_height,
+                int(crop_row_id) % roi_width,
+            ] = 1
+        else:
+            masks[row_idx, :, :, :] = np.uint8(crop_row_id)
     run.create_array(
         "masks_roi",
         data=masks,
         chunks=(mask_row_chunk or max(1, row_count), 1, 2, 3),
         overwrite=True,
     )
-    run.create_array("source_crop_row_ids", data=np.asarray(crop_row_ids, dtype=np.int64), overwrite=True)
-    frame_indices = np.asarray(crop_row_ids, dtype=np.int64) + 1000
-    run.create_array("frame_indices", data=frame_indices, overwrite=True)
+    run.create_array(
+        "source_crop_row_ids",
+        data=np.asarray(crop_row_ids, dtype=np.int64),
+        overwrite=True,
+    )
+    frame_values = np.asarray(
+        (
+            frame_indices
+            if frame_indices is not None
+            else (np.asarray(crop_row_ids, dtype=np.int64) + 1000)
+        ),
+        dtype=np.int64,
+    )
+    if int(frame_values.shape[0]) != row_count:
+        raise ValueError("frame_indices must have one value per crop row")
+    run.create_array("frame_indices", data=frame_values, overwrite=True)
     clip_frame_counts = np.bincount(
-        frame_indices,
-        minlength=(int(frame_indices.max()) + 1 if frame_indices.size else 1),
+        frame_values,
+        minlength=(int(frame_values.max()) + 1 if frame_values.size else 1),
     ).astype(np.int32)
-    run.create_array("frame_counts", data=clip_frame_counts, chunks=(min(1024, clip_frame_counts.size),))
-    run.create_array("available_channels", data=np.ones((row_count, len(labels)), dtype=bool), overwrite=True)
+    run.create_array(
+        "frame_counts",
+        data=clip_frame_counts,
+        chunks=(min(1024, clip_frame_counts.size),),
+    )
+    run.create_array(
+        "available_channels",
+        data=np.ones((len(labels),), dtype=bool),
+        overwrite=True,
+    )
 
     metrics = run.require_group("metrics")
     metric_values = np.stack(
@@ -94,11 +151,19 @@ def _write_package(
         ],
         axis=1,
     )
-    metrics.create_array("area_px", data=metric_values[:, : len(labels)], chunks=(max(1, row_count), len(labels)))
+    metrics.create_array(
+        "area_px",
+        data=metric_values[:, : len(labels)],
+        chunks=(max(1, row_count), len(labels)),
+    )
 
     components = run.require_group("components")
     body = components.require_group("subject_body")
-    body.create_array("manual_override", data=np.zeros((row_count,), dtype=bool), chunks=(max(1, row_count),))
+    body.create_array(
+        "manual_override",
+        data=np.zeros((row_count,), dtype=bool),
+        chunks=(max(1, row_count),),
+    )
     if body_reason_labels is not None:
         write_reason_columns(
             body,
@@ -109,18 +174,104 @@ def _write_package(
     contours = body.require_group("contours")
     ptr = np.arange(row_count, dtype=np.int64)
     length = np.ones((row_count,), dtype=np.int32)
-    points_xy = np.asarray([[float(crop_row_id), float(crop_row_id) + 0.25] for crop_row_id in crop_row_ids], dtype=np.float32)
+    points_xy = np.asarray(
+        [
+            [float(crop_row_id), float(crop_row_id) + 0.25]
+            for crop_row_id in crop_row_ids
+        ],
+        dtype=np.float32,
+    )
     contours.create_array("ptr", data=ptr, chunks=(max(1, row_count),))
     contours.create_array("len", data=length, chunks=(max(1, row_count),))
     contours.create_array("points_xy", data=points_xy, chunks=(max(1, row_count), 2))
+
+    worker_proof = None
+    if production_proof:
+        for metric_name, metric_values in derive_subject_mask_metrics(masks).items():
+            metrics.create_array(
+                metric_name,
+                data=metric_values,
+                chunks=(max(1, row_count), *metric_values.shape[1:]),
+                overwrite=True,
+            )
+        run.attrs["stage_selector_eligible"] = False
+        run_path_text = f"refined_subject_masks_runs/{run_name}"
+        science = build_subject_mask_scientific_identity(
+            stage_kind="refined_subject_mask",
+            model={"artifact": "pytest_refiner"},
+            crop={"run_id": source_crop_run},
+            pixels={"digest": hashlib.sha256(package_name.encode()).hexdigest()},
+            row_identity={"source_crop_row_ids": list(crop_row_ids)},
+            inference_contract={"components": list(labels)},
+        )
+        attempt = build_subject_mask_attempt(
+            scientific_identity=science,
+            run_path=run_path_text,
+            attempt_id=str(uuid5(NAMESPACE_URL, f"pytest:{run_path_text}")),
+        )
+        arrays = {path: run[path] for path in REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS}
+        receipt = build_subject_mask_worker_semantic_receipt(
+            stage_kind="refined_subject_mask",
+            run_path=run_path_text,
+            scientific_identity=science,
+            attempt=attempt,
+            scope={"package_name": package_name},
+            row_count=row_count,
+            array_document=subject_mask_array_unit_document(
+                arrays,
+                REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+                unit_rows=max(1, min(2, row_count)),
+            ),
+            required_paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+            roi_aligned_paths=tuple(
+                path
+                for path in REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+                if path != "available_channels"
+            ),
+        )
+        receipt_bytes = canonical_json_bytes(receipt)
+        receipt_relative = f"{run_path_text}/worker_semantic_receipt.json"
+        receipt_path = package_root / receipt_relative
+        receipt_path.write_bytes(receipt_bytes)
+        binding = {
+            "schema_id": receipt["schema_id"],
+            "schema_version": receipt["schema_version"],
+            "payload_digest": receipt["payload_digest"],
+            "relative_path": receipt_relative,
+            "document_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+            "storage": "strict_json_sidecar_v1",
+        }
+        run.attrs.update(
+            {
+                "subject_mask_scientific_identity": science,
+                "subject_mask_attempt": attempt,
+                "subject_mask_worker_semantic_receipt_binding": binding,
+            }
+        )
+        worker_proof = {
+            "scientific_identity_digest": science["digest"],
+            "attempt_id": attempt["payload"]["attempt_id"],
+            "attempt_payload_digest": attempt["payload_digest"],
+            "semantic_receipt_payload_digest": receipt["payload_digest"],
+            "semantic_receipt_document_sha256": binding["document_sha256"],
+            "semantic_receipt_relative_path": receipt_relative,
+        }
+
+    # Clip packages are immutable handoff artifacts.  Even legacy-compatible
+    # test packages must carry both the completed run envelope and the sealed
+    # package envelope before the importer may inspect their payload.
+    mark_run_complete(run, run_name=run_name)
 
     package_path = tmp_path / f"{package_name}.tar.gz"
     manifest = {
         "schema_id": PACKAGE_SCHEMA_ID,
         "created_at_utc": "2026-07-08T00:00:00+00:00",
+        "package_completion_status": "complete",
         "run_group_path": f"refined_subject_masks_runs/{run_name}",
         "summary": {"rows_total": row_count},
     }
+    if worker_proof is not None:
+        manifest["worker_proof"] = worker_proof
     manifest_bytes = (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8")
     with tarfile.open(package_path, "w:gz") as tar:
         tar.add(run_path, arcname=f"refined_subject_masks_runs/{run_name}")
@@ -152,7 +303,10 @@ def test_row_chunk_copy_plan_splits_misaligned_clip_boundary_once() -> None:
     )
     row_maps = {
         package_a_path: (np.arange(6, dtype=np.int64), np.arange(6, dtype=np.int64)),
-        package_b_path: (np.arange(4, dtype=np.int64), np.arange(6, 10, dtype=np.int64)),
+        package_b_path: (
+            np.arange(4, dtype=np.int64),
+            np.arange(6, 10, dtype=np.int64),
+        ),
     }
 
     plan = _build_row_chunk_copy_plan(
@@ -162,9 +316,16 @@ def test_row_chunk_copy_plan_splits_misaligned_clip_boundary_once() -> None:
         row_chunk=4,
     )
 
-    assert [(chunk.dst_start, chunk.dst_stop) for chunk in plan] == [(0, 4), (4, 8), (8, 10)]
+    assert [(chunk.dst_start, chunk.dst_stop) for chunk in plan] == [
+        (0, 4),
+        (4, 8),
+        (8, 10),
+    ]
     assert [
-        [(run.package_path, run.src_start, run.src_stop, run.dst_start, run.dst_stop) for run in chunk.runs]
+        [
+            (run.package_path, run.src_start, run.src_stop, run.dst_start, run.dst_stop)
+            for run in chunk.runs
+        ]
         for chunk in plan
     ] == [
         [(package_a_path, 0, 4, 0, 4)],
@@ -176,7 +337,9 @@ def test_row_chunk_copy_plan_splits_misaligned_clip_boundary_once() -> None:
     ]
 
 
-def test_encoded_v2_packages_copy_complete_chunks_and_decode_only_boundary(tmp_path: Path) -> None:
+def test_encoded_v2_packages_copy_complete_chunks_and_decode_only_boundary(
+    tmp_path: Path,
+) -> None:
     target_zarr = tmp_path / "target.zarr"
     root = zarr.open_group(str(target_zarr), mode="w")
     crop = root.require_group("crop_runs").create_group("crop_proxy_collection")
@@ -268,7 +431,9 @@ def test_encoded_v2_packages_copy_complete_chunks_and_decode_only_boundary(tmp_p
     )
     np.testing.assert_array_equal(run["masks_roi"][:], baseline["masks_roi"][:])
     np.testing.assert_array_equal(run["frame_indices"][:], baseline["frame_indices"][:])
-    np.testing.assert_allclose(run["metrics"]["area_px"][:], baseline["metrics"]["area_px"][:])
+    np.testing.assert_allclose(
+        run["metrics"]["area_px"][:], baseline["metrics"]["area_px"][:]
+    )
     canary = validate_canary(
         zarr_path=target_zarr,
         baseline_run="refined_collection_v1_baseline",
@@ -287,7 +452,9 @@ def test_encoded_v2_packages_copy_complete_chunks_and_decode_only_boundary(tmp_p
         )
 
 
-def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_path: Path) -> None:
+def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(
+    tmp_path: Path,
+) -> None:
     target_zarr = tmp_path / "target.zarr"
     zarr.open_group(str(target_zarr), mode="w")
     _write_target_crop_contract(target_zarr, recording_frame_count=32_768)
@@ -319,7 +486,10 @@ def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_
     run = parent["refined_collection"]
     assert parent.attrs["latest_complete"] == "refined_collection"
     assert parent.attrs["latest"] == "refined_collection"
-    assert parent.attrs["refined_subject_mask_review_status_latest"] == "refined_collection"
+    assert (
+        parent.attrs["refined_subject_mask_review_status_latest"]
+        == "refined_collection"
+    )
     assert run.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
     assert run.attrs["mask_storage_authority"] == "masks_roi"
     assert run.attrs["editable_mask_surface"] == "masks_roi"
@@ -329,8 +499,12 @@ def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_
     assert run.attrs["derived_mask_caches_stale"] is False
     assert run.attrs["mask_store_contract_encodings"] == ["dense_uint8_v1"]
 
-    np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.asarray([10, 11, 12], dtype=np.int64))
-    np.testing.assert_array_equal(run["frame_indices"][:], np.asarray([1010, 1011, 1012], dtype=np.int64))
+    np.testing.assert_array_equal(
+        run["source_crop_row_ids"][:], np.asarray([10, 11, 12], dtype=np.int64)
+    )
+    np.testing.assert_array_equal(
+        run["frame_indices"][:], np.asarray([1010, 1011, 1012], dtype=np.int64)
+    )
     expected_frame_counts = np.zeros((32_768,), dtype=np.int32)
     expected_frame_counts[[1010, 1011, 1012]] = 1
     np.testing.assert_array_equal(run["frame_counts"][:], expected_frame_counts)
@@ -338,13 +512,22 @@ def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_
         "bincount_of_assembled_frame_indices_v1"
     )
     assert run["frame_counts"].attrs["palette_physical_layout"] == "indexed_sharding_v1"
-    assert tuple(int(value) for value in run["masks_roi"].chunks) == refined_subject_mask_storage_chunks(3, 2, 3)
+    assert tuple(
+        int(value) for value in run["masks_roi"].chunks
+    ) == refined_subject_mask_storage_chunks(3, 2, 3)
     assert run["masks_roi"].shape == (3, 2, 2, 3)
-    np.testing.assert_array_equal(run["masks_roi"][:, 0, 0, 0], np.asarray([10, 11, 12], dtype=np.uint8))
-    np.testing.assert_allclose(run["metrics"]["area_px"][:, 0], np.asarray([10.0, 11.0, 12.0], dtype=np.float32))
+    np.testing.assert_array_equal(
+        run["masks_roi"][:, 0, 0, 0], np.asarray([10, 11, 12], dtype=np.uint8)
+    )
+    np.testing.assert_allclose(
+        run["metrics"]["area_px"][:, 0],
+        np.asarray([10.0, 11.0, 12.0], dtype=np.float32),
+    )
 
     contours = run["components"]["subject_body"]["contours"]
-    np.testing.assert_array_equal(contours["ptr"][:], np.asarray([0, 1, 2], dtype=np.int64))
+    np.testing.assert_array_equal(
+        contours["ptr"][:], np.asarray([0, 1, 2], dtype=np.int64)
+    )
     np.testing.assert_array_equal(contours["len"][:], np.ones((3,), dtype=np.int32))
     np.testing.assert_allclose(
         contours["points_xy"][:],
@@ -365,14 +548,100 @@ def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_
         "/tmp/clip_a.flat_roi_cache.json",
         "/tmp/clip_b.flat_roi_cache.json",
     ]
-    assert run.attrs["source_roi_cache_keys"] == ["clip_a_cache_key", "clip_b_cache_key"]
+    assert run.attrs["source_roi_cache_keys"] == [
+        "clip_a_cache_key",
+        "clip_b_cache_key",
+    ]
     assert run.attrs["source_subject_mask_shard_runs"] == [
         "subject_masks_refined_clip_a",
         "subject_masks_refined_clip_b",
     ]
 
 
-def test_import_refined_subject_mask_clip_packages_rejects_duplicate_source_crop_rows(tmp_path: Path) -> None:
+def test_production_import_aggregates_two_clip_receipts_and_stays_inactive(
+    tmp_path: Path,
+) -> None:
+    target_zarr = tmp_path / "production_target.zarr"
+    root = zarr.open_group(str(target_zarr), mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "recording_id": "recording_001",
+            "recording_frame_index_row_count": 4,
+        }
+    )
+    crop = root.require_group("crop_runs").create_group("crop_proxy_collection")
+    crop.create_array(
+        "instance_key",
+        data=np.asarray([101, 102, 201, 301], dtype=np.uint64),
+    )
+    crop.create_array(
+        "source_acquisition_frame_index",
+        data=np.asarray([0, 0, 2, 3], dtype=np.int64),
+    )
+    crop.create_array(
+        "source_crop_xywh",
+        data=np.asarray(
+            [[0, 0, 8, 8], [1, 0, 8, 8], [0, 1, 8, 8], [1, 1, 8, 8]],
+            dtype=np.float32,
+        ),
+    )
+    package_a = _write_package(
+        tmp_path,
+        package_name="proof_clip_a",
+        run_name="refined_proof_a",
+        crop_row_ids=[0, 1],
+        frame_indices=[0, 0],
+        production_proof=True,
+    )
+    package_b = _write_package(
+        tmp_path,
+        package_name="proof_clip_b",
+        run_name="refined_proof_b",
+        crop_row_ids=[2, 3],
+        frame_indices=[2, 3],
+        production_proof=True,
+    )
+
+    result = import_refined_subject_mask_clip_packages(
+        zarr_path=target_zarr,
+        package_paths=(package_b, package_a),
+        output_run="refined_recording_draft",
+        expected_target_crop_run="crop_proxy_collection",
+        require_production_proof=True,
+        array_copy_workers=2,
+    )
+
+    assert result["status"] == "ok"
+    assert result["package_count"] == 2
+    assert result["selector_eligible"] is False
+    assert result["source_manifest_payload_digest"]
+    assert result["source_validation_receipt_payload_digest"]
+    reopened = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)
+    parent = reopened["refined_subject_masks_runs"]
+    run = parent["refined_recording_draft"]
+    assert run.attrs["stage_selector_eligible"] is False
+    assert parent.attrs.get("latest") != "refined_recording_draft"
+    assert parent.attrs.get("latest_complete") != "refined_recording_draft"
+    assert (
+        parent.attrs.get("refined_subject_mask_review_status_latest")
+        != "refined_recording_draft"
+    )
+    binding = run.attrs["subject_mask_recording_source_receipt_binding"]
+    receipt_path = target_zarr / str(binding["relative_path"])
+    assert receipt_path.is_file()
+    assert (
+        hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        == binding["document_sha256"]
+    )
+    assert (
+        run.attrs["run_manifest"]["payload_digest"]
+        == result["source_manifest_payload_digest"]
+    )
+
+
+def test_import_refined_subject_mask_clip_packages_rejects_duplicate_source_crop_rows(
+    tmp_path: Path,
+) -> None:
     target_zarr = tmp_path / "target.zarr"
     zarr.open_group(str(target_zarr), mode="w")
     package_a = _write_package(
@@ -396,7 +665,9 @@ def test_import_refined_subject_mask_clip_packages_rejects_duplicate_source_crop
         )
 
 
-def test_import_refined_subject_mask_clip_packages_rejects_mask_label_mismatch(tmp_path: Path) -> None:
+def test_import_refined_subject_mask_clip_packages_rejects_mask_label_mismatch(
+    tmp_path: Path,
+) -> None:
     target_zarr = tmp_path / "target.zarr"
     zarr.open_group(str(target_zarr), mode="w")
     package_a = _write_package(
@@ -434,7 +705,9 @@ def test_import_refined_subject_mask_clip_packages_requires_recording_frame_auth
         crop_row_ids=[10],
     )
 
-    with pytest.raises(ValueError, match="Cannot establish the recording frame universe"):
+    with pytest.raises(
+        ValueError, match="Cannot establish the recording frame universe"
+    ):
         import_refined_subject_mask_clip_packages(
             zarr_path=target_zarr,
             package_paths=[package],
@@ -443,7 +716,9 @@ def test_import_refined_subject_mask_clip_packages_requires_recording_frame_auth
         )
 
 
-def test_import_refined_subject_mask_clip_packages_regenerates_reason_bytes(tmp_path: Path) -> None:
+def test_import_refined_subject_mask_clip_packages_regenerates_reason_bytes(
+    tmp_path: Path,
+) -> None:
     target_zarr = tmp_path / "target.zarr"
     zarr.open_group(str(target_zarr), mode="w")
     _write_target_crop_contract(target_zarr)
@@ -459,7 +734,9 @@ def test_import_refined_subject_mask_clip_packages_regenerates_reason_bytes(tmp_
         package_name="clip_b",
         run_name="refined_clip_b",
         crop_row_ids=[11],
-        body_reason_labels=["different_reason_label_that_requires_a_wider_reason_bytes_matrix"],
+        body_reason_labels=[
+            "different_reason_label_that_requires_a_wider_reason_bytes_matrix"
+        ],
     )
 
     import_refined_subject_mask_clip_packages(
@@ -470,7 +747,9 @@ def test_import_refined_subject_mask_clip_packages_regenerates_reason_bytes(tmp_
     )
 
     root = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)
-    body = root["refined_subject_masks_runs"]["refined_collection"]["components"]["subject_body"]
+    body = root["refined_subject_masks_runs"]["refined_collection"]["components"][
+        "subject_body"
+    ]
     assert body["reason_bytes"].shape[0] == 2
     assert body["reason_bytes"].shape[1] > 64
     assert read_reason_labels(body).tolist() == [
@@ -479,7 +758,9 @@ def test_import_refined_subject_mask_clip_packages_regenerates_reason_bytes(tmp_
     ]
 
 
-def test_repair_refined_subject_mask_frame_counts_uses_atomic_swap(tmp_path: Path) -> None:
+def test_repair_refined_subject_mask_frame_counts_uses_atomic_swap(
+    tmp_path: Path,
+) -> None:
     target_zarr = tmp_path / "target.zarr"
     root = zarr.open_group(str(target_zarr), mode="w")
     root.attrs["recording_frame_index_row_count"] = 6
@@ -517,4 +798,6 @@ def test_repair_refined_subject_mask_frame_counts_uses_atomic_swap(tmp_path: Pat
         repaired["frame_counts"][:],
         np.asarray([1, 0, 2, 0, 0, 1], dtype=np.int32),
     )
-    assert not any(str(name).startswith("frame_counts_repair_") for name in repaired.keys())
+    assert not any(
+        str(name).startswith("frame_counts_repair_") for name in repaired.keys()
+    )

@@ -13,6 +13,7 @@ from fisheye.shared.artifact_fingerprint import (
     MANIFEST_FINGERPRINT_SCHEME,
     fingerprint_artifact,
     fingerprint_directory_manifest,
+    require_artifact_content_identity,
 )
 
 
@@ -100,6 +101,32 @@ def test_fingerprint_artifact_records_registry_hash_mismatch(tmp_path: Path) -> 
     assert result["registry_sha256"] == "b" * 64
     assert result["mismatch"] is True
     assert result["source"] == "computed"
+
+
+def test_required_artifact_identity_directly_rehashes_and_fails_mismatch(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.pt"
+    model.write_bytes(b"weights")
+    current = model.stat()
+    # A forged registry/stat shortcut must not bypass the scientific commit
+    # rehash even when size and mtime appear unchanged.
+    forged = "a" * 64
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        require_artifact_content_identity(
+            model,
+            role="subject_mask_unet_checkpoint",
+            expected_sha256=forged,
+        )
+
+    verified = require_artifact_content_identity(
+        model,
+        role="subject_mask_unet_checkpoint",
+        expected_sha256=_sha256(b"weights"),
+    )
+    assert verified["source"] == "direct_scientific_commit_rehash"
+    assert verified["size_bytes"] == current.st_size
 
 
 def test_fingerprint_artifact_tolerates_sidecar_write_failure(

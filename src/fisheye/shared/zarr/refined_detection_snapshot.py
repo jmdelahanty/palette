@@ -46,6 +46,10 @@ from fisheye.shared.zarr.storage_profiles import (
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 
 REFINED_DETECTION_SNAPSHOT_RECEIPT_SCHEMA_ID = (
@@ -272,7 +276,9 @@ def publish_selector_ineligible_refined_detection_snapshot(
             "created_by": str(created_by),
         }
     )
-    family = root.create_group("refined_detect_runs")
+    family = require_runs_parent(
+        root, "refined_detect_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+    )
     family.attrs.update(
         {
             "benchmark_only": True,

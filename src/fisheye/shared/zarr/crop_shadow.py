@@ -53,6 +53,10 @@ from fisheye.shared.zarr.storage_profiles import (
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 
 DEFAULT_CROP_GEOMETRY_SHADOW_ROOT = Path("/tmp/palette-crop-geometry-shadows")
@@ -504,7 +508,9 @@ def publish_selector_ineligible_crop_geometry_snapshot(
             "created_by": str(created_by),
         }
     )
-    family = root.create_group("crop_runs")
+    family = require_runs_parent(
+        root, "crop_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+    )
     family.attrs.update(
         {
             "benchmark_only": True,

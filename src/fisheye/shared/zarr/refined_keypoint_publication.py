@@ -14,12 +14,21 @@ import zarr
 from fisheye.shared.zarr.array_factory import create_array_from_plan
 from fisheye.shared.zarr.benchmark_runtime import utc_now
 from fisheye.shared.zarr.keypoint_schema import REFINED_KEYPOINT_SCHEMA_V2
+from fisheye.shared.zarr.keypoint_quality_manifest import (
+    quality_profile_from_manifest,
+)
+from fisheye.shared.zarr.keypoint_quality_schema import KeypointQualityDimensions
 from fisheye.shared.zarr.refined_keypoint_manifest import (
     REFINED_KEYPOINT_RUN_MANIFEST_ATTRIBUTE,
     RefinedKeypointSnapshotIdentity,
     RefinedKeypointSourceBindings,
+    build_refined_keypoint_source_bindings,
     build_refined_keypoint_run_manifest,
+    refined_keypoint_code_maps_from_manifest,
+    refined_keypoint_logical_content_document,
+    refined_keypoint_snapshot_identity_from_manifest,
     validate_refined_keypoint_publication,
+    validate_refined_keypoint_run_manifest,
 )
 from fisheye.shared.zarr.refined_keypoint_producer import (
     PreparedRefinedKeypointSnapshot,
@@ -31,7 +40,10 @@ from fisheye.shared.zarr.refined_keypoint_storage import (
 from fisheye.shared.zarr.storage_intent import StoragePlan
 from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1, StorageProfile
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
-
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 REFINED_KEYPOINT_SHADOW_SCHEMA_ID = "palette.refined_keypoint.shadow_publication"
 REFINED_KEYPOINT_SHADOW_SCHEMA_VERSION = 1
@@ -178,16 +190,12 @@ def validate_refined_keypoint_shadow_publication(
         )
         run = zarr.open_group(
             str(
-                publication.output_path
-                / "refined_keypoints_runs"
-                / publication.run_id
+                publication.output_path / "refined_keypoints_runs" / publication.run_id
             ),
             mode="r",
             use_consolidated=False,
         )
-        arrays = {
-            path: run[path] for path in REFINED_KEYPOINT_SCHEMA_V2.binding_paths
-        }
+        arrays = {path: run[path] for path in REFINED_KEYPOINT_SCHEMA_V2.binding_paths}
     except (OSError, TypeError, ValueError) as exc:
         return (f"refined-keypoint shadow reopen failed: {exc}",)
 
@@ -301,7 +309,11 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
             "created_by": str(created_by),
         }
     )
-    family = root.create_group("refined_keypoints_runs")
+    family = require_runs_parent(
+        root,
+        "refined_keypoints_runs",
+        completion_epoch=COMPLETION_EPOCH_STRICT,
+    )
     family.attrs.update(
         {
             "benchmark_only": True,
@@ -424,9 +436,7 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
         parent_arrays=parent_arrays,
         parent_retired_instance_keys=parent_retired,
     )
-    phase_seconds["final_consolidation_and_gate"] = (
-        time.perf_counter() - phase_started
-    )
+    phase_seconds["final_consolidation_and_gate"] = time.perf_counter() - phase_started
     if errors:
         run.attrs.update(
             {
@@ -471,12 +481,160 @@ def publish_selector_ineligible_refined_keypoint_snapshot(
     return publication
 
 
+def republish_selector_ineligible_refined_keypoint_snapshot(
+    *,
+    source_refined_manifest: Mapping[str, Any],
+    source_refined_arrays: Mapping[str, Any],
+    raw_manifest: Mapping[str, Any],
+    quality_manifest: Mapping[str, Any],
+    crop_manifest: Mapping[str, Any],
+    raw_arrays: Mapping[str, Any],
+    quality_arrays: Mapping[str, Any],
+    source_crop_arrays: Mapping[str, Any],
+    destination: Path,
+    run_id: str,
+    shadow_root: Path = DEFAULT_REFINED_KEYPOINT_SHADOW_ROOT,
+    storage_profile: StorageProfile = PUBLISHED_HTTP_V1,
+    created_by: str = "refined_keypoint_v2_contract_republication",
+) -> RefinedKeypointShadowPublication:
+    """Republish unchanged logical arrays under the current exact v2 contract.
+
+    The only accepted legacy transition is source-bindings v1 to v2, whose
+    sole semantic addition is inline skeleton semantics.  All arrays,
+    logical-content declarations, identity, and code registries remain exact.
+    This is an immutable companion publication; it never edits the source.
+    """
+
+    legacy_error = "Refined-keypoint skeleton semantics are not exact."
+    source_errors = validate_refined_keypoint_run_manifest(source_refined_manifest)
+    if source_errors not in ((), (legacy_error,)):
+        raise ValueError(
+            "Source refined-keypoint manifest has unsupported defects: "
+            + "; ".join(source_errors)
+        )
+
+    source = build_refined_keypoint_source_bindings(
+        raw_manifest=raw_manifest,
+        quality_manifest=quality_manifest,
+        crop_manifest=crop_manifest,
+    )
+    payload = source_refined_manifest.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TypeError("Source refined-keypoint manifest payload is missing.")
+    observed_bindings = payload.get("source_bindings")
+    if not isinstance(observed_bindings, Mapping):
+        raise TypeError("Source refined-keypoint bindings are missing.")
+    expected_bindings = source.as_manifest()
+    if source_errors:
+        if (
+            observed_bindings.get("schema_version") != 1
+            or expected_bindings.get("schema_version") != 2
+        ):
+            raise ValueError(
+                "Legacy skeleton-semantics omission must be source-bindings v1."
+            )
+        expected_bindings = dict(expected_bindings)
+        expected_bindings["schema_version"] = 1
+        skeleton = dict(expected_bindings["skeleton"])
+        skeleton.pop("semantics")
+        expected_bindings["skeleton"] = skeleton
+    if dict(observed_bindings) != expected_bindings:
+        raise ValueError(
+            "Source refined-keypoint bindings differ beyond the accepted "
+            "skeleton-semantics omission."
+        )
+
+    identity = refined_keypoint_snapshot_identity_from_manifest(source_refined_manifest)
+    review_state_map, reason_code_map = refined_keypoint_code_maps_from_manifest(
+        source_refined_manifest
+    )
+    quality_payload = quality_manifest.get("payload")
+    if not isinstance(quality_payload, Mapping):
+        raise TypeError("Quality manifest payload is missing.")
+    quality_logical = quality_payload.get("logical_schema")
+    if not isinstance(quality_logical, Mapping):
+        raise TypeError("Quality logical schema is missing.")
+    quality_profile_raw = quality_logical.get("profile")
+    if not isinstance(quality_profile_raw, Mapping):
+        raise TypeError("Quality profile is missing.")
+    quality_profile = quality_profile_from_manifest(quality_profile_raw)
+    dimensions = source.dimensions
+    quality_dimensions = KeypointQualityDimensions(
+        n_frames=dimensions.n_frames,
+        n_instances=dimensions.n_instances,
+        n_keypoints=dimensions.n_keypoints,
+        n_keypoint_metrics=len(quality_profile.keypoint_metrics),
+        n_pose_metrics=len(quality_profile.pose_metrics),
+    )
+    arrays = {
+        path: source_refined_arrays[path]
+        for path in REFINED_KEYPOINT_SCHEMA_V2.binding_paths
+    }
+    REFINED_KEYPOINT_SCHEMA_V2.require(
+        arrays,
+        dimensions=dimensions,
+        source_crop_arrays=source_crop_arrays,
+        skeleton_digest=source.skeleton_digest,
+        review_state_map=review_state_map,
+        reason_code_map=reason_code_map,
+    )
+    observed_content = refined_keypoint_logical_content_document(
+        arrays,
+        dimensions=dimensions,
+        source=source,
+        identity=identity,
+        source_crop_arrays=source_crop_arrays,
+        review_state_map=review_state_map,
+        reason_code_map=reason_code_map,
+    )
+    source_content = payload.get("logical_content")
+    if (
+        not isinstance(source_content, Mapping)
+        or source_content.get("document") != observed_content
+    ):
+        raise ValueError(
+            "Source refined-keypoint logical-content declaration differs from arrays."
+        )
+
+    prepared = PreparedRefinedKeypointSnapshot(
+        dimensions=dimensions,
+        quality_dimensions=quality_dimensions,
+        quality_profile=quality_profile,
+        decisions=(),
+        arrays=arrays,
+    )
+    publication = publish_selector_ineligible_refined_keypoint_snapshot(
+        prepared,
+        source=source,
+        raw_manifest=raw_manifest,
+        quality_manifest=quality_manifest,
+        crop_manifest=crop_manifest,
+        raw_arrays=raw_arrays,
+        quality_arrays=quality_arrays,
+        source_crop_arrays=source_crop_arrays,
+        identity=identity,
+        review_state_map=review_state_map,
+        reason_code_map=reason_code_map,
+        destination=destination,
+        run_id=run_id,
+        shadow_root=shadow_root,
+        storage_profile=storage_profile,
+        created_by=created_by,
+    )
+    if publication.manifest["payload"]["logical_content"] != source_content:
+        raise RuntimeError(
+            "Republished refined-keypoint logical content differs from source."
+        )
+    return publication
+
+
 __all__ = [
     "DEFAULT_REFINED_KEYPOINT_SHADOW_ROOT",
     "REFINED_KEYPOINT_SHADOW_SCHEMA_ID",
     "REFINED_KEYPOINT_SHADOW_SCHEMA_VERSION",
     "RefinedKeypointShadowPublication",
     "publish_selector_ineligible_refined_keypoint_snapshot",
+    "republish_selector_ineligible_refined_keypoint_snapshot",
     "refined_keypoint_metadata_declaration_maps",
     "require_safe_refined_keypoint_shadow_destination",
     "validate_refined_keypoint_shadow_publication",

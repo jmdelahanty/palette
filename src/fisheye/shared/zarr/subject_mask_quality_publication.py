@@ -46,12 +46,14 @@ from fisheye.shared.zarr.subject_mask_schema import (
     derive_subject_mask_frame_row_offsets,
 )
 from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
     mark_run_complete,
     mark_run_failed,
     mark_run_started,
+    require_runs_parent,
 )
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
@@ -79,7 +81,9 @@ _SELECTOR_ATTRIBUTES = (
 _SOURCE_PATHS = {
     "masks_roi",
     "instance_key",
+    "source_crop_row_ids",
     "source_acquisition_frame_index",
+    "frame_row_offsets",
     "available_channels",
 }
 
@@ -139,9 +143,7 @@ def require_local_subject_mask_quality_scratch_root(
         Path("/local"),
         Path("/dev/shm"),
     }
-    if not any(
-        resolved == root or root in resolved.parents for root in allowed_roots
-    ):
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
         raise ValueError(
             "Subject-mask quality scratch_root must be node-local; use /tmp, "
             "$TMPDIR, /nvme1, or a conventional local scratch mount."
@@ -281,9 +283,7 @@ def _validate_source_surface(
         raise ValueError(f"Source mask snapshot lacks arrays: {missing!r}.")
     if tuple(components.labels) != SUBJECT_V1_LR_COMPONENTS:
         raise ValueError("Quality v1 requires canonical subject_v1_lr components.")
-    mask_shape, mask_dtype = _shape_dtype(
-        source_arrays["masks_roi"], name="masks_roi"
-    )
+    mask_shape, mask_dtype = _shape_dtype(source_arrays["masks_roi"], name="masks_roi")
     if len(mask_shape) != 4 or mask_shape[1] != len(components.labels):
         raise ValueError("Source masks_roi must have shape (N,4,H,W).")
     if mask_dtype != np.dtype(np.uint8):
@@ -291,7 +291,9 @@ def _validate_source_surface(
     n_rois, n_channels, height, width = mask_shape
     expected = {
         "instance_key": ((n_rois,), np.dtype(np.uint64)),
+        "source_crop_row_ids": ((n_rois,), np.dtype(np.int64)),
         "source_acquisition_frame_index": ((n_rois,), np.dtype(np.int64)),
+        "frame_row_offsets": ((int(n_frames) + 1,), np.dtype(np.int64)),
         "available_channels": ((n_channels,), np.dtype(bool)),
     }
     for path, (shape, dtype) in expected.items():
@@ -299,6 +301,19 @@ def _validate_source_surface(
         if observed_shape != shape or observed_dtype != dtype:
             raise ValueError(f"Source {path} must be {dtype}{shape}.")
     available = np.asarray(source_arrays["available_channels"][...], dtype=bool)
+    source_frames = np.asarray(
+        source_arrays["source_acquisition_frame_index"][...], dtype=np.int64
+    )
+    expected_offsets = derive_subject_mask_frame_row_offsets(
+        source_frames,
+        n_frames=int(n_frames),
+    )
+    source_offsets = np.asarray(source_arrays["frame_row_offsets"][...], dtype=np.int64)
+    if not np.array_equal(source_offsets, expected_offsets):
+        raise ValueError(
+            "Source frame_row_offsets do not exactly index "
+            "source_acquisition_frame_index."
+        )
     if source.component_registry_digest != canonical_json_sha256(
         components.as_manifest()
     ):
@@ -444,9 +459,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         n_component_metrics=len(profile.component_metrics),
         n_observation_metrics=len(profile.observation_metrics),
     )
-    plans = plan_subject_mask_quality_storage(
-        dimensions, profile=storage_profile
-    )
+    plans = plan_subject_mask_quality_storage(dimensions, profile=storage_profile)
     block_rows = _effective_compute_block_rows(
         n_channels=dimensions.n_channels,
         roi_height=dimensions.roi_height,
@@ -473,6 +486,14 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
         scratch_path = Path(temporary)
         scratch_arrays = _create_scratch_arrays(scratch_path, plans)
         source_digest = hashlib.sha256()
+        identity_digests = {
+            path: hashlib.sha256()
+            for path in (
+                "instance_key",
+                "source_crop_row_ids",
+                "source_acquisition_frame_index",
+            )
+        }
         phase_started = time.perf_counter()
         for start in range(0, dimensions.n_rois, block_rows):
             stop = min(start + block_rows, dimensions.n_rois)
@@ -481,9 +502,20 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             )
             source_digest.update(masks.view(np.uint8))
             keys = _read_rows(source_mask_arrays["instance_key"], start, stop)
+            source_crop_row_ids = _read_rows(
+                source_mask_arrays["source_crop_row_ids"], start, stop
+            )
             frames = _read_rows(
                 source_mask_arrays["source_acquisition_frame_index"], start, stop
             )
+            for path, values in (
+                ("instance_key", keys),
+                ("source_crop_row_ids", source_crop_row_ids),
+                ("source_acquisition_frame_index", frames),
+            ):
+                identity_digests[path].update(
+                    np.ascontiguousarray(values).view(np.uint8)
+                )
             payload = compute_subject_mask_quality_block(
                 masks,
                 available_channels=available,
@@ -497,13 +529,31 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             scratch_arrays["source_acquisition_frame_index"][start:stop] = frames
             for path, values in payload.as_arrays().items():
                 scratch_arrays[path][start:stop] = values
-        if source_digest.hexdigest() != source.dense_array_values_sha256:
-            raise ValueError("Decoded dense source-mask digest mismatch.")
+        observed_source_digests = {
+            "masks_roi": source_digest.hexdigest(),
+            **{path: digest.hexdigest() for path, digest in identity_digests.items()},
+            "frame_row_offsets": hashlib.sha256(
+                np.ascontiguousarray(source_mask_arrays["frame_row_offsets"][...]).view(
+                    np.uint8
+                )
+            ).hexdigest(),
+            "available_channels": hashlib.sha256(
+                np.ascontiguousarray(available).view(np.uint8)
+            ).hexdigest(),
+        }
+        if observed_source_digests != dict(source.source_array_values_sha256):
+            mismatches = sorted(
+                path
+                for path, observed in observed_source_digests.items()
+                if source.source_array_values_sha256.get(path) != observed
+            )
+            raise ValueError(
+                "Exact refined source-array digest mismatch for: "
+                + ", ".join(mismatches)
+            )
         frames = scratch_arrays["source_acquisition_frame_index"]
         scratch_arrays["frame_row_offsets"][...] = (
-            derive_subject_mask_frame_row_offsets(
-                frames, n_frames=dimensions.n_frames
-            )
+            derive_subject_mask_frame_row_offsets(frames, n_frames=dimensions.n_frames)
         )
         phase_seconds["bounded_compute_to_scratch"] = (
             time.perf_counter() - phase_started
@@ -537,7 +587,11 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                 "created_by": str(created_by),
             }
         )
-        family = root.create_group("subject_mask_quality_runs")
+        family = require_runs_parent(
+            root,
+            "subject_mask_quality_runs",
+            completion_epoch=COMPLETION_EPOCH_STRICT,
+        )
         family.attrs.update(
             {
                 "benchmark_only": True,
@@ -572,8 +626,7 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
 
         destination_arrays: dict[str, Any] = {}
         bindings = {
-            binding.path: binding
-            for binding in SUBJECT_MASK_QUALITY_SCHEMA_V1.bindings
+            binding.path: binding for binding in SUBJECT_MASK_QUALITY_SCHEMA_V1.bindings
         }
         phase_started = time.perf_counter()
         physical_write_counts: dict[str, int] = {}
@@ -601,12 +654,8 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
                 plan=entry.plan,
             )
             destination_arrays[path] = destination_array
-        phase_seconds["physical_unit_publication"] = (
-            time.perf_counter() - phase_started
-        )
+        phase_seconds["physical_unit_publication"] = time.perf_counter() - phase_started
         run.attrs["physical_write_counts"] = physical_write_counts
-        run.attrs["status"] = "complete"
-        mark_run_complete(run, run_name=resolved_run_id)
 
         phase_started = time.perf_counter()
         consolidate_metadata_capture_expected_warnings(output_path)
@@ -668,6 +717,38 @@ def publish_selector_ineligible_subject_mask_quality_snapshot(
             )
             raise RuntimeError(
                 "Subject-mask quality publication failed: " + "; ".join(errors)
+            )
+
+        # Seal only after the complete logical, physical, direct/consolidated,
+        # source-binding, and manifest gates above have passed.  Lifecycle
+        # fields are deliberately outside the scientific metadata digest.
+        run.attrs["status"] = "complete"
+        mark_run_complete(run, run_name=resolved_run_id)
+        consolidate_metadata_capture_expected_warnings(output_path)
+        final_direct, final_consolidated = (
+            subject_mask_quality_metadata_declaration_maps(
+                output_path,
+                run_id=resolved_run_id,
+                plans=plans,
+            )
+        )
+        final_errors = validate_subject_mask_quality_publication(
+            manifest,
+            direct_metadata_declarations=final_direct,
+            consolidated_metadata_declarations=final_consolidated,
+            arrays=destination_arrays,
+            source_manifest=source_manifest,
+        )
+        if final_errors:
+            mark_run_failed(
+                run,
+                run_name=resolved_run_id,
+                error="; ".join(final_errors),
+            )
+            consolidate_metadata_capture_expected_warnings(output_path)
+            raise RuntimeError(
+                "Subject-mask quality completion seal failed: "
+                + "; ".join(final_errors)
             )
 
         publication = SubjectMaskQualityShadowPublication(

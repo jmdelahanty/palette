@@ -178,6 +178,42 @@ def fingerprint_artifact(
     return payload
 
 
+def require_artifact_content_identity(
+    path: str | Path,
+    *,
+    role: str,
+    expected_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Directly hash an artifact and fail closed on missing or changed bytes.
+
+    This is the scientific-commit boundary.  Unlike the best-effort provenance
+    helper above, it deliberately ignores registry stat shortcuts and sidecar
+    caches so a same-size/same-mtime replacement cannot be accepted.
+    """
+
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Required {role} artifact is not a file: {resolved}")
+    expected = _normalize_sha256(expected_sha256)
+    if expected_sha256 is not None and expected is None:
+        raise ValueError(f"Expected SHA-256 for {role} is malformed.")
+    stat_payload = _stat_payload(resolved)
+    actual = _sha256_file(resolved)
+    if expected is not None and actual != expected:
+        raise ValueError(
+            f"Required {role} artifact SHA-256 mismatch: expected {expected}, "
+            f"observed {actual}."
+        )
+    return {
+        "role": str(role),
+        "path": str(resolved),
+        "fingerprint_scheme": CONTENT_FINGERPRINT_SCHEME,
+        "sha256": actual,
+        "source": "direct_scientific_commit_rehash",
+        **stat_payload,
+    }
+
+
 def fingerprint_directory_manifest(
     directory: str | Path,
     *,

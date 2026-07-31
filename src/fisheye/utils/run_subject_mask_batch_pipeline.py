@@ -50,6 +50,7 @@ from fisheye.shared.workflow_profile import WorkflowProfiler
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    is_run_selector_eligible,
     mark_run_complete,
     require_runs_parent,
 )
@@ -488,16 +489,12 @@ def build_archive_plan(
 
 def _selected_subject_run_for_finalization(plan: ArchivePlan) -> str:
     zarr_path = Path(plan.zarr_path)
-    if plan.subject_output_parent != SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
-        raise RuntimeError(
-            "Refined subject-mask finalization requires canonical subject_mask_runs input; "
-            f"got {plan.subject_output_parent!r}."
-        )
-    if plan.run_inference or (zarr_path / "subject_mask_runs" / plan.subject_run).is_dir():
+    subject_parent = str(plan.subject_output_parent)
+    if plan.run_inference or (zarr_path / subject_parent / plan.subject_run).is_dir():
         return plan.subject_run
-    latest = _latest_group_name(zarr_path / "subject_mask_runs")
+    latest = _latest_group_name(zarr_path / subject_parent)
     if latest is None:
-        raise RuntimeError(f"{zarr_path} has no subject_mask_runs to finalize.")
+        raise RuntimeError(f"{zarr_path} has no {subject_parent} to finalize.")
     return latest
 
 
@@ -619,8 +616,6 @@ def _finalization_command(
         "-m",
         "fisheye.refinement.finalize_subject_masks",
         plan.zarr_path,
-        "--subject-run",
-        subject_run,
         "--run-name",
         plan.refined_run,
         "--components",
@@ -643,6 +638,13 @@ def _finalization_command(
         str(plan.assignment_keypoint_run),
         "--json",
     ]
+    if plan.subject_output_parent == SUBJECT_MASK_SHARD_OUTPUT_PARENT:
+        cmd.extend(["--subject-shard-run", subject_run])
+        if not plan.crop_run:
+            raise ValueError("Shard finalization requires an exact target crop run.")
+        cmd.extend(["--target-crop-run", str(plan.crop_run)])
+    else:
+        cmd.extend(["--subject-run", subject_run])
     if args.finalize_num_workers is not None:
         cmd.extend(["--num-workers", str(args.finalize_num_workers)])
     if args.finalize_dense_mask_row_chunk is not None:
@@ -672,6 +674,8 @@ def _finalization_command(
         cmd.extend(["--progress-jsonl", str(progress_path)])
     if defer_registry_status:
         cmd.append("--defer-registry-status")
+    if bool(getattr(args, "require_production_proof", False)):
+        cmd.append("--require-production-proof")
     if args.overwrite:
         cmd.append("--overwrite")
     return cmd
@@ -835,8 +839,9 @@ def _prepare_output_staging_zarr(
 
     if plan.run_finalization and not plan.run_inference:
         subject_run = _selected_subject_run_for_finalization(plan)
-        source_subject = source_zarr_path / "subject_mask_runs" / subject_run
-        staged_subject = staged_zarr_path / "subject_mask_runs" / subject_run
+        subject_parent = str(plan.subject_output_parent)
+        source_subject = source_zarr_path / subject_parent / subject_run
+        staged_subject = staged_zarr_path / subject_parent / subject_run
         if not source_subject.is_dir():
             raise FileNotFoundError(f"Cannot stage finalization source subject-mask run: {source_subject}")
         if not staged_subject.exists() and not staged_subject.is_symlink():
@@ -848,7 +853,11 @@ def _prepare_output_staging_zarr(
                     if isinstance(raw_package_path, str) and raw_package_path:
                         package_path = Path(raw_package_path)
                 if package_path is not None and package_path.is_file():
-                    _extract_run_group_tar_package(package_path, staged_zarr_path / "subject_mask_runs", subject_run)
+                    _extract_run_group_tar_package(
+                        package_path,
+                        staged_zarr_path / subject_parent,
+                        subject_run,
+                    )
                 else:
                     shutil.copytree(source_subject, staged_subject, symlinks=True)
             else:
@@ -1156,7 +1165,8 @@ def _publish_staged_outputs(
             run_name=plan.refined_run,
             run_provenance=refined_run_provenance,
         )
-        refined_parent.attrs["refined_subject_mask_review_status_latest"] = plan.refined_run
+        if is_run_selector_eligible(refined_group):
+            refined_parent.attrs["refined_subject_mask_review_status_latest"] = plan.refined_run
         if not defer_registry_status and not emit_refined_subject_mask_stage_completion(
             root,
             ctx.source_zarr_path,
@@ -1353,6 +1363,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pilot-size", type=int, default=None, help="Limit to the first N eligible archives.")
     parser.add_argument("--include-smoke", action="store_true", help="Include /smoke/ analysis Zarrs.")
     parser.add_argument("--run-label", default=f"batch_{_utc_now_compact()}")
+    parser.add_argument(
+        "--subject-run-name",
+        help="Exact raw worker run name; defaults to the run-label derivation.",
+    )
+    parser.add_argument(
+        "--refined-run-name",
+        help="Exact refined worker draft name; defaults to the run-label derivation.",
+    )
     parser.add_argument(
         "--workflow-stage",
         choices=("all", "inference", "finalization"),
@@ -1559,6 +1577,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--require-production-proof",
+        action="store_true",
+        help=(
+            "Require authenticated source identity and semantic receipts and "
+            "keep refined worker outputs selector-ineligible for bundle publication."
+        ),
+    )
+    parser.add_argument(
         "--stage-output-to-scratch",
         action="store_true",
         help=(
@@ -1620,16 +1646,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     args.registry = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     dry_run = not bool(args.apply)
-    if args.subject_output_parent != SUBJECT_MASK_CANONICAL_OUTPUT_PARENT and args.workflow_stage != "inference":
-        print(
-            "--subject-output-parent subject_mask_shard_runs is inference-only; "
-            "run canonical finalization after collection merge.",
-            file=sys.stderr,
-        )
-        return 2
-
-    subject_run = f"subject_masks_unet_registry_{args.run_label}"
-    refined_run = f"refined_subject_masks_smart_finalizer_{args.run_label}"
+    subject_run = args.subject_run_name or f"subject_masks_unet_registry_{args.run_label}"
+    refined_run = args.refined_run_name or f"refined_subject_masks_smart_finalizer_{args.run_label}"
     if args.roots_from_report is not None:
         root_inputs = _zarr_paths_from_report(args.roots_from_report)
         discovered_zarrs = _discover_analysis_zarrs(root_inputs, include_smoke=bool(args.include_smoke))

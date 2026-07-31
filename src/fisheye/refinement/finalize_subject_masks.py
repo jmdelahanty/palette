@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import hashlib
 import json
 import os
 import sys
@@ -47,7 +48,10 @@ from ..shared.proof_verification import (
     proof_verification_scope,
     restart_proof_verification,
 )
-from ..shared.row_lineage import copy_row_lineage_arrays_from_sources, stamp_row_identity_mode
+from ..shared.row_lineage import (
+    copy_row_lineage_arrays_from_sources,
+    stamp_row_identity_mode,
+)
 from ..shared.refined_subject_mask_mutation import (
     resolve_mutable_refined_subject_mask_run,
 )
@@ -69,8 +73,31 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_storage_row_chunk,
     refined_subject_mask_storage_chunks,
 )
-from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
+from ..shared.subject_mask_registry_status import (
+    emit_refined_subject_mask_stage_completion,
+)
+from ..shared.subject_mask_worker_receipt import (
+    REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+    build_subject_mask_worker_semantic_receipt,
+)
+from ..shared.subject_mask_attempt import (
+    build_subject_mask_attempt,
+    build_subject_mask_scientific_identity,
+    resolve_subject_mask_attempt_lineage,
+    validate_subject_mask_scientific_identity,
+)
+from ..shared.zarr.manifest_digest import canonical_json_bytes, canonical_json_sha256
+from ..shared.zarr.subject_mask_validation_receipt import (
+    SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM,
+    subject_mask_array_unit_document,
+    streaming_array_sha256,
+)
+from ..shared.zarr_run_completion import (
+    is_run_selector_eligible,
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from ..tune.refined_subject_mask_review import (
     DEFAULT_REVIEW_INTENDED_USE,
     DEFAULT_REVIEW_METHOD,
@@ -130,11 +157,20 @@ from ..shared.refined_subject_component_contours import (
     DEFAULT_CONTOUR_METHOD_VERSION,
     DEFAULT_SAMPLED_CONTOUR_COUNTS,
     DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
+    ensure_component_row_update_tracking,
     extract_largest_external_contour,
     resample_closed_contour,
     write_refined_subject_component_contours,
     write_refined_subject_sampled_component_contours,
     write_sampled_component_contour_arrays,
+)
+from ..shared.zarr.refined_subject_mask_extensions import (
+    REFINED_SUBJECT_MASK_DRAFT_AUDIT_MANIFEST_ATTRIBUTE,
+    REFINED_SUBJECT_MASK_DRAFT_AUDIT_SCHEMA_V1,
+)
+from ..shared.zarr.subject_mask_schema import (
+    SubjectMaskComponentRegistry,
+    SubjectMaskDimensions,
 )
 from .subject_eye_assignment import (
     EYES_UNION_ASSIGNMENT_METHOD,
@@ -149,7 +185,9 @@ from .subject_mask_finalization import (
 )
 
 SMART_FINALIZE_SUBJECT_MASKS_METHOD = "smart_finalize_subject_masks_v1"
-SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA = "palette_subject_mask_shard_collection_finalizer_v1"
+SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA = (
+    "palette_subject_mask_shard_collection_finalizer_v1"
+)
 SUBJECT_MASK_CANONICAL_PARENT = "subject_mask_runs"
 SUBJECT_MASK_SHARD_PARENT = "subject_mask_shard_runs"
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_smart_finalize_subject_masks"
@@ -185,6 +223,15 @@ _MASK_STORAGES_WITH_RLE = {"dense_and_rle", "dense_bitpacked_and_rle"}
 _MASK_STORAGES_REMOVE_DENSE: set[str] = set()
 _MASK_STORAGES_DIRECT_BITPACKED: set[str] = set()
 _MASK_RLE_VALIDATION_MODES = MASK_RLE_VALIDATION_MODES
+REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR = "subject_mask_scientific_identity"
+REFINED_SUBJECT_MASK_ATTEMPT_ATTR = "subject_mask_attempt"
+REFINED_SUBJECT_MASK_ATTEMPT_LINEAGE_EVIDENCE_ATTR = (
+    "subject_mask_attempt_lineage_evidence"
+)
+REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR = (
+    "subject_mask_worker_semantic_receipt_binding"
+)
+REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_SIDECAR = "worker_semantic_receipt.json"
 _CANONICAL_REFINED_SOURCE_ARRAYS = (
     "source_crop_row_ids",
     "instance_key",
@@ -346,7 +393,9 @@ def _compact_nonnegative_index_array(values: np.ndarray, *, name: str) -> np.nda
 def _build_collection_worker_plan(
     collection: _SubjectMaskShardCollection,
 ) -> _SubjectMaskCollectionWorkerPlan:
-    source_indices = np.asarray(collection.row_source_indices, dtype=np.int64).reshape(-1)
+    source_indices = np.asarray(collection.row_source_indices, dtype=np.int64).reshape(
+        -1
+    )
     shard_row_counts = np.bincount(
         source_indices,
         minlength=len(collection.shard_runs),
@@ -356,7 +405,9 @@ def _build_collection_worker_plan(
         shard_runs=tuple(collection.shard_runs),
         shard_crop_runs=tuple(collection.shard_crop_runs),
         source_crop_run=str(collection.source_crop_run),
-        source_crop_rebased_from_shards=bool(collection.source_crop_rebased_from_shards),
+        source_crop_rebased_from_shards=bool(
+            collection.source_crop_rebased_from_shards
+        ),
         shard_row_counts=tuple(int(value) for value in shard_row_counts.tolist()),
         row_source_indices=_compact_nonnegative_index_array(
             source_indices,
@@ -407,7 +458,9 @@ class _SubjectMaskParentAliasRoot:
             return self._root.get(self._source_parent, default)
         prefix = f"{SUBJECT_MASK_CANONICAL_PARENT}/"
         if path.startswith(prefix):
-            return self._root.get(f"{self._source_parent}/{path[len(prefix):]}", default)
+            return self._root.get(
+                f"{self._source_parent}/{path[len(prefix):]}", default
+            )
         return self._root.get(path, default)
 
 
@@ -422,7 +475,9 @@ class _IndexedCollectionArray:
         local_indices: np.ndarray,
     ) -> None:
         if not arrays:
-            raise ValueError("Indexed collection array requires at least one source array.")
+            raise ValueError(
+                "Indexed collection array requires at least one source array."
+            )
         self._arrays = tuple(arrays)
         self._source_indices = np.asarray(source_indices).reshape(-1)
         self._local_indices = np.asarray(local_indices).reshape(-1)
@@ -431,7 +486,9 @@ class _IndexedCollectionArray:
         if self._local_indices.dtype.kind not in "iu":
             self._local_indices = self._local_indices.astype(np.int64)
         if self._source_indices.shape != self._local_indices.shape:
-            raise ValueError("source_indices and local_indices must have the same shape.")
+            raise ValueError(
+                "source_indices and local_indices must have the same shape."
+            )
         first = arrays[0]
         first_shape = tuple(int(value) for value in getattr(first, "shape"))
         self.shape = (int(self._source_indices.shape[0]), *first_shape[1:])
@@ -441,7 +498,10 @@ class _IndexedCollectionArray:
         self.chunks = None
         if chunks:
             chunks_tuple = tuple(int(value) for value in chunks)
-            self.chunks = (min(max(1, self.shape[0]), chunks_tuple[0]), *chunks_tuple[1:])
+            self.chunks = (
+                min(max(1, self.shape[0]), chunks_tuple[0]),
+                *chunks_tuple[1:],
+            )
 
     def __getitem__(self, key: object) -> np.ndarray:
         if isinstance(key, tuple):
@@ -465,16 +525,20 @@ class _IndexedCollectionArray:
             positions = np.asarray(row_key)
             if positions.dtype.kind == "b":
                 if positions.ndim != 1 or int(positions.shape[0]) != int(self.shape[0]):
-                    raise IndexError("boolean collection row index must match the row count")
+                    raise IndexError(
+                        "boolean collection row index must match the row count"
+                    )
                 positions = np.flatnonzero(positions)
             else:
                 positions = np.asarray(positions, dtype=np.int64)
-                positions = np.where(positions < 0, positions + int(self.shape[0]), positions)
+                positions = np.where(
+                    positions < 0, positions + int(self.shape[0]), positions
+                )
                 if bool(np.any((positions < 0) | (positions >= int(self.shape[0])))):
                     raise IndexError("collection row index is out of bounds")
         flat_positions = np.asarray(positions, dtype=np.int64).reshape(-1)
         if flat_positions.size == 0:
-            return np.empty((0, *self.shape[1 + len(rest):]), dtype=self.dtype)
+            return np.empty((0, *self.shape[1 + len(rest) :]), dtype=self.dtype)
 
         # Collection rows are normally contiguous within one source shard. Read
         # each contiguous local-row run as one slice instead of issuing one Zarr
@@ -491,9 +555,10 @@ class _IndexedCollectionArray:
                 same_source = int(self._source_indices[current_position]) == int(
                     self._source_indices[previous_position]
                 )
-                next_local_row = int(self._local_indices[current_position]) == int(
-                    self._local_indices[previous_position]
-                ) + 1
+                next_local_row = (
+                    int(self._local_indices[current_position])
+                    == int(self._local_indices[previous_position]) + 1
+                )
                 if same_source and next_local_row:
                     continue
 
@@ -516,7 +581,9 @@ class _IndexedCollectionArray:
 class _SubjectMaskCollectionGroup:
     """Minimal group-like object satisfying the finalizer's source-run contract."""
 
-    def __init__(self, attrs: Mapping[str, object], arrays: Mapping[str, object], *, path: str) -> None:
+    def __init__(
+        self, attrs: Mapping[str, object], arrays: Mapping[str, object], *, path: str
+    ) -> None:
         self.attrs = dict(attrs)
         self._arrays = dict(arrays)
         self.path = str(path)
@@ -611,7 +678,9 @@ def _normalize_postcompute_backend(postcompute_backend: object) -> str:
 
 
 def _stable_json_equal(left: object, right: object) -> bool:
-    return json.dumps(json_attr_safe(left), sort_keys=True, separators=(",", ":")) == json.dumps(
+    return json.dumps(
+        json_attr_safe(left), sort_keys=True, separators=(",", ":")
+    ) == json.dumps(
         json_attr_safe(right),
         sort_keys=True,
         separators=(",", ":"),
@@ -633,24 +702,34 @@ def _load_shard_names_from_file(path: Path) -> list[str]:
                 names: list[str] = []
                 for item in value:
                     if isinstance(item, Mapping):
-                        raw_name = item.get("run_name") or item.get("run") or item.get("name")
+                        raw_name = (
+                            item.get("run_name") or item.get("run") or item.get("name")
+                        )
                         if raw_name is None:
-                            raise ValueError(f"Shard-run entry in {path} is missing run_name/run/name: {item!r}")
+                            raise ValueError(
+                                f"Shard-run entry in {path} is missing run_name/run/name: {item!r}"
+                            )
                         names.append(str(raw_name))
                     else:
                         names.append(str(item))
                 return names
-    raise ValueError(f"Could not read shard run list from {path}; expected list or mapping with shard_runs.")
+    raise ValueError(
+        f"Could not read shard run list from {path}; expected list or mapping with shard_runs."
+    )
 
 
-def _row_identity_from_group(group: zarr.Group, row_ids: np.ndarray, names: Sequence[str]) -> list[tuple[object, ...]]:
+def _row_identity_from_group(
+    group: zarr.Group, row_ids: np.ndarray, names: Sequence[str]
+) -> list[tuple[object, ...]]:
     arrays = {name: _array_data(group[name]) for name in names}
     identities: list[tuple[object, ...]] = []
     for row_id in np.asarray(row_ids, dtype=np.int64).reshape(-1):
         parts: list[object] = []
         for name in names:
             value = np.asarray(arrays[name][int(row_id)])
-            parts.append(value.item() if value.ndim == 0 else tuple(value.reshape(-1).tolist()))
+            parts.append(
+                value.item() if value.ndim == 0 else tuple(value.reshape(-1).tolist())
+            )
         identities.append(tuple(parts))
     return identities
 
@@ -675,8 +754,13 @@ def _load_subject_mask_shard_sources(
         group = parent[name]
         status = str(group.attrs.get("palette_run_completion_status") or "")
         if status and status != "complete":
-            raise ValueError(f"{SUBJECT_MASK_SHARD_PARENT}/{name} is not complete (status={status!r}).")
-        if str(group.attrs.get("incremental_materialization_role") or "") == "delta_replacement_rows":
+            raise ValueError(
+                f"{SUBJECT_MASK_SHARD_PARENT}/{name} is not complete (status={status!r})."
+            )
+        if (
+            str(group.attrs.get("incremental_materialization_role") or "")
+            == "delta_replacement_rows"
+        ):
             raise ValueError(
                 f"{SUBJECT_MASK_SHARD_PARENT}/{name} contains incremental delta rows, "
                 "not a complete collection partition. Publish it through the keyed "
@@ -684,7 +768,9 @@ def _load_subject_mask_shard_sources(
             )
         source = _load_source_subject_mask_run(alias_root, name)  # type: ignore[arg-type]
         if source.source_crop_row_ids is None:
-            raise ValueError(f"{SUBJECT_MASK_SHARD_PARENT}/{name} missing source_crop_row_ids.")
+            raise ValueError(
+                f"{SUBJECT_MASK_SHARD_PARENT}/{name} missing source_crop_row_ids."
+            )
         sources.append(
             _SubjectMaskShardSource(
                 name=name,
@@ -696,26 +782,43 @@ def _load_subject_mask_shard_sources(
     return sources
 
 
-def _validate_subject_mask_shard_compatibility(shards: Sequence[_SubjectMaskShardSource]) -> None:
+def _validate_subject_mask_shard_compatibility(
+    shards: Sequence[_SubjectMaskShardSource],
+) -> None:
     first = shards[0].source
     for shard in shards[1:]:
         source = shard.source
         if tuple(source.mask_labels) != tuple(first.mask_labels):
-            raise ValueError(f"Shard mask_labels differ between {shards[0].name} and {shard.name}.")
-        if not np.array_equal(np.asarray(source.available_channels, dtype=bool), np.asarray(first.available_channels, dtype=bool)):
-            raise ValueError(f"Shard available_channels differ between {shards[0].name} and {shard.name}.")
+            raise ValueError(
+                f"Shard mask_labels differ between {shards[0].name} and {shard.name}."
+            )
+        if not np.array_equal(
+            np.asarray(source.available_channels, dtype=bool),
+            np.asarray(first.available_channels, dtype=bool),
+        ):
+            raise ValueError(
+                f"Shard available_channels differ between {shards[0].name} and {shard.name}."
+            )
         if tuple(source.masks_roi.shape[1:]) != tuple(first.masks_roi.shape[1:]):
-            raise ValueError(f"Shard ROI/probability shape differs between {shards[0].name} and {shard.name}.")
+            raise ValueError(
+                f"Shard ROI/probability shape differs between {shards[0].name} and {shard.name}."
+            )
         if tuple(source.probability_thresholds) != tuple(first.probability_thresholds):
-            raise ValueError(f"Shard probability thresholds differ between {shards[0].name} and {shard.name}.")
+            raise ValueError(
+                f"Shard probability thresholds differ between {shards[0].name} and {shard.name}."
+            )
         if source.probability_encoding != first.probability_encoding:
-            raise ValueError(f"Shard probability encoding differs between {shards[0].name} and {shard.name}.")
+            raise ValueError(
+                f"Shard probability encoding differs between {shards[0].name} and {shard.name}."
+            )
         for attr_name in _SUBJECT_MASK_SHARD_COMPAT_ATTRS:
             left = first.group.attrs.get(attr_name)
             right = source.group.attrs.get(attr_name)
             if left is not None or right is not None:
                 if not _stable_json_equal(left, right):
-                    raise ValueError(f"Shard attr {attr_name!r} differs between {shards[0].name} and {shard.name}.")
+                    raise ValueError(
+                        f"Shard attr {attr_name!r} differs between {shards[0].name} and {shard.name}."
+                    )
 
 
 def _resolve_subject_mask_crop_rebase(
@@ -733,7 +836,12 @@ def _resolve_subject_mask_crop_rebase(
                 f"found {list(unique_crop_runs)!r}."
             )
         row_ids = np.concatenate(
-            [np.asarray(shard.source.source_crop_row_ids[:], dtype=np.int64).reshape(-1) for shard in shards],
+            [
+                np.asarray(shard.source.source_crop_row_ids[:], dtype=np.int64).reshape(
+                    -1
+                )
+                for shard in shards
+            ],
             axis=0,
         )
         return unique_crop_runs[0], row_ids, unique_crop_runs, False
@@ -745,9 +853,9 @@ def _resolve_subject_mask_crop_rebase(
     if unique_crop_runs == (str(target_crop_run),):
         row_ids = np.concatenate(
             [
-                np.asarray(
-                    shard.source.source_crop_row_ids[:], dtype=np.int64
-                ).reshape(-1)
+                np.asarray(shard.source.source_crop_row_ids[:], dtype=np.int64).reshape(
+                    -1
+                )
                 for shard in shards
             ],
             axis=0,
@@ -755,27 +863,45 @@ def _resolve_subject_mask_crop_rebase(
         return str(target_crop_run), row_ids, unique_crop_runs, False
 
     target_group = crop_parent[target_crop_run]
-    missing_target = [name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in target_group]
+    missing_target = [
+        name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in target_group
+    ]
     if missing_target:
-        raise ValueError(f"target crop run crop_runs/{target_crop_run} missing identity arrays: {missing_target}")
+        raise ValueError(
+            f"target crop run crop_runs/{target_crop_run} missing identity arrays: {missing_target}"
+        )
     target_rows = np.arange(int(target_group["frame_indices"].shape[0]), dtype=np.int64)
-    target_identities = _row_identity_from_group(target_group, target_rows, _CROP_REBASE_IDENTITY_ARRAYS)
+    target_identities = _row_identity_from_group(
+        target_group, target_rows, _CROP_REBASE_IDENTITY_ARRAYS
+    )
     target_map: dict[tuple[object, ...], int] = {}
     for row_idx, identity in enumerate(target_identities):
         if identity in target_map:
-            raise ValueError(f"target crop run crop_runs/{target_crop_run} has duplicate crop row identities.")
+            raise ValueError(
+                f"target crop run crop_runs/{target_crop_run} has duplicate crop row identities."
+            )
         target_map[identity] = int(row_idx)
 
     mapped_chunks: list[np.ndarray] = []
     for shard in shards:
         source_group = crop_parent.get(shard.source_crop_run)
         if source_group is None:
-            raise ValueError(f"source crop run not found: crop_runs/{shard.source_crop_run}")
-        missing_source = [name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in source_group]
+            raise ValueError(
+                f"source crop run not found: crop_runs/{shard.source_crop_run}"
+            )
+        missing_source = [
+            name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in source_group
+        ]
         if missing_source:
-            raise ValueError(f"source crop run crop_runs/{shard.source_crop_run} missing identity arrays: {missing_source}")
-        source_rows = np.asarray(shard.source.source_crop_row_ids[:], dtype=np.int64).reshape(-1)
-        source_identities = _row_identity_from_group(source_group, source_rows, _CROP_REBASE_IDENTITY_ARRAYS)
+            raise ValueError(
+                f"source crop run crop_runs/{shard.source_crop_run} missing identity arrays: {missing_source}"
+            )
+        source_rows = np.asarray(
+            shard.source.source_crop_row_ids[:], dtype=np.int64
+        ).reshape(-1)
+        source_identities = _row_identity_from_group(
+            source_group, source_rows, _CROP_REBASE_IDENTITY_ARRAYS
+        )
         mapped = np.full(source_rows.shape[0], -1, dtype=np.int64)
         for local_idx, identity in enumerate(source_identities):
             target_row = target_map.get(identity)
@@ -786,7 +912,12 @@ def _resolve_subject_mask_crop_rebase(
                 )
             mapped[local_idx] = int(target_row)
         mapped_chunks.append(mapped)
-    return str(target_crop_run), np.concatenate(mapped_chunks, axis=0), unique_crop_runs, True
+    return (
+        str(target_crop_run),
+        np.concatenate(mapped_chunks, axis=0),
+        unique_crop_runs,
+        True,
+    )
 
 
 def _target_crop_lineage_array(
@@ -799,7 +930,9 @@ def _target_crop_lineage_array(
     crop_group = root.get(f"crop_runs/{crop_run}")
     if crop_group is None or name not in crop_group:
         return None
-    return _array_data(crop_group[name])[np.asarray(target_rows, dtype=np.int64).reshape(-1)]
+    return _array_data(crop_group[name])[
+        np.asarray(target_rows, dtype=np.int64).reshape(-1)
+    ]
 
 
 def _load_subject_mask_source(
@@ -812,26 +945,45 @@ def _load_subject_mask_source(
 ) -> tuple[SourceSubjectMaskRun, _SubjectMaskShardCollection | None]:
     if subject_shard_runs:
         if subject_run:
-            raise ValueError("Pass either --subject-run or --subject-shard-run, not both.")
+            raise ValueError(
+                "Pass either --subject-run or --subject-shard-run, not both."
+            )
         shards = _load_subject_mask_shard_sources(root, subject_shard_runs)
         _validate_subject_mask_shard_compatibility(shards)
         if collection_worker_plan is not None:
-            if str(collection_worker_plan.schema_id) != _COLLECTION_WORKER_INDEX_PLAN_SCHEMA:
+            if (
+                str(collection_worker_plan.schema_id)
+                != _COLLECTION_WORKER_INDEX_PLAN_SCHEMA
+            ):
                 raise ValueError(
                     f"Unsupported collection worker plan schema: {collection_worker_plan.schema_id!r}."
                 )
-            if tuple(collection_worker_plan.shard_runs) != tuple(str(name) for name in subject_shard_runs):
-                raise ValueError("Collection worker plan shard runs do not match the requested shard runs.")
+            if tuple(collection_worker_plan.shard_runs) != tuple(
+                str(name) for name in subject_shard_runs
+            ):
+                raise ValueError(
+                    "Collection worker plan shard runs do not match the requested shard runs."
+                )
             source_crop_run = str(collection_worker_plan.source_crop_run)
             if target_crop_run and source_crop_run != str(target_crop_run):
-                raise ValueError("Collection worker plan target crop run does not match the request.")
-            sorted_crop_rows = np.asarray(collection_worker_plan.source_crop_row_ids).reshape(-1)
+                raise ValueError(
+                    "Collection worker plan target crop run does not match the request."
+                )
+            sorted_crop_rows = np.asarray(
+                collection_worker_plan.source_crop_row_ids
+            ).reshape(-1)
             shard_crop_runs = tuple(collection_worker_plan.shard_crop_runs)
             if set(shard_crop_runs) != {shard.source_crop_run for shard in shards}:
-                raise ValueError("Collection worker plan source crop runs do not match the source shards.")
+                raise ValueError(
+                    "Collection worker plan source crop runs do not match the source shards."
+                )
             rebased = bool(collection_worker_plan.source_crop_rebased_from_shards)
-            source_indices = np.asarray(collection_worker_plan.row_source_indices).reshape(-1)
-            local_indices = np.asarray(collection_worker_plan.row_local_indices).reshape(-1)
+            source_indices = np.asarray(
+                collection_worker_plan.row_source_indices
+            ).reshape(-1)
+            local_indices = np.asarray(
+                collection_worker_plan.row_local_indices
+            ).reshape(-1)
             expected_rows = int(sum(int(shard.row_count) for shard in shards))
             if not (
                 int(sorted_crop_rows.shape[0])
@@ -843,16 +995,22 @@ def _load_subject_mask_source(
                     "Collection worker plan row arrays do not match the subject-mask shard row count."
                 )
             if source_indices.size and int(source_indices.max()) >= len(shards):
-                raise ValueError("Collection worker plan contains an invalid shard index.")
+                raise ValueError(
+                    "Collection worker plan contains an invalid shard index."
+                )
             if tuple(collection_worker_plan.shard_row_counts) != tuple(
                 int(shard.row_count) for shard in shards
             ):
-                raise ValueError("Collection worker plan shard row counts do not match the source shards.")
+                raise ValueError(
+                    "Collection worker plan shard row counts do not match the source shards."
+                )
         else:
-            source_crop_run, source_crop_row_ids, shard_crop_runs, rebased = _resolve_subject_mask_crop_rebase(
-                root,
-                shards,
-                target_crop_run=target_crop_run,
+            source_crop_run, source_crop_row_ids, shard_crop_runs, rebased = (
+                _resolve_subject_mask_crop_rebase(
+                    root,
+                    shards,
+                    target_crop_run=target_crop_run,
+                )
             )
             source_indices = np.concatenate(
                 [
@@ -865,7 +1023,9 @@ def _load_subject_mask_source(
                 [np.arange(shard.row_count, dtype=np.int64) for shard in shards],
                 axis=0,
             )
-            order = np.argsort(np.asarray(source_crop_row_ids, dtype=np.int64), kind="stable")
+            order = np.argsort(
+                np.asarray(source_crop_row_ids, dtype=np.int64), kind="stable"
+            )
             sorted_crop_rows = np.asarray(source_crop_row_ids, dtype=np.int64)[order]
             if np.unique(sorted_crop_rows).shape[0] != sorted_crop_rows.shape[0]:
                 raise ValueError(
@@ -900,7 +1060,12 @@ def _load_subject_mask_source(
         arrays["source_crop_row_ids"] = sorted_crop_rows
         if target_crop_run:
             for name in _CROP_REBASE_COPY_ARRAYS:
-                target_values = _target_crop_lineage_array(root, crop_run=source_crop_run, target_rows=sorted_crop_rows, name=name)
+                target_values = _target_crop_lineage_array(
+                    root,
+                    crop_run=source_crop_run,
+                    target_rows=sorted_crop_rows,
+                    name=name,
+                )
                 if target_values is not None:
                     arrays[name] = np.asarray(target_values)
         frame_counts = None
@@ -915,7 +1080,9 @@ def _load_subject_mask_source(
                 else np.arange(sorted_crop_rows.shape[0], dtype=np.int64)
             )
             frame_axis_len = int(frames.max()) + 1 if frames.size else 0
-            frame_counts = np.bincount(frames, minlength=frame_axis_len).astype(np.int32)
+            frame_counts = np.bincount(frames, minlength=frame_axis_len).astype(
+                np.int32
+            )
         arrays["frame_counts"] = np.asarray(frame_counts, dtype=np.int32)
 
         attrs = dict(first_source.group.attrs)
@@ -923,7 +1090,9 @@ def _load_subject_mask_source(
             {
                 "source_crop_run": source_crop_run,
                 "source_subject_mask_shard_runs": [shard.name for shard in shards],
-                "source_subject_mask_shard_run_paths": [f"{SUBJECT_MASK_SHARD_PARENT}/{shard.name}" for shard in shards],
+                "source_subject_mask_shard_run_paths": [
+                    f"{SUBJECT_MASK_SHARD_PARENT}/{shard.name}" for shard in shards
+                ],
                 "source_subject_mask_shard_crop_runs": list(shard_crop_runs),
                 "source_crop_rebased_from_shards": bool(rebased),
                 "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
@@ -950,7 +1119,10 @@ def _load_subject_mask_source(
             arrays,
             path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>",
         )
-        if first_source.mask_surface_path == "mask_probs_roi" and "mask_probs_roi" in arrays:
+        if (
+            first_source.mask_surface_path == "mask_probs_roi"
+            and "mask_probs_roi" in arrays
+        ):
             masks_roi = first_source.masks_roi.__class__(  # type: ignore[misc]
                 arrays["mask_probs_roi"],
                 thresholds=first_source.probability_thresholds,
@@ -967,11 +1139,15 @@ def _load_subject_mask_source(
                 source_path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>/mask_probs_roi",
             )
         else:
-            raise ValueError("Subject-mask shards must provide mask_probs_roi or masks_roi.")
+            raise ValueError(
+                "Subject-mask shards must provide mask_probs_roi or masks_roi."
+            )
 
         collection = _SubjectMaskShardCollection(
             shard_runs=tuple(shard.name for shard in shards),
-            shard_run_paths=tuple(f"{SUBJECT_MASK_SHARD_PARENT}/{shard.name}" for shard in shards),
+            shard_run_paths=tuple(
+                f"{SUBJECT_MASK_SHARD_PARENT}/{shard.name}" for shard in shards
+            ),
             shard_crop_runs=tuple(shard_crop_runs),
             source_crop_run=str(source_crop_run),
             source_crop_rebased_from_shards=bool(rebased),
@@ -1007,13 +1183,19 @@ def _load_subject_mask_source(
         )
         return source, collection
     if target_crop_run:
-        raise ValueError("--target-crop-run is only valid with subject-mask shard finalization.")
+        raise ValueError(
+            "--target-crop-run is only valid with subject-mask shard finalization."
+        )
     return _load_source_subject_mask_run(root, subject_run), None
 
 
 def _component_contour_targets(component_names: Sequence[str]) -> list[str]:
     requested = {str(component) for component in component_names}
-    return [component for component in _COMPONENT_CONTOUR_COMPONENTS if component in requested]
+    return [
+        component
+        for component in _COMPONENT_CONTOUR_COMPONENTS
+        if component in requested
+    ]
 
 
 def _summaries_to_json_safe(summaries: Sequence[object]) -> list[dict[str, object]]:
@@ -1029,11 +1211,18 @@ def _summaries_to_json_safe(summaries: Sequence[object]) -> list[dict[str, objec
                 "point_count": int(summary.get("point_count", 0) or 0),
                 "existing": bool(summary.get("existing", False)),
             }
-            for key in ("sample_count", "valid_count", "source_point_count", "row_chunk"):
+            for key in (
+                "sample_count",
+                "valid_count",
+                "source_point_count",
+                "row_chunk",
+            ):
                 if key in summary:
                     item[key] = int(summary.get(key, 0) or 0)
             if "postcompute_backend" in summary:
-                item["postcompute_backend"] = str(summary.get("postcompute_backend") or "")
+                item["postcompute_backend"] = str(
+                    summary.get("postcompute_backend") or ""
+                )
             payload.append(item)
             continue
         item = {
@@ -1049,7 +1238,9 @@ def _summaries_to_json_safe(summaries: Sequence[object]) -> list[dict[str, objec
             if hasattr(summary, key):
                 item[key] = int(getattr(summary, key, 0) or 0)
         if hasattr(summary, "postcompute_backend"):
-            item["postcompute_backend"] = str(getattr(summary, "postcompute_backend", "") or "")
+            item["postcompute_backend"] = str(
+                getattr(summary, "postcompute_backend", "") or ""
+            )
         payload.append(item)
     return payload
 
@@ -1082,8 +1273,7 @@ class _TimingRecorder:
         total = float(duration_seconds)
         rows = int(total_rows)
         phase_seconds = {
-            str(key): float(value)
-            for key, value in sorted(self.phase_seconds.items())
+            str(key): float(value) for key, value in sorted(self.phase_seconds.items())
         }
         return {
             "duration_seconds": total,
@@ -1091,11 +1281,15 @@ class _TimingRecorder:
             "rows_per_second": float(rows / total) if total > 0 else 0.0,
             "phase_seconds": phase_seconds,
             "phase_counts": {
-                str(key): int(value)
-                for key, value in sorted(self.phase_counts.items())
+                str(key): int(value) for key, value in sorted(self.phase_counts.items())
             },
             "chunk_count": int(len(self.chunk_timings)),
-            "chunk_seconds_total": float(sum(float(item.get("total_seconds") or 0.0) for item in self.chunk_timings)),
+            "chunk_seconds_total": float(
+                sum(
+                    float(item.get("total_seconds") or 0.0)
+                    for item in self.chunk_timings
+                )
+            ),
             "slowest_chunks": sorted(
                 (
                     {
@@ -1146,7 +1340,10 @@ class _ProgressJsonlReporter:
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(_json_safe(record), sort_keys=True, separators=(",", ":")) + "\n")
+            handle.write(
+                json.dumps(_json_safe(record), sort_keys=True, separators=(",", ":"))
+                + "\n"
+            )
 
     @contextmanager
     def phase(self, phase: str, **payload: object) -> Iterator[None]:
@@ -1170,7 +1367,9 @@ class _ProgressJsonlReporter:
             )
 
 
-def _decode_probabilities(values: np.ndarray, *, encoding: Optional[str], source_path: str) -> np.ndarray:
+def _decode_probabilities(
+    values: np.ndarray, *, encoding: Optional[str], source_path: str
+) -> np.ndarray:
     return decode_probability_values(values, encoding=encoding, source_path=source_path)
 
 
@@ -1255,7 +1454,9 @@ def _split_reason_tags(label: object) -> list[str]:
     return tags
 
 
-def _merge_reason_label_arrays(base_labels: np.ndarray, extra_labels: np.ndarray) -> np.ndarray:
+def _merge_reason_label_arrays(
+    base_labels: np.ndarray, extra_labels: np.ndarray
+) -> np.ndarray:
     base = np.asarray(base_labels, dtype=object).reshape(-1)
     extra = np.asarray(extra_labels, dtype=object).reshape(-1)
     if base.shape[0] != extra.shape[0]:
@@ -1266,7 +1467,9 @@ def _merge_reason_label_arrays(base_labels: np.ndarray, extra_labels: np.ndarray
     return merged
 
 
-def _replace_metric_qc_reason_labels(base_labels: np.ndarray, qc_labels: np.ndarray) -> np.ndarray:
+def _replace_metric_qc_reason_labels(
+    base_labels: np.ndarray, qc_labels: np.ndarray
+) -> np.ndarray:
     """Refresh generated metric-QC tags while preserving manual/operator tags."""
 
     base = np.asarray(base_labels, dtype=object).reshape(-1)
@@ -1302,7 +1505,9 @@ def _compute_component_metric_qc_reason_labels(
         dtype=np.int32,
     ).reshape(-1)
     largest_fraction = np.asarray(
-        component_metrics.get("largest_component_fraction", np.ones_like(area, dtype=np.float32)),
+        component_metrics.get(
+            "largest_component_fraction", np.ones_like(area, dtype=np.float32)
+        ),
         dtype=np.float32,
     ).reshape(-1)
     hole_count = np.asarray(
@@ -1310,7 +1515,11 @@ def _compute_component_metric_qc_reason_labels(
         dtype=np.int32,
     ).reshape(-1)
     solidity_raw = component_metrics.get("solidity")
-    solidity = np.asarray(solidity_raw, dtype=np.float32).reshape(-1) if solidity_raw is not None else None
+    solidity = (
+        np.asarray(solidity_raw, dtype=np.float32).reshape(-1)
+        if solidity_raw is not None
+        else None
+    )
 
     labels = np.full((int(area.shape[0]),), "clean", dtype=object)
     for row_idx in range(int(area.shape[0])):
@@ -1321,7 +1530,9 @@ def _compute_component_metric_qc_reason_labels(
             tags.append("needs_review_metric_small_area")
         if int(component_count[row_idx]) > int(policy.max_component_count):
             tags.append("needs_review_metric_multiple_components")
-        if bool(present[row_idx]) and float(largest_fraction[row_idx]) < float(policy.min_largest_component_fraction):
+        if bool(present[row_idx]) and float(largest_fraction[row_idx]) < float(
+            policy.min_largest_component_fraction
+        ):
             tags.append("needs_review_metric_fragmented_component")
         if int(hole_count[row_idx]) > int(policy.max_hole_count):
             tags.append("needs_review_metric_holes")
@@ -1333,7 +1544,9 @@ def _compute_component_metric_qc_reason_labels(
     return labels
 
 
-def _component_threshold(source: SourceSubjectMaskRun, component_name: str, component_idx: int) -> float:
+def _component_threshold(
+    source: SourceSubjectMaskRun, component_name: str, component_idx: int
+) -> float:
     if component_idx < len(source.probability_thresholds):
         return float(source.probability_thresholds[component_idx])
     labels = tuple(str(label) for label in source.mask_labels)
@@ -1350,13 +1563,17 @@ def _component_surface_rows(
     start_row: int,
     stop_row: int,
 ) -> tuple[np.ndarray, bool, str, Optional[str], float, int]:
-    component_idx = _require_available_component(source, component_name, "subject_mask_runs")
+    component_idx = _require_available_component(
+        source, component_name, "subject_mask_runs"
+    )
     probabilities = source.probabilities_roi
     if probabilities is None:
         probabilities = source.group.get("mask_probs_roi")
     threshold = _component_threshold(source, component_name, component_idx)
     if probabilities is not None:
-        encoding = source.probability_encoding or _probability_encoding_for_group(source.group)
+        encoding = source.probability_encoding or _probability_encoding_for_group(
+            source.group
+        )
         raw = np.asarray(probabilities[int(start_row) : int(stop_row), component_idx])
         source_path = f"subject_mask_runs/{source.run_name}/mask_probs_roi"
         return (
@@ -1371,10 +1588,14 @@ def _component_surface_rows(
     masks = source.group.get("masks_roi")
     if masks is None:
         if source.mask_surface_path != "mask_rle":
-            raise RuntimeError(f"subject_mask_runs/{source.run_name} missing masks_roi, mask_probs_roi, or mask_rle.")
+            raise RuntimeError(
+                f"subject_mask_runs/{source.run_name} missing masks_roi, mask_probs_roi, or mask_rle."
+            )
         masks = source.masks_roi
     return (
-        np.asarray(masks[int(start_row) : int(stop_row), component_idx], dtype=np.uint8),
+        np.asarray(
+            masks[int(start_row) : int(stop_row), component_idx], dtype=np.uint8
+        ),
         False,
         str(source.mask_surface_path or "masks_roi"),
         None,
@@ -1414,11 +1635,13 @@ def _finalize_source_component_rows(
     start_row: int,
     stop_row: int,
 ) -> _FinalizedComponentBatch:
-    surfaces, is_probability, surface_path, encoding, threshold, _component_idx = _component_surface_rows(
-        source,
-        component_name,
-        start_row=start_row,
-        stop_row=stop_row,
+    surfaces, is_probability, surface_path, encoding, threshold, _component_idx = (
+        _component_surface_rows(
+            source,
+            component_name,
+            start_row=start_row,
+            stop_row=stop_row,
+        )
     )
     if surfaces.ndim != 3:
         raise ValueError(
@@ -1484,7 +1707,8 @@ def _source_payload_for_finalized_component(
     payload = _source_component_provenance_payload(source, batch.component_name)
     source_parent = (
         SUBJECT_MASK_SHARD_PARENT
-        if source.group.attrs.get("collection_finalizer_schema") == SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA
+        if source.group.attrs.get("collection_finalizer_schema")
+        == SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA
         else SUBJECT_MASK_CANONICAL_PARENT
     )
     payload["finalization_method"] = SMART_FINALIZE_SUBJECT_MASKS_METHOD
@@ -1498,11 +1722,17 @@ def _source_payload_for_finalized_component(
         payload["source_probability_path"] = (
             f"{source_parent}/{source.run_name}/{batch.source_surface_path}"
         )
-        payload["source_probability_encoding"] = str(batch.source_probability_encoding or "")
-        payload["source_probability_threshold"] = float(batch.source_probability_threshold)
+        payload["source_probability_encoding"] = str(
+            batch.source_probability_encoding or ""
+        )
+        payload["source_probability_threshold"] = float(
+            batch.source_probability_threshold
+        )
         payload["source_binary_derivation"] = "smart_finalize(mask_probs_roi)"
     else:
-        payload["source_binary_derivation"] = f"smart_finalize({batch.source_surface_path})"
+        payload["source_binary_derivation"] = (
+            f"smart_finalize({batch.source_surface_path})"
+        )
     return payload
 
 
@@ -1519,13 +1749,16 @@ def _source_payload_for_assigned_eye_component(
 ) -> dict[str, object]:
     source_parent = (
         SUBJECT_MASK_SHARD_PARENT
-        if source.group.attrs.get("collection_finalizer_schema") == SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA
+        if source.group.attrs.get("collection_finalizer_schema")
+        == SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA
         else SUBJECT_MASK_CANONICAL_PARENT
     )
     payload: dict[str, object] = {
         "source_stage": source_parent,
         "source_run": source.run_name,
-        "source_method": source.source_method or source.group.attrs.get("method") or "unknown",
+        "source_method": source.source_method
+        or source.group.attrs.get("method")
+        or "unknown",
         "source_channels": [_RAW_EYE_UNION_COMPONENT],
         "source_crop_run": source.crop_run,
         "derived_component": str(component_name),
@@ -1545,18 +1778,26 @@ def _source_payload_for_assigned_eye_component(
     label_schema_id = source.group.attrs.get("label_schema_id")
     if label_schema_id is not None:
         payload["source_label_schema_id"] = str(label_schema_id)
-    created_at = source.group.attrs.get("created_at_utc") or source.group.attrs.get("created_utc")
+    created_at = source.group.attrs.get("created_at_utc") or source.group.attrs.get(
+        "created_utc"
+    )
     if created_at is not None:
         payload["source_created_at_utc"] = str(created_at)
     if union_batch.source_surface_kind == "probability":
         payload["source_probability_path"] = (
             f"{source_parent}/{source.run_name}/{union_batch.source_surface_path}"
         )
-        payload["source_probability_encoding"] = str(union_batch.source_probability_encoding or "")
-        payload["source_probability_threshold"] = float(union_batch.source_probability_threshold)
+        payload["source_probability_encoding"] = str(
+            union_batch.source_probability_encoding or ""
+        )
+        payload["source_probability_threshold"] = float(
+            union_batch.source_probability_threshold
+        )
         payload["source_binary_derivation"] = "smart_finalize(mask_probs_roi)"
     else:
-        payload["source_binary_derivation"] = f"smart_finalize({union_batch.source_surface_path})"
+        payload["source_binary_derivation"] = (
+            f"smart_finalize({union_batch.source_surface_path})"
+        )
     return payload
 
 
@@ -1657,7 +1898,10 @@ def _resolve_assignment_keypoint_rows(
         )
 
     selected_rows = np.asarray(
-        [keypoint_row_by_crop_row[int(crop_row_id)] for crop_row_id in mask_ids.tolist()],
+        [
+            keypoint_row_by_crop_row[int(crop_row_id)]
+            for crop_row_id in mask_ids.tolist()
+        ],
         dtype=np.int64,
     )
     keypoints_subset = np.asarray(keypoints_roi[:], dtype=np.float32)[selected_rows]
@@ -1672,8 +1916,12 @@ def _resolve_assignment_keypoint_rows(
             "mask_has_source_crop_row_ids": True,
             "keypoint_rows_available": int(keypoint_ids.shape[0]),
             "keypoint_rows_selected": int(selected_rows.shape[0]),
-            "keypoint_selection_min_row": int(selected_rows.min()) if selected_rows.size else None,
-            "keypoint_selection_max_row": int(selected_rows.max()) if selected_rows.size else None,
+            "keypoint_selection_min_row": (
+                int(selected_rows.min()) if selected_rows.size else None
+            ),
+            "keypoint_selection_max_row": (
+                int(selected_rows.max()) if selected_rows.size else None
+            ),
         },
     )
 
@@ -1775,7 +2023,10 @@ def _resolve_eye_assignment_context(
     assignment_keypoints_run: Optional[str] = None,
 ) -> _EyeAssignmentContext:
     if source.canonical_coordinates:
-        if assignment_keypoint_group is not None or assignment_keypoints_run is not None:
+        if (
+            assignment_keypoint_group is not None
+            or assignment_keypoints_run is not None
+        ):
             raise ValueError(
                 "Explicit assignment-keypoint overrides are legacy-only and cannot produce "
                 "a canonical refined subject-mask run."
@@ -1803,8 +2054,12 @@ def _resolve_eye_assignment_context(
             )
         keypoint_success = np.asarray(success_node[:])
         if success_node is None or np.dtype(success_node.dtype) != np.dtype("bool"):
-            raise ValueError("Canonical keypoint success authority must use exact bool dtype.")
-        if np.asarray(keypoint_success).shape != (canonical.context.row_identity.leading_dimension,):
+            raise ValueError(
+                "Canonical keypoint success authority must use exact bool dtype."
+            )
+        if np.asarray(keypoint_success).shape != (
+            canonical.context.row_identity.leading_dimension,
+        ):
             raise ValueError(
                 "Canonical keypoint success authority must have one exact value per keypoint row."
             )
@@ -1834,26 +2089,34 @@ def _resolve_eye_assignment_context(
             canonical_coordinate_surfaces=canonical,
         )
 
-    kp_group, keypoint_run_name, keypoint_group_name, keypoint_source_kind = _resolve_subject_keypoint_group(
-        root,
-        source,
-        assignment_keypoint_group=assignment_keypoint_group,
-        assignment_keypoints_run=assignment_keypoints_run,
+    kp_group, keypoint_run_name, keypoint_group_name, keypoint_source_kind = (
+        _resolve_subject_keypoint_group(
+            root,
+            source,
+            assignment_keypoint_group=assignment_keypoint_group,
+            assignment_keypoints_run=assignment_keypoints_run,
+        )
     )
     keypoints_roi = kp_group.get("keypoints_roi")
     if keypoints_roi is None:
-        raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
-    keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
+        raise ValueError(
+            f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union."
+        )
+    keypoint_success, success_dataset = _resolve_keypoint_success_array(
+        kp_group, keypoint_run_name
+    )
     eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group, keypoint_run_name)
-    keypoints_roi, keypoint_success, row_identity_summary = _resolve_assignment_keypoint_rows(
-        keypoints_roi=keypoints_roi,
-        keypoint_success=keypoint_success,
-        keypoint_source_crop_row_ids=kp_group.get("source_crop_row_ids"),
-        mask_source_crop_row_ids=source.group.get("source_crop_row_ids"),
-        expected_rows=int(source.masks_roi.shape[0]),
-        keypoint_run_name=keypoint_run_name,
-        keypoint_group_name=keypoint_group_name,
-        mask_run_name=source.run_name,
+    keypoints_roi, keypoint_success, row_identity_summary = (
+        _resolve_assignment_keypoint_rows(
+            keypoints_roi=keypoints_roi,
+            keypoint_success=keypoint_success,
+            keypoint_source_crop_row_ids=kp_group.get("source_crop_row_ids"),
+            mask_source_crop_row_ids=source.group.get("source_crop_row_ids"),
+            expected_rows=int(source.masks_roi.shape[0]),
+            keypoint_run_name=keypoint_run_name,
+            keypoint_group_name=keypoint_group_name,
+            mask_run_name=source.run_name,
+        )
     )
     return _EyeAssignmentContext(
         keypoints_roi=keypoints_roi,
@@ -1878,8 +2141,12 @@ def _assign_finalized_eyes_union_rows(
 ) -> _EyeAssignmentChunk:
     assignment = assign_eyes_union_to_lr(
         np.asarray(union_batch.masks, dtype=np.uint8),
-        keypoints_roi=np.asarray(context.keypoints_roi[int(start_row) : int(stop_row)], dtype=np.float32),
-        keypoint_success=np.asarray(context.keypoint_success[int(start_row) : int(stop_row)], dtype=bool),
+        keypoints_roi=np.asarray(
+            context.keypoints_roi[int(start_row) : int(stop_row)], dtype=np.float32
+        ),
+        keypoint_success=np.asarray(
+            context.keypoint_success[int(start_row) : int(stop_row)], dtype=bool
+        ),
         eye_keypoint_indices=context.eye_keypoint_indices,
     )
     summary = dict(assignment.summary)
@@ -1897,28 +2164,41 @@ def _assign_finalized_eyes_union_rows(
     masks: dict[str, np.ndarray] = {}
     component_metrics: dict[str, dict[str, np.ndarray]] = {}
     for component_name in _EYE_COMPONENTS:
-        assignment_reasons = np.asarray(assignment.reason_labels[component_name], dtype=object)
+        assignment_reasons = np.asarray(
+            assignment.reason_labels[component_name], dtype=object
+        )
         reason_labels = np.asarray(
             [
-                _combine_reason_labels(union_batch.reason_labels[row_idx], assignment_reasons[row_idx])
+                _combine_reason_labels(
+                    union_batch.reason_labels[row_idx], assignment_reasons[row_idx]
+                )
                 for row_idx in range(int(union_batch.reason_labels.shape[0]))
             ],
             dtype=object,
         )
         reason_labels_by_component[component_name] = reason_labels
-        masks[component_name] = np.asarray(assignment.masks[component_name], dtype=np.uint8)
-        component_metrics[component_name] = _component_metrics_from_assigned_eye_masks(masks[component_name])
+        masks[component_name] = np.asarray(
+            assignment.masks[component_name], dtype=np.uint8
+        )
+        component_metrics[component_name] = _component_metrics_from_assigned_eye_masks(
+            masks[component_name]
+        )
     return _EyeAssignmentChunk(
         masks=masks,
         reason_labels=reason_labels_by_component,
         component_metrics=component_metrics,
         summary=summary,
-        phase_seconds={str(key): float(value) for key, value in dict(assignment.phase_seconds).items()},
+        phase_seconds={
+            str(key): float(value)
+            for key, value in dict(assignment.phase_seconds).items()
+        },
         eye_geometry=_eye_geometry_from_assignment_result(assignment),
     )
 
 
-def _merge_assignment_summary(target: dict[str, object], chunk_summary: Mapping[str, object]) -> dict[str, object]:
+def _merge_assignment_summary(
+    target: dict[str, object], chunk_summary: Mapping[str, object]
+) -> dict[str, object]:
     if not target:
         target.update(
             {
@@ -1931,14 +2211,25 @@ def _merge_assignment_summary(target: dict[str, object], chunk_summary: Mapping[
                 "reason_counts": {},
                 "keypoint_run": chunk_summary.get("keypoint_run"),
                 "keypoint_group": chunk_summary.get("keypoint_group"),
-                "keypoint_success_dataset": chunk_summary.get("keypoint_success_dataset"),
+                "keypoint_success_dataset": chunk_summary.get(
+                    "keypoint_success_dataset"
+                ),
                 "keypoint_source_kind": chunk_summary.get("keypoint_source_kind"),
-                "keypoint_mask_row_identity": dict(chunk_summary.get("keypoint_mask_row_identity") or {}),
-                "keypoint_mask_row_identity_check": chunk_summary.get("keypoint_mask_row_identity_check"),
+                "keypoint_mask_row_identity": dict(
+                    chunk_summary.get("keypoint_mask_row_identity") or {}
+                ),
+                "keypoint_mask_row_identity_check": chunk_summary.get(
+                    "keypoint_mask_row_identity_check"
+                ),
                 "assignment_keypoint_contract": ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
             }
         )
-    for key in ("total_rows", "assigned_rows", "assigned_needs_review_rows", "failed_rows"):
+    for key in (
+        "total_rows",
+        "assigned_rows",
+        "assigned_needs_review_rows",
+        "failed_rows",
+    ):
         target[key] = int(target.get(key) or 0) + int(chunk_summary.get(key) or 0)
     for key in ("status_counts", "reason_counts"):
         merged = dict(target.get(key) or {})
@@ -1972,7 +2263,9 @@ def _requested_output_components(
             output.extend(_EYE_COMPONENTS)
         if _has_available_component(source, "swim_bladder"):
             output.append("swim_bladder")
-        return tuple(component for component in CANONICAL_COMPONENT_ORDER if component in output)
+        return tuple(
+            component for component in CANONICAL_COMPONENT_ORDER if component in output
+        )
 
     normalized = []
     seen: set[str] = set()
@@ -1991,13 +2284,23 @@ def _requested_output_components(
             normalized.append(component)
     if "eye_left" in seen or "eye_right" in seen:
         if not _has_available_component(source, _RAW_EYE_UNION_COMPONENT):
-            raise ValueError("Requested eye_left/eye_right finalization requires an available eyes_union source channel.")
+            raise ValueError(
+                "Requested eye_left/eye_right finalization requires an available eyes_union source channel."
+            )
         if not set(_EYE_COMPONENTS).issubset(seen):
-            raise ValueError("Request both eye_left and eye_right, or request eyes_union, for smart eye finalization.")
-    invalid = [component for component in normalized if component not in CANONICAL_COMPONENT_ORDER]
+            raise ValueError(
+                "Request both eye_left and eye_right, or request eyes_union, for smart eye finalization."
+            )
+    invalid = [
+        component
+        for component in normalized
+        if component not in CANONICAL_COMPONENT_ORDER
+    ]
     if invalid:
         raise ValueError(f"Unsupported smart-finalizer component(s): {invalid}.")
-    return tuple(component for component in CANONICAL_COMPONENT_ORDER if component in normalized)
+    return tuple(
+        component for component in CANONICAL_COMPONENT_ORDER if component in normalized
+    )
 
 
 def _review_counts_from_labels(labels: np.ndarray) -> dict[str, int]:
@@ -2011,16 +2314,22 @@ def _review_counts_from_labels(labels: np.ndarray) -> dict[str, int]:
     return {"pending": int(pending), "needs_review": int(needs_review)}
 
 
-def _add_review_counts(target: dict[str, dict[str, int]], component_name: str, labels: np.ndarray) -> None:
+def _add_review_counts(
+    target: dict[str, dict[str, int]], component_name: str, labels: np.ndarray
+) -> None:
     counts = _review_counts_from_labels(labels)
     existing = target.setdefault(str(component_name), {"pending": 0, "needs_review": 0})
     for key, value in counts.items():
         existing[str(key)] = int(existing.get(str(key), 0)) + int(value)
 
 
-def _merge_review_counts(target: dict[str, dict[str, int]], source: Mapping[str, object]) -> None:
+def _merge_review_counts(
+    target: dict[str, dict[str, int]], source: Mapping[str, object]
+) -> None:
     for component_name, counts_raw in dict(source).items():
-        existing = target.setdefault(str(component_name), {"pending": 0, "needs_review": 0})
+        existing = target.setdefault(
+            str(component_name), {"pending": 0, "needs_review": 0}
+        )
         for key, value in dict(counts_raw or {}).items():
             existing[str(key)] = int(existing.get(str(key), 0)) + int(value)
 
@@ -2028,10 +2337,7 @@ def _merge_review_counts(target: dict[str, dict[str, int]], source: Mapping[str,
 def _row_chunks(total_rows: int, chunk_size: int) -> list[tuple[int, int]]:
     total = max(0, int(total_rows))
     size = max(1, int(chunk_size))
-    return [
-        (start, min(total, start + size))
-        for start in range(0, total, size)
-    ]
+    return [(start, min(total, start + size)) for start in range(0, total, size)]
 
 
 def _parallel_worker_row_chunk_size(
@@ -2043,8 +2349,12 @@ def _parallel_worker_row_chunk_size(
     """Return a worker chunk size that avoids concurrent partial Zarr chunk writes."""
 
     requested = max(1, int(requested_chunk_size))
-    dense_chunk = refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk)
-    return int(max(dense_chunk, ((requested + dense_chunk - 1) // dense_chunk) * dense_chunk))
+    dense_chunk = refined_subject_mask_storage_row_chunk(
+        total_rows, dense_mask_row_chunk
+    )
+    return int(
+        max(dense_chunk, ((requested + dense_chunk - 1) // dense_chunk) * dense_chunk)
+    )
 
 
 def _worker_chunk_size_for_backend(
@@ -2064,7 +2374,9 @@ def _worker_chunk_size_for_backend(
     return requested
 
 
-def _chunk_alignment_label(execution_backend: str, *, dense_mask_row_chunk: int | None = None) -> str:
+def _chunk_alignment_label(
+    execution_backend: str, *, dense_mask_row_chunk: int | None = None
+) -> str:
     if execution_backend != _PROCESS_SHARD_EXECUTION_BACKEND:
         return "requested_chunk_size"
     return "dense_mask_row_chunk"
@@ -2127,8 +2439,14 @@ def _derived_metric_chunks_2d(total_rows: int, component_count: int) -> tuple[in
     return (_common_derived_metric_row_chunk(total_rows), int(component_count))
 
 
-def _derived_metric_chunks_lastdim(total_rows: int, component_count: int, width: int) -> tuple[int, int, int]:
-    return (_common_derived_metric_row_chunk(total_rows), int(component_count), int(width))
+def _derived_metric_chunks_lastdim(
+    total_rows: int, component_count: int, width: int
+) -> tuple[int, int, int]:
+    return (
+        _common_derived_metric_row_chunk(total_rows),
+        int(component_count),
+        int(width),
+    )
 
 
 def _live_metric_chunks_2d(total_rows: int) -> tuple[int, int]:
@@ -2145,7 +2463,11 @@ def _source_lineage_map(source: SourceSubjectMaskRun) -> dict[str, object | None
         "source_detect_row_index": source.source_detect_row_index,
         "instance_key": source.instance_key,
     }
-    for name in ("source_frame_indices", "source_clip_indices", "source_clip_local_frame_indices"):
+    for name in (
+        "source_frame_indices",
+        "source_clip_indices",
+        "source_clip_local_frame_indices",
+    ):
         if name not in lineage:
             lineage[name] = source.group.get(name)
     return lineage
@@ -2180,7 +2502,9 @@ def _copy_exact_canonical_source_arrays(
         )
 
 
-def _canonical_refined_selector_snapshot(parent: zarr.Group) -> dict[str, tuple[bool, Any]]:
+def _canonical_refined_selector_snapshot(
+    parent: zarr.Group,
+) -> dict[str, tuple[bool, Any]]:
     return {
         name: (name in parent.attrs, copy.deepcopy(parent.attrs.get(name)))
         for name in _CANONICAL_REFINED_SELECTOR_ATTRS
@@ -2225,7 +2549,9 @@ def _create_component_shell(
     retain_source_seeds: bool,
     dense_mask_row_chunk: int | None = None,
 ) -> zarr.Group:
-    component_group = run_group.require_group("components").require_group(component_name)
+    component_group = run_group.require_group("components").require_group(
+        component_name
+    )
     derived_metric_chunks = (_common_derived_metric_row_chunk(total_rows),)
     live_metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
     _create_filled_array(
@@ -2249,7 +2575,9 @@ def _create_component_shell(
         dtype=bool,
         chunks=live_metric_chunks,
     )
-    component_group.attrs["source_sync_schema_id"] = REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID
+    component_group.attrs["source_sync_schema_id"] = (
+        REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID
+    )
     _create_filled_array(
         component_group,
         "source_row_fingerprint",
@@ -2263,6 +2591,10 @@ def _create_component_shell(
         shape=(total_rows,),
         dtype=bool,
         chunks=live_metric_chunks,
+    )
+    ensure_component_row_update_tracking(
+        component_group,
+        roi_count=int(total_rows),
     )
     _create_filled_array(
         component_group,
@@ -2278,25 +2610,37 @@ def _create_component_shell(
             shape=(total_rows, height, width),
             dtype=np.uint8,
             chunks=(
-                refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk),
+                refined_subject_mask_storage_row_chunk(
+                    total_rows, dense_mask_row_chunk
+                ),
                 int(height),
                 int(width),
             ),
         )
-        component_group.attrs["source_seed_masks_schema_id"] = _SOURCE_SEED_MASKS_SCHEMA_ID
+        component_group.attrs["source_seed_masks_schema_id"] = (
+            _SOURCE_SEED_MASKS_SCHEMA_ID
+        )
         component_group.attrs["source_seed_masks_status"] = "retained"
         component_group.attrs["source_seed_masks_reason"] = "retain_source_seeds=true"
     else:
         component_group.attrs["source_seed_masks_status"] = "omitted"
         component_group.attrs["source_seed_masks_reason"] = "production_default"
     if component_name == "subject_body":
-        component_group.attrs["component_schema_id"] = DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID
-        component_group.attrs["anatomical_scope"] = DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE
-        component_group.attrs["pectoral_fin_policy"] = DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY
+        component_group.attrs["component_schema_id"] = (
+            DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID
+        )
+        component_group.attrs["anatomical_scope"] = (
+            DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE
+        )
+        component_group.attrs["pectoral_fin_policy"] = (
+            DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY
+        )
 
     metrics_group = component_group.require_group("metrics")
     component_group.attrs["derived_metric_row_chunk"] = int(derived_metric_chunks[0])
-    component_group.attrs["derived_metric_write_policy"] = COMMON_DERIVED_METRIC_WRITE_POLICY
+    component_group.attrs["derived_metric_write_policy"] = (
+        COMMON_DERIVED_METRIC_WRITE_POLICY
+    )
     metrics_group.attrs["surface_role"] = "sealed_derived_analysis"
     metrics_group.attrs["row_chunk"] = int(derived_metric_chunks[0])
     metrics_group.attrs["write_policy"] = COMMON_DERIVED_METRIC_WRITE_POLICY
@@ -2367,7 +2711,9 @@ def _create_finalization_metric_shell(
             dtype=np.float32,
             chunks=metric_chunks,
         )
-    metrics_group.attrs["schema_id"] = "refined_subject_component_finalization_metrics_v1"
+    metrics_group.attrs["schema_id"] = (
+        "refined_subject_component_finalization_metrics_v1"
+    )
     metrics_group.attrs["method"] = SMART_FINALIZE_SUBJECT_MASKS_METHOD
     metrics_group.attrs["surface_role"] = "sealed_derived_analysis"
     metrics_group.attrs["write_policy"] = str(write_policy)
@@ -2448,6 +2794,7 @@ def _create_refined_run_shell(
     create_dense_masks: bool = True,
     create_bitpacked_masks: bool = False,
     publication_owner: str | None = None,
+    selector_eligible: bool = True,
 ) -> zarr.Group:
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
@@ -2463,10 +2810,16 @@ def _create_refined_run_shell(
     future_canonical = bool(source.canonical_coordinates)
 
     run_group = refined_parent.create_group(target_run)
+    # Production-proof worker outputs are immutable drafts.  They cannot be
+    # selected independently of the recording-level raw/refined/quality
+    # bundle that later validates their cross-stage bindings.
+    run_group.attrs["stage_selector_eligible"] = bool(selector_eligible)
     if future_canonical:
         owner = str(publication_owner or "")
         if len(owner) != 32:
-            raise ValueError("Canonical refined output requires an unguessable publication owner.")
+            raise ValueError(
+                "Canonical refined output requires an unguessable publication owner."
+            )
         run_group.attrs[REFINED_SUBJECT_MASK_PUBLICATION_OWNER_ATTR] = owner
         run_group.attrs["stage_selector_eligible"] = False
         mark_run_started(
@@ -2591,14 +2944,20 @@ def _create_refined_run_shell(
     if source.source_method:
         run_group.attrs["source_subject_mask_method"] = source.source_method
     if source.source_keypoints_run:
-        run_group.attrs.update(build_source_keypoints_attrs(source.source_keypoints_run, include_legacy_alias=True))
+        run_group.attrs.update(
+            build_source_keypoints_attrs(
+                source.source_keypoints_run, include_legacy_alias=True
+            )
+        )
     if source.source_keypoint_group:
         run_group.attrs["source_keypoint_group"] = source.source_keypoint_group
     run_group.attrs["source_crop_run"] = source.crop_run
     run_group.attrs.update(source.source_crop_snapshot)
     run_group.attrs["mask_labels"] = list(component_names)
     run_group.attrs["dense_mask_row_chunk"] = int(dense_storage_chunks[0])
-    run_group.attrs["dense_mask_storage_chunks"] = [int(value) for value in dense_storage_chunks]
+    run_group.attrs["dense_mask_storage_chunks"] = [
+        int(value) for value in dense_storage_chunks
+    ]
     run_group.attrs["label_schema_id"] = _infer_refined_label_schema_id(component_names)
     run_group.attrs["output_semantics"] = "multilabel"
     run_group.attrs["refinement_semantics"] = "canonical_component_masks"
@@ -2609,9 +2968,7 @@ def _create_refined_run_shell(
     # This writer always creates the full bbox surface from masks using the
     # shared half-open derivation, independent of the source run's age.
     run_group.attrs["bbox_xyxy_convention"] = "pixel_edge_half_open"
-    run_group.attrs["bbox_xyxy_derivation"] = (
-        "foreground_half_open_pixel_edges_xyxy_v1"
-    )
+    run_group.attrs["bbox_xyxy_derivation"] = "foreground_half_open_pixel_edges_xyxy_v1"
     for key, value in extra_attrs.items():
         run_group.attrs[str(key)] = value
     if future_canonical:
@@ -2623,7 +2980,9 @@ def _create_refined_run_shell(
         run_group,
         run_group,
         requested_mode=(
-            str(requested_identity_mode) if requested_identity_mode is not None else None
+            str(requested_identity_mode)
+            if requested_identity_mode is not None
+            else None
         ),
     )
 
@@ -2658,7 +3017,9 @@ def _create_refined_run_shell(
         "source_keypoints_run": source.source_keypoints_run,
         "source_keypoint_group": source.source_keypoint_group,
     }
-    stage_inputs_payload.update({str(key): value for key, value in provenance_inputs.items()})
+    stage_inputs_payload.update(
+        {str(key): value for key, value in provenance_inputs.items()}
+    )
     provenance = build_stage_provenance(
         stage=REFINED_SUBJECT_STAGE_NAME,
         command=stage_command or (" ".join(sys.argv) if sys.argv else "unknown"),
@@ -2689,34 +3050,125 @@ def _create_refined_run_shell(
             "worker_chunk_size": provenance_inputs.get("worker_chunk_size"),
             "chunk_count": provenance_inputs.get("chunk_count"),
             "dense_mask_row_chunk": provenance_inputs.get("dense_mask_row_chunk"),
-            "dense_mask_storage_chunks": provenance_inputs.get("dense_mask_storage_chunks"),
-            "finalization_metric_row_chunk": provenance_inputs.get("finalization_metric_row_chunk"),
+            "dense_mask_storage_chunks": provenance_inputs.get(
+                "dense_mask_storage_chunks"
+            ),
+            "finalization_metric_row_chunk": provenance_inputs.get(
+                "finalization_metric_row_chunk"
+            ),
             "finalization_metric_write_policy": provenance_inputs.get(
                 "finalization_metric_write_policy"
             ),
             "common_metric_row_chunk": provenance_inputs.get("common_metric_row_chunk"),
-            "common_metric_component_chunk": provenance_inputs.get("common_metric_component_chunk"),
-            "common_metric_write_policy": provenance_inputs.get("common_metric_write_policy"),
+            "common_metric_component_chunk": provenance_inputs.get(
+                "common_metric_component_chunk"
+            ),
+            "common_metric_write_policy": provenance_inputs.get(
+                "common_metric_write_policy"
+            ),
             "write_eye_geometry": provenance_inputs.get("eye_geometry_requested"),
-            "write_component_contours": provenance_inputs.get("component_contours_requested"),
+            "write_component_contours": provenance_inputs.get(
+                "component_contours_requested"
+            ),
             "write_sampled_component_contours": provenance_inputs.get(
                 "sampled_component_contours_requested"
             ),
             "sampled_contour_counts": provenance_inputs.get("sampled_contour_counts"),
-            "sampled_contour_row_chunk": provenance_inputs.get("sampled_contour_row_chunk"),
+            "sampled_contour_row_chunk": provenance_inputs.get(
+                "sampled_contour_row_chunk"
+            ),
             "retain_source_seeds": provenance_inputs.get("retain_source_seeds"),
-            "source_seed_masks_status": provenance_inputs.get("source_seed_masks_status"),
+            "source_seed_masks_status": provenance_inputs.get(
+                "source_seed_masks_status"
+            ),
             "execution_backend": provenance_inputs.get("execution_backend"),
-            "process_shard_execution_enabled": provenance_inputs.get("process_shard_execution_enabled"),
+            "process_shard_execution_enabled": provenance_inputs.get(
+                "process_shard_execution_enabled"
+            ),
             "worker_process_count": provenance_inputs.get("worker_process_count"),
             "requested_chunk_size": provenance_inputs.get("requested_chunk_size"),
             "chunk_alignment": provenance_inputs.get("chunk_alignment"),
-            "collection_worker_index_plan": provenance_inputs.get("collection_worker_index_plan"),
+            "collection_worker_index_plan": provenance_inputs.get(
+                "collection_worker_index_plan"
+            ),
         },
         inputs=stage_inputs_payload,
     )
     write_stage_provenance(run_group, provenance)
     return run_group
+
+
+def _persist_production_draft_audit_manifest(
+    run_group: zarr.Group,
+    *,
+    component_names: Sequence[str],
+) -> dict[str, object]:
+    """Validate and bind the exact editable audit surface on an inactive draft."""
+
+    if run_group.attrs.get("stage_selector_eligible") is not False:
+        raise RuntimeError(
+            "Editable subject-mask draft audit may only be bound to an "
+            "individually selector-ineligible run."
+        )
+    masks = run_group.get("masks_roi")
+    offsets = run_group.get("frame_row_offsets")
+    if masks is None or len(masks.shape) != 4:
+        raise RuntimeError(
+            "Production refined subject-mask draft requires dense masks_roi."
+        )
+    if offsets is not None:
+        if len(offsets.shape) != 1 or int(offsets.shape[0]) <= 1:
+            raise RuntimeError(
+                "Production refined subject-mask draft frame_row_offsets is invalid."
+            )
+        n_frames = int(offsets.shape[0]) - 1
+    else:
+        frame_counts = run_group.get("frame_counts")
+        if frame_counts is not None and len(frame_counts.shape) == 1:
+            n_frames = int(frame_counts.shape[0])
+        else:
+            frames = run_group.get("source_acquisition_frame_index")
+            if frames is None or len(frames.shape) != 1:
+                raise RuntimeError(
+                    "Production refined subject-mask draft lacks a frame-axis declaration."
+                )
+            frame_values = np.asarray(frames[:], dtype=np.int64)
+            n_frames = int(frame_values.max(initial=-1)) + 1
+        if n_frames <= 0:
+            raise RuntimeError(
+                "Production refined subject-mask draft frame axis must be nonempty."
+            )
+    labels = tuple(str(label) for label in component_names)
+    dimensions = SubjectMaskDimensions(
+        n_frames=n_frames,
+        n_rois=int(masks.shape[0]),
+        n_channels=int(masks.shape[1]),
+        roi_height=int(masks.shape[2]),
+        roi_width=int(masks.shape[3]),
+    )
+    components = SubjectMaskComponentRegistry(labels)
+    arrays = {
+        path: run_group[path]
+        for path in REFINED_SUBJECT_MASK_DRAFT_AUDIT_SCHEMA_V1.binding_paths(components)
+    }
+    REFINED_SUBJECT_MASK_DRAFT_AUDIT_SCHEMA_V1.require(
+        arrays,
+        dimensions=dimensions,
+        components=components,
+    )
+    manifest = REFINED_SUBJECT_MASK_DRAFT_AUDIT_SCHEMA_V1.as_manifest(
+        dimensions=dimensions,
+        components=components,
+    )
+    run_group.attrs[REFINED_SUBJECT_MASK_DRAFT_AUDIT_MANIFEST_ATTRIBUTE] = manifest
+    if (
+        run_group.attrs.get(REFINED_SUBJECT_MASK_DRAFT_AUDIT_MANIFEST_ATTRIBUTE)
+        != manifest
+    ):
+        raise RuntimeError(
+            "Editable subject-mask draft audit manifest did not persist."
+        )
+    return manifest
 
 
 def _component_metrics_from_finalization_batch(
@@ -2727,7 +3179,10 @@ def _component_metrics_from_finalization_batch(
     """Reuse topology metrics already computed during smart component finalization."""
 
     component_metrics: dict[str, np.ndarray] = {}
-    for target_name, (source_name, dtype) in _COMPONENT_METRIC_FINALIZATION_SOURCES.items():
+    for target_name, (
+        source_name,
+        dtype,
+    ) in _COMPONENT_METRIC_FINALIZATION_SOURCES.items():
         values = batch.metrics.get(source_name)
         if values is None:
             continue
@@ -2738,7 +3193,9 @@ def _component_metrics_from_finalization_batch(
     return component_metrics
 
 
-def _component_metrics_from_assigned_eye_masks(masks: np.ndarray) -> dict[str, np.ndarray]:
+def _component_metrics_from_assigned_eye_masks(
+    masks: np.ndarray,
+) -> dict[str, np.ndarray]:
     """Seed topology metrics for assignment-derived eye masks.
 
     ``assign_eyes_union_to_lr`` writes either an empty mask or one selected
@@ -2748,7 +3205,9 @@ def _component_metrics_from_assigned_eye_masks(masks: np.ndarray) -> dict[str, n
 
     binary = np.asarray(masks, dtype=np.uint8) > 0
     if binary.ndim != 3:
-        raise ValueError(f"Expected assigned eye masks with shape (N,H,W), got {tuple(binary.shape)}.")
+        raise ValueError(
+            f"Expected assigned eye masks with shape (N,H,W), got {tuple(binary.shape)}."
+        )
     present = np.any(binary, axis=(1, 2))
     return {
         "component_count": present.astype(np.int32, copy=False),
@@ -2756,17 +3215,29 @@ def _component_metrics_from_assigned_eye_masks(masks: np.ndarray) -> dict[str, n
     }
 
 
-def _eye_geometry_from_assignment_result(assignment: EyesUnionAssignmentResult) -> dict[str, object]:
-    row_count = int(next(iter(assignment.masks.values())).shape[0]) if assignment.masks else 0
+def _eye_geometry_from_assignment_result(
+    assignment: EyesUnionAssignmentResult,
+) -> dict[str, object]:
+    row_count = (
+        int(next(iter(assignment.masks.values())).shape[0]) if assignment.masks else 0
+    )
     geometry = dict(assignment.eye_geometry)
-    ellipse_params = np.asarray(geometry.get("ellipse_params"), dtype=np.float32).reshape(row_count, 2, 5)
-    ellipse_success = np.asarray(geometry.get("ellipse_success"), dtype=bool).reshape(row_count, 2)
-    centroids = np.asarray(geometry.get("centroids"), dtype=np.float32).reshape(row_count, 2, 2)
+    ellipse_params = np.asarray(
+        geometry.get("ellipse_params"), dtype=np.float32
+    ).reshape(row_count, 2, 5)
+    ellipse_success = np.asarray(geometry.get("ellipse_success"), dtype=bool).reshape(
+        row_count, 2
+    )
+    centroids = np.asarray(geometry.get("centroids"), dtype=np.float32).reshape(
+        row_count, 2, 2
+    )
 
     separation_px = np.full((row_count,), np.nan, dtype=np.float32)
     separation_valid = np.zeros((row_count,), dtype=bool)
     if row_count > 0:
-        pair_valid = np.all(ellipse_success, axis=1) & np.all(np.isfinite(centroids), axis=(1, 2))
+        pair_valid = np.all(ellipse_success, axis=1) & np.all(
+            np.isfinite(centroids), axis=(1, 2)
+        )
         separation_valid[pair_valid] = True
         separation_px[pair_valid] = np.linalg.norm(
             centroids[pair_valid, 0] - centroids[pair_valid, 1],
@@ -2775,7 +3246,9 @@ def _eye_geometry_from_assignment_result(assignment: EyesUnionAssignmentResult) 
 
     contours_raw = geometry.get("contours")
     contours_by_component = contours_raw if isinstance(contours_raw, Mapping) else {}
-    eye_contours = {name: _empty_local_contour_pack(row_count) for name in _EYE_COMPONENTS}
+    eye_contours = {
+        name: _empty_local_contour_pack(row_count) for name in _EYE_COMPONENTS
+    }
     for component_name in _EYE_COMPONENTS:
         contour_values = contours_by_component.get(component_name)
         if contour_values is None:
@@ -2783,14 +3256,19 @@ def _eye_geometry_from_assignment_result(assignment: EyesUnionAssignmentResult) 
         for local_idx, contour in enumerate(contour_values):
             if local_idx >= row_count:
                 break
-            _add_local_contour(eye_contours[component_name], local_idx, contour, min_points=1)
+            _add_local_contour(
+                eye_contours[component_name], local_idx, contour, min_points=1
+            )
 
     return {
         "ellipse_params": ellipse_params,
         "ellipse_success": ellipse_success,
         "separation_px": separation_px,
         "separation_valid": separation_valid,
-        "contours": {name: _finalize_local_contour_pack(pack) for name, pack in eye_contours.items()},
+        "contours": {
+            name: _finalize_local_contour_pack(pack)
+            for name, pack in eye_contours.items()
+        },
         "ellipse_success_count": int(np.count_nonzero(ellipse_success)),
         "pair_success_count": int(np.count_nonzero(separation_valid)),
         "source": _ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
@@ -2802,7 +3280,9 @@ def _compute_component_hole_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarr
 
     binary = np.asarray(masks_roi, dtype=np.uint8) > 0
     if binary.ndim != 3:
-        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}.")
+        raise ValueError(
+            f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}."
+        )
     total = int(binary.shape[0])
     hole_count = np.zeros((total,), dtype=np.int32)
     hole_area_fraction = np.zeros((total,), dtype=np.float32)
@@ -2812,7 +3292,9 @@ def _compute_component_hole_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarr
         if area <= 0:
             continue
         background_input = (~mask).astype(np.uint8, copy=False)
-        num_bg_labels, bg_labels = cv2.connectedComponents(background_input, connectivity=8)
+        num_bg_labels, bg_labels = cv2.connectedComponents(
+            background_input, connectivity=8
+        )
         if num_bg_labels <= 1:
             continue
         border_labels = set()
@@ -2820,7 +3302,11 @@ def _compute_component_hole_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarr
         border_labels.update(int(value) for value in bg_labels[-1, :].tolist())
         border_labels.update(int(value) for value in bg_labels[:, 0].tolist())
         border_labels.update(int(value) for value in bg_labels[:, -1].tolist())
-        hole_labels = [label for label in range(1, int(num_bg_labels)) if label not in border_labels]
+        hole_labels = [
+            label
+            for label in range(1, int(num_bg_labels))
+            if label not in border_labels
+        ]
         if not hole_labels:
             continue
         bg_counts = np.bincount(bg_labels.reshape(-1), minlength=int(num_bg_labels))
@@ -2838,7 +3324,9 @@ def _compute_component_spatial_metrics(masks: np.ndarray) -> dict[str, np.ndarra
 
     binary = np.asarray(masks, dtype=np.uint8)
     if binary.ndim != 3:
-        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}.")
+        raise ValueError(
+            f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}."
+        )
     return batch_mask_spatial_metrics(binary)
 
 
@@ -2863,7 +3351,9 @@ def _write_component_metrics_chunk(
         chunk_timing=chunk_timing,
     )
     metrics_group = component_group["metrics"]
-    with _timed_chunk_phase(timing, chunk_timing, f"write_component_metric_arrays_{component_name}"):
+    with _timed_chunk_phase(
+        timing, chunk_timing, f"write_component_metric_arrays_{component_name}"
+    ):
         for metric_name, values in component_metrics.items():
             metrics_group[str(metric_name)][row_slice] = np.asarray(values)
     if write_attrs:
@@ -2883,7 +3373,9 @@ def _compute_component_metrics_payload(
     """Compute component metrics without opening or mutating a destination."""
 
     if metric_level not in _METRIC_LEVELS:
-        raise ValueError(f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}.")
+        raise ValueError(
+            f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}."
+        )
     component_metrics: dict[str, np.ndarray] = {
         str(name): np.asarray(values)
         for name, values in dict(precomputed_metrics or {}).items()
@@ -2895,24 +3387,36 @@ def _compute_component_metrics_payload(
     ]
     if missing_topology:
         if set(missing_topology).issubset({"hole_count", "hole_area_fraction"}):
-            with _timed_chunk_phase(timing, chunk_timing, f"compute_hole_metrics_{component_name}"):
+            with _timed_chunk_phase(
+                timing, chunk_timing, f"compute_hole_metrics_{component_name}"
+            ):
                 computed_topology = _compute_component_hole_metrics(masks)
         else:
-            with _timed_chunk_phase(timing, chunk_timing, f"compute_topology_metrics_{component_name}"):
+            with _timed_chunk_phase(
+                timing, chunk_timing, f"compute_topology_metrics_{component_name}"
+            ):
                 computed_topology = _compute_component_topology_metrics(masks)
         for name in missing_topology:
             component_metrics[str(name)] = np.asarray(computed_topology[str(name)])
     if metric_level == "full":
-        with _timed_chunk_phase(timing, chunk_timing, f"compute_sigma_noise_metrics_{component_name}"):
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"compute_sigma_noise_metrics_{component_name}"
+        ):
             component_metrics.update(_compute_component_sigma_noise_metrics(masks))
-        with _timed_chunk_phase(timing, chunk_timing, f"compute_curvature_var_metrics_{component_name}"):
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"compute_curvature_var_metrics_{component_name}"
+        ):
             component_metrics.update(_compute_component_curvature_var_metrics(masks))
-        with _timed_chunk_phase(timing, chunk_timing, f"compute_shape_qc_metrics_{component_name}"):
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"compute_shape_qc_metrics_{component_name}"
+        ):
             component_metrics.update(_compute_component_shape_qc_metrics(masks))
     return component_metrics
 
 
-def _set_component_metric_attrs(component_group: zarr.Group, *, metric_level: str) -> None:
+def _set_component_metric_attrs(
+    component_group: zarr.Group, *, metric_level: str
+) -> None:
     metrics_group = component_group["metrics"]
     component_name = str(component_group.name).rstrip("/").split("/")[-1]
     metrics_group.attrs["schema_id"] = _COMPONENT_METRICS_SCHEMA_ID
@@ -2923,7 +3427,12 @@ def _set_component_metric_attrs(component_group: zarr.Group, *, metric_level: st
     metrics_group.attrs["computed_metric_names"] = (
         list(_COMPONENT_METRIC_NAMES)
         if metric_level == "full"
-        else ["component_count", "largest_component_fraction", "hole_count", "hole_area_fraction"]
+        else [
+            "component_count",
+            "largest_component_fraction",
+            "hole_count",
+            "hole_area_fraction",
+        ]
     )
     metrics_group.attrs["deferred_metric_names"] = (
         []
@@ -2931,7 +3440,9 @@ def _set_component_metric_attrs(component_group: zarr.Group, *, metric_level: st
         else ["sigma_noise", "curvature_var", "ipr", "solidity"]
     )
     metrics_group.attrs["qc_schema_id"] = _COMPONENT_METRIC_QC_SCHEMA_ID
-    metrics_group.attrs["qc_policy"] = _component_metric_qc_policy_payload(component_name)
+    metrics_group.attrs["qc_policy"] = _component_metric_qc_policy_payload(
+        component_name
+    )
     component_group.attrs["component_metric_level"] = metric_level
     component_group.attrs["component_metrics_schema_id"] = _COMPONENT_METRICS_SCHEMA_ID
     component_group.attrs["metric_qc_schema_id"] = _COMPONENT_METRIC_QC_SCHEMA_ID
@@ -2992,7 +3503,9 @@ def _write_mask_local_metric_payload(
     spatial_metrics = payload.spatial_metrics
     mask_present = np.asarray(spatial_metrics["mask_present"], dtype=bool)
     area_px = np.asarray(spatial_metrics["area_px"], dtype=np.float32)
-    with _timed_chunk_phase(timing, chunk_timing, f"write_run_spatial_metrics_{component_name}"):
+    with _timed_chunk_phase(
+        timing, chunk_timing, f"write_run_spatial_metrics_{component_name}"
+    ):
         run_group["metrics/mask_present"][row_slice, int(component_idx)] = mask_present
         run_group["metrics/area_px"][row_slice, int(component_idx)] = area_px
         run_group["metrics/centroid_xy"][row_slice, int(component_idx), :] = np.asarray(
@@ -3009,11 +3522,15 @@ def _write_mask_local_metric_payload(
         )
 
     component_group = run_group["components"][component_name]
-    with _timed_chunk_phase(timing, chunk_timing, f"write_component_spatial_metrics_{component_name}"):
+    with _timed_chunk_phase(
+        timing, chunk_timing, f"write_component_spatial_metrics_{component_name}"
+    ):
         component_group["mask_present"][row_slice] = mask_present
         component_group["area_px"][row_slice] = area_px
     metrics_group = component_group["metrics"]
-    with _timed_chunk_phase(timing, chunk_timing, f"write_component_metric_arrays_{component_name}"):
+    with _timed_chunk_phase(
+        timing, chunk_timing, f"write_component_metric_arrays_{component_name}"
+    ):
         for metric_name, values in payload.component_metrics.items():
             metrics_group[str(metric_name)][row_slice] = np.asarray(values)
     if write_metric_attrs:
@@ -3036,7 +3553,9 @@ def _compute_mask_local_metric_payload(
     """Compute all fixed-shape mask-local metrics without destination I/O."""
 
     masks_u8 = np.asarray(masks, dtype=np.uint8)
-    with _timed_chunk_phase(timing, chunk_timing, f"compute_spatial_metrics_{component_name}"):
+    with _timed_chunk_phase(
+        timing, chunk_timing, f"compute_spatial_metrics_{component_name}"
+    ):
         spatial_metrics = {
             str(name): np.asarray(values)
             for name, values in _compute_component_spatial_metrics(masks_u8).items()
@@ -3049,7 +3568,9 @@ def _compute_mask_local_metric_payload(
         timing=timing,
         chunk_timing=chunk_timing,
     )
-    with _timed_chunk_phase(timing, chunk_timing, f"compute_metric_qc_reasons_{component_name}"):
+    with _timed_chunk_phase(
+        timing, chunk_timing, f"compute_metric_qc_reasons_{component_name}"
+    ):
         reason_labels = _compute_component_metric_qc_reason_labels(
             component_name,
             mask_present=np.asarray(spatial_metrics["mask_present"], dtype=bool),
@@ -3082,21 +3603,31 @@ def _write_canonical_component_chunk(
     masks_u8 = np.asarray(masks, dtype=np.uint8)
     source_u8 = np.asarray(source_masks, dtype=np.uint8)
     if "masks_roi" in run_group:
-        with _timed_chunk_phase(timing, chunk_timing, f"write_masks_roi_{component_name}"):
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"write_masks_roi_{component_name}"
+        ):
             run_group["masks_roi"][row_slice, int(component_idx)] = masks_u8
     elif "mask_bitpacked" in run_group:
-        with _timed_chunk_phase(timing, chunk_timing, f"write_mask_bitpacked_{component_name}"):
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"write_mask_bitpacked_{component_name}"
+        ):
             run_group["mask_bitpacked/masks_packed"][
                 row_slice,
                 int(component_idx) : int(component_idx) + 1,
             ] = pack_binary_mask_stack(masks_u8[:, None, :, :])
     else:
-        raise RuntimeError("Refined subject-mask run has neither masks_roi nor mask_bitpacked storage.")
+        raise RuntimeError(
+            "Refined subject-mask run has neither masks_roi nor mask_bitpacked storage."
+        )
     component_group = run_group["components"][component_name]
     if retain_source_seeds:
-        with _timed_chunk_phase(timing, chunk_timing, f"write_source_seed_masks_{component_name}"):
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"write_source_seed_masks_{component_name}"
+        ):
             component_group["source_seed_masks_roi"][row_slice] = source_u8
-    with _timed_chunk_phase(timing, chunk_timing, f"compute_source_row_fingerprint_{component_name}"):
+    with _timed_chunk_phase(
+        timing, chunk_timing, f"compute_source_row_fingerprint_{component_name}"
+    ):
         source_row_fingerprint = _compute_mask_row_fingerprints(source_u8)
     metric_payload = _compute_mask_local_metric_payload(
         component_name=component_name,
@@ -3107,8 +3638,12 @@ def _write_canonical_component_chunk(
         chunk_timing=chunk_timing,
     )
     if write_derived_metrics:
-        with _timed_chunk_phase(timing, chunk_timing, f"write_source_row_fingerprint_{component_name}"):
-            component_group["source_row_fingerprint"][row_slice] = source_row_fingerprint
+        with _timed_chunk_phase(
+            timing, chunk_timing, f"write_source_row_fingerprint_{component_name}"
+        ):
+            component_group["source_row_fingerprint"][
+                row_slice
+            ] = source_row_fingerprint
         write_result = _write_mask_local_metric_payload(
             run_group,
             component_name=component_name,
@@ -3122,14 +3657,22 @@ def _write_canonical_component_chunk(
         )
     else:
         write_result = _ComponentMetricWriteResult(
-            mask_present=np.asarray(metric_payload.spatial_metrics["mask_present"], dtype=bool),
+            mask_present=np.asarray(
+                metric_payload.spatial_metrics["mask_present"], dtype=bool
+            ),
             reason_labels=np.asarray(metric_payload.reason_labels, dtype=object),
         )
     return _CanonicalComponentChunkResult(
         mask_present=np.asarray(write_result.mask_present, dtype=bool),
         reason_labels=np.asarray(write_result.reason_labels, dtype=object),
-        spatial_metrics={str(name): np.asarray(values) for name, values in metric_payload.spatial_metrics.items()},
-        component_metrics={str(name): np.asarray(values) for name, values in metric_payload.component_metrics.items()},
+        spatial_metrics={
+            str(name): np.asarray(values)
+            for name, values in metric_payload.spatial_metrics.items()
+        },
+        component_metrics={
+            str(name): np.asarray(values)
+            for name, values in metric_payload.component_metrics.items()
+        },
         source_row_fingerprint=np.asarray(source_row_fingerprint, dtype=np.uint64),
     )
 
@@ -3163,7 +3706,13 @@ def _empty_local_contour_pack(row_count: int) -> dict[str, object]:
     }
 
 
-def _add_local_contour(pack: dict[str, object], row_index: int, contour: np.ndarray | None, *, min_points: int) -> None:
+def _add_local_contour(
+    pack: dict[str, object],
+    row_index: int,
+    contour: np.ndarray | None,
+    *,
+    min_points: int,
+) -> None:
     if contour is None:
         return
     points = np.asarray(contour, dtype=np.float32).reshape(-1, 2)
@@ -3172,7 +3721,11 @@ def _add_local_contour(pack: dict[str, object], row_index: int, contour: np.ndar
     ptr = pack["ptr"]
     length = pack["len"]
     points_list = pack["points"]
-    if not isinstance(ptr, np.ndarray) or not isinstance(length, np.ndarray) or not isinstance(points_list, list):
+    if (
+        not isinstance(ptr, np.ndarray)
+        or not isinstance(length, np.ndarray)
+        or not isinstance(points_list, list)
+    ):
         raise TypeError("Invalid local contour pack.")
     local_offset = int(pack["point_count"])
     ptr[int(row_index)] = np.int64(local_offset)
@@ -3200,7 +3753,9 @@ def _finalize_local_contour_pack(pack: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _sample_packed_contours(pack: Mapping[str, object], sample_count: int) -> dict[str, np.ndarray]:
+def _sample_packed_contours(
+    pack: Mapping[str, object], sample_count: int
+) -> dict[str, np.ndarray]:
     """Convert one row-indexed ragged pack into a fixed-K numeric payload."""
 
     ptr = np.asarray(pack["ptr"], dtype=np.int64).reshape(-1)
@@ -3254,7 +3809,10 @@ def _compute_refined_subject_postcompute_shard(
     row_count = max(0, stop - start)
     masks = np.asarray(masks_roi[start:stop], dtype=np.uint8)
 
-    sampled_counts = {str(name): int(value) for name, value in dict(sampled_contour_counts or {}).items()}
+    sampled_counts = {
+        str(name): int(value)
+        for name, value in dict(sampled_contour_counts or {}).items()
+    }
     raw_contour_packs: dict[str, dict[str, object]] = {}
     eye_payload: dict[str, object] | None = None
     if write_eye_geometry and set(_EYE_COMPONENTS).issubset(label_map):
@@ -3263,24 +3821,37 @@ def _compute_refined_subject_postcompute_shard(
         separation_px = np.full((row_count,), np.nan, dtype=np.float32)
         separation_valid = np.zeros((row_count,), dtype=bool)
         centroids = np.full((row_count, 2, 2), np.nan, dtype=np.float32)
-        eye_contours = {name: _empty_local_contour_pack(row_count) for name in _EYE_COMPONENTS}
+        eye_contours = {
+            name: _empty_local_contour_pack(row_count) for name in _EYE_COMPONENTS
+        }
 
         for local_idx in range(row_count):
             for eye_idx, component_name in enumerate(_EYE_COMPONENTS):
                 comp_idx = int(label_map[component_name])
                 if comp_idx >= int(available.shape[0]) or not bool(available[comp_idx]):
                     continue
-                success, ellipse, centroid, contour, _failure = _measure_mask(masks[local_idx, comp_idx])
-                ellipse_params[local_idx, eye_idx] = np.asarray(ellipse, dtype=np.float32)
+                success, ellipse, centroid, contour, _failure = _measure_mask(
+                    masks[local_idx, comp_idx]
+                )
+                ellipse_params[local_idx, eye_idx] = np.asarray(
+                    ellipse, dtype=np.float32
+                )
                 ellipse_success[local_idx, eye_idx] = bool(success)
                 centroids[local_idx, eye_idx] = np.asarray(centroid, dtype=np.float32)
-                _add_local_contour(eye_contours[component_name], local_idx, contour, min_points=1)
-            if bool(np.all(ellipse_success[local_idx])) and bool(np.all(np.isfinite(centroids[local_idx]))):
-                separation_px[local_idx] = np.float32(np.linalg.norm(centroids[local_idx, 0] - centroids[local_idx, 1]))
+                _add_local_contour(
+                    eye_contours[component_name], local_idx, contour, min_points=1
+                )
+            if bool(np.all(ellipse_success[local_idx])) and bool(
+                np.all(np.isfinite(centroids[local_idx]))
+            ):
+                separation_px[local_idx] = np.float32(
+                    np.linalg.norm(centroids[local_idx, 0] - centroids[local_idx, 1])
+                )
                 separation_valid[local_idx] = True
 
         finalized_eye_contours = {
-            name: _finalize_local_contour_pack(pack) for name, pack in eye_contours.items()
+            name: _finalize_local_contour_pack(pack)
+            for name, pack in eye_contours.items()
         }
         raw_contour_packs.update(finalized_eye_contours)
         eye_payload = {
@@ -3306,7 +3877,9 @@ def _compute_refined_subject_postcompute_shard(
             continue
         pack = _empty_local_contour_pack(row_count)
         for local_idx in range(row_count):
-            contour = extract_largest_external_contour(masks[local_idx, comp_idx], min_points=2)
+            contour = extract_largest_external_contour(
+                masks[local_idx, comp_idx], min_points=2
+            )
             _add_local_contour(pack, local_idx, contour, min_points=2)
         raw_contour_packs[component_name] = _finalize_local_contour_pack(pack)
 
@@ -3319,7 +3892,9 @@ def _compute_refined_subject_postcompute_shard(
                 contour_payload[component_name] = raw_contour_packs[component_name]
 
     sampled_payload = {
-        component_name: _sample_packed_contours(raw_contour_packs[component_name], sample_count)
+        component_name: _sample_packed_contours(
+            raw_contour_packs[component_name], sample_count
+        )
         for component_name, sample_count in sampled_counts.items()
         if component_name in raw_contour_packs
     }
@@ -3367,7 +3942,9 @@ def _merge_contour_packs(
         local_points = np.asarray(pack["points_xy"], dtype=np.float32).reshape(-1, 2)
         valid = local_len > 0
         for local_idx in np.nonzero(valid)[0]:
-            ptr[start + int(local_idx)] = np.int64(global_offset + int(local_ptr[int(local_idx)]))
+            ptr[start + int(local_idx)] = np.int64(
+                global_offset + int(local_ptr[int(local_idx)])
+            )
             length[start + int(local_idx)] = np.int32(local_len[int(local_idx)])
         if int(local_points.shape[0]) > 0:
             point_chunks.append(local_points)
@@ -3418,13 +3995,19 @@ def _write_packed_component_contours(
             "boundary_policy": DEFAULT_BOUNDARY_POLICY,
             "min_points": int(min_points),
             "generated_at_utc": _utc_now(),
-            "points_placeholder_when_empty": bool(pack.get("points_placeholder_when_empty")),
+            "points_placeholder_when_empty": bool(
+                pack.get("points_placeholder_when_empty")
+            ),
             "cache_coverage": "full_indexed_rows",
             "postcompute_backend": str(postcompute_backend),
         }
     )
-    contours_group.create_array("ptr", data=ptr, chunks=(max(1, int(chunk_rois)),), overwrite=True)
-    contours_group.create_array("len", data=length, chunks=(max(1, int(chunk_rois)),), overwrite=True)
+    contours_group.create_array(
+        "ptr", data=ptr, chunks=(max(1, int(chunk_rois)),), overwrite=True
+    )
+    contours_group.create_array(
+        "len", data=length, chunks=(max(1, int(chunk_rois)),), overwrite=True
+    )
     contours_group.create_array(
         "points_xy",
         data=points_xy,
@@ -3453,7 +4036,11 @@ def _write_sharded_eye_geometry(
     if not set(_EYE_COMPONENTS).issubset(label_map):
         return {"status": "skipped", "reason": "missing_eye_components"}
     try:
-        mask_store = open_mask_store(run_group, source_path=f"refined_subject_masks_runs/{refined_run}", prefer="dense")
+        mask_store = open_mask_store(
+            run_group,
+            source_path=f"refined_subject_masks_runs/{refined_run}",
+            prefer="dense",
+        )
     except MaskStoreError as exc:
         return {"status": "skipped", "reason": "missing_mask_store", "error": str(exc)}
 
@@ -3474,10 +4061,18 @@ def _write_sharded_eye_geometry(
             continue
         start = int(shard["start_row"])
         stop = int(shard["stop_row"])
-        ellipse_params[start:stop] = np.asarray(eye_payload["ellipse_params"], dtype=np.float32)
-        ellipse_success[start:stop] = np.asarray(eye_payload["ellipse_success"], dtype=bool)
-        separation_px[start:stop] = np.asarray(eye_payload["separation_px"], dtype=np.float32)
-        separation_valid[start:stop] = np.asarray(eye_payload["separation_valid"], dtype=bool)
+        ellipse_params[start:stop] = np.asarray(
+            eye_payload["ellipse_params"], dtype=np.float32
+        )
+        ellipse_success[start:stop] = np.asarray(
+            eye_payload["ellipse_success"], dtype=bool
+        )
+        separation_px[start:stop] = np.asarray(
+            eye_payload["separation_px"], dtype=np.float32
+        )
+        separation_valid[start:stop] = np.asarray(
+            eye_payload["separation_valid"], dtype=bool
+        )
 
     components_parent = run_group.require_group("components")
     source_label_schema = str(run_group.attrs.get("label_schema_id") or "")
@@ -3485,7 +4080,9 @@ def _write_sharded_eye_geometry(
         component_group = components_parent.require_group(component_name)
         geometry_group = component_group.require_group("geometry")
         geometry_group.attrs["geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
-        geometry_group.attrs["geometry_method"] = "fit_ellipse_from_refined_subject_component_mask"
+        geometry_group.attrs["geometry_method"] = (
+            "fit_ellipse_from_refined_subject_component_mask"
+        )
         geometry_group.attrs["source_mask_component"] = component_name
         geometry_group.attrs["source_measurement"] = geometry_source
         geometry_group.attrs["updated_at_utc"] = _utc_now()
@@ -3503,7 +4100,9 @@ def _write_sharded_eye_geometry(
             overwrite=True,
         )
         if write_component_contours:
-            pack = _merge_contour_packs(shards, component_name, total_rois=total_rois, source_key="eye_geometry")
+            pack = _merge_contour_packs(
+                shards, component_name, total_rois=total_rois, source_key="eye_geometry"
+            )
             _write_packed_component_contours(
                 component_group,
                 pack,
@@ -3515,14 +4114,23 @@ def _write_sharded_eye_geometry(
                 postcompute_backend=postcompute_backend,
             )
 
-    relation_metrics = run_group.require_group("relations").require_group("eye_pair").require_group("metrics")
+    relation_metrics = (
+        run_group.require_group("relations")
+        .require_group("eye_pair")
+        .require_group("metrics")
+    )
     relation_metrics.attrs["relation_schema_id"] = EYE_PAIR_RELATION_SCHEMA_ID
     relation_metrics.attrs["relation_components"] = list(_EYE_COMPONENTS)
     relation_metrics.attrs["relation_method"] = "ellipse_centroid_distance"
     relation_metrics.attrs["source_measurement"] = geometry_source
     relation_metrics.attrs["updated_at_utc"] = _utc_now()
     relation_metrics.attrs["postcompute_backend"] = str(postcompute_backend)
-    relation_metrics.create_array("separation_px", data=separation_px, chunks=(max(1, int(chunk_rois)),), overwrite=True)
+    relation_metrics.create_array(
+        "separation_px",
+        data=separation_px,
+        chunks=(max(1, int(chunk_rois)),),
+        overwrite=True,
+    )
     relation_metrics.create_array(
         "separation_valid",
         data=separation_valid,
@@ -3565,7 +4173,12 @@ def _write_sharded_component_contours(
     for component_name in _COMPONENT_CONTOUR_COMPONENTS:
         if component_name not in label_map:
             continue
-        pack = _merge_contour_packs(shards, component_name, total_rois=total_rois, source_key="component_contours")
+        pack = _merge_contour_packs(
+            shards,
+            component_name,
+            total_rois=total_rois,
+            source_key="component_contours",
+        )
         component_group = components_parent.require_group(component_name)
         summaries.append(
             _write_packed_component_contours(
@@ -3581,10 +4194,14 @@ def _write_sharded_component_contours(
         )
     if summaries:
         run_group.attrs["component_contours_status"] = "computed"
-        run_group.attrs["component_contours_components"] = [item["component"] for item in summaries]
+        run_group.attrs["component_contours_components"] = [
+            item["component"] for item in summaries
+        ]
         run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
         run_group.attrs["component_contours_summary"] = list(_json_safe(summaries))
-        run_group.attrs["component_contours_postcompute_backend"] = str(postcompute_backend)
+        run_group.attrs["component_contours_postcompute_backend"] = str(
+            postcompute_backend
+        )
     return summaries
 
 
@@ -3623,7 +4240,9 @@ def _write_sharded_sampled_component_contours(
             stop = int(shard["stop_row"])
             points_xy[start:stop] = np.asarray(payload["points_xy"], dtype=np.float32)
             valid[start:stop] = np.asarray(payload["valid"], dtype=bool)
-            source_point_count[start:stop] = np.asarray(payload["source_point_count"], dtype=np.int32)
+            source_point_count[start:stop] = np.asarray(
+                payload["source_point_count"], dtype=np.int32
+            )
         summary = write_sampled_component_contour_arrays(
             components_parent.require_group(component_name),
             points_xy=points_xy,
@@ -3656,17 +4275,23 @@ def _update_sampled_component_contour_attrs(
         return
     combined = {
         str(item["component"]): dict(item)
-        for item in list(run_group.attrs.get("sampled_component_contours_summary") or [])
+        for item in list(
+            run_group.attrs.get("sampled_component_contours_summary") or []
+        )
         if isinstance(item, Mapping) and item.get("component")
     }
     for item in summaries:
         combined[str(item["component"])] = dict(item)
     ordered = [combined[name] for name in CANONICAL_COMPONENT_ORDER if name in combined]
     run_group.attrs["sampled_component_contours_status"] = "computed"
-    run_group.attrs["sampled_component_contours_components"] = [item["component"] for item in ordered]
+    run_group.attrs["sampled_component_contours_components"] = [
+        item["component"] for item in ordered
+    ]
     run_group.attrs["sampled_component_contours_updated_at_utc"] = _utc_now()
     run_group.attrs["sampled_component_contours_summary"] = list(_json_safe(ordered))
-    previous_backend = str(run_group.attrs.get("sampled_component_contours_postcompute_backend") or "")
+    previous_backend = str(
+        run_group.attrs.get("sampled_component_contours_postcompute_backend") or ""
+    )
     resolved_backend = (
         str(postcompute_backend)
         if not previous_backend or previous_backend == str(postcompute_backend)
@@ -3743,7 +4368,10 @@ def _run_sharded_refined_subject_postcompute(
     sampled_contour_counts: Mapping[str, int] | None = None,
     sampled_contour_row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
 ) -> dict[str, object]:
-    sampled_counts = {str(name): int(value) for name, value in dict(sampled_contour_counts or {}).items()}
+    sampled_counts = {
+        str(name): int(value)
+        for name, value in dict(sampled_contour_counts or {}).items()
+    }
     if not write_eye_geometry and not write_component_contours and not sampled_counts:
         return {"status": "skipped", "reason": "no_postcompute_requested"}
 
@@ -3754,7 +4382,10 @@ def _run_sharded_refined_subject_postcompute(
         return {"status": "skipped", "reason": "missing_masks_roi"}
     total_rois = int(masks_roi.shape[0])
     shard_size = max(1, min(int(chunk_size), total_rois if total_rois > 0 else 1))
-    ranges = [(start, min(total_rois, start + shard_size)) for start in range(0, total_rois, shard_size)]
+    ranges = [
+        (start, min(total_rois, start + shard_size))
+        for start in range(0, total_rois, shard_size)
+    ]
     worker_count = max(1, int(num_workers or 1))
     started = time.perf_counter()
     if worker_count == 1 or len(ranges) <= 1:
@@ -3829,7 +4460,11 @@ def _run_sharded_refined_subject_postcompute(
                 "status": "updated",
                 "postcompute_backend": _PROCESS_SHARD_POSTCOMPUTE_BACKEND,
                 "duration_seconds": duration_seconds,
-                "rows_per_second": float(total_rois / duration_seconds) if duration_seconds > 0 else None,
+                "rows_per_second": (
+                    float(total_rois / duration_seconds)
+                    if duration_seconds > 0
+                    else None
+                ),
                 "roi_count": total_rois,
                 "shard_count": len(shards),
                 "shard_size": int(shard_size),
@@ -3840,7 +4475,9 @@ def _run_sharded_refined_subject_postcompute(
                 "eye_geometry": eye_summary,
                 "component_contours": contour_summaries,
                 "sampled_component_contours": sampled_contour_summaries,
-                "worker_durations_seconds": [float(item.get("duration_seconds") or 0.0) for item in shards],
+                "worker_durations_seconds": [
+                    float(item.get("duration_seconds") or 0.0) for item in shards
+                ],
             }
         )
     )
@@ -3878,7 +4515,9 @@ def _ensure_metric_array(
     )
 
 
-def _ensure_refined_run_metric_shell(run_group: zarr.Group, *, total_rows: int, component_count: int) -> None:
+def _ensure_refined_run_metric_shell(
+    run_group: zarr.Group, *, total_rows: int, component_count: int
+) -> None:
     metrics_group = run_group.require_group("metrics")
     _ensure_metric_array(
         metrics_group,
@@ -3931,7 +4570,9 @@ def _ensure_refined_component_metric_shell(
     component_name: str,
     total_rows: int,
 ) -> zarr.Group:
-    component_group = run_group.require_group("components").require_group(component_name)
+    component_group = run_group.require_group("components").require_group(
+        component_name
+    )
     derived_metric_chunks = (_common_derived_metric_row_chunk(total_rows),)
     live_metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
     _ensure_metric_array(
@@ -4026,13 +4667,17 @@ def _component_indices_for_refined_run(
         if component is None or component in seen:
             continue
         if component not in label_map:
-            raise ValueError(f"Component {component!r} not present in refined run mask_labels.")
+            raise ValueError(
+                f"Component {component!r} not present in refined run mask_labels."
+            )
         seen.add(component)
         resolved.append((component, int(label_map[component])))
     return tuple(resolved)
 
 
-def _existing_component_reasons(component_group: zarr.Group, total_rows: int) -> np.ndarray:
+def _existing_component_reasons(
+    component_group: zarr.Group, total_rows: int
+) -> np.ndarray:
     labels = read_reason_labels(component_group)
     if labels is None:
         return np.full((total_rows,), "clean", dtype=object)
@@ -4089,9 +4734,9 @@ def _require_exact_existing_half_open_bbox_surface(
         )
         actual_bbox = np.asarray(bbox[row_slice], dtype=np.float32)
         actual_valid = np.asarray(valid[row_slice], dtype=bool)
-        if not np.array_equal(actual_bbox, expected_bbox, equal_nan=True) or not np.array_equal(
-            actual_valid, expected_valid
-        ):
+        if not np.array_equal(
+            actual_bbox, expected_bbox, equal_nan=True
+        ) or not np.array_equal(actual_valid, expected_valid):
             raise ValueError(
                 "Partial refined metric refresh found bbox values that are not the exact "
                 "half-open derivation of the current masks. Run a full all-component refresh."
@@ -4113,7 +4758,9 @@ def refresh_refined_subject_mask_metrics_run(
 
     metric_level = str(metric_level)
     if metric_level not in _METRIC_LEVELS:
-        raise ValueError(f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}.")
+        raise ValueError(
+            f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}."
+        )
     stage_start = time.perf_counter()
     timing = _TimingRecorder()
     run_name, run_group = _resolve_refined_subject_run_group(root, refined_run)
@@ -4171,8 +4818,12 @@ def refresh_refined_subject_mask_metrics_run(
         prefer="dense",
     )
     if tuple(int(value) for value in mask_store.shape) != mask_shape:
-        raise RuntimeError("Refined mask store changed during metric refresh preflight.")
-    _ensure_refined_run_metric_shell(run_group, total_rows=total_rows, component_count=component_count)
+        raise RuntimeError(
+            "Refined mask store changed during metric refresh preflight."
+        )
+    _ensure_refined_run_metric_shell(
+        run_group, total_rows=total_rows, component_count=component_count
+    )
     chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
     review_counts: dict[str, dict[str, int]] = {}
     refreshed_components: list[str] = []
@@ -4186,7 +4837,9 @@ def refresh_refined_subject_mask_metrics_run(
             component_name=component_name,
             total_rows=total_rows,
         )
-        reason_labels_by_component[component_name] = _existing_component_reasons(component_group, total_rows)
+        reason_labels_by_component[component_name] = _existing_component_reasons(
+            component_group, total_rows
+        )
         rows_with_component_by_component[component_name] = 0
 
     for start_row, stop_row in chunk_ranges:
@@ -4202,7 +4855,9 @@ def refresh_refined_subject_mask_metrics_run(
         for component_name, component_idx in component_indices:
             phase_start = time.perf_counter()
             component_masks = np.asarray(
-                mask_store.read_dense(rows=row_slice, channels=int(component_idx))[:, 0],
+                mask_store.read_dense(rows=row_slice, channels=int(component_idx))[
+                    :, 0
+                ],
                 dtype=np.uint8,
             )
             write_result = _write_mask_local_metrics_chunk(
@@ -4214,13 +4869,19 @@ def refresh_refined_subject_mask_metrics_run(
                 metric_level=metric_level,
                 write_metric_attrs=False,
             )
-            elapsed = timing.add(f"refresh_metrics_{component_name}", time.perf_counter() - phase_start)
+            elapsed = timing.add(
+                f"refresh_metrics_{component_name}", time.perf_counter() - phase_start
+            )
             chunk_timing[f"refresh_metrics_{component_name}_seconds"] = elapsed
-            rows_with_component_by_component[component_name] += int(np.count_nonzero(write_result.mask_present))
+            rows_with_component_by_component[component_name] += int(
+                np.count_nonzero(write_result.mask_present)
+            )
             if refresh_reason_tags:
-                reason_labels_by_component[component_name][row_slice] = _replace_metric_qc_reason_labels(
-                    reason_labels_by_component[component_name][row_slice],
-                    write_result.reason_labels,
+                reason_labels_by_component[component_name][row_slice] = (
+                    _replace_metric_qc_reason_labels(
+                        reason_labels_by_component[component_name][row_slice],
+                        write_result.reason_labels,
+                    )
                 )
         chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
         timing.chunk_timings.append(chunk_timing)
@@ -4239,7 +4900,9 @@ def refresh_refined_subject_mask_metrics_run(
                 chunk_size=max(1, min(256, total_rows)),
                 overwrite=True,
             )
-        _add_review_counts(review_counts, component_name, reason_labels_by_component[component_name])
+        _add_review_counts(
+            review_counts, component_name, reason_labels_by_component[component_name]
+        )
         refreshed_components.append(component_name)
 
     if full_component_refresh:
@@ -4250,12 +4913,16 @@ def refresh_refined_subject_mask_metrics_run(
             "foreground_half_open_pixel_edges_xyxy_v1"
         )
 
-    if write_eye_geometry and set(_EYE_COMPONENTS).issubset({name for name, _idx in component_indices}):
+    if write_eye_geometry and set(_EYE_COMPONENTS).issubset(
+        {name for name, _idx in component_indices}
+    ):
         write_refined_subject_eye_geometry(run_group)
         run_group.attrs["eye_geometry_status"] = "computed"
 
     if write_component_contours:
-        contour_components = _component_contour_targets([name for name, _idx in component_indices])
+        contour_components = _component_contour_targets(
+            [name for name, _idx in component_indices]
+        )
         if contour_components:
             with timing.phase("write_component_contours"):
                 contour_summaries = _summaries_to_json_safe(
@@ -4270,14 +4937,20 @@ def refresh_refined_subject_mask_metrics_run(
             run_group.attrs["component_contours_status"] = "computed"
             run_group.attrs["component_contours_components"] = list(contour_components)
             run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
-            run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
+            run_group.attrs["component_contours_summary"] = list(
+                _json_safe(contour_summaries)
+            )
         else:
             run_group.attrs["component_contours_status"] = "deferred"
-            run_group.attrs["component_contours_deferred_reason"] = "no_subject_body_or_swim_bladder_components_selected"
+            run_group.attrs["component_contours_deferred_reason"] = (
+                "no_subject_body_or_swim_bladder_components_selected"
+            )
 
     refreshed_at = _utc_now()
     duration_seconds = float(time.perf_counter() - stage_start)
-    timing_summary = timing.summary(total_rows=total_rows, duration_seconds=duration_seconds)
+    timing_summary = timing.summary(
+        total_rows=total_rows, duration_seconds=duration_seconds
+    )
     timing_summary.update(execution_metadata)
     run_group.attrs["component_metric_level"] = metric_level
     run_group.attrs["component_metrics_schema_id"] = _COMPONENT_METRICS_SCHEMA_ID
@@ -4285,8 +4958,12 @@ def refresh_refined_subject_mask_metrics_run(
     run_group.attrs["component_metric_qc_refreshed_at_utc"] = refreshed_at
     run_group.attrs["component_metric_qc_review_counts"] = review_counts
     run_group.attrs["component_metric_qc_execution_backend"] = _SERIAL_EXECUTION_BACKEND
-    run_group.attrs["component_metric_qc_timing_summary"] = dict(_json_safe(timing_summary))
-    run_group.attrs["component_metric_qc_chunk_timings"] = list(_json_safe(timing.chunk_timings))
+    run_group.attrs["component_metric_qc_timing_summary"] = dict(
+        _json_safe(timing_summary)
+    )
+    run_group.attrs["component_metric_qc_chunk_timings"] = list(
+        _json_safe(timing.chunk_timings)
+    )
     summary_stats = dict(run_group.attrs.get("summary_statistics") or {})
     summary_stats["rows_total"] = int(total_rows)
     summary_stats["component_metric_level"] = metric_level
@@ -4338,7 +5015,9 @@ def refresh_refined_subject_mask_metrics(
     )
 
 
-def _common_metric_chunk_payload(result: _CanonicalComponentChunkResult) -> dict[str, object]:
+def _common_metric_chunk_payload(
+    result: _CanonicalComponentChunkResult,
+) -> dict[str, object]:
     return {
         "spatial_metrics": {
             str(name): np.asarray(values)
@@ -4348,7 +5027,9 @@ def _common_metric_chunk_payload(result: _CanonicalComponentChunkResult) -> dict
             str(name): np.asarray(values)
             for name, values in result.component_metrics.items()
         },
-        "source_row_fingerprint": np.asarray(result.source_row_fingerprint, dtype=np.uint64),
+        "source_row_fingerprint": np.asarray(
+            result.source_row_fingerprint, dtype=np.uint64
+        ),
     }
 
 
@@ -4398,9 +5079,11 @@ def _merge_common_metric_chunk_payload(
             )
         np.asarray(metric_arrays[metric_name])[row_slice] = np.asarray(values)
     component["component_metrics"] = metric_arrays
-    np.asarray(component["source_row_fingerprint"], dtype=np.uint64)[row_slice] = np.asarray(
-        payload["source_row_fingerprint"],
-        dtype=np.uint64,
+    np.asarray(component["source_row_fingerprint"], dtype=np.uint64)[row_slice] = (
+        np.asarray(
+            payload["source_row_fingerprint"],
+            dtype=np.uint64,
+        )
     )
 
 
@@ -4411,9 +5094,20 @@ def _write_common_run_metrics(
     payloads_by_component: Mapping[str, Mapping[str, object]],
 ) -> None:
     run_metrics = run_group["metrics"]
-    for name in ("mask_present", "area_px", "centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid"):
+    for name in (
+        "mask_present",
+        "area_px",
+        "centroid_xy",
+        "centroid_valid",
+        "bbox_xyxy",
+        "bbox_valid",
+    ):
         component_values = [
-            np.asarray(dict(payloads_by_component[str(component_name)]["spatial_metrics"])[name])
+            np.asarray(
+                dict(payloads_by_component[str(component_name)]["spatial_metrics"])[
+                    name
+                ]
+            )
             for component_name in component_names
         ]
         run_metrics[name][:] = np.stack(component_values, axis=1)
@@ -4429,8 +5123,12 @@ def _write_common_component_metrics(
     spatial_metrics = dict(payload.get("spatial_metrics") or {})
     component_metrics = dict(payload.get("component_metrics") or {})
     component_group = run_group["components"][component_name]
-    component_group["mask_present"][:] = np.asarray(spatial_metrics["mask_present"], dtype=bool)
-    component_group["area_px"][:] = np.asarray(spatial_metrics["area_px"], dtype=np.float32)
+    component_group["mask_present"][:] = np.asarray(
+        spatial_metrics["mask_present"], dtype=bool
+    )
+    component_group["area_px"][:] = np.asarray(
+        spatial_metrics["area_px"], dtype=np.float32
+    )
     component_group["source_row_fingerprint"][:] = np.asarray(
         payload["source_row_fingerprint"],
         dtype=np.uint64,
@@ -4440,7 +5138,9 @@ def _write_common_component_metrics(
     _set_component_metric_attrs(component_group, metric_level=metric_level)
 
 
-def _finalization_metric_chunk_payload(batch: _FinalizedComponentBatch) -> dict[str, object]:
+def _finalization_metric_chunk_payload(
+    batch: _FinalizedComponentBatch,
+) -> dict[str, object]:
     return {
         "metrics": {
             str(metric_name): np.asarray(values, dtype=np.float32)
@@ -4477,7 +5177,9 @@ def _merge_finalization_metric_chunk_payload(
         name = str(metric_name)
         if name not in metric_arrays:
             metric_arrays[name] = np.zeros((int(total_rows),), dtype=np.float32)
-        np.asarray(metric_arrays[name], dtype=np.float32)[row_slice] = np.asarray(values, dtype=np.float32)
+        np.asarray(metric_arrays[name], dtype=np.float32)[row_slice] = np.asarray(
+            values, dtype=np.float32
+        )
     component["metrics"] = metric_arrays
     np.asarray(component["quality_code"], dtype=np.int16)[row_slice] = np.asarray(
         payload["quality_code"],
@@ -4508,8 +5210,315 @@ def _write_finalization_metrics_component(
     metrics_group = component_group["finalization_metrics"]
     for metric_name, values in metric_arrays.items():
         metrics_group[str(metric_name)][:] = np.asarray(values, dtype=np.float32)
-    metrics_group["quality_code"][:] = np.asarray(payload["quality_code"], dtype=np.int16)
-    metrics_group["quality_score"][:] = np.asarray(payload["quality_score"], dtype=np.float32)
+    metrics_group["quality_code"][:] = np.asarray(
+        payload["quality_code"], dtype=np.int16
+    )
+    metrics_group["quality_score"][:] = np.asarray(
+        payload["quality_score"], dtype=np.float32
+    )
+
+
+def _refined_chunk_semantic_array_units(
+    *,
+    component_names: Sequence[str],
+    masks_by_component: Mapping[str, np.ndarray],
+    common_metrics_by_component: Mapping[str, Mapping[str, object]],
+    start_row: int,
+    stop_row: int,
+) -> dict[str, dict[str, object]]:
+    """Hash exact refined core rows while every component remains resident."""
+
+    names = tuple(str(name) for name in component_names)
+    if set(masks_by_component) != set(names) or set(common_metrics_by_component) != set(
+        names
+    ):
+        raise ValueError("Refined semantic evidence lacks one or more components.")
+    arrays: dict[str, np.ndarray] = {
+        "masks_roi": np.ascontiguousarray(
+            np.stack(
+                [
+                    np.asarray(masks_by_component[name], dtype=np.uint8)
+                    for name in names
+                ],
+                axis=1,
+            )
+        )
+    }
+    for metric_name, dtype in (
+        ("mask_present", np.dtype(bool)),
+        ("area_px", np.dtype(np.float32)),
+        ("centroid_xy", np.dtype(np.float32)),
+        ("centroid_valid", np.dtype(bool)),
+        ("bbox_xyxy", np.dtype(np.float32)),
+        ("bbox_valid", np.dtype(bool)),
+    ):
+        arrays[f"metrics/{metric_name}"] = np.ascontiguousarray(
+            np.stack(
+                [
+                    np.asarray(
+                        dict(common_metrics_by_component[name]["spatial_metrics"])[
+                            metric_name
+                        ],
+                        dtype=dtype,
+                    )
+                    for name in names
+                ],
+                axis=1,
+            )
+        )
+    expected_rows = int(stop_row) - int(start_row)
+    result: dict[str, dict[str, object]] = {}
+    for path, values in arrays.items():
+        if int(values.shape[0]) != expected_rows:
+            raise ValueError(f"Refined semantic row count differs for {path!r}.")
+        result[path] = {
+            "start_row": int(start_row),
+            "stop_row": int(stop_row),
+            "decoded_bytes": int(values.nbytes),
+            "sha256": hashlib.sha256(values.view(np.uint8)).hexdigest(),
+        }
+    return result
+
+
+def _refined_worker_array_document(
+    *,
+    units_by_path: Mapping[str, Sequence[Mapping[str, Any]]],
+    total_rows: int,
+    channel_count: int,
+    height: int,
+    width: int,
+) -> dict[str, dict[str, object]]:
+    shapes_dtypes: dict[str, tuple[tuple[int, ...], np.dtype[Any]]] = {
+        "masks_roi": (
+            (total_rows, channel_count, height, width),
+            np.dtype(np.uint8),
+        ),
+        "metrics/mask_present": ((total_rows, channel_count), np.dtype(bool)),
+        "metrics/area_px": ((total_rows, channel_count), np.dtype(np.float32)),
+        "metrics/centroid_xy": (
+            (total_rows, channel_count, 2),
+            np.dtype(np.float32),
+        ),
+        "metrics/centroid_valid": ((total_rows, channel_count), np.dtype(bool)),
+        "metrics/bbox_xyxy": (
+            (total_rows, channel_count, 4),
+            np.dtype(np.float32),
+        ),
+        "metrics/bbox_valid": ((total_rows, channel_count), np.dtype(bool)),
+    }
+    if set(units_by_path) != set(shapes_dtypes):
+        raise ValueError("Refined worker semantic array inventory differs.")
+    document: dict[str, dict[str, object]] = {}
+    for path, (shape, dtype) in shapes_dtypes.items():
+        units = [dict(unit) for unit in units_by_path[path]]
+        cursor = 0
+        row_bytes = int(dtype.itemsize) * int(np.prod(shape[1:]))
+        for unit in units:
+            start = unit.get("start_row")
+            stop = unit.get("stop_row")
+            if (
+                type(start) is not int
+                or type(stop) is not int
+                or start != cursor
+                or not (start < stop <= total_rows)
+                or unit.get("decoded_bytes") != (stop - start) * row_bytes
+            ):
+                raise ValueError(
+                    f"Refined worker semantic coverage differs for {path!r}."
+                )
+            cursor = int(stop)
+        if cursor != total_rows:
+            raise ValueError(
+                f"Refined worker semantic coverage is incomplete for {path!r}."
+            )
+        document[path] = {
+            "shape": list(shape),
+            "dtype": str(dtype),
+            "digest_algorithm": SUBJECT_MASK_ARRAY_UNIT_DIGEST_ALGORITHM,
+            "unit_count": len(units),
+            "units_digest": canonical_json_sha256(units),
+            "units": units,
+        }
+    return document
+
+
+def _refined_source_manifest_reference(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    payload = value.get("payload")
+    payload_digest = value.get("payload_digest")
+    if (
+        not isinstance(payload, Mapping)
+        or not isinstance(payload_digest, str)
+        or canonical_json_sha256(payload) != payload_digest
+    ):
+        raise ValueError("Source subject-mask run_manifest digest is invalid.")
+    return {
+        "schema_id": value.get("schema_id"),
+        "schema_version": value.get("schema_version"),
+        "payload_digest": payload_digest,
+    }
+
+
+def _refined_source_row_identity_document(
+    source: SourceSubjectMaskRun,
+) -> dict[str, object]:
+    arrays: dict[str, dict[str, object]] = {}
+    for name in _CANONICAL_REFINED_SOURCE_ARRAYS:
+        value = source.group.get(name)
+        if value is None:
+            continue
+        arrays[name] = {
+            "shape": [int(item) for item in value.shape],
+            "dtype": str(np.dtype(value.dtype)),
+            "sha256": streaming_array_sha256(value),
+        }
+    available = np.ascontiguousarray(np.asarray(source.available_channels, dtype=bool))
+    arrays["available_channels"] = {
+        "shape": [int(item) for item in available.shape],
+        "dtype": str(available.dtype),
+        "sha256": hashlib.sha256(available.view(np.uint8)).hexdigest(),
+    }
+    return {
+        "row_count": int(source.masks_roi.shape[0]),
+        "arrays": arrays,
+    }
+
+
+def _build_refined_subject_mask_scientific_identity(
+    *,
+    source: SourceSubjectMaskRun,
+    component_names: Sequence[str],
+    source_payloads: Mapping[str, Mapping[str, object]],
+    assignment_keypoint_attrs: Mapping[str, object],
+    require_production_proof: bool,
+) -> dict[str, object]:
+    source_science = source.group.attrs.get(
+        REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR
+    )
+    source_science_digest: str | None = None
+    if source_science is not None:
+        if not isinstance(source_science, Mapping):
+            raise ValueError("Source subject-mask scientific identity is malformed.")
+        science_errors = validate_subject_mask_scientific_identity(source_science)
+        if science_errors:
+            raise ValueError(
+                "Source subject-mask scientific identity is invalid: "
+                + "; ".join(science_errors)
+            )
+        source_science_digest = str(source_science["digest"])
+    source_manifest = _refined_source_manifest_reference(
+        source.group.attrs.get("run_manifest")
+    )
+    source_worker_binding = source.group.attrs.get(
+        REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR
+    )
+    if require_production_proof and (
+        source_science_digest is None
+        or (source_manifest is None and not isinstance(source_worker_binding, Mapping))
+    ):
+        raise ValueError(
+            "Production refined-mask proof requires the raw source scientific "
+            "identity and either its sealed core manifest or worker receipt binding."
+        )
+    input_binding = {
+        "run_path": str(getattr(source.group, "path", "")).strip("/"),
+        "run_manifest": source_manifest,
+        "scientific_identity_digest": source_science_digest,
+        "worker_semantic_receipt_binding": (
+            dict(source_worker_binding)
+            if isinstance(source_worker_binding, Mapping)
+            else None
+        ),
+    }
+    row_identity = _refined_source_row_identity_document(source)
+    crop = {
+        "run_id": str(source.crop_run),
+        "source_crop_snapshot": dict(_json_safe(source.source_crop_snapshot)),
+        "roi_shape_hw": [
+            int(source.masks_roi.shape[2]),
+            int(source.masks_roi.shape[3]),
+        ],
+    }
+    pixels = {
+        "semantic_input": "raw_subject_mask_surface",
+        "surface_kind": str(source.mask_surface_kind),
+        "surface_path": str(source.mask_surface_path),
+        "probability_encoding": source.probability_encoding,
+        "source_input_binding": input_binding,
+    }
+    inference_contract = {
+        "method": SMART_FINALIZE_SUBJECT_MASKS_METHOD,
+        "finalization_semantics": "smart_probability_to_refined_candidate",
+        "output_component_order": [str(name) for name in component_names],
+        "component_sources_and_policies": dict(_json_safe(source_payloads)),
+        "eye_assignment_contract": dict(_json_safe(assignment_keypoint_attrs)),
+        "authoritative_output": "dense_uint8_masks_roi",
+        "derived_cache_policy": "bitpacked_rle_metrics_contours_non_authoritative",
+    }
+    return build_subject_mask_scientific_identity(
+        stage_kind="refined_subject_mask",
+        model={
+            "role": "deterministic_refinement_policy",
+            "method": SMART_FINALIZE_SUBJECT_MASKS_METHOD,
+            "source_input_binding": input_binding,
+        },
+        crop=crop,
+        pixels=pixels,
+        row_identity=row_identity,
+        inference_contract=inference_contract,
+    )
+
+
+def _seal_refined_worker_semantic_receipt(
+    *,
+    run_group: zarr.Group,
+    run_path: str,
+    scientific_identity: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    units_by_path: Mapping[str, Sequence[Mapping[str, Any]]],
+    total_rows: int,
+    component_count: int,
+    height: int,
+    width: int,
+) -> dict[str, object]:
+    array_document = _refined_worker_array_document(
+        units_by_path=units_by_path,
+        total_rows=total_rows,
+        channel_count=component_count,
+        height=height,
+        width=width,
+    )
+    array_document.update(
+        subject_mask_array_unit_document(
+            {"available_channels": run_group["available_channels"]},
+            ("available_channels",),
+            unit_rows=max(1, int(component_count)),
+        )
+    )
+    payload = scientific_identity.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("Refined worker scientific identity payload is absent.")
+    roi_paths = tuple(
+        path
+        for path in REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+        if path != "available_channels"
+    )
+    return build_subject_mask_worker_semantic_receipt(
+        stage_kind="refined_subject_mask",
+        run_path=run_path,
+        scientific_identity=scientific_identity,
+        attempt=attempt,
+        scope={
+            "crop": payload.get("crop"),
+            "pixels": payload.get("pixels"),
+            "row_identity": payload.get("row_identity"),
+        },
+        row_count=int(total_rows),
+        array_document=array_document,
+        required_paths=REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS,
+        roi_aligned_paths=roi_paths,
+    )
 
 
 def _process_and_write_finalizer_chunk_open(
@@ -4544,6 +5553,7 @@ def _process_and_write_finalizer_chunk_open(
     review_counts: dict[str, dict[str, int]] = {}
     reason_labels_by_component: dict[str, list[str]] = {}
     common_metrics_by_component: dict[str, dict[str, object]] = {}
+    semantic_masks_by_component: dict[str, np.ndarray] = {}
     finalization_metrics_by_component: dict[str, dict[str, object]] = {}
     eyes_union_assignment_summary: dict[str, object] = {}
     eye_geometry_payload: dict[str, object] | None = None
@@ -4556,7 +5566,9 @@ def _process_and_write_finalizer_chunk_open(
             start_row=start_row,
             stop_row=stop_row,
         )
-        elapsed = timing.add(f"finalize_{raw_component}", time.perf_counter() - phase_start)
+        elapsed = timing.add(
+            f"finalize_{raw_component}", time.perf_counter() - phase_start
+        )
         chunk_timing[f"finalize_{raw_component}_seconds"] = elapsed
         chunk_batches[raw_component] = batch
         if raw_component == _RAW_EYE_UNION_COMPONENT:
@@ -4582,13 +5594,26 @@ def _process_and_write_finalizer_chunk_open(
             timing=timing,
             chunk_timing=chunk_timing,
         )
-        common_metrics_by_component[raw_component] = _common_metric_chunk_payload(write_result)
-        finalization_metrics_by_component[raw_component] = _finalization_metric_chunk_payload(batch)
-        elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
+        common_metrics_by_component[raw_component] = _common_metric_chunk_payload(
+            write_result
+        )
+        semantic_masks_by_component[raw_component] = np.asarray(
+            batch.masks, dtype=np.uint8
+        )
+        finalization_metrics_by_component[raw_component] = (
+            _finalization_metric_chunk_payload(batch)
+        )
+        elapsed = timing.add(
+            f"write_{raw_component}", time.perf_counter() - phase_start
+        )
         chunk_timing[f"write_{raw_component}_seconds"] = elapsed
         chunk_any |= write_result.mask_present
-        labels = _merge_reason_label_arrays(batch.reason_labels, write_result.reason_labels)
-        reason_labels_by_component[raw_component] = [str(value) for value in labels.tolist()]
+        labels = _merge_reason_label_arrays(
+            batch.reason_labels, write_result.reason_labels
+        )
+        reason_labels_by_component[raw_component] = [
+            str(value) for value in labels.tolist()
+        ]
         _add_review_counts(review_counts, raw_component, labels)
 
     if eye_assignment_context is not None:
@@ -4603,8 +5628,12 @@ def _process_and_write_finalizer_chunk_open(
         )
         elapsed = timing.add("eye_assignment", time.perf_counter() - phase_start)
         chunk_timing["eye_assignment_seconds"] = elapsed
-        _record_eye_assignment_phase_seconds(timing, chunk_timing, assignment_chunk.phase_seconds)
-        _merge_assignment_summary(eyes_union_assignment_summary, assignment_chunk.summary)
+        _record_eye_assignment_phase_seconds(
+            timing, chunk_timing, assignment_chunk.phase_seconds
+        )
+        _merge_assignment_summary(
+            eyes_union_assignment_summary, assignment_chunk.summary
+        )
         eye_geometry_payload = assignment_chunk.eye_geometry
         for component_name in _EYE_COMPONENTS:
             component_idx = int(component_to_index[component_name])
@@ -4618,25 +5647,41 @@ def _process_and_write_finalizer_chunk_open(
                 masks=masks,
                 source_masks=masks,
                 metric_level=metric_level,
-                precomputed_component_metrics=assignment_chunk.component_metrics.get(component_name),
+                precomputed_component_metrics=assignment_chunk.component_metrics.get(
+                    component_name
+                ),
                 write_metric_attrs=False,
                 write_derived_metrics=False,
                 retain_source_seeds=retain_source_seeds,
                 timing=timing,
                 chunk_timing=chunk_timing,
             )
-            common_metrics_by_component[component_name] = _common_metric_chunk_payload(write_result)
-            elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
+            common_metrics_by_component[component_name] = _common_metric_chunk_payload(
+                write_result
+            )
+            semantic_masks_by_component[component_name] = masks
+            elapsed = timing.add(
+                f"write_{component_name}", time.perf_counter() - phase_start
+            )
             chunk_timing[f"write_{component_name}_seconds"] = elapsed
             chunk_any |= write_result.mask_present
             labels = _merge_reason_label_arrays(
                 assignment_chunk.reason_labels[component_name],
                 write_result.reason_labels,
             )
-            reason_labels_by_component[component_name] = [str(value) for value in labels.tolist()]
+            reason_labels_by_component[component_name] = [
+                str(value) for value in labels.tolist()
+            ]
             _add_review_counts(review_counts, component_name, labels)
 
     chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
+    worker_semantic_array_units = _refined_chunk_semantic_array_units(
+        component_names=component_names,
+        masks_by_component=semantic_masks_by_component,
+        common_metrics_by_component=common_metrics_by_component,
+        start_row=int(start_row),
+        stop_row=int(stop_row),
+    )
     return {
         "chunk_timing": chunk_timing,
         "phase_seconds": dict(timing.phase_seconds),
@@ -4646,8 +5691,11 @@ def _process_and_write_finalizer_chunk_open(
         "common_metrics_by_component": common_metrics_by_component,
         "finalization_metrics_by_component": finalization_metrics_by_component,
         "rows_with_nonempty_masks": int(np.count_nonzero(chunk_any)),
-        "eyes_union_assignment_summary": dict(_json_safe(eyes_union_assignment_summary)),
+        "eyes_union_assignment_summary": dict(
+            _json_safe(eyes_union_assignment_summary)
+        ),
         "eye_geometry": eye_geometry_payload,
+        "worker_semantic_array_units": worker_semantic_array_units,
     }
 
 
@@ -4684,7 +5732,11 @@ def _process_and_write_finalizer_shard(
     component_names = tuple(str(name) for name in component_names)
     progress = _ProgressJsonlReporter(
         Path(progress_jsonl).expanduser().resolve() if progress_jsonl else None,
-        start_time=float(progress_start_time) if progress_start_time is not None else time.perf_counter(),
+        start_time=(
+            float(progress_start_time)
+            if progress_start_time is not None
+            else time.perf_counter()
+        ),
     )
 
     eye_assignment_context: _EyeAssignmentContext | None = None
@@ -4700,7 +5752,9 @@ def _process_and_write_finalizer_shard(
     rows_completed_in_shard = 0
     shard_start = int(chunk_specs[0][1]) if chunk_specs else 0
     shard_stop = int(chunk_specs[-1][2]) if chunk_specs else 0
-    for chunk_ordinal, (chunk_index, start_row, stop_row) in enumerate(chunk_specs, start=1):
+    for chunk_ordinal, (chunk_index, start_row, stop_row) in enumerate(
+        chunk_specs, start=1
+    ):
         chunk_start = int(start_row)
         chunk_stop = int(stop_row)
         try:
@@ -4818,7 +5872,9 @@ def _compute_finalizer_process_shards(
                 shard_index=int(shard_index),
                 total_shards=int(len(shards)),
                 worker_count=int(worker_count),
-                progress_jsonl=str(progress.path) if progress.path is not None else None,
+                progress_jsonl=(
+                    str(progress.path) if progress.path is not None else None
+                ),
                 progress_start_time=float(progress.start_time),
             )
             future_to_shard[future] = shard_payload
@@ -4834,7 +5890,9 @@ def _compute_finalizer_process_shards(
                 raise
             results.extend(shard_results)
             completed += 1
-            rows_completed += int(shard_payload["stop_row"]) - int(shard_payload["start_row"])
+            rows_completed += int(shard_payload["stop_row"]) - int(
+                shard_payload["start_row"]
+            )
             progress.emit(
                 "process_shard_completed",
                 completed_shards=int(completed),
@@ -4874,18 +5932,28 @@ def finalize_subject_mask_run(
     dry_run: bool = False,
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
+    attempt_id: str | None = None,
+    retry_of_attempt_id: str | None = None,
+    supersedes_run: str | None = None,
+    require_production_proof: bool = False,
     progress_jsonl: str | Path | None = None,
 ) -> dict[str, object]:
     """Finalize one subject-mask run into a canonical refined-subject run."""
 
     if bool(assignment_keypoint_group) != bool(assignment_keypoints_run):
-        raise ValueError("Pass both assignment_keypoint_group and assignment_keypoints_run, or neither.")
+        raise ValueError(
+            "Pass both assignment_keypoint_group and assignment_keypoints_run, or neither."
+        )
     metric_level = str(metric_level)
     if metric_level not in _METRIC_LEVELS:
-        raise ValueError(f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}.")
+        raise ValueError(
+            f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}."
+        )
     mask_storage = str(mask_storage)
     if mask_storage not in _MASK_STORAGE_CHOICES:
-        raise ValueError(f"mask_storage must be one of {_MASK_STORAGE_CHOICES}; got {mask_storage!r}.")
+        raise ValueError(
+            f"mask_storage must be one of {_MASK_STORAGE_CHOICES}; got {mask_storage!r}."
+        )
     if mask_storage in _MASK_STORAGE_COMPACT_ONLY:
         raise ValueError(
             f"mask_storage={mask_storage!r} is compact-only and is no longer valid for editable refined "
@@ -4915,19 +5983,35 @@ def finalize_subject_mask_run(
     )
     resolved_sampled_contour_counts = {
         str(name): int(value)
-        for name, value in {**DEFAULT_SAMPLED_CONTOUR_COUNTS, **dict(sampled_contour_counts or {})}.items()
+        for name, value in {
+            **DEFAULT_SAMPLED_CONTOUR_COUNTS,
+            **dict(sampled_contour_counts or {}),
+        }.items()
     }
     if any(value <= 0 for value in resolved_sampled_contour_counts.values()):
         raise ValueError("All sampled contour counts must be positive.")
     normalized_sampled_contour_row_chunk = max(1, int(sampled_contour_row_chunk))
     if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND and zarr_path is None:
-        raise ValueError(f"execution_backend={execution_backend!r} requires a filesystem zarr_path.")
+        raise ValueError(
+            f"execution_backend={execution_backend!r} requires a filesystem zarr_path."
+        )
     if (
         postcompute_backend == _PROCESS_SHARD_POSTCOMPUTE_BACKEND
-        and (write_eye_geometry or write_component_contours or write_sampled_component_contours)
+        and (
+            write_eye_geometry
+            or write_component_contours
+            or write_sampled_component_contours
+        )
         and zarr_path is None
     ):
-        raise ValueError("postcompute_backend='process_shards' requires a filesystem zarr_path.")
+        raise ValueError(
+            "postcompute_backend='process_shards' requires a filesystem zarr_path."
+        )
+    if require_production_proof and zarr_path is None:
+        raise ValueError(
+            "require_production_proof=True requires a filesystem zarr_path for "
+            "the immutable semantic receipt sidecar."
+        )
     source, shard_collection = _load_subject_mask_source(
         root,
         subject_run=subject_run,
@@ -4949,20 +6033,29 @@ def finalize_subject_mask_run(
         )
     collection_worker_plan = (
         _build_collection_worker_plan(shard_collection)
-        if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND and shard_collection is not None
+        if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND
+        and shard_collection is not None
         else None
     )
-    collection_worker_plan_summary = _collection_worker_plan_summary(collection_worker_plan)
+    collection_worker_plan_summary = _collection_worker_plan_summary(
+        collection_worker_plan
+    )
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
     width = int(source.masks_roi.shape[3])
     if source.source_crop_row_ids is None:
-        source_parent = SUBJECT_MASK_SHARD_PARENT if shard_collection is not None else SUBJECT_MASK_CANONICAL_PARENT
+        source_parent = (
+            SUBJECT_MASK_SHARD_PARENT
+            if shard_collection is not None
+            else SUBJECT_MASK_CANONICAL_PARENT
+        )
         raise ValueError(
             f"{source_parent}/{source.run_name} cannot be finalized without source_crop_row_ids; "
             "write or backfill explicit crop-row lineage first."
         )
-    effective_dense_mask_row_chunk = refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk)
+    effective_dense_mask_row_chunk = refined_subject_mask_storage_row_chunk(
+        total_rows, dense_mask_row_chunk
+    )
     finalization_metric_row_chunk = max(
         1,
         min(int(FINALIZATION_METRIC_ROW_CHUNK), int(total_rows)),
@@ -4985,9 +6078,12 @@ def finalize_subject_mask_run(
     chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
     execution_metadata: dict[str, object] = {
         "execution_backend": execution_backend,
-        "process_shard_execution_enabled": execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND,
+        "process_shard_execution_enabled": execution_backend
+        == _PROCESS_SHARD_EXECUTION_BACKEND,
         "worker_process_count": (
-            normalized_num_workers if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND else None
+            normalized_num_workers
+            if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND
+            else None
         ),
         "requested_chunk_size": requested_chunk_size,
         "worker_chunk_size": worker_chunk_size,
@@ -4999,7 +6095,9 @@ def finalize_subject_mask_run(
     }
     component_names = _requested_output_components(source, components)
     if not component_names:
-        raise ValueError(f"subject_mask_runs/{source.run_name} has no finalizable subject-mask components.")
+        raise ValueError(
+            f"subject_mask_runs/{source.run_name} has no finalizable subject-mask components."
+        )
     required_raw_components = []
     if "subject_body" in component_names:
         required_raw_components.append("subject_body")
@@ -5035,7 +6133,9 @@ def finalize_subject_mask_run(
         "worker_chunk_size": worker_chunk_size,
         "chunk_count": len(chunk_ranges),
         "dense_mask_row_chunk": int(effective_dense_mask_row_chunk),
-        "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
+        "dense_mask_storage_chunks": [
+            int(value) for value in dense_mask_storage_chunks
+        ],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
         "common_metric_row_chunk": int(common_metric_row_chunk),
@@ -5048,7 +6148,9 @@ def finalize_subject_mask_run(
         "sampled_contour_counts": dict(resolved_sampled_contour_counts),
         "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
         "retain_source_seeds": bool(retain_source_seeds),
-        "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
+        "source_seed_masks_status": (
+            "retained" if bool(retain_source_seeds) else "omitted"
+        ),
         "mask_storage": mask_storage,
         "mask_rle_validation_mode": mask_rle_validation_mode,
         "would_write_mask_bitpacked": mask_storage in _MASK_STORAGES_WITH_BITPACKED,
@@ -5066,16 +6168,24 @@ def finalize_subject_mask_run(
                 "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
                 "finalized_from_subject_mask_shards": True,
                 "source_subject_mask_shard_runs": list(shard_collection.shard_runs),
-                "source_subject_mask_shard_run_paths": list(shard_collection.shard_run_paths),
-                "source_subject_mask_shard_crop_runs": list(shard_collection.shard_crop_runs),
-                "source_crop_rebased_from_shards": bool(shard_collection.source_crop_rebased_from_shards),
+                "source_subject_mask_shard_run_paths": list(
+                    shard_collection.shard_run_paths
+                ),
+                "source_subject_mask_shard_crop_runs": list(
+                    shard_collection.shard_crop_runs
+                ),
+                "source_crop_rebased_from_shards": bool(
+                    shard_collection.source_crop_rebased_from_shards
+                ),
                 "source_crop_rebase_target_run": str(target_crop_run or ""),
             }
         )
     if dry_run:
         return summary
 
-    progress = _ProgressJsonlReporter(Path(progress_jsonl).expanduser().resolve() if progress_jsonl else None)
+    progress = _ProgressJsonlReporter(
+        Path(progress_jsonl).expanduser().resolve() if progress_jsonl else None
+    )
     progress.emit(
         "start",
         zarr_path=str(zarr_path or ""),
@@ -5107,7 +6217,9 @@ def finalize_subject_mask_run(
         postcompute_chunk_size=int(normalized_postcompute_chunk_size),
         postcompute_num_workers=normalized_postcompute_num_workers,
         finalized_from_subject_mask_shards=bool(shard_collection is not None),
-        source_subject_mask_shard_runs=list(shard_collection.shard_runs) if shard_collection is not None else [],
+        source_subject_mask_shard_runs=(
+            list(shard_collection.shard_runs) if shard_collection is not None else []
+        ),
         source_crop_rebase_target_run=str(target_crop_run or ""),
         collection_worker_index_plan=collection_worker_plan_summary,
     )
@@ -5134,6 +6246,11 @@ def finalize_subject_mask_run(
     first_batches: dict[str, _FinalizedComponentBatch] = {}
     common_metrics_by_component: dict[str, dict[str, object]] = {}
     finalization_metrics_by_component: dict[str, dict[str, object]] = {}
+    refined_semantic_units_by_path: dict[str, list[dict[str, object]]] = {
+        path: []
+        for path in REFINED_SUBJECT_MASK_WORKER_OUTPUT_PATHS
+        if path != "available_channels"
+    }
     rows_with_nonempty_masks = 0
     eyes_union_assignment_summary: dict[str, object] = {}
     assignment_eye_geometry_shards: list[dict[str, object]] = []
@@ -5158,7 +6275,9 @@ def finalize_subject_mask_run(
             eye_assignment_context.row_identity_summary
         )
         assignment_keypoint_attrs["assignment_keypoint_row_identity_check"] = str(
-            eye_assignment_context.row_identity_summary.get("row_identity_check", "unknown")
+            eye_assignment_context.row_identity_summary.get(
+                "row_identity_check", "unknown"
+            )
         )
         canonical_keypoints = eye_assignment_context.canonical_coordinate_surfaces
         if canonical_keypoints is not None:
@@ -5188,7 +6307,9 @@ def finalize_subject_mask_run(
                     ),
                     "assignment_keypoint_eye_indices": {
                         "eye_left": int(eye_assignment_context.eye_keypoint_indices[0]),
-                        "eye_right": int(eye_assignment_context.eye_keypoint_indices[1]),
+                        "eye_right": int(
+                            eye_assignment_context.eye_keypoint_indices[1]
+                        ),
                     },
                 }
             )
@@ -5202,12 +6323,20 @@ def finalize_subject_mask_run(
         "sampled_contour_counts": dict(resolved_sampled_contour_counts),
         "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
         "retain_source_seeds": bool(retain_source_seeds),
-        "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
-        "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
+        "source_seed_masks_status": (
+            "retained" if bool(retain_source_seeds) else "omitted"
+        ),
+        "source_seed_masks_reason": (
+            "retain_source_seeds=true"
+            if bool(retain_source_seeds)
+            else "production_default"
+        ),
         "mask_storage_requested": mask_storage,
         "mask_rle_validation_mode": mask_rle_validation_mode,
         "dense_mask_row_chunk": int(effective_dense_mask_row_chunk),
-        "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
+        "dense_mask_storage_chunks": [
+            int(value) for value in dense_mask_storage_chunks
+        ],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
         "common_metric_row_chunk": int(common_metric_row_chunk),
@@ -5219,12 +6348,15 @@ def finalize_subject_mask_run(
         **execution_metadata,
         "source_input_subject_mask_run": source.run_name,
         "source_component_runs": {
-            component_name: source.run_name
-            for component_name in component_names
+            component_name: source.run_name for component_name in component_names
         },
         "source_component_sources": {
             component_name: {
-                "source_stage": SUBJECT_MASK_SHARD_PARENT if shard_collection is not None else SUBJECT_MASK_CANONICAL_PARENT,
+                "source_stage": (
+                    SUBJECT_MASK_SHARD_PARENT
+                    if shard_collection is not None
+                    else SUBJECT_MASK_CANONICAL_PARENT
+                ),
                 "source_run": source.run_name,
             }
             for component_name in component_names
@@ -5236,9 +6368,15 @@ def finalize_subject_mask_run(
                 "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
                 "finalized_from_subject_mask_shards": True,
                 "source_subject_mask_shard_runs": list(shard_collection.shard_runs),
-                "source_subject_mask_shard_run_paths": list(shard_collection.shard_run_paths),
-                "source_subject_mask_shard_crop_runs": list(shard_collection.shard_crop_runs),
-                "source_crop_rebased_from_shards": bool(shard_collection.source_crop_rebased_from_shards),
+                "source_subject_mask_shard_run_paths": list(
+                    shard_collection.shard_run_paths
+                ),
+                "source_subject_mask_shard_crop_runs": list(
+                    shard_collection.shard_crop_runs
+                ),
+                "source_crop_rebased_from_shards": bool(
+                    shard_collection.source_crop_rebased_from_shards
+                ),
                 "source_crop_rebase_target_run": str(target_crop_run or ""),
             }
         )
@@ -5254,7 +6392,9 @@ def finalize_subject_mask_run(
         "worker_chunk_size": int(worker_chunk_size),
         "chunk_count": int(len(chunk_ranges)),
         "dense_mask_row_chunk": int(effective_dense_mask_row_chunk),
-        "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
+        "dense_mask_storage_chunks": [
+            int(value) for value in dense_mask_storage_chunks
+        ],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
         "common_metric_row_chunk": int(common_metric_row_chunk),
@@ -5267,8 +6407,14 @@ def finalize_subject_mask_run(
         "sampled_contour_counts": dict(resolved_sampled_contour_counts),
         "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
         "retain_source_seeds": bool(retain_source_seeds),
-        "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
-        "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
+        "source_seed_masks_status": (
+            "retained" if bool(retain_source_seeds) else "omitted"
+        ),
+        "source_seed_masks_reason": (
+            "retain_source_seeds=true"
+            if bool(retain_source_seeds)
+            else "production_default"
+        ),
         "mask_storage_requested": mask_storage,
         "mask_rle_validation_mode": mask_rle_validation_mode,
         "postcompute_backend": postcompute_backend,
@@ -5282,9 +6428,15 @@ def finalize_subject_mask_run(
                 "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
                 "finalized_from_subject_mask_shards": True,
                 "source_subject_mask_shard_runs": list(shard_collection.shard_runs),
-                "source_subject_mask_shard_run_paths": list(shard_collection.shard_run_paths),
-                "source_subject_mask_shard_crop_runs": list(shard_collection.shard_crop_runs),
-                "source_crop_rebased_from_shards": bool(shard_collection.source_crop_rebased_from_shards),
+                "source_subject_mask_shard_run_paths": list(
+                    shard_collection.shard_run_paths
+                ),
+                "source_subject_mask_shard_crop_runs": list(
+                    shard_collection.shard_crop_runs
+                ),
+                "source_crop_rebased_from_shards": bool(
+                    shard_collection.source_crop_rebased_from_shards
+                ),
                 "source_crop_rebase_target_run": str(target_crop_run or ""),
             }
         )
@@ -5307,11 +6459,14 @@ def finalize_subject_mask_run(
                 create_dense_masks=not direct_bitpacked_output,
                 create_bitpacked_masks=direct_bitpacked_output,
                 publication_owner=canonical_publication_owner,
+                selector_eligible=not bool(require_production_proof),
             )
 
     if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND:
         assert zarr_path is not None
-        worker_subject_run = "" if shard_collection is not None else str(source.run_name)
+        worker_subject_run = (
+            "" if shard_collection is not None else str(source.run_name)
+        )
         with progress.phase("parallel_prepare_shells"):
             with timing.phase("parallel_prepare_shells"):
                 for raw_component in required_raw_components:
@@ -5349,17 +6504,28 @@ def finalize_subject_mask_run(
                     progress=progress,
                 )
 
-        for result in sorted(parallel_results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
+        for result in sorted(
+            parallel_results,
+            key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0),
+        ):
             chunk_timing = dict(result["chunk_timing"])
             timing.chunk_timings.append(chunk_timing)
             for phase, seconds in dict(result.get("phase_seconds") or {}).items():
                 timing.add(str(phase), float(seconds))
             _merge_review_counts(review_counts, dict(result.get("review_counts") or {}))
             rows_with_nonempty_masks += int(result.get("rows_with_nonempty_masks") or 0)
-            row_slice = slice(int(chunk_timing["start_row"]), int(chunk_timing["stop_row"]))
-            for component_name, labels in dict(result.get("reason_labels_by_component") or {}).items():
-                reason_labels_by_component[str(component_name)][row_slice] = np.asarray(labels, dtype=object)
-            for component_name, payload in dict(result.get("common_metrics_by_component") or {}).items():
+            row_slice = slice(
+                int(chunk_timing["start_row"]), int(chunk_timing["stop_row"])
+            )
+            for component_name, labels in dict(
+                result.get("reason_labels_by_component") or {}
+            ).items():
+                reason_labels_by_component[str(component_name)][row_slice] = np.asarray(
+                    labels, dtype=object
+                )
+            for component_name, payload in dict(
+                result.get("common_metrics_by_component") or {}
+            ).items():
                 _merge_common_metric_chunk_payload(
                     common_metrics_by_component,
                     component_name=str(component_name),
@@ -5391,6 +6557,20 @@ def finalize_subject_mask_run(
                         "eye_geometry": eye_geometry_payload,
                     }
                 )
+            semantic_units = result.get("worker_semantic_array_units")
+            if not isinstance(semantic_units, Mapping) or set(semantic_units) != set(
+                refined_semantic_units_by_path
+            ):
+                raise RuntimeError(
+                    "Refined process worker returned an incomplete semantic receipt."
+                )
+            for path in refined_semantic_units_by_path:
+                unit = semantic_units[path]
+                if not isinstance(unit, Mapping):
+                    raise RuntimeError(
+                        f"Refined process worker semantic unit is invalid for {path!r}."
+                    )
+                refined_semantic_units_by_path[path].append(dict(unit))
         for component_name in component_names:
             _set_component_metric_attrs(
                 run_group["components"][component_name],
@@ -5415,6 +6595,8 @@ def finalize_subject_mask_run(
             row_slice = slice(int(start_row), int(stop_row))
             chunk_any = np.zeros((int(stop_row) - int(start_row),), dtype=bool)
             chunk_batches: dict[str, _FinalizedComponentBatch] = {}
+            semantic_masks_by_component: dict[str, np.ndarray] = {}
+            semantic_common_metrics_by_component: dict[str, dict[str, object]] = {}
             for raw_component in required_raw_components:
                 phase_start = time.perf_counter()
                 batch = _finalize_source_component_rows(
@@ -5423,7 +6605,9 @@ def finalize_subject_mask_run(
                     start_row=start_row,
                     stop_row=stop_row,
                 )
-                elapsed = timing.add(f"finalize_{raw_component}", time.perf_counter() - phase_start)
+                elapsed = timing.add(
+                    f"finalize_{raw_component}", time.perf_counter() - phase_start
+                )
                 chunk_timing[f"finalize_{raw_component}_seconds"] = elapsed
                 chunk_batches[raw_component] = batch
                 first_batches.setdefault(raw_component, batch)
@@ -5455,6 +6639,12 @@ def finalize_subject_mask_run(
                     payload=_common_metric_chunk_payload(write_result),
                     total_rows=total_rows,
                 )
+                semantic_masks_by_component[raw_component] = np.asarray(
+                    batch.masks, dtype=np.uint8
+                )
+                semantic_common_metrics_by_component[raw_component] = (
+                    _common_metric_chunk_payload(write_result)
+                )
                 chunk_any |= write_result.mask_present
                 _merge_finalization_metric_chunk_payload(
                     finalization_metrics_by_component,
@@ -5463,12 +6653,19 @@ def finalize_subject_mask_run(
                     payload=_finalization_metric_chunk_payload(batch),
                     total_rows=total_rows,
                 )
-                elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
+                elapsed = timing.add(
+                    f"write_{raw_component}", time.perf_counter() - phase_start
+                )
                 chunk_timing[f"write_{raw_component}_seconds"] = elapsed
-                labels = _merge_reason_label_arrays(batch.reason_labels, write_result.reason_labels)
+                labels = _merge_reason_label_arrays(
+                    batch.reason_labels, write_result.reason_labels
+                )
                 reason_labels_by_component[raw_component][row_slice] = labels
                 _add_review_counts(review_counts, raw_component, labels)
-                source_payloads.setdefault(raw_component, _source_payload_for_finalized_component(source, batch))
+                source_payloads.setdefault(
+                    raw_component,
+                    _source_payload_for_finalized_component(source, batch),
+                )
 
             if eye_assignment_context is not None:
                 union_batch = chunk_batches[_RAW_EYE_UNION_COMPONENT]
@@ -5480,10 +6677,16 @@ def finalize_subject_mask_run(
                     start_row=start_row,
                     stop_row=stop_row,
                 )
-                elapsed = timing.add("eye_assignment", time.perf_counter() - phase_start)
+                elapsed = timing.add(
+                    "eye_assignment", time.perf_counter() - phase_start
+                )
                 chunk_timing["eye_assignment_seconds"] = elapsed
-                _record_eye_assignment_phase_seconds(timing, chunk_timing, assignment_chunk.phase_seconds)
-                _merge_assignment_summary(eyes_union_assignment_summary, assignment_chunk.summary)
+                _record_eye_assignment_phase_seconds(
+                    timing, chunk_timing, assignment_chunk.phase_seconds
+                )
+                _merge_assignment_summary(
+                    eyes_union_assignment_summary, assignment_chunk.summary
+                )
                 if isinstance(assignment_chunk.eye_geometry, Mapping):
                     assignment_eye_geometry_shards.append(
                         {
@@ -5494,7 +6697,9 @@ def finalize_subject_mask_run(
                     )
                 for component_name in _EYE_COMPONENTS:
                     component_idx = int(component_to_index[component_name])
-                    masks = np.asarray(assignment_chunk.masks[component_name], dtype=np.uint8)
+                    masks = np.asarray(
+                        assignment_chunk.masks[component_name], dtype=np.uint8
+                    )
                     phase_start = time.perf_counter()
                     write_result = _write_canonical_component_chunk(
                         run_group,
@@ -5504,7 +6709,9 @@ def finalize_subject_mask_run(
                         masks=masks,
                         source_masks=masks,
                         metric_level=metric_level,
-                        precomputed_component_metrics=assignment_chunk.component_metrics.get(component_name),
+                        precomputed_component_metrics=assignment_chunk.component_metrics.get(
+                            component_name
+                        ),
                         write_derived_metrics=False,
                         retain_source_seeds=bool(retain_source_seeds),
                         timing=timing,
@@ -5517,7 +6724,13 @@ def finalize_subject_mask_run(
                         payload=_common_metric_chunk_payload(write_result),
                         total_rows=total_rows,
                     )
-                    elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
+                    semantic_masks_by_component[component_name] = masks
+                    semantic_common_metrics_by_component[component_name] = (
+                        _common_metric_chunk_payload(write_result)
+                    )
+                    elapsed = timing.add(
+                        f"write_{component_name}", time.perf_counter() - phase_start
+                    )
                     chunk_timing[f"write_{component_name}_seconds"] = elapsed
                     chunk_any |= write_result.mask_present
                     labels = _merge_reason_label_arrays(
@@ -5526,6 +6739,18 @@ def finalize_subject_mask_run(
                     )
                     reason_labels_by_component[component_name][row_slice] = labels
                     _add_review_counts(review_counts, component_name, labels)
+
+            chunk_semantic_units = _refined_chunk_semantic_array_units(
+                component_names=component_names,
+                masks_by_component=semantic_masks_by_component,
+                common_metrics_by_component=semantic_common_metrics_by_component,
+                start_row=int(start_row),
+                stop_row=int(stop_row),
+            )
+            for path in refined_semantic_units_by_path:
+                refined_semantic_units_by_path[path].append(
+                    dict(chunk_semantic_units[path])
+                )
 
             rows_with_nonempty_masks += int(np.count_nonzero(chunk_any))
             chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
@@ -5541,7 +6766,9 @@ def finalize_subject_mask_run(
                 total_seconds=float(chunk_timing["total_seconds"]),
             )
 
-    missing_common_metric_components = sorted(set(component_names) - set(common_metrics_by_component))
+    missing_common_metric_components = sorted(
+        set(component_names) - set(common_metrics_by_component)
+    )
     if missing_common_metric_components:
         raise RuntimeError(
             "Missing driver-merge common metrics for components: "
@@ -5607,31 +6834,37 @@ def finalize_subject_mask_run(
                 )
 
     if eye_assignment_context is not None:
-        usable_rows = int(eyes_union_assignment_summary.get("assigned_rows") or 0) + int(
-            eyes_union_assignment_summary.get("assigned_needs_review_rows") or 0
-        )
+        usable_rows = int(
+            eyes_union_assignment_summary.get("assigned_rows") or 0
+        ) + int(eyes_union_assignment_summary.get("assigned_needs_review_rows") or 0)
         if usable_rows <= 0:
             raise ValueError(
                 f"eyes_union assignment for subject_mask_runs/{source.run_name} produced no usable LR eye rows; "
                 f"summary={eyes_union_assignment_summary!r}."
             )
         union_batch = first_batches[_RAW_EYE_UNION_COMPONENT]
-        run_group.attrs["eyes_union_assignment_summary"] = dict(_json_safe(eyes_union_assignment_summary))
+        run_group.attrs["eyes_union_assignment_summary"] = dict(
+            _json_safe(eyes_union_assignment_summary)
+        )
         provenance = dict(run_group.attrs.get("provenance") or {})
         provenance_inputs_payload = dict(provenance.get("inputs") or {})
-        provenance_inputs_payload["eyes_union_assignment_summary"] = dict(_json_safe(eyes_union_assignment_summary))
+        provenance_inputs_payload["eyes_union_assignment_summary"] = dict(
+            _json_safe(eyes_union_assignment_summary)
+        )
         provenance["inputs"] = provenance_inputs_payload
         run_group.attrs["provenance"] = provenance
         for component_name in _EYE_COMPONENTS:
-            source_payloads[component_name] = _source_payload_for_assigned_eye_component(
-                source,
-                component_name=component_name,
-                union_batch=union_batch,
-                assignment_summary=eyes_union_assignment_summary,
-                keypoint_run_name=eye_assignment_context.keypoint_run_name,
-                keypoint_group_name=eye_assignment_context.keypoint_group_name,
-                keypoint_success_dataset=eye_assignment_context.keypoint_success_dataset,
-                keypoint_source_kind=eye_assignment_context.keypoint_source_kind,
+            source_payloads[component_name] = (
+                _source_payload_for_assigned_eye_component(
+                    source,
+                    component_name=component_name,
+                    union_batch=union_batch,
+                    assignment_summary=eyes_union_assignment_summary,
+                    keypoint_run_name=eye_assignment_context.keypoint_run_name,
+                    keypoint_group_name=eye_assignment_context.keypoint_group_name,
+                    keypoint_success_dataset=eye_assignment_context.keypoint_success_dataset,
+                    keypoint_source_kind=eye_assignment_context.keypoint_source_kind,
+                )
             )
 
     created = str(run_group.attrs.get("created_at_utc") or _utc_now())
@@ -5673,11 +6906,17 @@ def finalize_subject_mask_run(
     assignment_eye_geometry_complete = bool(
         eye_geometry_requested
         and len(assignment_eye_geometry_shards) == len(chunk_ranges)
-        and sum(int(item["stop_row"]) - int(item["start_row"]) for item in assignment_eye_geometry_shards)
+        and sum(
+            int(item["stop_row"]) - int(item["start_row"])
+            for item in assignment_eye_geometry_shards
+        )
         == int(total_rows)
     )
     assignment_eye_geometry_rows = int(
-        sum(int(item["stop_row"]) - int(item["start_row"]) for item in assignment_eye_geometry_shards)
+        sum(
+            int(item["stop_row"]) - int(item["start_row"])
+            for item in assignment_eye_geometry_shards
+        )
     )
     finalizer_warnings: list[dict[str, object]] = []
     postcompute_summary: dict[str, object] = {}
@@ -5690,7 +6929,10 @@ def finalize_subject_mask_run(
             with timing.phase("write_eye_geometry_from_assignment"):
                 postcompute_summary["eye_geometry"] = _write_sharded_eye_geometry(
                     run_group,
-                    sorted(assignment_eye_geometry_shards, key=lambda item: int(item["start_row"])),
+                    sorted(
+                        assignment_eye_geometry_shards,
+                        key=lambda item: int(item["start_row"]),
+                    ),
                     chunk_rois=max(1, min(256, total_rows if total_rows > 0 else 1)),
                     refined_run=target_run,
                     postcompute_backend=_ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
@@ -5705,32 +6947,38 @@ def finalize_subject_mask_run(
         if sampled_eye_counts:
             with progress.phase("write_sampled_eye_contours_from_assignment"):
                 with timing.phase("write_sampled_eye_contours_from_assignment"):
-                    assignment_sampled_summaries = _write_sampled_component_contours_from_raw_shards(
-                        run_group,
-                        sorted(assignment_eye_geometry_shards, key=lambda item: int(item["start_row"])),
-                        sample_counts=sampled_eye_counts,
-                        source_key="eye_geometry",
-                        row_chunk=normalized_sampled_contour_row_chunk,
-                        refined_run=target_run,
-                        postcompute_backend=_ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
+                    assignment_sampled_summaries = (
+                        _write_sampled_component_contours_from_raw_shards(
+                            run_group,
+                            sorted(
+                                assignment_eye_geometry_shards,
+                                key=lambda item: int(item["start_row"]),
+                            ),
+                            sample_counts=sampled_eye_counts,
+                            source_key="eye_geometry",
+                            row_chunk=normalized_sampled_contour_row_chunk,
+                            refined_run=target_run,
+                            postcompute_backend=_ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
+                        )
                     )
-            sampled_contour_summaries.extend(_summaries_to_json_safe(assignment_sampled_summaries))
+            sampled_contour_summaries.extend(
+                _summaries_to_json_safe(assignment_sampled_summaries)
+            )
             postcompute_summary["sampled_component_contours"] = list(
                 _json_safe(sampled_contour_summaries)
             )
 
-    if (
-        postcompute_backend == _PROCESS_SHARD_POSTCOMPUTE_BACKEND
-        and (
-            (eye_geometry_requested and not assignment_eye_geometry_complete)
-            or component_contours_requested
-            or bool(remaining_sampled_contour_counts)
-        )
+    if postcompute_backend == _PROCESS_SHARD_POSTCOMPUTE_BACKEND and (
+        (eye_geometry_requested and not assignment_eye_geometry_complete)
+        or component_contours_requested
+        or bool(remaining_sampled_contour_counts)
     ):
         assert zarr_path is not None
         with progress.phase(
             "postcompute_process_shards",
-            write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
+            write_eye_geometry=bool(
+                eye_geometry_requested and not assignment_eye_geometry_complete
+            ),
             write_component_contours=bool(component_contours_requested),
             write_sampled_component_contours=bool(remaining_sampled_contour_counts),
             chunk_size=int(normalized_postcompute_chunk_size),
@@ -5742,7 +6990,9 @@ def finalize_subject_mask_run(
                     refined_run=target_run,
                     chunk_size=int(normalized_postcompute_chunk_size),
                     num_workers=normalized_postcompute_num_workers,
-                    write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
+                    write_eye_geometry=bool(
+                        eye_geometry_requested and not assignment_eye_geometry_complete
+                    ),
                     write_component_contours=component_contours_requested,
                     sampled_contour_counts=remaining_sampled_contour_counts,
                     sampled_contour_row_chunk=normalized_sampled_contour_row_chunk,
@@ -5775,7 +7025,9 @@ def finalize_subject_mask_run(
             run_group.attrs["eye_geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
             run_group.attrs["eye_geometry_updated_at_utc"] = _utc_now()
             run_group.attrs["eye_geometry_status"] = "computed"
-            run_group.attrs["eye_geometry_postcompute_backend"] = _PROCESS_SHARD_POSTCOMPUTE_BACKEND
+            run_group.attrs["eye_geometry_postcompute_backend"] = (
+                _PROCESS_SHARD_POSTCOMPUTE_BACKEND
+            )
             run_group.attrs.pop("eye_geometry_deferred_reason", None)
         if contour_summaries:
             run_group.attrs["component_contours_status"] = "computed"
@@ -5783,14 +7035,20 @@ def finalize_subject_mask_run(
                 str(item["component"]) for item in contour_summaries
             ]
             run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
-            run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
-            run_group.attrs["component_contours_postcompute_backend"] = _PROCESS_SHARD_POSTCOMPUTE_BACKEND
+            run_group.attrs["component_contours_summary"] = list(
+                _json_safe(contour_summaries)
+            )
+            run_group.attrs["component_contours_postcompute_backend"] = (
+                _PROCESS_SHARD_POSTCOMPUTE_BACKEND
+            )
     elif eye_geometry_requested and not assignment_eye_geometry_complete:
         with progress.phase("write_eye_geometry"):
             with timing.phase("write_eye_geometry"):
-                postcompute_summary["eye_geometry"] = write_refined_subject_eye_geometry(
-                    run_group,
-                    write_component_contours=bool(component_contours_requested),
+                postcompute_summary["eye_geometry"] = (
+                    write_refined_subject_eye_geometry(
+                        run_group,
+                        write_component_contours=bool(component_contours_requested),
+                    )
                 )
         run_group.attrs["eye_geometry_status"] = "computed"
 
@@ -5818,17 +7076,28 @@ def finalize_subject_mask_run(
         finalizer_warnings.append(warning)
         progress.emit("warning", **warning)
     run_group.attrs["eye_geometry_reuse_status"] = str(eye_geometry_reuse_status)
-    run_group.attrs["eye_geometry_assignment_geometry_rows"] = int(assignment_eye_geometry_rows)
-    run_group.attrs["eye_geometry_assignment_geometry_expected_rows"] = int(total_rows if eye_geometry_requested else 0)
-    run_group.attrs["eye_geometry_assignment_geometry_shards"] = int(len(assignment_eye_geometry_shards))
+    run_group.attrs["eye_geometry_assignment_geometry_rows"] = int(
+        assignment_eye_geometry_rows
+    )
+    run_group.attrs["eye_geometry_assignment_geometry_expected_rows"] = int(
+        total_rows if eye_geometry_requested else 0
+    )
+    run_group.attrs["eye_geometry_assignment_geometry_shards"] = int(
+        len(assignment_eye_geometry_shards)
+    )
     run_group.attrs["eye_geometry_assignment_geometry_expected_shards"] = int(
         len(chunk_ranges) if eye_geometry_requested else 0
     )
     run_group.attrs["smart_finalizer_warnings"] = list(_json_safe(finalizer_warnings))
 
-    if postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND or not component_contours_requested:
+    if (
+        postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND
+        or not component_contours_requested
+    ):
         if component_contours_requested:
-            with progress.phase("write_component_contours", components=list(contour_components)):
+            with progress.phase(
+                "write_component_contours", components=list(contour_components)
+            ):
                 with timing.phase("write_component_contours"):
                     contour_summaries = _summaries_to_json_safe(
                         write_refined_subject_component_contours(
@@ -5842,9 +7111,16 @@ def finalize_subject_mask_run(
             run_group.attrs["component_contours_status"] = "computed"
             run_group.attrs["component_contours_components"] = list(contour_components)
             run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
-            run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
-            postcompute_summary["component_contours"] = list(_json_safe(contour_summaries))
-    if postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND and remaining_sampled_contour_counts:
+            run_group.attrs["component_contours_summary"] = list(
+                _json_safe(contour_summaries)
+            )
+            postcompute_summary["component_contours"] = list(
+                _json_safe(contour_summaries)
+            )
+    if (
+        postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND
+        and remaining_sampled_contour_counts
+    ):
         with progress.phase(
             "write_sampled_component_contours",
             components=list(remaining_sampled_contour_counts),
@@ -5866,17 +7142,27 @@ def finalize_subject_mask_run(
             serial_sampled_summaries,
             postcompute_backend=_SERIAL_POSTCOMPUTE_BACKEND,
         )
-        postcompute_summary["sampled_component_contours"] = list(_json_safe(sampled_contour_summaries))
+        postcompute_summary["sampled_component_contours"] = list(
+            _json_safe(sampled_contour_summaries)
+        )
     if write_component_contours and not contour_components:
         run_group.attrs["component_contours_status"] = "deferred"
-        run_group.attrs["component_contours_deferred_reason"] = "no_subject_body_or_swim_bladder_components_selected"
+        run_group.attrs["component_contours_deferred_reason"] = (
+            "no_subject_body_or_swim_bladder_components_selected"
+        )
     if write_sampled_component_contours and not sampled_component_contours_requested:
         run_group.attrs["sampled_component_contours_status"] = "deferred"
-        run_group.attrs["sampled_component_contours_deferred_reason"] = "no_supported_components_selected"
-    sampled_order = {name: index for index, name in enumerate(CANONICAL_COMPONENT_ORDER)}
+        run_group.attrs["sampled_component_contours_deferred_reason"] = (
+            "no_supported_components_selected"
+        )
+    sampled_order = {
+        name: index for index, name in enumerate(CANONICAL_COMPONENT_ORDER)
+    }
     sampled_contour_summaries = sorted(
         sampled_contour_summaries,
-        key=lambda item: sampled_order.get(str(item.get("component")), len(sampled_order)),
+        key=lambda item: sampled_order.get(
+            str(item.get("component")), len(sampled_order)
+        ),
     )
     if sampled_contour_summaries:
         postcompute_summary["sampled_component_contours"] = list(
@@ -5900,12 +7186,19 @@ def finalize_subject_mask_run(
             with timing.phase("validate_bitpacked_mask_store"):
                 validation = validate_bitpacked_mask_store_invariants(
                     run_group,
-                    expected_shape=(int(total_rows), int(len(component_names)), int(height), int(width)),
+                    expected_shape=(
+                        int(total_rows),
+                        int(len(component_names)),
+                        int(height),
+                        int(width),
+                    ),
                     component_names=component_names,
                     source_path=f"refined_subject_masks_runs/{target_run}",
                 )
         packed = run_group["mask_bitpacked/masks_packed"]
-        logical_bytes = int(np.prod(tuple(int(value) for value in packed.shape), dtype=np.int64))
+        logical_bytes = int(
+            np.prod(tuple(int(value) for value in packed.shape), dtype=np.int64)
+        )
         mask_bitpacked_summary = {
             "status": "written_direct",
             "encoding": MASK_BITPACKED_ENCODING,
@@ -5913,7 +7206,12 @@ def finalize_subject_mask_run(
             "source_encoding": "chunk_finalizer_binary_masks",
             "rows": int(total_rows),
             "channels": int(len(component_names)),
-            "shape": [int(total_rows), int(len(component_names)), int(height), int(width)],
+            "shape": [
+                int(total_rows),
+                int(len(component_names)),
+                int(height),
+                int(width),
+            ],
             "encoded_shape": [int(value) for value in packed.shape],
             "component_names": list(component_names),
             "logical_bytes": int(logical_bytes),
@@ -5926,6 +7224,7 @@ def finalize_subject_mask_run(
             },
         }
     elif mask_storage in _MASK_STORAGES_WITH_BITPACKED:
+
         def _emit_bitpacked_progress(event: str, **payload: object) -> None:
             progress.emit(str(event), **payload)
 
@@ -5954,9 +7253,13 @@ def finalize_subject_mask_run(
 
     if mask_storage in _MASK_STORAGES_WITH_RLE:
         rle_encode_workers = max(1, int(normalized_num_workers or 1))
-        rle_source_zarr_path = zarr_path if zarr_path is not None and rle_encode_workers > 1 else None
+        rle_source_zarr_path = (
+            zarr_path if zarr_path is not None and rle_encode_workers > 1 else None
+        )
         rle_source_run_path = (
-            f"refined_subject_masks_runs/{target_run}" if rle_source_zarr_path is not None else None
+            f"refined_subject_masks_runs/{target_run}"
+            if rle_source_zarr_path is not None
+            else None
         )
 
         def _emit_rle_progress(event: str, **payload: object) -> None:
@@ -5991,22 +7294,55 @@ def finalize_subject_mask_run(
     if mask_storage in _MASK_STORAGES_REMOVE_DENSE:
         if "masks_roi" in run_group:
             del run_group["masks_roi"]
-        mask_bitpacked_summary["dense_cache_removed"] = mask_storage in _MASK_STORAGES_WITH_BITPACKED
-        mask_rle_summary["dense_cache_removed"] = mask_storage in _MASK_STORAGES_WITH_RLE
+        mask_bitpacked_summary["dense_cache_removed"] = (
+            mask_storage in _MASK_STORAGES_WITH_BITPACKED
+        )
+        mask_rle_summary["dense_cache_removed"] = (
+            mask_storage in _MASK_STORAGES_WITH_RLE
+        )
 
+    bitpacked_fresh = (
+        mask_storage not in _MASK_STORAGES_WITH_BITPACKED
+        or dict(mask_bitpacked_summary.get("roundtrip_validation") or {}).get("status")
+        == "passed"
+    )
+    rle_fresh = (
+        mask_storage not in _MASK_STORAGES_WITH_RLE
+        or dict(mask_rle_summary.get("roundtrip_validation") or {}).get("status")
+        == "passed"
+    )
+    complete_derived_surface_fresh = bool(bitpacked_fresh and rle_fresh)
     update_mask_storage_attrs(
         run_group,
         has_dense="masks_roi" in run_group,
         has_bitpacked="mask_bitpacked" in run_group,
         has_rle="mask_rle" in run_group,
+        reset_stale_flags=complete_derived_surface_fresh,
     )
+    if not complete_derived_surface_fresh:
+        run_group.attrs["derived_mask_caches_stale"] = True
+        run_group.attrs["metrics_stale"] = False
+        run_group.attrs["contours_stale"] = False
+        if future_canonical:
+            raise ValueError(
+                "Canonical refined publication requires exact round-trip validation "
+                "for every materialized bitpacked/RLE cache."
+            )
     run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
-    run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = mask_rle_validation_mode
-    run_group.attrs["smart_finalizer_mask_bitpacked_summary"] = dict(_json_safe(mask_bitpacked_summary))
-    run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
+    run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = (
+        mask_rle_validation_mode
+    )
+    run_group.attrs["smart_finalizer_mask_bitpacked_summary"] = dict(
+        _json_safe(mask_bitpacked_summary)
+    )
+    run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(
+        _json_safe(mask_rle_summary)
+    )
 
     duration_seconds = float(time.perf_counter() - stage_start)
-    timing_summary = timing.summary(total_rows=total_rows, duration_seconds=duration_seconds)
+    timing_summary = timing.summary(
+        total_rows=total_rows, duration_seconds=duration_seconds
+    )
     timing_summary.update(execution_metadata)
     run_group.attrs["duration_seconds"] = duration_seconds
     run_group.attrs["summary_statistics"] = {
@@ -6016,11 +7352,15 @@ def finalize_subject_mask_run(
         "rows_per_second": float(timing_summary["rows_per_second"]),
     }
     run_group.attrs["smart_finalizer_timing_summary"] = dict(_json_safe(timing_summary))
-    run_group.attrs["smart_finalizer_chunk_timings"] = list(_json_safe(timing.chunk_timings))
+    run_group.attrs["smart_finalizer_chunk_timings"] = list(
+        _json_safe(timing.chunk_timings)
+    )
     run_group.attrs["smart_finalizer_review_counts"] = review_counts
     run_group.attrs["smart_finalizer_chunk_size"] = int(max(1, int(chunk_size)))
     run_group.attrs["smart_finalizer_worker_chunk_size"] = int(worker_chunk_size)
-    run_group.attrs["smart_finalizer_dense_mask_row_chunk"] = int(effective_dense_mask_row_chunk)
+    run_group.attrs["smart_finalizer_dense_mask_row_chunk"] = int(
+        effective_dense_mask_row_chunk
+    )
     run_group.attrs["smart_finalizer_dense_mask_storage_chunks"] = [
         int(value) for value in dense_mask_storage_chunks
     ]
@@ -6030,13 +7370,21 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_finalization_metric_write_policy"] = (
         finalization_metric_write_policy
     )
-    run_group.attrs["smart_finalizer_common_metric_row_chunk"] = int(common_metric_row_chunk)
-    run_group.attrs["smart_finalizer_common_metric_component_chunk"] = int(len(component_names))
-    run_group.attrs["smart_finalizer_common_metric_write_policy"] = common_metric_write_policy
+    run_group.attrs["smart_finalizer_common_metric_row_chunk"] = int(
+        common_metric_row_chunk
+    )
+    run_group.attrs["smart_finalizer_common_metric_component_chunk"] = int(
+        len(component_names)
+    )
+    run_group.attrs["smart_finalizer_common_metric_write_policy"] = (
+        common_metric_write_policy
+    )
     run_group.attrs["smart_finalizer_chunk_count"] = int(len(chunk_ranges))
     run_group.attrs["smart_finalizer_metric_level"] = metric_level
     run_group.attrs["smart_finalizer_write_eye_geometry"] = bool(write_eye_geometry)
-    run_group.attrs["smart_finalizer_write_component_contours"] = bool(write_component_contours)
+    run_group.attrs["smart_finalizer_write_component_contours"] = bool(
+        write_component_contours
+    )
     run_group.attrs["smart_finalizer_write_sampled_component_contours"] = bool(
         write_sampled_component_contours
     )
@@ -6047,24 +7395,123 @@ def finalize_subject_mask_run(
         normalized_sampled_contour_row_chunk
     )
     run_group.attrs["smart_finalizer_retain_source_seeds"] = bool(retain_source_seeds)
-    run_group.attrs["source_seed_masks_status"] = "retained" if bool(retain_source_seeds) else "omitted"
+    run_group.attrs["source_seed_masks_status"] = (
+        "retained" if bool(retain_source_seeds) else "omitted"
+    )
     run_group.attrs["source_seed_masks_reason"] = (
-        "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default"
+        "retain_source_seeds=true"
+        if bool(retain_source_seeds)
+        else "production_default"
     )
     run_group.attrs["smart_finalizer_postcompute_backend"] = postcompute_backend
-    run_group.attrs["smart_finalizer_postcompute_chunk_size"] = int(normalized_postcompute_chunk_size)
-    run_group.attrs["smart_finalizer_postcompute_num_workers"] = normalized_postcompute_num_workers
-    run_group.attrs["smart_finalizer_postcompute_summary"] = dict(_json_safe(postcompute_summary))
+    run_group.attrs["smart_finalizer_postcompute_chunk_size"] = int(
+        normalized_postcompute_chunk_size
+    )
+    run_group.attrs["smart_finalizer_postcompute_num_workers"] = (
+        normalized_postcompute_num_workers
+    )
+    run_group.attrs["smart_finalizer_postcompute_summary"] = dict(
+        _json_safe(postcompute_summary)
+    )
     run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
-    run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = mask_rle_validation_mode
-    run_group.attrs["smart_finalizer_mask_bitpacked_summary"] = dict(_json_safe(mask_bitpacked_summary))
-    run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
+    run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = (
+        mask_rle_validation_mode
+    )
+    run_group.attrs["smart_finalizer_mask_bitpacked_summary"] = dict(
+        _json_safe(mask_bitpacked_summary)
+    )
+    run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(
+        _json_safe(mask_rle_summary)
+    )
     run_group.attrs["smart_finalizer_execution_backend"] = execution_backend
-    run_group.attrs["process_shard_execution_enabled"] = execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND
+    run_group.attrs["process_shard_execution_enabled"] = (
+        execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND
+    )
     run_group.attrs["worker_process_count"] = execution_metadata["worker_process_count"]
     run_group.attrs["requested_chunk_size"] = int(requested_chunk_size)
     run_group.attrs["worker_chunk_size"] = int(worker_chunk_size)
     run_group.attrs["chunk_alignment"] = str(execution_metadata["chunk_alignment"])
+    missing_source_payloads = sorted(set(component_names) - set(source_payloads))
+    if missing_source_payloads:
+        raise RuntimeError(
+            "Refined scientific identity lacks component policies for "
+            f"{missing_source_payloads}."
+        )
+    if require_production_proof:
+        _persist_production_draft_audit_manifest(
+            run_group,
+            component_names=component_names,
+        )
+    scientific_identity = _build_refined_subject_mask_scientific_identity(
+        source=source,
+        component_names=component_names,
+        source_payloads=source_payloads,
+        assignment_keypoint_attrs=assignment_keypoint_attrs,
+        require_production_proof=bool(require_production_proof),
+    )
+    attempt = build_subject_mask_attempt(
+        scientific_identity=scientific_identity,
+        run_path=f"refined_subject_masks_runs/{target_run}",
+        attempt_id=attempt_id,
+        retry_of_attempt_id=retry_of_attempt_id,
+        supersedes_run=supersedes_run,
+    )
+    attempt_lineage = resolve_subject_mask_attempt_lineage(
+        parent=refined_parent,
+        current_run_name=target_run,
+        scientific_identity=scientific_identity,
+        attempt=attempt,
+        retry_of_attempt_id=retry_of_attempt_id,
+        supersedes_run=supersedes_run,
+        scientific_identity_attr=REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR,
+        attempt_attr=REFINED_SUBJECT_MASK_ATTEMPT_ATTR,
+    )
+    run_group.attrs[REFINED_SUBJECT_MASK_SCIENTIFIC_IDENTITY_ATTR] = scientific_identity
+    run_group.attrs[REFINED_SUBJECT_MASK_ATTEMPT_ATTR] = attempt
+    run_group.attrs[REFINED_SUBJECT_MASK_ATTEMPT_LINEAGE_EVIDENCE_ATTR] = (
+        attempt_lineage
+    )
+    worker_receipt = _seal_refined_worker_semantic_receipt(
+        run_group=run_group,
+        run_path=f"refined_subject_masks_runs/{target_run}",
+        scientific_identity=scientific_identity,
+        attempt=attempt,
+        units_by_path=refined_semantic_units_by_path,
+        total_rows=int(total_rows),
+        component_count=int(len(component_names)),
+        height=int(height),
+        width=int(width),
+    )
+    worker_receipt_bytes = canonical_json_bytes(worker_receipt)
+    receipt_relative_path = (
+        f"refined_subject_masks_runs/{target_run}/"
+        f"{REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_SIDECAR}"
+    )
+    receipt_binding: dict[str, object] = {
+        "schema_id": worker_receipt["schema_id"],
+        "schema_version": worker_receipt["schema_version"],
+        "payload_digest": worker_receipt["payload_digest"],
+        "document_sha256": hashlib.sha256(worker_receipt_bytes).hexdigest(),
+    }
+    if zarr_path is not None:
+        receipt_path = Path(zarr_path).expanduser().resolve() / receipt_relative_path
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_receipt_path = receipt_path.with_name(
+            f".{receipt_path.name}.{uuid4().hex}.tmp"
+        )
+        temporary_receipt_path.write_bytes(worker_receipt_bytes)
+        with temporary_receipt_path.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary_receipt_path, receipt_path)
+        receipt_binding.update(
+            {
+                "relative_path": receipt_relative_path,
+                "storage": "strict_json_sidecar_v1",
+            }
+        )
+    else:
+        receipt_binding["storage"] = "validated_in_memory_only"
+    run_group.attrs[REFINED_SUBJECT_MASK_WORKER_SEMANTIC_RECEIPT_ATTR] = receipt_binding
     run_provenance = build_run_provenance_from_stage_record(
         run_group.attrs.get("provenance", {}),
         fallback_command="finalize_subject_masks",
@@ -6073,7 +7520,9 @@ def finalize_subject_mask_run(
         assert canonical_publication_owner is not None
         with proof_verification_scope():
             if eye_assignment_context is not None:
-                canonical_keypoints = eye_assignment_context.canonical_coordinate_surfaces
+                canonical_keypoints = (
+                    eye_assignment_context.canonical_coordinate_surfaces
+                )
                 if canonical_keypoints is None:
                     raise RuntimeError(
                         "Canonical refined eye assignment lost its sealed keypoint dependency."
@@ -6097,10 +7546,12 @@ def finalize_subject_mask_run(
             )
             run_group = root[f"refined_subject_masks_runs/{target_run}"]
             _stamp_non_authoritative_refined_mask_caches(run_group)
-            pending_coordinate_surfaces = publish_refined_subject_mask_coordinate_surfaces(
-                root,
-                f"refined_subject_masks_runs/{target_run}",
-                expected_publication_owner=canonical_publication_owner,
+            pending_coordinate_surfaces = (
+                publish_refined_subject_mask_coordinate_surfaces(
+                    root,
+                    f"refined_subject_masks_runs/{target_run}",
+                    expected_publication_owner=canonical_publication_owner,
+                )
             )
             # Close the running-child proof phase before completion changes the
             # lifecycle record. Activation starts a fresh completed-child phase
@@ -6118,7 +7569,9 @@ def finalize_subject_mask_run(
             try:
                 refined_parent.attrs["latest_pending"] = target_run
                 if refined_parent.attrs.get("latest_pending") != target_run:
-                    raise RuntimeError("Canonical refined latest_pending did not persist exactly.")
+                    raise RuntimeError(
+                        "Canonical refined latest_pending did not persist exactly."
+                    )
                 _activate_validated_refined_subject_mask_coordinate_surfaces(
                     root,
                     refined_parent,
@@ -6141,7 +7594,10 @@ def finalize_subject_mask_run(
             run_name=target_run,
             run_provenance=run_provenance,
         )
-        refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
+        if is_run_selector_eligible(run_group):
+            refined_parent.attrs["refined_subject_mask_review_status_latest"] = (
+                target_run
+            )
 
     summary.update(
         {
@@ -6158,7 +7614,9 @@ def finalize_subject_mask_run(
             "sampled_contour_counts": dict(resolved_sampled_contour_counts),
             "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
             "retain_source_seeds": bool(retain_source_seeds),
-            "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
+            "source_seed_masks_status": (
+                "retained" if bool(retain_source_seeds) else "omitted"
+            ),
             "mask_storage": mask_storage,
             "mask_rle_validation_mode": mask_rle_validation_mode,
             "mask_bitpacked_summary": dict(_json_safe(mask_bitpacked_summary)),
@@ -6169,8 +7627,12 @@ def finalize_subject_mask_run(
             "postcompute_summary": dict(_json_safe(postcompute_summary)),
             "eye_geometry_reuse_status": str(eye_geometry_reuse_status),
             "eye_geometry_assignment_geometry_rows": int(assignment_eye_geometry_rows),
-            "eye_geometry_assignment_geometry_expected_rows": int(total_rows if eye_geometry_requested else 0),
-            "eye_geometry_assignment_geometry_shards": int(len(assignment_eye_geometry_shards)),
+            "eye_geometry_assignment_geometry_expected_rows": int(
+                total_rows if eye_geometry_requested else 0
+            ),
+            "eye_geometry_assignment_geometry_shards": int(
+                len(assignment_eye_geometry_shards)
+            ),
             "eye_geometry_assignment_geometry_expected_shards": int(
                 len(chunk_ranges) if eye_geometry_requested else 0
             ),
@@ -6224,6 +7686,10 @@ def finalize_subject_masks(
     dry_run: bool = False,
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
+    attempt_id: str | None = None,
+    retry_of_attempt_id: str | None = None,
+    supersedes_run: str | None = None,
+    require_production_proof: bool = False,
     registry: str | Path | None = None,
     defer_registry_status: bool = False,
     progress_jsonl: str | Path | None = None,
@@ -6258,6 +7724,10 @@ def finalize_subject_masks(
         dry_run=dry_run,
         assignment_keypoint_group=assignment_keypoint_group,
         assignment_keypoints_run=assignment_keypoints_run,
+        attempt_id=attempt_id,
+        retry_of_attempt_id=retry_of_attempt_id,
+        supersedes_run=supersedes_run,
+        require_production_proof=bool(require_production_proof),
         progress_jsonl=progress_jsonl,
     )
     if not dry_run and not defer_registry_status:
@@ -6276,7 +7746,9 @@ def finalize_subject_masks(
     return summary
 
 
-def _parse_components(values: Optional[Sequence[Sequence[str]]], single_values: Optional[Sequence[str]]) -> Optional[list[str]]:
+def _parse_components(
+    values: Optional[Sequence[Sequence[str]]], single_values: Optional[Sequence[str]]
+) -> Optional[list[str]]:
     merged: list[str] = []
     for group in values or ():
         merged.extend(str(value) for value in group)
@@ -6289,12 +7761,16 @@ def _parse_sampled_contour_counts(values: Sequence[str] | None) -> dict[str, int
     counts: dict[str, int] = {}
     for value in values or ():
         if "=" not in str(value):
-            raise ValueError(f"Expected COMPONENT=K for --sampled-contour-k; got {value!r}.")
+            raise ValueError(
+                f"Expected COMPONENT=K for --sampled-contour-k; got {value!r}."
+            )
         component, raw_count = str(value).split("=", 1)
         component = component.strip()
         count = int(raw_count)
         if not component or count <= 0:
-            raise ValueError(f"Expected a component name and positive K; got {value!r}.")
+            raise ValueError(
+                f"Expected a component name and positive K; got {value!r}."
+            )
         counts[component] = count
     return counts
 
@@ -6350,7 +7826,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="component_values",
         help="Optional single output component selector. Repeat to add more components.",
     )
-    parser.add_argument("--chunk-size", type=int, default=256, help="Number of ROI rows to finalize per write chunk.")
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="Number of ROI rows to finalize per write chunk.",
+    )
     parser.add_argument(
         "--metric-level",
         choices=_METRIC_LEVELS,
@@ -6471,8 +7952,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Worker process count for process_shards.",
     )
-    parser.add_argument("--overwrite", action="store_true", help="Replace an existing target refined run.")
-    parser.add_argument("--dry-run", action="store_true", help="Resolve the plan without mutating the archive.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing target refined run.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve the plan without mutating the archive.",
+    )
     parser.add_argument(
         "--assignment-keypoint-group",
         choices=("refined_keypoints_runs", "keypoints_runs"),
@@ -6481,6 +7970,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--assignment-keypoints-run",
         help="Explicit keypoint run to use for eyes_union -> eye_left/eye_right assignment.",
+    )
+    parser.add_argument(
+        "--attempt-id",
+        help="Optional UUID for this immutable refined-mask execution attempt.",
+    )
+    parser.add_argument(
+        "--retry-of-attempt-id",
+        help="UUID of one failed sibling attempt with identical scientific identity.",
+    )
+    parser.add_argument(
+        "--supersedes-run",
+        help="Explicit complete sibling run replaced by this scientifically distinct run.",
+    )
+    parser.add_argument(
+        "--require-production-proof",
+        action="store_true",
+        help=(
+            "Fail closed unless upstream scientific/proof bindings and a durable "
+            "refined worker semantic receipt can be persisted."
+        ),
     )
     parser.add_argument(
         "--registry",
@@ -6514,7 +8023,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error(str(exc))
     subject_shard_runs = list(args.subject_shard_run or [])
     if args.subject_shard_runs_file is not None:
-        subject_shard_runs.extend(_load_shard_names_from_file(args.subject_shard_runs_file))
+        subject_shard_runs.extend(
+            _load_shard_names_from_file(args.subject_shard_runs_file)
+        )
     summary = finalize_subject_masks(
         args.zarr_path,
         subject_run=args.subject_run,
@@ -6542,6 +8053,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         dry_run=bool(args.dry_run),
         assignment_keypoint_group=args.assignment_keypoint_group,
         assignment_keypoints_run=args.assignment_keypoints_run,
+        attempt_id=args.attempt_id,
+        retry_of_attempt_id=args.retry_of_attempt_id,
+        supersedes_run=args.supersedes_run,
+        require_production_proof=bool(args.require_production_proof),
         registry=args.registry,
         defer_registry_status=bool(args.defer_registry_status),
         progress_jsonl=args.progress_jsonl,

@@ -41,6 +41,10 @@ from fisheye.shared.zarr.storage_profiles import (
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_STRICT,
+    require_runs_parent,
+)
 
 
 NATIVE_CANONICAL_DETECTION_CANDIDATE_SCHEMA_ID = (
@@ -226,7 +230,9 @@ def write_native_clipped_detection_candidate(
             "created_at_utc": utc_now(),
         }
     )
-    family = root.create_group("detect_runs")
+    family = require_runs_parent(
+        root, "detect_runs", completion_epoch=COMPLETION_EPOCH_STRICT
+    )
     family.attrs.update(
         {
             "stage_selector_eligible": False,

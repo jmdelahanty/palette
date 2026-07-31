@@ -37,11 +37,15 @@ from fisheye.shared.zarr.subject_mask_quality_storage import (
     plan_subject_mask_quality_storage,
 )
 from fisheye.shared.zarr.subject_mask_schema import SubjectMaskComponentRegistry
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETED_AT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+)
 
 SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_ID = (
     "palette.subject_mask_quality.run_manifest"
 )
-SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION = 1
+SUBJECT_MASK_QUALITY_RUN_MANIFEST_SCHEMA_VERSION = 2
 SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE = "run_manifest"
 SUBJECT_MASK_QUALITY_RUN_MANIFEST_PERSISTED_PATH = (
     "subject_mask_quality_runs/<run>/zarr.json.attributes.run_manifest"
@@ -52,7 +56,15 @@ SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_ID = (
 SUBJECT_MASK_QUALITY_LOGICAL_CONTENT_SCHEMA_VERSION = 1
 SUBJECT_MASK_QUALITY_ARRAY_DIGEST_ALGORITHM = "sha256_c_contiguous_bytes_v1"
 SUBJECT_MASK_QUALITY_METADATA_DIGEST_SCOPE = (
-    "exact_group_and_array_declarations_with_attributes_redacting_only_run_manifest"
+    "exact_group_and_array_declarations_redacting_manifest_lifecycle_"
+    "and_transport_publication_attrs"
+)
+_TRANSPORT_PUBLICATION_ATTRS = (
+    "atomic_publication_owner_uuid",
+    "atomic_publication_tombstone",
+    "cluster_output_staging",
+    "publication_status",
+    "subject_mask_bundle_selector_eligible",
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -200,6 +212,7 @@ def quality_source_from_manifest(
         "manifest_digest",
         "dense_array_values_sha256",
         "component_registry_digest",
+        "source_array_values_sha256",
         "coverage",
     }
     if set(value) != expected:
@@ -209,6 +222,7 @@ def quality_source_from_manifest(
         manifest_digest=value.get("manifest_digest"),
         dense_array_values_sha256=value.get("dense_array_values_sha256"),
         component_registry_digest=value.get("component_registry_digest"),
+        source_array_values_sha256=value.get("source_array_values_sha256"),
     )
     if dict(value) != source.as_manifest():
         raise ValueError("Subject-mask quality source is not canonical.")
@@ -240,8 +254,7 @@ def quality_policy_from_manifest(
         raise ValueError("Subject-mask quality policy has an unexpected field set.")
     if (
         value.get("schema_id") != SUBJECT_MASK_QUALITY_POLICY_SCHEMA_ID
-        or value.get("schema_version")
-        != SUBJECT_MASK_QUALITY_POLICY_SCHEMA_VERSION
+        or value.get("schema_version") != SUBJECT_MASK_QUALITY_POLICY_SCHEMA_VERSION
         or value.get("policy_id") != SUBJECT_V1_LR_QUALITY_PROFILE_ID
     ):
         raise ValueError("Subject-mask quality policy identity mismatch.")
@@ -252,9 +265,7 @@ def quality_policy_from_manifest(
         if type(value.get(name)) is not float:
             raise TypeError(f"Subject-mask quality policy {name} must be a float.")
     policy = SubjectV1LrObservationQualityPolicy(
-        maximum_outside_body_fraction=value.get(
-            "maximum_outside_body_fraction"
-        ),
+        maximum_outside_body_fraction=value.get("maximum_outside_body_fraction"),
         maximum_exclusive_pair_overlap_fraction=value.get(
             "maximum_exclusive_pair_overlap_fraction"
         ),
@@ -357,6 +368,7 @@ def subject_mask_quality_logical_content_document(
         "component_registry_digest": source.component_registry_digest,
         "source_manifest_digest": source.manifest_digest,
         "source_dense_array_values_sha256": source.dense_array_values_sha256,
+        "source_array_values_sha256": dict(source.source_array_values_sha256),
         "profile_digest": profile.profile_digest,
         "policy_digest": profile.policy_digest,
         "arrays": declarations,
@@ -387,7 +399,14 @@ def subject_mask_quality_metadata_declarations_digest(
                 if not isinstance(attributes, Mapping):
                     raise ValueError("Quality run group attributes must be an object.")
                 redacted = dict(attributes)
-                redacted.pop(SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE, None)
+                for name in (
+                    SUBJECT_MASK_QUALITY_RUN_MANIFEST_ATTRIBUTE,
+                    "status",
+                    RUN_COMPLETION_STATUS_ATTR,
+                    RUN_COMPLETED_AT_ATTR,
+                    *_TRANSPORT_PUBLICATION_ATTRS,
+                ):
+                    redacted.pop(name, None)
                 declaration["attributes"] = redacted
         if direct != consolidated:
             raise ValueError(
@@ -474,9 +493,7 @@ def build_subject_mask_quality_run_manifest(
             "metadata_declarations_digest_scope": (
                 SUBJECT_MASK_QUALITY_METADATA_DIGEST_SCOPE
             ),
-            "metadata_declarations_digest_algorithm": (
-                CANONICAL_JSON_DIGEST_ALGORITHM
-            ),
+            "metadata_declarations_digest_algorithm": (CANONICAL_JSON_DIGEST_ALGORITHM),
             "metadata_declarations_digest": metadata_digest,
         },
         "logical_schema": SUBJECT_MASK_QUALITY_SCHEMA_V1.as_manifest(
@@ -593,9 +610,7 @@ def _parse_manifest_components(
             "metadata_declarations_digest_scope": (
                 SUBJECT_MASK_QUALITY_METADATA_DIGEST_SCOPE
             ),
-            "metadata_declarations_digest_algorithm": (
-                CANONICAL_JSON_DIGEST_ALGORITHM
-            ),
+            "metadata_declarations_digest_algorithm": (CANONICAL_JSON_DIGEST_ALGORITHM),
             "metadata_declarations_digest": publication.get(
                 "metadata_declarations_digest"
             ),
@@ -627,7 +642,9 @@ def _parse_manifest_components(
                 isinstance(item, Mapping)
                 for item in (component_value, profile_value, source_value)
             ):
-                raise TypeError("Quality logical components/profile/source must be objects.")
+                raise TypeError(
+                    "Quality logical components/profile/source must be objects."
+                )
             components = component_registry_from_manifest(component_value)
             profile = quality_profile_from_manifest(profile_value)
             source = quality_source_from_manifest(source_value)
@@ -638,7 +655,9 @@ def _parse_manifest_components(
                 source=source,
             )
             if dict(logical) != expected_logical:
-                errors.append("subject-mask quality logical_schema differs from builder")
+                errors.append(
+                    "subject-mask quality logical_schema differs from builder"
+                )
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
 
@@ -714,6 +733,7 @@ def _validate_logical_content(
         "component_registry_digest",
         "source_manifest_digest",
         "source_dense_array_values_sha256",
+        "source_array_values_sha256",
         "profile_digest",
         "policy_digest",
         "arrays",
@@ -731,15 +751,17 @@ def _validate_logical_content(
         }
     ):
         errors.append("subject-mask quality logical_content identity mismatch")
-    if dimensions is not None and document.get(
-        "dimensions"
-    ) != dimensions.as_manifest():
+    if (
+        dimensions is not None
+        and document.get("dimensions") != dimensions.as_manifest()
+    ):
         errors.append("subject-mask quality logical_content dimensions mismatch")
     if source is not None:
         expected_source = {
             "component_registry_digest": source.component_registry_digest,
             "source_manifest_digest": source.manifest_digest,
             "source_dense_array_values_sha256": source.dense_array_values_sha256,
+            "source_array_values_sha256": dict(source.source_array_values_sha256),
         }
         for name, expected_value in expected_source.items():
             if document.get(name) != expected_value:
@@ -846,8 +868,7 @@ def validate_subject_mask_quality_run_manifest(
         errors.append("subject-mask quality write_receipt is not exact")
     else:
         if (
-            receipt.get("schema_id")
-            != "palette.subject_mask_quality.write_receipt"
+            receipt.get("schema_id") != "palette.subject_mask_quality.write_receipt"
             or receipt.get("schema_version") != 1
             or receipt.get("output_write_unit")
             != "complete_outer_shard_or_unsharded_chunk"
@@ -873,18 +894,13 @@ def validate_subject_mask_quality_run_manifest(
             )
         ):
             row_bytes = (
-                dimensions.n_channels
-                * dimensions.roi_height
-                * dimensions.roi_width
+                dimensions.n_channels * dimensions.roi_height * dimensions.roi_width
             )
             expected_rows = max(
                 1,
-                int(receipt["source_compute_block_bytes_budget"])
-                // max(1, row_bytes),
+                int(receipt["source_compute_block_bytes_budget"]) // max(1, row_bytes),
             )
-            expected_count = (
-                dimensions.n_rois + expected_rows - 1
-            ) // expected_rows
+            expected_count = (dimensions.n_rois + expected_rows - 1) // expected_rows
             if receipt.get("source_compute_block_rows") != expected_rows:
                 errors.append(
                     "subject-mask quality effective compute block rows mismatch"
@@ -928,10 +944,7 @@ def validate_subject_mask_quality_publication(
         source,
         _,
     ) = _parse_manifest_components(manifest)
-    if any(
-        item is None
-        for item in (payload, dimensions, components, profile, source)
-    ):
+    if any(item is None for item in (payload, dimensions, components, profile, source)):
         return (*errors, "subject-mask quality manifest components are invalid")
     try:
         source_manifest_digest = canonical_json_sha256(source_manifest)
@@ -967,20 +980,19 @@ def validate_subject_mask_quality_publication(
         ):
             errors.append("subject-mask quality metadata digest mismatch")
     storage = payload.get("storage_plan")
-    raw_profile = storage.get("storage_profile") if isinstance(storage, Mapping) else None
+    raw_profile = (
+        storage.get("storage_profile") if isinstance(storage, Mapping) else None
+    )
     try:
         if not isinstance(raw_profile, Mapping):
             raise ValueError("subject-mask quality storage profile is missing")
         storage_profile = storage_profile_from_manifest(raw_profile)
-        plans = plan_subject_mask_quality_storage(
-            dimensions, profile=storage_profile
-        )
+        plans = plan_subject_mask_quality_storage(dimensions, profile=storage_profile)
     except (TypeError, ValueError) as exc:
         errors.append(f"cannot reconstruct subject-mask quality physical plan: {exc}")
     else:
         bindings = {
-            binding.path: binding
-            for binding in SUBJECT_MASK_QUALITY_SCHEMA_V1.bindings
+            binding.path: binding for binding in SUBJECT_MASK_QUALITY_SCHEMA_V1.bindings
         }
         for entry in plans.entries:
             declaration = direct_metadata_declarations.get(entry.rule.path)
