@@ -12,7 +12,10 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
-from ..pose.schema import resolve_required_keypoint_indices_from_attrs
+from ..pose.schema import (
+    resolve_required_keypoint_indices,
+    resolve_required_keypoint_indices_from_attrs,
+)
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from ..shared.provenance_attrs import (
@@ -33,6 +36,9 @@ from ..shared.row_lineage import (
 )
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
 from ..shared.zarr_run_completion import require_runs_parent
+from ..shared.zarr.refined_keypoint_manifest import (
+    refined_keypoint_source_bindings_from_manifest,
+)
 from ..tune.refined_subject_mask_review import (
     RefinedSubjectComponentSeed,
     SourceSubjectMaskRun,
@@ -554,12 +560,25 @@ def _resolve_eye_keypoint_indices(kp_group: zarr.Group, keypoint_run_name: str) 
         raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
     keypoint_count = int(keypoints_roi.shape[1])
     try:
-        resolved = resolve_required_keypoint_indices_from_attrs(
-            kp_group.attrs,
-            _EYE_COMPONENTS,
-            keypoint_count=keypoint_count,
-        )
-    except ValueError as exc:
+        source_bindings = kp_group.attrs.get("source_bindings")
+        if source_bindings is not None:
+            if not isinstance(source_bindings, Mapping):
+                raise ValueError("source_bindings must be an object")
+            source = refined_keypoint_source_bindings_from_manifest(
+                source_bindings
+            )
+            resolved = resolve_required_keypoint_indices(
+                source.skeleton_semantics["keypoint_labels"],
+                _EYE_COMPONENTS,
+                keypoint_count=keypoint_count,
+            )
+        else:
+            resolved = resolve_required_keypoint_indices_from_attrs(
+                kp_group.attrs,
+                _EYE_COMPONENTS,
+                keypoint_count=keypoint_count,
+            )
+    except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Keypoint run {keypoint_run_name!r} is missing canonical eye labels required "
             f"for eyes_union assignment: {exc}"

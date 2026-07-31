@@ -15,6 +15,7 @@ from fisheye.shared.zarr.array_factory import (
 from fisheye.shared.zarr.benchmark_runtime import sha256_array
 from fisheye.shared.zarr.keypoint_manifest import (
     keypoint_skeleton_digest,
+    keypoint_skeleton_document,
     validate_keypoint_run_manifest,
 )
 from fisheye.shared.zarr.keypoint_quality_manifest import (
@@ -51,7 +52,7 @@ REFINED_KEYPOINT_LOGICAL_CONTENT_SCHEMA_VERSION = 1
 REFINED_KEYPOINT_SOURCE_BINDINGS_SCHEMA_ID = (
     "palette.refined_keypoint.source_bindings"
 )
-REFINED_KEYPOINT_SOURCE_BINDINGS_SCHEMA_VERSION = 1
+REFINED_KEYPOINT_SOURCE_BINDINGS_SCHEMA_VERSION = 2
 REFINED_KEYPOINT_SNAPSHOT_IDENTITY_SCHEMA_ID = (
     "palette.refined_keypoint.snapshot_identity"
 )
@@ -155,6 +156,75 @@ def _dimensions_from_manifest(value: object) -> KeypointDimensions:
     return dimensions
 
 
+def _validated_skeleton_semantics(
+    value: object,
+    *,
+    skeleton_id: str,
+    skeleton_digest: str,
+    dimensions: KeypointDimensions,
+) -> dict[str, Any]:
+    expected = {
+        "schema_id",
+        "schema_version",
+        "skeleton_id",
+        "kpt_shape",
+        "keypoint_labels",
+        "nodes",
+        "edges",
+        "heading_computation",
+        "heading_computation_source",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ValueError("Refined-keypoint skeleton semantics are not exact.")
+    document = dict(value)
+    if (
+        document.get("schema_id") != "palette.keypoint.skeleton_semantics"
+        or document.get("schema_version") != 1
+        or document.get("skeleton_id") != skeleton_id
+    ):
+        raise ValueError("Refined-keypoint skeleton semantic identity mismatch.")
+    labels = document.get("keypoint_labels")
+    nodes = document.get("nodes")
+    edges = document.get("edges")
+    if (
+        not isinstance(labels, list)
+        or len(labels) != dimensions.n_keypoints
+        or any(not isinstance(label, str) or not label.strip() for label in labels)
+        or len(set(labels)) != len(labels)
+    ):
+        raise ValueError("Refined-keypoint ordered labels are invalid.")
+    if document.get("kpt_shape") != [dimensions.n_keypoints, 2]:
+        raise ValueError("Refined-keypoint skeleton shape is invalid.")
+    if not isinstance(nodes, list) or nodes != [
+        {"id": index, "name": label} for index, label in enumerate(labels)
+    ]:
+        raise ValueError("Refined-keypoint skeleton nodes differ from ordered labels.")
+    if not isinstance(edges, list):
+        raise ValueError("Refined-keypoint skeleton edges must be an array.")
+    normalized_edges: list[tuple[int, int]] = []
+    for edge in edges:
+        if (
+            not isinstance(edge, list)
+            or len(edge) != 2
+            or any(type(index) is not int for index in edge)
+            or any(index < 0 or index >= dimensions.n_keypoints for index in edge)
+        ):
+            raise ValueError("Refined-keypoint skeleton edge is invalid.")
+        normalized_edges.append((edge[0], edge[1]))
+    if len(normalized_edges) != len(set(normalized_edges)):
+        raise ValueError("Refined-keypoint skeleton edges cannot contain duplicates.")
+    if not isinstance(document.get("heading_computation"), Mapping):
+        raise ValueError("Refined-keypoint heading computation must be an object.")
+    _require_text(
+        document.get("heading_computation_source"),
+        name="heading_computation_source",
+    )
+    canonical_json_bytes(document)
+    if canonical_json_sha256(document) != skeleton_digest:
+        raise ValueError("Refined-keypoint skeleton semantics digest mismatch.")
+    return document
+
+
 def normalized_retired_instance_keys(values: Sequence[int]) -> np.ndarray:
     result = np.asarray(tuple(values), dtype=np.uint64)
     if result.ndim != 1:
@@ -188,6 +258,7 @@ class RefinedKeypointSourceBindings:
     crop_logical_content_digest: str
     skeleton_id: str
     skeleton_digest: str
+    skeleton_semantics: Mapping[str, Any]
     coordinate_catalog_digest: str
     dimensions: KeypointDimensions
 
@@ -218,6 +289,16 @@ class RefinedKeypointSourceBindings:
             )
         if not isinstance(self.dimensions, KeypointDimensions):
             raise TypeError("dimensions must be KeypointDimensions.")
+        object.__setattr__(
+            self,
+            "skeleton_semantics",
+            _validated_skeleton_semantics(
+                self.skeleton_semantics,
+                skeleton_id=self.skeleton_id,
+                skeleton_digest=self.skeleton_digest,
+                dimensions=self.dimensions,
+            ),
+        )
 
     def as_manifest(self) -> dict[str, object]:
         return {
@@ -257,6 +338,7 @@ class RefinedKeypointSourceBindings:
             "skeleton": {
                 "skeleton_id": self.skeleton_id,
                 "skeleton_digest": self.skeleton_digest,
+                "semantics": dict(self.skeleton_semantics),
             },
             "coordinate_catalog_digest": self.coordinate_catalog_digest,
             "dimensions": self.dimensions.as_manifest(),
@@ -418,12 +500,21 @@ def _source_bindings_from_manifest(value: Mapping[str, Any]) -> RefinedKeypointS
         crop_logical_content_digest=crop.get("logical_content_digest"),
         skeleton_id=skeleton.get("skeleton_id"),
         skeleton_digest=skeleton.get("skeleton_digest"),
+        skeleton_semantics=skeleton.get("semantics"),
         coordinate_catalog_digest=value.get("coordinate_catalog_digest"),
         dimensions=_dimensions_from_manifest(value.get("dimensions")),
     )
     if dict(value) != source.as_manifest():
         raise ValueError("Refined-keypoint source bindings are not canonical.")
     return source
+
+
+def refined_keypoint_source_bindings_from_manifest(
+    value: Mapping[str, Any],
+) -> RefinedKeypointSourceBindings:
+    """Parse exact, digest-bound refined-keypoint source semantics."""
+
+    return _source_bindings_from_manifest(value)
 
 
 def _identity_from_manifest(value: Mapping[str, Any]) -> RefinedKeypointSnapshotIdentity:
@@ -640,6 +731,7 @@ def build_refined_keypoint_source_bindings(
         raise ValueError("Raw pose schema is missing.")
     skeleton_id = _require_text(pose_schema.get("skeleton_id"), name="skeleton_id")
     skeleton_digest = keypoint_skeleton_digest(pose_binding)
+    skeleton_semantics = keypoint_skeleton_document(pose_binding)
     quality_profile = quality_logical.get("profile")
     if not isinstance(quality_profile, Mapping):
         raise ValueError("Quality profile is missing.")
@@ -661,6 +753,7 @@ def build_refined_keypoint_source_bindings(
         crop_logical_content_digest=crop_logical_digest,
         skeleton_id=skeleton_id,
         skeleton_digest=skeleton_digest,
+        skeleton_semantics=skeleton_semantics,
         coordinate_catalog_digest=coordinate.get("digest"),
         dimensions=dimensions,
     )
@@ -1272,6 +1365,7 @@ __all__ = [
     "normalized_retired_instance_keys",
     "refined_keypoint_logical_content_document",
     "refined_keypoint_metadata_declarations_digest",
+    "refined_keypoint_source_bindings_from_manifest",
     "retired_instance_keys_digest",
     "validate_refined_keypoint_publication",
     "validate_refined_keypoint_run_manifest",

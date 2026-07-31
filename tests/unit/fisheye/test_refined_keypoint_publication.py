@@ -5,6 +5,9 @@ import copy
 import numpy as np
 import zarr
 
+from fisheye.refinement.assemble_refined_subject_masks import (
+    _resolve_eye_keypoint_indices,
+)
 from fisheye.shared.pose_model_schema_binding import (
     build_explicit_pose_model_schema_binding,
 )
@@ -407,6 +410,14 @@ def test_refined_publication_round_trip_is_exact_and_selector_ineligible(
     assert run.attrs["stage_selector_eligible"] is False
     assert set(run.array_keys()) == set(REFINED_KEYPOINT_SCHEMA_V2.binding_paths)
     assert "heading" not in " ".join(run.array_keys())
+    assert "keypoint_labels" not in run.attrs
+    skeleton = run.attrs["source_bindings"]["skeleton"]
+    assert skeleton["semantics"]["keypoint_labels"] == [
+        "swim_bladder",
+        "eye_left",
+        "eye_right",
+    ]
+    assert _resolve_eye_keypoint_indices(run, publication.run_id) == (1, 2)
     assert np.asarray(run["keypoint_edit_flags"][:])[2, 0]
     assert not np.asarray(run["refined_success"][:])[3]
 
@@ -420,6 +431,18 @@ def test_refined_manifest_rejects_recomputed_nested_tampering(tmp_path: object) 
     errors = validate_refined_keypoint_run_manifest(tampered)
 
     assert any("storage plan differs" in error for error in errors)
+
+    skeleton_tampered = copy.deepcopy(publication.manifest)
+    skeleton_tampered["payload"]["source_bindings"]["skeleton"]["semantics"][
+        "keypoint_labels"
+    ][1:] = ["eye_right", "eye_left"]
+    skeleton_tampered["payload_digest"] = canonical_json_sha256(
+        skeleton_tampered["payload"]
+    )
+
+    skeleton_errors = validate_refined_keypoint_run_manifest(skeleton_tampered)
+
+    assert any("skeleton" in error for error in skeleton_errors)
 
 
 def test_refined_publication_rejects_source_fact_and_retired_key_tampering(

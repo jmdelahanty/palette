@@ -221,6 +221,17 @@ row ID is unnecessary while the contract permits exactly one keypoint row per
 observation. Detection additions first create a new detection/crop observation
 and therefore a new `instance_key` before keypoint inference or manual labeling.
 
+Refined source-bindings v2 persist the complete canonical skeleton-semantics
+document, not merely its ID and digest. The document contains the ordered
+labels, nodes, edges, `[K,2]` shape, and heading recipe. Its canonical JSON
+SHA-256 must equal the bound skeleton digest, its nodes must reproduce the
+ordered labels exactly, and its cardinality must equal the keypoint array's
+second axis. Consumers resolve anatomical roles such as `eye_left` and
+`eye_right` from these labels at runtime; positional or model-specific index
+fallbacks are forbidden. Historical refined source-bindings v1, which contain
+only `skeleton_id` and `skeleton_digest`, are insufficient for an anatomical
+consumer unless a separate explicitly bound semantics document is available.
+
 Edits are keyed deltas. Accepted deltas compact into a new immutable sharded
 snapshot. Training exports cite that compact snapshot and materialize their own
 dense image/label representation; they do not treat an edit delta as training
