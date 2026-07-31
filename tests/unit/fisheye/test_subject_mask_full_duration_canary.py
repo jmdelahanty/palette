@@ -236,6 +236,32 @@ def test_whole_video_is_one_real_window_with_the_same_row_contract(
     assert [(value["row_start"], value["row_stop"]) for value in windows] == [(0, 4)]
 
 
+def test_cluster_file_identity_ignores_mount_local_device_and_inode() -> None:
+    planned = {
+        "path": "/groups/recording/clip.mp4",
+        "size_bytes": 100,
+        "mtime_ns": 123,
+        "device": 84,
+        "inode": 1000,
+    }
+    compute_node = {
+        **planned,
+        "device": 101,
+        "inode": 2000,
+    }
+
+    assert canary._same_cluster_file_identity(compute_node, planned)
+    assert not canary._same_cluster_file_identity(
+        {**compute_node, "size_bytes": 101}, planned
+    )
+    assert not canary._same_cluster_file_identity(
+        {**compute_node, "mtime_ns": 124}, planned
+    )
+    assert not canary._same_cluster_file_identity(
+        {**compute_node, "path": "/groups/recording/other.mp4"}, planned
+    )
+
+
 def test_lsf_workflow_keeps_inference_refinement_and_publication_separate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -136,6 +136,17 @@ def _same_file_identity(path: Path, expected: Mapping[str, Any]) -> bool:
     )
 
 
+def _same_cluster_file_identity(
+    observed: Mapping[str, Any], expected: Mapping[str, Any]
+) -> bool:
+    """Compare file evidence that remains stable across cluster mount clients."""
+
+    return all(
+        observed.get(name) == expected.get(name)
+        for name in ("path", "size_bytes", "mtime_ns")
+    )
+
+
 def _copy_file_with_digest(source: Path, destination: Path) -> dict[str, Any]:
     source = source.expanduser().resolve()
     before = _file_identity(source)
@@ -890,7 +901,9 @@ def run_inference_window(
         video_copy = _copy_file_with_digest(
             Path(window["source_video_path"]), staged_video
         )
-        if video_copy["source"] != window["source_file"]:
+        if not _same_cluster_file_identity(
+            video_copy["source"], window["source_file"]
+        ):
             raise RuntimeError("Window source-video identity changed after planning.")
         staged_model = work / Path(plan["model"]["path"]).name
         model_copy = _copy_file_with_digest(Path(plan["model"]["path"]), staged_model)
