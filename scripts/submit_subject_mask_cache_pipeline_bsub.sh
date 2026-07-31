@@ -24,6 +24,7 @@ HOST=""
 RESUME_SCRATCH=""
 RESUME_SOURCE_JOB_ID=""
 RESUME_SOURCE_PALETTE_COMMIT=""
+GPU=1
 SUBMIT=0
 
 usage() {
@@ -59,6 +60,7 @@ Options:
   --resume-scratch PATH     Resume a complete retained raw-inference scratch
   --resume-source-job-id ID Required with --resume-scratch
   --resume-source-commit ID Required with --resume-scratch
+  --no-gpu                  Submit CPU-only continuation
   --submit                  Submit; otherwise render only
   -h, --help
 EOF
@@ -91,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --resume-scratch) RESUME_SCRATCH="$2"; shift 2 ;;
     --resume-source-job-id) RESUME_SOURCE_JOB_ID="$2"; shift 2 ;;
     --resume-source-commit) RESUME_SOURCE_PALETTE_COMMIT="$2"; shift 2 ;;
+    --no-gpu) GPU=0; shift ;;
     --submit) SUBMIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -223,8 +226,11 @@ chmod +x "$JOB_SCRIPT"
 BSUB_COMMAND=(
   bsub -J "sm_cache_$RUN_ID" -q "$QUEUE" -n "$NCORES" -W "$WALLTIME"
   -M "$((MEM_GB * 1024))" -R "span[hosts=1] rusage[mem=${MEM_GB}G]"
-  -gpu "num=1" -oo "$STDOUT_LOG" -eo "$STDERR_LOG" bash "$JOB_SCRIPT"
+  -oo "$STDOUT_LOG" -eo "$STDERR_LOG" bash "$JOB_SCRIPT"
 )
+if [[ "$GPU" == 1 ]]; then
+  BSUB_COMMAND=("${BSUB_COMMAND[@]:0:1}" -gpu "num=1" "${BSUB_COMMAND[@]:1}")
+fi
 if [[ -n "$HOST" ]]; then
   BSUB_COMMAND=("${BSUB_COMMAND[@]:0:1}" -m "$HOST" "${BSUB_COMMAND[@]:1}")
 fi
