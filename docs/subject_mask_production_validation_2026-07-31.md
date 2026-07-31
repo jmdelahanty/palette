@@ -143,3 +143,7 @@ to use reference-full validation.  This implementation does not alter that
 process.  It also does not authorize a full-duration run yet: maintained raw
 inference and refined finalization must first emit the frozen receipt evidence,
 and the two validation modes must agree on the completed 22,926-row fixture.
+
+The shared inference hardware/runtime contract is documented in
+`docs/inference_accelerator_provenance_2026-07-31.md`. Subject-mask publication
+receipts retain the upstream stage and run provenance before scratch cleanup.

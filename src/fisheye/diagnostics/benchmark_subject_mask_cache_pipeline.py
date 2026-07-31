@@ -26,7 +26,10 @@ import zarr
 
 from fisheye.shared.flat_roi_cache import load_flat_roi_cache_manifest
 from fisheye.shared.zarr.benchmark_runtime import storage_stats
-from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.manifest_digest import (
+    canonical_json_sha256,
+    metadata_without_empty_group_consolidation,
+)
 from fisheye.shared.zarr.subject_mask_core_publication import (
     publish_selector_ineligible_subject_mask_core_snapshot,
 )
@@ -448,7 +451,7 @@ def _read_benchmark(
         "quality": (
             quality_store,
             f"subject_mask_quality_runs/{quality_run}",
-            "observation_flags",
+            "observation_quality_flags",
         ),
     }
     result: dict[str, Any] = {}
@@ -491,6 +494,252 @@ def _read_benchmark(
             "random_frame_logical_bytes": logical_bytes,
         }
     return result
+
+
+def _validate_published_metadata_equivalence(
+    store: Path, *, run_path: str
+) -> dict[str, Any]:
+    """Revalidate every direct declaration against root consolidation."""
+
+    root_document = _strict_json(store / "zarr.json")
+    envelope = root_document.get("consolidated_metadata")
+    if not isinstance(envelope, Mapping) or envelope.get("kind") != "inline":
+        raise ValueError(f"{store} lacks inline consolidated metadata.")
+    consolidated = envelope.get("metadata")
+    if not isinstance(consolidated, Mapping):
+        raise ValueError(f"{store} has malformed consolidated metadata.")
+
+    direct: dict[str, dict[str, Any]] = {}
+    run_root = store / run_path
+    if not run_root.is_dir():
+        raise FileNotFoundError(run_root)
+    for metadata_path in sorted(run_root.rglob("zarr.json")):
+        relative = metadata_path.parent.relative_to(store).as_posix()
+        direct[relative] = _strict_json(metadata_path)
+    consolidated_scope = {
+        str(path): dict(value)
+        for path, value in consolidated.items()
+        if str(path) == run_path or str(path).startswith(f"{run_path}/")
+        if isinstance(value, Mapping)
+    }
+    if set(direct) != set(consolidated_scope):
+        missing = sorted(set(direct) - set(consolidated_scope))
+        unexpected = sorted(set(consolidated_scope) - set(direct))
+        raise ValueError(
+            f"{run_path} direct/consolidated path inventory differs: "
+            f"missing={missing!r}, unexpected={unexpected!r}."
+        )
+    normalized: dict[str, dict[str, Any]] = {}
+    for path, document in direct.items():
+        direct_document = metadata_without_empty_group_consolidation(
+            document,
+            path=path,
+        )
+        consolidated_document = metadata_without_empty_group_consolidation(
+            consolidated_scope[path],
+            path=path,
+        )
+        if direct_document != consolidated_document:
+            raise ValueError(
+                f"{path} direct and consolidated metadata declarations differ."
+            )
+        normalized[path] = direct_document
+    return {
+        "declaration_count": len(normalized),
+        "normalized_digest": canonical_json_sha256(normalized),
+    }
+
+
+def _resume_published_pipeline(
+    args: argparse.Namespace, scratch: Path, local_output: Path
+) -> dict[str, Any]:
+    """Finish a failed diagnostic handoff from already gated local stores."""
+
+    crop_source = args.source_crop_zarr.expanduser().resolve()
+    keypoint_source = args.source_refined_keypoint_zarr.expanduser().resolve()
+    cache_source = args.roi_cache_manifest.expanduser().resolve()
+    model_source = args.subject_mask_model.expanduser().resolve()
+    source_preflight = _source_preflight(
+        crop_source=crop_source,
+        crop_run=args.crop_run,
+        keypoint_source=keypoint_source,
+        refined_keypoint_run=args.refined_keypoint_run,
+        cache_source=cache_source,
+    )
+    source_hashes = {
+        "crop_root_metadata": _sha256_file(crop_source / "zarr.json"),
+        "keypoint_root_metadata": _sha256_file(keypoint_source / "zarr.json"),
+        "cache_manifest": _sha256_file(cache_source),
+        "model": _sha256_file(model_source),
+    }
+    specs = {
+        "raw": (
+            local_output / "raw.zarr",
+            f"subject_mask_runs/{args.raw_run}",
+            "palette.subject_mask_core.run_manifest",
+            2,
+        ),
+        "refined": (
+            local_output / "refined.zarr",
+            f"refined_subject_masks_runs/{args.refined_run}",
+            "palette.subject_mask_core.run_manifest",
+            2,
+        ),
+        "quality": (
+            local_output / "quality.zarr",
+            f"subject_mask_quality_runs/{args.quality_run}",
+            "palette.subject_mask_quality.run_manifest",
+            1,
+        ),
+    }
+    manifests: dict[str, dict[str, Any]] = {}
+    groups: dict[str, Any] = {}
+    metadata_receipts: dict[str, dict[str, Any]] = {}
+    for name, (store, run_path, schema_id, schema_version) in specs.items():
+        metadata_receipts[name] = _validate_published_metadata_equivalence(
+            store,
+            run_path=run_path,
+        )
+        run = zarr.open_group(
+            str(store / run_path),
+            mode="r",
+            use_consolidated=False,
+        )
+        manifest = _bound_run_manifest(run, label=run_path)
+        if manifest.get("schema_id") != schema_id or manifest.get(
+            "schema_version"
+        ) != schema_version:
+            raise ValueError(f"{run_path} has the wrong run-manifest contract.")
+        payload = manifest["payload"]
+        publication = payload.get("publication")
+        logical_schema = payload.get("logical_schema")
+        if not isinstance(publication, Mapping) or not isinstance(
+            logical_schema, Mapping
+        ):
+            raise ValueError(f"{run_path} has an incomplete persisted manifest.")
+        if payload.get("run_id") != run_path.rsplit("/", 1)[-1]:
+            raise ValueError(f"{run_path} run identity differs from its path.")
+        if (
+            publication.get("completion_status") != "complete"
+            or publication.get("stage_selector_eligible") is not False
+            or publication.get("metadata_state")
+            != "direct_and_consolidated_validated"
+            or run.attrs.get("palette_run_completion_status") != "complete"
+            or run.attrs.get("stage_selector_eligible") is not False
+            or run.attrs.get("shadow_only") is not True
+        ):
+            raise ValueError(f"{run_path} is not a completed selector-ineligible run.")
+        dimensions = logical_schema.get("dimensions")
+        if not isinstance(dimensions, Mapping) or (
+            int(dimensions.get("n_frames", -1)) != source_preflight["n_frames"]
+            or int(dimensions.get("n_rois", -1)) != source_preflight["n_rows"]
+        ):
+            raise ValueError(f"{run_path} dimensions differ from source preflight.")
+        bindings = logical_schema.get("bindings")
+        if not isinstance(bindings, list):
+            raise ValueError(f"{run_path} lacks its exact logical bindings.")
+        missing = [
+            str(binding.get("path"))
+            for binding in bindings
+            if isinstance(binding, Mapping)
+            and binding.get("required") is True
+            and str(binding.get("path")) not in run
+        ]
+        if missing:
+            raise ValueError(f"{run_path} lacks required arrays: {missing!r}.")
+        groups[name] = run
+        manifests[name] = manifest
+
+    expected_keys = np.asarray(groups["refined"]["instance_key"][...])
+    expected_frames = np.asarray(
+        groups["refined"]["source_acquisition_frame_index"][...],
+        dtype=np.int64,
+    )
+    expected_offsets = derive_subject_mask_frame_row_offsets(
+        expected_frames,
+        n_frames=int(source_preflight["n_frames"]),
+    )
+    for name, run in groups.items():
+        if not np.array_equal(np.asarray(run["instance_key"][...]), expected_keys):
+            raise ValueError(f"{name} instance keys differ during resume.")
+        if not np.array_equal(
+            np.asarray(run["source_acquisition_frame_index"][...], dtype=np.int64),
+            expected_frames,
+        ):
+            raise ValueError(f"{name} frame identities differ during resume.")
+        if not np.array_equal(
+            np.asarray(run["frame_row_offsets"][...], dtype=np.int64),
+            expected_offsets,
+        ):
+            raise ValueError(f"{name} frame offsets differ during resume.")
+
+    quality_source = manifests["quality"]["payload"].get(
+        "source_refined_subject_mask_snapshot"
+    )
+    if not isinstance(quality_source, Mapping) or quality_source.get(
+        "manifest_digest"
+    ) != canonical_json_sha256(manifests["refined"]):
+        raise ValueError("Quality snapshot is not bound to the refined manifest.")
+
+    phases: dict[str, Any] = {
+        "source_preflight": source_preflight,
+        "resume_after_publication": {
+            "source_job_id": args.resume_source_job_id,
+            "source_palette_commit": args.resume_source_palette_commit,
+            "policy": "reuse_only_completed_gated_node_local_stores",
+            "metadata": metadata_receipts,
+        },
+        "node_local_reads": _read_benchmark(
+            raw_store=specs["raw"][0],
+            raw_run=args.raw_run,
+            refined_store=specs["refined"][0],
+            refined_run=args.refined_run,
+            quality_store=specs["quality"][0],
+            quality_run=args.quality_run,
+        ),
+    }
+    evidence_dir = local_output / "evidence"
+    if evidence_dir.exists():
+        raise FileExistsError(
+            "Post-publication resume requires no pre-existing evidence directory."
+        )
+    evidence_dir.mkdir()
+    evidence_paths = {
+        "raw_inference_log": scratch / "raw_inference.log",
+        "refinement_log": scratch / "refinement.log",
+        "refinement_progress": scratch / "refinement_progress.jsonl",
+    }
+    published_evidence: dict[str, str] = {}
+    for name, source_path in evidence_paths.items():
+        if not source_path.is_file():
+            continue
+        target = evidence_dir / source_path.name
+        shutil.copy2(source_path, target)
+        published_evidence[name] = str(target.relative_to(local_output))
+
+    def summary(name: str) -> dict[str, Any]:
+        payload = manifests[name]["payload"]
+        return {
+            "run_id": payload["run_id"],
+            "manifest_digest": manifests[name]["payload_digest"],
+            "logical_content_digest": payload["logical_content"]["digest"],
+            "storage": payload["storage_plan"]["object_estimate"],
+        }
+
+    return {
+        "source_hashes": source_hashes,
+        "n_frames": int(source_preflight["n_frames"]),
+        "n_rows": int(source_preflight["n_rows"]),
+        "raw": summary("raw"),
+        "refined": summary("refined"),
+        "quality": summary("quality"),
+        "phases": phases,
+        "evidence": published_evidence,
+        "stores": {
+            name: storage_stats(local_output / f"{name}.zarr")
+            for name in ("raw", "refined", "quality")
+        },
+    }
 
 
 def _run_pipeline(
@@ -650,6 +899,10 @@ def _run_pipeline(
         },
         "row_count": int(shard["mask_probs_roi"].shape[0]),
         "mask_labels": list(DEFAULT_RAW_LABELS),
+        "inference_stage_provenance": dict(shard.attrs.get("provenance") or {}),
+        "inference_run_provenance": dict(
+            shard.attrs.get("run_provenance") or {}
+        ),
     }
     raw_attributes = _strict_attribute_subset(
         shard.attrs,
@@ -931,7 +1184,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     scratch = (
         _require_existing_node_local(args.scratch_root)
-        if args.resume_after_raw_inference
+        if args.resume_after_raw_inference or args.resume_after_publication
         else _require_node_local(args.scratch_root)
     )
     local_output = scratch / "completed"
@@ -940,12 +1193,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Resume requires an existing empty completed output directory."
             )
+    elif args.resume_after_publication:
+        expected = {
+            local_output / "raw.zarr",
+            local_output / "refined.zarr",
+            local_output / "quality.zarr",
+        }
+        if not local_output.is_dir() or not all(path.is_dir() for path in expected):
+            raise ValueError(
+                "Post-publication resume requires existing raw, refined, and "
+                "quality stores."
+            )
     else:
         local_output.mkdir()
     hidden: Path | None = None
     published = False
     try:
-        result = _run_pipeline(args, scratch, local_output)
+        result = (
+            _resume_published_pipeline(args, scratch, local_output)
+            if args.resume_after_publication
+            else _run_pipeline(args, scratch, local_output)
+        )
         hidden = destination.with_name(f".{destination.name}.partial.{os.getpid()}")
         if hidden.exists():
             raise FileExistsError(hidden)
@@ -977,6 +1245,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     args.subject_mask_model.expanduser().resolve()
                 ),
                 "resume_after_raw_inference": bool(args.resume_after_raw_inference),
+                "resume_after_publication": bool(args.resume_after_publication),
                 "resume_source_job_id": args.resume_source_job_id,
                 "resume_source_palette_commit": (args.resume_source_palette_commit),
             },
@@ -1048,6 +1317,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--finalize-workers", type=int, default=8)
     parser.add_argument("--resume-after-raw-inference", action="store_true")
+    parser.add_argument("--resume-after-publication", action="store_true")
     parser.add_argument("--resume-source-job-id")
     parser.add_argument("--resume-source-palette-commit")
     parser.add_argument("--keep-scratch", action="store_true")
@@ -1058,7 +1328,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.batch_size <= 0 or args.finalize_workers <= 0:
         raise SystemExit("--batch-size and --finalize-workers must be positive")
-    if args.resume_after_raw_inference and (
+    if args.resume_after_raw_inference and args.resume_after_publication:
+        raise SystemExit("Choose only one resume boundary.")
+    if (args.resume_after_raw_inference or args.resume_after_publication) and (
         not args.resume_source_job_id or not args.resume_source_palette_commit
     ):
         raise SystemExit(

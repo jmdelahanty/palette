@@ -100,6 +100,9 @@ class TestSystemInfo:
         assert 'platform' in info
         assert 'gpu' in info
         assert 'environment' in info
+        assert info['gpu']['schema_id'] == 'palette.accelerator_runtime'
+        assert info['gpu']['schema_version'] == 1
+        assert info['environment']['accelerator'] == info['gpu']
         
         # Should not have all packages
         assert 'all_packages' not in info

@@ -15,6 +15,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
+ACCELERATOR_PROVENANCE_SCHEMA_ID = "palette.accelerator_runtime"
+ACCELERATOR_PROVENANCE_SCHEMA_VERSION = 1
+
 # === Helper Functions ===
 
 def _which(cmd: str) -> bool:
@@ -303,6 +306,10 @@ def get_gpu_info() -> Dict[str, Any]:
         Dict with GPU details from available libraries
     """
     gpu_info = {
+        'schema_id': ACCELERATOR_PROVENANCE_SCHEMA_ID,
+        'schema_version': ACCELERATOR_PROVENANCE_SCHEMA_VERSION,
+        'captured_at_utc': datetime.now(timezone.utc).isoformat(),
+        'capture_semantics': 'runtime_identity_and_point_in_time_telemetry_v1',
         'available': False,
         'devices': [],
         'backend': None
@@ -317,6 +324,28 @@ def get_gpu_info() -> Dict[str, Any]:
     # Try PyTorch first (most commonly used)
     try:
         import torch
+        cudnn_version = torch.backends.cudnn.version()
+        gpu_info['runtime'] = {
+            'torch_version': str(getattr(torch, '__version__', 'unknown')),
+            'cuda_version': torch.version.cuda,
+            'cudnn_version': (
+                int(cudnn_version) if cudnn_version is not None else None
+            ),
+            'cudnn_enabled': bool(torch.backends.cudnn.enabled),
+            'cudnn_benchmark': bool(torch.backends.cudnn.benchmark),
+            'cudnn_deterministic': bool(torch.backends.cudnn.deterministic),
+            'float32_matmul_precision': (
+                str(torch.get_float32_matmul_precision())
+                if hasattr(torch, 'get_float32_matmul_precision')
+                else None
+            ),
+            'matmul_allow_tf32': (
+                bool(torch.backends.cuda.matmul.allow_tf32)
+                if hasattr(torch.backends, 'cuda')
+                and hasattr(torch.backends.cuda, 'matmul')
+                else None
+            ),
+        }
         if torch.cuda.is_available():
             gpu_info['available'] = True
             gpu_info['backend'] = 'cuda'
@@ -336,6 +365,11 @@ def get_gpu_info() -> Dict[str, Any]:
                     'total_memory_gb': round(device_props.total_memory / (1024**3), 2),
                     'multi_processor_count': device_props.multi_processor_count
                 }
+                device_uuid = getattr(device_props, 'uuid', None)
+                if isinstance(device_uuid, bytes):
+                    device_uuid = device_uuid.decode('utf-8', 'replace')
+                if device_uuid is not None:
+                    device_info['uuid'] = str(device_uuid)
                 
                 # Get current memory usage if CUDA is initialized
                 try:
@@ -351,24 +385,24 @@ def get_gpu_info() -> Dict[str, Any]:
                 
                 gpu_info['devices'].append(device_info)
                 
-    except ImportError:
+    except Exception:
         pass
     
     # Try CuPy as fallback
     if not gpu_info['available']:
         try:
             import cupy as cp
-            gpu_info['available'] = True
-            gpu_info['backend'] = 'cupy'
-            
             device = cp.cuda.Device()
-            gpu_info['devices'].append({
+            device_info = {
                 'index': 0,
                 'name': device.name.decode('utf-8') if hasattr(device.name, 'decode') else str(device.name),
                 'compute_capability': device.compute_capability,
                 'total_memory_gb': round(device.mem_info[1] / (1024**3), 2),
                 'free_memory_gb': round(device.mem_info[0] / (1024**3), 2)
-            })
+            }
+            gpu_info['devices'].append(device_info)
+            gpu_info['available'] = True
+            gpu_info['backend'] = 'cupy'
         except (ImportError, Exception):
             pass
     
@@ -404,9 +438,29 @@ def get_gpu_info() -> Dict[str, Any]:
         pynvml.nvmlShutdown()
     except (ImportError, Exception):
         pass
+
+    # Driver identity is process-wide.  Query it even when PyTorch already
+    # found the visible device; the old fallback-only path omitted it on most
+    # successful CUDA runs.
+    if _which('nvidia-smi'):
+        driver_output = _run([
+            'nvidia-smi',
+            '--query-gpu=driver_version',
+            '--format=csv,noheader,nounits'
+        ], timeout=3.0)
+        if driver_output:
+            driver_versions = sorted({
+                value.strip()
+                for value in driver_output.splitlines()
+                if value.strip()
+            })
+            if driver_versions:
+                gpu_info['driver_versions'] = driver_versions
+                if len(driver_versions) == 1:
+                    gpu_info['driver_version'] = driver_versions[0]
     
     # Fallback to nvidia-smi if nothing else worked
-    if not gpu_info['available'] and _which('nvidia-smi'):
+    if not gpu_info['devices'] and _which('nvidia-smi'):
         nvidia_smi_info = get_nvidia_smi_info()
         if nvidia_smi_info:
             gpu_info.update(nvidia_smi_info)
@@ -422,7 +476,7 @@ def get_nvidia_smi_info() -> Optional[Dict[str, Any]]:
     """
     output = _run([
         'nvidia-smi',
-        '--query-gpu=name,memory.total,memory.free,temperature.gpu,utilization.gpu',
+        '--query-gpu=index,uuid,name,driver_version,memory.total,memory.free,temperature.gpu,utilization.gpu',
         '--format=csv,noheader,nounits'
     ], timeout=3.0)
     
@@ -434,14 +488,16 @@ def get_nvidia_smi_info() -> Optional[Dict[str, Any]]:
         if not line:
             continue
         parts = [p.strip() for p in line.split(',')]
-        if len(parts) >= 5:
+        if len(parts) >= 8:
             devices.append({
-                'index': i,
-                'name': parts[0],
-                'total_memory_mb': int(parts[1]),
-                'free_memory_mb': int(parts[2]),
-                'temperature_c': int(parts[3]),
-                'utilization_percent': int(parts[4])
+                'index': int(parts[0]),
+                'uuid': parts[1],
+                'name': parts[2],
+                'driver_version': parts[3],
+                'total_memory_mb': int(parts[4]),
+                'free_memory_mb': int(parts[5]),
+                'temperature_c': int(parts[6]),
+                'utilization_percent': int(parts[7])
             })
     
     if devices:
@@ -755,11 +811,17 @@ def get_environment_info(
     capture_env_vars: bool = True  # New parameter
 ) -> Dict[str, Any]:
     """Get comprehensive environment information."""
+    gpu_info = get_gpu_info()
+    environment = get_environment_summary()
+    # Stage provenance has historically persisted ``environment`` but not the
+    # sibling ``gpu`` result.  Embed the exact same versioned document so every
+    # current caller automatically retains accelerator identity.
+    environment['accelerator'] = gpu_info
     env_info = {
         'git': get_git_info(),
         'platform': get_platform_info(collect_ip=collect_ip, disk_path=disk_path),
-        'gpu': get_gpu_info(),
-        'environment': get_environment_summary()
+        'gpu': gpu_info,
+        'environment': environment
     }
     
     if capture_env_vars:

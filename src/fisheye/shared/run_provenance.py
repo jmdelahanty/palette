@@ -310,13 +310,30 @@ def build_run_provenance_from_stage_record(
     params = raw_params if isinstance(raw_params, Mapping) else {}
     raw_inputs = stage_record.get("inputs")
     input_run_ids = raw_inputs if isinstance(raw_inputs, Mapping) else {}
-    return build_writer_run_provenance(
+    provenance = build_writer_run_provenance(
         command=str(command),
         params=params,
         input_run_ids=input_run_ids,
         cwd=cwd,
         include_system_context=include_system_context,
     )
+    # Reuse the accelerator snapshot already captured for stage provenance.
+    # This avoids a second hardware probe and ensures short-lived inference
+    # workers retain the same device identity in both provenance surfaces.
+    raw_environment = stage_record.get("environment")
+    if not include_system_context and isinstance(raw_environment, Mapping):
+        accelerator = raw_environment.get("accelerator")
+        if isinstance(accelerator, Mapping):
+            environment = {
+                str(key): value
+                for key, value in raw_environment.items()
+                if key != "accelerator"
+            }
+            provenance["system"] = {
+                "environment": json_ready(environment),
+                "gpu": json_ready(accelerator),
+            }
+    return provenance
 
 
 def normalize_run_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:

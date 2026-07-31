@@ -224,6 +224,45 @@ def test_build_run_provenance_from_stage_record_reuses_parameters_and_inputs() -
     assert validate_run_provenance(payload).valid is True
 
 
+def test_build_run_provenance_from_stage_record_reuses_accelerator_snapshot() -> None:
+    accelerator = {
+        "schema_id": "palette.accelerator_runtime",
+        "schema_version": 1,
+        "available": True,
+        "backend": "cuda",
+        "driver_version": "550.54.15",
+        "runtime": {
+            "torch_version": "2.5.1",
+            "cuda_version": "12.4",
+            "cudnn_version": 90100,
+        },
+        "devices": [
+            {
+                "index": 0,
+                "name": "NVIDIA L4",
+                "uuid": "GPU-fixture",
+            }
+        ],
+    }
+
+    payload = build_run_provenance_from_stage_record(
+        {
+            "stage": "subject_masks",
+            "parameters": {"batch_size": 128},
+            "inputs": {"crop_run": "crop_001"},
+            "environment": {
+                "python_version": "3.11.15",
+                "accelerator": accelerator,
+            },
+        }
+    )
+
+    assert payload["system"] == {
+        "environment": {"python_version": "3.11.15"},
+        "gpu": accelerator,
+    }
+
+
 def test_provenance_resolves_source_checkout_outside_git_working_directory(
     tmp_path: Path,
     monkeypatch,

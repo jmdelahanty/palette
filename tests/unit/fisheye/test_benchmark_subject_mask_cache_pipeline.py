@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.diagnostics.benchmark_subject_mask_cache_pipeline import (
     _bound_run_manifest,
@@ -16,6 +17,7 @@ from fisheye.diagnostics.benchmark_subject_mask_cache_pipeline import (
     _require_node_local,
     _resume_cache,
     _stage_cache,
+    _validate_published_metadata_equivalence,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -158,7 +160,7 @@ def test_read_benchmark_opens_exact_local_runs_without_consolidated_metadata(
     payloads = {
         "mask_probs_roi": np.zeros((3, 4, 2, 2), dtype=np.float32),
         "masks_roi": np.zeros((3, 4, 2, 2), dtype=np.uint8),
-        "observation_flags": np.zeros((3,), dtype=np.uint16),
+        "observation_quality_flags": np.zeros((3,), dtype=np.uint16),
     }
     opened: list[tuple[Path, str, bool]] = []
 
@@ -168,7 +170,7 @@ def test_read_benchmark_opens_exact_local_runs_without_consolidated_metadata(
         resolved = Path(path)
         opened.append((resolved, mode, use_consolidated))
         if "subject_mask_quality_runs" in resolved.parts:
-            payload_name = "observation_flags"
+            payload_name = "observation_quality_flags"
         elif "refined_subject_masks_runs" in resolved.parts:
             payload_name = "masks_roi"
         else:
@@ -210,3 +212,54 @@ def test_read_benchmark_opens_exact_local_runs_without_consolidated_metadata(
             False,
         ),
     ]
+
+
+def test_read_benchmark_uses_exact_persisted_payload_names(tmp_path: Path) -> None:
+    offsets = np.asarray([0, 2, 2, 3], dtype=np.int64)
+    stores = (
+        (
+            tmp_path / "raw.zarr",
+            "subject_mask_runs",
+            "raw",
+            "mask_probs_roi",
+            np.zeros((3, 4, 2, 2), dtype=np.uint8),
+        ),
+        (
+            tmp_path / "refined.zarr",
+            "refined_subject_masks_runs",
+            "refined",
+            "masks_roi",
+            np.zeros((3, 4, 2, 2), dtype=np.uint8),
+        ),
+        (
+            tmp_path / "quality.zarr",
+            "subject_mask_quality_runs",
+            "quality",
+            "observation_quality_flags",
+            np.zeros((3,), dtype=np.uint16),
+        ),
+    )
+    for store, family_name, run_name, payload_name, payload in stores:
+        root = zarr.open_group(str(store), mode="w", zarr_format=3)
+        run = root.create_group(family_name).create_group(run_name)
+        run.create_array("frame_row_offsets", data=offsets)
+        run.create_array(payload_name, data=payload)
+        zarr.consolidate_metadata(str(store))
+
+    result = _read_benchmark(
+        raw_store=tmp_path / "raw.zarr",
+        raw_run="raw",
+        refined_store=tmp_path / "refined.zarr",
+        refined_run="refined",
+        quality_store=tmp_path / "quality.zarr",
+        quality_run="quality",
+    )
+
+    assert set(result) == {"raw", "refined", "quality"}
+    assert all(item["offset_reads"] == 1 for item in result.values())
+    for store, family_name, run_name, _payload_name, _payload in stores:
+        receipt = _validate_published_metadata_equivalence(
+            store,
+            run_path=f"{family_name}/{run_name}",
+        )
+        assert receipt["declaration_count"] == 3
