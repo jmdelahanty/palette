@@ -12,6 +12,7 @@ from fisheye.shared.row_source_signature import (
     assert_row_source_signature_specs_match,
     build_row_source_signatures,
     copy_selected_row_source_signatures,
+    load_group_row_source_signature_spec,
     load_row_source_signature_spec,
     validate_row_source_signature_array,
 )
@@ -209,6 +210,51 @@ def test_copy_selected_signatures_persists_exact_inference_binding() -> None:
         target.attrs["source_row_signature_spec_digest"]
         == batch.spec.spec_digest
     )
+
+
+def test_copy_selected_signatures_accepts_strict_crop_envelope() -> None:
+    root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+    source = root.create_group("crop")
+    target = root.create_group("delta")
+    batch = _build(
+        np.asarray([11, 22, 33], dtype=np.uint64),
+        np.arange(12, dtype=np.float32).reshape(3, 4),
+    )
+    source.create_array(
+        "source_row_signature", data=batch.signatures, chunks=(1, 32)
+    )
+    source.attrs["row_signature"] = {
+        "array_path": "source_row_signature",
+        **batch.spec.to_attrs(prefix=""),
+    }
+
+    copied = copy_selected_row_source_signatures(
+        target,
+        source,
+        np.asarray([2, 0], dtype=np.int64),
+        shard_rows=2,
+    )
+
+    np.testing.assert_array_equal(copied, batch.signatures[[2, 0]])
+    assert load_group_row_source_signature_spec(source.attrs) == batch.spec
+    assert target.attrs["source_row_signature_spec_digest"] == batch.spec.spec_digest
+
+
+def test_strict_signature_envelope_rejects_wrong_array_and_extra_fields() -> None:
+    batch = _build(
+        np.asarray([11], dtype=np.uint64),
+        np.zeros((1, 4), dtype=np.float32),
+    )
+    nested = {
+        "array_path": "wrong",
+        **batch.spec.to_attrs(prefix=""),
+    }
+    with pytest.raises(RowSourceSignatureError, match="wrong array path"):
+        load_group_row_source_signature_spec({"row_signature": nested})
+    nested["array_path"] = "source_row_signature"
+    nested["unexpected"] = True
+    with pytest.raises(RowSourceSignatureError, match="fields do not match"):
+        load_group_row_source_signature_spec({"row_signature": nested})
 
 
 def test_copy_selected_signatures_bootstraps_verified_auxiliary_proxy() -> None:

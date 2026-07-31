@@ -549,6 +549,41 @@ def load_row_source_signature_spec(
     )
 
 
+def load_group_row_source_signature_spec(
+    attrs: Mapping[str, Any],
+) -> RowSourceSignatureSpec:
+    """Load either legacy flat attrs or the strict crop manifest envelope."""
+
+    if "source_row_signature_schema_id" in attrs:
+        return load_row_source_signature_spec(attrs)
+    nested = attrs.get("row_signature")
+    if not isinstance(nested, Mapping):
+        raise RowSourceSignatureError(
+            "Missing row source signature attrs and strict row_signature envelope."
+        )
+    expected_fields = {
+        "array_path",
+        "schema_id",
+        "schema_version",
+        "algorithm",
+        "width_bytes",
+        "canonicalization",
+        "stage",
+        "basis",
+        "spec_digest",
+        "spec",
+    }
+    if set(nested) != expected_fields:
+        raise RowSourceSignatureError(
+            "Strict row_signature envelope fields do not match schema version 1."
+        )
+    if nested.get("array_path") != ROW_SOURCE_SIGNATURE_ARRAY:
+        raise RowSourceSignatureError(
+            "Strict row_signature envelope binds the wrong array path."
+        )
+    return load_row_source_signature_spec(nested, prefix="")
+
+
 def validate_row_source_signature_array(
     array: Any,
     *,
@@ -600,7 +635,7 @@ def copy_selected_row_source_signatures(
             signatures = np.asarray(oindex[rows.tolist(), :], dtype=np.uint8)
         else:
             signatures = np.asarray(source_array[:], dtype=np.uint8)[rows]
-        spec = load_row_source_signature_spec(source_group.attrs)
+        spec = load_group_row_source_signature_spec(source_group.attrs)
     else:
         if root is None:
             raise RowSourceSignatureError(
@@ -662,6 +697,7 @@ __all__ = [
     "RowSourceSignatureBatch",
     "build_row_source_signatures",
     "load_row_source_signature_spec",
+    "load_group_row_source_signature_spec",
     "validate_row_source_signature_array",
     "copy_selected_row_source_signatures",
     "assert_row_source_signature_specs_match",
