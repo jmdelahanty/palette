@@ -1714,6 +1714,7 @@ STIMULUS_RESPONSE_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
 STIMULUS_RESPONSE_LAYOUT_DEFAULT = STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
 STIMULUS_RESPONSE_SCHEMA_ID = "palette.stimulus_response"
 STIMULUS_RESPONSE_SCHEMA_VERSION = 2
+STIMULUS_RESPONSE_METHOD_VERSION = "stimulus_response.v3"
 
 
 def _scalar_for_record(value: Any) -> Any:
@@ -2226,7 +2227,7 @@ def write_stimulus_response_run(
         "schema_id": STIMULUS_RESPONSE_SCHEMA_ID,
         "schema_version": STIMULUS_RESPONSE_SCHEMA_VERSION,
         "method": "stimulus_response",
-        "method_version": "stimulus_response.v3",
+        "method_version": STIMULUS_RESPONSE_METHOD_VERSION,
         "row_axis": "stimulus_steps",
         "layout": layout,
         "parameters": safe_parameters,
