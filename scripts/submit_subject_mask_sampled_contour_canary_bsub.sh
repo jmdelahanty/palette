@@ -180,8 +180,11 @@ if [[ "$ACTUAL_COMMIT" != "$PALETTE_COMMIT" ]]; then
 fi
 
 export PYTHONPYCACHEPREFIX="$SCRATCH_BASE/pycache"
-export OMP_NUM_THREADS="$LSB_DJOB_NUMPROC"
-export OPENCV_FOR_THREADS_NUM="$LSB_DJOB_NUMPROC"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TBB_NUM_THREADS=1
 cd "$REPO_DIR"
 /usr/bin/time -v -o "$RUN_DIR/resource_usage.txt" \
   scripts/py -m fisheye.diagnostics.publish_subject_mask_sampled_contour_canary \

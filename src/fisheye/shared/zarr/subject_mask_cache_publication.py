@@ -147,6 +147,12 @@ def _compute_sampled_contour_block(
 ) -> tuple[int, int, dict[str, np.ndarray]]:
     """Compute one independent dense-row block without writing Zarr."""
 
+    import cv2
+
+    # One Python process owns one CPU worker slot.  OpenCV otherwise creates a
+    # host-sized native pool in every process, causing severe oversubscription
+    # under LSF even though findContours itself does not benefit from it.
+    cv2.setNumThreads(1)
     run = zarr.open_group(
         str(Path(source_root) / "refined_subject_masks_runs" / str(refined_run_id)),
         mode="r",
@@ -201,25 +207,32 @@ def _generate_sampled_contours(
         for component in components.labels
     }
     if effective_workers == 1:
+        import cv2
+
+        previous_cv2_threads = cv2.getNumThreads()
+        cv2.setNumThreads(1)
         masks_roi = source_run["masks_roi"]
-        for start, stop in ranges:
-            masks = np.asarray(masks_roi[start:stop])
-            payload: dict[str, np.ndarray] = {}
-            for component_index, component in enumerate(components.labels):
-                contours = [
-                    extract_largest_external_contour(mask)
-                    for mask in masks[:, component_index]
-                ]
-                points, valid, source_counts = sample_contours_fixed_k(
-                    contours,
-                    sample_count=sample_counts[component],
-                    min_points=2,
-                )
-                prefix = f"components/{component}/sampled_contours"
-                payload[f"{prefix}/points_xy"] = points
-                payload[f"{prefix}/valid"] = valid
-                payload[f"{prefix}/source_point_count"] = source_counts
-            _store_sampled_contour_block(memmaps, (start, stop, payload))
+        try:
+            for start, stop in ranges:
+                masks = np.asarray(masks_roi[start:stop])
+                payload: dict[str, np.ndarray] = {}
+                for component_index, component in enumerate(components.labels):
+                    contours = [
+                        extract_largest_external_contour(mask)
+                        for mask in masks[:, component_index]
+                    ]
+                    points, valid, source_counts = sample_contours_fixed_k(
+                        contours,
+                        sample_count=sample_counts[component],
+                        min_points=2,
+                    )
+                    prefix = f"components/{component}/sampled_contours"
+                    payload[f"{prefix}/points_xy"] = points
+                    payload[f"{prefix}/valid"] = valid
+                    payload[f"{prefix}/source_point_count"] = source_counts
+                _store_sampled_contour_block(memmaps, (start, stop, payload))
+        finally:
+            cv2.setNumThreads(previous_cv2_threads)
         return effective_workers
 
     range_iterator = iter(ranges)

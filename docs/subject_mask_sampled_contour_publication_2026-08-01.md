@@ -2,8 +2,8 @@
 
 Date: 2026-08-01
 
-Status: implemented selector-ineligible candidate; Crimson performance and
-visual-equivalence gate pending.
+Status: Palette full-duration selector-ineligible canary passed; Crimson
+mounted-read and visual-equivalence gate pending.
 
 ## Decision
 
@@ -33,9 +33,10 @@ The default component sample counts are:
 
 Each valid row is a clockwise, canonical-start, closed-arc-length sample of the
 largest external contour in ROI pixel coordinates. Invalid rows use
-`valid=false`, `source_point_count=0`, and all-NaN points. Full ragged contours
-remain an optional cold inspection/export cache and are not required for the
-viewer profile.
+`valid=false` and all-NaN points. `source_point_count` always records the
+observed finite source-vertex count (zero when no contour exists); a count below
+two cannot produce a valid sample. Full ragged contours remain an optional cold
+inspection/export cache and are not required for the viewer profile.
 
 ## Why It Is a Separate Run
 
@@ -135,8 +136,10 @@ explicit bundle-v3 cache to an unrelated contour source.
 - [x] Add bundle-v3 import, cross-binding, activation, and rollback behavior.
 - [x] Preserve v1/v2 read compatibility and opt-in publication.
 - [x] Add recomputed-digest tampering and wrong-authority rejection tests.
-- [ ] Publish one full-duration selector-ineligible cache/bundle-v3 canary.
-- [ ] Measure cache publication time, peak RSS, physical bytes, and object count.
+- [x] Publish one full-duration selector-ineligible cache canary without
+  duplicating the already-accepted bundle-v2 source.
+- [x] Measure cache publication time, peak RSS, physical bytes, and object
+  count.
 - [ ] Run Crimson exact-schema/open, random frame, 70-frame window, traversal,
   cancellation, RSS, and Metal visual-equivalence gates.
 - [ ] Promote or revise the physical profile from that evidence.
