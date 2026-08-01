@@ -1,0 +1,180 @@
+{
+  "schema_id": "palette.diagnostics.subject_mask_full_duration_canary",
+  "schema_version": 1,
+  "date": "2026-07-31",
+  "classification": "selector_ineligible_full_duration_canary",
+  "status": "complete",
+  "run_root": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/subject_mask_storage/full_duration/sleepyfish_cam2010095_20260731_73f7bb5e",
+  "plan": {
+    "payload_digest": "0fb4451df97b871f6eb187becf053305bf9d1139b817ef7d24e063306fc559a8",
+    "file_sha256": "883e1c22b71689996671c2a87a04cb56f3ecccc8aa4ad38eec3c02ac19161146",
+    "n_windows": 22,
+    "n_frames": 1188000,
+    "n_rows": 1169010
+  },
+  "code": {
+    "worker_palette_commit": "73f7bb5e9bf840f7a5ce697857f8130a6115bff4",
+    "publisher_palette_commit": "58a010aa9482919026137a969a6b41cfb75d3ddf",
+    "publisher_worktree_dirty": false
+  },
+  "jobs": {
+    "inference_array": {
+      "job_id": 153237178,
+      "done": 22,
+      "exit": 0
+    },
+    "original_refinement_array": {
+      "job_id": 153237179,
+      "done": 18,
+      "exit": 4,
+      "failed_array_indices": [
+        2,
+        3,
+        5,
+        6
+      ]
+    },
+    "original_dependent_publisher": {
+      "job_id": 153237180,
+      "status": "EXIT",
+      "publication_started": false
+    },
+    "refinement_recovery_array": {
+      "job_id": 153237659,
+      "done": 4,
+      "exit": 0
+    },
+    "registry_bug_publisher": {
+      "job_id": 153237675,
+      "status": "EXIT",
+      "error": "Raw and refined component registries differ.",
+      "planned_targets_exposed": false
+    },
+    "corrected_publisher": {
+      "job_id": 153237730,
+      "status": "DONE",
+      "host": "h06u01",
+      "runtime_seconds": 14680,
+      "cpu_seconds": 17920.0,
+      "max_memory_mib": 4896,
+      "average_memory_mib": 2270.48,
+      "max_swap_mib": 0
+    },
+    "independent_bundle_validator": {
+      "job_id": 153238285,
+      "status": "DONE",
+      "host": "h07u06",
+      "runtime_seconds": 29,
+      "max_memory_mib": 2716,
+      "output_sha256": "6c35013b530c1f1fa9ffbb931f8d9d69a4d1b45c17b6b9b58ef7823825eb9adb"
+    }
+  },
+  "worker_receipt_audit": {
+    "inference_count": 22,
+    "refinement_count": 22,
+    "all_complete": true,
+    "plan_digest_match": true,
+    "result_digests_match": true,
+    "coverage_start": 0,
+    "coverage_stop": 1169010,
+    "coverage_exact": true,
+    "unique_scientific_identities_per_stage": 22,
+    "unique_attempt_digests_per_stage": 22,
+    "unique_receipt_digests_per_stage": 22
+  },
+  "inference_performance": {
+    "source_video_bytes": 308075820594,
+    "logical_roi_cache_bytes": 306448957440,
+    "median_cache_materialization_rows_per_second": 171.5,
+    "median_unet_inference_rows_per_second": 82.4,
+    "decoder_profile": "one_decoder_per_gpu_task_correctness_canary"
+  },
+  "publication": {
+    "duration_seconds": 14673.298812878002,
+    "bundle_elapsed_seconds": 181.27309576400148,
+    "approximate_phase_seconds": {
+      "raw_probability_rematerialization": 3510.089955,
+      "refined_dense_rematerialization": 4878.009051,
+      "full_refined_source_quality_compute": 6085.959039
+    },
+    "analysis_tree": {
+      "file_count": 7689,
+      "apparent_bytes": 6728697933
+    },
+    "members": {
+      "raw": {
+        "run_path": "subject_mask_runs/subject_masks_sleepyfish_subject_mask_full_duration_20260731_73f7bb5e",
+        "logical_mask_bytes": 919346872320,
+        "file_count": 3457,
+        "physical_bytes": 5467856548,
+        "copy_duration_seconds": 87.21567828900152,
+        "manifest_payload_digest": "daaac87be7ba8b58c69ca697385a0484614038f0250eff009d5122ed2b26d83f"
+      },
+      "refined": {
+        "run_path": "refined_subject_masks_runs/refined_subject_masks_sleepyfish_subject_mask_full_duration_20260731_73f7bb5e",
+        "logical_mask_bytes": 1225795829760,
+        "file_count": 4119,
+        "physical_bytes": 929290971,
+        "copy_duration_seconds": 73.9709390019998,
+        "manifest_payload_digest": "9efe2d3e5865d495e40779ecb1be3fcc55953b02bd82ca20125f953c0c2aa78c"
+      },
+      "quality": {
+        "run_path": "subject_mask_quality_runs/subject_mask_quality_sleepyfish_subject_mask_full_duration_20260731_73f7bb5e",
+        "file_count": 30,
+        "physical_bytes": 43688406,
+        "copy_duration_seconds": 0.629061247997015,
+        "manifest_payload_digest": "8ff994ffb3b22403ed6099cb1fd7e0292674427bf9832c98d57bc0f03936cc6b"
+      },
+      "bundle": {
+        "run_path": "subject_mask_bundle_runs/subject_mask_bundle_sleepyfish_subject_mask_full_duration_20260731_73f7bb5e",
+        "manifest_payload_digest": "cfcfd2297985bd097546d8642f02cea5d5556df0487dad0ad1d9a9bafea3ed0b",
+        "component_registry_policy": "raw_and_refined_bound_independently_v1"
+      }
+    }
+  },
+  "component_contract": {
+    "raw_labels": [
+      "subject_body",
+      "eyes_union",
+      "swim_bladder"
+    ],
+    "refined_labels": [
+      "subject_body",
+      "eye_left",
+      "eye_right",
+      "swim_bladder"
+    ],
+    "quality_labels": [
+      "subject_body",
+      "eye_left",
+      "eye_right",
+      "swim_bladder"
+    ],
+    "shared_identity_hashes_match": true
+  },
+  "validation": {
+    "result_payload_digest": "9522ffbb8e15039f00a5835bfa34a2dae0653564ae3f2bac767a398cef1b4a30",
+    "result_payload_digest_recomputed": true,
+    "result_file_sha256": "2979713fac5b50c60b5faeb15e517d323f8be9497642da081a135eafa7dedaa6",
+    "deep_bundle_status": "valid",
+    "direct_consolidated_equivalent": true,
+    "all_member_import_inventories_equal": true,
+    "python_validator_peak_rss_mib": 2716,
+    "python_validator_observed_outer_shard_allocations": {
+      "raw_mib": 156,
+      "refined_gib": 1.12
+    }
+  },
+  "safety": {
+    "subject_mask_authority_present": false,
+    "registry_mutated": false,
+    "production_paths_written": false,
+    "all_bundle_members_selector_ineligible": true,
+    "bundle_selector_eligible": false,
+    "activation_state": "deferred"
+  },
+  "retained_outage_temporary_paths": [
+    ".clip_000001.291ee5f13f5640cdaea0766e3be7faca.tmp",
+    ".clip_000004.66f7ee23d8b848cfbbdee71bbdc0958f.tmp"
+  ]
+}

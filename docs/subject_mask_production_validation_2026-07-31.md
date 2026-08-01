@@ -5,8 +5,10 @@ Date: 2026-07-31
 Status: maintained raw inference, refined finalization, whole-recording, and
 clipped-recording DAGs now produce proof-bound inactive bundle candidates;
 the 22,926-row paired validation-mode gate passes, reference-full remains the
-API default, the isolated full-duration driver passes real-input preflight,
-and no selector, registry authority, or full-duration job has been activated
+API default, and the selector-ineligible 1,188,000-frame canary passes after a
+cluster-outage recovery and bundle-v2 registry correction. No selector,
+registry authority, or production path has been activated; Crimson review and
+production promotion remain open
 
 ## Decision
 
@@ -287,6 +289,59 @@ That `/tmp` run explicitly recorded a dirty development checkout and is
 preflight evidence only; the cluster canary must use a fresh companion and
 plan produced by the final clean deployed commit.
 
+## Completed Full-Duration Canary
+
+The immutable full-duration plan at
+
+`/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/subject_mask_storage/full_duration/sleepyfish_cam2010095_20260731_73f7bb5e`
+
+covered all 22 real clips, 1,188,000 acquisition frames, and 1,169,010 crop
+rows. Its plan digest is
+`0fb4451df97b871f6eb187becf053305bf9d1139b817ef7d24e063306fc559a8`.
+All inference workers and the complete final set of refinement workers are
+bound to commit `73f7bb5e9bf840f7a5ce697857f8130a6115bff4`.
+
+A cluster-wide execution-host outage interrupted four active refinement
+partitions. Eighteen existing refinement receipts were preserved; only the
+four absent partitions were retried. The recovered set passed independent
+hash, identity, and exact contiguous-coverage checks. This is direct evidence
+that immutable clip bundles and terminal receipts provide the intended
+restart boundary.
+
+The first fresh recording publisher then failed closed on a real contract
+error: the three-channel raw union-eye registry differs intentionally from the
+four-channel editable left/right-eye registry. Commit
+`58a010aa9482919026137a969a6b41cfb75d3ddf` introduced bundle manifest v2 and
+binds those registries independently while retaining exact common row, frame,
+crop, and instance identity. The final result records the worker and publisher
+commits separately.
+
+The corrected publisher completed in 14,673.299 seconds with 4,896 MiB LSF
+peak memory and no swap. It imported 5,467,856,548 raw bytes in 3,457 files,
+929,290,971 refined bytes in 4,119 files, and 43,688,406 quality bytes in 30
+files. Recording-level atomic import, validation, and bundle publication took
+181.273 seconds. The final result payload digest is
+`9522ffbb8e15039f00a5835bfa34a2dae0653564ae3f2bac767a398cef1b4a30`.
+The raw and refined pixel tensors represent 0.836 TiB and 1.115 TiB of logical
+decoded bytes. Persisted lifecycle timestamps attribute approximately 3,510 s
+to raw rematerialization, 4,878 s to refined rematerialization, and 6,086 s to
+the full refined-source quality computation.
+
+Independent read-only LSF validation reopened the complete candidate and
+returned `status=valid`. It confirmed direct/consolidated metadata, exact
+member and bundle manifest bindings, completion, and selector ineligibility.
+No root `subject_mask_authority`, registry, or production path changed.
+
+The validation also exposed a remaining operational issue. Python Zarr's
+bounded-sample path allocated complete 156 MiB raw and 1.12 GiB refined outer
+shards. A low-memory login validation failed, while the unchanged validation
+passed in 29 seconds with 2,716 MiB peak RSS on an LSF node. The persisted
+layout is valid, but the validator must be optimized for inner-chunk reads or
+run with an explicit memory envelope.
+
+Complete recovery, storage, identity, and validation evidence is recorded in
+`docs/diagnostics/subject_mask_full_duration_canary_2026-07-31/README.md`.
+
 ## Implementation Checklist
 
 - [x] Preserve reference-full as the default.
@@ -317,10 +372,11 @@ plan produced by the final clean deployed commit.
       partitions. Complete partitions now require exact crop-offset coverage,
       digest-bound collection/clip identities, and independent finalizer
       validation; the ordinary work-package default remains delta-only.
-- [ ] Benchmark full-duration phase time, decoded bytes, peak RSS, and bounded
+- [x] Benchmark full-duration phase time, decoded bytes, peak RSS, and bounded
       reopen reads.
-- [ ] Run one selector-ineligible full-duration production-streaming canary.
-- [ ] Obtain Palette and Crimson correctness/performance review.
+- [x] Run one selector-ineligible full-duration production-streaming canary.
+- [x] Obtain Palette full-duration correctness/publication evidence.
+- [ ] Obtain Crimson correctness/performance review.
 - [ ] Activate a versioned profile only after those gates pass.
 
 ## Safety Boundary
@@ -338,14 +394,13 @@ broader subject-mask, refined-mask, and clipped-inference tests plus 21/21
 focused publication/canary tests.
 
 The first isolated 54,000-frame inference preflight completed successfully and
-published a terminal, selector-ineligible worker bundle. It then exposed that
-the inference writer had labeled every work package as a delta even when the
-driver had supplied the exact complete crop-row partition for one authenticated
-clip. The refinement finalizer correctly failed closed. The writer and
-finalizer now share the explicit complete-partition proof above. A fresh
-single-clip inference/refinement preflight is still required before launching
-all 22 windows; no production selector, registry authority, or archive has been
-changed.
+published a terminal, selector-ineligible worker bundle. It exposed that the
+inference writer had labeled every work package as a delta even when the driver
+had supplied the exact complete crop-row partition for one authenticated clip.
+The refinement finalizer correctly failed closed. The writer and finalizer now
+share the explicit complete-partition proof above, and the completed 22-window
+canary validates that proof at recording scale. No production selector,
+registry authority, or archive has been changed.
 
 The shared inference hardware/runtime contract is documented in
 `docs/inference_accelerator_provenance_2026-07-31.md`. Subject-mask publication
