@@ -25,11 +25,13 @@ from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
+from .storage_contract_catalog import SERIALIZED_REGISTRY_STAGE_IDS
+
 
 REPORT_SCHEMA = "palette.derived_analysis_registry_finalizer.v1"
 TARGET_RECEIPT_SCHEMA = "palette.chaser_analytics_target_receipt.v1"
 _DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
-_SUPPORTED_STAGES = frozenset({"eye_angles", "track_kinematics"})
+_SUPPORTED_STAGES = SERIALIZED_REGISTRY_STAGE_IDS
 
 
 @dataclass(frozen=True)

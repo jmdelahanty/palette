@@ -33,7 +33,12 @@ STAGE_RUN_PARENTS: dict[str, tuple[str, ...]] = {
     # names retain their online/offline scope (for example
     # ``offline/track_001``) beneath this parent.
     "track_kinematics": ("analysis/track_kinematics_runs",),
+    "swim_bouts": ("analysis/swim_bout_runs",),
+    "bout_kinematics": ("analysis/bout_kinematics_runs",),
     "eye_angles": ("analysis/eye_angle_runs",),
+    "subject_shape": ("analysis/subject_shape_runs",),
+    "tail_kinematics": ("analysis/tail_kinematics_runs",),
+    "stimulus_response": ("analysis/stimulus_response_runs",),
 }
 
 

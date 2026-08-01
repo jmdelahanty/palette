@@ -7,6 +7,9 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Mapping
 
+from fisheye.analysis_workflows.storage_contract_catalog import (
+    DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
+)
 from fisheye.registry.stage_catalog import canonical_stage_id
 
 
@@ -14,14 +17,9 @@ STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
     "refined_keypoints": ("refined_keypoints_runs",),
     "refined_subject_masks": ("refined_subject_masks_runs",),
     "tracks": ("tracking_runs",),
-    "track_kinematics": ("analysis/track_kinematics_runs/offline",),
-    "swim_bouts": ("analysis/swim_bout_runs",),
-    "bout_kinematics": ("analysis/bout_kinematics_runs",),
-    "eye_angles": ("analysis/eye_angle_runs",),
-    "subject_shape": ("analysis/subject_shape_runs",),
-    "tail_kinematics": ("analysis/tail_kinematics_runs",),
     "tail_posture_view": ("analysis/tail_posture_view_runs",),
     "bout_classification": ("analysis/bout_classification_runs",),
+    **DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
 }
 POINTER_KEYS = ("latest_complete", "latest_materialized", "latest")
 COMPLETE_STATUSES = frozenset({"complete", "completed", "ok", "success"})

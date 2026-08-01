@@ -2,8 +2,8 @@
 
 Date: 2026-08-01
 
-Status: executable contract catalog added; registry completion reconciliation
-pending a clean handoff from the active registry-publication branch
+Status: executable contract catalog and serialized track/eye registry
+publication reconciled; remaining families are intentionally not activated
 
 ## Scope
 
@@ -51,6 +51,7 @@ family:
 - the module and constant names that own schema, method, and layout versions;
 - the production materializer module;
 - the current physical-policy owner; and
+- the registry-publication mode; and
 - whether the shared byte planner has been adopted.
 
 The catalog resolves live constants from each writer rather than copying schema
@@ -74,12 +75,13 @@ multiple field arrays and conditional paths may be mutually exclusive.
 
 ## Registry And Selection Boundary
 
-`analysis_workflows.availability` already knows the derived run-parent paths,
-but the shared registry/status mapping in `shared.stage_run_groups` does not yet
-contain the complete derived family set. An active parallel branch is adding
-runtime completion projection for track kinematics and eye angles. That branch
-must be checkpointed and reconciled before this work changes the overlapping
-registry files.
+The executable catalog now owns derived workflow-availability parents, including
+the scoped offline selection parent for track kinematics. The shared
+registry/status mapping includes the canonical root parent for every in-scope
+family. Track-kinematics and eye-angle runtime publication additionally use a
+serialized registry finalizer so parallel analysis workers never contend for
+the SQLite writer lock. The other families have paths registered for discovery
+but do not gain new completion projection or activation behavior here.
 
 Publication activation remains separate from storage reconciliation. Merging
 this catalog and documentation must not change production pointers, eligibility,
@@ -93,8 +95,10 @@ or selector policy.
 - [x] Add an executable writer-backed schema/publication catalog.
 - [x] Correct eye-angle, subject-shape, and tail-kinematics versions in the
       canonical matrix.
-- [ ] Reconcile the registry-publication agent's clean commit.
-- [ ] Replace duplicate derived run-parent maps with one shared mapping.
+- [x] Reconcile the registry-publication agent's clean commit.
+- [x] Replace the duplicated workflow-availability declarations with
+      catalog-owned derived run-parent mappings, while preserving the scoped
+      offline track-selection parent.
 - [ ] Add completion projection for the remaining maintained derived families,
       with family-specific activation gates.
 - [ ] Inventory exact per-array shapes, dtypes, access classes, chunks, shards,
