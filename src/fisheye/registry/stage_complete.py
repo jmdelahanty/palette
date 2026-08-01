@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Tuple, Union
 
@@ -34,6 +36,7 @@ InvalidateStepsFn = Callable[..., None]
 
 
 _STEP_RUN_PARENTS = STAGE_RUN_PARENTS
+_DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 
 _STAGE_ARRAY_SPEC_ALIASES = {
     # Defensive aliases for legacy callers and tests; current production
@@ -43,6 +46,7 @@ _STAGE_ARRAY_SPEC_ALIASES = {
     "assign_ids": "arena_assignment",
     "track": "tracking",
     "tracks": "tracking",
+    "eye_angles": "eye_angle",
 }
 
 # Stage-array specs were originally diagnostic contracts and still need a
@@ -91,15 +95,23 @@ def _resolve_completion_run_group(
             return None
 
     def _get_child_from_parent(parent: zarr.Group, name: str) -> Optional[zarr.Group]:
-        try:
-            if name in parent:
-                return parent[name]
-        except Exception:
-            pass
-        try:
-            candidate = parent.get(name)
-        except Exception:
-            candidate = None
+        path_parts = [part for part in str(name).strip("/").split("/") if part]
+        if not path_parts or any(part in {".", ".."} for part in path_parts):
+            return None
+        candidate: Any = parent
+        for part in path_parts:
+            try:
+                if part in candidate:
+                    candidate = candidate[part]
+                    continue
+            except Exception:
+                pass
+            try:
+                candidate = candidate.get(part)
+            except Exception:
+                return None
+            if candidate is None:
+                return None
         return candidate
 
     if completion_group_path:
@@ -170,10 +182,7 @@ def _resolve_completion_run_group(
                     if direct_child is not None:
                         return direct_parent, direct_child
     for parent_name in _STEP_RUN_PARENTS.get(step_name, (f"{step_name}_runs",)):
-        try:
-            parent = root.get(parent_name)
-        except Exception:
-            parent = None
+        parent = _get_child_from_parent(root, str(parent_name))
         if parent is None:
             direct_parent = _open_direct_path(str(parent_name))
             if direct_parent is None:
@@ -348,10 +357,13 @@ def emit_stage_completion(
     resolve_dataset_id_fn: ResolveDatasetIdFn = resolve_dataset_id,
     upsert_step_status_fn: UpsertStepStatusFn = upsert_recording_step_status,
     invalidate_steps_fn: InvalidateStepsFn = invalidate_downstream_steps,
+    require_complete_invalidation: bool = False,
 ) -> bool:
     registry_db: Optional[Registry] = None
     close_registry = False
     try:
+        if os.environ.get(_DISABLE_REGISTRY_WRITES_ENV) == "1":
+            return False
         registry_db, close_registry = _resolve_registry_input(
             registry,
             auto_registry_from_env=auto_registry_from_env,
@@ -397,46 +409,70 @@ def emit_stage_completion(
             )
         metadata_session_uuid = getattr(metadata, "session_uuid", None)
         metadata_recording_id = getattr(metadata, "recording_id", None)
-        dataset_id = metadata.dataset_id
-        resolve_effective_dataset_id = getattr(registry_db, "resolve_effective_dataset_id", None)
-        if callable(resolve_effective_dataset_id):
-            dataset_id = resolve_effective_dataset_id(
-                metadata.dataset_id,
-                session_uuid=metadata_session_uuid,
-                zarr_path=resolved_path,
-            )
-        if upsert_dataset_row:
-            registry_db.upsert_dataset(
-                dataset_id,
-                session_uuid=metadata_session_uuid,
-                zarr_path=resolved_path,
-                recording_id=metadata_recording_id,
-                zarr_use=getattr(metadata, "zarr_use", None),
-                zarr_purpose=getattr(metadata, "zarr_purpose", None),
-            )
-        upsert_step_status_fn(
-            registry_db,
-            dataset_id=dataset_id,
-            recording_id=metadata_recording_id,
-            step_name=step_name,
-            status=status,
-            run_name=run_name,
-            method=method,
-            coverage_pct=coverage_pct,
-            review_status_json=dict(review_status_json) if isinstance(review_status_json, Mapping) else None,
-            details_json=_merge_validation_details(details_json, validation_details),
-            source=source,
-            zarr_mtime_ns=safe_zarr_mtime_ns(resolved_path),
+        # Keep every registry mutation for one stage publication inside one
+        # short SQLite writer transaction.  Zarr validation above remains
+        # outside the lock so parallel workers do not hold the shared registry
+        # while reading PRFS metadata.
+        transaction_factory = getattr(registry_db, "_transaction_context", None)
+        transaction = (
+            transaction_factory() if callable(transaction_factory) else nullcontext()
         )
-        if invalidate_on_ok and status == "ok":
-            invalidate_steps_fn(
+        with transaction:
+            dataset_id = metadata.dataset_id
+            resolve_effective_dataset_id = getattr(
+                registry_db, "resolve_effective_dataset_id", None
+            )
+            if callable(resolve_effective_dataset_id):
+                dataset_id = resolve_effective_dataset_id(
+                    metadata.dataset_id,
+                    session_uuid=metadata_session_uuid,
+                    zarr_path=resolved_path,
+                )
+            if upsert_dataset_row:
+                registry_db.upsert_dataset(
+                    dataset_id,
+                    session_uuid=metadata_session_uuid,
+                    zarr_path=resolved_path,
+                    recording_id=metadata_recording_id,
+                    zarr_use=getattr(metadata, "zarr_use", None),
+                    zarr_purpose=getattr(metadata, "zarr_purpose", None),
+                )
+            upsert_step_status_fn(
                 registry_db,
                 dataset_id=dataset_id,
-                step_name=step_name,
-                source=source,
                 recording_id=metadata_recording_id,
-                trigger_run_name=trigger_run_name if trigger_run_name is not None else run_name,
+                step_name=step_name,
+                status=status,
+                run_name=run_name,
+                method=method,
+                coverage_pct=coverage_pct,
+                review_status_json=(
+                    dict(review_status_json)
+                    if isinstance(review_status_json, Mapping)
+                    else None
+                ),
+                details_json=_merge_validation_details(
+                    details_json, validation_details
+                ),
+                source=source,
+                zarr_mtime_ns=safe_zarr_mtime_ns(resolved_path),
             )
+            if invalidate_on_ok and status == "ok":
+                invalidation = invalidate_steps_fn(
+                    registry_db,
+                    dataset_id=dataset_id,
+                    step_name=step_name,
+                    source=source,
+                    recording_id=metadata_recording_id,
+                    trigger_run_name=(
+                        trigger_run_name if trigger_run_name is not None else run_name
+                    ),
+                )
+                if require_complete_invalidation and invalidation.get("errors"):
+                    raise RuntimeError(
+                        "downstream registry invalidation failed: "
+                        + "; ".join(str(item) for item in invalidation["errors"])
+                    )
         return True
     except Exception as exc:
         if console is not None:

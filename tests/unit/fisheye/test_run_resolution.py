@@ -218,3 +218,7 @@ def test_inventory_latest_reads_registry_view(tmp_path: Path) -> None:
 def test_stage_run_group_map_includes_live_background_bridge() -> None:
     assert stage_run_parent_paths("background") == ("background_runs", "background")
     assert stage_run_parent_paths("refined_detect") == ("refined_detect_runs", "refined_runs")
+    assert stage_run_parent_paths("eye_angles") == ("analysis/eye_angle_runs",)
+    assert stage_run_parent_paths("track_kinematics") == (
+        "analysis/track_kinematics_runs",
+    )

@@ -124,6 +124,7 @@ def execute_workflow_plan(
     workflow_payload: Mapping[str, object],
     apply: bool,
     report_path: Path | None,
+    defer_registry_writes: bool = True,
 ) -> dict[str, object]:
     """Run commands serially, verifying completion before advancing."""
 
@@ -155,6 +156,11 @@ def execute_workflow_plan(
         "lsf_job_id": os.environ.get("LSB_JOBID"),
         "palette_git": get_git_info(Path(__file__).resolve().parents[3]),
         "zarr_path": str(zarr_path),
+        "registry_write_mode": (
+            "deferred_to_serial_finalizer"
+            if defer_registry_writes
+            else "inline_explicit"
+        ),
         "workflow": dict(workflow_payload),
         "execution_plan": execution_plan.to_dict(),
         "node_results": results,
@@ -176,6 +182,10 @@ def execute_workflow_plan(
         "MPLCONFIGDIR",
         str((report_path or Path("/tmp/workflow.json")).parent / "matplotlib"),
     )
+    if defer_registry_writes:
+        environment["PALETTE_DISABLE_REGISTRY_WRITES"] = "1"
+    else:
+        environment.pop("PALETTE_DISABLE_REGISTRY_WRITES", None)
 
     for command in execution_plan.commands:
         result = _result_for_node(results, command.node_id)
@@ -275,6 +285,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Execute serially inside LSF. Default renders a read-only dry run.",
     )
+    parser.add_argument(
+        "--inline-registry",
+        action="store_true",
+        help=(
+            "Allow stage subprocesses to update SQLite directly. The production "
+            "default defers writes to a dependent serial registry finalizer."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -321,6 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             workflow_payload=workflow.to_dict(),
             apply=bool(args.apply),
             report_path=args.report.expanduser() if args.report is not None else None,
+            defer_registry_writes=not bool(args.inline_registry),
         )
     except (KeyError, ValueError, WorkflowExecutionError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -23,6 +23,9 @@ QUEUE=""
 NCORES=4
 MEM_GB=16
 MAX_ACTIVE=8
+SUBMIT_REGISTRY_FINALIZER=1
+REGISTRY_FINALIZER_MEM_GB=8
+REGISTRY_FINALIZER_WALLTIME="1:00"
 LOG_DIR="/groups/johnson/johnsonlab/jeremy/recordings/logs/chaser_analytics/bsub_submissions"
 RUN_ID_OVERRIDE=""
 DRY_RUN=0
@@ -169,6 +172,10 @@ LSF options:
   --ncores N                  Cores per array task (default: 4).
   --mem-gb N                  Memory per task in GB (default: 16).
   --max-active N              LSF array concurrency, %[N] (default: 8).
+  --no-registry-finalizer     Leave completion receipts unapplied; array workers
+                              still never write SQLite directly.
+  --registry-finalizer-mem-gb N
+  --registry-finalizer-walltime H:MM
   --log-dir PATH              Submission run dir parent.
   --run-id ID                 Stable run id. Defaults to UTC timestamp.
   --dry-run                   Write manifest/job script and print bsub command; do not submit.
@@ -264,6 +271,9 @@ while [[ $# -gt 0 ]]; do
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --max-active) MAX_ACTIVE="$2"; shift 2;;
+    --no-registry-finalizer) SUBMIT_REGISTRY_FINALIZER=0; shift;;
+    --registry-finalizer-mem-gb) REGISTRY_FINALIZER_MEM_GB="$2"; shift 2;;
+    --registry-finalizer-walltime) REGISTRY_FINALIZER_WALLTIME="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --run-id) RUN_ID_OVERRIDE="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
@@ -367,6 +377,10 @@ fi
 
 if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
   echo "--source must be filesystem or registry, got: $SOURCE" >&2
+  exit 2
+fi
+if [[ ! "$REGISTRY_FINALIZER_MEM_GB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--registry-finalizer-mem-gb must be a positive integer" >&2
   exit 2
 fi
 for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
@@ -696,6 +710,9 @@ safe_name="$(basename "$zarr_path" | tr -c 'A-Za-z0-9._-' '_')"
 json_dir="$RUN_DIR/json/${index}_${safe_name}"
 mkdir -p "$json_dir" "$RUN_DIR/status" "$RUN_DIR/matplotlib/${index}"
 export MPLCONFIGDIR="$RUN_DIR/matplotlib/${index}"
+# Array elements publish Zarr artifacts only.  The dependent one-slot
+# finalizer owns every SQLite mutation for this campaign.
+export PALETTE_DISABLE_REGISTRY_WRITES=1
 
 cd "$REPO_ROOT"
 if [[ "$(git rev-parse HEAD)" != "$EXPECTED_COMMIT" ]]; then
@@ -717,7 +734,9 @@ if [[ "$NO_INTERACTIVE_SPEC" == "1" ]]; then interactive_args+=(--no-interactive
 
 write_status() {
   local state="$1"
-  "$py" - "$RUN_DIR/status/${index}_${safe_name}.json" "$state" "$index" "$zarr_path" <<'PY'
+  "$py" - "$RUN_DIR/status/${index}_${safe_name}.json" "$state" "$index" "$zarr_path" \
+    "$EXPECTED_COMMIT" "$RUN_MOVEMENT" "$TRACK_RUN" "$RUN_EYE_ANGLES" \
+    "$EYE_ANGLE_RUN" "$EYE_ANGLE_OUTPUT_RUN" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -725,9 +744,24 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 payload = {
+    "schema_id": "palette.chaser_analytics_target_receipt.v1",
+    "schema_version": 1,
     "status": sys.argv[2],
+    "registry_write_mode": "deferred_to_serial_finalizer",
     "array_index": int(sys.argv[3]),
     "zarr_path": sys.argv[4],
+    "palette_commit": sys.argv[5],
+    "requested_publications": {
+        "track_kinematics": {
+            "requested": sys.argv[6] == "1",
+            "run_name": f"offline/{sys.argv[7]}",
+        },
+        "eye_angles": {
+            "requested": sys.argv[8] == "1",
+            "input_selector": sys.argv[9],
+            "output_run_name": sys.argv[10],
+        },
+    },
     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
 }
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1016,6 +1050,51 @@ write_status complete
 JOB
 chmod +x "$JOB_SCRIPT"
 
+FINALIZER_SCRIPT="$RUN_DIR/run_registry_finalizer.sh"
+FINALIZER_REPORT="$RUN_DIR/registry_finalizer.json"
+DERIVED_STAGE_SELECTORS=()
+if [[ "$RUN_MOVEMENT" == "1" ]]; then
+  DERIVED_STAGE_SELECTORS+=("track_kinematics=offline/${TRACK_RUN}")
+fi
+if [[ "$RUN_EYE_ANGLES" == "1" ]]; then
+  DERIVED_STAGE_SELECTORS+=("eye_angles=latest")
+fi
+
+repo_q="$(printf '%q' "$PALETTE_REPO")"
+commit_q="$(printf '%q' "$EXPECTED_COMMIT")"
+targets_q="$(printf '%q' "$RUN_DIR/recordings.txt")"
+status_q="$(printf '%q' "$RUN_DIR/status")"
+registry_q="$(printf '%q' "$REGISTRY")"
+report_q="$(printf '%q' "$FINALIZER_REPORT")"
+stage_args=""
+for selector in "${DERIVED_STAGE_SELECTORS[@]}"; do
+  printf -v selector_q '%q' "$selector"
+  stage_args+=" --stage-selector ${selector_q}"
+done
+cat >"$FINALIZER_SCRIPT" <<JOB
+#!/usr/bin/env bash
+set -euo pipefail
+umask 0002
+cd ${repo_q}
+[[ "\$(git rev-parse HEAD)" == ${commit_q} ]] || {
+  printf 'Palette commit mismatch in chaser registry finalizer.\n' >&2
+  exit 2
+}
+[[ -z "\$(git status --porcelain)" ]] || {
+  printf 'Refusing dirty Palette checkout in chaser registry finalizer.\n' >&2
+  exit 2
+}
+unset PALETTE_DISABLE_REGISTRY_WRITES
+export PYTHONPATH=${repo_q}/src:${repo_q}\${PYTHONPATH:+:\${PYTHONPATH}}
+scripts/py -m fisheye.analysis_workflows.registry_finalize \
+  --target-list ${targets_q} \
+  --status-dir ${status_q}${stage_args} \
+  --registry ${registry_q} \
+  --apply \
+  --output-json ${report_q}
+JOB
+chmod +x "$FINALIZER_SCRIPT"
+
 BSUB_ARGS=(-J "chaser_analytics[1-${target_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
 if [[ "${#DEPENDENCY_DONE[@]}" -gt 0 ]]; then
   dependency_expression=""
@@ -1035,6 +1114,10 @@ echo "run_dir: $RUN_DIR"
 echo "target_count: $target_count"
 echo "resources: ncores=$NCORES mem_gb=$MEM_GB max_active=$MAX_ACTIVE queue=${QUEUE:-<default>}"
 echo "job_script: $JOB_SCRIPT"
+echo "registry_write_mode: deferred_to_serial_finalizer"
+echo "registry_finalizer: $([[ "$SUBMIT_REGISTRY_FINALIZER" == "1" ]] && echo enabled || echo disabled)"
+echo "registry_finalizer_script: $FINALIZER_SCRIPT"
+echo "registry_finalizer_report: $FINALIZER_REPORT"
 printf 'bsub_command:'
 printf ' %q' "${BSUB_COMMAND[@]}"
 printf '\n'
@@ -1061,3 +1144,36 @@ if [[ -z "$job_id" ]]; then
   exit 2
 fi
 printf 'job_id=%s\n' "$job_id"
+
+if [[ "$SUBMIT_REGISTRY_FINALIZER" == "1" && "${#DERIVED_STAGE_SELECTORS[@]}" -gt 0 ]]; then
+  FINALIZER_BSUB_ARGS=(
+    -J "chaser_registry_${RUN_ID}"
+    -n 1
+    -W "$REGISTRY_FINALIZER_WALLTIME"
+    -R "span[hosts=1]"
+    -R "rusage[mem=${REGISTRY_FINALIZER_MEM_GB}G]"
+    -w "done(${job_id})"
+    -oo "$RUN_DIR/registry_finalizer_%J.out"
+    -eo "$RUN_DIR/registry_finalizer_%J.err"
+  )
+  if [[ -n "$QUEUE" ]]; then FINALIZER_BSUB_ARGS+=(-q "$QUEUE"); fi
+  FINALIZER_COMMAND=(bsub "${FINALIZER_BSUB_ARGS[@]}" bash "$FINALIZER_SCRIPT")
+  if command -v bsub >/dev/null 2>&1; then
+    finalizer_output="$("${FINALIZER_COMMAND[@]}")"
+  else
+    printf -v remote_finalizer_command '%q ' "${FINALIZER_COMMAND[@]}"
+    finalizer_output="$(ssh "$SUBMIT_HOST" "$remote_finalizer_command")"
+  fi
+  printf '%s\n' "$finalizer_output"
+  finalizer_job_id="$(printf '%s\n' "$finalizer_output" | sed -n 's/^Job <\([0-9][0-9]*\)>.*/\1/p' | head -n 1)"
+  [[ -n "$finalizer_job_id" ]] || {
+    echo "Could not parse registry finalizer LSF job ID" >&2
+    exit 2
+  }
+  printf 'registry_finalizer_job_id=%s\n' "$finalizer_job_id"
+  printf 'registry_finalizer_dependency=done(%s)\n' "$job_id"
+  printf 'registry_finalizer_report=%s\n' "$FINALIZER_REPORT"
+elif [[ "${#DERIVED_STAGE_SELECTORS[@]}" -gt 0 ]]; then
+  echo "Registry writes were deferred. Run the rendered finalizer after the array succeeds:"
+  echo "  bash $(printf '%q' "$FINALIZER_SCRIPT")"
+fi

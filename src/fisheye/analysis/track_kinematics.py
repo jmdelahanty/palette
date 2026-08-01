@@ -103,6 +103,9 @@ from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
 )
+from fisheye.shared.derived_analysis_registry_status import (
+    emit_track_kinematics_stage_completion,
+)
 from fisheye.shared.run_provenance import (
     build_run_provenance_from_stage_record,
     sha256_payload,
@@ -13715,6 +13718,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             )
                         ),
                     )
+                    registry_root = open_zarr_root(output_path, mode="r")
+                    emit_track_kinematics_stage_completion(
+                        registry_root,
+                        output_path,
+                        run_group=registry_root[
+                            f"analysis/track_kinematics_runs/online/{run_name}"
+                        ],
+                        run_name=run_name,
+                        run_type="online",
+                        source="runtime_track_kinematics_online",
+                        console=console,
+                    )
 
                     console.print(
                         f"[green]✓[/green] Saved track kinematics run to [bold]analysis/track_kinematics_runs/online/{run_name}[/bold]"
@@ -14233,6 +14248,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                         ),
                                     )
                                 ),
+                            )
+                            registry_root = open_zarr_root(output_path, mode="r")
+                            emit_track_kinematics_stage_completion(
+                                registry_root,
+                                output_path,
+                                run_group=registry_root[
+                                    "analysis/track_kinematics_runs/offline/"
+                                    f"{offline_run_name}"
+                                ],
+                                run_name=offline_run_name,
+                                run_type="offline",
+                                source="runtime_track_kinematics_offline",
+                                console=console,
                             )
 
                         console.print(

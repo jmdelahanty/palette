@@ -56,6 +56,15 @@ _SHAPE_ARRAY_PATHS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_registry_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mod,
+        "emit_eye_angle_stage_completion",
+        lambda *args, **kwargs: False,
+    )
+
+
 def _fixture_keypoint_label_authority_record(
     *,
     row_identity_ref: str,
@@ -1621,6 +1630,22 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     scratch = tmp_path / "scratch"
     _build_source(source)
     _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    registry_events: list[dict[str, object]] = []
+
+    def capture_registry(root, zarr_path, **kwargs):  # type: ignore[no-untyped-def]
+        run = kwargs["run_group"]
+        parent = root["analysis/eye_angle_runs"]
+        assert run.attrs["palette_run_completion_status"] == "complete"
+        assert run.attrs["stage_selector_eligible"] is True
+        assert parent.attrs["latest"] == "eye_1"
+        registry_events.append({"zarr_path": zarr_path, **kwargs})
+        return True
+
+    monkeypatch.setattr(
+        mod,
+        "emit_eye_angle_stage_completion",
+        capture_registry,
+    )
 
     result = mod.materialize_eye_angles(
         source,
@@ -1650,6 +1675,10 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     assert result["publish"]["pre_pointer_validation"]["valid"] is True
     assert result["publish"]["final_validation"]["valid"] is True
     assert result["publish"]["source_revision_audit"]["status"] == "current"
+    assert result["publish"]["registry_updated"] is True
+    assert len(registry_events) == 1
+    assert registry_events[0]["run_name"] == "eye_1"
+    assert registry_events[0]["source"] == "eye_angle_atomic_materializer"
 
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     parent = root["analysis/eye_angle_runs"]

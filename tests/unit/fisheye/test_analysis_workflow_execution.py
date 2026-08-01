@@ -418,6 +418,7 @@ def test_apply_verifies_completed_run_before_reporting_success(
     def fake_run(argv, *, check, env):
         assert check is False
         assert env["MPLBACKEND"] == "Agg"
+        assert env["PALETTE_DISABLE_REGISTRY_WRITES"] == "1"
         parent = zarr_path / "analysis" / "swim_bout_runs"
         _write_group(parent)
         _write_group(
@@ -442,6 +443,7 @@ def test_apply_verifies_completed_run_before_reporting_success(
     )
 
     assert payload["status"] == "complete"
+    assert payload["registry_write_mode"] == "deferred_to_serial_finalizer"
     swim_result = next(
         result
         for result in payload["node_results"]

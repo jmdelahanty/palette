@@ -46,6 +46,9 @@ from fisheye.shared.coordinate_identity import (
     OBSERVATION_INSTANCE_DOMAIN,
 )
 from fisheye.shared.coordinate_record import bind_persisted_coordinate_record
+from fisheye.shared.derived_analysis_registry_status import (
+    emit_eye_angle_stage_completion,
+)
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
@@ -6336,6 +6339,17 @@ def run(
         parent_group.attrs["latest_complete"] = resolved_run_name
         parent_group.attrs["latest"] = resolved_run_name
         run_group.attrs["stage_selector_eligible"] = True
+        registry_root = open_zarr_root(args.zarr_path, mode="r")
+        emit_eye_angle_stage_completion(
+            registry_root,
+            args.zarr_path,
+            run_group=registry_root[
+                f"analysis/eye_angle_runs/{resolved_run_name}"
+            ],
+            run_name=resolved_run_name,
+            source="runtime_eye_angle_analysis",
+            console=console,
+        )
 
     if not args.quiet:
         console.print(

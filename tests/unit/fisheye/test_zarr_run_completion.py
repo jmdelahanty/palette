@@ -13,6 +13,7 @@ import zarr
 from fisheye.registry import stage_complete as stage_complete_mod
 from fisheye.registry.db import DatasetMetadata, Registry
 from fisheye.registry.stage_complete import emit_stage_completion
+from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared import zarr_run_completion as completion_mod
 from fisheye.utils import backfill_completion_epoch as backfill_mod
 from fisheye.utils import triage_completion_epoch_blockers as triage_mod
@@ -251,6 +252,28 @@ def _add_valid_track_kinematics_surface(run: FakeGroup) -> None:
         "num_tracks",
     ):
         run.attrs[attr_name] = "ok"
+
+
+def _add_valid_eye_angle_surface(run: FakeGroup) -> None:
+    for attr_name in (
+        "report_version",
+        "provenance",
+        "source_eye_geometry_stage",
+        "source_eye_geometry_run",
+        "source_keypoint_run",
+        "source_keypoints_run",
+        "fps",
+        "num_detections",
+        "num_frames",
+    ):
+        run.attrs[attr_name] = "ok"
+    run.attrs["status"] = "complete"
+    support = run.require_group("support")
+    support["frame_indices"] = FakeArray((2,), "int64")
+    support["time_seconds"] = FakeArray((2,), "float64")
+    support["ellipse_major"] = FakeArray((2,), "float64")
+    support["ellipse_minor"] = FakeArray((2,), "float64")
+    support["ellipse_ratio"] = FakeArray((2,), "float64")
 
 
 _PROMOTED_STAGE_COMPLETION_CASES = (
@@ -2739,6 +2762,180 @@ def test_emit_stage_completion_uses_explicit_nested_completion_group_path(tmp_pa
     assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
     assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]
     assert details["stage_array_validation_enforced"] is True  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("step_name", "parent_path", "run_name", "add_surface", "expected_stage"),
+    (
+        (
+            "eye_angles",
+            "analysis/eye_angle_runs",
+            "eye_001",
+            _add_valid_eye_angle_surface,
+            "eye_angle",
+        ),
+        (
+            "track_kinematics",
+            "analysis/track_kinematics_runs",
+            "offline/track_001",
+            _add_valid_track_kinematics_surface,
+            "track_kinematics",
+        ),
+    ),
+)
+def test_emit_stage_completion_resolves_nested_analysis_run_parents(
+    tmp_path: Path,
+    step_name: str,
+    parent_path: str,
+    run_name: str,
+    add_surface,
+    expected_stage: str,
+) -> None:
+    root = FakeGroup()
+    parent = root.require_group(parent_path)
+    run = parent.require_group(run_name)
+    add_surface(run)
+    mark_run_started(run, run_name=run_name, stage=step_name)
+    mark_run_complete(
+        run,
+        parent_group=parent,
+        run_name=run_name,
+        run_provenance=_valid_run_provenance(),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name=step_name,
+        status="ok",
+        source="unit_test",
+        run_name=run_name,
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    details = captured["details_json"]
+    assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
+    assert details["stage_array_validation_stage"] == expected_stage  # type: ignore[index]
+
+
+def test_emit_stage_completion_rejects_parent_escape_run_name(tmp_path: Path) -> None:
+    root = FakeGroup()
+    root.require_group("analysis/track_kinematics_runs/offline/track_001")
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="track_kinematics",
+        status="ok",
+        source="unit_test",
+        run_name="../track_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: None,
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is False
+
+
+def test_emit_stage_completion_honors_global_deferred_registry_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PALETTE_DISABLE_REGISTRY_WRITES", "1")
+    monkeypatch.setattr(
+        "fisheye.registry.stage_complete._resolve_registry_input",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("deferred worker opened the registry")
+        ),
+    )
+
+    assert (
+        emit_stage_completion(
+            None,
+            tmp_path / "archive.zarr",
+            step_name="eye_angles",
+            status="missing",
+            source="unit_test",
+        )
+        is False
+    )
+
+
+def test_emit_stage_completion_rolls_back_status_history_and_cascade_together(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "archive.zarr"
+    registry.upsert_dataset(
+        "dataset_atomic",
+        session_uuid=None,
+        zarr_path=zarr_path,
+        recording_id="recording_atomic",
+        zarr_use="analysis",
+    )
+
+    def invalidation_with_error(registry_arg, **kwargs):
+        upsert_recording_step_status(
+            registry_arg,
+            dataset_id=kwargs["dataset_id"],
+            recording_id=kwargs["recording_id"],
+            step_name="stimulus_response",
+            status="missing",
+            source="unit_test_cascade",
+        )
+        return {"steps_invalidated": ["stimulus_response"], "errors": ["boom"]}
+
+    metadata = type(
+        "Metadata",
+        (),
+        {
+            "dataset_id": "dataset_atomic",
+            "recording_id": "recording_atomic",
+            "session_uuid": None,
+        },
+    )()
+    wrote = emit_stage_completion(
+        None,
+        zarr_path,
+        step_name="eye_angles",
+        status="ok",
+        source="unit_test",
+        registry=registry,
+        metadata=metadata,
+        upsert_dataset_row=False,
+        invalidate_steps_fn=invalidation_with_error,
+        require_complete_invalidation=True,
+    )
+
+    assert wrote is False
+    assert registry.conn.execute(
+        "SELECT COUNT(*) FROM recording_step_status "
+        "WHERE dataset_id = 'dataset_atomic';"
+    ).fetchone()[0] == 0
+    assert registry.conn.execute(
+        "SELECT COUNT(*) FROM recording_step_status_history "
+        "WHERE dataset_id = 'dataset_atomic';"
+    ).fetchone()[0] == 0
+    registry.close()
 
 
 def test_emit_stage_completion_resolves_detect_quality_by_direct_path_when_parent_metadata_stale(

@@ -6,6 +6,7 @@ ZARR_PATH=""
 EXECUTION_ID=""
 CONFIG=""
 PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/palette}"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 LOG_DIR=""
 QUEUE=""
@@ -13,6 +14,9 @@ NCORES=4
 MEM_GB=32
 WALLTIME="24:00"
 SUBMIT=0
+SUBMIT_REGISTRY_FINALIZER=1
+REGISTRY_FINALIZER_MEM_GB=8
+REGISTRY_FINALIZER_WALLTIME="1:00"
 KINEMATICS_SAMPLE_RATE_HZ=""
 ACTIVITY_SPATIAL_BIN_SIZE_S=""
 TARGETS=()
@@ -41,6 +45,10 @@ Options:
   --kinematics-sample-rate-hz HZ
   --activity-spatial-bin-size-s S
   --palette-repo PATH          Cluster-visible Palette checkout
+  --registry PATH              Shared Palette registry
+  --no-registry-finalizer      Leave receipt unapplied; workers still never write SQLite
+  --registry-finalizer-mem-gb N
+  --registry-finalizer-walltime H:MM
   --submit-host HOST           SSH poller used when bsub is unavailable locally
   --log-dir PATH               Submission root; defaults beside the recording
   --queue NAME                 LSF queue; default is the cluster default
@@ -73,6 +81,10 @@ while [[ $# -gt 0 ]]; do
     --kinematics-sample-rate-hz) KINEMATICS_SAMPLE_RATE_HZ="$2"; shift 2;;
     --activity-spatial-bin-size-s) ACTIVITY_SPATIAL_BIN_SIZE_S="$2"; shift 2;;
     --palette-repo) PALETTE_REPO="$2"; shift 2;;
+    --registry) REGISTRY="$2"; shift 2;;
+    --no-registry-finalizer) SUBMIT_REGISTRY_FINALIZER=0; shift;;
+    --registry-finalizer-mem-gb) REGISTRY_FINALIZER_MEM_GB="$2"; shift 2;;
+    --registry-finalizer-walltime) REGISTRY_FINALIZER_WALLTIME="$2"; shift 2;;
     --submit-host) SUBMIT_HOST="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
@@ -92,11 +104,15 @@ done
   fail "unsafe --execution-id: $EXECUTION_ID"
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be a positive integer"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be a positive integer"
+[[ "$REGISTRY_FINALIZER_MEM_GB" =~ ^[1-9][0-9]*$ ]] || \
+  fail "--registry-finalizer-mem-gb must be a positive integer"
 [[ -f "$ZARR_PATH/zarr.json" ]] || fail "analysis Zarr metadata not found: $ZARR_PATH"
 [[ -e "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable"
 [[ -f "$PALETTE_REPO/src/fisheye/utils/execute_analysis_workflow.py" ]] || \
   fail "Palette checkout does not contain the analysis-workflow executor"
+[[ -f "$PALETTE_REPO/src/fisheye/analysis_workflows/registry_finalize.py" ]] || \
+  fail "Palette checkout does not contain the analysis registry finalizer"
 [[ -z "$(git -C "$PALETTE_REPO" status --porcelain)" ]] || \
   fail "Palette checkout must be clean before rendering an execution job: $PALETTE_REPO"
 if [[ -n "$CONFIG" ]]; then
@@ -122,6 +138,8 @@ RUNTIME_ENVIRONMENT_FILE="${RUN_DIR}/runtime_environment.txt"
 RESOURCE_SUMMARY_FILE="${RUN_DIR}/resource_telemetry_summary.json"
 RESOURCE_SAMPLES_FILE="${RUN_DIR}/resource_telemetry_samples.jsonl"
 RESOURCE_STDOUT_FILE="${RUN_DIR}/workflow_stdout.log"
+REGISTRY_FINALIZER_SCRIPT="${RUN_DIR}/run_registry_finalizer.sh"
+REGISTRY_FINALIZER_REPORT="${RUN_DIR}/registry_finalizer.json"
 
 q_repo="$(printf '%q' "$PALETTE_REPO")"
 q_zarr="$(printf '%q' "$ZARR_PATH")"
@@ -133,6 +151,8 @@ q_runtime_environment="$(printf '%q' "$RUNTIME_ENVIRONMENT_FILE")"
 q_resource_summary="$(printf '%q' "$RESOURCE_SUMMARY_FILE")"
 q_resource_samples="$(printf '%q' "$RESOURCE_SAMPLES_FILE")"
 q_resource_stdout="$(printf '%q' "$RESOURCE_STDOUT_FILE")"
+q_registry="$(printf '%q' "$REGISTRY")"
+q_registry_finalizer_report="$(printf '%q' "$REGISTRY_FINALIZER_REPORT")"
 q_requested_queue="$(printf '%q' "${QUEUE:-<cluster-default>}")"
 quote_array() {
   local rendered="" value quoted
@@ -265,6 +285,9 @@ export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
+# Registry mutations are owned by the dependent one-slot finalizer.  Every
+# stage subprocess inherits this fail-closed guard.
+export PALETTE_DISABLE_REGISTRY_WRITES=1
 
 cmd=(
   scripts/py -m fisheye.utils.execute_analysis_workflow
@@ -338,6 +361,36 @@ exit "${payload_rc}"
 JOBSCRIPT
 chmod +x "$JOB_SCRIPT"
 
+cat >"$REGISTRY_FINALIZER_SCRIPT" <<JOBSCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+umask 0002
+
+PALETTE_REPO=${q_repo}
+EXPECTED_COMMIT=${q_expected_commit}
+REPORT_PATH=${q_report}
+REGISTRY=${q_registry}
+FINALIZER_REPORT=${q_registry_finalizer_report}
+
+cd "\${PALETTE_REPO}"
+[[ "\$(git rev-parse HEAD)" == "\${EXPECTED_COMMIT}" ]] || {
+  printf 'Palette commit mismatch in registry finalizer.\n' >&2
+  exit 2
+}
+[[ -z "\$(git status --porcelain)" ]] || {
+  printf 'Refusing dirty Palette checkout in registry finalizer.\n' >&2
+  exit 2
+}
+unset PALETTE_DISABLE_REGISTRY_WRITES
+export PYTHONPATH="\${PALETTE_REPO}/src:\${PALETTE_REPO}\${PYTHONPATH:+:\${PYTHONPATH}}"
+scripts/py -m fisheye.analysis_workflows.registry_finalize \
+  --execution-report "\${REPORT_PATH}" \
+  --registry "\${REGISTRY}" \
+  --apply \
+  --output-json "\${FINALIZER_REPORT}"
+JOBSCRIPT
+chmod +x "$REGISTRY_FINALIZER_SCRIPT"
+
 BSUB_ARGS=(
   -J "analysis_workflow_${EXECUTION_ID}"
   -n "$NCORES"
@@ -361,6 +414,12 @@ printf 'runtime_environment=%s\n' "$RUNTIME_ENVIRONMENT_FILE"
 printf 'resource_telemetry_summary=%s\n' "$RESOURCE_SUMMARY_FILE"
 printf 'resource_telemetry_samples=%s\n' "$RESOURCE_SAMPLES_FILE"
 printf 'workflow_stdout=%s\n' "$RESOURCE_STDOUT_FILE"
+printf 'registry_write_mode=deferred_to_serial_finalizer\n'
+printf 'registry=%s\n' "$REGISTRY"
+printf 'registry_finalizer=%s\n' \
+  "$([[ "$SUBMIT_REGISTRY_FINALIZER" == "1" ]] && printf enabled || printf disabled)"
+printf 'registry_finalizer_script=%s\n' "$REGISTRY_FINALIZER_SCRIPT"
+printf 'registry_finalizer_report=%s\n' "$REGISTRY_FINALIZER_REPORT"
 printf 'requested_queue=%s\n' "${QUEUE:-<cluster-default>}"
 printf 'requested_resources=ncores:%s mem_gb_per_slot:%s walltime:%s\n' \
   "$NCORES" "$MEM_GB" "$WALLTIME"
@@ -406,4 +465,39 @@ if [[ "$SUBMIT" == "1" ]]; then
   printf 'lsf_stderr=%s\n' "${RUN_DIR}/${job_id}.err"
   printf 'status_file=%s\n' "$STATUS_FILE"
   printf 'submission_file=%s\n' "$SUBMISSION_FILE"
+
+  if [[ "$SUBMIT_REGISTRY_FINALIZER" == "1" ]]; then
+    FINALIZER_BSUB_ARGS=(
+      -J "analysis_registry_${EXECUTION_ID}"
+      -n 1
+      -W "$REGISTRY_FINALIZER_WALLTIME"
+      -R "span[hosts=1]"
+      -R "rusage[mem=${REGISTRY_FINALIZER_MEM_GB}G]"
+      -w "done(${job_id})"
+      -oo "${RUN_DIR}/registry_finalizer_%J.out"
+      -eo "${RUN_DIR}/registry_finalizer_%J.err"
+    )
+    if [[ -n "$QUEUE" ]]; then FINALIZER_BSUB_ARGS+=(-q "$QUEUE"); fi
+    FINALIZER_BSUB_COMMAND=(
+      bsub "${FINALIZER_BSUB_ARGS[@]}" bash "$REGISTRY_FINALIZER_SCRIPT"
+    )
+    if command -v bsub >/dev/null 2>&1; then
+      finalizer_output="$("${FINALIZER_BSUB_COMMAND[@]}")"
+    else
+      printf -v remote_finalizer_command '%q ' "${FINALIZER_BSUB_COMMAND[@]}"
+      finalizer_output="$(ssh "$SUBMIT_HOST" "$remote_finalizer_command")"
+    fi
+    printf '%s\n' "$finalizer_output"
+    finalizer_job_id="$(printf '%s\n' "$finalizer_output" | sed -n 's/^Job <\([0-9][0-9]*\)>.*/\1/p' | head -n 1)"
+    [[ -n "$finalizer_job_id" ]] || fail "could not parse registry finalizer job ID"
+    {
+      printf 'registry_write_mode=deferred_to_serial_finalizer\n'
+      printf 'registry=%s\n' "$REGISTRY"
+      printf 'registry_finalizer_job_id=%s\n' "$finalizer_job_id"
+      printf 'registry_finalizer_dependency=done(%s)\n' "$job_id"
+      printf 'registry_finalizer_report=%s\n' "$REGISTRY_FINALIZER_REPORT"
+    } >>"$SUBMISSION_FILE"
+    printf 'registry_finalizer_job_id=%s\n' "$finalizer_job_id"
+    printf 'registry_finalizer_report=%s\n' "$REGISTRY_FINALIZER_REPORT"
+  fi
 fi

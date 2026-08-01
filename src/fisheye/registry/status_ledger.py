@@ -156,7 +156,10 @@ def upsert_recording_step_status(
     history_payload = dict(payload)
     history_payload["recorded_utc"] = _utc_now()
 
-    with registry.conn:
+    # Respect an enclosing Registry-managed transaction.  Serial registry
+    # finalizers use that boundary to commit the latest row, its history event,
+    # and any downstream invalidations as one atomic publication.
+    with registry._maybe_transaction():
         registry.conn.execute(
             """
             INSERT INTO recording_step_status (

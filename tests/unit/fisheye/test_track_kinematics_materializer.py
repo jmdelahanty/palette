@@ -12,6 +12,15 @@ import zarr
 from fisheye.analysis_workflows.materializers import track_kinematics as mod
 
 
+@pytest.fixture(autouse=True)
+def _disable_registry_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mod,
+        "emit_track_kinematics_stage_completion",
+        lambda *args, **kwargs: False,
+    )
+
+
 def _build_source(path: Path) -> None:
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
     root.attrs.update(
@@ -521,6 +530,22 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     _build_source(source)
     events: list[tuple[Any, ...]] = []
     _install_writer_api(monkeypatch, events)
+    registry_events: list[dict[str, object]] = []
+
+    def capture_registry(root, zarr_path, **kwargs):  # type: ignore[no-untyped-def]
+        run = kwargs["run_group"]
+        parent = root["analysis/track_kinematics_runs"]
+        assert run.attrs["palette_run_completion_status"] == "complete"
+        assert run.attrs["stage_selector_eligible"] is True
+        assert parent.attrs["latest"] == "offline/track_1"
+        registry_events.append({"zarr_path": zarr_path, **kwargs})
+        return True
+
+    monkeypatch.setattr(
+        mod,
+        "emit_track_kinematics_stage_completion",
+        capture_registry,
+    )
 
     result = mod.materialize_track_kinematics(
         source,
@@ -538,6 +563,13 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
     assert result["status"] == "complete"
     assert result["publish"]["pre_pointer_validation"]["valid"] is True
     assert result["publish"]["final_validation"]["valid"] is True
+    assert result["publish"]["registry_updated"] is True
+    assert len(registry_events) == 1
+    assert registry_events[0]["run_name"] == "track_1"
+    assert registry_events[0]["run_type"] == "offline"
+    assert registry_events[0]["source"] == (
+        "track_kinematics_atomic_materializer"
+    )
     assert result["publish"]["physical_copy"]["verification"] == (
         "sha256_all_physical_files"
     )

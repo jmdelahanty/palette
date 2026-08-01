@@ -30,6 +30,15 @@ from fisheye.visualization.visualize_eye_angles import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_registry_writes(monkeypatch):
+    monkeypatch.setattr(
+        eye_angle_analysis,
+        "emit_eye_angle_stage_completion",
+        lambda *args, **kwargs: False,
+    )
+
+
 def test_eye_angle_archive_opener_uses_palette_zarr_policy(monkeypatch, tmp_path) -> None:
     calls = []
     sentinel = object()
@@ -643,7 +652,27 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
             "--quiet",
         ]
     )
+    registry_publication: dict[str, object] = {}
+
+    def capture_registry_publication(root, zarr_path, **kwargs):  # type: ignore[no-untyped-def]
+        run_group = kwargs["run_group"]
+        parent = root["analysis/eye_angle_runs"]
+        assert run_group.attrs["palette_run_completion_status"] == "complete"
+        assert run_group.attrs["stage_selector_eligible"] is True
+        assert parent.attrs["latest"] == "eye_contract_001"
+        assert parent.attrs["latest_complete"] == "eye_contract_001"
+        registry_publication.update({"zarr_path": zarr_path, **kwargs})
+        return True
+
+    monkeypatch.setattr(
+        eye_angle_analysis,
+        "emit_eye_angle_stage_completion",
+        capture_registry_publication,
+    )
     eye_angle_analysis.run(args)
+
+    assert registry_publication["run_name"] == "eye_contract_001"
+    assert registry_publication["source"] == "runtime_eye_angle_analysis"
 
     persisted_root = zarr.open_group(
         str(zarr_path),

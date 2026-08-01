@@ -122,6 +122,28 @@ scripts/py -m fisheye.utils.report_stage_array_validation_shadow \
   --include-no-spec
 ```
 
+### Parallel-job registry ownership
+
+Production job arrays must not let each array element update the shared SQLite
+registry. Workers publish and validate their Zarr runs with
+`PALETTE_DISABLE_REGISTRY_WRITES=1`, then leave an immutable completion receipt
+outside the archive. One dependent, one-slot registry-finalizer job consumes
+the exact receipt set, freshly verifies every selected run, and performs the
+registry updates serially.
+
+`emit_stage_completion` enforces the defer environment variable centrally. A
+stage publication writes the dataset row, latest step-status row, history row,
+and downstream cascade inside one short `BEGIN IMMEDIATE` transaction; Zarr
+validation happens before the SQLite writer lock is acquired. Required
+derived-analysis finalizers fail and roll back the stage transaction if any
+downstream invalidation fails.
+
+The general analysis-workflow and chaser-array submitters use
+`fisheye.analysis_workflows.registry_finalize`. Direct inline registry writes
+remain available only as an explicit standalone execution policy. Disabling a
+finalizer does not re-enable worker writes: it leaves receipts unapplied for a
+later serial reconciliation.
+
 ## Read Rule
 
 Future-normal readers resolve default inputs with

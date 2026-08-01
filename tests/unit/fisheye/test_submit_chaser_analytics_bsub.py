@@ -113,6 +113,12 @@ def test_skipped_producers_resolve_authoritative_inputs_per_recording(
     assert config["SPEED_LEVEL"] == "''"
     assert 'if [[ -n "$SPEED_LEVEL" ]]' in job_script
     assert 'epoch_speed_args+=(--speed-level "$SPEED_LEVEL")' in job_script
+    assert "export PALETTE_DISABLE_REGISTRY_WRITES=1" in job_script
+    assert '"registry_write_mode": "deferred_to_serial_finalizer"' in job_script
+    run_dir = tmp_path / "logs" / "chaser_analytics_authoritative_inputs"
+    finalizer = (run_dir / "run_registry_finalizer.sh").read_text(encoding="utf-8")
+    assert "fisheye.analysis_workflows.registry_finalize" in finalizer
+    assert "--stage-selector eye_angles=latest" in finalizer
 
 
 def test_explicit_reused_inputs_override_authoritative_resolution(

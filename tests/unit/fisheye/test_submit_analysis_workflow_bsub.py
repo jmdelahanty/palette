@@ -30,6 +30,15 @@ def _build_clean_palette_checkout(path: Path) -> None:
     module = path / "src" / "fisheye" / "utils" / "execute_analysis_workflow.py"
     module.parent.mkdir(parents=True)
     module.write_text("# fixture\n", encoding="utf-8")
+    finalizer_module = (
+        path
+        / "src"
+        / "fisheye"
+        / "analysis_workflows"
+        / "registry_finalize.py"
+    )
+    finalizer_module.parent.mkdir(parents=True)
+    finalizer_module.write_text("# fixture\n", encoding="utf-8")
     telemetry_module = (
         path
         / "src"
@@ -148,8 +157,21 @@ def test_submit_analysis_workflow_records_requested_and_runtime_resources(
         f"resource_telemetry_summary={run_dir / 'resource_telemetry_summary.json'}"
         in submission
     )
+    assert "registry_write_mode=deferred_to_serial_finalizer" in submission
+    assert "registry_finalizer_dependency=done(123456)" in submission
+    assert "registry_finalizer_job_id=123456" in submission
+
+    registry_finalizer = (run_dir / "run_registry_finalizer.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "fisheye.analysis_workflows.registry_finalize" in registry_finalizer
+    assert "--execution-report" in registry_finalizer
+    assert "unset PALETTE_DISABLE_REGISTRY_WRITES" in registry_finalizer
 
     job_script = run_dir / "run_analysis_workflow.sh"
+    assert "export PALETTE_DISABLE_REGISTRY_WRITES=1" in job_script.read_text(
+        encoding="utf-8"
+    )
     subprocess.run(["bash", "-n", str(job_script)], check=True)
     job_env = dict(env)
     job_env.update(

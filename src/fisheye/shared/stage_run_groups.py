@@ -29,6 +29,11 @@ STAGE_RUN_PARENTS: dict[str, tuple[str, ...]] = {
     "track": ("tracking_runs",),
     "tracks": ("tracking_runs",),
     "tracking": ("tracking_runs",),
+    # Derived-analysis families live below analysis/.  Qualified track run
+    # names retain their online/offline scope (for example
+    # ``offline/track_001``) beneath this parent.
+    "track_kinematics": ("analysis/track_kinematics_runs",),
+    "eye_angles": ("analysis/eye_angle_runs",),
 }
 
 

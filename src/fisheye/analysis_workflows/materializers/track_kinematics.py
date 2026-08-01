@@ -26,6 +26,9 @@ import numpy as np
 import zarr
 
 from ...analysis import track_kinematics as track_writer
+from ...shared.derived_analysis_registry_status import (
+    emit_track_kinematics_stage_completion,
+)
 from ...shared.json_safety import json_attr_safe
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import require_runs_parent
@@ -933,7 +936,7 @@ def publish_track_kinematics_run(
         ):
             raise RuntimeError("Track-kinematics parent pointers were not updated consistently.")
 
-    return atomic_publish_run_group(
+    result = atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
             local_run_path=plan.sharded_run,
@@ -967,6 +970,18 @@ def publish_track_kinematics_run(
             "materialization": json_attr_safe(materialization_payload),
         },
     )
+    authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
+    result["registry_updated"] = emit_track_kinematics_stage_completion(
+        authoritative_root,
+        plan.source_zarr,
+        run_group=authoritative_root[
+            f"analysis/track_kinematics_runs/offline/{plan.run_name}"
+        ],
+        run_name=plan.run_name,
+        run_type="offline",
+        source="track_kinematics_atomic_materializer",
+    )
+    return result
 
 
 def materialize_track_kinematics(

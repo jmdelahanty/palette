@@ -30,6 +30,9 @@ import numpy as np
 import zarr
 
 from ...analysis import eye_angle_analysis as eye_writer
+from ...shared.derived_analysis_registry_status import (
+    emit_eye_angle_stage_completion,
+)
 from ...shared.eye_geometry_source import EYE_GEOMETRY_STAGE_SUBJECT_SHAPE
 from ...shared.json_safety import json_attr_safe
 from ...shared.metadata import get_fps
@@ -1292,7 +1295,7 @@ def publish_eye_angle_run(
                 return
             raise
 
-    return atomic_publish_run_group(
+    result = atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
             local_run_path=plan.sharded_run,
@@ -1327,6 +1330,17 @@ def publish_eye_angle_run(
             "materialization": json_attr_safe(materialization_payload),
         },
     )
+    authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
+    result["registry_updated"] = emit_eye_angle_stage_completion(
+        authoritative_root,
+        plan.source_zarr,
+        run_group=authoritative_root[
+            f"analysis/eye_angle_runs/{plan.run_name}"
+        ],
+        run_name=plan.run_name,
+        source="eye_angle_atomic_materializer",
+    )
+    return result
 
 
 def materialize_eye_angles(
