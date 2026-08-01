@@ -19,6 +19,10 @@ from fisheye.shared.zarr.subject_mask_bundle_publication import (
     activate_subject_mask_bundle,
     publish_subject_mask_bundle_candidate,
 )
+from fisheye.shared.zarr.subject_mask_cache_publication import (
+    SUBJECT_MASK_CACHE_FAMILY,
+    publish_selector_ineligible_subject_mask_sampled_contours,
+)
 from fisheye.shared.zarr.subject_mask_core_publication import (
     publish_selector_ineligible_subject_mask_core_snapshot,
 )
@@ -193,6 +197,109 @@ def test_bundle_candidate_is_complete_but_not_authoritative(tmp_path: Path) -> N
         assert run.attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR) is None
         for selector in ("latest", "latest_complete", "authoritative_run"):
             assert root[family].attrs.get(selector) is None
+
+
+def test_bundle_v3_binds_independent_sampled_contour_cache(tmp_path: Path) -> None:
+    raw, refined, quality = _publish_members(tmp_path)
+    cache = publish_selector_ineligible_subject_mask_sampled_contours(
+        refined_snapshot_root=refined.output_path,
+        refined_run_id=refined.run_id,
+        destination=tmp_path / "cache.zarr",
+        cache_run_id="cache_001",
+        source_compute_block_bytes=512,
+        created_by="pytest",
+    )
+    archive = _analysis_archive(tmp_path)
+    receipt = publish_subject_mask_bundle_candidate(
+        analysis_zarr=archive,
+        recording_identity="recording_001",
+        raw_snapshot_root=raw.output_path,
+        raw_run_id=raw.run_id,
+        refined_snapshot_root=refined.output_path,
+        refined_run_id=refined.run_id,
+        quality_snapshot_root=quality.output_path,
+        quality_run_id=quality.run_id,
+        cache_snapshot_root=cache.output_path,
+        cache_run_id=cache.run_id,
+        bundle_id="bundle_003",
+    )
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    bundle = root[f"{SUBJECT_MASK_BUNDLE_FAMILY}/bundle_003"]
+    manifest = bundle.attrs["run_manifest"]
+    assert manifest["schema_version"] == 3
+    assert set(manifest["payload"]["members"]) == {
+        "raw",
+        "refined",
+        "quality",
+        "presentation_cache",
+    }
+    assert manifest["payload"]["members"]["presentation_cache"]["run_path"] == (
+        f"{SUBJECT_MASK_CACHE_FAMILY}/cache_001"
+    )
+    assert receipt["selector_eligible"] is False
+
+    authority = activate_subject_mask_bundle(
+        analysis_zarr=archive, bundle_id="bundle_003"
+    )
+    reopened = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    assert "presentation_cache" in authority["members"]
+    assert (
+        reopened[f"{SUBJECT_MASK_CACHE_FAMILY}/cache_001"].attrs[
+            SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR
+        ]
+        is True
+    )
+
+
+def test_bundle_v3_rejects_cache_bound_to_different_dense_authority_before_import(
+    tmp_path: Path,
+) -> None:
+    raw, refined, quality = _publish_members(tmp_path)
+    cache = publish_selector_ineligible_subject_mask_sampled_contours(
+        refined_snapshot_root=refined.output_path,
+        refined_run_id=refined.run_id,
+        destination=tmp_path / "cache.zarr",
+        cache_run_id="cache_001",
+        source_compute_block_bytes=512,
+        created_by="pytest",
+    )
+    cache_run = zarr.open_group(
+        str(cache.output_path / SUBJECT_MASK_CACHE_FAMILY / cache.run_id),
+        mode="a",
+        use_consolidated=False,
+    )
+    manifest = copy.deepcopy(cache_run.attrs["run_manifest"])
+    source = manifest["payload"]["source_refined_subject_mask_snapshot"]
+    source["dense_array_values_sha256"] = "11" * 32
+    extension = manifest["payload"]["cache_extension"]
+    for receipt in extension["receipts"]:
+        receipt["payload"]["source"]["dense_array_values_sha256"] = "11" * 32
+        receipt["payload_digest"] = canonical_json_sha256(receipt["payload"])
+    extension["receipts_digest"] = canonical_json_sha256(extension["receipts"])
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+    cache_run.attrs["run_manifest"] = manifest
+
+    archive = _analysis_archive(tmp_path)
+    with pytest.raises(ValueError, match="Presentation-cache/refined source binding"):
+        publish_subject_mask_bundle_candidate(
+            analysis_zarr=archive,
+            recording_identity="recording_001",
+            raw_snapshot_root=raw.output_path,
+            raw_run_id=raw.run_id,
+            refined_snapshot_root=refined.output_path,
+            refined_run_id=refined.run_id,
+            quality_snapshot_root=quality.output_path,
+            quality_run_id=quality.run_id,
+            cache_snapshot_root=cache.output_path,
+            cache_run_id=cache.run_id,
+            bundle_id="bundle_003",
+        )
+
+    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    assert "subject_mask_runs" not in root
+    assert SUBJECT_MASK_CACHE_FAMILY not in root
+    assert SUBJECT_MASK_BUNDLE_FAMILY not in root
 
 
 def test_v1_cross_binding_remains_read_compatible(tmp_path: Path) -> None:

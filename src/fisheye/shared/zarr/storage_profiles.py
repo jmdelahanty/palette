@@ -200,6 +200,27 @@ DETECTION_PUBLISHED_ACCESS_AWARE_V1 = StorageProfile(
     target_chunk_bytes_by_access=((AccessPattern.EAGER, 1 * MIB),),
 )
 
+# Candidate presentation-cache profile for row-addressed subject-mask display
+# products such as fixed-count sampled contours.  The 128 KiB inner target
+# bounds one-frame read amplification, while 8 MiB indexed shards keep the
+# immutable recording-level object count low.  This profile remains a
+# selector-ineligible candidate until a real Crimson mounted-read gate promotes
+# it; the semantic contract does not depend on that later promotion decision.
+SUBJECT_MASK_PRESENTATION_CANDIDATE_V1 = StorageProfile(
+    profile_id="subject_mask_presentation_candidate_v1",
+    target_chunk_bytes=128 * KIB,
+    min_chunk_bytes=128 * KIB,
+    max_chunk_bytes=128 * KIB,
+    eager_max_bytes=8 * MIB,
+    target_shard_bytes=8 * MIB,
+    per_row_target_shard_bytes=8 * MIB,
+    max_shard_bytes=8 * MIB,
+    max_payload_objects=4_096,
+    codec_profile_id="zstd_fast_v1",
+    shard_immutable=True,
+    shard_owned_appends=True,
+)
+
 # Explicit rollback for immutable detection snapshots.  This is the genuine
 # 1 MiB unsharded benchmark control, not the generic sharded HTTP profile.
 DETECTION_REGULAR_ROLLBACK_V1 = StorageProfile(
@@ -238,6 +259,7 @@ STORAGE_PROFILES = {
         EDITABLE_LOCAL_V1,
         PUBLISHED_HTTP_V1,
         DETECTION_PUBLISHED_ACCESS_AWARE_V1,
+        SUBJECT_MASK_PRESENTATION_CANDIDATE_V1,
         DETECTION_REGULAR_ROLLBACK_V1,
         TRAINING_IMMUTABLE_V1,
     )

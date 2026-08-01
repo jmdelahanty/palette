@@ -4,7 +4,9 @@ The compute archive is treated as a selector-ineligible draft.  This command
 turns its raw and refined producer receipts into production-streaming source
 receipts, rematerializes both cores through the shared storage planner,
 computes the independent quality run, and atomically imports the three members
-as one inactive bundle.  Activation is a separate explicit operation.
+as one inactive bundle.  When ``--cache-run`` is supplied, it also derives the
+recording-level sampled-contour presentation cache and emits bundle v3.
+Activation is a separate explicit operation.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ from fisheye.shared.zarr.subject_mask_bundle_publication import (
 from fisheye.shared.zarr.subject_mask_core_publication import (
     SubjectMaskCoreValidationMode,
     publish_selector_ineligible_subject_mask_core_snapshot,
+)
+from fisheye.shared.zarr.subject_mask_cache_publication import (
+    DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
+    publish_selector_ineligible_subject_mask_sampled_contours,
 )
 from fisheye.shared.zarr.subject_mask_quality_manifest import (
     SubjectMaskQualitySourceReference,
@@ -486,8 +492,11 @@ def publish_recording_subject_mask_bundle(
     bundle_id: str,
     local_output_root: Path,
     quality_scratch_root: Path,
+    cache_run: str | None = None,
     activate: bool = False,
     refined_draft_runs: Sequence[str] | None = None,
+    cache_source_compute_block_bytes: int = DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
+    cache_compute_workers: int = 1,
 ) -> dict[str, object]:
     target = analysis_zarr.expanduser().resolve()
     draft_path = draft_zarr.expanduser().resolve()
@@ -523,9 +532,7 @@ def publish_recording_subject_mask_bundle(
     refined_draft = refined_drafts[0]
     n_frames = int(crop["frame_row_offsets"].shape[0]) - 1
     raw_labels = tuple(str(value) for value in raw_draft.attrs["mask_labels"])
-    refined_labels = tuple(
-        str(value) for value in refined_draft.attrs["mask_labels"]
-    )
+    refined_labels = tuple(str(value) for value in refined_draft.attrs["mask_labels"])
     raw_components = SubjectMaskComponentRegistry(raw_labels)
     refined_components = SubjectMaskComponentRegistry(refined_labels)
     if len(raw_drafts) == 1:
@@ -697,6 +704,18 @@ def publish_recording_subject_mask_bundle(
         source_validation_receipt=refined_receipt,
         created_by="publish_recording_subject_mask_bundle",
     )
+    cache_publication = None
+    cache_store = output / "cache.zarr"
+    if cache_run is not None:
+        cache_publication = publish_selector_ineligible_subject_mask_sampled_contours(
+            refined_snapshot_root=refined_store,
+            refined_run_id=refined_run,
+            destination=cache_store,
+            cache_run_id=cache_run,
+            source_compute_block_bytes=cache_source_compute_block_bytes,
+            compute_workers=cache_compute_workers,
+            created_by="publish_recording_subject_mask_bundle",
+        )
     refined_root = open_zarr_root(refined_store, mode="r")
     refined_published_run = refined_root[f"refined_subject_masks_runs/{refined_run}"]
     refined_docs = refined_publication.manifest["payload"]["logical_content"][
@@ -757,6 +776,10 @@ def publish_recording_subject_mask_bundle(
         quality_snapshot_root=quality_store,
         quality_run_id=quality_run,
         bundle_id=bundle_id,
+        cache_snapshot_root=(cache_store if cache_publication is not None else None),
+        cache_run_id=(
+            cache_publication.run_id if cache_publication is not None else None
+        ),
     )
     authority = (
         activate_subject_mask_bundle(analysis_zarr=target, bundle_id=bundle_id)
@@ -771,6 +794,11 @@ def publish_recording_subject_mask_bundle(
         "raw_manifest_digest": raw_publication.manifest["payload_digest"],
         "refined_manifest_digest": refined_publication.manifest["payload_digest"],
         "quality_manifest_digest": quality_publication.manifest["payload_digest"],
+        "cache_manifest_digest": (
+            cache_publication.manifest["payload_digest"]
+            if cache_publication is not None
+            else None
+        ),
         "bundle": bundle,
         "authority": authority,
     }
@@ -791,9 +819,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-run", required=True)
     parser.add_argument("--refined-run", required=True)
     parser.add_argument("--quality-run", required=True)
+    parser.add_argument(
+        "--cache-run",
+        help=(
+            "Optional immutable sampled-contour cache run; supplying it emits "
+            "the four-member bundle-v3 candidate."
+        ),
+    )
     parser.add_argument("--bundle-id", required=True)
     parser.add_argument("--local-output-root", required=True, type=Path)
     parser.add_argument("--quality-scratch-root", required=True, type=Path)
+    parser.add_argument(
+        "--cache-source-compute-block-bytes",
+        type=int,
+        default=DEFAULT_SOURCE_COMPUTE_BLOCK_BYTES,
+    )
+    parser.add_argument(
+        "--cache-compute-workers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel dense-row contour extraction workers. Zarr publication "
+            "remains single-owner (default: 1)."
+        ),
+    )
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -813,9 +862,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_run=args.raw_run,
         refined_run=args.refined_run,
         quality_run=args.quality_run,
+        cache_run=args.cache_run,
         bundle_id=args.bundle_id,
         local_output_root=args.local_output_root,
         quality_scratch_root=args.quality_scratch_root,
+        cache_source_compute_block_bytes=args.cache_source_compute_block_bytes,
+        cache_compute_workers=args.cache_compute_workers,
         activate=bool(args.activate),
     )
     print(json.dumps(result, indent=None if args.json else 2, sort_keys=True))
