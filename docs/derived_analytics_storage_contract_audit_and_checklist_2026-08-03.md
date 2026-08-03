@@ -3,11 +3,12 @@
 Date: 2026-08-03
 
 Status: active implementation checklist; reconciled through coordination
-checkpoint `5d7fb30c`; correctness, executable-catalog, shared-planner,
+checkpoint `d82dcf41`; correctness, executable-catalog, shared-planner,
 serialized-registry, compact-rematerialization, and benchmark-planning
-foundations are integrated; opt-in writer candidates are being adopted family
-by family; no production profile or scientific selector authority changed by
-these checkpoints
+foundations are integrated; selector-ineligible swim-bout and bout-kinematics
+candidate publishers are integrated; opt-in writer candidates are being
+adopted family by family; no production profile or scientific selector
+authority changed by these checkpoints
 
 ## Purpose
 
@@ -44,12 +45,13 @@ entries. Seven use the shared atomic materializer boundary:
 Tail-posture views and bout classification are also cataloged, truthfully, as
 guarded direct writers rather than falsely claiming atomic-materializer
 ownership. None of the nine uses the shared byte-budgeted planner as its
-production default yet. Tail-posture and bout-classification now expose guarded,
-selector-ineligible planner candidates, and eye-angle candidate adoption is
-under final review. All nine have serialized registry projection for eligible
-authorities. Stimulus epochs, occupancy outputs, and the chaser analysis suite
-use additional stage-local schemas and writers. Several legacy or in-place
-writers remain explicitly classified compatibility or maintenance surfaces.
+production default yet. Tail-posture, bout-classification, tail-kinematics,
+eye-angle, swim-bout, and bout-kinematics now expose explicit
+selector-ineligible planner candidates. All nine have serialized registry
+projection for eligible authorities. Stimulus epochs, occupancy outputs, and
+the chaser analysis suite use additional stage-local schemas and writers.
+Several legacy or in-place writers remain explicitly classified compatibility
+or maintenance surfaces.
 
 The target is not one scientific schema for every datatype. The target is one
 contract system in which every persisted output is classified and every
@@ -110,9 +112,9 @@ true.
 | Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract | Version or flatten the two structured lineage dtypes in the shared factory before candidate adoption; retain float64 position authority |
 | Subject shape | Strong typed semantic surface, content manifest, lineage, atomic sharded publication, and serialized registry projection | Close the currently dynamic component/relation/body-frame array inventory before byte-planned adoption |
 | Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
-| Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Benchmark the candidate through Palette and Crimson before profile promotion |
-| Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, and serialized registry projection | Adopt byte planning and benchmark the real consumer |
-| Bout kinematics | Exact compact-v7 manifest, authoritative selection, and serialized registry projection | Adopt byte planning and add a consumer benchmark |
+| Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an explicit selector-ineligible byte-planned direct-writer candidate | Add a consolidated atomic publication boundary, then benchmark through Palette and Crimson before profile promotion |
+| Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
+| Bout kinematics | Exact compact-v7 manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
 | Stimulus response | Exact opt-in compact-v3 schema with closed table bundles, fixed dtypes, strict coercion, and atomic publication; legacy v2 remains the default compatibility path | Adopt byte planning in the v3 writer and benchmark before any default change |
 | Body frame | Exact ten-array schema, byte planner, strict manifest, and consolidated publication | Move from selector-ineligible companion evidence to an explicitly governed production lifecycle when authorized |
 | Keypoint quality | Exact diagnostic schema, byte planner, strict manifest, and consolidated publication | Add explicit production lifecycle/registry policy when authorized |
@@ -235,20 +237,21 @@ review instead of editing another lane's files.
 
 Historical lanes are pinned from the coordination history and do not modify
 production archives, selectors, or registries. New implementation lanes must
-start from the current clean coordination history (`5d7fb30c` at this
+start from the current clean coordination history (`d82dcf41` at this
 reverification), not from one of the older worktree heads listed by
 `git worktree list`. A historical dirty worktree is evidence to reconcile, not
 a safe base for new work.
 
 | Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
 | --- | --- | --- | --- | --- |
-| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `5d7fb30c` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
+| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `d82dcf41` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
 | Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | Integrated as `a2668075` and `f178e315`; it classifies rather than promotes |
 | Eye-angle exact schema | `/tmp/palette-eye-v7-clean-20260803` / `agent/palette/eye-v7-clean-20260803` | `dd4c0f74` | Reusable analytics array declaration, exact 41-array eye-angle schema, deep writer/reader/readiness validation, and explicit v2-v6 compatibility boundaries | Reviewed as ready, committed as `3025d66e`, and integrated as `c1976300` |
 | Eye-angle byte candidate | historical isolated lane | `28f0132c` through `ac6b8bc3` | Exact 41-array planner/factory candidate and semantic fills | Integrated; remains explicit and selector-ineligible |
 | Tail-kinematics byte candidate | historical isolated lane | integrated as `600fab64` | Exact 21-array core, revision bundle, planner/factory candidate, metadata equivalence, and lifecycle guards | Integrated; remains explicit and selector-ineligible |
 | Track-kinematics exact schema | historical isolated lane | integrated as `af38edba` | Exact current motion vocabulary and explicit shared-factory blocker | Integrated; no physical candidate was created |
-| Shared compact rematerialization | coordination lane | integrated as `5d7fb30c` | Exact declaration-bound replanning, frame-axis growth, whole-physical-unit writes, receipt and metadata validation | Infrastructure only; family publishers remain opt-in and pending |
+| Shared compact rematerialization | coordination lane | integrated as `5d7fb30c` | Exact declaration-bound replanning, frame-axis growth, whole-physical-unit writes, receipt and metadata validation | Infrastructure only; family adoption remains explicit and opt-in |
+| Shared compact candidate publication | coordination lane | integrated as `d82dcf41` | Immutable selector-ineligible swim-bout and bout-kinematics candidates, logical hashes, local metadata equivalence, and selector non-mutation | Candidate evidence only; benchmark and promotion remain pending |
 
 The next safe parallel wave assigns disjoint ownership as follows. The
 coordination lane remains the only owner of shared catalogs, planner/factory
@@ -314,6 +317,10 @@ now implemented on the coordination branch:
 - exact byte-planned tail-kinematics candidate publication with semantic fills,
   executable receipt replanning, direct/consolidated metadata equivalence,
   serial whole-shard ownership, and selector non-mutation: `600fab64`.
+- selector-ineligible exact compact candidate publication for swim bouts and
+  bout kinematics, including node-local rematerialization, per-array logical
+  hashes, receipt validation, local direct/consolidated metadata equivalence,
+  atomic run-group publication, and unchanged authority pointers: `d82dcf41`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
@@ -327,8 +334,11 @@ The tail lane passed 90 focused/broader storage regressions before integration;
 the integrated tail/planner checkpoint passed 49 focused tests. Track schema
 validation passed six exact-schema tests and the established 108-test motion
 publication suite. The shared compact rematerializer and exact compact schemas
-passed 24 focused tests. These are correctness results, not full-duration
-performance evidence.
+passed 24 focused tests. The compact candidate publisher passed seven focused
+candidate tests and nine existing materializer tests. Its maintained readers
+passed 18 swim-bout and 18 bout-kinematics tests after the latter's historical
+fixture was made explicit about completion, eligibility, and compatibility.
+These are correctness results, not full-duration performance evidence.
 
 ### Phase 0 — Preserve the audit baseline
 
@@ -497,7 +507,9 @@ Candidate-adoption checkpoints (these do not promote a profile):
       process-shard ownership, and leaves all parent selectors unchanged.
 - [ ] Subject-shape candidate adoption.
 - [ ] Track-kinematics candidate adoption.
-- [ ] Shared columnar adoption for swim bouts and bout kinematics.
+- [x] Shared columnar adoption for swim bouts and bout kinematics. The new
+      candidate publisher rematerializes exact compact runs through the shared
+      byte planner without changing either production writer or selector.
 - [x] Add the shared exact compact rematerialization boundary used by that
       adoption: it derives the growth axis from semantic axes, creates arrays
       through the common factory, writes complete physical units, preserves
@@ -610,6 +622,6 @@ Continue exact-contract and opt-in candidate work without promoting defaults:
    coordination lane;
 3. integrate each family lane serially and run the combined catalog, lifecycle,
    exact-schema, and storage-receipt matrix; and
-4. wire the shared compact rematerializer into selector-ineligible swim-bout
-   and bout-kinematics candidate publishers, followed by family-specific
-   reader/publisher benchmarks.
+4. run family-specific writer/rematerialization/publication/reader benchmarks
+   for the integrated selector-ineligible swim-bout and bout-kinematics
+   candidates at representative short and full-duration scales.

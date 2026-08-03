@@ -56,6 +56,14 @@ def _track_motion_authority() -> dict[str, object]:
 
 @pytest.fixture(autouse=True)
 def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    load_swim_bout_tables = bout_kinematics_module.load_swim_bout_tables
+
+    def _load_legacy_swim_bout_tables(*args: object, **kwargs: object) -> object:
+        """Keep this computation fixture explicit about its historical input."""
+
+        kwargs["legacy_compatibility"] = True
+        return load_swim_bout_tables(*args, **kwargs)
+
     def _load_verified_track(
         root: zarr.Group,
         *,
@@ -121,6 +129,11 @@ def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
         "load_track_kinematics_track",
         _load_verified_track,
     )
+    monkeypatch.setattr(
+        bout_kinematics_module,
+        "load_swim_bout_tables",
+        _load_legacy_swim_bout_tables,
+    )
 
 
 def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
@@ -185,7 +198,10 @@ def _make_archive(tmp_path: Path) -> Path:
 
     bout_parent = analysis.create_group("swim_bout_runs")
     bout_parent.attrs["latest"] = "bouts_1"
+    bout_parent.attrs["latest_complete"] = "bouts_1"
     bout_run = bout_parent.create_group("bouts_1")
+    bout_run.attrs["palette_run_completion_status"] = "complete"
+    bout_run.attrs["stage_selector_eligible"] = True
     bout_run.attrs["source_track_kinematics_run"] = "tk_1"
     bout_run.attrs["track_id"] = 0
     bout_run.attrs["default_level"] = "speed_filtered"
