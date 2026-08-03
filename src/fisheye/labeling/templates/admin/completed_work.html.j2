@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin completed work review</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5f6d62;
+      --line: #d8ded5;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+      --shadow: rgba(23, 32, 26, 0.12);
+    }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 88% 12%, rgba(15, 111, 92, 0.16), transparent 28rem),
+        linear-gradient(135deg, #f8f0dc, #eef6ef 62%, #fffaf0);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 34px 18px 64px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.2rem, 5vw, 4.6rem);
+      letter-spacing: -0.055em;
+      line-height: 0.92;
+      margin: 8px 0 16px;
+    }
+    a {
+      color: var(--accent);
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      margin: 22px 0;
+    }
+    .stat, .card {
+      background: rgba(255, 253, 245, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      box-shadow: 0 14px 36px var(--shadow);
+      padding: 16px;
+    }
+    .stat b {
+      display: block;
+      font-size: 1.7rem;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0;
+    }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fffef9;
+      padding: 5px 9px;
+      font-size: 0.88rem;
+    }
+    .filters {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr 1.4fr auto auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .filters label {
+      color: var(--muted);
+      font-size: 0.85rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    input, select, button {
+      box-sizing: border-box;
+      width: 100%;
+      margin-top: 5px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 9px 11px;
+      background: #fffdf8;
+      color: var(--ink);
+      font: inherit;
+    }
+    button {
+      border: 0;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .reset {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 9px 11px;
+      text-align: center;
+      background: #fffdf8;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.9rem;
+    }
+    th, td {
+      border-top: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    @media (max-width: 900px) {
+      .summary {
+        grid-template-columns: 1fr;
+      }
+      .filters {
+        grid-template-columns: 1fr;
+      }
+      table, thead, tbody, th, td, tr {
+        display: block;
+      }
+      th {
+        display: none;
+      }
+      tr {
+        border-top: 1px solid var(--line);
+        padding: 10px 0;
+      }
+      td {
+        border-top: 0;
+        padding: 5px 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <a href="/admin" class="muted">Admin home</a> &middot; <a href="/admin/datasets" class="muted">Dataset progress</a> &middot; <a href="/admin/users" class="muted">Labeling users</a>
+    <h1>Completed work review</h1>
+    <p class="muted">Queue of labeler-completed tasks waiting for admin inspection. Review decisions and supported audited corrections are available from each task page.</p>
+    <section class="summary">
+      <div class="stat"><b>@@slot_001@@</b><span>completed rows shown</span></div>
+      <div class="stat"><b>@@slot_002@@</b><span>pending admin review</span></div>
+      <div class="stat"><b>@@slot_003@@</b><span>accepted as-is</span></div>
+      <div class="stat"><b>@@slot_004@@</b><span>accepted with corrections</span></div>
+      <div class="stat"><b>@@slot_005@@</b><span>needs revision</span></div>
+    </section>
+    <section class="card">
+      <h2>Filters</h2>
+      @@slot_010@@
+    </section>
+    <section class="card">
+      <h2>Workflow counts</h2>
+      <div class="chips">@@slot_006@@</div>
+      <h2>Labeler counts</h2>
+      <div class="chips">@@slot_007@@</div>
+      <p class="muted">@@slot_009@@</p>
+    </section>
+    <section class="card">
+      <h2>Completed tasks</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Task</th>
+            <th>Recording</th>
+            <th>Labeler</th>
+            <th>Workflow</th>
+            <th>Admin review</th>
+            <th>Completed</th>
+            <th>Saves</th>
+            <th>Issues</th>
+            <th>Latest save</th>
+            <th>Event counts</th>
+          </tr>
+        </thead>
+        <tbody>@@slot_008@@</tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,4 +1,4 @@
-"""Read-only admin JSON routes served through the Flask strangler."""
+"""Admin JSON routes served through the Flask strangler."""
 
 from __future__ import annotations
 
@@ -7,11 +7,15 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 from urllib.parse import unquote
 
+import numpy as np
 from flask import Flask, Response, request
 
+from .assignment_store import ADMIN_REVIEW_STATES
 from .admin_registry import (
+    _admin_completed_work_payload,
     _admin_dataset_export_csv,
     _admin_dataset_export_rows,
+    _admin_task_review_payload,
 )
 from .admin_dashboard import (
     _admin_datasets_payload,
@@ -90,7 +94,7 @@ def _session_closure_support(event: Mapping[str, object] | None) -> dict[str, ob
 
 
 def register_admin_api_routes(app: Flask, state: Any) -> None:
-    """Register read-only admin JSON endpoints on ``app``."""
+    """Register admin JSON endpoints on ``app``."""
 
     @claimed_route(app, "/api/health", methods=["GET"])
     def health() -> Response:
@@ -215,6 +219,474 @@ def register_admin_api_routes(app: Flask, state: Any) -> None:
             },
         )
 
+    @claimed_route(app, "/api/admin/completed-work", methods=["GET"])
+    def admin_completed_work() -> Response:
+        _user, error = _admin_user_or_error(state)
+        if error is not None:
+            return error
+        try:
+            payload = _admin_completed_work_payload(
+                state.store,
+                assignee_user=_last_arg_any("user", "assignee_user") or None,
+                workflow_kind=_last_arg("workflow_kind") or None,
+                recording_id=_last_arg("recording_id") or None,
+                admin_review_state=_last_arg("admin_review_state") or "pending",
+            )
+        except Exception as exc:
+            return _json(
+                _format_error(
+                    "admin_completed_work_failed",
+                    details=str(exc),
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                ),
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return _json(payload)
+
+    @claimed_route(app, "/api/admin/admin-reviews", methods=["POST"])
+    def admin_review_update() -> Response:
+        user, error = _admin_user_or_error(state)
+        if error is not None:
+            return error
+        body = request.get_json(silent=True)
+        if not isinstance(body, Mapping):
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="Expected a JSON object body.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        task_id = str(body.get("task_id") or "").strip()
+        review_state = str(body.get("state") or body.get("admin_review_state") or "").strip()
+        notes = str(body.get("notes") or "").strip() or None
+        if not task_id:
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="Missing task_id.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if not review_state:
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="Missing admin review state.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            review = state.store.upsert_admin_review(
+                task_id=task_id,
+                state=review_state,
+                reviewer_user=str(user or ""),
+                notes=notes,
+                metadata={
+                    "source_route": "/api/admin/admin-reviews",
+                    "source": "admin_task_detail_page",
+                },
+            )
+            payload = _admin_task_review_payload(state.store, task_id)
+        except KeyError:
+            return _json(
+                _format_error("task_not_found", status=HTTPStatus.NOT_FOUND),
+                status=HTTPStatus.NOT_FOUND,
+            )
+        except Exception as exc:
+            return _json(
+                _format_error(
+                    "admin_review_update_failed",
+                    details=str(exc),
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        return _json(
+            {
+                "ok": True,
+                "schema": "palette.web_labeling_admin_review_update.v1",
+                "admin_review": review,
+                "admin_task_review": payload or {},
+                "operator_action": (
+                    "The admin review state was recorded in the labeling sidecar and an audit event was appended."
+                ),
+            }
+        )
+
+    @claimed_route(app, "/api/admin/keypoint-preview", methods=["GET"])
+    def admin_keypoint_preview() -> Response:
+        _user, error = _admin_user_or_error(state)
+        if error is not None:
+            return error
+        task_id = _last_arg("task_id")
+        roi_idx_text = _last_arg("roi_idx")
+        if not task_id:
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="Missing task_id.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if not roi_idx_text:
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="Missing roi_idx.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            roi_idx = int(roi_idx_text)
+        except ValueError:
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="roi_idx must be an integer.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        task = state.store.get_task(task_id)
+        if task is None:
+            return _json(
+                _format_error("task_not_found", status=HTTPStatus.NOT_FOUND),
+                status=HTTPStatus.NOT_FOUND,
+            )
+        if str(task.get("workflow_kind") or "") != "keypoints":
+            return _json(
+                _format_error(
+                    "unsupported_workflow",
+                    details="Admin keypoint preview is only available for keypoint tasks.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        scope = task.get("scope") if isinstance(task.get("scope"), Mapping) else {}
+        zarr_path = str(scope.get("zarr_path") or "").strip()
+        if not zarr_path:
+            return _json(
+                _format_error(
+                    "task_scope_missing_zarr_path",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            from fisheye.tune import keypoint_review_backend as backend_module
+            from .web_responses import _raw_array_payload
+
+            _root, refined, crop, resolved_refined_run, resolved_crop_run = backend_module.resolve_latest_refined_and_crop(
+                zarr_path,
+                refined_run=str(scope.get("refined_run") or "").strip() or None,
+                crop_run=str(scope.get("crop_run") or "").strip() or None,
+                mode="r",
+            )
+            frame_indices = np.asarray(crop["frame_indices"][:], dtype=np.int64)
+            if roi_idx < 0 or roi_idx >= int(frame_indices.shape[0]):
+                raise IndexError("roi_idx is out of range.")
+            points = np.asarray(refined["keypoints_roi"][roi_idx], dtype=float)
+            image = np.asarray(crop["roi_images"][roi_idx], dtype=np.uint8)
+            labels = list(refined.attrs.get("keypoint_labels", []))
+            if not labels:
+                labels = [str(index + 1) for index in range(int(points.shape[0]))]
+            reason = ""
+            if "reason" in refined:
+                reason = str(refined["reason"][roi_idx])
+            def _json_scalar(value: object) -> object:
+                try:
+                    scalar = np.asarray(value).item()
+                except Exception:
+                    return str(value)
+                if isinstance(scalar, np.generic):
+                    scalar = scalar.item()
+                if isinstance(scalar, (bytes, bytearray, memoryview)):
+                    try:
+                        return bytes(scalar).decode("utf-8")
+                    except Exception:
+                        return str(scalar)
+                if isinstance(scalar, float):
+                    return scalar if np.isfinite(scalar) else None
+                if isinstance(scalar, (bool, int, str)) or scalar is None:
+                    return scalar
+                return str(scalar)
+            status: dict[str, object] = {}
+            for name in (
+                "heading",
+                "refined_success",
+                "usable_keypoints",
+                "edit_applied",
+                "confidence_valid",
+                "geometry_valid",
+                "heading_finite",
+                "heading_usable",
+            ):
+                if name not in refined:
+                    continue
+                status[name] = _json_scalar(refined[name][roi_idx])
+            for name in ("source_refined_row_ids", "source_detect_row_index"):
+                if name not in crop:
+                    continue
+                status[name] = _json_scalar(crop[name][roi_idx])
+            def _json_point(point: object) -> list[float | None]:
+                pair = np.asarray(point, dtype=float).reshape(-1)
+                x = float(pair[0])
+                y = float(pair[1])
+                return [
+                    x if np.isfinite(x) else None,
+                    y if np.isfinite(y) else None,
+                ]
+            roi_payload = {
+                "roi_idx": roi_idx,
+                "position": roi_idx,
+                "total": int(frame_indices.shape[0]),
+                "frame_idx": int(frame_indices[roi_idx]),
+                "labels": [str(label) for label in labels],
+                "points": [_json_point(point) for point in points],
+                "reason": reason,
+                "status": status,
+                "roi_image": _raw_array_payload(image),
+            }
+            summary = {
+                "zarr_path": zarr_path,
+                "refined_run": str(resolved_refined_run),
+                "crop_run": str(resolved_crop_run),
+                "total_rois": int(frame_indices.shape[0]),
+            }
+        except Exception as exc:
+            return _json(
+                _format_error(
+                    "admin_keypoint_preview_failed",
+                    details=str(exc),
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        return _json(
+            {
+                "ok": True,
+                "schema": "palette.web_labeling_admin_keypoint_preview.v1",
+                "task_id": task_id,
+                "recording_id": str(task.get("recording_id") or ""),
+                "dataset_id": str(task.get("dataset_id") or ""),
+                "assignee_user": str(task.get("assignee_user") or ""),
+                "workflow_kind": str(task.get("workflow_kind") or ""),
+                "read_only": True,
+                "refined_run": str(summary.get("refined_run") or ""),
+                "crop_run": str(summary.get("crop_run") or ""),
+                "roi": roi_payload,
+                "summary": summary,
+                "operator_action": (
+                    "This preview is read-only. Use the separate correction route only after explicitly enabling correction mode."
+                ),
+            }
+        )
+
+    @claimed_route(app, "/api/admin/keypoint-corrections", methods=["POST"])
+    def admin_keypoint_correction() -> Response:
+        user, error = _admin_user_or_error(state)
+        if error is not None:
+            return error
+        body = request.get_json(silent=True)
+        if not isinstance(body, Mapping):
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="Expected a JSON object body.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        task_id = str(body.get("task_id") or "").strip()
+        roi_idx_raw = body.get("roi_idx")
+        points = body.get("points")
+        notes = str(body.get("notes") or "").strip() or None
+        set_review_state = str(body.get("set_review_state") or "accepted_with_corrections").strip()
+        if not task_id:
+            return _json(
+                _format_error("payload_validation", details="Missing task_id.", status=HTTPStatus.BAD_REQUEST),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            roi_idx = int(roi_idx_raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return _json(
+                _format_error("payload_validation", details="roi_idx must be an integer.", status=HTTPStatus.BAD_REQUEST),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if not isinstance(points, list):
+            return _json(
+                _format_error("payload_validation", details="Missing points list.", status=HTTPStatus.BAD_REQUEST),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if set_review_state and set_review_state not in ADMIN_REVIEW_STATES:
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details=(
+                        "set_review_state must be empty or one of: "
+                        + ", ".join(ADMIN_REVIEW_STATES)
+                    ),
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        task = state.store.get_task(task_id)
+        if task is None:
+            return _json(_format_error("task_not_found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+        if str(task.get("workflow_kind") or "") != "keypoints":
+            return _json(
+                _format_error(
+                    "unsupported_workflow",
+                    details="Admin keypoint correction is only available for keypoint tasks.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if str(task.get("state") or "") != "complete":
+            return _json(
+                _format_error(
+                    "task_not_complete",
+                    details="Admin correction writes require a completed task.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        scope = task.get("scope") if isinstance(task.get("scope"), Mapping) else {}
+        zarr_path = str(scope.get("zarr_path") or "").strip()
+        if not zarr_path:
+            return _json(
+                _format_error("task_scope_missing_zarr_path", status=HTTPStatus.BAD_REQUEST),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            from fisheye.tune import keypoint_review_backend as backend_module
+
+            review_session = backend_module.resolve_review_session(
+                zarr_path,
+                refined_run=str(scope.get("refined_run") or "").strip() or None,
+                crop_run=str(scope.get("crop_run") or "").strip() or None,
+                include_all=True,
+                target_roi_indices=[roi_idx],
+            )
+            before = dict(backend_module.load_roi_payload(review_session, position=0))
+            before_points = before.get("points") if isinstance(before.get("points"), list) else []
+            result = backend_module.save_roi_correction(
+                review_session,
+                position=0,
+                points=points,  # type: ignore[arg-type]
+            )
+            readback = result.get("readback") if isinstance(result.get("readback"), Mapping) else {}
+            after_points = points
+            labels = before.get("labels") if isinstance(before.get("labels"), list) else []
+            deltas: list[dict[str, object]] = []
+            for index, point_after in enumerate(after_points):
+                point_before = before_points[index] if index < len(before_points) else None
+                if (
+                    not isinstance(point_before, list)
+                    or not isinstance(point_after, list)
+                    or len(point_before) < 2
+                    or len(point_after) < 2
+                    or point_before[0] is None
+                    or point_before[1] is None
+                    or point_after[0] is None
+                    or point_after[1] is None
+                ):
+                    continue
+                bx = float(point_before[0])
+                by = float(point_before[1])
+                ax = float(point_after[0])
+                ay = float(point_after[1])
+                dx = ax - bx
+                dy = ay - by
+                deltas.append(
+                    {
+                        "index": index,
+                        "label": str(labels[index] if index < len(labels) else index + 1),
+                        "before": [bx, by],
+                        "after": [ax, ay],
+                        "dx": dx,
+                        "dy": dy,
+                        "distance_px": float(np.hypot(dx, dy)),
+                    }
+                )
+            correction_event = state.store.record_event(
+                task_id=task_id,
+                recording_id=str(task.get("recording_id") or ""),
+                user=str(user or ""),
+                event_type="admin_save_keypoint_correction",
+                target={
+                    "roi_idx": result.get("roi_idx"),
+                    "frame_idx": result.get("frame_idx"),
+                    "refined_run": str(review_session.refined_run),
+                    "crop_run": str(review_session.crop_run),
+                    "admin_review_state": set_review_state,
+                },
+                before={
+                    "labeler_user": str(task.get("assignee_user") or ""),
+                    "roi_idx": before.get("roi_idx"),
+                    "frame_idx": before.get("frame_idx"),
+                    "points": before_points,
+                    "reason": before.get("reason"),
+                    "status": before.get("status"),
+                },
+                after={
+                    "admin_reviewer_user": str(user or ""),
+                    "points": after_points,
+                    "deltas": deltas,
+                    "changed": result.get("changed"),
+                    "reason_updated": result.get("reason_updated"),
+                    "readback": readback,
+                    "notes": notes,
+                },
+            )
+            admin_review = None
+            if set_review_state:
+                correction_event_count = state.store.count_admin_correction_events(task_id)
+                admin_review = state.store.upsert_admin_review(
+                    task_id=task_id,
+                    state=set_review_state,
+                    reviewer_user=str(user or ""),
+                    notes=notes,
+                    correction_event_count=correction_event_count,
+                    metadata={
+                        "source_route": "/api/admin/keypoint-corrections",
+                        "latest_correction_event_id": str(correction_event.get("event_id") or ""),
+                    },
+                )
+        except Exception as exc:
+            return _json(
+                _format_error(
+                    "admin_keypoint_correction_failed",
+                    details=str(exc),
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        return _json(
+            {
+                "ok": True,
+                "schema": "palette.web_labeling_admin_keypoint_correction.v1",
+                "task_id": task_id,
+                "roi_idx": result.get("roi_idx"),
+                "frame_idx": result.get("frame_idx"),
+                "result": result,
+                "delta_count": len(deltas),
+                "deltas": deltas,
+                "correction_event": correction_event,
+                "admin_review": admin_review or {},
+                "operator_action": (
+                    "Admin keypoint correction was applied to the refined keypoint run and recorded as a distinct audit event."
+                ),
+            }
+        )
+
     @claimed_route(app, "/api/admin/users", methods=["GET"])
     def admin_users() -> Response:
         _user, error = _admin_user_or_error(state)
@@ -315,6 +787,31 @@ def register_admin_api_routes(app: Flask, state: Any) -> None:
                 ),
             }
         )
+
+    @claimed_route(
+        app,
+        "/api/admin/tasks/<path:task_id>",
+        claim="prefix",
+        claim_prefix_value="/api/admin/tasks",
+        methods=["GET"],
+    )
+    def admin_task_review(task_id: str) -> Response:
+        _user, error = _admin_user_or_error(state)
+        if error is not None:
+            return error
+        resolved_task_id = unquote(str(task_id or "").strip("/"))
+        if not resolved_task_id:
+            return _json(
+                _format_error("missing_task_id", status=HTTPStatus.NOT_FOUND),
+                status=HTTPStatus.NOT_FOUND,
+            )
+        payload = _admin_task_review_payload(state.store, resolved_task_id)
+        if payload is None:
+            return _json(
+                _format_error("task_not_found", status=HTTPStatus.NOT_FOUND),
+                status=HTTPStatus.NOT_FOUND,
+            )
+        return _json(payload)
 
     @claimed_route(
         app,

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 from urllib.parse import quote
@@ -62,6 +63,435 @@ def _admin_compact_task(task: Mapping[str, object]) -> dict[str, object]:
         "completed_at_utc": str(task.get("completed_at_utc") or ""),
         "scope_keys": scope_keys,
         "admin_task_url": f"/admin/tasks/{quote(str(task.get('task_id') or ''), safe='')}",
+    }
+
+def _admin_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _admin_event_type_counts(events: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        event_type = str(event.get("event_type") or "unknown")
+        counts[event_type] = counts.get(event_type, 0) + 1
+    return counts
+
+def _admin_is_save_event(event_type: str) -> bool:
+    normalized = str(event_type or "").strip()
+    return normalized in {
+        "save_keypoints",
+        "save_detect_instances",
+        "save_detection",
+        "checkpoint_subject_mask_roi",
+        "apply_subject_mask_session_checkpoints",
+        "apply_subject_mask_session_checkpoint",
+    } or normalized.startswith(("save_", "admin_save_"))
+
+def _admin_is_issue_event(event_type: str) -> bool:
+    normalized = str(event_type or "").strip()
+    return (
+        normalized.startswith("keypoint_mark_")
+        or normalized.startswith("detect_mark_")
+        or normalized.startswith("subject_mask_mark_")
+        or normalized.endswith("_issue")
+        or "issue" in normalized
+    )
+
+def _admin_latest_event(events: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    return dict(events[0]) if events else None
+
+def _admin_latest_matching_event(
+    events: Sequence[Mapping[str, object]],
+    predicate,
+) -> dict[str, object] | None:
+    for event in events:
+        if predicate(str(event.get("event_type") or "")):
+            return dict(event)
+    return None
+
+def _admin_optional_review_rows_by_task(
+    store,
+    task_ids: Sequence[str],
+) -> dict[str, dict[str, object]]:
+    """Return the persisted admin-review row for each requested task.
+
+    The table-existence check keeps read-only inspection compatible with an older
+    sidecar opened before :meth:`LabelingStore.initialize` can migrate it.
+    """
+
+    normalized_task_ids = sorted({str(task_id).strip() for task_id in task_ids if str(task_id).strip()})
+    if not normalized_task_ids:
+        return {}
+    store.initialize()
+    table_row = store.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='labeling_admin_reviews';"
+    ).fetchone()
+    if table_row is None:
+        return {}
+    placeholders = ",".join("?" for _ in normalized_task_ids)
+    rows = store.conn.execute(
+        f"""
+        SELECT *
+        FROM labeling_admin_reviews
+        WHERE task_id IN ({placeholders})
+        ORDER BY task_id, updated_at_utc DESC, created_at_utc DESC;
+        """,
+        normalized_task_ids,
+    ).fetchall()
+    reviews: dict[str, dict[str, object]] = {}
+    for row in rows:
+        row_dict = dict(row)
+        task_id = str(row_dict.get("task_id") or "")
+        if task_id and task_id not in reviews:
+            reviews[task_id] = row_dict
+    return reviews
+
+def _admin_completed_work_payload(
+    store,
+    *,
+    assignee_user: str | None = None,
+    workflow_kind: str | None = None,
+    recording_id: str | None = None,
+    admin_review_state: str | None = "pending",
+    event_limit_per_task: int = 1000,
+) -> dict[str, object]:
+    """Build the admin queue for completed work awaiting review."""
+
+    tasks = [
+        task
+        for task in store.list_tasks(
+            recording_id=recording_id or None,
+            assignee_user=assignee_user or None,
+            include_completed=True,
+        )
+        if str(task.get("state") or "") == "complete"
+    ]
+    if workflow_kind:
+        tasks = [
+            task
+            for task in tasks
+            if str(task.get("workflow_kind") or "") == str(workflow_kind)
+        ]
+    review_rows_by_task = _admin_optional_review_rows_by_task(
+        store,
+        [str(task.get("task_id") or "") for task in tasks],
+    )
+    requested_review_state = str(admin_review_state or "pending").strip() or "pending"
+    include_all_review_states = requested_review_state in {"all", "*"}
+    rows: list[dict[str, object]] = []
+    for task in tasks:
+        task_id = str(task.get("task_id") or "")
+        events = store.list_events(task_id=task_id, limit=max(1, int(event_limit_per_task)))
+        event_counts = _admin_event_type_counts(events)
+        save_events = [
+            event
+            for event in events
+            if _admin_is_save_event(str(event.get("event_type") or ""))
+        ]
+        issue_events = [
+            event
+            for event in events
+            if _admin_is_issue_event(str(event.get("event_type") or ""))
+        ]
+        review = review_rows_by_task.get(task_id, {})
+        review_state = str(review.get("state") or "pending")
+        if not include_all_review_states and review_state != requested_review_state:
+            continue
+        compact = _admin_compact_task(task)
+        latest_event = _admin_latest_event(events)
+        latest_save_event = _admin_latest_matching_event(events, _admin_is_save_event)
+        rows.append(
+            {
+                **compact,
+                "labeler_user": str(compact.get("assignee_user") or ""),
+                "admin_review_state": review_state,
+                "admin_review_id": str(review.get("review_id") or ""),
+                "admin_review_reviewer_user": str(review.get("reviewer_user") or ""),
+                "admin_review_updated_at_utc": str(review.get("updated_at_utc") or ""),
+                "admin_review_notes": str(review.get("notes") or ""),
+                "admin_review_correction_event_count": int(review.get("correction_event_count") or 0),
+                "admin_review_required": review_state in {"", "pending"},
+                "open_admin_review_url": str(compact.get("admin_task_url") or ""),
+                "event_count": len(events),
+                "event_counts": event_counts,
+                "save_event_count": len(save_events),
+                "issue_event_count": len(issue_events),
+                "issue_event_types": sorted(
+                    {
+                        str(event.get("event_type") or "")
+                        for event in issue_events
+                        if str(event.get("event_type") or "")
+                    }
+                ),
+                "latest_event": latest_event or {},
+                "latest_event_type": str((latest_event or {}).get("event_type") or ""),
+                "latest_event_at_utc": str((latest_event or {}).get("created_at_utc") or ""),
+                "latest_save_event": latest_save_event or {},
+                "latest_save_event_id": str((latest_save_event or {}).get("event_id") or ""),
+                "latest_save_event_at_utc": str((latest_save_event or {}).get("created_at_utc") or ""),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            str(row.get("admin_review_state") or ""),
+            str(row.get("completed_at_utc") or ""),
+            str(row.get("labeler_user") or ""),
+            str(row.get("recording_id") or ""),
+        )
+    )
+    state_counts: dict[str, int] = {}
+    workflow_counts: dict[str, int] = {}
+    labeler_counts: dict[str, int] = {}
+    for row in rows:
+        state = str(row.get("admin_review_state") or "pending")
+        workflow = str(row.get("workflow_kind") or "unknown")
+        labeler = str(row.get("labeler_user") or "unassigned")
+        state_counts[state] = state_counts.get(state, 0) + 1
+        workflow_counts[workflow] = workflow_counts.get(workflow, 0) + 1
+        labeler_counts[labeler] = labeler_counts.get(labeler, 0) + 1
+    return {
+        "ok": True,
+        "schema": "palette.web_labeling_admin_completed_work.v1",
+        "generated_at_utc": _admin_utc_now(),
+        "store_path": str(store.path),
+        "filters": {
+            "assignee_user": str(assignee_user or ""),
+            "workflow_kind": str(workflow_kind or ""),
+            "recording_id": str(recording_id or ""),
+            "admin_review_state": requested_review_state,
+        },
+        "counts": {
+            "completed_work_count": len(rows),
+            "pending_admin_review_count": state_counts.get("pending", 0),
+            "accepted_as_is_count": state_counts.get("accepted_as_is", 0),
+            "accepted_with_corrections_count": state_counts.get("accepted_with_corrections", 0),
+            "needs_revision_count": state_counts.get("needs_revision", 0),
+            "rejected_count": state_counts.get("rejected", 0),
+        },
+        "admin_review_state_counts": state_counts,
+        "workflow_counts": workflow_counts,
+        "labeler_counts": labeler_counts,
+        "completed_work": rows,
+        "mutation_routes_enabled": True,
+        "operator_action": (
+            "Inspect completed tasks from this queue. Use each task detail page to record an admin review decision."
+        ),
+    }
+
+def _admin_mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+def _admin_event_snapshot(event: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "event_id": str(event.get("event_id") or ""),
+        "event_type": str(event.get("event_type") or ""),
+        "created_at_utc": str(event.get("created_at_utc") or ""),
+        "user": str(event.get("user") or ""),
+        "recording_id": str(event.get("recording_id") or ""),
+        "task_id": str(event.get("task_id") or ""),
+        "target": dict(_admin_mapping(event.get("target"))),
+        "before": dict(_admin_mapping(event.get("before"))),
+        "after": dict(_admin_mapping(event.get("after"))),
+    }
+
+def _admin_points_summary(points: object) -> dict[str, object]:
+    if not isinstance(points, Sequence) or isinstance(points, (str, bytes)):
+        return {"count": 0, "finite_count": 0, "missing_count": 0}
+    count = 0
+    finite_count = 0
+    missing_count = 0
+    for point in points:
+        if not isinstance(point, Sequence) or isinstance(point, (str, bytes)):
+            continue
+        values = list(point)
+        if len(values) < 2:
+            continue
+        count += 1
+        try:
+            x = float(values[0])  # type: ignore[arg-type]
+            y = float(values[1])  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            missing_count += 1
+            continue
+        if x == x and y == y:
+            finite_count += 1
+        else:
+            missing_count += 1
+    return {"count": count, "finite_count": finite_count, "missing_count": missing_count}
+
+def _admin_keypoint_review_rows(
+    events: Sequence[Mapping[str, object]],
+    *,
+    max_rows: int = 40,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    seen_roi: set[str] = set()
+    for event in events:
+        if str(event.get("event_type") or "") != "save_keypoints":
+            continue
+        target = _admin_mapping(event.get("target"))
+        before = _admin_mapping(event.get("before"))
+        after = _admin_mapping(event.get("after"))
+        readback = _admin_mapping(after.get("readback"))
+        status = _admin_mapping(readback.get("status"))
+        roi_idx = (
+            target.get("roi_idx")
+            if target.get("roi_idx") is not None
+            else readback.get("roi_idx")
+            if readback.get("roi_idx") is not None
+            else before.get("roi_idx")
+        )
+        roi_key = str(roi_idx)
+        if not roi_key or roi_key in seen_roi:
+            continue
+        seen_roi.add(roi_key)
+        before_points = before.get("points")
+        rows.append(
+            {
+                "roi_idx": roi_idx,
+                "frame_idx": (
+                    target.get("frame_idx")
+                    if target.get("frame_idx") is not None
+                    else readback.get("frame_idx")
+                    if readback.get("frame_idx") is not None
+                    else before.get("frame_idx")
+                ),
+                "event_id": str(event.get("event_id") or ""),
+                "saved_at_utc": str(event.get("created_at_utc") or ""),
+                "saved_by": str(event.get("user") or ""),
+                "changed": bool(after.get("changed")),
+                "reason_before": str(before.get("reason") or ""),
+                "reason_after": str(readback.get("reason") or before.get("reason") or ""),
+                "status_after": dict(status),
+                "usable_keypoints": bool(status.get("usable_keypoints")),
+                "refined_success": bool(status.get("refined_success")),
+                "heading": status.get("heading"),
+                "before_points_summary": _admin_points_summary(before_points),
+            }
+        )
+        if len(rows) >= max_rows:
+            break
+    return rows
+
+def _admin_subject_mask_review_rows(
+    events: Sequence[Mapping[str, object]],
+    *,
+    max_rows: int = 40,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for event in events:
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {
+            "checkpoint_subject_mask_roi",
+            "apply_subject_mask_session_checkpoints",
+            "apply_subject_mask_session_checkpoint",
+        }:
+            continue
+        target = _admin_mapping(event.get("target"))
+        before = _admin_mapping(event.get("before"))
+        after = _admin_mapping(event.get("after"))
+        rows.append(
+            {
+                "event_id": str(event.get("event_id") or ""),
+                "event_type": event_type,
+                "saved_at_utc": str(event.get("created_at_utc") or ""),
+                "saved_by": str(event.get("user") or ""),
+                "roi_idx": target.get("roi_idx") if target.get("roi_idx") is not None else after.get("roi_idx"),
+                "component_name": str(target.get("component_name") or after.get("component_name") or ""),
+                "edit_revision_before": before.get("edit_revision"),
+                "edit_revision_after": after.get("edit_revision"),
+                "area_px_before": before.get("area_px_total"),
+                "area_px_after": after.get("area_px_total"),
+                "applied_checkpoint_count": after.get("applied_checkpoint_count"),
+            }
+        )
+        if len(rows) >= max_rows:
+            break
+    return rows
+
+def _admin_task_review_payload(
+    store,
+    task_id: str,
+    *,
+    event_limit: int = 500,
+) -> dict[str, object] | None:
+    """Build an admin review payload for a single task."""
+
+    resolved_task_id = str(task_id or "").strip()
+    if not resolved_task_id:
+        return None
+    task = store.get_task(resolved_task_id)
+    if task is None:
+        return None
+    events = store.list_events(task_id=resolved_task_id, limit=max(1, int(event_limit)))
+    review = _admin_optional_review_rows_by_task(store, [resolved_task_id]).get(resolved_task_id, {})
+    event_counts = _admin_event_type_counts(events)
+    save_events = [
+        event
+        for event in events
+        if _admin_is_save_event(str(event.get("event_type") or ""))
+    ]
+    issue_events = [
+        event
+        for event in events
+        if _admin_is_issue_event(str(event.get("event_type") or ""))
+    ]
+    latest_event = _admin_latest_event(events)
+    latest_save_event = _admin_latest_matching_event(events, _admin_is_save_event)
+    workflow_kind = str(task.get("workflow_kind") or "")
+    return {
+        "ok": True,
+        "schema": "palette.web_labeling_admin_task_review.v1",
+        "generated_at_utc": _admin_utc_now(),
+        "store_path": str(store.path),
+        "task": _admin_compact_task(task),
+        "task_scope": task.get("scope") if isinstance(task.get("scope"), Mapping) else {},
+        "task_raw": dict(task),
+        "admin_review": {
+            "state": str(review.get("state") or "pending"),
+            "review_id": str(review.get("review_id") or ""),
+            "reviewer_user": str(review.get("reviewer_user") or ""),
+            "updated_at_utc": str(review.get("updated_at_utc") or ""),
+            "notes": str(review.get("notes") or ""),
+            "correction_event_count": int(review.get("correction_event_count") or 0),
+            "mutation_routes_enabled": True,
+        },
+        "event_count": len(events),
+        "event_counts": event_counts,
+        "save_event_count": len(save_events),
+        "issue_event_count": len(issue_events),
+        "issue_event_types": sorted(
+            {
+                str(event.get("event_type") or "")
+                for event in issue_events
+                if str(event.get("event_type") or "")
+            }
+        ),
+        "latest_event": _admin_event_snapshot(latest_event) if latest_event else {},
+        "latest_save_event": _admin_event_snapshot(latest_save_event) if latest_save_event else {},
+        "recent_events": [_admin_event_snapshot(event) for event in events[:100]],
+        "keypoint_review": {
+            "available": workflow_kind == "keypoints",
+            "rows": _admin_keypoint_review_rows(events) if workflow_kind == "keypoints" else [],
+            "operator_action": (
+                "Inspect the latest saved ROI rows. The preview is read-only until an admin explicitly enables correction mode."
+                if workflow_kind == "keypoints"
+                else ""
+            ),
+        },
+        "subject_mask_review": {
+            "available": workflow_kind == "subject_mask_component",
+            "rows": _admin_subject_mask_review_rows(events) if workflow_kind == "subject_mask_component" else [],
+            "operator_action": (
+                "Inspect checkpoint/apply events. Visual mask overlays and admin correction writes are a follow-up slice."
+                if workflow_kind == "subject_mask_component"
+                else ""
+            ),
+        },
+        "task_state_mutation_route_enabled": True,
+        "admin_review_mutation_routes_enabled": True,
+        "operator_action": (
+            "Inspect the completed task and record an admin review decision. Keypoint tasks also support explicit audited corrections."
+        ),
     }
 
 def _admin_registry_path_from_env() -> Path | None:

@@ -1,11 +1,11 @@
-"""Read-only admin HTML renderers for labeling web surfaces."""
+"""Admin HTML renderers for labeling web surfaces."""
 
 from __future__ import annotations
 
 import html
 import json
-from typing import Mapping, Sequence
-from urllib.parse import quote
+from typing import Mapping
+from urllib.parse import quote, urlencode
 
 from .assignment_store import LABELING_USER_ROLES, LABELING_USER_STATUSES
 from .admin_registry import _task_title
@@ -19,6 +19,7 @@ from .web_auth import (
 from .web_policy import IDENTITY_PROBE_PATH, PERSONAL_WORK_PATH
 
 __all__ = [
+    "_admin_completed_work_html",
     "_admin_datasets_html",
     "_admin_html",
     "_admin_recording_html",
@@ -34,6 +35,133 @@ def _admin_datasets_html() -> bytes:
 
 def _admin_html() -> bytes:
     return read_labeling_asset("templates/admin/index.html.j2").encode("utf-8")
+
+
+def _admin_completed_work_html(payload: Mapping[str, object]) -> bytes:
+    counts = payload.get("counts") if isinstance(payload.get("counts"), Mapping) else {}
+    workflow_counts = payload.get("workflow_counts") if isinstance(payload.get("workflow_counts"), Mapping) else {}
+    labeler_counts = payload.get("labeler_counts") if isinstance(payload.get("labeler_counts"), Mapping) else {}
+    filters = payload.get("filters") if isinstance(payload.get("filters"), Mapping) else {}
+    selected_review_state = str(filters.get("admin_review_state") or "pending")
+    selected_workflow = str(filters.get("workflow_kind") or "")
+    selected_labeler = str(filters.get("assignee_user") or "")
+    selected_recording = str(filters.get("recording_id") or "")
+    filter_query = {
+        key: value
+        for key, value in {
+            "admin_review_state": selected_review_state,
+            "workflow_kind": selected_workflow,
+            "assignee_user": selected_labeler,
+            "recording_id": selected_recording,
+        }.items()
+        if str(value)
+    }
+    current_queue_url = "/admin/completed-work"
+    if filter_query:
+        current_queue_url += "?" + urlencode(filter_query)
+    review_state_options = "\n".join(
+        f'<option value="{html.escape(state)}"{" selected" if state == selected_review_state else ""}>{html.escape(label)}</option>'
+        for state, label in (
+            ("pending", "Pending admin review"),
+            ("accepted_as_is", "Accepted as-is"),
+            ("accepted_with_corrections", "Accepted with corrections"),
+            ("needs_revision", "Needs revision"),
+            ("rejected", "Rejected"),
+            ("all", "All review states"),
+        )
+    )
+    quick_filter_links = " ".join(
+        f'<a class="chip" href="/admin/completed-work?{html.escape(urlencode({"admin_review_state": state}))}">{html.escape(label)}</a>'
+        for state, label in (
+            ("pending", "Pending"),
+            ("accepted_as_is", "Accepted as-is"),
+            ("accepted_with_corrections", "Accepted with corrections"),
+            ("needs_revision", "Needs revision"),
+            ("rejected", "Rejected"),
+            ("all", "All"),
+        )
+    )
+    filter_controls_html = (
+        '<form class="filters" method="get" action="/admin/completed-work">'
+        "<label>Admin review state<br>"
+        f'<select name="admin_review_state">{review_state_options}</select>'
+        "</label>"
+        "<label>Workflow kind<br>"
+        f'<input name="workflow_kind" value="{html.escape(selected_workflow)}" placeholder="keypoints"></label>'
+        "<label>Labeler<br>"
+        f'<input name="assignee_user" value="{html.escape(selected_labeler)}" placeholder="user id"></label>'
+        "<label>Recording id<br>"
+        f'<input name="recording_id" value="{html.escape(selected_recording)}" placeholder="recording id"></label>'
+        '<button type="submit">Apply filters</button>'
+        '<a class="reset" href="/admin/completed-work">Reset</a>'
+        "</form>"
+        f'<div class="chips">{quick_filter_links}</div>'
+        f'<p class="muted">Current queue URL: <code>{html.escape(current_queue_url)}</code></p>'
+    )
+    rows = [
+        row
+        for row in (
+            payload.get("completed_work")
+            if isinstance(payload.get("completed_work"), list)
+            else []
+        )
+        if isinstance(row, Mapping)
+    ]
+    workflow_counts_html = "".join(
+        f'<span class="chip">{html.escape(str(key))}: {html.escape(str(value))}</span>'
+        for key, value in sorted(workflow_counts.items())
+    ) or '<span class="muted">None</span>'
+    labeler_counts_html = "".join(
+        f'<span class="chip">{html.escape(str(key))}: {html.escape(str(value))}</span>'
+        for key, value in sorted(labeler_counts.items())
+    ) or '<span class="muted">None</span>'
+    row_html_parts: list[str] = []
+    for row in rows:
+        task_id = str(row.get("task_id") or "")
+        recording_id = str(row.get("recording_id") or "")
+        labeler = str(row.get("labeler_user") or row.get("assignee_user") or "")
+        task_url = str(row.get("open_admin_review_url") or "")
+        if task_url:
+            task_url = task_url + "?" + urlencode({"return_to": current_queue_url})
+        issue_types = row.get("issue_event_types") if isinstance(row.get("issue_event_types"), list) else []
+        issue_text = ", ".join(str(item) for item in issue_types if str(item)) or "none"
+        event_counts = row.get("event_counts") if isinstance(row.get("event_counts"), Mapping) else {}
+        event_summary = ", ".join(
+            f"{key}: {value}" for key, value in sorted(event_counts.items())
+        ) or "none"
+        row_html_parts.append(
+            "<tr>"
+            f'<td><a href="{html.escape(task_url)}">{html.escape(task_id)}</a></td>'
+            f'<td><a href="/admin/recordings/{quote(recording_id, safe="")}">{html.escape(recording_id)}</a></td>'
+            f'<td><a href="/admin/users/{quote(labeler, safe="")}">{html.escape(labeler)}</a></td>'
+            f"<td>{html.escape(str(row.get('workflow_kind') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('admin_review_state') or 'pending'))}</td>"
+            f"<td>{html.escape(str(row.get('completed_at_utc') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('save_event_count') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('issue_event_count') or 0))}<br><span class=\"muted\">{html.escape(issue_text)}</span></td>"
+            f"<td>{html.escape(str(row.get('latest_save_event_at_utc') or ''))}</td>"
+            f"<td><details><summary>events</summary><p class=\"muted\">{html.escape(event_summary)}</p></details></td>"
+            "</tr>"
+        )
+    rows_html = "\n".join(row_html_parts) or (
+        '<tr><td colspan="10" class="muted">No completed work is waiting for admin review.</td></tr>'
+    )
+    body = render_labeling_template(
+        "admin/completed_work.html.j2",
+        {
+            "slot_001": html.escape(str(counts.get("completed_work_count", 0))),
+            "slot_002": html.escape(str(counts.get("pending_admin_review_count", 0))),
+            "slot_003": html.escape(str(counts.get("accepted_as_is_count", 0))),
+            "slot_004": html.escape(str(counts.get("accepted_with_corrections_count", 0))),
+            "slot_005": html.escape(str(counts.get("needs_revision_count", 0))),
+            "slot_006": workflow_counts_html,
+            "slot_007": labeler_counts_html,
+            "slot_008": rows_html,
+            "slot_009": html.escape(str(payload.get("operator_action") or "")),
+            "slot_010": filter_controls_html,
+        },
+    )
+    return body.encode("utf-8")
 
 
 
@@ -190,17 +318,40 @@ def _admin_recording_html(payload: Mapping[str, object]) -> bytes:
     return body.encode("utf-8")
 
 
-def _admin_task_html(task: Mapping[str, object], *, events: Sequence[Mapping[str, object]] = ()) -> bytes:
+def _admin_task_html(payload: Mapping[str, object]) -> bytes:
+    task = payload.get("task") if isinstance(payload.get("task"), Mapping) else {}
     safe_title = html.escape(_task_title(task))
     task_id = str(task.get("task_id") or "")
     task_id_js = json.dumps(task_id)
+    return_url = str(payload.get("admin_queue_return_url") or "/admin/completed-work")
+    if not return_url.startswith("/admin/completed-work"):
+        return_url = "/admin/completed-work"
     current_state = str(task.get("state") or "")
     state_options = "\n".join(
         f'<option value="{html.escape(state)}"{" selected" if state == current_state else ""}>{html.escape(state)}</option>'
         for state in ("pending", "in_progress", "complete")
     )
-    scope = task.get("scope")
+    scope = payload.get("task_scope")
     scope_text = json.dumps(scope if isinstance(scope, (dict, list)) else {}, indent=2, sort_keys=True)
+    api_url = f"/api/admin/tasks/{quote(task_id, safe='')}"
+    admin_review = payload.get("admin_review") if isinstance(payload.get("admin_review"), Mapping) else {}
+    review_state = str(admin_review.get("state") or "pending")
+    review_state_options = "\n".join(
+        f'<option value="{html.escape(state)}"{" selected" if state == review_state else ""}>{html.escape(state)}</option>'
+        for state in (
+            "pending",
+            "accepted_as_is",
+            "accepted_with_corrections",
+            "needs_revision",
+            "rejected",
+        )
+    )
+    review_notes = str(admin_review.get("notes") or "")
+    event_counts = payload.get("event_counts") if isinstance(payload.get("event_counts"), Mapping) else {}
+    event_count_chips = "".join(
+        f'<span class="chip">{html.escape(str(key))}: {html.escape(str(value))}</span>'
+        for key, value in sorted(event_counts.items())
+    ) or '<span class="muted">None</span>'
     rows = [
         ("Task id", task.get("task_id")),
         ("Recording", task.get("recording_id")),
@@ -223,7 +374,134 @@ def _admin_task_html(task: Mapping[str, object], *, events: Sequence[Mapping[str
         f"<tr><th>{html.escape(label)}</th><td>{html.escape(str(value or ''))}</td></tr>"
         for label, value in rows
     )
-    if events:
+    review_rows = [
+        ("Admin review state", admin_review.get("state") or "pending"),
+        ("Admin reviewer", admin_review.get("reviewer_user")),
+        ("Admin review updated", admin_review.get("updated_at_utc")),
+        ("Admin review notes", admin_review.get("notes")),
+        ("Admin correction events", admin_review.get("correction_event_count")),
+        ("Admin review mutations", "enabled"),
+        ("Save events", payload.get("save_event_count")),
+        ("Issue events", payload.get("issue_event_count")),
+    ]
+    review_html = "\n".join(
+        f"<tr><th>{html.escape(label)}</th><td>{html.escape(str(value or ''))}</td></tr>"
+        for label, value in review_rows
+    )
+    keypoint_review = payload.get("keypoint_review") if isinstance(payload.get("keypoint_review"), Mapping) else {}
+    keypoint_rows = keypoint_review.get("rows") if isinstance(keypoint_review.get("rows"), list) else []
+    if keypoint_review.get("available"):
+        keypoint_row_html = ""
+        roi_options_html = ""
+        for row in keypoint_rows:
+            if not isinstance(row, Mapping):
+                continue
+            roi_idx_text = str(row.get("roi_idx") or "")
+            frame_idx_text = str(row.get("frame_idx") or "")
+            if roi_idx_text:
+                roi_options_html += (
+                    f'<option value="{html.escape(roi_idx_text)}">'
+                    f"ROI {html.escape(roi_idx_text)}"
+                    + (f" / frame {html.escape(frame_idx_text)}" if frame_idx_text else "")
+                    + "</option>"
+                )
+            point_summary = row.get("before_points_summary") if isinstance(row.get("before_points_summary"), Mapping) else {}
+            status_after = row.get("status_after") if isinstance(row.get("status_after"), Mapping) else {}
+            status_text = ", ".join(
+                f"{key}: {value}"
+                for key, value in sorted(status_after.items())
+                if key in {"usable_keypoints", "refined_success", "geometry_valid", "confidence_valid", "heading_usable"}
+            ) or "none"
+            event_id = str(row.get("event_id") or "")
+            keypoint_row_html += (
+                "<tr>"
+                f"<td>{html.escape(str(row.get('roi_idx') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('frame_idx') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('saved_at_utc') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('saved_by') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('changed')))}</td>"
+                f"<td>{html.escape(str(point_summary.get('finite_count') or 0))}/{html.escape(str(point_summary.get('count') or 0))} finite</td>"
+                f"<td>{html.escape(status_text)}</td>"
+                f"<td><a href=\"/api/admin/events/{quote(event_id, safe='')}\">{html.escape(event_id)}</a></td>"
+                "</tr>"
+            )
+        if not keypoint_row_html:
+            keypoint_row_html = '<tr><td colspan="8" class="muted">No keypoint save events are recorded for this task.</td></tr>'
+        if roi_options_html:
+            preview_html = (
+                '<div class="preview-grid">'
+                '<div class="preview-panel">'
+                '<label>Recent saved ROI<br><select id="admin-keypoint-preview-roi">'
+                f"{roi_options_html}"
+                "</select></label>"
+                '<label>Go to ROI index<br><input id="admin-keypoint-preview-roi-input" type="number" min="0" step="1" value=""></label>'
+                '<div class="button-row">'
+                '<button type="button" id="admin-keypoint-preview-prev">Previous</button>'
+                '<button type="button" id="admin-keypoint-preview-next">Next</button>'
+                '<button type="button" id="admin-keypoint-preview-go">Go to ROI</button>'
+                '<button type="button" id="admin-keypoint-preview-refresh">Refresh preview</button>'
+                '<button type="button" id="admin-keypoint-correction-toggle">Enable correction</button>'
+                '<button type="button" id="admin-keypoint-correction-save" disabled>Save admin correction</button>'
+                "</div>"
+                '<label>Place missing keypoint<br><select id="admin-keypoint-placement-select">'
+                '<option value="">Drag existing point</option>'
+                "</select></label>"
+                '<dl id="admin-keypoint-preview-status" class="preview-meta"></dl>'
+                '<canvas id="admin-keypoint-preview-canvas" aria-label="Read-only keypoint preview"></canvas>'
+                "</div>"
+                '<div class="preview-panel">'
+                "<h3>Current ROI payload</h3>"
+                '<pre id="admin-keypoint-preview-json" class="muted"></pre>'
+                "</div>"
+                "</div>"
+            )
+        else:
+            preview_html = '<p class="muted">No saved ROI rows are available for preview.</p>'
+        keypoint_html = (
+            "<section class=\"card\">"
+            "<h2>Keypoint review snapshot</h2>"
+            f"<p class=\"muted\">{html.escape(str(keypoint_review.get('operator_action') or ''))}</p>"
+            f"{preview_html}"
+            "<table><thead><tr><th>ROI</th><th>Frame</th><th>Saved</th><th>By</th><th>Changed</th><th>Prior points</th><th>Readback status</th><th>Event</th></tr></thead>"
+            f"<tbody>{keypoint_row_html}</tbody></table>"
+            "</section>"
+        )
+    else:
+        keypoint_html = ""
+    subject_mask_review = payload.get("subject_mask_review") if isinstance(payload.get("subject_mask_review"), Mapping) else {}
+    subject_mask_rows = subject_mask_review.get("rows") if isinstance(subject_mask_review.get("rows"), list) else []
+    if subject_mask_review.get("available"):
+        mask_row_html = ""
+        for row in subject_mask_rows:
+            if not isinstance(row, Mapping):
+                continue
+            event_id = str(row.get("event_id") or "")
+            mask_row_html += (
+                "<tr>"
+                f"<td>{html.escape(str(row.get('event_type') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('roi_idx') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('component_name') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('saved_at_utc') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('saved_by') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('edit_revision_before') or ''))} -> {html.escape(str(row.get('edit_revision_after') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('area_px_before') or ''))} -> {html.escape(str(row.get('area_px_after') or ''))}</td>"
+                f"<td><a href=\"/api/admin/events/{quote(event_id, safe='')}\">{html.escape(event_id)}</a></td>"
+                "</tr>"
+            )
+        if not mask_row_html:
+            mask_row_html = '<tr><td colspan="8" class="muted">No mask checkpoint/apply events are recorded for this task.</td></tr>'
+        subject_mask_html = (
+            "<section class=\"card\">"
+            "<h2>Subject-mask review snapshot</h2>"
+            f"<p class=\"muted\">{html.escape(str(subject_mask_review.get('operator_action') or ''))}</p>"
+            "<table><thead><tr><th>Event</th><th>ROI</th><th>Component</th><th>Saved</th><th>By</th><th>Revision</th><th>Area px</th><th>Event id</th></tr></thead>"
+            f"<tbody>{mask_row_html}</tbody></table>"
+            "</section>"
+        )
+    else:
+        subject_mask_html = ""
+    recent_events = payload.get("recent_events") if isinstance(payload.get("recent_events"), list) else []
+    if recent_events:
         event_html = "\n".join(
             "<details>"
             f"<summary><b>{html.escape(str(event.get('event_type') or 'event'))}</b> "
@@ -231,7 +509,8 @@ def _admin_task_html(task: Mapping[str, object], *, events: Sequence[Mapping[str
             f"<code>{html.escape(str(event.get('event_id') or ''))}</code></summary>"
             f"<pre>{html.escape(json.dumps({key: event.get(key) for key in ('target', 'before', 'after')}, indent=2, sort_keys=True))}</pre>"
             "</details>"
-            for event in events
+            for event in recent_events
+            if isinstance(event, Mapping)
         )
     else:
         event_html = '<p class="muted">No audit events recorded for this task.</p>'
@@ -245,6 +524,16 @@ def _admin_task_html(task: Mapping[str, object], *, events: Sequence[Mapping[str
             "slot_005": html.escape(scope_text),
             "slot_006": event_html,
             "slot_007": task_id_js,
+            "slot_008": review_html,
+            "slot_009": event_count_chips,
+            "slot_010": keypoint_html,
+            "slot_011": subject_mask_html,
+            "slot_012": html.escape(api_url),
+            "slot_013": html.escape(str(payload.get("operator_action") or "")),
+            "slot_014": review_state_options,
+            "slot_015": html.escape(review_notes),
+            "slot_016": html.escape(return_url),
+            "slot_017": read_labeling_asset("static/js/image_canvas_viewport.js"),
         },
     )
     return body.encode("utf-8")
@@ -437,4 +726,3 @@ def _admin_user_html(*, user: str, work: Mapping[str, object], dashboard_row: Ma
         },
     )
     return body.encode("utf-8")
-

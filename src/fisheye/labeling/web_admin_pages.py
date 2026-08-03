@@ -5,16 +5,18 @@ from __future__ import annotations
 from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote
 
 from flask import Flask, Response, request
 
+from .admin_registry import _admin_completed_work_payload, _admin_task_review_payload
 from .admin_dashboard import (
     _admin_recording_payload,
     _admin_user_payload,
     _admin_users_payload,
 )
 from .web_admin_renderers import (
+    _admin_completed_work_html,
     _admin_datasets_html,
     _admin_html,
     _admin_recording_html,
@@ -29,6 +31,19 @@ from .web_error_pages import _browser_error_html
 from .web_responses import _format_error
 
 AdminPageResponder = Callable[..., tuple[bytes, HTTPStatus, str]]
+
+
+def _last_query_arg(request_adapter: object, *names: str, default: str = "") -> str:
+    path = str(getattr(request_adapter, "path", "") or "")
+    query = path.partition("?")[2]
+    if not query:
+        return default
+    values_by_name = parse_qs(query, keep_blank_values=True)
+    for name in names:
+        values = values_by_name.get(name)
+        if values:
+            return str(values[-1]).strip()
+    return default
 
 
 def _admin_page_response_payload(
@@ -64,6 +79,25 @@ def _admin_page_response_payload(
         return _admin_html(), HTTPStatus.OK, "text/html; charset=utf-8"
     if path == "/admin/datasets":
         return _admin_datasets_html(), HTTPStatus.OK, "text/html; charset=utf-8"
+    if path == "/admin/completed-work":
+        return (
+            _admin_completed_work_html(
+                _admin_completed_work_payload(
+                    state.store,
+                    assignee_user=_last_query_arg(request_adapter, "user", "assignee_user") or None,
+                    workflow_kind=_last_query_arg(request_adapter, "workflow_kind") or None,
+                    recording_id=_last_query_arg(request_adapter, "recording_id") or None,
+                    admin_review_state=_last_query_arg(
+                        request_adapter,
+                        "admin_review_state",
+                        default="pending",
+                    )
+                    or "pending",
+                )
+            ),
+            HTTPStatus.OK,
+            "text/html; charset=utf-8",
+        )
     if path == "/admin/users":
         return (
             _admin_users_html(_admin_users_payload(state.store, config=state.config)),
@@ -120,17 +154,19 @@ def _admin_page_response_payload(
                 HTTPStatus.NOT_FOUND,
                 "text/html; charset=utf-8",
             )
-        task = state.store.get_task(task_id)
-        if task is None:
+        payload = _admin_task_review_payload(state.store, task_id)
+        if payload is None:
             payload = _format_error("task_not_found", status=HTTPStatus.NOT_FOUND)
             return (
                 _browser_error_html(payload),
                 HTTPStatus.NOT_FOUND,
                 "text/html; charset=utf-8",
             )
-        events = state.store.list_events(task_id=task_id, limit=100)
+        return_to = _last_query_arg(request_adapter, "return_to")
+        if return_to.startswith("/admin/completed-work"):
+            payload = {**payload, "admin_queue_return_url": return_to}
         return (
-            _admin_task_html(task, events=events),
+            _admin_task_html(payload),
             HTTPStatus.OK,
             "text/html; charset=utf-8",
         )
@@ -168,7 +204,7 @@ def register_admin_page_routes(
     state: Any,
     response_builder: AdminPageResponder,
 ) -> None:
-    """Register read-only admin HTML pages on ``app``."""
+    """Register admin HTML pages on ``app``."""
 
     @claimed_route(app, "/admin", methods=["GET"])
     def admin_page_home() -> Response:
@@ -177,6 +213,10 @@ def register_admin_page_routes(
     @claimed_route(app, "/admin/datasets", methods=["GET"])
     def admin_page_datasets() -> Response:
         return _respond(state, response_builder, path="/admin/datasets")
+
+    @claimed_route(app, "/admin/completed-work", methods=["GET"])
+    def admin_page_completed_work() -> Response:
+        return _respond(state, response_builder, path="/admin/completed-work")
 
     @claimed_route(app, "/admin/users", methods=["GET"])
     def admin_page_users() -> Response:

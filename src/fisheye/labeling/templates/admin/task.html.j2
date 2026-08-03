@@ -11,6 +11,8 @@
       --line: #d7ded5;
       --paper: #f7f5ec;
       --card: #fffdf5;
+      --accent: #0f6f5c;
+      --warn: #9a6b1f;
     }
     body {
       margin: 0;
@@ -19,15 +21,21 @@
       font-family: Georgia, "Times New Roman", serif;
     }
     main {
-      max-width: 960px;
+      max-width: 1180px;
       margin: 0 auto;
       padding: 32px 18px 56px;
     }
-    article {
+    article, .card {
       border: 1px solid var(--line);
       border-radius: 22px;
       background: var(--card);
       padding: 20px;
+      margin: 16px 0;
+    }
+    a {
+      color: var(--accent);
+      font-weight: 800;
+      text-decoration: none;
     }
     table {
       width: 100%;
@@ -64,6 +72,27 @@
     .muted {
       color: var(--muted);
     }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0 14px;
+    }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fffef9;
+      padding: 5px 9px;
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+      font-size: 0.88rem;
+    }
+    .notice {
+      border-left: 5px solid var(--warn);
+      border-radius: 14px;
+      background: #fff6dd;
+      padding: 12px 14px;
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
     .state-form {
       margin: 18px 0;
       border: 1px solid var(--line);
@@ -76,19 +105,111 @@
       margin: 8px 0;
       font-family: "Trebuchet MS", Verdana, sans-serif;
     }
-    .state-form select, .state-form button {
+    .state-form select, .state-form button, .state-form textarea {
       font: inherit;
       padding: 7px 9px;
+    }
+    .state-form textarea {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 5.5rem;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fffdf8;
+      color: var(--ink);
+      display: block;
+      margin-top: 6px;
+    }
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0;
+    }
+    .preview-grid {
+      display: grid;
+      grid-template-columns: minmax(520px, 1.35fr) minmax(280px, 0.65fr);
+      gap: 14px;
+      align-items: start;
+    }
+    .preview-panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fffdf8;
+      padding: 14px;
+    }
+    #admin-keypoint-preview-canvas {
+      display: block;
+      width: min(100%, 760px);
+      max-width: 100%;
+      height: auto;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #111;
+      image-rendering: pixelated;
+      cursor: grab;
+    }
+    #admin-keypoint-preview-canvas.correction-enabled {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 4px rgba(15, 111, 92, 0.18);
+      cursor: crosshair;
+    }
+    .preview-meta {
+      display: grid;
+      grid-template-columns: max-content minmax(0, 1fr);
+      gap: 6px 10px;
+      margin: 10px 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fffaf0;
+      padding: 10px;
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+      font-size: 0.92rem;
+    }
+    .preview-meta dt {
+      margin: 0;
+      color: var(--muted);
+      font-weight: 800;
+    }
+    .preview-meta dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 900px) {
+      .preview-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
 <body>
   <main>
-    <p><a href="/admin">Back to admin</a></p>
+    <p><a href="/admin">Admin home</a> &middot; <a href="@@slot_016@@">Completed work review</a> &middot; <a href="@@slot_012@@">JSON payload</a></p>
     <article>
+      <p class="muted">Admin task detail</p>
       <h1>@@slot_002@@</h1>
-      <p class="muted">Admin task detail. Label mutations still require the assigned user's guarded labeling session; operators may only change task state here.</p>
+      <p class="notice">@@slot_013@@</p>
       <table>@@slot_003@@</table>
+      <h2>Admin review state</h2>
+      <table>@@slot_008@@</table>
+      <h2>Event counts</h2>
+      <div class="chips">@@slot_009@@</div>
+      <section class="state-form">
+        <h2>Admin review decision</h2>
+        <p class="muted">This records your review decision in the labeling sidecar and appends an audit event. It does not mutate keypoints, masks, or task completion state.</p>
+        <form id="admin-review-form">
+          <label>Review state<br><select id="admin-review-state">@@slot_014@@</select></label>
+          <label>Review notes<br><textarea id="admin-review-notes">@@slot_015@@</textarea></label>
+          <div class="button-row">
+            <button type="button" data-review-state="accepted_as_is">Accept as-is</button>
+            <button type="button" data-review-state="accepted_with_corrections">Accept with corrections</button>
+            <button type="button" data-review-state="needs_revision">Needs revision</button>
+            <button type="button" data-review-state="rejected">Reject</button>
+            <button type="submit">Save selected state</button>
+          </div>
+        </form>
+        <pre id="admin-review-result" class="muted"></pre>
+      </section>
       <section class="state-form">
         <h2>Operator task state</h2>
         <p class="muted">Use this only for completion corrections or explicit reopen workflows. Reopening a completed task records <code>task_reopened</code>; completing a task closes open sessions.</p>
@@ -98,6 +219,8 @@
         </form>
         <pre id="task-state-result" class="muted"></pre>
       </section>
+      @@slot_010@@
+      @@slot_011@@
       <h2>Task scope</h2>
       <pre>@@slot_005@@</pre>
       <h2>Recent audit events</h2>
@@ -106,7 +229,429 @@
   </main>
   <script>
     const taskId = @@slot_007@@;
+    const adminReviewResultEl = document.getElementById("admin-review-result");
     const resultEl = document.getElementById("task-state-result");
+    async function saveAdminReview(stateValue) {
+      const stateEl = document.getElementById("admin-review-state");
+      const notesEl = document.getElementById("admin-review-notes");
+      if (stateValue) stateEl.value = stateValue;
+      adminReviewResultEl.textContent = "Saving admin review...";
+      try {
+        const response = await fetch("/api/admin/admin-reviews", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            task_id: taskId,
+            state: stateEl.value,
+            notes: notesEl.value
+          })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.details || data.error || "admin review update failed");
+        }
+        adminReviewResultEl.textContent = JSON.stringify(data.admin_review, null, 2);
+      } catch (error) {
+        adminReviewResultEl.textContent = `Error: ${error.message || String(error)}`;
+      }
+    }
+    document.getElementById("admin-review-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await saveAdminReview("");
+    });
+    document.querySelectorAll("[data-review-state]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        await saveAdminReview(button.getAttribute("data-review-state") || "");
+      });
+    });
+  </script>
+  <script>
+@@slot_017@@
+  </script>
+  <script>
+    function decodeRawImage(image) {
+      const shape = image.shape || [];
+      const height = Number(shape[0] || 0);
+      const width = Number(shape[1] || 0);
+      const channels = Number(image.channels || (shape.length >= 3 ? shape[2] : 1));
+      const binary = atob(image.pixels || "");
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < width * height; i += 1) {
+        const source = channels === 1 ? i : i * channels;
+        const r = binary.charCodeAt(source);
+        const g = channels >= 3 ? binary.charCodeAt(source + 1) : r;
+        const b = channels >= 3 ? binary.charCodeAt(source + 2) : r;
+        rgba[i * 4] = r;
+        rgba[i * 4 + 1] = g;
+        rgba[i * 4 + 2] = b;
+        rgba[i * 4 + 3] = 255;
+      }
+      return {width, height, data: new ImageData(rgba, width, height)};
+    }
+    function keypointColor(index, total) {
+      const hue = (index * 360 / Math.max(1, total)) % 360;
+      return `hsl(${hue}, 86%, 55%)`;
+    }
+    function keypointIsFinite(point) {
+      return point && point.length >= 2 && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]));
+    }
+    let adminKeypointPreviewPayload = null;
+    let adminKeypointPreviewPoints = [];
+    let adminKeypointViewport = null;
+    let adminKeypointShowText = true;
+    let adminKeypointCurrentRoi = null;
+    let adminKeypointTotalRois = null;
+    let adminKeypointCorrectionEnabled = false;
+    let adminKeypointDraggingIndex = -1;
+    let adminKeypointDirty = false;
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+    function setAdminCorrectionEnabled(enabled) {
+      adminKeypointCorrectionEnabled = Boolean(enabled);
+      adminKeypointDirty = false;
+      adminKeypointDraggingIndex = -1;
+      const canvas = document.getElementById("admin-keypoint-preview-canvas");
+      const toggle = document.getElementById("admin-keypoint-correction-toggle");
+      const saveButton = document.getElementById("admin-keypoint-correction-save");
+      canvas?.classList.toggle("correction-enabled", adminKeypointCorrectionEnabled);
+      if (canvas) canvas.style.cursor = adminKeypointCorrectionEnabled ? "crosshair" : "grab";
+      if (toggle) toggle.textContent = adminKeypointCorrectionEnabled ? "Disable correction" : "Enable correction";
+      if (saveButton) saveButton.disabled = !adminKeypointCorrectionEnabled;
+      if (adminKeypointPreviewPayload) drawAdminKeypointPreview(adminKeypointPreviewPayload);
+    }
+    function selectedAdminPlacementIndex() {
+      const select = document.getElementById("admin-keypoint-placement-select");
+      if (!select || select.value === "") return -1;
+      const index = Number(select.value);
+      return Number.isInteger(index) && index >= 0 ? index : -1;
+    }
+    function refreshAdminPlacementOptions() {
+      const select = document.getElementById("admin-keypoint-placement-select");
+      const payload = adminKeypointPreviewPayload;
+      if (!select || !payload || !payload.roi) return;
+      const previous = select.value;
+      const labels = payload.roi.labels || [];
+      const missing = [];
+      adminKeypointPreviewPoints.forEach((point, index) => {
+        if (!keypointIsFinite(point)) missing.push(index);
+      });
+      select.innerHTML = '<option value="">Drag existing point</option>';
+      missing.forEach((index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = `${labels[index] || `keypoint ${index + 1}`} (${index})`;
+        select.appendChild(option);
+      });
+      if (missing.length === 0) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.disabled = true;
+        option.textContent = "No missing keypoints";
+        select.appendChild(option);
+      } else if (previous && missing.includes(Number(previous))) {
+        select.value = previous;
+      }
+    }
+    function canvasPreviewCanvasPoint(event) {
+      const viewport = ensureAdminKeypointViewport();
+      return viewport.canvasPoint(event);
+    }
+    function canvasPreviewImagePoint(event) {
+      const viewport = ensureAdminKeypointViewport();
+      const [canvasX, canvasY] = canvasPreviewCanvasPoint(event);
+      return viewport.canvasToImage(canvasX, canvasY);
+    }
+    function nearestAdminKeypointAtCanvas(canvasX, canvasY) {
+      const viewport = ensureAdminKeypointViewport();
+      let best = -1;
+      let bestDistance = Infinity;
+      adminKeypointPreviewPoints.forEach((point, index) => {
+        if (!keypointIsFinite(point)) return;
+        const [pointCanvasX, pointCanvasY] = viewport.imageToCanvas(Number(point[0]), Number(point[1]));
+        const dx = pointCanvasX - canvasX;
+        const dy = pointCanvasY - canvasY;
+        const distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = index;
+        }
+      });
+      const hitRadius = Math.max(12, Math.min(24, 18 * (window.devicePixelRatio || 1)));
+      return bestDistance <= hitRadius * hitRadius ? best : -1;
+    }
+    function ensureAdminKeypointViewport() {
+      const canvas = document.getElementById("admin-keypoint-preview-canvas");
+      if (!adminKeypointViewport && canvas) {
+        adminKeypointViewport = createImageCanvasViewport(canvas, renderAdminKeypointPreview, {minScale: 1, maxScale: 20});
+      }
+      return adminKeypointViewport;
+    }
+    function renderAdminKeypointPreview() {
+      const payload = adminKeypointPreviewPayload;
+      const canvas = document.getElementById("admin-keypoint-preview-canvas");
+      const statusEl = document.getElementById("admin-keypoint-preview-status");
+      const jsonEl = document.getElementById("admin-keypoint-preview-json");
+      if (!canvas || !payload || !payload.roi) return;
+      const viewport = ensureAdminKeypointViewport();
+      if (!viewport || !viewport.hasImage()) return;
+      const ctx = canvas.getContext("2d");
+      viewport.drawImage();
+      const labels = payload.roi.labels || [];
+      const points = adminKeypointPreviewPoints.length ? adminKeypointPreviewPoints : (payload.roi.points || []);
+      const radius = Math.max(3, Math.min(6, canvas.width / 80));
+      ctx.textBaseline = "middle";
+      ctx.font = `${Math.max(10, Math.min(14, canvas.width / 30))}px Trebuchet MS, Verdana, sans-serif`;
+      points.forEach((point, index) => {
+        if (!keypointIsFinite(point)) return;
+        const x = Number(point[0]);
+        const y = Number(point[1]);
+        const [canvasX, canvasY] = viewport.imageToCanvas(x, y);
+        const color = keypointColor(index, points.length);
+        ctx.beginPath();
+        ctx.arc(canvasX, canvasY, radius, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.strokeStyle = "#111";
+        ctx.lineWidth = 2;
+        ctx.fill();
+        ctx.stroke();
+        if (adminKeypointCorrectionEnabled && index === adminKeypointDraggingIndex) {
+          ctx.beginPath();
+          ctx.arc(canvasX, canvasY, radius + 5, 0, Math.PI * 2);
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        if (adminKeypointShowText) {
+          ctx.fillStyle = color;
+          ctx.strokeStyle = "rgba(0,0,0,0.85)";
+          ctx.lineWidth = 3;
+          const label = labels[index] || String(index + 1);
+          ctx.strokeText(label, canvasX + radius + 4, canvasY);
+          ctx.fillText(label, canvasX + radius + 4, canvasY);
+        }
+      });
+      const status = payload.roi.status || {};
+      if (statusEl) {
+        const rows = [
+          ["ROI", payload.roi.roi_idx],
+          ["Total ROIs", payload.roi.total || payload.summary?.total_rois || ""],
+          ["Frame", payload.roi.frame_idx],
+          ["Run", payload.refined_run || ""],
+          ["Reason", payload.roi.reason || ""],
+          ["Usable", status.usable_keypoints],
+          ["Refined", status.refined_success],
+          ["Missing keypoints", points.filter((point) => !keypointIsFinite(point)).length],
+          ["Labels", adminKeypointShowText ? "shown" : "hidden"],
+          ["Correction", adminKeypointCorrectionEnabled ? (adminKeypointDirty ? "editing; unsaved" : "enabled") : "disabled"]
+        ];
+        statusEl.innerHTML = rows.map(([label, value]) =>
+          `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`
+        ).join("");
+      }
+      if (jsonEl) {
+        jsonEl.textContent = JSON.stringify({
+          roi_idx: payload.roi.roi_idx,
+          frame_idx: payload.roi.frame_idx,
+          labels: payload.roi.labels,
+          points: payload.roi.points,
+          reason: payload.roi.reason,
+          status: payload.roi.status,
+          crop_run: payload.crop_run,
+          refined_run: payload.refined_run
+        }, null, 2);
+      }
+    }
+    function drawAdminKeypointPreview(payload) {
+      adminKeypointPreviewPayload = payload;
+      const viewport = ensureAdminKeypointViewport();
+      if (!viewport || !payload || !payload.roi) return;
+      const image = decodeRawImage(payload.roi.roi_image || {});
+      const sizeChanged = viewport.imageWidth !== image.width || viewport.imageHeight !== image.height;
+      viewport.setImageData(image.data, {resetView: sizeChanged});
+      renderAdminKeypointPreview();
+    }
+    async function loadAdminKeypointPreview() {
+      const select = document.getElementById("admin-keypoint-preview-roi");
+      const input = document.getElementById("admin-keypoint-preview-roi-input");
+      const statusEl = document.getElementById("admin-keypoint-preview-status");
+      const roiIdx = input && input.value !== "" ? input.value : (select ? select.value : "");
+      if (!roiIdx) return;
+      if (statusEl) statusEl.innerHTML = "<dt>Status</dt><dd>Loading preview...</dd>";
+      try {
+        const response = await fetch(`/api/admin/keypoint-preview?task_id=${encodeURIComponent(taskId)}&roi_idx=${encodeURIComponent(roiIdx)}`);
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.details || payload.error || "keypoint preview failed");
+        }
+        adminKeypointPreviewPoints = (payload.roi.points || []).map((point) => [
+          point && point[0] != null ? Number(point[0]) : null,
+          point && point[1] != null ? Number(point[1]) : null
+        ]);
+        adminKeypointCurrentRoi = Number(payload.roi.roi_idx);
+        adminKeypointTotalRois = Number(payload.roi.total || payload.summary?.total_rois || 0);
+        if (input) {
+          input.value = String(adminKeypointCurrentRoi);
+          if (Number.isFinite(adminKeypointTotalRois) && adminKeypointTotalRois > 0) {
+            input.max = String(adminKeypointTotalRois - 1);
+          }
+        }
+        if (select) {
+          const matching = Array.from(select.options).findIndex((option) => String(option.value) === String(adminKeypointCurrentRoi));
+          if (matching >= 0) select.selectedIndex = matching;
+        }
+        adminKeypointDirty = false;
+        adminKeypointDraggingIndex = -1;
+        refreshAdminPlacementOptions();
+        drawAdminKeypointPreview(payload);
+      } catch (error) {
+        if (statusEl) statusEl.innerHTML = `<dt>Error</dt><dd>${escapeHtml(error.message || error)}</dd>`;
+      }
+    }
+    function moveAdminKeypointPreview(delta) {
+      const input = document.getElementById("admin-keypoint-preview-roi-input");
+      const total = Number(adminKeypointTotalRois || 0);
+      const current = Number.isFinite(Number(adminKeypointCurrentRoi)) ? Number(adminKeypointCurrentRoi) : Number(input?.value || 0);
+      const maxRoi = total > 0 ? total - 1 : Math.max(current + delta, current);
+      const next = Math.max(0, Math.min(maxRoi, current + delta));
+      if (input) input.value = String(next);
+      loadAdminKeypointPreview();
+    }
+    const keypointPreviewSelect = document.getElementById("admin-keypoint-preview-roi");
+    if (keypointPreviewSelect) {
+      keypointPreviewSelect.addEventListener("change", () => {
+        const input = document.getElementById("admin-keypoint-preview-roi-input");
+        if (input) input.value = keypointPreviewSelect.value;
+        loadAdminKeypointPreview();
+      });
+      document.getElementById("admin-keypoint-preview-refresh")?.addEventListener("click", loadAdminKeypointPreview);
+      document.getElementById("admin-keypoint-preview-prev")?.addEventListener("click", () => moveAdminKeypointPreview(-1));
+      document.getElementById("admin-keypoint-preview-next")?.addEventListener("click", () => moveAdminKeypointPreview(1));
+      document.getElementById("admin-keypoint-preview-go")?.addEventListener("click", loadAdminKeypointPreview);
+      document.getElementById("admin-keypoint-preview-roi-input")?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          loadAdminKeypointPreview();
+        }
+      });
+      document.getElementById("admin-keypoint-correction-toggle")?.addEventListener("click", () => setAdminCorrectionEnabled(!adminKeypointCorrectionEnabled));
+      document.getElementById("admin-keypoint-correction-save")?.addEventListener("click", async () => {
+        const statusEl = document.getElementById("admin-keypoint-preview-status");
+        if (!adminKeypointPreviewPayload) return;
+        try {
+          if (statusEl) statusEl.innerHTML = "<dt>Status</dt><dd>Saving admin correction...</dd>";
+          const notesEl = document.getElementById("admin-review-notes");
+          const response = await fetch("/api/admin/keypoint-corrections", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              task_id: taskId,
+              roi_idx: adminKeypointPreviewPayload.roi.roi_idx,
+              points: adminKeypointPreviewPoints,
+              notes: notesEl ? notesEl.value : "",
+              set_review_state: "accepted_with_corrections"
+            })
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload.ok) {
+            throw new Error(payload.details || payload.error || "admin correction save failed");
+          }
+          adminKeypointDirty = false;
+          await loadAdminKeypointPreview();
+          if (statusEl) statusEl.innerHTML += `<dt>Saved</dt><dd>${escapeHtml(payload.correction_event?.event_id || "")}</dd>`;
+        } catch (error) {
+          if (statusEl) statusEl.innerHTML = `<dt>Error</dt><dd>${escapeHtml(error.message || error)}</dd>`;
+        }
+      });
+      const previewCanvas = document.getElementById("admin-keypoint-preview-canvas");
+      previewCanvas?.addEventListener("mousedown", (event) => {
+        const viewport = ensureAdminKeypointViewport();
+        if (viewport && viewport.beginPan(event)) return;
+        if (!adminKeypointCorrectionEnabled || !adminKeypointPreviewPayload || event.button !== 0) return;
+        event.preventDefault();
+        const [canvasX, canvasY] = canvasPreviewCanvasPoint(event);
+        const placementIndex = selectedAdminPlacementIndex();
+        if (placementIndex >= 0) {
+          const [x, y] = viewport.canvasToImage(canvasX, canvasY);
+          adminKeypointPreviewPoints[placementIndex] = [
+            Math.max(0, Math.min(previewCanvas.width - 1, x)),
+            Math.max(0, Math.min(previewCanvas.height - 1, y))
+          ];
+          adminKeypointDraggingIndex = placementIndex;
+          adminKeypointDirty = true;
+          refreshAdminPlacementOptions();
+          renderAdminKeypointPreview();
+          return;
+        }
+        const nearest = nearestAdminKeypointAtCanvas(canvasX, canvasY);
+        if (nearest < 0) return;
+        adminKeypointDraggingIndex = nearest;
+        renderAdminKeypointPreview();
+      });
+      previewCanvas?.addEventListener("mousemove", (event) => {
+        const viewport = ensureAdminKeypointViewport();
+        if (viewport && viewport.panMove(event)) return;
+        if (!adminKeypointCorrectionEnabled || adminKeypointDraggingIndex < 0 || !adminKeypointPreviewPayload) return;
+        event.preventDefault();
+        const [x, y] = canvasPreviewImagePoint(event);
+        adminKeypointPreviewPoints[adminKeypointDraggingIndex] = [
+          Math.max(0, Math.min(previewCanvas.width - 1, x)),
+          Math.max(0, Math.min(previewCanvas.height - 1, y))
+        ];
+        adminKeypointDirty = true;
+        renderAdminKeypointPreview();
+      });
+      previewCanvas?.addEventListener("wheel", (event) => {
+        ensureAdminKeypointViewport()?.handleWheel(event);
+      }, {passive: false});
+      previewCanvas?.addEventListener("auxclick", (event) => {
+        if (event.button === 1) event.preventDefault();
+      });
+      window.addEventListener("mouseup", () => {
+        adminKeypointDraggingIndex = -1;
+        ensureAdminKeypointViewport()?.endPan();
+      });
+      window.addEventListener("keydown", (event) => {
+        const targetTag = event.target?.tagName?.toLowerCase();
+        if (targetTag === "input" || targetTag === "textarea" || targetTag === "select") return;
+        if (!document.getElementById("admin-keypoint-preview-canvas")) return;
+        if (event.key === "f" || event.key === "F") {
+          event.preventDefault();
+          ensureAdminKeypointViewport()?.fit(false);
+          renderAdminKeypointPreview();
+          return;
+        }
+        if (event.key === "t" || event.key === "T") {
+          event.preventDefault();
+          adminKeypointShowText = !adminKeypointShowText;
+          renderAdminKeypointPreview();
+          return;
+        }
+        if (event.key === "n") {
+          event.preventDefault();
+          moveAdminKeypointPreview(1);
+          return;
+        }
+        if (event.key === "p") {
+          event.preventDefault();
+          moveAdminKeypointPreview(-1);
+          return;
+        }
+        if (event.key === "r" || event.key === "R") {
+          event.preventDefault();
+          loadAdminKeypointPreview();
+          return;
+        }
+        if ((event.key === "s" || event.key === "S") && adminKeypointCorrectionEnabled) {
+          event.preventDefault();
+          document.getElementById("admin-keypoint-correction-save")?.click();
+        }
+      });
+      loadAdminKeypointPreview();
+    }
     document.getElementById("task-state-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       resultEl.textContent = "Saving...";

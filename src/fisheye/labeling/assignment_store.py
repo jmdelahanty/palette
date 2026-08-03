@@ -12,14 +12,21 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 STORE_ENV_VAR = "PALETTE_LABELING_STORE_PATH"
 DEFAULT_STORE_PATH = "~/.palette/labeling_work.sqlite"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 LABELING_USER_ROLES = ("labeler", "operator", "admin")
 LABELING_USER_STATUSES = ("active", "inactive")
+ADMIN_REVIEW_STATES = (
+    "pending",
+    "accepted_as_is",
+    "accepted_with_corrections",
+    "needs_revision",
+    "rejected",
+)
 LABELER_START_TASK_STATES = ("pending", "in_progress")
 USER_SUMMARY_REDACT_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])(?:/[^\s,;:'\"<>]+)+")
 USER_SUMMARY_REDACT_ZARR_TOKEN_RE = re.compile(r"(?<![\w./-])[\w./-]*\.zarr(?:[/\w.-]*)?")
@@ -375,6 +382,20 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 FOREIGN KEY(session_id) REFERENCES labeling_sessions(session_id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS labeling_admin_reviews (
+                review_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL UNIQUE,
+                recording_id TEXT NOT NULL,
+                reviewer_user TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                notes TEXT,
+                correction_event_count INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES labeling_tasks(task_id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_labeling_assignments_assignee
                 ON recording_assignments(assignee_user, status);
             CREATE INDEX IF NOT EXISTS idx_labeling_tasks_recording
@@ -395,6 +416,10 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 ON labeling_session_checkpoints(task_id, state, updated_at_utc);
             CREATE INDEX IF NOT EXISTS idx_labeling_session_checkpoints_apply
                 ON labeling_session_checkpoints(task_id, apply_id, state);
+            CREATE INDEX IF NOT EXISTS idx_labeling_admin_reviews_state
+                ON labeling_admin_reviews(state, updated_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_labeling_admin_reviews_recording
+                ON labeling_admin_reviews(recording_id, state);
             """
         )
         now = utc_now()
@@ -431,6 +456,159 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             (str(SCHEMA_VERSION),),
         )
         self.conn.commit()
+
+    def get_admin_review(self, task_id: str) -> dict[str, object] | None:
+        self.initialize()
+        resolved_task_id = str(task_id or "").strip()
+        if not resolved_task_id:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM labeling_admin_reviews WHERE task_id = ?;",
+            (resolved_task_id,),
+        ).fetchone()
+        return _row_to_dict(row) if row is not None else None
+
+    def count_admin_correction_events(self, task_id: str) -> int:
+        self.initialize()
+        resolved_task_id = str(task_id or "").strip()
+        if not resolved_task_id:
+            return 0
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS correction_event_count
+            FROM labeling_task_events
+            WHERE task_id = ?
+              AND event_type LIKE 'admin_save_%_correction';
+            """,
+            (resolved_task_id,),
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["correction_event_count"] or 0)
+
+    def upsert_admin_review(
+        self,
+        *,
+        task_id: str,
+        state: str,
+        reviewer_user: str,
+        notes: str | None = None,
+        correction_event_count: int | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.initialize()
+        resolved_task_id = str(task_id or "").strip()
+        if not resolved_task_id:
+            raise ValueError("task_id is required.")
+        state_value = str(state or "").strip()
+        if state_value not in ADMIN_REVIEW_STATES:
+            raise ValueError(
+                f"admin review state must be one of: {', '.join(ADMIN_REVIEW_STATES)}"
+            )
+        reviewer = str(reviewer_user or "").strip()
+        if not reviewer:
+            raise ValueError("reviewer_user is required.")
+        task = self.get_task(resolved_task_id)
+        if task is None:
+            raise KeyError(f"Unknown labeling task: {resolved_task_id}")
+        if str(task.get("state") or "") != "complete" and state_value != "pending":
+            raise ValueError("Admin review decisions require a completed task.")
+        existing = self.get_admin_review(resolved_task_id)
+        existing_target = (
+            {
+                "review_id": existing.get("review_id"),
+                "task_id": existing.get("task_id"),
+                "recording_id": existing.get("recording_id"),
+                "reviewer_user": existing.get("reviewer_user"),
+                "state": existing.get("state"),
+                "notes": existing.get("notes"),
+                "correction_event_count": existing.get("correction_event_count"),
+                "metadata": existing.get("metadata"),
+            }
+            if existing is not None
+            else None
+        )
+        now = utc_now()
+        review_id = str((existing or {}).get("review_id") or uuid.uuid4())
+        normalized_notes = _normalize_optional_text(notes)
+        live_correction_count = self.count_admin_correction_events(resolved_task_id)
+        provided_correction_count = (
+            int(correction_event_count) if correction_event_count is not None else 0
+        )
+        existing_correction_count = int((existing or {}).get("correction_event_count") or 0)
+        correction_count = max(
+            live_correction_count,
+            provided_correction_count,
+            existing_correction_count,
+        )
+        existing_metadata = (existing or {}).get("metadata")
+        if isinstance(metadata, Mapping):
+            metadata_value: Mapping[str, object] = dict(metadata)
+        elif isinstance(existing_metadata, Mapping):
+            metadata_value = dict(existing_metadata)
+        else:
+            metadata_value = {}
+        self.conn.execute(
+            """
+            INSERT INTO labeling_admin_reviews (
+                review_id, task_id, recording_id, reviewer_user, state, notes,
+                correction_event_count, metadata_json, created_at_utc, updated_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                reviewer_user = excluded.reviewer_user,
+                state = excluded.state,
+                notes = excluded.notes,
+                correction_event_count = excluded.correction_event_count,
+                metadata_json = excluded.metadata_json,
+                updated_at_utc = excluded.updated_at_utc;
+            """,
+            (
+                review_id,
+                resolved_task_id,
+                str(task.get("recording_id") or ""),
+                reviewer,
+                state_value,
+                normalized_notes,
+                correction_count,
+                _json_dumps(metadata_value),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        row = self.get_admin_review(resolved_task_id)
+        assert row is not None
+        should_record_review_change = (
+            existing is None
+            or str(existing.get("state") or "") != state_value
+            or str(existing.get("reviewer_user") or "") != reviewer
+            or _normalize_optional_text(existing.get("notes")) != normalized_notes
+        )
+        if should_record_review_change:
+            self.record_event(
+                task_id=resolved_task_id,
+                recording_id=str(task.get("recording_id") or ""),
+                user=reviewer,
+                event_type="admin_review_state_changed",
+                target={
+                    "review_id": str(row.get("review_id") or review_id),
+                    "task_id": resolved_task_id,
+                    "admin_review_state": state_value,
+                },
+                before=existing_target,
+                after={
+                    "review_id": row.get("review_id"),
+                    "task_id": row.get("task_id"),
+                    "recording_id": row.get("recording_id"),
+                    "reviewer_user": row.get("reviewer_user"),
+                    "state": row.get("state"),
+                    "notes": row.get("notes"),
+                    "correction_event_count": row.get("correction_event_count"),
+                    "metadata": row.get("metadata"),
+                },
+            )
+        return row
 
     def assignment_schema_integrity(self) -> dict[str, object]:
         """Return structural evidence for recording assignment ownership rules."""
