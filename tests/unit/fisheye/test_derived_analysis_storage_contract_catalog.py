@@ -26,6 +26,9 @@ EXPECTED_SCHEMA_IDENTITIES = {
     "tail_posture_view": ("analysis.tail_posture_view_runs", 3),
     "bout_classification": ("analysis.bout_classification_runs", 2),
     "stimulus_response": ("palette.stimulus_response", 2),
+    "stimulus_epochs": ("palette.stimulus_epoch_windows.v1", 1),
+    "detection_occupancy": ("palette.detection_occupancy.v1", 1),
+    "session_occupancy": ("palette.session_occupancy.v1", 1),
 }
 
 EXPECTED_DIRECT_WRITERS = {
@@ -40,6 +43,24 @@ EXPECTED_DIRECT_WRITERS = {
         "write_megabouts_classification_run",
         "palette_megabouts_direct_classifier",
         "columnar_store_array_v1",
+    ),
+    "stimulus_epochs": (
+        "fisheye.analysis.stimulus_epoch_runs",
+        "write_stimulus_epoch_run",
+        "event_alias_windows",
+        "stimulus_epoch_fixed_row_v1",
+    ),
+    "detection_occupancy": (
+        "fisheye.analysis.detection_occupancy_runs",
+        "write_detection_occupancy_run",
+        "detection_centroid_epoch_occupancy",
+        "detection_occupancy_fixed_row_v1",
+    ),
+    "session_occupancy": (
+        "fisheye.analysis.detection_occupancy_runs",
+        "write_session_occupancy_run",
+        "detection_centroid_full_session_occupancy",
+        "detection_occupancy_fixed_row_v1",
     ),
 }
 

@@ -41,6 +41,9 @@ STAGE_RUN_PARENTS: dict[str, tuple[str, ...]] = {
     "tail_posture_view": ("analysis/tail_posture_view_runs",),
     "bout_classification": ("analysis/bout_classification_runs",),
     "stimulus_response": ("analysis/stimulus_response_runs",),
+    "stimulus_epochs": ("analysis/stimulus_epoch_runs",),
+    "detection_occupancy": ("analysis/detection_occupancy_runs",),
+    "session_occupancy": ("analysis/session_occupancy_runs",),
 }
 
 

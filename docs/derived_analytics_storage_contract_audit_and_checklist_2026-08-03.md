@@ -31,8 +31,9 @@ selector changes.
 Palette does **not** yet have uniform production-grade storage contracts for
 all analytics outputs.
 
-Nine maintained array-bearing derived families now have executable catalog
-entries. Seven use the shared atomic materializer boundary:
+Twelve maintained array-bearing derived families now have executable catalog
+entries. Seven production authorities use the shared atomic materializer
+boundary:
 
 - track kinematics;
 - swim bouts;
@@ -42,14 +43,16 @@ entries. Seven use the shared atomic materializer boundary:
 - tail kinematics; and
 - stimulus response.
 
-Tail-posture views and bout classification are also cataloged, truthfully, as
-guarded direct writers rather than falsely claiming atomic-materializer
-ownership. None of the nine uses the shared byte-budgeted planner as its
-production default yet. Tail-posture, bout-classification, tail-kinematics,
+Tail-posture views, bout classification, stimulus epochs, detection occupancy,
+and session occupancy are also cataloged, truthfully, as guarded direct writers
+rather than falsely claiming atomic-materializer ownership. None of the twelve
+uses the shared byte-budgeted planner as its production default yet.
+Tail-posture, bout-classification, tail-kinematics,
 eye-angle, swim-bout, and bout-kinematics now expose explicit
-selector-ineligible planner candidates. All nine have serialized registry
-projection for eligible authorities. Stimulus epochs, occupancy outputs, and
-the chaser analysis suite use additional stage-local schemas and writers.
+selector-ineligible planner candidates. Stimulus epochs and both occupancy
+families now do as well. All twelve have serialized registry projection for
+eligible authorities. The chaser analysis suite still uses additional
+stage-local schemas and writers.
 Several legacy or in-place writers remain explicitly classified compatibility
 or maintenance surfaces.
 
@@ -122,7 +125,7 @@ true.
 | Tail-posture view | Exact typed arrays, guarded lifecycle, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate and decide whether to migrate to the atomic materializer |
 | Bout classification | Exact compact-v2 manifest, guarded activation, serialized registry projection, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate through its real consumer |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
-| Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
+| Stimulus epochs | Current v1 direct authority is centrally cataloged; an exact 12-array v2, candidate-owned lineage/manifest, shared byte plan, atomic publication, and failure repair are implemented as a selector-ineligible candidate | Add a strict v2 consumer and real archive benchmark before any writer/default promotion |
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities now have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, and a selector-ineligible shared-planner rematerialization path | Add central stage/catalog/registry ownership after the stimulus-epoch dependency lands; benchmark both families before promotion |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Add central catalog/byte planning plus consolidated activation and chained recovery coverage |
@@ -627,7 +630,7 @@ Recommended migration order:
 
 ### Phase 7 — Complete publication and registry projection
 
-- [x] Add serialized registry completion/invalidation projection for all nine
+- [x] Add serialized registry completion/invalidation projection for all twelve
       maintained catalog stages. The finalizer reopens each archive directly,
       requires matching `latest`/`latest_complete`, completion, and selector
       eligibility, and dispatches registry writes serially; no worker owns the

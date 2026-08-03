@@ -175,6 +175,28 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
         owner_module="fisheye.analysis_workflows.materializers.stimulus_response",
         entrypoint_attr="materialize_stimulus_response",
     ),
+    _atomic_candidate(
+        "stimulus_epochs",
+        profile_id="published_http_v1",
+        owner_module="fisheye.analysis_workflows.materializers.stimulus_epochs",
+        entrypoint_attr="materialize_stimulus_epoch_candidate",
+    ),
+    _atomic_candidate(
+        "detection_occupancy",
+        profile_id="published_http_v1",
+        owner_module=(
+            "fisheye.analysis_workflows.materializers.exact_tabular_candidate"
+        ),
+        entrypoint_attr="materialize_exact_tabular_candidate",
+    ),
+    _atomic_candidate(
+        "session_occupancy",
+        profile_id="published_http_v1",
+        owner_module=(
+            "fisheye.analysis_workflows.materializers.exact_tabular_candidate"
+        ),
+        entrypoint_attr="materialize_exact_tabular_candidate",
+    ),
     _direct_candidate(
         "tail_posture_view",
         profile_id="published_http_v1",

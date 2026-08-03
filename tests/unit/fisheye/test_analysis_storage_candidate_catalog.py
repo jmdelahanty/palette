@@ -21,6 +21,9 @@ EXPECTED_ATOMIC = {
     "eye_angles",
     "tail_kinematics",
     "stimulus_response",
+    "stimulus_epochs",
+    "detection_occupancy",
+    "session_occupancy",
 }
 EXPECTED_DIRECT = {"tail_posture_view", "bout_classification"}
 

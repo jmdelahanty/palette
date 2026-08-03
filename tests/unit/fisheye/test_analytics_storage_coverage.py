@@ -64,22 +64,22 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         record["surface_id"]: record for record in report["classified_surfaces"]
     }
 
-    assert len(contracts) == len(DERIVED_ANALYSIS_STORAGE_CONTRACTS) == 9
-    assert len(candidates) == len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == 7
-    assert len(surfaces) == len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 22
+    assert len(contracts) == len(DERIVED_ANALYSIS_STORAGE_CONTRACTS) == 12
+    assert len(candidates) == len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == 10
+    assert len(surfaces) == len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 19
     assert report["summary"] == {
-        "derived_stage_count": 10,
-        "central_storage_contract_count": 9,
-        "storage_candidate_count": 7,
-        "atomic_storage_candidate_count": 5,
+        "derived_stage_count": 13,
+        "central_storage_contract_count": 12,
+        "storage_candidate_count": 10,
+        "atomic_storage_candidate_count": 8,
         "guarded_direct_storage_candidate_count": 2,
         "classified_non_catalog_stage_count": 1,
-        "classified_surface_count": 22,
-        "additional_classified_surface_count": 21,
+        "classified_surface_count": 19,
+        "additional_classified_surface_count": 18,
         "byte_planner_adopted_count": 0,
-        "serialized_registry_publication_count": 9,
-        "exact_contract_required_surface_count": 18,
-        "central_catalog_adoption_pending_surface_count": 4,
+        "serialized_registry_publication_count": 12,
+        "exact_contract_required_surface_count": 15,
+        "central_catalog_adoption_pending_surface_count": 1,
     }
     assert contracts["eye_angles"]["byte_planner_adopted"] is False
     assert contracts["eye_angles"]["registry_publication"] == (
@@ -195,7 +195,7 @@ def test_classified_fallback_cannot_hide_required_central_adoption() -> None:
     existing = next(
         surface
         for surface in ANALYTICS_SURFACE_CLASSIFICATIONS
-        if surface.surface_id == "stimulus_epochs"
+        if surface.surface_id == "chaser_distance"
     )
     required_fallback = replace(
         existing,

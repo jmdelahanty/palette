@@ -521,30 +521,6 @@ def _chaser_component(
 
 ANALYTICS_SURFACE_CLASSIFICATIONS: tuple[AnalyticsSurfaceClassification, ...] = (
     _scientific_run(
-        surface_id="stimulus_epochs",
-        owner_module="fisheye.analysis.stimulus_epoch_runs",
-        owner_entrypoint="write_stimulus_epoch_run",
-        owner_path="analysis/stimulus_epoch_runs/{run}",
-        schema_id="palette.stimulus_epoch_windows.v1",
-        schema_version=1,
-    ),
-    _scientific_run(
-        surface_id="detection_occupancy",
-        owner_module="fisheye.analysis.detection_occupancy_runs",
-        owner_entrypoint="write_detection_occupancy_run",
-        owner_path="analysis/detection_occupancy_runs/{run}",
-        schema_id="palette.detection_occupancy.v1",
-        schema_version=1,
-    ),
-    _scientific_run(
-        surface_id="session_occupancy",
-        owner_module="fisheye.analysis.detection_occupancy_runs",
-        owner_entrypoint="write_session_occupancy_run",
-        owner_path="analysis/session_occupancy_runs/{run}",
-        schema_id="palette.session_occupancy.v1",
-        schema_version=1,
-    ),
-    _scientific_run(
         surface_id="chaser_distance",
         owner_module="fisheye.analysis.chaser_distance_runs",
         owner_entrypoint="write_chaser_distance_run",
