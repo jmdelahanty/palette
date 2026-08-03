@@ -15,6 +15,8 @@ from fisheye.analysis_workflows.surface_classification_catalog import (
     ANALYTICS_SURFACE_CLASSIFICATION_BY_ID,
     ANALYTICS_SURFACE_CLASSIFICATIONS,
     CHASER_PROFILE_SURFACE_IDS,
+    AnalyticsConsumerScope,
+    AnalyticsLifecycleContext,
     AnalyticsMutationMode,
     AnalyticsSurfaceClass,
     AnalyticsSurfaceLifecycle,
@@ -38,6 +40,15 @@ def test_catalog_has_unique_closed_machine_readable_records() -> None:
         entry.exact_storage_contract_status
         for entry in ANALYTICS_SURFACE_CLASSIFICATIONS
     } == set(ExactStorageContractStatus)
+    assert {entry.lifecycle for entry in ANALYTICS_SURFACE_CLASSIFICATIONS} == set(
+        AnalyticsSurfaceLifecycle
+    )
+    assert {
+        entry.lifecycle_context for entry in ANALYTICS_SURFACE_CLASSIFICATIONS
+    } == set(AnalyticsLifecycleContext)
+    assert {entry.consumer_scope for entry in ANALYTICS_SURFACE_CLASSIFICATIONS} == set(
+        AnalyticsConsumerScope
+    )
 
 
 def test_every_classification_resolves_its_current_code_owner() -> None:
@@ -90,17 +101,18 @@ def test_current_top_level_catalog_gaps_are_explicit_not_false_adoptions() -> No
     assert actual.isdisjoint(DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE)
 
 
-def test_registered_gate_uses_its_independent_exact_publication_contract() -> None:
+def test_registered_gate_publication_is_hardened_while_storage_contract_is_open() -> (
+    None
+):
     gate = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["registered_detection_gate"]
     audit = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["registered_detection_gate_audit"]
     assert gate.classification is AnalyticsSurfaceClass.MAINTAINED_SCIENTIFIC_AUTHORITY
     assert gate.owner_path == "analysis/detection_gate_runs/{run}"
     assert gate.central_storage_catalog_required is False
-    assert gate.exact_storage_contract_required is False
-    assert (
-        gate.exact_storage_contract_status
-        is ExactStorageContractStatus.IMPLEMENTED_INDEPENDENT
-    )
+    assert gate.exact_storage_contract_required is True
+    assert gate.exact_storage_contract_status is ExactStorageContractStatus.REQUIRED
+    assert gate.lifecycle_context is AnalyticsLifecycleContext.POLICY_EVIDENCE_RUN
+    assert gate.consumer_scope is AnalyticsConsumerScope.REGISTERED_DETECTION_GATE
     assert audit.classification is AnalyticsSurfaceClass.EXPORT
     assert audit.array_bearing is False
     assert (
@@ -113,6 +125,7 @@ def test_registered_gate_uses_its_independent_exact_publication_contract() -> No
         gate.schema_id,
         gate.schema_version,
     )
+    assert callable(gate_module.validate_registered_detection_gate_run)
     assert (audit_module.SCHEMA_ID, audit_module.SCHEMA_VERSION) == (
         audit.schema_id,
         audit.schema_version,
@@ -132,32 +145,47 @@ def test_detection_quality_classifications_expose_both_current_storage_surfaces(
         "detect_runs/{detect_run}/quality_reports/{quality_run}"
     )
     assert (
-        collection.exact_storage_contract_status
-        is ExactStorageContractStatus.IMPLEMENTED_INDEPENDENT
+        collection.exact_storage_contract_status is ExactStorageContractStatus.REQUIRED
     )
     assert nested.exact_storage_contract_status is ExactStorageContractStatus.REQUIRED
+    assert collection.stage_binding == nested.stage_binding == "detect_quality"
+    assert (
+        collection.lifecycle_context
+        is AnalyticsLifecycleContext.RECORDING_WIDE_QUALITY_SNAPSHOT
+    )
+    assert (
+        collection.consumer_scope
+        is AnalyticsConsumerScope.RECORDING_WIDE_DETECTION_QUALITY
+    )
+    assert (
+        nested.lifecycle_context
+        is AnalyticsLifecycleContext.SOURCE_DETECT_NESTED_QUALITY_REPORT
+    )
+    assert nested.consumer_scope is AnalyticsConsumerScope.SOURCE_DETECT_LOCAL_QUALITY
     assert collection.central_storage_catalog_required is False
     assert nested.central_storage_catalog_required is False
     collection_module = importlib.import_module(collection.owner_module)
     assert collection_module.COLLECTION_QUALITY_SCHEMA == collection.schema_id
+    refine_module = importlib.import_module("fisheye.refinement.refine_detect")
+    registry_module = importlib.import_module("fisheye.registry.maintenance")
+    assert callable(refine_module._resolve_modern_quality_group)
+    assert callable(refine_module._resolve_detection_quality_labels)
+    assert callable(registry_module._resolve_detect_quality_group)
 
 
 def test_legacy_and_in_place_surfaces_cannot_be_mistaken_for_current_authorities() -> (
     None
 ):
     speed = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["speed_runs"]
-    statistics = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["swim_bout_statistics"]
     interpolation = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["chaser_state_interpolation"]
-    for entry in (speed, statistics):
-        assert entry.classification is AnalyticsSurfaceClass.LEGACY
-        assert entry.lifecycle is AnalyticsSurfaceLifecycle.LEGACY
-        assert entry.central_storage_catalog_required is False
-        assert entry.exact_storage_contract_required is False
-        assert (
-            entry.exact_storage_contract_status
-            is ExactStorageContractStatus.LEGACY_COMPATIBILITY_ONLY
-        )
-    assert statistics.owner_path == "analysis/swim_bout_runs/{run}"
+    assert speed.classification is AnalyticsSurfaceClass.LEGACY
+    assert speed.lifecycle is AnalyticsSurfaceLifecycle.LEGACY
+    assert speed.central_storage_catalog_required is False
+    assert speed.exact_storage_contract_required is False
+    assert (
+        speed.exact_storage_contract_status
+        is ExactStorageContractStatus.LEGACY_COMPATIBILITY_ONLY
+    )
     assert interpolation.classification is AnalyticsSurfaceClass.MAINTENANCE_OUTPUT
     assert interpolation.lifecycle is AnalyticsSurfaceLifecycle.LEGACY
     assert interpolation.mutation_mode is AnalyticsMutationMode.IN_PLACE_MUTATION
@@ -166,6 +194,28 @@ def test_legacy_and_in_place_surfaces_cannot_be_mistaken_for_current_authorities
         is ExactStorageContractStatus.LEGACY_COMPATIBILITY_ONLY
     )
     assert interpolation.owner_path == "analysis/stimulus_runs/{run}"
+
+
+def test_active_swim_bout_statistics_writer_is_an_explicit_namespace_collision() -> (
+    None
+):
+    statistics = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["swim_bout_statistics"]
+    maintained = DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE["swim_bouts"]
+    assert statistics.classification is AnalyticsSurfaceClass.LEGACY
+    assert statistics.lifecycle is AnalyticsSurfaceLifecycle.CURRENT_LEGACY_SHAPED
+    assert (
+        statistics.lifecycle_context
+        is AnalyticsLifecycleContext.ACTIVE_LEGACY_NAMESPACE_COLLISION
+    )
+    assert statistics.consumer_scope is AnalyticsConsumerScope.SHARED_SWIM_BOUT_SELECTOR
+    assert statistics.owner_path == f"{maintained.run_parent}/{{run}}"
+    assert statistics.stage_binding == "swim_bout_statistics"
+    assert statistics.schema_id is None
+    assert (
+        statistics.exact_storage_contract_status is ExactStorageContractStatus.REQUIRED
+    )
+    assert statistics.central_storage_catalog_required is False
+    assert statistics.surface_id not in DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE
 
 
 def test_track_visualization_agrees_with_stage_and_run_parent_catalogs() -> None:
@@ -189,9 +239,12 @@ def test_track_visualization_agrees_with_stage_and_run_parent_catalogs() -> None
     (
         ({"surface_id": "bad/path"}, "canonical identifier"),
         ({"classification": "legacy"}, "closed enum"),
+        ({"lifecycle_context": "top_level_run"}, "closed enum"),
+        ({"consumer_scope": "recording_analysis"}, "closed enum"),
         ({"array_bearing": 1}, "exact bool"),
         ({"exact_storage_contract_status": "required"}, "closed enum"),
         ({"owner_module": "analysis.owner"}, "exact fisheye module"),
+        ({"stage_binding": "bad/stage"}, "canonical identifier"),
         ({"owner_path": "/analysis/runs"}, "canonical path pattern"),
         ({"schema_id": "palette.unpaired"}, "declared together"),
         (
@@ -219,3 +272,133 @@ def test_owner_path_rejects_backslash_and_control_characters(owner_path: str) ->
     base = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["speed_runs"]
     with pytest.raises(ValueError, match="canonical path pattern"):
         replace(base, owner_path=owner_path)
+
+
+@pytest.mark.parametrize(
+    "owner_path",
+    (
+        "analysis/{run",
+        "analysis/run}",
+        "analysis/{}",
+        "analysis/{bad-name}",
+        "analysis/{run!r}",
+        "analysis/{run:>8}",
+    ),
+)
+def test_owner_path_rejects_malformed_or_noncanonical_templates(
+    owner_path: str,
+) -> None:
+    base = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["speed_runs"]
+    with pytest.raises(ValueError, match="owner_path"):
+        replace(base, owner_path=owner_path)
+
+
+@pytest.mark.parametrize(
+    "schema_id",
+    (
+        " palette.bad",
+        "palette.bad ",
+        "Palette.bad",
+        "palette.bad id",
+        "palette.bad-name",
+        "palette..bad",
+        "palette.bad/child",
+        "palette.",
+    ),
+)
+def test_schema_identity_rejects_whitespace_and_noncanonical_ids(
+    schema_id: str,
+) -> None:
+    base = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID["registered_detection_gate"]
+    with pytest.raises(ValueError, match="schema identity"):
+        replace(base, schema_id=schema_id)
+
+
+@pytest.mark.parametrize(
+    ("surface_id", "changes", "error"),
+    (
+        (
+            "registered_detection_gate",
+            {"lifecycle": AnalyticsSurfaceLifecycle.LEGACY},
+            "scientific authorities and components must be current",
+        ),
+        (
+            "registered_detection_gate",
+            {
+                "exact_storage_contract_status": (
+                    ExactStorageContractStatus.LEGACY_COMPATIBILITY_ONLY
+                )
+            },
+            "current surfaces cannot be legacy compatibility-only",
+        ),
+        (
+            "registered_detection_gate",
+            {
+                "exact_storage_contract_status": ExactStorageContractStatus.NOT_APPLICABLE
+            },
+            "require an exact storage-contract disposition",
+        ),
+        (
+            "speed_runs",
+            {"lifecycle": AnalyticsSurfaceLifecycle.CURRENT},
+            "explicit legacy lifecycle",
+        ),
+        (
+            "swim_bout_statistics",
+            {"lifecycle": AnalyticsSurfaceLifecycle.LEGACY},
+            "required exact contracts",
+        ),
+        (
+            "swim_bout_statistics",
+            {
+                "exact_storage_contract_status": (
+                    ExactStorageContractStatus.LEGACY_COMPATIBILITY_ONLY
+                )
+            },
+            "active namespace collisions",
+        ),
+        (
+            "registered_detection_gate_audit",
+            {"array_bearing": True},
+            "agree with lifecycle_context",
+        ),
+        (
+            "chaser_quadrant_occupancy",
+            {"central_storage_catalog_required": True},
+            "central catalog adoption",
+        ),
+        (
+            "stimulus_epochs",
+            {"consumer_scope": AnalyticsConsumerScope.CHASER_COMPONENT_READER},
+            "agree with lifecycle_context",
+        ),
+        (
+            "speed_runs",
+            {"exact_storage_contract_status": ExactStorageContractStatus.REQUIRED},
+            "required exact contracts",
+        ),
+        (
+            "registered_detection_gate_audit",
+            {"exact_storage_contract_status": ExactStorageContractStatus.REQUIRED},
+            "required exact contracts",
+        ),
+        (
+            "detection_quality_collection",
+            {"owner_path": "detect_runs/{run}/quality_reports/{quality_run}"},
+            "recording-wide quality context",
+        ),
+        (
+            "detection_quality_nested_report",
+            {"stage_binding": "nested_quality"},
+            "source-local quality context",
+        ),
+    ),
+)
+def test_semantic_closure_rejects_impossible_cross_field_combinations(
+    surface_id: str,
+    changes: dict[str, object],
+    error: str,
+) -> None:
+    base = ANALYTICS_SURFACE_CLASSIFICATION_BY_ID[surface_id]
+    with pytest.raises((TypeError, ValueError), match=error):
+        replace(base, **changes)
