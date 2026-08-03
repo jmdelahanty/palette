@@ -24,6 +24,7 @@ READ_MATRIX_STAGES = {
     "chaser_distance",
     "stimulus_epochs",
     "stimulus_response",
+    "eye_angles",
     "subject_shape",
 }
 
@@ -89,6 +90,11 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         "fisheye.diagnostics.benchmark_stimulus_response_reads"
     )
     assert stimulus_response.adapter_entrypoint == "run_benchmark_matrix"
+    eye_angles = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["eye_angles"]
+    assert eye_angles.adapter_module == (
+        "fisheye.diagnostics.benchmark_eye_angle_v7_reads"
+    )
+    assert eye_angles.adapter_entrypoint == "run_benchmark_matrix"
     subject_shape = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["subject_shape"]
     assert subject_shape.adapter_module == (
         "fisheye.diagnostics.benchmark_subject_shape_v4_candidate"
@@ -137,7 +143,7 @@ def test_implemented_declaration_fails_closed(
 
 
 def test_plan_only_declaration_cannot_claim_adapter_or_execution() -> None:
-    base = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["eye_angles"]
+    base = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["tail_kinematics"]
     with pytest.raises(ValueError, match="must not claim an adapter"):
         replace(base, adapter_module="fisheye.diagnostics.some_benchmark")
     with pytest.raises(ValueError, match="requires an implemented adapter"):
