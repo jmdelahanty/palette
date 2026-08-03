@@ -22,6 +22,8 @@ from fisheye.analysis_workflows.storage_contract_catalog import (
 )
 from fisheye.analysis_workflows.surface_classification_catalog import (
     ANALYTICS_SURFACE_CLASSIFICATIONS,
+    AnalyticsConsumerScope,
+    AnalyticsLifecycleContext,
 )
 from fisheye.registry.stage_catalog import DERIVED_ANALYSIS, STAGE_SPECS, StageSpec
 
@@ -64,22 +66,22 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         record["surface_id"]: record for record in report["classified_surfaces"]
     }
 
-    assert len(contracts) == len(DERIVED_ANALYSIS_STORAGE_CONTRACTS) == 12
-    assert len(candidates) == len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == 12
-    assert len(surfaces) == len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 19
+    assert len(contracts) == len(DERIVED_ANALYSIS_STORAGE_CONTRACTS) == 13
+    assert len(candidates) == len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == 13
+    assert len(surfaces) == len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 18
     assert report["summary"] == {
-        "derived_stage_count": 13,
-        "central_storage_contract_count": 12,
-        "storage_candidate_count": 12,
-        "atomic_storage_candidate_count": 10,
+        "derived_stage_count": 14,
+        "central_storage_contract_count": 13,
+        "storage_candidate_count": 13,
+        "atomic_storage_candidate_count": 11,
         "guarded_direct_storage_candidate_count": 2,
         "classified_non_catalog_stage_count": 1,
-        "classified_surface_count": 19,
-        "additional_classified_surface_count": 18,
+        "classified_surface_count": 18,
+        "additional_classified_surface_count": 17,
         "byte_planner_adopted_count": 0,
-        "serialized_registry_publication_count": 12,
-        "exact_contract_required_surface_count": 15,
-        "central_catalog_adoption_pending_surface_count": 1,
+        "serialized_registry_publication_count": 13,
+        "exact_contract_required_surface_count": 14,
+        "central_catalog_adoption_pending_surface_count": 0,
     }
     assert contracts["eye_angles"]["byte_planner_adopted"] is False
     assert contracts["eye_angles"]["registry_publication"] == (
@@ -94,10 +96,18 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         for record in candidates.values()
     )
     assert all(
-        record["run_parent"] == contracts[stage_id]["run_parent"]
+        record["run_parent"]
+        == (
+            "analysis/chaser_distance_storage_candidates"
+            if stage_id == "chaser_distance"
+            else contracts[stage_id]["run_parent"]
+        )
         for stage_id, record in candidates.items()
     )
-    assert surfaces["chaser_distance"]["central_storage_catalog_required"] is True
+    assert contracts["chaser_distance"]["run_parent"] == (
+        "analysis/chaser_distance_runs"
+    )
+    assert candidates["chaser_distance"]["profile_id"] == "published_http_v1"
     assert (
         surfaces["track_kinematics_visualization"]["exact_storage_contract_status"]
         == "not_applicable"
@@ -199,12 +209,15 @@ def test_classified_fallback_cannot_hide_required_central_adoption() -> None:
     existing = next(
         surface
         for surface in ANALYTICS_SURFACE_CLASSIFICATIONS
-        if surface.surface_id == "chaser_distance"
+        if surface.surface_id == "registered_detection_gate"
     )
     required_fallback = replace(
         existing,
         surface_id="track_kinematics_visualization",
         stage_binding="track_kinematics_visualization",
+        lifecycle_context=AnalyticsLifecycleContext.TOP_LEVEL_RUN,
+        consumer_scope=AnalyticsConsumerScope.RECORDING_ANALYSIS,
+        central_storage_catalog_required=True,
     )
     surfaces = tuple(
         required_fallback

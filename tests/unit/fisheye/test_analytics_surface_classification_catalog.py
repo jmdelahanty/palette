@@ -32,7 +32,7 @@ def test_catalog_has_unique_closed_machine_readable_records() -> None:
     assert len(ANALYTICS_SURFACE_CLASSIFICATIONS) == len(
         ANALYTICS_SURFACE_CLASSIFICATION_BY_ID
     )
-    assert len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 19
+    assert len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 18
     assert json.loads(json.dumps(classified_surface_records()))
     assert {entry.classification for entry in ANALYTICS_SURFACE_CLASSIFICATIONS} == set(
         AnalyticsSurfaceClass
@@ -46,9 +46,9 @@ def test_catalog_has_unique_closed_machine_readable_records() -> None:
     )
     assert {
         entry.lifecycle_context for entry in ANALYTICS_SURFACE_CLASSIFICATIONS
-    } == set(AnalyticsLifecycleContext)
-    assert {entry.consumer_scope for entry in ANALYTICS_SURFACE_CLASSIFICATIONS} == set(
-        AnalyticsConsumerScope
+    } == set(AnalyticsLifecycleContext) - {AnalyticsLifecycleContext.TOP_LEVEL_RUN}
+    assert {entry.consumer_scope for entry in ANALYTICS_SURFACE_CLASSIFICATIONS} == (
+        set(AnalyticsConsumerScope) - {AnalyticsConsumerScope.RECORDING_ANALYSIS}
     )
 
 
@@ -64,7 +64,11 @@ def test_full_chaser_profile_is_covered_exactly_without_promoting_components() -
 
     for module_id, module in modules.items():
         implementation = importlib.import_module(module.implementation)
-        if module_id in {"stimulus_epochs", "detection_occupancy"}:
+        if module_id in {
+            "stimulus_epochs",
+            "detection_occupancy",
+            "chaser_distance",
+        }:
             contract = DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[module_id]
             resolved = contract.resolved_schema()
             assert contract.schema_module == module.implementation
@@ -83,22 +87,15 @@ def test_full_chaser_profile_is_covered_exactly_without_promoting_components() -
         )
         assert implementation.SCHEMA_ID == entry.schema_id
         assert implementation.SCHEMA_VERSION == entry.schema_version
-        if module_id == "chaser_distance":
-            assert (
-                entry.classification
-                is AnalyticsSurfaceClass.MAINTAINED_SCIENTIFIC_AUTHORITY
-            )
-            assert entry.central_storage_catalog_required is True
-        else:
-            assert entry.classification is AnalyticsSurfaceClass.EMBEDDED_COMPONENT
-            assert entry.central_storage_catalog_required is False
-            assert entry.exact_storage_contract_required is True
-            assert entry.owner_path.startswith("analysis/chaser_distance_runs/{run}/")
-            assert implementation.COMPONENT_PARENT_NAME in entry.owner_path
+        assert entry.classification is AnalyticsSurfaceClass.EMBEDDED_COMPONENT
+        assert entry.central_storage_catalog_required is False
+        assert entry.exact_storage_contract_required is True
+        assert entry.owner_path.startswith("analysis/chaser_distance_runs/{run}/")
+        assert implementation.COMPONENT_PARENT_NAME in entry.owner_path
 
 
 def test_current_top_level_catalog_gaps_are_explicit_not_false_adoptions() -> None:
-    expected = {"chaser_distance"}
+    expected: set[str] = set()
     actual = {
         entry.surface_id
         for entry in ANALYTICS_SURFACE_CLASSIFICATIONS
@@ -379,8 +376,8 @@ def test_schema_identity_rejects_whitespace_and_noncanonical_ids(
             "central catalog adoption",
         ),
         (
-            "chaser_distance",
-            {"consumer_scope": AnalyticsConsumerScope.CHASER_COMPONENT_READER},
+            "chaser_quadrant_occupancy",
+            {"consumer_scope": AnalyticsConsumerScope.RECORDING_ANALYSIS},
             "agree with lifecycle_context",
         ),
         (

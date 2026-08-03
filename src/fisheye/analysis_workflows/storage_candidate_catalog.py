@@ -236,6 +236,15 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
         ),
         entrypoint_attr="materialize_exact_tabular_candidate",
     ),
+    _atomic_candidate(
+        "chaser_distance",
+        run_parent="analysis/chaser_distance_storage_candidates",
+        profile_id="published_http_v1",
+        owner_module=(
+            "fisheye.analysis_workflows.materializers.chaser_distance_base"
+        ),
+        entrypoint_attr="materialize_chaser_distance_base_candidate",
+    ),
     _direct_candidate(
         "tail_posture_view",
         profile_id="published_http_v1",

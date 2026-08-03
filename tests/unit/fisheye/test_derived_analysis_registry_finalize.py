@@ -22,6 +22,16 @@ GENERIC_STAGE_RUNS = {
         "classify_1",
     ),
     "stimulus_response": ("analysis/stimulus_response_runs", "stimulus_1"),
+    "stimulus_epochs": ("analysis/stimulus_epoch_runs", "epochs_1"),
+    "detection_occupancy": (
+        "analysis/detection_occupancy_runs",
+        "detection_occupancy_1",
+    ),
+    "session_occupancy": (
+        "analysis/session_occupancy_runs",
+        "session_occupancy_1",
+    ),
+    "chaser_distance": ("analysis/chaser_distance_runs", "chaser_distance_1"),
 }
 
 

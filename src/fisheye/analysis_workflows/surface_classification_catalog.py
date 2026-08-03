@@ -520,14 +520,6 @@ def _chaser_component(
 
 
 ANALYTICS_SURFACE_CLASSIFICATIONS: tuple[AnalyticsSurfaceClassification, ...] = (
-    _scientific_run(
-        surface_id="chaser_distance",
-        owner_module="fisheye.analysis.chaser_distance_runs",
-        owner_entrypoint="write_chaser_distance_run",
-        owner_path="analysis/chaser_distance_runs/{run}",
-        schema_id="palette.chaser_distance.v1",
-        schema_version=1,
-    ),
     _chaser_component(
         surface_id="chaser_quadrant_occupancy",
         owner_module="fisheye.analysis.chaser_quadrant_occupancy",

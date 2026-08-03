@@ -29,6 +29,7 @@ EXPECTED_SCHEMA_IDENTITIES = {
     "stimulus_epochs": ("palette.stimulus_epoch_windows.v1", 1),
     "detection_occupancy": ("palette.detection_occupancy.v1", 1),
     "session_occupancy": ("palette.session_occupancy.v1", 1),
+    "chaser_distance": ("palette.chaser_distance.v1", 1),
 }
 
 EXPECTED_DIRECT_WRITERS = {
@@ -61,6 +62,12 @@ EXPECTED_DIRECT_WRITERS = {
         "write_session_occupancy_run",
         "detection_centroid_full_session_occupancy",
         "detection_occupancy_fixed_row_v1",
+    ),
+    "chaser_distance": (
+        "fisheye.analysis.chaser_distance_runs",
+        "write_chaser_distance_run",
+        "offline_detection_to_chaser_distance",
+        "chaser_distance_fixed_row_8192_2048_v1",
     ),
 }
 

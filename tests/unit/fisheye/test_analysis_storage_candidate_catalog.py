@@ -26,6 +26,7 @@ EXPECTED_ATOMIC = {
     "stimulus_epochs",
     "detection_occupancy",
     "session_occupancy",
+    "chaser_distance",
 }
 EXPECTED_DIRECT = {"tail_posture_view", "bout_classification"}
 
@@ -42,9 +43,14 @@ def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:
     )
     for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES:
         assert candidate.resolves_entrypoint(), candidate.stage_id
-        assert candidate.run_parent == (
-            DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[candidate.stage_id].run_parent
+        expected_parent = (
+            "analysis/chaser_distance_storage_candidates"
+            if candidate.stage_id == "chaser_distance"
+            else DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[
+                candidate.stage_id
+            ].run_parent
         )
+        assert candidate.run_parent == expected_parent
         record = candidate.as_record()
         assert record["selector_eligible"] is False
         assert record["profile_promoted"] is False

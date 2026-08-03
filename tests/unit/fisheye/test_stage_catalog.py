@@ -135,6 +135,10 @@ def test_stage_catalog_dependency_and_invalidation_maps_are_canonical() -> None:
         "stimulus_epochs",
     )
     assert deps["session_occupancy"] == ("refined_detect",)
+    assert deps["chaser_distance"] == (
+        "detect",
+        "stimulus_epochs",
+    )
 
     for spec in STAGE_SPECS:
         for dep in spec.depends_on:

@@ -414,6 +414,24 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
         publication_owner_module="fisheye.analysis.detection_occupancy_runs",
         publication_entrypoint_attr="write_session_occupancy_run",
     ),
+    DerivedAnalysisStorageContract(
+        stage_id="chaser_distance",
+        run_parent="analysis/chaser_distance_runs",
+        availability_parents=("analysis/chaser_distance_runs",),
+        schema_module="fisheye.analysis.chaser_distance_runs",
+        schema_id_attr="SCHEMA_ID",
+        schema_version_attr="SCHEMA_VERSION",
+        method_version_attr="METHOD_VERSION",
+        layout_attr=None,
+        materializer_module=None,
+        physical_policy_owner="chaser_distance_fixed_row_8192_2048_v1",
+        registry_publication="serialized_finalizer_v1",
+        byte_planner_adopted=False,
+        method_attr="METHOD",
+        publication_owner_kind="guarded_direct_writer_v1",
+        publication_owner_module="fisheye.analysis.chaser_distance_runs",
+        publication_entrypoint_attr="write_chaser_distance_run",
+    ),
 )
 
 

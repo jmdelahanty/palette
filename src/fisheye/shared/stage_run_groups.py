@@ -44,6 +44,7 @@ STAGE_RUN_PARENTS: dict[str, tuple[str, ...]] = {
     "stimulus_epochs": ("analysis/stimulus_epoch_runs",),
     "detection_occupancy": ("analysis/detection_occupancy_runs",),
     "session_occupancy": ("analysis/session_occupancy_runs",),
+    "chaser_distance": ("analysis/chaser_distance_runs",),
 }
 
 

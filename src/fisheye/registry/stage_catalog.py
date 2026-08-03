@@ -283,6 +283,16 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         description="Full-recording detection occupancy and coverage.",
     ),
     StageSpec(
+        id="chaser_distance",
+        depends_on=("detect", "stimulus_epochs"),
+        artifact_families=("analysis/chaser_distance_runs",),
+        category=DERIVED_ANALYSIS,
+        description=(
+            "Canonical fish-to-chaser positions, distances, and stimulus-window "
+            "summaries."
+        ),
+    ),
+    StageSpec(
         id="dish_mask",
         aliases=("mask",),
         category=TUNING,
