@@ -3,7 +3,7 @@
 Date: 2026-08-03
 
 Status: active implementation checklist; reconciled through the reviewed
-recording-summary Arrow checkpoint `9da4de70`; correctness, executable
+baseline-summary Arrow checkpoint `55cd2797`; correctness, executable
 catalog, shared planner, serialized registry, compact rematerialization, and
 benchmark foundations are integrated. All thirteen current catalog families
 have explicit unpromoted physical candidates. No production profile,
@@ -139,7 +139,7 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes exact position-occupancy and recording-summary schemas across writing, staging, and manifest-selected reads | Freeze the remaining 35 explicitly enumerated compatibility schemas where cross-language stability requires them |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes exact position-occupancy, recording-summary, and baseline-behavior-summary schemas across writing, staging, and manifest-selected reads | Freeze the remaining 34 explicitly enumerated compatibility schemas where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
@@ -298,6 +298,7 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Stimulus-response compact-v3 source/candidate read matrix | `/tmp/palette-stimulus-response-v3-read-benchmark-20260803` / `agent/palette/stimulus-response-v3-read-benchmark-20260803` | integrated as `a3814845` | Explicit compatibility-source/candidate names, executable v1/v2 schemas, offline-replanned HTTP-v1 receipt, complete decoded equality, rotated fresh processes, metadata/archive guards, and hard nonpromotion | Independently reviewed ACCEPT; representative execution, writer/publication timing, physical-I/O tracing, consumers, and promotion remain pending |
 | First exact Arrow export schema | `/tmp/palette-analytics-arrow-dtype-contracts-20260803` / `agent/palette/analytics-arrow-dtype-contracts-20260803` | integrated as `379b9262` | Closed digest-bound Arrow envelope, exact 62-field position-occupancy schema, writer/staging/read validation, and an explicit census of 36 inferred compatibility schemas | Independently reviewed ACCEPT; remaining exact schemas, zero-row hardening, and production evidence remain pending |
 | Second exact Arrow export schema | `/tmp/palette-recording-summary-arrow-contract-20260803` / `agent/palette/recording-summary-arrow-contract-20260803` | integrated as `9da4de70` | Exact ordered 32-field recording-summary schema, stable nullable capability columns, manifest-exact zero-row behavior, strict writer/footer/selected-reader validation, and registry rejection of inferred minimal summaries | Independently reviewed ACCEPT; remaining 35 schemas and production consumer evidence remain pending |
+| Third exact Arrow export schema | `/tmp/palette-baseline-summary-arrow-contract-20260803` / `agent/palette/baseline-summary-arrow-contract-20260803` | integrated as `55cd2797` | Exact ordered 95-field baseline-behavior-summary schema, fixed eight-key source projection, nullable FPS discrepancy, strict writer/footer/selected-reader validation, and representation-only source test doubles | Independently reviewed ACCEPT; source authority remains quarantined and the remaining 34 schemas and cross-language evidence remain pending |
 
 The next safe parallel wave assigns disjoint consumer/benchmark ownership as
 follows. The coordination lane remains the only owner of shared catalogs,
@@ -571,7 +572,10 @@ a v3 storage-candidate regression.
     - [x] Freeze the exact ordered 32-field `recording_summary` schema, including
           stable null columns for absent source capabilities and manifest-exact
           zero-row generations with no placeholder Parquet part.
-    - [ ] Replace the explicitly enumerated 28 other canonical/group-statistics,
+    - [x] Freeze the exact ordered 95-field `baseline_behavior_summary` schema,
+          including the closed eight-key source-summary projection, nullable
+          FPS discrepancy, and representation-only authority boundary.
+    - [ ] Replace the explicitly enumerated 27 other canonical/group-statistics,
           four baseline-strategy, and three training-response inferred schemas
           only after their producer semantics and nullability are frozen.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
