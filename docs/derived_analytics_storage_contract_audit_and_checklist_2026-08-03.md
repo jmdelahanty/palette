@@ -2,8 +2,9 @@
 
 Date: 2026-08-03
 
-Status: active implementation checklist; read-only census complete; no production
-profiles, selectors, or registries changed by this checkpoint
+Status: active implementation checklist; read-only census and correctness
+phases 1-2 complete; no production profile or scientific selector authority
+changed by these checkpoints
 
 ## Purpose
 
@@ -209,6 +210,26 @@ Evidence:
 
 ## Implementation Checklist
 
+### Implemented checkpoints
+
+The first two correctness phases are now implemented on the coordination
+branch:
+
+- fail-closed completion, eligibility, swim-bout, eye-angle, visualization,
+  and explicit legacy-selection boundaries: `bf98bea4`, `1f57eea6`, and
+  `7c706daa`;
+- manifest-exclusive immutable Parquet generations, short per-run advisory
+  locking plus manifest compare-and-swap, exact part inventories, strict
+  registry and consumer selection, and snapshot-bound downstream provenance:
+  `f6f541b6`;
+- run-parent initialization guard repair: `7d155423`.
+
+The integrated regression matrix passed 359 tests with 14 expected legacy
+compatibility xfails. The atomic-publication lane also received an independent
+adversarial review with no remaining correctness or publication-safety
+blockers. Physical-profile promotion and production selector activation remain
+out of scope.
+
 ### Phase 0 — Preserve the audit baseline
 
 - [x] Inventory the seven cataloged maintained derived families.
@@ -223,30 +244,30 @@ Evidence:
 
 ### Phase 1 — Fix fail-closed lifecycle behavior
 
-- [ ] Change generic workflow availability to use the canonical completion and
+- [x] Change generic workflow availability to use the canonical completion and
       eligibility resolver.
-- [ ] Reject selector-ineligible candidates during implicit reuse.
-- [ ] Permit statusless or lexical legacy discovery only behind an explicit
+- [x] Reject selector-ineligible candidates during implicit reuse.
+- [x] Permit statusless or lexical legacy discovery only behind an explicit
       inspection/compatibility policy.
-- [ ] Add crash-window tests for completion written before activation.
-- [ ] Migrate swim-bout run discovery to exact completion and eligibility
+- [x] Add crash-window tests for completion written before activation.
+- [x] Migrate swim-bout run discovery to exact completion and eligibility
       checks.
-- [ ] Migrate eye-angle readers and overlay tooling away from unqualified
+- [x] Migrate eye-angle readers and overlay tooling away from unqualified
       `latest` lookup.
-- [ ] Confirm explicit run selection fails terminally instead of falling back.
+- [x] Confirm explicit run selection fails terminally instead of falling back.
 
 ### Phase 2 — Make export generations atomic
 
-- [ ] Write each Parquet export generation into a hidden temporary sibling.
-- [ ] Validate the complete part inventory, schemas, row counts, and content
+- [x] Write each Parquet export generation into a hidden temporary sibling.
+- [x] Validate the complete part inventory, schemas, row counts, and content
       digests before publication.
-- [ ] Atomically rename the validated generation into its immutable final path.
-- [ ] Make the manifest enumerate the only allowed part files.
-- [ ] Reject extra, missing, duplicate, or digest-mismatched parts.
-- [ ] Change consumers to read the manifest-selected files rather than globbing
+- [x] Atomically rename the validated generation into its immutable final path.
+- [x] Make the manifest enumerate the only allowed part files.
+- [x] Reject extra, missing, duplicate, or digest-mismatched parts.
+- [x] Change consumers to read the manifest-selected files rather than globbing
       a directory.
-- [ ] Require validation before registry indexing or activation.
-- [ ] Add a regression test in which a replacement generation has fewer parts.
+- [x] Require validation before registry indexing or activation.
+- [x] Add a regression test in which a replacement generation has fewer parts.
 
 ### Phase 3 — Complete the executable analytics catalog
 
