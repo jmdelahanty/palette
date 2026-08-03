@@ -40,29 +40,38 @@ selected consumer.
 - Exact decoded full-array equality, including raw IEEE payload bytes.
 - Equal logical ROI, frame, QA, and support tables after excluding only run
   name/path metadata that must differ between immutable children.
-- Executable source and candidate array-schema manifests.
+- Executable source and candidate array-schema manifests. The source's exact
+  41-array paths, resolved shapes, and dtypes are replayed from the installed
+  v7 schema; its embedded physical declarations are also required to match the
+  immutable archive while no independent legacy physical receipt exists.
 - Candidate storage receipt exactly replanned from uncompressed data shape,
   dtype, and access class.
 - Candidate direct physical declarations exactly reconstructed from that plan,
   including chunks, shards, codecs, and fills.
 - Complete output, variant, algorithm, and source-lineage manifests with their
   executable validation and dependency metadata binding.
-- Exact atomic-publication owner, target, copy verification, validation gates,
-  visibility policy, unchanged parent-selector snapshot, and nonpromotion
-  policy.
-- Direct and root-inline consolidated metadata equivalence for both runs.
+- Exact atomic-publication root and nested field sets, owner, target, policy,
+  physical-copy evidence, all four complete validation phases, materialization
+  and source-revision bindings, visibility policy, unchanged parent-selector
+  snapshot, and nonpromotion policy.
+- Direct and root-inline consolidated metadata equivalence for both runs,
+  including the exact installed receipt schema ID and version.
 
 ## Safety and evidence rules
 
 - Archive, selected runs, selected dependencies, and output ancestry reject
-  symlinks; run names reject aliases and path syntax.
+  symlinks; every archive-relative selected/dependency path component is
+  checked with `lstat` and resolved containment before that hierarchy is read;
+  run names reject aliases and path syntax.
 - The benchmark opens Zarr only with `mode="r"`.
 - The output must be a new disjoint path whose name is explicitly benchmark
   scoped.
 - A before/after metadata guard covers root, analysis, the eye-angle parent,
   both runs, and bound source dependency declarations.
-- Each role/order position runs in a distinct fresh process; the controller PID
-  cannot appear as a trial PID.
+- Each role/order position runs in a distinct fresh process. The controller PID
+  is passed into, persisted by, and validated within every child; every child
+  requires it to equal its live parent PID, every child PID differs from it,
+  and matrix/trial driver identities must match exactly.
 - Candidate/source order rotates deterministically by repetition.
 - The JSON envelope is self-digested for corruption detection, but portable
   authority still requires an external SHA-256 or signature over the final
@@ -78,9 +87,12 @@ selected consumer.
 - [x] Require direct/consolidated equivalence.
 - [x] Record wall/CPU/RSS/storage facts and null untraced physical I/O.
 - [x] Run rotated fresh processes with PID/order enforcement.
+- [x] Bind the exact controller PID into every child trial and reject replayed
+  or independently rehashed driver identity.
 - [x] Guard archive metadata read-only before/after the matrix.
 - [x] Freeze diagnostic-only adapter and hard nonpromotion fields.
-- [x] Cover coordinated receipt and lineage rehash attempts.
+- [x] Cover coordinated storage, publication, metadata-identity, source
+  declaration, and lineage rehash attempts.
 - [x] Cover aliases, unsafe outputs, symlink archives, order errors, and false
   physical-I/O claims.
 - [ ] Run a five-repetition full-duration matrix on a published matched pair.
@@ -101,4 +113,3 @@ scripts/py -m fisheye.diagnostics.benchmark_eye_angle_v7_reads matrix \
 
 The output contains `workload.json`, one trial JSON per fresh process, and
 `matrix.json`. It does not update a selector, registry, or profile.
-

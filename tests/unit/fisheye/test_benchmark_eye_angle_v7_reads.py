@@ -126,6 +126,12 @@ def test_fresh_process_matrix_is_balanced_read_only_and_nonpromoting(
     )
     assert payload["palette_consumer_implemented"] is False
 
+    tampered = deepcopy(result)
+    tampered["payload"]["driver_process_id"] += 10_000
+    tampered = _resign(tampered, benchmark.MATRIX_SCHEMA_ID)
+    with pytest.raises(ValueError, match="trial order binding"):
+        benchmark.require_matrix_result(tampered)
+
 
 def test_candidate_storage_receipt_coordinated_rehash_is_rejected(
     eye_angle_pair: Path,
@@ -181,6 +187,104 @@ def test_dependency_lineage_coordinated_rehash_is_rejected(
         benchmark.require_workload(tampered)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda receipt: receipt.__setitem__("unexpected_authority", True),
+        lambda receipt: receipt.__setitem__("policy", "hostile.policy"),
+        lambda receipt: receipt["physical_copy"].__setitem__(
+            "unverified_bytes", 1
+        ),
+        lambda receipt: receipt["final_validation"].__setitem__(
+            "unexpected_phase_claim", True
+        ),
+    ),
+)
+def test_atomic_publication_coordinated_rehash_is_rejected(
+    eye_angle_pair: Path,
+    mutation,
+) -> None:
+    workload = benchmark._preflight(
+        eye_angle_pair,
+        source_run_name="eye_source",
+        candidate_run_name="eye_candidate",
+        seed=37,
+        repetitions=1,
+    )
+    tampered = deepcopy(workload)
+    payload = tampered["payload"]
+    receipt = payload["candidate_publication_receipt"]
+    mutation(receipt)
+    payload["candidate_publication_receipt_digest"] = canonical_json_sha256(receipt)
+    candidate_path = payload["candidate_run_path"]
+    declarations = payload["candidate_metadata_declarations"]
+    declarations[candidate_path]["attributes"]["cluster_output_staging"] = deepcopy(
+        receipt
+    )
+    payload["candidate_metadata_equivalence"]["declarations_sha256"] = (
+        canonical_json_sha256(declarations)
+    )
+    tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
+    with pytest.raises(ValueError, match="publication|physical-copy|validation"):
+        benchmark.require_workload(tampered)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("schema_id", "hostile.metadata_equivalence"),
+        ("schema_version", 2),
+    ),
+)
+def test_metadata_equivalence_receipt_identity_rehash_is_rejected(
+    eye_angle_pair: Path,
+    field: str,
+    value: object,
+) -> None:
+    workload = benchmark._preflight(
+        eye_angle_pair,
+        source_run_name="eye_source",
+        candidate_run_name="eye_candidate",
+        seed=37,
+        repetitions=1,
+    )
+    tampered = deepcopy(workload)
+    tampered["payload"]["source_metadata_equivalence"][field] = value
+    tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
+    with pytest.raises(ValueError, match="metadata-equivalence receipt is invalid"):
+        benchmark.require_workload(tampered)
+
+
+@pytest.mark.parametrize("field", ("data_type", "shape", "chunk_grid"))
+def test_source_array_declaration_rehash_is_rejected(
+    eye_angle_pair: Path,
+    field: str,
+) -> None:
+    workload = benchmark._preflight(
+        eye_angle_pair,
+        source_run_name="eye_source",
+        candidate_run_name="eye_candidate",
+        seed=37,
+        repetitions=1,
+    )
+    tampered = deepcopy(workload)
+    payload = tampered["payload"]
+    run_path = payload["source_run_path"]
+    declaration = payload["source_metadata_declarations"][f"{run_path}/roi_angles"]
+    if field == "data_type":
+        declaration[field] = "float64"
+    elif field == "shape":
+        declaration[field][0] += 1
+    else:
+        declaration[field]["configuration"]["chunk_shape"][0] += 1
+    payload["source_metadata_equivalence"]["declarations_sha256"] = (
+        canonical_json_sha256(payload["source_metadata_declarations"])
+    )
+    tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
+    with pytest.raises(ValueError, match="Source array|Source physical metadata"):
+        benchmark.require_workload(tampered)
+
+
 def test_trial_role_order_and_physical_io_claims_fail_closed(
     eye_angle_pair: Path,
 ) -> None:
@@ -199,6 +303,7 @@ def test_trial_role_order_and_physical_io_claims_fail_closed(
         role=role,
         repetition_index=0,
         order_position=0,
+        driver_process_id=os.getppid(),
         seed=37,
         cache_state="unit-test",
         workload=workload,
@@ -217,6 +322,21 @@ def test_trial_role_order_and_physical_io_claims_fail_closed(
             role=role,
             repetition_index=0,
             order_position=1,
+            driver_process_id=os.getppid(),
+            seed=37,
+            cache_state="unit-test",
+            workload=workload,
+        )
+
+    with pytest.raises(ValueError, match="equal the live parent"):
+        benchmark.run_single_trial(
+            eye_angle_pair,
+            source_run="eye_source",
+            candidate_run="eye_candidate",
+            role=role,
+            repetition_index=0,
+            order_position=0,
+            driver_process_id=max(os.getpid(), os.getppid()) + 10_000,
             seed=37,
             cache_state="unit-test",
             workload=workload,
@@ -262,6 +382,52 @@ def test_unsafe_names_outputs_and_symlinked_runs_are_rejected(
     linked_archive.symlink_to(eye_angle_pair, target_is_directory=True)
     with pytest.raises(ValueError, match="must not be a symlink"):
         benchmark._safe_archive(linked_archive)
+
+
+def test_selected_and_dependency_ancestor_symlinks_fail_before_reads(
+    eye_angle_pair: Path,
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "selected-ancestor.zarr"
+    shutil.copytree(eye_angle_pair, selected)
+    analysis = selected / "analysis"
+    retained_analysis = selected / "analysis-real"
+    analysis.rename(retained_analysis)
+    analysis.symlink_to(retained_analysis.name, target_is_directory=True)
+    with pytest.raises(ValueError, match="path component is a forbidden symlink"):
+        benchmark._preflight(
+            selected,
+            source_run_name="eye_source",
+            candidate_run_name="eye_candidate",
+            seed=37,
+            repetitions=1,
+        )
+
+    workload = benchmark._preflight(
+        eye_angle_pair,
+        source_run_name="eye_source",
+        candidate_run_name="eye_candidate",
+        seed=37,
+        repetitions=1,
+    )
+    dependency_path = next(
+        Path(path)
+        for path in workload["payload"]["dependency_paths"]
+        if len(Path(path).parts) >= 3
+        and not path.startswith(f"{benchmark.EYE_ANGLE_RUN_PARENT}/")
+    )
+    linked_dependency = tmp_path / "dependency-ancestor.zarr"
+    shutil.copytree(eye_angle_pair, linked_dependency)
+    ancestor_relative = dependency_path.parent
+    ancestor = linked_dependency.joinpath(*ancestor_relative.parts)
+    retained = ancestor.with_name(f"{ancestor.name}-real")
+    ancestor.rename(retained)
+    ancestor.symlink_to(retained.name, target_is_directory=True)
+    with pytest.raises(ValueError, match="Eye-angle dependency path component"):
+        benchmark._dependency_declarations(
+            linked_dependency,
+            paths=(dependency_path.as_posix(),),
+        )
 
 
 def test_candidate_normal_reader_still_rejects_selector_ineligible_run(

@@ -59,7 +59,12 @@ from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
     ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION,
     SERIALIZATION_POLICY,
 )
-from fisheye.analysis_workflows.materializers.eye_angles import PUBLISH_SCHEMA_ID
+from fisheye.analysis_workflows.materializers.eye_angles import (
+    MATERIALIZATION_SCHEMA_ID,
+    PUBLISH_SCHEMA_ID,
+    SOURCE_REVISION_AUDIT_SCHEMA_ID,
+    STAGING_SCHEMA_ID,
+)
 from fisheye.shared.zarr.array_factory import (
     array_metadata_declaration_from_plan,
 )
@@ -76,6 +81,8 @@ from fisheye.shared.zarr.manifest_digest import (
     metadata_without_empty_group_consolidation,
 )
 from fisheye.shared.zarr.metadata_equivalence import (
+    METADATA_EQUIVALENCE_SCHEMA_ID,
+    METADATA_EQUIVALENCE_SCHEMA_VERSION,
     validate_direct_consolidated_subtree,
 )
 
@@ -95,6 +102,9 @@ _CANDIDATE_PROMOTION_POLICY = (
 )
 _ATOMIC_ROLLBACK_POLICY = (
     "retain_failed_public_tombstone_leave_unleased_parent_state_untouched"
+)
+_CANDIDATE_PUBLICATION_POLICY = (
+    "exact_source_subset_staged_local_compute_then_shard_then_atomic_run_group_publish"
 )
 _RESERVED_ARRAY_ATTRIBUTES = frozenset(
     {
@@ -204,8 +214,41 @@ def _run_path(name: str) -> str:
     return f"{EYE_ANGLE_RUN_PARENT}/{name}"
 
 
+def _require_archive_directory(
+    archive: Path,
+    relative_path: str,
+    *,
+    label: str,
+) -> Path:
+    pure = PurePosixPath(relative_path)
+    if (
+        type(relative_path) is not str
+        or not relative_path
+        or relative_path.startswith("/")
+        or ".." in pure.parts
+        or any(part in {"", "."} for part in pure.parts)
+    ):
+        raise ValueError(f"{label} path is not one canonical archive-relative path.")
+    node = archive
+    for component in pure.parts:
+        node = node / component
+        try:
+            node.lstat()
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"{label} path is absent: {node}.") from exc
+        if node.is_symlink():
+            raise ValueError(f"{label} path component is a forbidden symlink: {node}.")
+        if not node.is_dir():
+            raise ValueError(f"{label} path component is not a directory: {node}.")
+    try:
+        node.resolve(strict=True).relative_to(archive)
+    except ValueError as exc:
+        raise ValueError(f"{label} resolves outside the archive.") from exc
+    return node
+
+
 def _require_nonsymlink_tree(path: Path, *, label: str) -> None:
-    if not path.is_dir() or path.is_symlink():
+    if path.is_symlink() or not path.is_dir():
         raise ValueError(f"{label} must be one nonsymlink directory.")
     for child in path.rglob("*"):
         if child.is_symlink():
@@ -213,7 +256,11 @@ def _require_nonsymlink_tree(path: Path, *, label: str) -> None:
 
 
 def _safe_run_directory(archive: Path, *, name: str) -> Path:
-    path = archive.joinpath(*_run_path(name).split("/"))
+    path = _require_archive_directory(
+        archive,
+        _run_path(name),
+        label="Selected eye-angle run",
+    )
     _require_nonsymlink_tree(path, label="Selected eye-angle run")
     return path
 
@@ -470,7 +517,9 @@ def _require_metadata_receipt(
     if not isinstance(value, Mapping) or set(value) != expected_fields:
         raise ValueError("Eye-angle metadata-equivalence receipt is not exact.")
     if (
-        value["subtree_path"] != run_path
+        value["schema_id"] != METADATA_EQUIVALENCE_SCHEMA_ID
+        or value["schema_version"] != METADATA_EQUIVALENCE_SCHEMA_VERSION
+        or value["subtree_path"] != run_path
         or value["array_count"] != array_count
         or not _is_sha256(value["declarations_sha256"])
         or any(
@@ -480,6 +529,77 @@ def _require_metadata_receipt(
         or value["node_count"] != value["group_count"] + value["array_count"]
     ):
         raise ValueError("Eye-angle metadata-equivalence receipt is invalid.")
+
+
+def _resolved_source_shape(
+    shape_template: Sequence[str | int], dimensions: Mapping[str, int]
+) -> list[int]:
+    return [
+        int(dimensions[item]) if isinstance(item, str) else int(item)
+        for item in shape_template
+    ]
+
+
+def _require_source_array_declarations(
+    value: Mapping[str, Any],
+    *,
+    run_path: str,
+    dimensions: EyeAngleDimensions,
+) -> None:
+    expected = {
+        declaration.path: declaration
+        for declaration in build_eye_angle_array_declarations(
+            byte_planner_adopted=False
+        )
+    }
+    prefix = f"{run_path}/"
+    observed = {
+        path.removeprefix(prefix): declaration
+        for path, declaration in value.items()
+        if path.startswith(prefix)
+        and isinstance(declaration, Mapping)
+        and declaration.get("node_type") == "array"
+    }
+    if set(observed) != set(expected):
+        raise ValueError("Source array declaration inventory differs from executable v7.")
+    resolved_dimensions = dimensions.contract_dimensions
+    for path, contract in expected.items():
+        declaration = observed[path]
+        try:
+            observed_dtype = np.dtype(declaration.get("data_type")).str
+        except TypeError as exc:
+            raise ValueError(
+                f"Source array dtype is invalid at {path!r}."
+            ) from exc
+        expected_dtype = np.dtype(contract.contract.dtype.numpy_dtype).str
+        expected_shape = _resolved_source_shape(
+            contract.contract.shape_template,
+            resolved_dimensions,
+        )
+        if (
+            declaration.get("shape") != expected_shape
+            or observed_dtype != expected_dtype
+        ):
+            raise ValueError(
+                f"Source array logical declaration differs from executable v7 at {path!r}."
+            )
+        chunk_grid = declaration.get("chunk_grid")
+        codecs = declaration.get("codecs")
+        if (
+            not isinstance(chunk_grid, Mapping)
+            or chunk_grid.get("name") != "regular"
+            or not isinstance(chunk_grid.get("configuration"), Mapping)
+            or not isinstance(
+                chunk_grid["configuration"].get("chunk_shape"), list
+            )
+            or len(chunk_grid["configuration"]["chunk_shape"])
+            != len(expected_shape)
+            or not isinstance(codecs, list)
+            or not codecs
+        ):
+            raise ValueError(
+                f"Source array physical declaration is malformed at {path!r}."
+            )
 
 
 def _require_metadata_declarations(
@@ -716,7 +836,13 @@ def _dependency_declarations(
 ) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for relative in paths:
-        metadata = archive.joinpath(*PurePosixPath(relative).parts, "zarr.json")
+        dependency = _require_archive_directory(
+            archive,
+            relative,
+            label="Eye-angle dependency",
+        )
+        _require_nonsymlink_tree(dependency, label="Eye-angle dependency")
+        metadata = dependency / "zarr.json"
         if not metadata.is_file():
             continue
         if metadata.is_symlink():
@@ -847,16 +973,27 @@ def _require_publication_receipt(
     run_path: str,
     owner_uuid: object,
     parent_attrs: Mapping[str, Any],
+    candidate_attrs: Mapping[str, Any],
+    dimensions: EyeAngleDimensions,
 ) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("Candidate lacks an atomic publication receipt.")
     required = {
+        "authoritative_source_zarr",
+        "node_local_staged_zarr",
+        "node_local_regular_run",
+        "node_local_sharded_run",
+        "node_local_publication_run",
+        "materialization",
+        "source_revision_audit",
         "schema_id",
         "publisher_contract",
         "policy",
         "serialization_policy",
         "rollback_policy",
         "published_at_utc",
+        "host",
+        "lsb_jobid",
         "source_zarr",
         "publication_source_run_path",
         "target_run_path",
@@ -876,8 +1013,8 @@ def _require_publication_receipt(
         "metadata_visibility_policy",
         "storage_profile_id",
     }
-    if not required.issubset(value):
-        raise ValueError("Candidate atomic publication receipt is incomplete.")
+    if set(value) != required:
+        raise ValueError("Candidate atomic publication receipt field set is not exact.")
     if (
         value.get("schema_id") != PUBLISH_SCHEMA_ID
         or value.get("publisher_contract")
@@ -886,6 +1023,7 @@ def _require_publication_receipt(
             "schema_version": ATOMIC_RUN_PUBLISHER_SCHEMA_VERSION,
         }
         or value.get("serialization_policy") != SERIALIZATION_POLICY
+        or value.get("policy") != _CANDIDATE_PUBLICATION_POLICY
         or value.get("rollback_policy") != _ATOMIC_ROLLBACK_POLICY
         or value.get("publication_owner_attr") != ATOMIC_PUBLICATION_OWNER_ATTR
         or value.get("publication_owner_uuid") != owner_uuid
@@ -896,6 +1034,7 @@ def _require_publication_receipt(
         or value.get("promotion_policy") != _CANDIDATE_PROMOTION_POLICY
         or value.get("storage_profile_id")
         != EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+        or Path(str(value.get("authoritative_source_zarr"))).resolve() != archive
         or Path(str(value.get("source_zarr"))).resolve() != archive
         or Path(str(value.get("target_run_path"))).resolve()
         != archive.joinpath(*run_path.split("/"))
@@ -903,11 +1042,30 @@ def _require_publication_receipt(
         or value.get("parent_attrs_after") != {EYE_ANGLE_RUN_PARENT: dict(parent_attrs)}
     ):
         raise ValueError("Candidate atomic publication receipt binding is invalid.")
+    local_publication = Path(str(value.get("node_local_publication_run")))
+    local_regular = Path(str(value.get("node_local_regular_run")))
+    local_staged = Path(str(value.get("node_local_staged_zarr")))
     if (
         type(value.get("publication_source_run_path")) is not str
         or not Path(value["publication_source_run_path"]).is_absolute()
+        or not local_publication.is_absolute()
+        or not local_regular.is_absolute()
+        or not local_staged.is_absolute()
+        or Path(value["publication_source_run_path"]) != local_publication
+        or local_regular != local_publication
+        or value.get("node_local_sharded_run") is not None
+        or not local_publication.is_relative_to(local_staged)
     ):
         raise ValueError("Candidate publication source path is invalid.")
+    if (
+        type(value.get("published_at_utc")) is not str
+        or not value["published_at_utc"]
+        or type(value.get("host")) is not str
+        or not value["host"]
+        or value.get("lsb_jobid") is not None
+        and type(value.get("lsb_jobid")) is not str
+    ):
+        raise ValueError("Candidate publication runtime identity is invalid.")
     for field in ("copy_duration_seconds",):
         observed = value.get(field)
         if (
@@ -920,8 +1078,26 @@ def _require_publication_receipt(
     physical = value.get("physical_copy")
     if (
         not isinstance(physical, Mapping)
+        or set(physical)
+        != {
+            "backend",
+            "verification",
+            "file_count",
+            "physical_bytes",
+            "inventory_sha256",
+            "content_sha256",
+        }
+        or physical.get("backend") not in {"python", "rsync"}
         or physical.get("verification")
         not in {"sha256_all_physical_files", "rsync_checksum_dry_run"}
+        or (
+            physical.get("backend") == "python"
+            and physical.get("verification") != "sha256_all_physical_files"
+        )
+        or (
+            physical.get("backend") == "rsync"
+            and physical.get("verification") != "rsync_checksum_dry_run"
+        )
         or type(physical.get("file_count")) is not int
         or physical["file_count"] < 1
         or type(physical.get("physical_bytes")) is not int
@@ -930,6 +1106,62 @@ def _require_publication_receipt(
         or not _is_sha256(physical.get("content_sha256"))
     ):
         raise ValueError("Candidate physical-copy receipt is invalid.")
+    expected_validation_fields = {
+        "valid",
+        "errors",
+        "exact_compact_v7_valid",
+        "row_count",
+        "frame_count",
+        "angle_channel_count",
+        "qa_channel_count",
+        "array_count",
+        "sharded_array_count",
+        "require_sharded",
+        "source_contract_sha256",
+        "instance_key_sha256",
+        "source_acquisition_frame_index_sha256",
+        "algorithm_contract_sha256",
+        "output_schema_sha256",
+        "physical_storage_layout",
+        "storage_profile_id",
+        "candidate_storage_valid",
+    }
+    materialization = value.get("materialization")
+    persisted_materialization = candidate_attrs.get("node_local_materialization")
+    if (
+        not isinstance(materialization, Mapping)
+        or materialization != persisted_materialization
+        or set(materialization)
+        != {
+            "schema_id",
+            "status",
+            "completed_at_utc",
+            "authoritative_source_zarr",
+            "node_local_staged_zarr",
+            "source_access_policy",
+            "source_staging",
+            "compute",
+            "regular_validation",
+            "source_contract_sha256",
+            "source_metadata_sha256",
+            "staged_input_integrity_receipt_sha256",
+            "staged_input_integrity_receipt",
+            "algorithm_contract",
+            "output_contract",
+            "local_direct_consolidated_array_count",
+            "final_physical_validation",
+        }
+        or materialization.get("schema_id") != MATERIALIZATION_SCHEMA_ID
+        or materialization.get("status") != "complete"
+        or materialization.get("authoritative_source_zarr") != str(archive)
+        or Path(str(materialization.get("node_local_staged_zarr"))) != local_staged
+        or materialization.get("source_access_policy")
+        != "authoritative_shared_read_only_then_exact_local_subset"
+        or materialization.get("local_direct_consolidated_array_count") != 41
+    ):
+        raise ValueError("Candidate materialization receipt is not exact.")
+    final_physical_validation = materialization.get("final_physical_validation")
+    regular_validation = materialization.get("regular_validation")
     for field in (
         "local_validation",
         "temporary_validation",
@@ -939,12 +1171,83 @@ def _require_publication_receipt(
         validation = value.get(field)
         if (
             not isinstance(validation, Mapping)
+            or set(validation) != expected_validation_fields
             or validation.get("valid") is not True
             or validation.get("errors") != []
             or validation.get("array_count") != 41
             or validation.get("exact_compact_v7_valid") is not True
+            or validation.get("row_count") != dimensions.n_roi_rows
+            or validation.get("frame_count") != dimensions.n_frames
+            or validation.get("angle_channel_count")
+            != dimensions.contract_dimensions["n_angle_channels"]
+            or validation.get("qa_channel_count")
+            != dimensions.contract_dimensions["n_qa_channels"]
+            or validation.get("sharded_array_count") != 0
+            or validation.get("require_sharded") is not False
+            or validation.get("physical_storage_layout") is not None
+            or validation.get("storage_profile_id")
+            != EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+            or validation.get("candidate_storage_valid") is not True
+            or any(
+                not _is_sha256(validation.get(name))
+                for name in (
+                    "source_contract_sha256",
+                    "instance_key_sha256",
+                    "source_acquisition_frame_index_sha256",
+                    "algorithm_contract_sha256",
+                    "output_schema_sha256",
+                )
+            )
+            or validation != final_physical_validation
         ):
             raise ValueError(f"Candidate publication {field} did not pass exactly.")
+    if (
+        not isinstance(regular_validation, Mapping)
+        or set(regular_validation) != expected_validation_fields
+        or regular_validation != final_physical_validation
+    ):
+        raise ValueError("Candidate materialization validation phases differ.")
+    staging = materialization.get("source_staging")
+    if (
+        not isinstance(staging, Mapping)
+        or staging.get("schema_id") != STAGING_SCHEMA_ID
+        or staging.get("status") != "complete"
+        or staging.get("authoritative_source_zarr") != str(archive)
+        or Path(str(staging.get("node_local_staged_zarr"))) != local_staged
+    ):
+        raise ValueError("Candidate source-staging receipt is invalid.")
+    revision = value.get("source_revision_audit")
+    if (
+        not isinstance(revision, Mapping)
+        or set(revision)
+        != {
+            "schema_id",
+            "status",
+            "checked_at_utc",
+            "authoritative_source_zarr",
+            "subject_shape_run",
+            "keypoint_run",
+            "inventory",
+            "expected_source_metadata_sha256",
+            "observed_source_metadata_sha256",
+            "expected_source_contract_sha256",
+            "observed_source_contract_sha256",
+            "full_selected_scientific_input_content_hash",
+            "errors",
+        }
+        or revision.get("schema_id") != SOURCE_REVISION_AUDIT_SCHEMA_ID
+        or revision.get("status") != "current"
+        or revision.get("authoritative_source_zarr") != str(archive)
+        or revision.get("errors") != []
+        or revision.get("full_selected_scientific_input_content_hash") is not True
+        or revision.get("expected_source_metadata_sha256")
+        != revision.get("observed_source_metadata_sha256")
+        or revision.get("expected_source_contract_sha256")
+        != revision.get("observed_source_contract_sha256")
+        or not _is_sha256(revision.get("expected_source_metadata_sha256"))
+        or not _is_sha256(revision.get("expected_source_contract_sha256"))
+    ):
+        raise ValueError("Candidate source-revision receipt is invalid.")
     visibility = value.get("metadata_visibility_policy")
     if visibility != {
         "authoritative_root_consolidation": "after_final_publisher_metadata_write",
@@ -1120,6 +1423,8 @@ def _preflight(
         run_path=_run_path(candidate_name),
         owner_uuid=candidate_attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR),
         parent_attrs=direct_parent_attrs,
+        candidate_attrs=candidate_attrs,
+        dimensions=dimensions,
     )
     dependencies = tuple(
         sorted(
@@ -1401,6 +1706,11 @@ def require_workload(value: Mapping[str, Any]) -> None:
         receipt=payload["candidate_metadata_equivalence"],
         run_path=payload["candidate_run_path"],
     )
+    _require_source_array_declarations(
+        source_declarations,
+        run_path=payload["source_run_path"],
+        dimensions=dimensions,
+    )
     if _physical_array_declarations(
         source_declarations, run_path=payload["source_run_path"]
     ) == _physical_array_declarations(
@@ -1444,6 +1754,8 @@ def require_workload(value: Mapping[str, Any]) -> None:
         run_path=payload["candidate_run_path"],
         owner_uuid=candidate_attrs.get(ATOMIC_PUBLICATION_OWNER_ATTR),
         parent_attrs=parent_snapshot,
+        candidate_attrs=candidate_attrs,
+        dimensions=dimensions,
     )
     if payload["candidate_publication_receipt_digest"] != canonical_json_sha256(
         publication
@@ -1473,6 +1785,11 @@ def require_workload(value: Mapping[str, Any]) -> None:
         != payload["dependency_metadata_declarations"]
     ):
         raise ValueError("Eye-angle dependency metadata binding differs.")
+    if _metadata_declarations(
+        archive,
+        run_path=payload["source_run_path"],
+    ) != source_declarations:
+        raise ValueError("Source physical metadata declarations changed or were rehashed.")
     if (
         payload["candidate_selector_eligible"] is not False
         or payload["promotion_authorized"] is not False
@@ -1520,6 +1837,7 @@ def run_single_trial(
     role: str,
     repetition_index: int,
     order_position: int,
+    driver_process_id: int,
     seed: int,
     cache_state: str,
     workload: Mapping[str, Any],
@@ -1541,6 +1859,16 @@ def run_single_trial(
     order = _trial_order(seed=seed, repetition_index=repetition_index)
     if order_position not in {0, 1} or order[order_position] != role:
         raise ValueError("Eye-angle trial rotation binding is invalid.")
+    if (
+        type(driver_process_id) is not int
+        or driver_process_id <= 0
+        or driver_process_id == os.getpid()
+        or driver_process_id != os.getppid()
+    ):
+        raise ValueError(
+            "Eye-angle trial driver PID must equal the live parent and differ from "
+            "the child."
+        )
     if (
         type(cache_state) is not str
         or not cache_state
@@ -1592,6 +1920,7 @@ def run_single_trial(
         "seed": seed,
         "cache_state": cache_state,
         "process_id": os.getpid(),
+        "driver_process_id": driver_process_id,
         "started_at_utc": started,
         "completed_at_utc": utc_now(),
         "environment": _environment(archive=archive, cache_state=cache_state),
@@ -1642,6 +1971,7 @@ def require_trial_result(
         "seed",
         "cache_state",
         "process_id",
+        "driver_process_id",
         "started_at_utc",
         "completed_at_utc",
         "environment",
@@ -1688,6 +2018,9 @@ def require_trial_result(
         != role
         or type(payload["process_id"]) is not int
         or payload["process_id"] <= 0
+        or type(payload["driver_process_id"]) is not int
+        or payload["driver_process_id"] <= 0
+        or payload["driver_process_id"] == payload["process_id"]
     ):
         raise ValueError("Eye-angle trial role/order/process binding is invalid.")
     if any(
@@ -1861,6 +2194,7 @@ def require_matrix_result(value: Mapping[str, Any]) -> None:
             or trial_payload["role"]
             != _trial_order(seed=payload["seed"], repetition_index=repetition)[position]
             or trial_payload["cache_state"] != payload["cache_state"]
+            or trial_payload["driver_process_id"] != payload["driver_process_id"]
         ):
             raise ValueError("Eye-angle matrix trial order binding differs.")
         process_ids.append(trial_payload["process_id"])
@@ -1937,6 +2271,7 @@ def run_benchmark_matrix(
         dependency_paths=expected["dependency_paths"],
     )
     started = utc_now()
+    driver_process_id = os.getpid()
     trials: list[dict[str, Any]] = []
     for repetition in range(repetitions):
         for position, role in enumerate(
@@ -1960,6 +2295,8 @@ def run_benchmark_matrix(
                 str(repetition),
                 "--order-position",
                 str(position),
+                "--driver-process-id",
+                str(driver_process_id),
                 "--seed",
                 str(seed),
                 "--cache-state",
@@ -2002,7 +2339,7 @@ def run_benchmark_matrix(
         "seed": seed,
         "repetitions": repetitions,
         "cache_state": cache_state,
-        "driver_process_id": os.getpid(),
+        "driver_process_id": driver_process_id,
         "trials": trials,
         "summary": _matrix_summary(trials),
         "correctness": {
@@ -2054,6 +2391,7 @@ def _parser() -> argparse.ArgumentParser:
     trial.add_argument("--role", choices=("source", "candidate"), required=True)
     trial.add_argument("--repetition-index", type=int, required=True)
     trial.add_argument("--order-position", type=int, required=True)
+    trial.add_argument("--driver-process-id", type=int, required=True)
     trial.add_argument("--seed", type=int, required=True)
     trial.add_argument("--cache-state", required=True)
     trial.add_argument("--workload", type=Path, required=True)
@@ -2085,6 +2423,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         role=args.role,
         repetition_index=args.repetition_index,
         order_position=args.order_position,
+        driver_process_id=args.driver_process_id,
         seed=args.seed,
         cache_state=args.cache_state,
         workload=workload,
