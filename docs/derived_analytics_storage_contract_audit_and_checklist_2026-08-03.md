@@ -125,7 +125,7 @@ true.
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
-| Chaser components | Protocol-neutral schemas, payload-bound manifests, verified detached reads, and all ten maintained writers routed through node-local sealed immutable publication | Add explicit digest-bound dependency handles, runner receipts, consolidated activation, export adoption, and chained recovery coverage |
+| Chaser components | Protocol-neutral schemas, payload-bound manifests, selector and explicit dependency-handle readers, and all ten maintained writers routed through node-local sealed immutable publication | Propagate handles through runner receipts and scientific consumers; add consolidated activation, export adoption, and chained recovery coverage |
 | Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
@@ -479,7 +479,9 @@ implicit discovery.
       production activation quarantined until atomic workflow adoption.
 - [ ] Record every requested component's output identity, exact dependency
       handle, and validation result in the chaser runner receipt. Individual
-      writers now return a digest-bound receipt; orchestration adoption remains.
+      writer receipt v2 now returns a self-digested explicit dependency handle
+      that loads selector-ineligible candidates without fallback;
+      orchestration-result propagation remains.
 - [ ] Keep export of unsealed component tables fail closed.
 - [ ] Add recovery tests for interrupted component publication and stale
       pointers. Post-selector failure rollback is covered; add interruption

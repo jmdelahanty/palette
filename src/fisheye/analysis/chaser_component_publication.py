@@ -41,6 +41,9 @@ COMPONENT_SELECTOR_DIGEST_ATTR = f"{COMPONENT_SELECTOR_ATTR}_sha256"
 COMPONENT_SELECTOR_SCHEMA_ID = "palette.chaser_component_publication_authority"
 COMPONENT_SELECTOR_SCHEMA_VERSION = 1
 
+COMPONENT_HANDLE_SCHEMA_ID = "palette.chaser_component_dependency_handle"
+COMPONENT_HANDLE_SCHEMA_VERSION = 1
+
 _MANIFEST_FIELDS = frozenset(
     {
         "schema_id",
@@ -94,6 +97,25 @@ _SELECTOR_FIELDS = frozenset(
         "approval_state",
     }
 )
+_HANDLE_BODY_FIELDS = frozenset(
+    {
+        "schema_id",
+        "schema_version",
+        "resolution_policy",
+        "base_run_path",
+        "base_publication_seal_sha256",
+        "component_family",
+        "component_name",
+        "component_path",
+        "component_manifest_ref",
+        "component_manifest_sha256",
+        "semantic_schema_id",
+        "semantic_schema_version",
+        "method_id",
+        "method_version",
+    }
+)
+_HANDLE_FIELDS = frozenset({*_HANDLE_BODY_FIELDS, "record_sha256"})
 
 # These component-root attributes are owned by the mechanical publisher.  They
 # are explicitly non-scientific and are excluded so hidden-copy ownership,
@@ -641,43 +663,112 @@ def validate_chaser_component_selector(
     return selector
 
 
-def load_selected_chaser_component(
-    root: Any,
+def build_chaser_component_handle(
+    component: Any,
     *,
     snapshot: Any,
-    component_family: str,
+    relative_path: str,
+) -> dict[str, Any]:
+    """Build one portable handle for an exact sealed component dependency.
+
+    Unlike a selector, this record grants no archive-wide authority.  It lets a
+    workflow pass one already-validated immutable candidate to a downstream
+    component without writing ``latest`` or making the candidate selectable.
+    """
+
+    path = _relative_path(relative_path, label="component dependency path")
+    manifest = validate_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        expected_relative_path=path,
+    )
+    identity = manifest["component"]
+    base = _base_authority(snapshot)
+    full_path = f"{base['run_path']}/{path}"
+    body = {
+        "schema_id": COMPONENT_HANDLE_SCHEMA_ID,
+        "schema_version": COMPONENT_HANDLE_SCHEMA_VERSION,
+        "resolution_policy": "explicit_manifest_no_selector_fallback",
+        "base_run_path": base["run_path"],
+        "base_publication_seal_sha256": base["publication_seal_sha256"],
+        "component_family": identity["component_family"],
+        "component_name": identity["component_name"],
+        "component_path": full_path,
+        "component_manifest_ref": f"/{full_path}@{COMPONENT_MANIFEST_ATTR}",
+        "component_manifest_sha256": component_record_sha256(manifest),
+        "semantic_schema_id": identity["semantic_schema_id"],
+        "semantic_schema_version": identity["semantic_schema_version"],
+        "method_id": identity["method_id"],
+        "method_version": identity["method_version"],
+    }
+    return {**body, "record_sha256": component_record_sha256(body)}
+
+
+def validate_chaser_component_handle(
+    handle: Any,
+    *,
+    snapshot: Any,
+) -> Mapping[str, Any]:
+    """Validate one explicit component handle without consulting a selector."""
+
+    record = _exact_fields(handle, _HANDLE_FIELDS, label="component dependency handle")
+    body = {key: record[key] for key in _HANDLE_BODY_FIELDS}
+    if (
+        body["schema_id"] != COMPONENT_HANDLE_SCHEMA_ID
+        or body["schema_version"] != COMPONENT_HANDLE_SCHEMA_VERSION
+        or body["resolution_policy"]
+        != "explicit_manifest_no_selector_fallback"
+    ):
+        _fail("Component dependency handle has an unsupported identity or policy.")
+    digest = _sha256(record["record_sha256"], label="component handle digest")
+    if component_record_sha256(body) != digest:
+        _fail("Component dependency handle digest does not match its canonical payload.")
+
+    base = _base_authority(snapshot)
+    if (
+        body["base_run_path"] != base["run_path"]
+        or body["base_publication_seal_sha256"]
+        != base["publication_seal_sha256"]
+    ):
+        _fail("Component dependency handle belongs to a different base authority.")
+    family = _controlled_name(body["component_family"], label="component family")
+    name = _controlled_name(body["component_name"], label="component name")
+    expected_path = f"{base['run_path']}/{family}/{name}"
+    if body["component_path"] != expected_path:
+        _fail("Component dependency handle path is not its exact base/family/name binding.")
+    if body["component_manifest_ref"] != (
+        f"/{expected_path}@{COMPONENT_MANIFEST_ATTR}"
+    ):
+        _fail("Component dependency handle has a different manifest reference.")
+    _sha256(
+        body["component_manifest_sha256"],
+        label="component manifest digest",
+    )
+    _schema_id(body["semantic_schema_id"], label="semantic schema id")
+    _positive_version(
+        body["semantic_schema_version"], label="semantic schema version"
+    )
+    _schema_id(body["method_id"], label="method id")
+    _schema_id(body["method_version"], label="method version")
+    canonical_component_json_bytes(record)
+    return record
+
+
+def _copy_verified_chaser_component(
+    component: Any,
+    *,
+    snapshot: Any,
+    relative_path: str,
+    expected_manifest_sha256: str,
     expected_semantic_schema_id: str,
     expected_semantic_schema_version: int,
 ) -> VerifiedChaserComponent:
-    """Load one selected component with no latest, scan, or raw-child fallback."""
-
-    family = _controlled_name(component_family, label="component family")
-    parent_path = f"{_relative_path(snapshot.run_path, label='base run path')}/{family}"
-    try:
-        parent = root[parent_path]
-    except Exception as exc:
-        _fail(f"Selected component family {parent_path!r} is unavailable: {exc}.")
-    raw_selector = _exact_fields(
-        parent.attrs.get(COMPONENT_SELECTOR_ATTR),
-        _SELECTOR_FIELDS,
-        label="component selector",
-    )
-    if raw_selector.get("component_family") != family:
-        _fail("Component selector belongs to a different component family.")
-    name = _controlled_name(
-        raw_selector.get("selected_component"), label="selected component"
-    )
-    try:
-        component = parent[name]
-    except Exception as exc:
-        _fail(f"Selected component {family}/{name!s} is unavailable: {exc}.")
-    selector = validate_chaser_component_selector(
-        parent,
-        component=component,
+    manifest = validate_chaser_component_manifest(
+        component,
         snapshot=snapshot,
-        expected_family=family,
+        expected_relative_path=relative_path,
+        expected_manifest_sha256=expected_manifest_sha256,
     )
-    manifest = component.attrs[COMPONENT_MANIFEST_ATTR]
     identity = manifest["component"]
     expected_schema_id = _schema_id(
         expected_semantic_schema_id,
@@ -715,6 +806,8 @@ def load_selected_chaser_component(
         )
         for declaration in manifest["payload"]["groups"]
     }
+    family = identity["component_family"]
+    name = identity["component_name"]
     return VerifiedChaserComponent(
         base_run_path=snapshot.run_path,
         component_family=family,
@@ -724,10 +817,89 @@ def load_selected_chaser_component(
         semantic_schema_version=identity["semantic_schema_version"],
         method_id=identity["method_id"],
         method_version=identity["method_version"],
-        manifest_sha256=selector["component_manifest_sha256"],
+        manifest_sha256=expected_manifest_sha256,
         manifest=MappingProxyType(copy.deepcopy(dict(manifest))),
         arrays=MappingProxyType(arrays),
         group_attributes=MappingProxyType(group_attributes),
+    )
+
+
+def load_explicit_chaser_component(
+    root: Any,
+    *,
+    snapshot: Any,
+    handle: Any,
+    expected_semantic_schema_id: str,
+    expected_semantic_schema_version: int,
+) -> VerifiedChaserComponent:
+    """Load one digest-bound candidate without selector or child fallback."""
+
+    record = validate_chaser_component_handle(handle, snapshot=snapshot)
+    if (
+        record["semantic_schema_id"] != expected_semantic_schema_id
+        or record["semantic_schema_version"] != expected_semantic_schema_version
+    ):
+        _fail("Component dependency handle has an incompatible semantic schema.")
+    try:
+        component = root[record["component_path"]]
+    except Exception as exc:
+        _fail(
+            f"Explicit component {record['component_path']!r} is unavailable: {exc}."
+        )
+    relative_path = f"{record['component_family']}/{record['component_name']}"
+    return _copy_verified_chaser_component(
+        component,
+        snapshot=snapshot,
+        relative_path=relative_path,
+        expected_manifest_sha256=record["component_manifest_sha256"],
+        expected_semantic_schema_id=expected_semantic_schema_id,
+        expected_semantic_schema_version=expected_semantic_schema_version,
+    )
+
+
+def load_selected_chaser_component(
+    root: Any,
+    *,
+    snapshot: Any,
+    component_family: str,
+    expected_semantic_schema_id: str,
+    expected_semantic_schema_version: int,
+) -> VerifiedChaserComponent:
+    """Load one selected component with no latest, scan, or raw-child fallback."""
+
+    family = _controlled_name(component_family, label="component family")
+    parent_path = f"{_relative_path(snapshot.run_path, label='base run path')}/{family}"
+    try:
+        parent = root[parent_path]
+    except Exception as exc:
+        _fail(f"Selected component family {parent_path!r} is unavailable: {exc}.")
+    raw_selector = _exact_fields(
+        parent.attrs.get(COMPONENT_SELECTOR_ATTR),
+        _SELECTOR_FIELDS,
+        label="component selector",
+    )
+    if raw_selector.get("component_family") != family:
+        _fail("Component selector belongs to a different component family.")
+    name = _controlled_name(
+        raw_selector.get("selected_component"), label="selected component"
+    )
+    try:
+        component = parent[name]
+    except Exception as exc:
+        _fail(f"Selected component {family}/{name!s} is unavailable: {exc}.")
+    selector = validate_chaser_component_selector(
+        parent,
+        component=component,
+        snapshot=snapshot,
+        expected_family=family,
+    )
+    return _copy_verified_chaser_component(
+        component,
+        snapshot=snapshot,
+        relative_path=selector["component_path"],
+        expected_manifest_sha256=selector["component_manifest_sha256"],
+        expected_semantic_schema_id=expected_semantic_schema_id,
+        expected_semantic_schema_version=expected_semantic_schema_version,
     )
 
 
@@ -740,17 +912,22 @@ __all__ = [
     "COMPONENT_SELECTOR_DIGEST_ATTR",
     "COMPONENT_SELECTOR_SCHEMA_ID",
     "COMPONENT_SELECTOR_SCHEMA_VERSION",
+    "COMPONENT_HANDLE_SCHEMA_ID",
+    "COMPONENT_HANDLE_SCHEMA_VERSION",
     "NON_AUTHORITATIVE_PUBLISHER_ATTRS",
     "ChaserComponentContract",
     "ChaserComponentPublicationError",
     "VerifiedChaserComponent",
     "build_chaser_component_manifest",
     "build_chaser_component_selector",
+    "build_chaser_component_handle",
     "canonical_component_json_bytes",
     "component_record_sha256",
     "persist_chaser_component_manifest",
     "persist_chaser_component_selector",
+    "load_explicit_chaser_component",
     "load_selected_chaser_component",
+    "validate_chaser_component_handle",
     "validate_chaser_component_manifest",
     "validate_chaser_component_selector",
 ]

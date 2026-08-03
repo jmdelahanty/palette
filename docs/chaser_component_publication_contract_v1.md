@@ -78,6 +78,15 @@ published component also retains the atomic receipt in
 `cluster_output_staging`. No legacy `latest` or `latest_complete` attribute is
 written.
 
+Writer receipt v2 also carries one
+`palette.chaser_component_dependency_handle.v1` record. The handle binds the
+exact base publication seal, component path, component manifest digest,
+semantic schema, and method identity, and self-digests that closed field set.
+`load_explicit_chaser_component()` accepts that handle without consulting a
+selector, scanning children, or following `latest`. This is intentionally a
+workflow-dependency authority only: it makes an immutable candidate usable by
+the next node without making it generally selectable.
+
 Component-owned arrays and visualization artifacts are included in the sealed
 payload. Historical run-level dashboard refreshes executed by some private
 payload builders occur only in node-local staging and are not copied into the
@@ -166,7 +175,9 @@ attributes. Maintained readers must consume only this authority envelope.
       selector-ineligible recovery tombstone.
 - [x] Give every maintained component an exact semantic schema declaration.
 - [x] Migrate all maintained component writers off direct visible mutation.
-- [ ] Migrate readers/exports to validated component handles.
+- [ ] Migrate readers/exports to validated component handles. The exact handle
+      builder, validator, detached loader, and writer-receipt binding are
+      implemented; scientific consumers still need argument adoption.
 - [x] Return a digest-bound writer publication receipt for every component.
 - [ ] Expand the orchestration runner receipt to bind every requested component
       manifest, explicit dependency handle, and selector result.

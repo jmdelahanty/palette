@@ -231,6 +231,13 @@ def test_sealed_writer_stages_publishes_and_returns_exact_receipt(
     assert receipt["schema_id"] == CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_ID
     assert receipt["component_family"] == "test_component"
     assert receipt["component_manifest_sha256"]
+    assert receipt["schema_version"] == 2
+    assert receipt["dependency_handle"]["component_path"] == str(path)
+    assert (
+        receipt["dependency_handle"]["component_manifest_sha256"]
+        == receipt["component_manifest_sha256"]
+    )
+    assert receipt["dependency_handle"]["record_sha256"]
     assert receipt["payload_array_count"] == 1
     assert receipt["selector_eligible"] is False
     assert receipt["validation"]["valid"] is True

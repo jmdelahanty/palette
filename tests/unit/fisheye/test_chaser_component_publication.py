@@ -13,11 +13,14 @@ from fisheye.analysis.chaser_component_publication import (
     COMPONENT_SELECTOR_DIGEST_ATTR,
     ChaserComponentContract,
     ChaserComponentPublicationError,
+    build_chaser_component_handle,
     component_record_sha256,
+    load_explicit_chaser_component,
     load_selected_chaser_component,
     persist_chaser_component_manifest,
     persist_chaser_component_selector,
     validate_chaser_component_manifest,
+    validate_chaser_component_handle,
     validate_chaser_component_selector,
 )
 
@@ -427,6 +430,133 @@ def test_selected_reader_returns_detached_exact_payload_without_latest_fallback(
     assert selected.group_attributes["events"]["row_axis"] == "event"
     with pytest.raises(TypeError):
         selected.manifest["publication_state"] = "tampered"
+
+
+def test_explicit_handle_loads_ineligible_component_without_selector() -> None:
+    component = _component()
+    snapshot = _snapshot()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    parent = _Group(
+        attrs={"latest": "unsealed_newer_child"},
+        groups={"escape_v2": component},
+    )
+    root = _Group(
+        groups={
+            "analysis": _Group(
+                groups={
+                    "chaser_distance_runs": _Group(
+                        groups={
+                            "canonical": _Group(
+                                groups={"chaser_escape_events": parent}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    handle = build_chaser_component_handle(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+    )
+
+    selected = load_explicit_chaser_component(
+        root,
+        snapshot=snapshot,
+        handle=handle,
+        expected_semantic_schema_id="palette.chaser_escape_events",
+        expected_semantic_schema_version=2,
+    )
+
+    assert selected.component_name == "escape_v2"
+    assert selected.array("events/distance_mm").tolist() == [1.25, 3.5]
+    assert COMPONENT_SELECTOR_ATTR not in parent.attrs
+    assert parent.attrs["latest"] == "unsealed_newer_child"
+
+
+def test_explicit_handle_rejects_rehashed_unknown_field_and_base_change() -> None:
+    component = _component()
+    snapshot = _snapshot()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    handle = build_chaser_component_handle(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+    )
+    tampered = copy.deepcopy(handle)
+    tampered["unexpected"] = "fallback"
+    body = {
+        key: value
+        for key, value in tampered.items()
+        if key not in {"record_sha256", "unexpected"}
+    }
+    tampered["record_sha256"] = component_record_sha256(body)
+
+    with pytest.raises(ChaserComponentPublicationError, match="exactly"):
+        validate_chaser_component_handle(tampered, snapshot=snapshot)
+    with pytest.raises(ChaserComponentPublicationError, match="different base"):
+        validate_chaser_component_handle(handle, snapshot=_snapshot(digest_byte="e"))
+
+
+def test_explicit_handle_rejects_manifest_replacement() -> None:
+    component = _component()
+    snapshot = _snapshot()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    handle = build_chaser_component_handle(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+    )
+    replacement = copy.deepcopy(component.attrs[COMPONENT_MANIFEST_ATTR])
+    replacement["parameters"]["threshold_mm"] = 8.0
+    component.attrs[COMPONENT_MANIFEST_ATTR] = replacement
+    component.attrs[COMPONENT_MANIFEST_DIGEST_ATTR] = component_record_sha256(
+        replacement
+    )
+    root = _Group(
+        groups={
+            "analysis": _Group(
+                groups={
+                    "chaser_distance_runs": _Group(
+                        groups={
+                            "canonical": _Group(
+                                groups={
+                                    "chaser_escape_events": _Group(
+                                        groups={"escape_v2": component}
+                                    )
+                                }
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+    with pytest.raises(ChaserComponentPublicationError, match="digest changed"):
+        load_explicit_chaser_component(
+            root,
+            snapshot=snapshot,
+            handle=handle,
+            expected_semantic_schema_id="palette.chaser_escape_events",
+            expected_semantic_schema_version=2,
+        )
 
 
 def test_selected_reader_rejects_schema_mismatch() -> None:

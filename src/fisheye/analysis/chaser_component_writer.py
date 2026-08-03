@@ -25,6 +25,7 @@ import zarr
 
 from fisheye.analysis.chaser_component_publication import (
     ChaserComponentContract,
+    build_chaser_component_handle,
     component_record_sha256,
     persist_chaser_component_manifest,
 )
@@ -40,7 +41,7 @@ from fisheye.shared.zarr_io import open_zarr_root
 CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_ID = (
     "palette.chaser_component_writer_publication_receipt"
 )
-CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_VERSION = 1
+CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_VERSION = 2
 
 _STAGING_CAPABILITY = object()
 _Writer = TypeVar("_Writer", bound=Callable[..., str])
@@ -305,6 +306,15 @@ def sealed_chaser_component_writer(
                     raise ChaserComponentWriterError(
                         "Atomic publisher did not return successful final validation."
                     )
+                published_root = open_zarr_root(source_zarr, mode="r")
+                dependency_handle = build_chaser_component_handle(
+                    published_root[expected_path],
+                    snapshot=load_chaser_distance_run(
+                        published_root,
+                        run_name=run_name,
+                    ),
+                    relative_path=relative_path,
+                )
                 writer_receipt = {
                     "schema_id": CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_ID,
                     "schema_version": CHASER_COMPONENT_WRITER_RECEIPT_SCHEMA_VERSION,
@@ -316,6 +326,7 @@ def sealed_chaser_component_writer(
                     "method_id": method_id,
                     "method_version": method_version,
                     "component_manifest_sha256": manifest_digest,
+                    "dependency_handle": dependency_handle,
                     "payload_array_count": len(manifest["payload"]["arrays"]),
                     "payload_group_count": len(manifest["payload"]["groups"]),
                     "selector_eligible": False,
