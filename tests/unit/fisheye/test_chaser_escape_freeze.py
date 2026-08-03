@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import zarr
 
-import fisheye.analysis.chaser_escape_freeze_summary as escape_freeze_summary
+from fisheye.analysis import chaser_component_writer
+from fisheye.analysis_workflows.materializers import chaser_component as materializer
 from fisheye.analysis.chaser_escape_freeze import (
     DEFAULT_BASELINE_WINDOW_S,
     DEFAULT_COMPONENT_NAME,
@@ -207,7 +209,33 @@ def test_escape_freeze_writer_distinguishes_trajectory_coordinate_frames(
 ) -> None:
     zarr_path = tmp_path / "escape_freeze.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
-    run = root.create_group("analysis").create_group("chaser_distance_runs").create_group("chaser_distance_1")
+    root.create_group("analysis").create_group("chaser_distance_runs").create_group(
+        "chaser_distance_1"
+    )
+    snapshot = SimpleNamespace(
+        run_path="analysis/chaser_distance_runs/chaser_distance_1",
+        publication_seal_ref="/analysis/chaser_distance_runs/chaser_distance_1@test_publication",
+        publication_seal_sha256="0" * 64,
+        surface_manifest_ref="/analysis/chaser_distance_runs/chaser_distance_1@test_surface",
+        surface_manifest_sha256="1" * 64,
+        row_identity_ref="/analysis/chaser_distance_runs/chaser_distance_1@test_rows",
+        row_identity_sha256="2" * 64,
+        authority_record=lambda: {
+            "schema_id": "palette.test.chaser_distance_read_authority",
+            "schema_version": 1,
+            "run_ref": "/analysis/chaser_distance_runs/chaser_distance_1",
+        },
+    )
+    monkeypatch.setattr(
+        chaser_component_writer,
+        "load_chaser_distance_run",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "load_chaser_distance_run",
+        lambda *_args, **_kwargs: snapshot,
+    )
     result = EscapeFreezeCanaryResult(
         zarr_path=str(zarr_path),
         recording_id="recording_1",
@@ -236,16 +264,15 @@ def test_escape_freeze_writer_distinguishes_trajectory_coordinate_frames(
         diagnostics={},
         warnings=(),
     )
-    monkeypatch.setattr(
-        escape_freeze_summary,
-        "reject_unsealed_chaser_derived_publication",
-        lambda *_args, **_kwargs: None,
-    )
-
     component_path = write_escape_freeze_canary_component(zarr_path, result, overwrite=True, write_png=False)
 
-    attrs = dict(root[component_path]["trial_trajectories"].attrs)
-    assert run["chaser_escape_freeze"].attrs["latest_complete"] == DEFAULT_COMPONENT_NAME
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    component = root[component_path]
+    attrs = dict(component["trial_trajectories"].attrs)
+    parent = root["analysis/chaser_distance_runs/chaser_distance_1/chaser_escape_freeze"]
+    assert "latest" not in parent.attrs
+    assert "latest_complete" not in parent.attrs
+    assert component.attrs["stage_selector_eligible"] is False
     assert attrs["coordinate_frame"] == "chaser_centric_mm"
     assert attrs["coordinate_frame_scope"] == "default for fish_x_chaser_frame_mm, fish_y_chaser_frame_mm, and bearing_deg"
     assert attrs["chaser_centric_x_axis_direction"] == "right_relative_to_chaser_heading"

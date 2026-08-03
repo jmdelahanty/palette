@@ -31,11 +31,18 @@ from fisheye.analysis.chaser_distance_runs import (
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadSnapshot,
     load_chaser_distance_run,
-    reject_unsealed_chaser_derived_publication,
+)
+from fisheye.analysis.chaser_component_writer import (
+    require_chaser_component_staging_capability,
+    sealed_chaser_component_writer,
 )
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
+from fisheye.shared.run_lineage_fingerprint import (
+    build_run_lineage_payload,
+    write_run_lineage_attrs,
+)
 from fisheye.shared.system_metadata import get_git_info
 
 
@@ -1212,6 +1219,13 @@ def render_egocentric_bearing_pre_post_point_cloud_png(
     return buf.getvalue()
 
 
+@sealed_chaser_component_writer(
+    component_family=COMPONENT_PARENT_NAME,
+    semantic_schema_id=SCHEMA_ID,
+    semantic_schema_version=SCHEMA_VERSION,
+    method_id=METHOD,
+    method_version=METHOD_VERSION,
+)
 def write_chaser_egocentric_bearing_component(
     zarr_path: Path,
     result: ChaserEgocentricBearingResult,
@@ -1219,21 +1233,19 @@ def write_chaser_egocentric_bearing_component(
     overwrite: bool = False,
     write_png: bool = True,
     write_interactive_spec: bool = True,
+    _chaser_component_staging_capability: object | None = None,
 ) -> str:
-    root = _open_root(zarr_path, mode="a")
-    reject_unsealed_chaser_derived_publication(
-        root,
-        run_name=result.chaser_distance_run_name,
-        run_path=result.chaser_distance_run_path,
-        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    require_chaser_component_staging_capability(
+        _chaser_component_staging_capability
     )
+    root = _open_root(zarr_path, mode="a")
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name
     if component_name in parent:
-        if not overwrite:
-            raise ValueError(f"Egocentric-bearing component already exists: {result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{component_name}")
-        del parent[component_name]
+        raise RuntimeError(
+            "Private chaser component staging archive contains a same-name child."
+        )
     component = parent.create_group(component_name)
 
     frames = component.require_group("frames")
@@ -1381,9 +1393,27 @@ def write_chaser_egocentric_bearing_component(
             }
         )
     )
-    parent.attrs["latest"] = component_name
-    parent.attrs["latest_complete"] = component_name
-
+    write_run_lineage_attrs(
+        component,
+        build_run_lineage_payload(
+            run_family=f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}",
+            analysis_schema={
+                "schema_id": SCHEMA_ID,
+                "schema_version": SCHEMA_VERSION,
+                "row_axis": "camera_frames",
+            },
+            method=METHOD,
+            method_version=METHOD_VERSION,
+            source_refs=source_refs,
+            parameters=parameters,
+            code={
+                "git_commit": git.get("commit_hash"),
+                "git_dirty": git.get("is_dirty"),
+            },
+        ),
+        fingerprint_status="best_effort",
+        overwrite=True,
+    )
     component_path = f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{component_name}"
     if write_png:
         common_source_runs = {

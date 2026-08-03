@@ -2,8 +2,9 @@
 
 Scientific component writers build and seal a complete node-local component.
 This materializer owns the destination transaction: same-filesystem hidden
-copy, validation, immutable rename, completion receipt, and digest-bound
-selector activation.
+copy, validation, immutable rename, and completion receipt. Digest-bound
+selector activation is a separate explicitly requested final callback; the
+default publication remains selector-ineligible.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ class ChaserComponentPublishRequest:
     contract: ChaserComponentContract
     copy_backend: str = "python"
     content_checksum: bool = False
+    activate_selector: bool = False
 
 
 def _restore_attr(attrs: Any, name: str, *, present: bool, value: Any) -> None:
@@ -84,7 +86,7 @@ def _normalized_request(
 def publish_sealed_chaser_component(
     request: ChaserComponentPublishRequest,
 ) -> dict[str, Any]:
-    """Publish one already-sealed node-local component and activate it last."""
+    """Publish one sealed node-local component; activate only when requested."""
 
     base_path, family, component_name = _normalized_request(request)
     source_zarr = request.source_zarr.expanduser().resolve()
@@ -253,8 +255,10 @@ def publish_sealed_chaser_component(
         prepare_parents=prepare_parents,
         complete_run=complete_run,
         verify_pointers=verify_pre_activation,
-        activate_run=activate_run,
-        rollback_activation=rollback_activation,
+        activate_run=activate_run if request.activate_selector else None,
+        rollback_activation=(
+            rollback_activation if request.activate_selector else None
+        ),
         payload_metadata={
             "schema_version": CHASER_COMPONENT_ATOMIC_PUBLISH_SCHEMA_VERSION,
             "base_run_path": base_path,
@@ -264,6 +268,7 @@ def publish_sealed_chaser_component(
             "component_manifest_digest_attr": COMPONENT_MANIFEST_DIGEST_ATTR,
             "component_manifest_sha256": local_manifest_digest,
             "component_selector_sha256": expected_selector_digest,
+            "selector_activation_requested": bool(request.activate_selector),
         },
     )
 

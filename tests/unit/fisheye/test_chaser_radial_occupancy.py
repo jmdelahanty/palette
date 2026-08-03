@@ -373,7 +373,6 @@ def test_wall_exclusion_keeps_interior_frames(tmp_path: Path) -> None:
 
 
 def test_invalid_fish_frames_are_excluded(tmp_path: Path) -> None:
-    rng = np.random.default_rng(23)
     n = 1000
     center = np.asarray([ARENA_CENTER_MM, ARENA_CENTER_MM])
     fish = np.tile(center + np.asarray([30.0, 0.0]), (n, 1))
@@ -569,8 +568,12 @@ def test_write_component_round_trips(tmp_path: Path) -> None:
     assert component.attrs["geometry_status"] == "circle"
 
     parent = root[f"analysis/chaser_distance_runs/chaser_distance_1/{COMPONENT_PARENT_NAME}"]
-    assert parent.attrs["latest"] == DEFAULT_COMPONENT_NAME
-    assert parent.attrs["latest_complete"] == DEFAULT_COMPONENT_NAME
+    assert "latest" not in parent.attrs
+    assert "latest_complete" not in parent.attrs
+    assert component.attrs["stage_selector_eligible"] is False
+    assert component.attrs["chaser_component_publication_manifest"][
+        "selector_eligible"
+    ] is False
 
     radial = component["radial_occupancy"]
     n_bins = int(result.radial_bin_centers_mm.shape[0])
@@ -615,7 +618,7 @@ def test_write_component_requires_overwrite(tmp_path: Path) -> None:
     result = build_chaser_radial_occupancy_result(zarr_path, chaser_distance_run="chaser_distance_1")
     write_chaser_radial_occupancy_component(zarr_path, result, overwrite=True, write_png=False)
 
-    with pytest.raises(ValueError, match="already exists"):
+    with pytest.raises(FileExistsError, match="Refusing to replace"):
         write_chaser_radial_occupancy_component(zarr_path, result, overwrite=False, write_png=False)
 
 

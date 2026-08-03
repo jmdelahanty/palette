@@ -2,9 +2,10 @@
 
 Date: 2026-08-03
 
-Status: shared logical and atomic-publication primitives implemented;
-scientific-writer/workflow adoption pending. This contract does not activate a
-production selector.
+Status: shared logical/atomic-publication primitives and maintained scientific
+writer adoption implemented. Publications made by the scientific writers are
+selector-ineligible candidates. This contract does not activate a production
+selector.
 
 ## Purpose
 
@@ -37,8 +38,68 @@ The logical module owns steps 3, 4 validation, 6, and 7.
 `analysis_workflows/materializers/chaser_component.py` owns the destination
 lock, hidden copy, revalidation, immutable rename, completion receipt,
 conditional selector rollback, and literal final eligibility commit. Scientific
-writers still need to adopt that materializer instead of writing directly into
-the authoritative archive.
+writers use `analysis/chaser_component_writer.py` to build only in a private
+node-local archive and then submit the sealed component directory to that
+materializer.
+
+The public scientific writer path never requests selector activation. The
+materializer's `activate_selector=True` mode exists only for a separate,
+explicit activation operation after review. Merely passing a historical
+`overwrite=True` argument does not authorize replacement or activation; a
+same-name immutable child fails closed.
+
+## Maintained Writer Adoption
+
+The following ten maintained component families use the same sealed staging
+boundary:
+
+1. `chaser_bout_response`
+2. `egocentric_bearing`
+3. `epoch_behavior_summary`
+4. `chaser_escape_events`
+5. `chaser_escape_freeze`
+6. `gaze_tracking`
+7. `chaser_near_field_occupancy`
+8. `chaser_quadrant_occupancy`
+9. `chaser_radial_occupancy`
+10. `chaser_response_regimes`
+
+Each declaration binds its existing `SCHEMA_ID`, `SCHEMA_VERSION`, `METHOD`,
+and `METHOD_VERSION`. The staging boundary requires an exact canonical
+run-lineage payload and binds its source refs, source fingerprints, parameters,
+and lineage digest into the component contract. Egocentric bearing and epoch
+behavior summary now emit the same exact lineage envelope as the other eight
+writers.
+
+The returned path remains a `str` for compatibility and carries a detached
+`publication_receipt` containing component identity, manifest digest, payload
+counts, final validation, and the complete atomic-publication receipt. The
+published component also retains the atomic receipt in
+`cluster_output_staging`. No legacy `latest` or `latest_complete` attribute is
+written.
+
+Component-owned arrays and visualization artifacts are included in the sealed
+payload. Historical run-level dashboard refreshes executed by some private
+payload builders occur only in node-local staging and are not copied into the
+authoritative archive. Rebuilding those compatibility dashboards is a separate
+post-activation maintenance concern, not part of scientific component
+authority.
+
+Downstream components that currently resolve an upstream dependency through
+`latest` intentionally remain fail closed after candidate publication. They
+must gain an explicit digest-bound selected-component request before an
+ineligible candidate can participate in a chained workflow. Candidate
+publication does not weaken that consumer rule merely to preserve historical
+one-process chaining.
+
+The known compatibility boundary is visible in the historical escape-event
+fixture: it publishes an egocentric-bearing candidate and immediately asks the
+bout-response builder to rediscover that candidate through legacy `latest`
+selection. The new writer correctly leaves the candidate ineligible and the
+builder rejects the chain. This is not repaired by making candidates
+discoverable. A later reader-adoption change must pass an explicit validated
+component handle (or activate an independently reviewed digest-bound
+selector), then update the chained workflow tests to exercise that authority.
 
 ## Manifest Envelope
 
@@ -103,15 +164,17 @@ attributes. Maintained readers must consume only this authority envelope.
       identity tampering.
 - [x] Add the destination hidden-copy/validate/rename publisher and a failed,
       selector-ineligible recovery tombstone.
-- [ ] Give every maintained component an exact semantic schema declaration.
-- [ ] Migrate all maintained component writers off direct visible mutation.
+- [x] Give every maintained component an exact semantic schema declaration.
+- [x] Migrate all maintained component writers off direct visible mutation.
 - [ ] Migrate readers/exports to validated component handles.
-- [ ] Expand the runner receipt to bind every requested component manifest and
+- [x] Expand the writer/runner receipt to bind every requested component manifest and
       selector result.
 - [x] Run focused real-Zarr success and post-selector failure/rollback tests
       outside the sandbox.
-- [ ] Run end-to-end component-family workflow tests outside the sandbox.
+- [ ] Run end-to-end activated component-family workflow tests outside the
+      sandbox after explicit dependency selection is implemented.
 
-Until the remaining items pass, the existing
-`reject_unsealed_chaser_derived_publication()` quarantine stays in place and
-production component selectors remain unchanged.
+Until the remaining reader/activation items pass, production component
+selectors remain unchanged. The old direct-writer quarantine remains available
+for legacy callers, while every maintained public scientific writer now routes
+through the sealed staging capability instead of calling it.

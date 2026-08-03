@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -23,7 +22,6 @@ from fisheye.analysis.chaser_egocentric_bearing import (
 )
 from fisheye.visualization.goodcopbadcop_interactive import (
     ChaserDashboardUnavailableError,
-    DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
     load_goodcopbadcop_interactive_data,
 )
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
@@ -340,22 +338,10 @@ def test_chaser_egocentric_bearing_writer_refreshes_interactive_spec(
     assert component.attrs["visualizations"][PRE_POST_POLAR_PNG_ARTIFACT_NAME]["media_type"] == "image/png"
     assert component.attrs["visualizations"][PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME]["media_type"] == "image/png"
 
-    spec_group = root[
-        "analysis/chaser_distance_runs/chaser_distance_1/visualizations/"
-        f"{DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT}"
-    ]
-    spec = json.loads(np.asarray(spec_group["spec_json"][:], dtype=np.uint8).tobytes().decode("utf-8"))
-    assert spec["source_runs"]["egocentric_bearing"] == "track_offline_tk_1_id_0_smoothed"
-    assert spec["source_paths"]["egocentric_bearing_deg"].endswith("/per_chaser/bearing_deg")
-    assert spec["source_paths"]["egocentric_hist_probability"].endswith(
-        "/distance_bearing_histogram/hist_probability"
-    )
-    assert spec["static_artifacts"]["egocentric_bearing_pre_post_polar"].endswith(
-        f"/visualizations/{PRE_POST_POLAR_PNG_ARTIFACT_NAME}"
-    )
-    assert spec["static_artifacts"]["egocentric_bearing_pre_post_polar_point_cloud"].endswith(
-        f"/visualizations/{PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME}"
-    )
+    assert component.attrs["stage_selector_eligible"] is False
+    assert component.attrs["chaser_component_publication_manifest"][
+        "selector_eligible"
+    ] is False
 
     with pytest.raises(
         ChaserDashboardUnavailableError,

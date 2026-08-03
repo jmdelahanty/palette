@@ -50,7 +50,10 @@ from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadSnapshot,
     load_chaser_distance_run,
-    reject_unsealed_chaser_derived_publication,
+)
+from fisheye.analysis.chaser_component_writer import (
+    require_chaser_component_staging_capability,
+    sealed_chaser_component_writer,
 )
 from fisheye.analysis.chaser_near_field_occupancy import _rectangle_annulus_area_mm2
 from fisheye.shared.arena_geometry import (
@@ -1267,6 +1270,13 @@ def _interactive_spec(result: ChaserRadialOccupancyResult, component_path: str) 
     }
 
 
+@sealed_chaser_component_writer(
+    component_family=COMPONENT_PARENT_NAME,
+    semantic_schema_id=SCHEMA_ID,
+    semantic_schema_version=SCHEMA_VERSION,
+    method_id=METHOD,
+    method_version=METHOD_VERSION,
+)
 def write_chaser_radial_occupancy_component(
     zarr_path: Path,
     result: ChaserRadialOccupancyResult,
@@ -1274,24 +1284,19 @@ def write_chaser_radial_occupancy_component(
     overwrite: bool = False,
     write_png: bool = True,
     write_interactive_spec: bool = True,
+    _chaser_component_staging_capability: object | None = None,
 ) -> str:
-    root = _open_root(zarr_path, mode="a")
-    reject_unsealed_chaser_derived_publication(
-        root,
-        run_name=result.chaser_distance_run_name,
-        run_path=result.chaser_distance_run_path,
-        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    require_chaser_component_staging_capability(
+        _chaser_component_staging_capability
     )
+    root = _open_root(zarr_path, mode="a")
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name
     if component_name in parent:
-        if not overwrite:
-            raise ValueError(
-                f"Chaser radial occupancy component already exists: "
-                f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{component_name}"
-            )
-        del parent[component_name]
+        raise RuntimeError(
+            "Private chaser component staging archive contains a same-name child."
+        )
     component = parent.create_group(component_name)
     component_path = f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{component_name}"
 
@@ -1504,9 +1509,6 @@ def write_chaser_radial_occupancy_component(
         code={"git_commit": git.get("commit_hash"), "git_dirty": git.get("is_dirty")},
     )
     write_run_lineage_attrs(component, lineage_payload, fingerprint_status="best_effort", overwrite=True)
-    parent.attrs["latest"] = component_name
-    parent.attrs["latest_complete"] = component_name
-
     if write_png:
         source_paths = {
             **source_refs,
@@ -1614,7 +1616,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "Defaults to the protocol position_transition_duration_s.",
     )
     parser.add_argument("--apply", action="store_true", help="Write the radial-occupancy component.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing component.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Deprecated compatibility flag; immutable published names are never replaced.",
+    )
     parser.add_argument("--no-png", action="store_true", help="Skip PNG artifacts.")
     parser.add_argument("--no-interactive-spec", action="store_true", help="Skip interactive plot spec artifact.")
     parser.add_argument("--json", action="store_true", help="Print JSON payload.")

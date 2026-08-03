@@ -57,8 +57,9 @@ from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     resolve_swim_bout_run_name,
 )
-from fisheye.analysis.chaser_distance_io import (
-    reject_unsealed_chaser_derived_publication,
+from fisheye.analysis.chaser_component_writer import (
+    require_chaser_component_staging_capability,
+    sealed_chaser_component_writer,
 )
 from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
@@ -1223,6 +1224,13 @@ def _parameters(result: ChaserBoutResponseResult) -> dict[str, Any]:
     }
 
 
+@sealed_chaser_component_writer(
+    component_family=COMPONENT_PARENT_NAME,
+    semantic_schema_id=SCHEMA_ID,
+    semantic_schema_version=SCHEMA_VERSION,
+    method_id=METHOD,
+    method_version=METHOD_VERSION,
+)
 def write_chaser_bout_response_component(
     zarr_path: Path,
     result: ChaserBoutResponseResult,
@@ -1230,20 +1238,18 @@ def write_chaser_bout_response_component(
     overwrite: bool = False,
     write_png: bool = True,
     write_interactive_spec: bool = True,
+    _chaser_component_staging_capability: object | None = None,
 ) -> str:
-    root = _open_root(zarr_path, mode="a")
-    reject_unsealed_chaser_derived_publication(
-        root,
-        run_name=result.chaser_distance_run_name,
-        run_path=result.chaser_distance_run_path,
-        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    require_chaser_component_staging_capability(
+        _chaser_component_staging_capability
     )
+    root = _open_root(zarr_path, mode="a")
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     if result.component_name in parent:
-        if not overwrite:
-            raise ValueError(f"Chaser bout-response component already exists: {result.component_name}")
-        del parent[result.component_name]
+        raise RuntimeError(
+            "Private chaser component staging archive contains a same-name child."
+        )
     component = parent.create_group(result.component_name)
     component_path = f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{result.component_name}"
 
@@ -1414,9 +1420,6 @@ def write_chaser_bout_response_component(
         fingerprint_status="best_effort",
         overwrite=True,
     )
-    parent.attrs["latest"] = result.component_name
-    parent.attrs["latest_complete"] = result.component_name
-
     if write_png:
         for artifact_name, renderer, description in (
             (CIRCLING_PNG_ARTIFACT_NAME, render_circling_png,

@@ -36,8 +36,9 @@ from fisheye.analysis.chaser_bout_response import (
     DEFAULT_VIRTUAL_ROTATIONS_DEG,
 )
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
-from fisheye.analysis.chaser_distance_io import (
-    reject_unsealed_chaser_derived_publication,
+from fisheye.analysis.chaser_component_writer import (
+    require_chaser_component_staging_capability,
+    sealed_chaser_component_writer,
 )
 from fisheye.analysis.chaser_egocentric_bearing import (
     ANGLE_CONVENTION,
@@ -1186,28 +1187,31 @@ def render_chaser_gaze_tracking_summary_png(
     return buffer.getvalue()
 
 
+@sealed_chaser_component_writer(
+    component_family=COMPONENT_PARENT_NAME,
+    semantic_schema_id=SCHEMA_ID,
+    semantic_schema_version=SCHEMA_VERSION,
+    method_id=METHOD,
+    method_version=METHOD_VERSION,
+)
 def write_chaser_gaze_tracking_component(
     zarr_path: Path,
     result: ChaserGazeTrackingResult,
     *,
     overwrite: bool = False,
     write_png: bool = True,
+    _chaser_component_staging_capability: object | None = None,
 ) -> str:
-    root = open_zarr_root(zarr_path, mode="a")
-    reject_unsealed_chaser_derived_publication(
-        root,
-        run_name=result.chaser_distance_run_name,
-        run_path=result.chaser_distance_run_path,
-        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    require_chaser_component_staging_capability(
+        _chaser_component_staging_capability
     )
+    root = open_zarr_root(zarr_path, mode="a")
     distance_run = root[result.chaser_distance_run_path]
     parent = distance_run.require_group(COMPONENT_PARENT_NAME)
     if result.component_name in parent:
-        if not overwrite:
-            raise ValueError(
-                f"Gaze-tracking component already exists: {result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{result.component_name}"
-            )
-        del parent[result.component_name]
+        raise RuntimeError(
+            "Private chaser component staging archive contains a same-name child."
+        )
     component = parent.create_group(result.component_name)
 
     frames = component.require_group("frames")
@@ -1398,8 +1402,6 @@ def write_chaser_gaze_tracking_component(
         )
     component.attrs["status"] = "complete"
     component.attrs["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
-    parent.attrs["latest"] = result.component_name
-    parent.attrs["latest_complete"] = result.component_name
     return f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{result.component_name}"
 
 

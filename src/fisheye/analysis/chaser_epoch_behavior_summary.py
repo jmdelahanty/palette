@@ -18,7 +18,10 @@ from fisheye.analysis.chaser_distance_runs import (
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadSnapshot,
     load_chaser_distance_run,
-    reject_unsealed_chaser_derived_publication,
+)
+from fisheye.analysis.chaser_component_writer import (
+    require_chaser_component_staging_capability,
+    sealed_chaser_component_writer,
 )
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.epoch_segments import (
@@ -33,6 +36,10 @@ from fisheye.analysis.track_kinematics_io import (
 )
 from fisheye.shared.arena_geometry import resolve_arena_geometry as _resolve_shared_arena_geometry
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
+from fisheye.shared.run_lineage_fingerprint import (
+    build_run_lineage_payload,
+    write_run_lineage_attrs,
+)
 from fisheye.shared.system_metadata import get_git_info
 
 SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v1"
@@ -1383,29 +1390,31 @@ def build_chaser_epoch_behavior_summary_result(
     )
 
 
+@sealed_chaser_component_writer(
+    component_family=COMPONENT_PARENT_NAME,
+    semantic_schema_id=SCHEMA_ID,
+    semantic_schema_version=SCHEMA_VERSION,
+    method_id=METHOD,
+    method_version=METHOD_VERSION,
+)
 def write_chaser_epoch_behavior_summary_component(
     zarr_path: Path | str,
     result: ChaserEpochBehaviorSummaryResult,
     *,
     overwrite: bool = False,
+    _chaser_component_staging_capability: object | None = None,
 ) -> str:
-    root = _open_root(Path(zarr_path), mode="a")
-    reject_unsealed_chaser_derived_publication(
-        root,
-        run_name=result.chaser_distance_run_name,
-        run_path=result.chaser_distance_run_path,
-        relative_path=f"{COMPONENT_PARENT_NAME}/{result.component_name}",
+    require_chaser_component_staging_capability(
+        _chaser_component_staging_capability
     )
+    root = _open_root(Path(zarr_path), mode="a")
     run_group = root[result.chaser_distance_run_path]
     parent = run_group.require_group(COMPONENT_PARENT_NAME)
     component_name = result.component_name
     if component_name in parent:
-        if not overwrite:
-            raise ValueError(
-                "chaser epoch behavior summary component already exists: "
-                f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{component_name}"
-            )
-        del parent[component_name]
+        raise RuntimeError(
+            "Private chaser component staging archive contains a same-name child."
+        )
     component = parent.create_group(component_name)
 
     write_columnar_dataset(
@@ -1541,8 +1550,27 @@ def write_chaser_epoch_behavior_summary_component(
             }
         )
     )
-    parent.attrs["latest"] = component_name
-    parent.attrs["latest_complete"] = component_name
+    write_run_lineage_attrs(
+        component,
+        build_run_lineage_payload(
+            run_family=f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}",
+            analysis_schema={
+                "schema_id": SCHEMA_ID,
+                "schema_version": SCHEMA_VERSION,
+                "row_axis": "fish_recording",
+            },
+            method=METHOD,
+            method_version=METHOD_VERSION,
+            source_refs=source_refs,
+            parameters=parameters,
+            code={
+                "git_commit": git.get("commit_hash"),
+                "git_dirty": git.get("is_dirty"),
+            },
+        ),
+        fingerprint_status="best_effort",
+        overwrite=True,
+    )
     return f"{result.chaser_distance_run_path}/{COMPONENT_PARENT_NAME}/{component_name}"
 
 

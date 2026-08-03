@@ -550,7 +550,12 @@ def test_write_component_round_trips(tmp_path: Path) -> None:
     assert spec.attrs["renderer"] == "palette-chaser-response-regimes-v1"
 
     parent = root[f"analysis/chaser_distance_runs/chaser_distance_1/{COMPONENT_PARENT_NAME}"]
-    assert parent.attrs["latest_complete"] == DEFAULT_COMPONENT_NAME
+    assert "latest" not in parent.attrs
+    assert "latest_complete" not in parent.attrs
+    assert component.attrs["stage_selector_eligible"] is False
+    assert component.attrs["chaser_component_publication_manifest"][
+        "selector_eligible"
+    ] is False
 
 
 def test_write_component_requires_overwrite(tmp_path: Path) -> None:
@@ -558,7 +563,7 @@ def test_write_component_requires_overwrite(tmp_path: Path) -> None:
     z = _build(tmp_path, fish, chaser, fish_valid=valid, name="twice.zarr")
     r = build_chaser_response_regimes_result(z, chaser_distance_run="chaser_distance_1", min_bin_frames=1)
     write_chaser_response_regimes_component(z, r, overwrite=True, write_png=False)
-    with pytest.raises(ValueError, match="already exists"):
+    with pytest.raises(FileExistsError, match="Refusing to replace"):
         write_chaser_response_regimes_component(z, r, overwrite=False, write_png=False)
 
 
