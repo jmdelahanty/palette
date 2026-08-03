@@ -1021,6 +1021,8 @@ def _require_source_revision_audit(
     archive: Path,
     expected_contract_sha256: str,
     expected_metadata_sha256: str,
+    expected_subject_shape_run: str,
+    expected_keypoint_run: str,
 ) -> Mapping[str, Any]:
     fields_ = {
         "schema_id",
@@ -1045,10 +1047,8 @@ def _require_source_revision_audit(
         or type(value.get("checked_at_utc")) is not str
         or not value["checked_at_utc"]
         or value.get("authoritative_source_zarr") != str(archive)
-        or type(value.get("subject_shape_run")) is not str
-        or not value["subject_shape_run"]
-        or type(value.get("keypoint_run")) is not str
-        or not value["keypoint_run"]
+        or value.get("subject_shape_run") != expected_subject_shape_run
+        or value.get("keypoint_run") != expected_keypoint_run
         or value.get("errors") != []
         or value.get("full_selected_scientific_input_content_hash") is not True
         or value.get("expected_source_metadata_sha256") != expected_metadata_sha256
@@ -1084,6 +1084,106 @@ def _require_staged_input_receipt(
     return canonical
 
 
+def _require_staged_source_identity(
+    contracts: object,
+    staged_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(contracts, Mapping):
+        raise ValueError("Candidate materialization source contracts are invalid.")
+    geometry = contracts.get("eye_geometry")
+    keypoints = contracts.get("keypoints")
+    diagnostic = contracts.get("diagnostic_base_keypoints")
+    resolved = contracts.get("resolved_arrays")
+    if any(
+        not isinstance(section, Mapping)
+        for section in (geometry, keypoints, diagnostic, resolved)
+    ):
+        raise ValueError("Candidate materialization source contract is incomplete.")
+    geometry_run = geometry.get("run_name")
+    geometry_path = geometry.get("path")
+    keypoint_run = keypoints.get("run_name")
+    keypoint_path = keypoints.get("path")
+    diagnostic_run = diagnostic.get("run_name")
+    diagnostic_path = diagnostic.get("path")
+    if (
+        type(geometry_run) is not str
+        or not geometry_run
+        or type(geometry_path) is not str
+        or not geometry_path
+        or type(keypoint_run) is not str
+        or not keypoint_run
+        or type(keypoint_path) is not str
+        or not keypoint_path
+        or diagnostic_run is not None
+        and type(diagnostic_run) is not str
+        or diagnostic_path is not None
+        and type(diagnostic_path) is not str
+    ):
+        raise ValueError("Candidate materialization source run identity is invalid.")
+    source_identity = staged_receipt.get("source_identity")
+    if (
+        not isinstance(source_identity, Mapping)
+        or source_identity.get("eye_geometry_stage") != geometry.get("stage_group")
+        or source_identity.get("eye_geometry_run") != geometry_run
+        or source_identity.get("eye_geometry_path") != geometry_path
+        or source_identity.get("keypoint_source_mode") != keypoints.get("source_mode")
+        or source_identity.get("keypoints_run") != keypoint_run
+        or source_identity.get("keypoints_path") != keypoint_path
+        or source_identity.get("diagnostic_base_keypoints_run") != diagnostic_run
+        or source_identity.get("diagnostic_base_keypoints_path") != diagnostic_path
+        or geometry.get("source_authority")
+        != staged_receipt.get("subject_shape_authority")
+        or keypoints.get("canonical_keypoint_authority")
+        != staged_receipt.get("canonical_keypoint_authority")
+    ):
+        raise ValueError("Candidate canonical staged source identity differs.")
+
+    components = geometry.get("components")
+    if not isinstance(components, list) or len(components) != 2:
+        raise ValueError("Candidate eye-geometry component source set is incomplete.")
+    selected_arrays: set[str] = {f"{geometry_path}/relations/eye_pair/separation_px"}
+    staged_logical_refs: set[str] = set()
+    for component in components:
+        if not isinstance(component, Mapping):
+            raise ValueError("Candidate eye-geometry component source is invalid.")
+        for name in ("ellipse_params_path", "ellipse_success_path"):
+            path = component.get(name)
+            if type(path) is not str or not path:
+                raise ValueError("Candidate eye-geometry source path is invalid.")
+            selected_arrays.add(path)
+            staged_logical_refs.add(path)
+    for path in resolved.values():
+        if path is not None:
+            if type(path) is not str or not path:
+                raise ValueError("Candidate resolved source array path is invalid.")
+            selected_arrays.add(path)
+            staged_logical_refs.add(path)
+
+    logical_inputs = staged_receipt.get("logical_inputs")
+    observed_receipt_refs: set[str] = set()
+    if not isinstance(logical_inputs, Mapping):
+        raise ValueError("Candidate staged logical-input inventory is invalid.")
+    for spec in logical_inputs.values():
+        if not isinstance(spec, Mapping):
+            raise ValueError("Candidate staged logical-input specification is invalid.")
+        refs = spec.get("source_array_refs")
+        if not isinstance(refs, list):
+            raise ValueError("Candidate staged source-array references are invalid.")
+        observed_receipt_refs.update(refs)
+    if observed_receipt_refs != staged_logical_refs:
+        raise ValueError(
+            "Candidate staged source-array references differ from contract."
+        )
+    return {
+        "subject_shape_run": geometry_run,
+        "keypoint_run": keypoint_run,
+        "source_keypoint_run": (
+            diagnostic_run if diagnostic_run is not None else keypoint_run
+        ),
+        "selected_arrays": sorted(selected_arrays),
+    }
+
+
 def _require_materialization_contracts(
     materialization: Mapping[str, Any],
     *,
@@ -1092,7 +1192,7 @@ def _require_materialization_contracts(
     candidate_attrs: Mapping[str, Any],
     dimensions: EyeAngleDimensions,
     final_validation: Mapping[str, Any],
-    publication_revision: Mapping[str, Any],
+    publication_revision: object,
 ) -> None:
     expected_contract_sha256 = canonical_json_sha256(
         candidate_attrs.get("eye_angle_source_contracts")
@@ -1113,6 +1213,17 @@ def _require_materialization_contracts(
         != staged_receipt["record_sha256"]
     ):
         raise ValueError("Candidate persisted staged-input digest differs.")
+    source_identity = _require_staged_source_identity(
+        candidate_attrs.get("eye_angle_source_contracts"), staged_receipt
+    )
+    publication_revision = _require_source_revision_audit(
+        publication_revision,
+        archive=archive,
+        expected_contract_sha256=expected_contract_sha256,
+        expected_metadata_sha256=str(source_metadata_sha256),
+        expected_subject_shape_run=source_identity["subject_shape_run"],
+        expected_keypoint_run=source_identity["keypoint_run"],
+    )
 
     compute = materialization.get("compute")
     compute_fields = {
@@ -1196,6 +1307,8 @@ def _require_materialization_contracts(
         label="Candidate materialization compute duration",
     )
     required_arguments = {
+        "--subject-shape-run": source_identity["subject_shape_run"],
+        "--keypoint-run": source_identity["keypoint_run"],
         "--chunk-size": str(compute["chunk_rows"]),
         "--dense-chunk-rows": str(compute["angle_chunk_rows"]),
         "--dense-chunk-columns": str(compute["angle_chunk_columns"]),
@@ -1287,18 +1400,15 @@ def _require_materialization_contracts(
         or staging.get("copy_backend") not in {"python", "rsync"}
         or staging.get("authoritative_source_zarr") != str(archive)
         or Path(str(staging.get("node_local_staged_zarr"))) != local_staged
-        or type(staging.get("subject_shape_run")) is not str
-        or not staging["subject_shape_run"]
-        or type(staging.get("keypoint_run")) is not str
-        or not staging["keypoint_run"]
-        or staging.get("source_keypoint_run") is not None
-        and type(staging.get("source_keypoint_run")) is not str
+        or staging.get("subject_shape_run") != source_identity["subject_shape_run"]
+        or staging.get("keypoint_run") != source_identity["keypoint_run"]
+        or staging.get("source_keypoint_run") != source_identity["source_keypoint_run"]
         or staging.get("row_count") != dimensions.n_roi_rows
         or staging.get("frame_count") != dimensions.n_frames
         or not isinstance(selected_arrays, list)
         or not selected_arrays
         or any(type(item) is not str or not item for item in selected_arrays)
-        or selected_arrays != sorted(set(selected_arrays))
+        or selected_arrays != source_identity["selected_arrays"]
         or staging.get("source_contracts")
         != candidate_attrs.get("eye_angle_source_contracts")
         or staging.get("source_contract_sha256") != expected_contract_sha256
@@ -1325,6 +1435,8 @@ def _require_materialization_contracts(
         archive=archive,
         expected_contract_sha256=expected_contract_sha256,
         expected_metadata_sha256=str(source_metadata_sha256),
+        expected_subject_shape_run=source_identity["subject_shape_run"],
+        expected_keypoint_run=source_identity["keypoint_run"],
     )
     for field in (
         "subject_shape_run",
@@ -1622,19 +1734,9 @@ def _require_publication_receipt(
         or regular_validation != final_physical_validation
     ):
         raise ValueError("Candidate materialization validation phases differ.")
-    revision = value.get("source_revision_audit")
-    expected_contract_sha256 = canonical_json_sha256(
-        candidate_attrs.get("eye_angle_source_contracts")
-    )
     source_metadata_sha256 = materialization.get("source_metadata_sha256")
     if not _is_sha256(source_metadata_sha256):
         raise ValueError("Candidate materialization source-metadata digest is invalid.")
-    revision = _require_source_revision_audit(
-        revision,
-        archive=archive,
-        expected_contract_sha256=expected_contract_sha256,
-        expected_metadata_sha256=str(source_metadata_sha256),
-    )
     _require_materialization_contracts(
         materialization,
         archive=archive,
@@ -1642,7 +1744,7 @@ def _require_publication_receipt(
         candidate_attrs=candidate_attrs,
         dimensions=dimensions,
         final_validation=final_physical_validation,
-        publication_revision=revision,
+        publication_revision=value.get("source_revision_audit"),
     )
     visibility = value.get("metadata_visibility_policy")
     if visibility != {

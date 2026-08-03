@@ -56,7 +56,11 @@ selected consumer.
   snapshot, and nonpromotion policy. The materialization check reuses the
   installed canonical staged-input receipt validator and exact-checks the
   compute, source-staging, inventory, capacity, algorithm, and output
-  subcontracts with cross-envelope digest/identity binding.
+  subcontracts with cross-envelope digest/identity binding. Duplicated
+  subject-shape, canonical-keypoint, and diagnostic-keypoint run names must
+  equal the scientific source contract and staged authority, while the staged
+  selected-array inventory is reconstructed exactly from those contracts and
+  the canonical staged logical-input references.
 - Direct and root-inline consolidated metadata equivalence for both runs,
   including the exact installed receipt schema ID and version.
 
@@ -112,7 +116,8 @@ equivalence.
 - [x] Freeze diagnostic-only adapter and hard nonpromotion fields.
 - [x] Cover coordinated storage, publication, metadata-identity, source
   declaration, lineage, nested materialization, staged-receipt, and
-  cross-envelope rehash attempts.
+  cross-envelope rehash attempts, including renamed source runs and altered
+  staged-array inventories.
 - [x] Cover aliases, unsafe outputs, symlink archives, order errors, and false
   physical-I/O claims.
 - [ ] Run a five-repetition full-duration matrix on a published matched pair.

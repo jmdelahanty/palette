@@ -31,14 +31,9 @@ def _resign(value: dict[str, object], schema_id: str) -> dict[str, object]:
     }
 
 
-def _tamper_staged_receipt_with_coordinated_rehash(
-    publication: dict[str, object],
-) -> None:
-    materialization = publication["materialization"]
-    assert isinstance(materialization, dict)
+def _rehash_materialization_staged_receipt(materialization: dict[str, object]) -> None:
     staged_receipt = materialization["staged_input_integrity_receipt"]
     assert isinstance(staged_receipt, dict)
-    staged_receipt["unexpected_authority"] = True
     body = {
         key: value for key, value in staged_receipt.items() if key != "record_sha256"
     }
@@ -50,6 +45,75 @@ def _tamper_staged_receipt_with_coordinated_rehash(
     assert isinstance(staging, dict)
     staging["staged_input_integrity_receipt"] = deepcopy(staged_receipt)
     staging["staged_input_integrity_receipt_sha256"] = staged_receipt["record_sha256"]
+
+
+def _tamper_staged_receipt_with_coordinated_rehash(
+    publication: dict[str, object],
+) -> None:
+    materialization = publication["materialization"]
+    assert isinstance(materialization, dict)
+    staged_receipt = materialization["staged_input_integrity_receipt"]
+    assert isinstance(staged_receipt, dict)
+    staged_receipt["unexpected_authority"] = True
+    _rehash_materialization_staged_receipt(materialization)
+
+
+def _tamper_subject_shape_identity(publication: dict[str, object]) -> None:
+    materialization = publication["materialization"]
+    assert isinstance(materialization, dict)
+    staging = materialization["source_staging"]
+    assert isinstance(staging, dict)
+    staging["subject_shape_run"] = "hostile_shape"
+    staging_revision = staging["source_revision_audit"]
+    assert isinstance(staging_revision, dict)
+    staging_revision["subject_shape_run"] = "hostile_shape"
+    publication_revision = publication["source_revision_audit"]
+    assert isinstance(publication_revision, dict)
+    publication_revision["subject_shape_run"] = "hostile_shape"
+    staged_receipt = materialization["staged_input_integrity_receipt"]
+    assert isinstance(staged_receipt, dict)
+    source_identity = staged_receipt["source_identity"]
+    assert isinstance(source_identity, dict)
+    source_identity["eye_geometry_run"] = "hostile_shape"
+    _rehash_materialization_staged_receipt(materialization)
+
+
+def _tamper_keypoint_identity(publication: dict[str, object]) -> None:
+    materialization = publication["materialization"]
+    assert isinstance(materialization, dict)
+    staging = materialization["source_staging"]
+    assert isinstance(staging, dict)
+    staging["keypoint_run"] = "hostile_keypoints"
+    staging_revision = staging["source_revision_audit"]
+    assert isinstance(staging_revision, dict)
+    staging_revision["keypoint_run"] = "hostile_keypoints"
+    publication_revision = publication["source_revision_audit"]
+    assert isinstance(publication_revision, dict)
+    publication_revision["keypoint_run"] = "hostile_keypoints"
+    staged_receipt = materialization["staged_input_integrity_receipt"]
+    assert isinstance(staged_receipt, dict)
+    source_identity = staged_receipt["source_identity"]
+    assert isinstance(source_identity, dict)
+    source_identity["keypoints_run"] = "hostile_keypoints"
+    _rehash_materialization_staged_receipt(materialization)
+
+
+def _tamper_diagnostic_keypoint_identity(publication: dict[str, object]) -> None:
+    materialization = publication["materialization"]
+    assert isinstance(materialization, dict)
+    staging = materialization["source_staging"]
+    assert isinstance(staging, dict)
+    staging["source_keypoint_run"] = "hostile_diagnostic_keypoints"
+
+
+def _tamper_selected_source_arrays(publication: dict[str, object]) -> None:
+    materialization = publication["materialization"]
+    assert isinstance(materialization, dict)
+    staging = materialization["source_staging"]
+    assert isinstance(staging, dict)
+    selected = staging["selected_arrays"]
+    assert isinstance(selected, list)
+    staging["selected_arrays"] = sorted([*selected, "hostile/source_array"])
 
 
 @pytest.fixture(scope="module")
@@ -205,7 +269,11 @@ def test_dependency_lineage_coordinated_rehash_is_rejected(
         )
     tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
     with pytest.raises(
-        ValueError, match="dependency identity differs|source-revision receipt"
+        ValueError,
+        match=(
+            "dependency identity differs|source-revision receipt|"
+            "materialization source binding"
+        ),
     ):
         benchmark.require_workload(tampered)
 
@@ -235,6 +303,10 @@ def test_dependency_lineage_coordinated_rehash_is_rejected(
         lambda receipt: receipt["materialization"]["output_contract"].__setitem__(
             "sha256", "0" * 64
         ),
+        _tamper_subject_shape_identity,
+        _tamper_keypoint_identity,
+        _tamper_diagnostic_keypoint_identity,
+        _tamper_selected_source_arrays,
     ),
 )
 def test_atomic_publication_coordinated_rehash_is_rejected(
@@ -267,7 +339,10 @@ def test_atomic_publication_coordinated_rehash_is_rejected(
     tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
     with pytest.raises(
         ValueError,
-        match="publication|physical-copy|validation|materialization|staging|staged-input",
+        match=(
+            "publication|physical-copy|validation|materialization|staging|"
+            "staged-input|source identity|source-revision"
+        ),
     ):
         benchmark.require_workload(tampered)
 
