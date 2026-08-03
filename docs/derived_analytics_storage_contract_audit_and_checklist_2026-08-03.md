@@ -259,6 +259,7 @@ a safe base for new work.
 | Chaser scientific writer adoption | historical isolated lane | integrated as `fc6a48c5` | All ten component writers, sealed staging capability, atomic component publisher, focused tests, and lifecycle doc | Integrated as candidate publication; explicit dependency handles and activation remain separate |
 | Chaser dependency/runner receipts | coordination lane | integrated as `34c067e5` and `21e115b3` | Self-digested explicit handles, detached exact reads, writer receipt v2, and cluster target receipt v2 | Integrated; scientific chained consumers and selector activation remain separate |
 | Stimulus-response v3 byte candidate | `/tmp/palette-stimulus-response-v3-candidate-20260803` / `agent/palette/stimulus-response-v3-candidate-20260803` | integrated as `40434306` | Exact opt-in candidate writer, storage receipt, metadata equivalence, immutable publisher, strict reader, and adversarial tests | Integrated; benchmark evidence and promotion remain pending |
+| Exact-tabular read benchmark | `/tmp/palette-bout-storage-benchmark-20260803` / `agent/palette/bout-storage-benchmark-20260803` | integrated as `e348d53f` | Fresh-process deterministic source/candidate runner for swim bouts and bout kinematics, exact equality, access-class reads, full scans, storage/RSS/timing evidence, and strict output contracts | Integrated; authorized short/full-duration execution and physical-I/O tracing remain pending |
 
 The next safe parallel wave assigns disjoint ownership as follows. The
 coordination lane remains the only owner of shared catalogs, planner/factory
@@ -340,6 +341,11 @@ now implemented on the coordination branch:
   the shared byte planner/factory, with semantic fills, immutable publication,
   receipt replanning, direct/consolidated metadata validation, and unchanged
   parent pointers: `40434306`.
+- deterministic read-only swim-bout/bout-kinematics source-versus-candidate
+  benchmark matrices with rotated fresh processes, suite/receipt binding,
+  direct/consolidated comparison, equality, object/byte/RSS/timing evidence,
+  and explicit null physical-I/O telemetry when tracing is absent:
+  `e348d53f`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
@@ -613,6 +619,11 @@ Recommended migration order:
       plan, selection, publication, or eligibility-policy tampering.
 - [ ] Define a deterministic writer/publisher/reader workload for every
       maintained family.
+- [x] Implement the deterministic read-side source/candidate matrix for exact
+      swim-bout and bout-kinematics candidates. It exercises receipt-bound
+      access selections and full scans in rotated fresh processes; publication
+      phase timings come from the existing candidate receipt. Physical request
+      and transfer counts remain explicitly unavailable until tracing is added.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
@@ -661,11 +672,12 @@ gates pass:
 
 Continue exact-contract and opt-in candidate work without promoting defaults:
 
-1. finish the disjoint stimulus-response and chaser-component lanes;
+1. finish subject-shape exact closure and migrate chaser scientific consumers
+   to the explicit dependency handles now present in writer/runner receipts;
 2. keep shared catalog/planner/registry/selector edits in this serial
    coordination lane;
 3. integrate each family lane serially and run the combined catalog, lifecycle,
    exact-schema, and storage-receipt matrix; and
-4. run family-specific writer/rematerialization/publication/reader benchmarks
-   for the integrated selector-ineligible swim-bout and bout-kinematics
-   candidates at representative short and full-duration scales.
+4. execute the integrated writer/rematerialization/publication/reader benchmark
+   for selector-ineligible swim-bout and bout-kinematics candidates on
+   representative short and full-duration datasets.
