@@ -31,8 +31,21 @@ from ...analysis.subject_shape_runs import (
     SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
     TAIL_SAMPLE_COUNT,
     bind_staged_subject_shape_run,
+    complete_bound_subject_shape_candidate_run,
     complete_bound_subject_shape_run_for_deferred_activation,
+    refresh_unbound_subject_shape_manifest_after_storage_materialization,
     write_subject_shape_run_group,
+)
+from ...analysis.subject_shape_storage import (
+    SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
+    SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES,
+    finalize_bound_subject_shape_storage_receipt,
+    is_subject_shape_storage_candidate,
+    materialize_subject_shape_storage_candidate,
+    set_subject_shape_metadata_visibility_policy,
+    validate_subject_shape_candidate_storage,
+    validate_subject_shape_direct_consolidated_storage,
+    validate_subject_shape_storage_source_manifest_link,
 )
 from ...shared.json_safety import json_attr_safe
 from ...shared.subject_shape_coordinate_publication import (
@@ -41,6 +54,7 @@ from ...shared.subject_shape_coordinate_publication import (
     load_completed_ineligible_subject_shape_coordinate_publication,
     rollback_deferred_subject_shape_coordinate_activation,
 )
+from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from ...shared.refined_subject_masks_io import (
     load_refined_subject_masks_run_tables,
     resolve_refined_subject_masks_run,
@@ -53,6 +67,7 @@ from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import require_runs_parent
 from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from .atomic_run_publisher import ATOMIC_PUBLICATION_TOMBSTONE_ATTR
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.subject_shape_materialization.v1"
@@ -80,6 +95,7 @@ class SubjectShapeMaterializationPlan:
     sharded_run: Path
     refined_run: str
     run_name: str
+    storage_profile_id: str
     row_count: int
     component_names: tuple[str, ...]
     block_rows: int
@@ -100,6 +116,10 @@ class SubjectShapeMaterializationPlan:
     def target_run_path(self) -> Path:
         return self.source_zarr / "analysis" / "subject_shape_runs" / self.run_name
 
+    @property
+    def publication_run_path(self) -> Path:
+        return self.sharded_run
+
     def to_json(self) -> dict[str, Any]:
         return json_attr_safe(
             {
@@ -113,6 +133,8 @@ class SubjectShapeMaterializationPlan:
                 "target_run_path": str(self.target_run_path),
                 "refined_run": self.refined_run,
                 "run_name": self.run_name,
+                "storage_profile_id": self.storage_profile_id,
+                "publication_run_path": str(self.publication_run_path),
                 "row_count": self.row_count,
                 "component_names": list(self.component_names),
                 "block_rows": self.block_rows,
@@ -160,6 +182,7 @@ def build_subject_shape_materialization_plan(
     scratch_root: str | Path,
     refined_run: str | None,
     run_name: str,
+    storage_profile: str = SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
     components: Sequence[str] | None = None,
     block_rows: int = DEFAULT_BLOCK_ROWS,
     output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
@@ -175,12 +198,25 @@ def build_subject_shape_materialization_plan(
     if not source.is_dir():
         raise FileNotFoundError(f"Source analysis Zarr not found: {source}")
     scratch = Path(scratch_root).expanduser().resolve()
+    scratch_inside_source = False
     try:
         scratch.relative_to(source)
     except ValueError:
         pass
     else:
-        raise ValueError("Scratch root must not be inside the authoritative source Zarr.")
+        scratch_inside_source = True
+    source_inside_scratch = False
+    try:
+        source.relative_to(scratch)
+    except ValueError:
+        pass
+    else:
+        source_inside_scratch = True
+    if scratch_inside_source or source_inside_scratch:
+        raise ValueError(
+            "Scratch root and authoritative source Zarr must be disjoint after "
+            "resolving symlinks; equality and either containment direction are unsafe."
+        )
     if int(block_rows) <= 0 or int(output_shard_rows) <= 0:
         raise ValueError("Block and output-shard row counts must be positive.")
     if int(num_workers) <= 0 or int(shard_copy_workers) <= 0 or int(native_threads) <= 0:
@@ -191,6 +227,12 @@ def build_subject_shape_materialization_plan(
     scheduler_key = str(scheduler).strip().lower().replace("_", "-")
     if scheduler_key not in {"single-threaded", "threads", "processes", "distributed"}:
         raise ValueError(f"Unsupported scheduler: {scheduler!r}.")
+    storage_profile_id = str(storage_profile)
+    if storage_profile_id not in SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES:
+        raise ValueError(
+            f"Unsupported subject-shape storage profile {storage_profile_id!r}; "
+            f"expected one of {SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES!r}."
+        )
 
     root = open_zarr_root(source, mode="r")
     refined_group, resolved_refined_run, _path = resolve_refined_subject_masks_run(root, refined_run)
@@ -248,6 +290,7 @@ def build_subject_shape_materialization_plan(
         sharded_run=scratch / "subject-shape-sharded-run",
         refined_run=resolved_refined_run,
         run_name=target_name,
+        storage_profile_id=storage_profile_id,
         row_count=row_count,
         component_names=selected,
         block_rows=int(block_rows),
@@ -292,6 +335,7 @@ def _validate_subject_shape_run(
     expected_binding_status: str,
     require_complete: bool,
     expected_selector_eligible: bool,
+    storage_profile_id: str = SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
 ) -> dict[str, Any]:
     group = open_zarr_root(path, mode="r")
     errors: list[str] = []
@@ -356,6 +400,14 @@ def _validate_subject_shape_run(
                 errors.append(f"unbound run contains canonical attr {name}")
         if "coordinate_records" in group:
             errors.append("unbound run contains coordinate_records")
+    storage_candidate = is_subject_shape_storage_candidate(storage_profile_id)
+    if storage_candidate:
+        phase = (
+            "bound"
+            if expected_binding_status == SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+            else "unbound"
+        )
+        errors.extend(validate_subject_shape_candidate_storage(group, phase=phase))
     return {
         "valid": not errors,
         "errors": errors,
@@ -363,6 +415,8 @@ def _validate_subject_shape_run(
         "require_sharded": bool(require_sharded),
         "binding_status": expected_binding_status,
         "physical_storage_layout": layout,
+        "storage_profile_id": storage_profile_id,
+        "storage_candidate": storage_candidate,
     }
 
 
@@ -372,18 +426,30 @@ def publish_subject_shape_run(
     materialization_payload: dict[str, Any],
     copy_backend: str,
 ) -> dict[str, Any]:
+    storage_profile_id = getattr(
+        plan,
+        "storage_profile_id",
+        SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
+    )
+    publication_run_path = getattr(
+        plan,
+        "publication_run_path",
+        plan.sharded_run,
+    )
+    storage_candidate = is_subject_shape_storage_candidate(storage_profile_id)
     transaction = {
         "binding_complete": False,
         "completion_published": False,
         "publication_owner_uuid": None,
     }
     deferred_activation: list[Any] = []
+    publication_pointer_snapshot: dict[str, tuple[bool, Any]] = {}
 
     def validate(path: Path) -> dict[str, Any]:
         structural = _validate_subject_shape_run(
             path,
             row_count=plan.row_count,
-            require_sharded=True,
+            require_sharded=not storage_candidate,
             expected_binding_status=(
                 SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
                 if transaction["binding_complete"]
@@ -391,6 +457,7 @@ def publish_subject_shape_run(
             ),
             require_complete=bool(transaction["completion_published"]),
             expected_selector_eligible=False,
+            storage_profile_id=storage_profile_id,
         )
         if not structural["valid"] or not transaction["binding_complete"]:
             return structural
@@ -424,11 +491,23 @@ def publish_subject_shape_run(
         return structural
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
-        return (
-            require_runs_parent(
-                root.require_group("analysis"),
-                "subject_shape_runs",
-            ),
+        parent = require_runs_parent(
+            root.require_group("analysis"),
+            "subject_shape_runs",
+        )
+        if storage_candidate and not publication_pointer_snapshot:
+            publication_pointer_snapshot.update(
+                {
+                    name: (name in parent.attrs, parent.attrs.get(name))
+                    for name in ("latest", "latest_complete")
+                }
+            )
+        return (parent,)
+
+    def candidate_pointers_unchanged(parent: zarr.Group) -> bool:
+        return bool(publication_pointer_snapshot) and all(
+            (name in parent.attrs, parent.attrs.get(name)) == expected
+            for name, expected in publication_pointer_snapshot.items()
         )
 
     def after_rename(
@@ -442,6 +521,24 @@ def publish_subject_shape_run(
             raise RuntimeError("Subject-shape publication owner is missing.")
         transaction["publication_owner_uuid"] = owner
         write_best_effort_run_lineage_attrs(run_group, run_family="subject_shape_run")
+        if storage_candidate:
+            source_link_issues = (
+                validate_subject_shape_storage_source_manifest_link(
+                    run_group,
+                    phase="unbound",
+                    verify_content=True,
+                    block_rows=int(getattr(plan, "block_rows", 1_024)),
+                )
+            )
+            if source_link_issues:
+                raise RuntimeError(
+                    "Subject-shape candidate differs from its original producer "
+                    "seal before binding: "
+                    + "; ".join(source_link_issues)
+                )
+            refresh_unbound_subject_shape_manifest_after_storage_materialization(
+                run_group
+            )
         binding = bind_staged_subject_shape_run(
             root,
             run_group,
@@ -450,8 +547,20 @@ def publish_subject_shape_run(
         )
         if binding.get("valid") is not True:
             raise RuntimeError(f"Final-path subject-shape binding failed: {binding!r}")
+        if storage_candidate:
+            receipt = finalize_bound_subject_shape_storage_receipt(run_group)
+            array_count = int(receipt["payload"]["object_estimate"]["array_metadata_objects"])
+            set_subject_shape_metadata_visibility_policy(
+                run_group,
+                expected_array_count=array_count,
+            )
+        else:
+            receipt = None
         transaction["binding_complete"] = True
-        return {"canonical_binding": binding}
+        return {
+            "canonical_binding": binding,
+            "storage_plan": receipt,
+        }
 
     def complete(
         root: zarr.Group,
@@ -465,19 +574,29 @@ def publish_subject_shape_run(
         owner = transaction["publication_owner_uuid"]
         if not isinstance(owner, str):
             raise RuntimeError("Subject-shape completion lacks its exact owner.")
-        completion, activation = (
-            complete_bound_subject_shape_run_for_deferred_activation(
+        if storage_candidate:
+            completion = complete_bound_subject_shape_candidate_run(
                 root,
                 run_group,
                 expected_run_name=plan.run_name,
                 publication_owner=owner,
             )
-        )
+            activation = None
+        else:
+            completion, activation = (
+                complete_bound_subject_shape_run_for_deferred_activation(
+                    root,
+                    run_group,
+                    expected_run_name=plan.run_name,
+                    publication_owner=owner,
+                )
+            )
         if completion.get("valid") is not True:
             raise RuntimeError(
                 f"Deferred subject-shape completion failed: {completion!r}."
             )
-        deferred_activation[:] = [activation]
+        if activation is not None:
+            deferred_activation[:] = [activation]
         transaction["completion_published"] = True
 
     def activate(
@@ -485,6 +604,47 @@ def publish_subject_shape_run(
         parent: zarr.Group,
         run_group: zarr.Group,
     ) -> None:
+        if storage_candidate:
+            if (
+                not candidate_pointers_unchanged(parent)
+                or run_group.attrs.get("palette_run_completion_status") != "complete"
+                or run_group.attrs.get("stage_selector_eligible") is not False
+            ):
+                raise RuntimeError(
+                    "Subject-shape candidate lost its complete, ineligible, "
+                    "pointer-preserving state before consolidation."
+                )
+            consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+            direct_root = zarr.open_group(
+                str(plan.source_zarr),
+                mode="r",
+                use_consolidated=False,
+            )
+            consolidated_root = zarr.open_group(
+                str(plan.source_zarr),
+                mode="r",
+                use_consolidated=True,
+            )
+            direct_parent = direct_root["analysis/subject_shape_runs"]
+            consolidated_parent = consolidated_root["analysis/subject_shape_runs"]
+            if not candidate_pointers_unchanged(
+                direct_parent
+            ) or not candidate_pointers_unchanged(consolidated_parent):
+                raise RuntimeError(
+                    "Subject-shape consolidated metadata changed the frozen "
+                    "candidate pointer snapshot."
+                )
+            issues = validate_subject_shape_direct_consolidated_storage(
+                direct_parent[plan.run_name],
+                consolidated_parent[plan.run_name],
+                phase="bound",
+            )
+            if issues:
+                raise RuntimeError(
+                    "Subject-shape direct/consolidated candidate declarations differ: "
+                    + "; ".join(issues)
+                )
+            return
         if len(deferred_activation) != 1:
             raise RuntimeError(
                 "Subject-shape publication lacks one deferred activation receipt."
@@ -515,7 +675,7 @@ def publish_subject_shape_run(
         )
 
     def rollback_activation() -> None:
-        if deferred_activation:
+        if not storage_candidate and deferred_activation:
             rollback_deferred_subject_shape_coordinate_activation(
                 deferred_activation[0]
             )
@@ -523,27 +683,76 @@ def publish_subject_shape_run(
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/subject_shape_runs"]
         run = parent[plan.run_name]
+        pointers_valid = (
+            candidate_pointers_unchanged(parent)
+            if storage_candidate
+            else (
+                str(parent.attrs.get("latest")) == plan.run_name
+                and str(parent.attrs.get("latest_complete")) == plan.run_name
+            )
+        )
         if (
-            str(parent.attrs.get("latest")) != plan.run_name
-            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            not pointers_valid
             or run.attrs.get("stage_selector_eligible") is not False
             or run.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
             != SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
         ):
             raise RuntimeError(
-                "Subject-shape complete run was not selected while remaining "
-                "ineligible before the final commit."
+                "Subject-shape complete run does not match its expected pointer "
+                "and selector-ineligible state."
+            )
+
+    def repair_failed_candidate_visibility(target_run_path: Path) -> None:
+        if target_run_path.resolve() != plan.target_run_path.resolve():
+            raise RuntimeError(
+                "Subject-shape failed-publication repair received another target."
+            )
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+        direct_root = zarr.open_group(
+            str(plan.source_zarr), mode="r", use_consolidated=False
+        )
+        consolidated_root = zarr.open_group(
+            str(plan.source_zarr), mode="r", use_consolidated=True
+        )
+        relative = f"analysis/subject_shape_runs/{plan.run_name}"
+        direct = direct_root[relative]
+        consolidated = consolidated_root[relative]
+        direct_attrs = dict(direct.attrs)
+        if direct_attrs != dict(consolidated.attrs):
+            raise RuntimeError(
+                "Subject-shape failed candidate differs between metadata views."
+            )
+        tombstone = direct_attrs.get(ATOMIC_PUBLICATION_TOMBSTONE_ATTR)
+        if (
+            direct_attrs.get("palette_run_completion_status") != "failed"
+            or direct_attrs.get("stage_selector_eligible") is not False
+            or "palette_run_completed_at_utc" in direct_attrs
+            or not isinstance(tombstone, Mapping)
+            or tombstone.get("schema_id") != "palette.atomic_publication_tombstone"
+            or tombstone.get("schema_version") != 1
+            or tombstone.get("run_name") != plan.run_name
+            or Path(str(tombstone.get("run_path"))).resolve()
+            != plan.target_run_path.resolve()
+            or tombstone.get("selector_eligible") is not False
+            or tombstone.get("retry_policy") != "new_immutable_run_name_required"
+        ):
+            raise RuntimeError(
+                "Subject-shape failed candidate is not an exact failed tombstone."
             )
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
-            local_run_path=plan.sharded_run,
+            local_run_path=publication_run_path,
             target_run_path=plan.target_run_path,
             run_name=plan.run_name,
             lock_suffix="subject-shape-publish",
             publish_schema_id=PUBLISH_SCHEMA_ID,
-            policy="read_only_compute_unbound_stage_shard_final_path_bind_then_publish",
+            policy=(
+                "read_only_compute_unbound_stage_byte_plan_final_path_bind_then_publish"
+                if storage_candidate
+                else "read_only_compute_unbound_stage_shard_final_path_bind_then_publish"
+            ),
             rollback_policy=(
                 "retain_owner_bound_failed_public_tombstone_and_"
                 "stage_specific_receipt_rollback_only"
@@ -559,10 +768,19 @@ def publish_subject_shape_run(
         complete_run=complete,
         verify_pointers=verify,
         activate_run=activate,
-        rollback_activation=rollback_activation,
+        rollback_activation=(None if storage_candidate else rollback_activation),
+        repair_failed_publication_visibility=(
+            repair_failed_candidate_visibility if storage_candidate else None
+        ),
         after_rename=after_rename,
         payload_metadata={
-            "local_sharded_run": str(plan.sharded_run),
+            "local_publication_run": str(publication_run_path),
+            "storage_profile_id": storage_profile_id,
+            "promotion_policy": (
+                "immutable_named_candidate_no_pointer_or_registry_activation"
+                if storage_candidate
+                else "complete_ineligible_then_pointers_then_eligibility_final"
+            ),
             "materialization": json_attr_safe(materialization_payload),
         },
     )
@@ -574,6 +792,7 @@ def materialize_subject_shape(
     scratch_root: str | Path,
     refined_run: str | None,
     run_name: str,
+    storage_profile: str = SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
     components: Sequence[str] | None = None,
     block_rows: int = DEFAULT_BLOCK_ROWS,
     output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
@@ -593,6 +812,7 @@ def materialize_subject_shape(
         scratch_root=scratch_root,
         refined_run=refined_run,
         run_name=run_name,
+        storage_profile=storage_profile,
         components=components,
         block_rows=block_rows,
         output_shard_rows=output_shard_rows,
@@ -654,18 +874,33 @@ def materialize_subject_shape(
         )
         if not compute_validation["valid"]:
             raise RuntimeError(f"Node-local compute validation failed: {compute_validation}")
-        sharding = copy_completed_run_to_sharded(
-            plan.compute_run_path,
-            plan.sharded_run,
-            row_count_array="row_index/instance_key",
-            shard_rows=plan.output_shard_rows,
-            workers=plan.shard_copy_workers,
+        storage_candidate = is_subject_shape_storage_candidate(
+            plan.storage_profile_id
         )
-        sharding_summary = {
-            key: value
-            for key, value in sharding.items()
-            if key not in {"arrays", "shards", "static_arrays"}
-        }
+        if storage_candidate:
+            compute_run = compute_root[
+                f"analysis/subject_shape_runs/{plan.run_name}"
+            ]
+            sharding_summary = materialize_subject_shape_storage_candidate(
+                compute_run,
+                plan.sharded_run,
+                phase="unbound",
+                copy_block_rows=plan.block_rows,
+            )
+            sharding_summary["exact_decoded_validation"] = True
+        else:
+            sharding = copy_completed_run_to_sharded(
+                plan.compute_run_path,
+                plan.sharded_run,
+                row_count_array="row_index/instance_key",
+                shard_rows=plan.output_shard_rows,
+                workers=plan.shard_copy_workers,
+            )
+            sharding_summary = {
+                key: value
+                for key, value in sharding.items()
+                if key not in {"arrays", "shards", "static_arrays"}
+            }
         sharded = open_zarr_root(plan.sharded_run, mode="a")
         if (
             sharded.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
@@ -684,10 +919,11 @@ def materialize_subject_shape(
         publishing_validation = _validate_subject_shape_run(
             plan.sharded_run,
             row_count=plan.row_count,
-            require_sharded=True,
+            require_sharded=not storage_candidate,
             expected_binding_status=SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
             require_complete=False,
             expected_selector_eligible=False,
+            storage_profile_id=plan.storage_profile_id,
         )
         if not publishing_validation["valid"]:
             raise RuntimeError(
@@ -743,6 +979,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--refined-run")
     parser.add_argument("--run-name", required=True)
+    parser.add_argument(
+        "--storage-profile",
+        choices=SUBJECT_SHAPE_STORAGE_PROFILE_CHOICES,
+        default=SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
+    )
     parser.add_argument("--component", action="append", dest="components")
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--block-rows", type=int, default=DEFAULT_BLOCK_ROWS)
@@ -777,6 +1018,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         scratch_root=scratch,
         refined_run=args.refined_run,
         run_name=args.run_name,
+        storage_profile=str(args.storage_profile),
         components=args.components,
         block_rows=int(args.block_rows),
         output_shard_rows=int(args.output_shard_rows),

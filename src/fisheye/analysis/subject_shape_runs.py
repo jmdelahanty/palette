@@ -37,6 +37,7 @@ from ..shared.archive_identity import archive_identity
 from ..shared.coordinate_frame_record import array_payload_sha256
 from ..shared.coordinate_record import (
     bind_persisted_coordinate_record,
+    coordinate_record_sha256,
     stamp_and_bind_persisted_coordinate_record,
 )
 from ..shared.json_safety import json_attr_safe
@@ -85,6 +86,8 @@ from ..shared.subject_shape_coordinate_publication import (
     SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR,
     SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS,
     SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR,
+    SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
+    SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
     SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID,
     SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
@@ -2735,6 +2738,67 @@ def _stamp_unbound_numeric_manifest(run_group: zarr.Group):
     )
 
 
+def refresh_unbound_subject_shape_manifest_after_storage_materialization(
+    run_group: zarr.Group,
+) -> dict[str, object]:
+    """Restamp the exact unbound receipt after a physical-only rewrite.
+
+    Candidate materialization preserves every decoded logical value but adds
+    planner-owned array metadata.  The retained unbound receipt must describe
+    that exact staged tree before authoritative final-path binding consumes it.
+    """
+
+    state = (
+        run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR),
+        run_group.attrs.get("palette_run_completion_status"),
+    )
+    if (
+        state
+        not in {
+            (SUBJECT_SHAPE_UNBOUND_STAGE_STATUS, "complete"),
+            (SUBJECT_SHAPE_PUBLISHING_BINDING_STATUS, "running"),
+        }
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Storage rematerialization requires one complete, unbound, "
+            "selector-ineligible subject-shape stage."
+        )
+    source_link = bind_persisted_coordinate_record(
+        run_group,
+        attr_name=SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
+    ).record
+    source_manifest = source_link.get("source_manifest")
+    source_manifest_sha256 = source_link.get("source_manifest_sha256")
+    if (
+        source_link.get("schema_id")
+        != SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID
+        or source_link.get("schema_version") != 1
+        or not isinstance(source_manifest, Mapping)
+        or not isinstance(source_manifest_sha256, str)
+        or coordinate_record_sha256(source_manifest) != source_manifest_sha256
+        or run_group.attrs.get(SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR)
+        != source_manifest
+        or run_group.attrs.get(f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256")
+        != source_manifest_sha256
+    ):
+        raise ValueError(
+            "Storage rematerialization lacks its exact original producer seal."
+        )
+    for name in (
+        SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR,
+        f"{SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR}_sha256",
+    ):
+        if name in run_group.attrs:
+            del run_group.attrs[name]
+    manifest = _stamp_unbound_numeric_manifest(run_group)
+    return {
+        "valid": True,
+        "status": SUBJECT_SHAPE_UNBOUND_STAGE_STATUS,
+        "unbound_manifest_sha256": manifest.record_sha256,
+    }
+
+
 def _load_unbound_numeric_manifest(run_group: zarr.Group):
     result = bind_persisted_coordinate_record(
         run_group,
@@ -2745,6 +2809,28 @@ def _load_unbound_numeric_manifest(run_group: zarr.Group):
             "Subject-shape unbound numeric manifest differs from live arrays."
         )
     return result
+
+
+def load_sealed_unbound_subject_shape_manifest(run_group: zarr.Group):
+    """Bind the producer seal only when it still matches every live array.
+
+    Physical rematerializers must call this before deriving a plan from live
+    metadata.  The check closes the gap where a changed dtype, shape, payload,
+    schema path, or authoritative attribute could otherwise be restamped as a
+    new apparently valid unbound stage.
+    """
+
+    if (
+        run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_UNBOUND_STAGE_STATUS
+        or run_group.attrs.get("palette_run_completion_status") != "complete"
+        or run_group.attrs.get("stage_selector_eligible") is not False
+    ):
+        raise ValueError(
+            "Subject-shape storage conversion requires one producer-sealed, "
+            "complete, unbound, selector-ineligible stage."
+        )
+    return _load_unbound_numeric_manifest(run_group)
 
 
 def _validate_unbound_subject_shape_payload(
@@ -3036,6 +3122,60 @@ def complete_bound_subject_shape_run_for_deferred_activation(
     if activation is None:
         raise RuntimeError("Deferred subject-shape completion lacks a receipt.")
     return summary, activation
+
+
+@proof_verification_operation
+def complete_bound_subject_shape_candidate_run(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_run_name: str,
+    publication_owner: str,
+) -> dict[str, object]:
+    """Complete one exact candidate without changing parent selection state."""
+
+    if archive_identity(authoritative_root) != archive_identity(final_run_group):
+        raise ValueError(
+            "Bound subject-shape candidate completion is outside the authoritative archive."
+        )
+    if (
+        str(final_run_group.path)
+        != f"analysis/subject_shape_runs/{expected_run_name}"
+        or final_run_group.attrs.get(SUBJECT_SHAPE_COORDINATE_BINDING_STATUS_ATTR)
+        != SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+        or final_run_group.attrs.get("palette_run_completion_status") != "running"
+        or final_run_group.attrs.get("stage_selector_eligible") is not False
+        or final_run_group.attrs.get(SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR)
+        != publication_owner
+    ):
+        raise ValueError(
+            "Subject-shape candidate completion requires one exact bound "
+            "running/ineligible child."
+        )
+    finish_proof_verification()
+    mark_run_complete(
+        final_run_group,
+        parent_group=None,
+        run_name=expected_run_name,
+        run_provenance=build_run_provenance_from_stage_record(
+            final_run_group.attrs.get("provenance", {}),
+            fallback_command="subject_shape_runs",
+        ),
+    )
+    restart_proof_verification()
+    proof = load_completed_ineligible_subject_shape_coordinate_publication(
+        authoritative_root,
+        f"analysis/subject_shape_runs/{expected_run_name}",
+        expected_publication_owner=publication_owner,
+    )
+    return {
+        "valid": True,
+        "status": SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
+        "run_name": expected_run_name,
+        "row_count": int(proof.row_identity.leading_dimension),
+        "publication_manifest_sha256": proof.manifest.record_sha256,
+        "selector_state": "unchanged_candidate_ineligible",
+    }
 
 
 def _complete_bound_subject_shape_run(

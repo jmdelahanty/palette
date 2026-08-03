@@ -136,6 +136,32 @@ SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR = (
 SUBJECT_SHAPE_SCHEMA_INVENTORY_SCHEMA_ID = (
     "palette.subject_shape_closed_schema_inventory"
 )
+SUBJECT_SHAPE_STORAGE_PLAN_ATTR = "subject_shape_storage_plan"
+SUBJECT_SHAPE_STORAGE_PLAN_DIGEST_ATTR = "subject_shape_storage_plan_payload_sha256"
+SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR = "subject_shape_storage_profile_id"
+SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR = "subject_shape_storage_profile_role"
+SUBJECT_SHAPE_STORAGE_PROFILE_ROLE = "explicit_unpromoted_candidate"
+SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR = "subject_shape_storage_candidate"
+SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR = (
+    "subject_shape_storage_source_unbound_manifest"
+)
+SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID = (
+    "palette.subject_shape_storage_source_unbound_manifest"
+)
+SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR = (
+    "subject_shape_storage_metadata_visibility_policy"
+)
+SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS = frozenset(
+    {
+        "logical_schema_id",
+        "logical_schema_version",
+        "storage_policy_version",
+        "storage_profile_id",
+        "codec_profile_id",
+        "access_pattern",
+        "write_mode",
+    }
+)
 SUBJECT_SHAPE_SCHEMA_VERSION = 1
 SUBJECT_SHAPE_DERIVATION_SCHEMA_ID = "palette.subject_shape_coordinate_derivation"
 SUBJECT_SHAPE_COMPONENT_SCHEMA_ID = "palette.mask_component_geometry_schema"
@@ -494,6 +520,41 @@ def _create_array(group: Any, name: str, values: np.ndarray) -> Any:
     if name in group:
         _fail(f"Immutable subject-shape publication refuses occupied array {name!r}.")
     data = np.asarray(values)
+    group_path = str(getattr(group, "path", "")).strip("/")
+    path_parts = tuple(part for part in group_path.split("/") if part)
+    if len(path_parts) >= 3 and path_parts[:2] == (
+        "analysis",
+        "subject_shape_runs",
+    ):
+        run_path = "/".join(path_parts[:3])
+        try:
+            import zarr
+
+            run = zarr.open_group(
+                store=group.store,
+                path=run_path,
+                mode="a",
+                use_consolidated=False,
+            )
+        except (AttributeError, TypeError, ValueError):
+            run = None
+        if (
+            run is not None
+            and run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR)
+            == SUBJECT_SHAPE_STORAGE_PROFILE_ROLE
+        ):
+            # Import lazily to keep the logical coordinate contract independent
+            # of the optional physical candidate adapter.
+            from fisheye.analysis.subject_shape_storage import (
+                create_bound_subject_shape_candidate_array,
+            )
+
+            return create_bound_subject_shape_candidate_array(
+                run,
+                group,
+                name=name,
+                values=data,
+            )
     chunks = (max(1, min(int(data.shape[0]), 1024)), *data.shape[1:]) if data.ndim else None
     kwargs: dict[str, Any] = {"data": data, "overwrite": False}
     if chunks is not None:
@@ -944,6 +1005,14 @@ _RUN_OPERATIONAL_ATTRS = frozenset(
         "lineage_payload_json",
         "physical_storage_layout",
         "cluster_output_staging",
+        SUBJECT_SHAPE_STORAGE_PLAN_ATTR,
+        SUBJECT_SHAPE_STORAGE_PLAN_DIGEST_ATTR,
+        SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR,
+        SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR,
+        SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR,
+        SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR,
+        f"{SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR}_sha256",
+        SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR,
     }
 )
 _RUN_AUTHORITATIVE_ATTRS = frozenset(
@@ -1308,7 +1377,12 @@ def _expected_subject_shape_array_attrs(
     *,
     phase: str,
 ) -> dict[str, frozenset[str]]:
-    expected = {path: frozenset() for path in array_paths}
+    candidate_storage = (
+        run.attrs.get(SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR)
+        == SUBJECT_SHAPE_STORAGE_PROFILE_ROLE
+    )
+    physical_attrs = SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS if candidate_storage else ()
+    expected = {path: frozenset(physical_attrs) for path in array_paths}
     if phase == "unbound":
         return expected
     identity_attrs = {
@@ -1317,7 +1391,9 @@ def _expected_subject_shape_array_attrs(
         ROW_IDENTITY_CONTRACT_REF_ATTR,
         ROW_IDENTITY_CONTRACT_DIGEST_ATTR,
     }
-    expected["instance_key"] = frozenset(identity_attrs)
+    expected["instance_key"] = frozenset(
+        set(expected["instance_key"]) | identity_attrs
+    )
     descriptor_attrs = {
         COORDINATE_DESCRIPTOR_ATTR,
         f"{COORDINATE_DESCRIPTOR_ATTR}_sha256",
@@ -4215,6 +4291,16 @@ __all__ = [
     "SUBJECT_SHAPE_SCALAR_SURFACE_ATTR",
     "SUBJECT_SHAPE_SCALAR_SURFACE_INVENTORY_ATTR",
     "SUBJECT_SHAPE_SCIENTIFIC_CONFIGURATION_ATTR",
+    "SUBJECT_SHAPE_STORAGE_ARRAY_ATTRS",
+    "SUBJECT_SHAPE_STORAGE_CANDIDATE_ATTR",
+    "SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR",
+    "SUBJECT_SHAPE_STORAGE_PLAN_ATTR",
+    "SUBJECT_SHAPE_STORAGE_PLAN_DIGEST_ATTR",
+    "SUBJECT_SHAPE_STORAGE_PROFILE_ID_ATTR",
+    "SUBJECT_SHAPE_STORAGE_PROFILE_ROLE",
+    "SUBJECT_SHAPE_STORAGE_PROFILE_ROLE_ATTR",
+    "SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_ATTR",
+    "SUBJECT_SHAPE_STORAGE_SOURCE_MANIFEST_SCHEMA_ID",
     "SUBJECT_SHAPE_TAIL_SAMPLE_AXIS_ATTR",
     "SUBJECT_SHAPE_UNBOUND_MANIFEST_ATTR",
     "SUBJECT_SHAPE_UNBOUND_MANIFEST_SCHEMA_ID",

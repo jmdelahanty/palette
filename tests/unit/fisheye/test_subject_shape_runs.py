@@ -9,7 +9,16 @@ import pytest
 import zarr
 
 from fisheye.analysis import subject_shape_runs as mod
+from fisheye.analysis.subject_shape_storage import (
+    SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    materialize_subject_shape_storage_candidate,
+    validate_subject_shape_candidate_storage,
+    validate_subject_shape_direct_consolidated_storage,
+)
 from fisheye.analysis_workflows.materializers import subject_shape as materializer
+from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
+    ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
+)
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.proof_verification import proof_verification_scope
@@ -401,6 +410,52 @@ def test_canonical_subject_shape_writer_and_materializer_reject_reordered_compon
         )
 
 
+def test_subject_shape_candidate_plan_rejects_resolved_containment_and_existing_name(
+    tmp_path: Path,
+    canonical_refined_root: zarr.Group,
+) -> None:
+    source = tmp_path / "canonical.zarr"
+    source_alias = tmp_path / "canonical-alias.zarr"
+    source_alias.symlink_to(source, target_is_directory=True)
+    with pytest.raises(ValueError, match="either containment direction"):
+        materializer.build_subject_shape_materialization_plan(
+            source_alias,
+            scratch_root=source / "unsafe-scratch",
+            refined_run="r1",
+            run_name="shape_candidate",
+            storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        )
+    with pytest.raises(ValueError, match="either containment direction"):
+        materializer.build_subject_shape_materialization_plan(
+            source,
+            scratch_root=source,
+            refined_run="r1",
+            run_name="shape_candidate_equal",
+            storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        )
+    with pytest.raises(ValueError, match="either containment direction"):
+        materializer.build_subject_shape_materialization_plan(
+            source,
+            scratch_root=tmp_path,
+            refined_run="r1",
+            run_name="shape_candidate_reverse",
+            storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        )
+
+    parent = canonical_refined_root.require_group("analysis").require_group(
+        "subject_shape_runs"
+    )
+    parent.create_group("occupied_candidate")
+    with pytest.raises(FileExistsError, match="replace existing authoritative run"):
+        materializer.build_subject_shape_materialization_plan(
+            source,
+            scratch_root=tmp_path / "safe-scratch",
+            refined_run="r1",
+            run_name="occupied_candidate",
+            storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        )
+
+
 def test_subject_shape_materializer_computes_shards_and_publishes(
     monkeypatch,
     tmp_path: Path,
@@ -501,6 +556,324 @@ def test_subject_shape_materializer_computes_shards_and_publishes(
         "coordinate_records/consumed_unbound_stage@"
         f"{SUBJECT_SHAPE_CONSUMED_UNBOUND_STAGE_ATTR}"
     )
+
+
+def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer_free(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    canonical_refined_root: zarr.Group,
+) -> None:
+    _patch_provenance(monkeypatch)
+    monkeypatch.setattr(
+        materializer,
+        "write_best_effort_run_lineage_attrs",
+        lambda *args, **kwargs: None,
+    )
+    source_path = tmp_path / "canonical.zarr"
+    original_pointers = {
+        "latest": "preexisting_subject_shape",
+        "latest_complete": "preexisting_subject_shape",
+    }
+    canonical_refined_root.require_group("analysis").require_group(
+        "subject_shape_runs"
+    ).attrs.update(original_pointers)
+    result = materializer.materialize_subject_shape(
+        source_path,
+        scratch_root=tmp_path / "candidate-scratch",
+        refined_run="r1",
+        run_name="shape_byte_candidate",
+        storage_profile=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        block_rows=2,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_copy_workers=1,
+        native_threads=1,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+        check_capacity=False,
+        stage_command="unit-test-subject-shape-byte-candidate",
+    )
+
+    assert result["status"] == "complete"
+    direct_root = zarr.open_group(
+        str(source_path), mode="r", use_consolidated=False
+    )
+    consolidated_root = zarr.open_group(
+        str(source_path), mode="r", use_consolidated=True
+    )
+    direct_parent = direct_root["analysis/subject_shape_runs"]
+    consolidated_parent = consolidated_root["analysis/subject_shape_runs"]
+    assert {
+        name: direct_parent.attrs[name] for name in original_pointers
+    } == original_pointers
+    assert dict(direct_parent.attrs) == dict(consolidated_parent.attrs)
+    direct = direct_parent["shape_byte_candidate"]
+    consolidated = consolidated_parent["shape_byte_candidate"]
+    assert direct.attrs["palette_run_completion_status"] == "complete"
+    assert direct.attrs["stage_selector_eligible"] is False
+    assert direct.attrs["subject_shape_storage_profile_id"] == (
+        SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+    )
+    assert not validate_subject_shape_candidate_storage(direct, phase="bound")
+    assert not validate_subject_shape_direct_consolidated_storage(
+        direct,
+        consolidated,
+    )
+    compute = zarr.open_group(
+        str(tmp_path / "candidate-scratch/compute.zarr"),
+        mode="a",
+        use_consolidated=False,
+    )["analysis/subject_shape_runs/shape_byte_candidate"]
+    local_candidate = zarr.open_group(
+        str(tmp_path / "candidate-scratch/subject-shape-sharded-run"),
+        mode="r",
+        use_consolidated=False,
+    )
+
+    def arrays(group: zarr.Group, prefix: str = "") -> dict[str, zarr.Array]:
+        result: dict[str, zarr.Array] = {}
+        for name in group.array_keys():
+            path = f"{prefix}/{name}" if prefix else str(name)
+            result[path] = group[name]
+        for name in group.group_keys():
+            path = f"{prefix}/{name}" if prefix else str(name)
+            result.update(arrays(group[name], path))
+        return result
+
+    compute_arrays = arrays(compute)
+    candidate_arrays = arrays(local_candidate)
+    assert set(candidate_arrays) == set(compute_arrays)
+    for path in sorted(compute_arrays):
+        source_array = compute_arrays[path]
+        candidate_array = candidate_arrays[path]
+        assert np.dtype(candidate_array.dtype) == np.dtype(source_array.dtype)
+        source_fill = source_array.fill_value
+        candidate_fill = candidate_array.fill_value
+        if isinstance(source_fill, (float, np.floating)) and np.isnan(source_fill):
+            assert isinstance(candidate_fill, (float, np.floating))
+            assert np.isnan(candidate_fill)
+        else:
+            assert candidate_fill == source_fill
+    assert candidate_arrays[
+        "components/subject_body/bspline_degree_used"
+    ].fill_value == -1
+    receipt = direct.attrs["subject_shape_storage_plan"]
+    assert receipt["payload"]["object_estimate"]["array_metadata_objects"] == len(
+        tuple(direct.array_keys())
+    ) + sum(
+        len(tuple(group.array_keys()))
+        for group in (
+            direct["row_index"],
+            direct["body_frame"],
+            direct["source_refined_subject_masks"],
+            direct["components/subject_body"],
+            direct["components/swim_bladder"],
+            direct["components/eye_left"],
+            direct["components/eye_right"],
+            direct["relations/eye_pair"],
+            direct["relations/swim_bladder_to_body"],
+            direct["relations/eyes_to_body"],
+        )
+    )
+    centerline_metadata = direct[
+        "components/subject_body/centerline_xy"
+    ].metadata.to_dict()
+    codecs = centerline_metadata["codecs"]
+    data_codecs = (
+        codecs[0]["configuration"]["codecs"]
+        if codecs[0]["name"] == "sharding_indexed"
+        else codecs
+    )
+    assert data_codecs[1] == {
+        "name": "zstd",
+        "configuration": {"level": 0, "checksum": False},
+    }
+    writable = zarr.open_group(
+        str(source_path), mode="a", use_consolidated=False
+    )["analysis/subject_shape_runs/shape_byte_candidate"]
+    digest = writable.attrs["subject_shape_storage_plan_payload_sha256"]
+    writable.attrs["subject_shape_storage_plan_payload_sha256"] = "0" * 64
+    assert any(
+        "digest mismatch" in error
+        for error in validate_subject_shape_candidate_storage(
+            writable,
+            phase="bound",
+        )
+    )
+    writable.attrs["subject_shape_storage_plan_payload_sha256"] = digest
+    centerline = writable["components/subject_body/centerline_xy"]
+    storage_profile_id = centerline.attrs["storage_profile_id"]
+    centerline.attrs["storage_profile_id"] = "hostile_profile"
+    assert any(
+        "physical metadata differs" in error
+        for error in validate_subject_shape_candidate_storage(
+            writable,
+            phase="bound",
+        )
+    )
+    centerline.attrs["storage_profile_id"] = storage_profile_id
+    writable["components/subject_body"].attrs["unconsolidated_tamper"] = True
+    assert any(
+        "group declarations differ" in error
+        for error in validate_subject_shape_direct_consolidated_storage(
+            writable,
+            consolidated,
+        )
+    )
+    writable.create_group("unexpected_unconsolidated_group")
+    assert any(
+        "group paths differ" in error
+        for error in validate_subject_shape_direct_consolidated_storage(
+            writable,
+            consolidated,
+        )
+    )
+    degree = compute["components/subject_body/bspline_degree_used"]
+    original_degree = int(degree[0])
+    degree[0] = original_degree + 1
+    with pytest.raises(ValueError, match="manifest differs from live arrays"):
+        materialize_subject_shape_storage_candidate(
+            compute,
+            tmp_path / "candidate-from-tampered-source",
+            copy_block_rows=2,
+        )
+    degree[0] = original_degree
+    revision_group = compute["source_refined_subject_masks"]
+    revision_available = np.asarray(
+        revision_group["row_revision_available"][:],
+        dtype=np.uint8,
+    )
+    del revision_group["row_revision_available"]
+    revision_group.create_array(
+        "row_revision_available",
+        data=revision_available,
+        chunks=revision_available.shape,
+    )
+    with pytest.raises(
+        (ValueError, SubjectShapeCoordinatePublicationError),
+        match="manifest|source-revision arrays",
+    ):
+        materialize_subject_shape_storage_candidate(
+            compute,
+            tmp_path / "candidate-from-dtype-tampered-source",
+            copy_block_rows=2,
+        )
+
+
+def test_subject_shape_candidate_repairs_failed_visibility_after_consolidation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    root = zarr.open_group(str(source), mode="w", zarr_format=3)
+    root.require_group("analysis").require_group("subject_shape_runs")
+    local = tmp_path / "local-candidate"
+    local_run = zarr.open_group(str(local), mode="w", zarr_format=3)
+    owner = "a" * 32
+    local_run.attrs.update(
+        {
+            SUBJECT_SHAPE_PUBLICATION_OWNER_ATTR: owner,
+            "palette_run_completion_status": "running",
+            "stage_selector_eligible": False,
+        }
+    )
+    plan = SimpleNamespace(
+        source_zarr=source,
+        sharded_run=local,
+        publication_run_path=local,
+        target_run_path=(
+            source / "analysis" / "subject_shape_runs" / "shape_failed_candidate"
+        ),
+        run_name="shape_failed_candidate",
+        row_count=1,
+        refined_run="refined_1",
+        storage_profile_id=SUBJECT_SHAPE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    )
+
+    monkeypatch.setattr(
+        materializer,
+        "_validate_subject_shape_run",
+        lambda *args, **kwargs: {"valid": True, "errors": []},
+    )
+    monkeypatch.setattr(
+        materializer,
+        "write_best_effort_run_lineage_attrs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "refresh_unbound_subject_shape_manifest_after_storage_materialization",
+        lambda *args, **kwargs: {"valid": True},
+    )
+    monkeypatch.setattr(
+        materializer,
+        "validate_subject_shape_storage_source_manifest_link",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setattr(
+        materializer,
+        "bind_staged_subject_shape_run",
+        lambda *args, **kwargs: {"valid": True},
+    )
+    monkeypatch.setattr(
+        materializer,
+        "finalize_bound_subject_shape_storage_receipt",
+        lambda *args, **kwargs: {
+            "payload": {"object_estimate": {"array_metadata_objects": 0}}
+        },
+    )
+    monkeypatch.setattr(
+        materializer,
+        "set_subject_shape_metadata_visibility_policy",
+        lambda *args, **kwargs: None,
+    )
+
+    def complete_candidate(_root, run_group, **_kwargs):
+        run_group.attrs["palette_run_completion_status"] = "complete"
+        run_group.attrs["coordinate_binding_status"] = SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
+        return {"valid": True}
+
+    monkeypatch.setattr(
+        materializer,
+        "complete_bound_subject_shape_candidate_run",
+        complete_candidate,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "validate_subject_shape_direct_consolidated_storage",
+        lambda *args, **kwargs: ("injected post-consolidation failure",),
+    )
+    monkeypatch.setattr(
+        materializer,
+        "load_completed_ineligible_subject_shape_coordinate_publication",
+        lambda *args, **kwargs: SimpleNamespace(
+            row_identity=SimpleNamespace(leading_dimension=1),
+            manifest=SimpleNamespace(record_sha256="b" * 64),
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="direct/consolidated candidate declarations differ",
+    ):
+        materializer.publish_subject_shape_run(
+            plan,
+            materialization_payload={},
+            copy_backend="python",
+        )
+
+    direct = zarr.open_group(
+        str(source), mode="r", use_consolidated=False
+    )["analysis/subject_shape_runs/shape_failed_candidate"]
+    consolidated = zarr.open_group(
+        str(source), mode="r", use_consolidated=True
+    )["analysis/subject_shape_runs/shape_failed_candidate"]
+    assert dict(direct.attrs) == dict(consolidated.attrs)
+    assert direct.attrs["palette_run_completion_status"] == "failed"
+    assert direct.attrs["stage_selector_eligible"] is False
+    assert ATOMIC_PUBLICATION_TOMBSTONE_ATTR in direct.attrs
 
 
 def test_subject_shape_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
