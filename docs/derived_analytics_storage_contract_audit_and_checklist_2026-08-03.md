@@ -125,7 +125,7 @@ true.
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
-| Chaser components | Protocol-neutral schemas plus payload-bound component manifests, verified detached reads, and an atomic component publisher | Adopt the shared publisher in each scientific writer and finish interruption recovery coverage |
+| Chaser components | Protocol-neutral schemas, payload-bound manifests, verified detached reads, and all ten maintained writers routed through node-local sealed immutable publication | Add explicit digest-bound dependency handles, runner receipts, consolidated activation, export adoption, and chained recovery coverage |
 | Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
@@ -213,18 +213,21 @@ Evidence:
 - `src/fisheye/analytics_exports/validation.py:87-178`
 - `src/fisheye/utils/plot_cross_recording_bout_kinematics.py:39-51`
 
-### Chaser component publication
+### Chaser component dependency selection
 
-The base chaser-distance run is hardened, but downstream components are
-intentionally rejected until they gain independent payload-bound seals. Code
-after the guard still contains delete-and-rewrite plus direct pointer updates,
-which must not become authoritative publication behavior.
+All ten maintained component writers now publish independently sealed,
+selector-ineligible immutable candidates. The remaining correctness boundary
+is consumption and orchestration: historical chained workflows try to
+rediscover a just-written candidate through legacy `latest`, while exports and
+runner receipts do not yet carry an explicit validated component handle.
+Candidates remain intentionally undiscoverable until those consumers bind an
+exact component manifest digest or a separately reviewed selector activation.
 
 Evidence:
 
-- `src/fisheye/analysis/chaser_distance_io.py:675`
-- `src/fisheye/analysis/chaser_quadrant_occupancy.py:1123-1140,1403`
-- `src/fisheye/utils/export_cross_recording_analytics.py:122-149`
+- `src/fisheye/analysis/chaser_component_writer.py`
+- `src/fisheye/analysis_workflows/materializers/chaser_component.py`
+- `docs/chaser_component_publication_contract_v1.md`
 
 ## Implementation Checklist
 
@@ -253,6 +256,7 @@ a safe base for new work.
 | Track-kinematics exact schema | historical isolated lane | integrated as `af38edba` | Exact current motion vocabulary and explicit shared-factory blocker | Integrated; no physical candidate was created |
 | Shared compact rematerialization | coordination lane | integrated as `5d7fb30c` | Exact declaration-bound replanning, frame-axis growth, whole-physical-unit writes, receipt and metadata validation | Infrastructure only; family adoption remains explicit and opt-in |
 | Shared compact candidate publication | coordination lane | integrated from `d82dcf41` | Immutable selector-ineligible swim-bout and bout-kinematics candidates, logical hashes, local and authoritative-root metadata equivalence, and selector non-mutation | Candidate evidence only; benchmark and promotion remain pending |
+| Chaser scientific writer adoption | historical isolated lane | integrated as `fc6a48c5` | All ten component writers, sealed staging capability, atomic component publisher, focused tests, and lifecycle doc | Integrated as candidate publication; explicit dependency handles and activation remain separate |
 
 The next safe parallel wave assigns disjoint ownership as follows. The
 coordination lane remains the only owner of shared catalogs, planner/factory
@@ -324,6 +328,9 @@ now implemented on the coordination branch:
   atomic run-group publication, authoritative-root reconsolidation after the
   final publisher metadata write, and unchanged authority pointers: begun in
   `d82dcf41` and hardened in the following coordination checkpoint.
+- node-local sealed immutable publication for all ten maintained chaser
+  component writers, with digest-bound writer receipts and no legacy pointer
+  writes or same-name replacement: `fc6a48c5`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
@@ -343,6 +350,12 @@ materializer tests. The combined rematerializer, publisher, and maintained
 reader matrix passed 47 tests after the historical bout-kinematics fixture was
 made explicit about completion, eligibility, and compatibility. These are
 correctness results, not full-duration performance evidence.
+
+The integrated chaser manifest/materializer/writer matrix passed 82 tests.
+Twenty broader historical chained-workflow cases remain intentionally failing
+closed because they try to select an ineligible component through `latest`;
+they are the explicit-handle migration surface, not authorization to restore
+implicit discovery.
 
 ### Phase 0 — Preserve the audit baseline
 
@@ -457,14 +470,16 @@ correctness results, not full-duration performance evidence.
 
 - [x] Define an immutable component manifest envelope with source-run identity,
       schema, parameters, array declarations, content digests, and completion.
-- [ ] Give each component its own hidden-copy/validate/rename publication step.
-      The shared atomic component publisher and baseline rollback test are now
-      implemented; adoption by each scientific writer remains.
-- [ ] Remove delete-and-rewrite publication of visible components.
+- [x] Give each component its own hidden-copy/validate/rename publication step.
+      All ten maintained writers now use the shared sealed staging and atomic
+      component publisher.
+- [x] Remove delete-and-rewrite publication of visible components from the ten
+      maintained writer paths.
 - [x] Define and test component selectors bound to exact manifest digests. Keep
       production activation quarantined until atomic workflow adoption.
-- [ ] Record every requested component's output identity and validation result
-      in the chaser runner receipt.
+- [ ] Record every requested component's output identity, exact dependency
+      handle, and validation result in the chaser runner receipt. Individual
+      writers now return a digest-bound receipt; orchestration adoption remains.
 - [ ] Keep export of unsealed component tables fail closed.
 - [ ] Add recovery tests for interrupted component publication and stale
       pointers. Post-selector failure rollback is covered; add interruption

@@ -167,8 +167,9 @@ attributes. Maintained readers must consume only this authority envelope.
 - [x] Give every maintained component an exact semantic schema declaration.
 - [x] Migrate all maintained component writers off direct visible mutation.
 - [ ] Migrate readers/exports to validated component handles.
-- [x] Expand the writer/runner receipt to bind every requested component manifest and
-      selector result.
+- [x] Return a digest-bound writer publication receipt for every component.
+- [ ] Expand the orchestration runner receipt to bind every requested component
+      manifest, explicit dependency handle, and selector result.
 - [x] Run focused real-Zarr success and post-selector failure/rollback tests
       outside the sandbox.
 - [ ] Run end-to-end activated component-family workflow tests outside the
