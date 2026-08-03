@@ -133,10 +133,26 @@ def test_direct_writer_ownership_and_physical_policy_are_exact() -> None:
         ({"byte_planner_adopted": 1}, "exact bool"),
         ({"registry_publication": "eventually"}, "supported exact mode"),
         ({"stage_id": "analysis/eye_angles"}, "canonical identifier"),
+        ({"stage_id": "bad stage"}, "canonical identifier"),
+        ({"stage_id": "bad.stage"}, "canonical identifier"),
         ({"run_parent": "/analysis/runs"}, "canonical relative path"),
+        ({"run_parent": "analysis/bad path"}, "canonical relative path"),
+        ({"run_parent": "analysis\\bad"}, "canonical relative path"),
+        ({"schema_module": "not a module"}, "canonical module path"),
+        ({"schema_module": "fisheye..writer"}, "canonical module path"),
+        ({"schema_id_attr": "bad attr"}, "canonical constant attr"),
+        ({"schema_version_attr": "schema_version"}, "canonical constant attr"),
+        ({"method_version_attr": "METHOD-VERSION"}, "canonical constant attr"),
+        ({"layout_attr": "layout"}, "canonical constant attr"),
+        ({"method_attr": "method"}, "canonical constant attr"),
+        ({"physical_policy_owner": "policy name"}, "policy identifier"),
         (
             {"availability_parents": ("analysis/other_runs",)},
             "equal or be nested below",
+        ),
+        (
+            {"availability_parents": ("analysis/eye_angle_runs/bad path",)},
+            "canonical relative path",
         ),
     ),
 )
@@ -157,7 +173,9 @@ def test_catalog_declaration_rejects_invalid_shared_owner_state(
             "must not claim a materializer",
         ),
         ({"publication_owner_module": None}, "requires an exact owner module"),
+        ({"publication_owner_module": "not a module"}, "exact owner module"),
         ({"publication_entrypoint_attr": None}, "requires an exact entrypoint"),
+        ({"publication_entrypoint_attr": "write-run"}, "exact entrypoint"),
     ),
 )
 def test_catalog_declaration_rejects_invalid_direct_owner_state(

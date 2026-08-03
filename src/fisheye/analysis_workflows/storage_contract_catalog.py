@@ -15,7 +15,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
+import re
 from typing import Any
+
+
+_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
+_MODULE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+_CONSTANT_ATTR = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_CALLABLE_ATTR = re.compile(r"^_?[a-z][a-z0-9_]*$")
+_PATH_SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
+_POLICY_OWNER = re.compile(r"^[A-Za-z0-9_.]+$")
 
 
 @dataclass(frozen=True)
@@ -53,7 +62,7 @@ class DerivedAnalysisStorageContract:
             "registry_publication": self.registry_publication,
         }
         for field, value in required_text.items():
-            if not isinstance(value, str) or not value or value != value.strip():
+            if type(value) is not str or not value or value != value.strip():
                 raise ValueError(f"{field} must be one nonempty exact string")
 
         def require_relative_path(value: str, *, field: str) -> None:
@@ -62,17 +71,30 @@ class DerivedAnalysisStorageContract:
                 value != value.strip()
                 or value.startswith("/")
                 or value.endswith("/")
-                or any(part in {"", ".", ".."} for part in parts)
+                or any(not _PATH_SEGMENT.fullmatch(part) for part in parts)
             ):
                 raise ValueError(f"{field} must be one canonical relative path")
 
-        if "/" in self.stage_id:
+        if not _IDENTIFIER.fullmatch(self.stage_id):
             raise ValueError("stage_id must be one canonical identifier")
+        if not _MODULE.fullmatch(self.schema_module):
+            raise ValueError("schema_module must be one canonical module path")
+        for field in (
+            "schema_id_attr",
+            "schema_version_attr",
+            "method_version_attr",
+        ):
+            if not _CONSTANT_ATTR.fullmatch(getattr(self, field)):
+                raise ValueError(f"{field} must be one canonical constant attr")
+        if not _POLICY_OWNER.fullmatch(self.physical_policy_owner):
+            raise ValueError(
+                "physical_policy_owner must be one canonical policy identifier"
+            )
         require_relative_path(self.run_parent, field="run_parent")
         if not isinstance(self.availability_parents, tuple) or not self.availability_parents:
             raise ValueError("availability_parents must be one nonempty tuple")
         for parent in self.availability_parents:
-            if not isinstance(parent, str):
+            if type(parent) is not str:
                 raise ValueError("availability parents must be exact strings")
             require_relative_path(parent, field="availability_parent")
             if parent != self.run_parent and not parent.startswith(
@@ -94,9 +116,9 @@ class DerivedAnalysisStorageContract:
             ("method_attr", self.method_attr),
         ):
             if value is not None and (
-                not isinstance(value, str) or not value or value != value.strip()
+                type(value) is not str or not _CONSTANT_ATTR.fullmatch(value)
             ):
-                raise ValueError(f"{field} must be None or one nonempty exact string")
+                raise ValueError(f"{field} must be None or one canonical constant attr")
 
         allowed_owner_kinds = {
             "shared_atomic_materializer_v1",
@@ -108,9 +130,8 @@ class DerivedAnalysisStorageContract:
             )
         if self.publication_owner_kind == "shared_atomic_materializer_v1":
             if (
-                not isinstance(self.materializer_module, str)
-                or not self.materializer_module
-                or self.materializer_module != self.materializer_module.strip()
+                type(self.materializer_module) is not str
+                or not _MODULE.fullmatch(self.materializer_module)
             ):
                 raise ValueError(
                     "shared atomic publication requires materializer_module"
@@ -129,19 +150,15 @@ class DerivedAnalysisStorageContract:
                     "guarded direct publication must not claim a materializer"
                 )
             if (
-                not isinstance(self.publication_owner_module, str)
-                or not self.publication_owner_module
-                or self.publication_owner_module
-                != self.publication_owner_module.strip()
+                type(self.publication_owner_module) is not str
+                or not _MODULE.fullmatch(self.publication_owner_module)
             ):
                 raise ValueError(
                     "guarded direct publication requires an exact owner module"
                 )
             if (
-                not isinstance(self.publication_entrypoint_attr, str)
-                or not self.publication_entrypoint_attr
-                or self.publication_entrypoint_attr
-                != self.publication_entrypoint_attr.strip()
+                type(self.publication_entrypoint_attr) is not str
+                or not _CALLABLE_ATTR.fullmatch(self.publication_entrypoint_attr)
             ):
                 raise ValueError(
                     "guarded direct publication requires an exact entrypoint attr"
