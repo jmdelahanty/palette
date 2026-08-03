@@ -1,7 +1,7 @@
 # Track-kinematics v2 read benchmark contract — 2026-08-03
 
-Status: implemented diagnostic awaiting independent review. The flat-lineage
-candidate remains selector-ineligible and unpromoted.
+Status: implemented diagnostic; independently reviewed and accepted. The
+flat-lineage candidate remains selector-ineligible and unpromoted.
 
 ## Purpose and boundary
 
@@ -162,7 +162,7 @@ summaries are recomputed.
 - [x] Exercise a genuine rsync publication when rsync is installed; the
   integration test skips deterministically when that executable is absent,
   while exact backend-pair unit coverage remains unconditional.
-- [ ] Receive an independent ACCEPT review before commit.
+- [x] Receive an independent ACCEPT review before commit.
 - [ ] Run a five-repetition full-duration matrix on an immutable matched pair.
 - [ ] Add OS/filesystem tracing if physical transfer attribution is required.
 - [ ] Implement or explicitly decline a maintained public v2 candidate reader.
