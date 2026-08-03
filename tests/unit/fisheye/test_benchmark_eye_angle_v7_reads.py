@@ -116,6 +116,24 @@ def _tamper_selected_source_arrays(publication: dict[str, object]) -> None:
     staging["selected_arrays"] = sorted([*selected, "hostile/source_array"])
 
 
+def _tamper_logical_role_reference_swap(publication: dict[str, object]) -> None:
+    materialization = publication["materialization"]
+    assert isinstance(materialization, dict)
+    staged_receipt = materialization["staged_input_integrity_receipt"]
+    assert isinstance(staged_receipt, dict)
+    logical_inputs = staged_receipt["logical_inputs"]
+    assert isinstance(logical_inputs, dict)
+    instance_key = logical_inputs["instance_key"]
+    frame_index = logical_inputs["source_acquisition_frame_index"]
+    assert isinstance(instance_key, dict)
+    assert isinstance(frame_index, dict)
+    instance_key["source_array_refs"], frame_index["source_array_refs"] = (
+        frame_index["source_array_refs"],
+        instance_key["source_array_refs"],
+    )
+    _rehash_materialization_staged_receipt(materialization)
+
+
 @pytest.fixture(scope="module")
 def eye_angle_pair(tmp_path_factory: pytest.TempPathFactory) -> Path:
     directory = tmp_path_factory.mktemp("eye-angle-v7-benchmark")
@@ -307,6 +325,7 @@ def test_dependency_lineage_coordinated_rehash_is_rejected(
         _tamper_keypoint_identity,
         _tamper_diagnostic_keypoint_identity,
         _tamper_selected_source_arrays,
+        _tamper_logical_role_reference_swap,
     ),
 )
 def test_atomic_publication_coordinated_rehash_is_rejected(
@@ -341,7 +360,7 @@ def test_atomic_publication_coordinated_rehash_is_rejected(
         ValueError,
         match=(
             "publication|physical-copy|validation|materialization|staging|"
-            "staged-input|source identity|source-revision"
+            "staged-input|source identity|source-revision|logical-input role"
         ),
     ):
         benchmark.require_workload(tampered)

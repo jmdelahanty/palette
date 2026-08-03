@@ -1142,38 +1142,128 @@ def _require_staged_source_identity(
     if not isinstance(components, list) or len(components) != 2:
         raise ValueError("Candidate eye-geometry component source set is incomplete.")
     selected_arrays: set[str] = {f"{geometry_path}/relations/eye_pair/separation_px"}
-    staged_logical_refs: set[str] = set()
+    expected_logical_refs: dict[str, list[str]] = {
+        "ellipse_params": [],
+        "ellipse_success": [],
+    }
     for component in components:
         if not isinstance(component, Mapping):
             raise ValueError("Candidate eye-geometry component source is invalid.")
-        for name in ("ellipse_params_path", "ellipse_success_path"):
+        if component.get("component") not in {"eye_left", "eye_right"}:
+            raise ValueError("Candidate eye-geometry component role is invalid.")
+        for name, role in (
+            ("ellipse_params_path", "ellipse_params"),
+            ("ellipse_success_path", "ellipse_success"),
+        ):
             path = component.get(name)
             if type(path) is not str or not path:
                 raise ValueError("Candidate eye-geometry source path is invalid.")
             selected_arrays.add(path)
-            staged_logical_refs.add(path)
-    for path in resolved.values():
-        if path is not None:
-            if type(path) is not str or not path:
-                raise ValueError("Candidate resolved source array path is invalid.")
-            selected_arrays.add(path)
-            staged_logical_refs.add(path)
+            expected_logical_refs[role].append(path)
+    if [component.get("component") for component in components] != [
+        "eye_left",
+        "eye_right",
+    ]:
+        raise ValueError("Candidate eye-geometry component order is invalid.")
+    direct_roles = {
+        "keypoints_roi",
+        "detection_success",
+        "instance_key",
+        "source_acquisition_frame_index",
+    }
+    if set(resolved) != direct_roles:
+        raise ValueError("Candidate resolved source-array role set is not exact.")
+    for role in sorted(direct_roles):
+        path = resolved.get(role)
+        if type(path) is not str or not path:
+            raise ValueError("Candidate resolved source array path is invalid.")
+        selected_arrays.add(path)
+        expected_logical_refs[role] = [path]
 
     logical_inputs = staged_receipt.get("logical_inputs")
-    observed_receipt_refs: set[str] = set()
-    if not isinstance(logical_inputs, Mapping):
+    if not isinstance(logical_inputs, Mapping) or set(logical_inputs) != set(
+        expected_logical_refs
+    ):
         raise ValueError("Candidate staged logical-input inventory is invalid.")
-    for spec in logical_inputs.values():
+    expected_assemblies = {
+        "ellipse_params": "stack_axis_1_eye_left_then_eye_right",
+        "ellipse_success": "stack_axis_1_eye_left_then_eye_right",
+        "keypoints_roi": "owned_c_order_identity",
+        "detection_success": "owned_c_order_astype_bool",
+        "instance_key": "owned_c_order_astype_uint64",
+        "source_acquisition_frame_index": "owned_c_order_astype_int64",
+    }
+    subject_authority = staged_receipt.get("subject_shape_authority")
+    subject_arrays = (
+        subject_authority.get("allowed_arrays")
+        if isinstance(subject_authority, Mapping)
+        else None
+    )
+    keypoint_authority = staged_receipt.get("canonical_keypoint_authority")
+    keypoint_arrays = (
+        keypoint_authority.get("arrays")
+        if isinstance(keypoint_authority, Mapping)
+        else None
+    )
+    if not isinstance(subject_arrays, Mapping) or not isinstance(
+        keypoint_arrays, Mapping
+    ):
+        raise ValueError("Candidate staged array authorities are incomplete.")
+    subject_by_ref = {
+        str(entry.get("array_ref", "")).lstrip("/"): entry
+        for entry in subject_arrays.values()
+        if isinstance(entry, Mapping)
+    }
+    for role, expected_refs in expected_logical_refs.items():
+        spec = logical_inputs.get(role)
         if not isinstance(spec, Mapping):
             raise ValueError("Candidate staged logical-input specification is invalid.")
-        refs = spec.get("source_array_refs")
-        if not isinstance(refs, list):
-            raise ValueError("Candidate staged source-array references are invalid.")
-        observed_receipt_refs.update(refs)
-    if observed_receipt_refs != staged_logical_refs:
-        raise ValueError(
-            "Candidate staged source-array references differ from contract."
-        )
+        if (
+            spec.get("source_array_refs") != expected_refs
+            or spec.get("assembly") != expected_assemblies[role]
+        ):
+            raise ValueError(
+                f"Candidate staged logical-input role {role!r} differs from contract."
+            )
+        if role in {"ellipse_params", "ellipse_success"}:
+            authority_entries = [subject_by_ref.get(path) for path in expected_refs]
+            if any(not isinstance(entry, Mapping) for entry in authority_entries):
+                raise ValueError("Candidate staged eye-array authority is incomplete.")
+            source_dtypes = [entry["dtype"] for entry in authority_entries]
+            source_shapes = [entry["shape"] for entry in authority_entries]
+            if len(set(source_dtypes)) != 1 or any(
+                shape[0] != staged_receipt["row_count"] for shape in source_shapes
+            ):
+                raise ValueError(
+                    "Candidate staged eye-array authority is inconsistent."
+                )
+            snapshot_shape = [
+                staged_receipt["row_count"],
+                len(authority_entries),
+                *source_shapes[0][1:],
+            ]
+            expected_snapshot_dtype = source_dtypes[0]
+        else:
+            authority_entry = keypoint_arrays.get(role)
+            if (
+                not isinstance(authority_entry, Mapping)
+                or str(authority_entry.get("array_ref", "")).lstrip("/")
+                != expected_refs[0]
+            ):
+                raise ValueError("Candidate staged keypoint-array authority differs.")
+            source_dtypes = [authority_entry.get("dtype")]
+            source_shapes = [authority_entry.get("shape")]
+            snapshot_shape = authority_entry.get("shape")
+            expected_snapshot_dtype = authority_entry.get("dtype")
+        if (
+            spec.get("source_dtypes") != source_dtypes
+            or spec.get("source_shapes") != source_shapes
+            or spec.get("snapshot_dtype") != expected_snapshot_dtype
+            or spec.get("snapshot_shape") != snapshot_shape
+        ):
+            raise ValueError(
+                f"Candidate staged logical-input role {role!r} dtype/shape differs."
+            )
     return {
         "subject_shape_run": geometry_run,
         "keypoint_run": keypoint_run,

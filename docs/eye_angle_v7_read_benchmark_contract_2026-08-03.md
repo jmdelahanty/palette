@@ -60,7 +60,12 @@ selected consumer.
   subject-shape, canonical-keypoint, and diagnostic-keypoint run names must
   equal the scientific source contract and staged authority, while the staged
   selected-array inventory is reconstructed exactly from those contracts and
-  the canonical staged logical-input references.
+  the canonical staged logical-input references. Every logical role is bound
+  to its exact ordered source references, assembly rule, dtype, and shape using
+  the nested subject-shape and canonical-keypoint authorities; an equal-array
+  role permutation is therefore invalid. The benchmark validates those sealed
+  authority observations and their digests but does not rehash the historical
+  dependency payload bytes during each evidence replay.
 - Direct and root-inline consolidated metadata equivalence for both runs,
   including the exact installed receipt schema ID and version.
 
@@ -117,7 +122,7 @@ equivalence.
 - [x] Cover coordinated storage, publication, metadata-identity, source
   declaration, lineage, nested materialization, staged-receipt, and
   cross-envelope rehash attempts, including renamed source runs and altered
-  staged-array inventories.
+  staged-array inventories or logical-role reference swaps.
 - [x] Cover aliases, unsafe outputs, symlink archives, order errors, and false
   physical-I/O claims.
 - [ ] Run a five-repetition full-duration matrix on a published matched pair.
