@@ -42,6 +42,60 @@ EYE_ANGLE_STORAGE_PROFILE_CHOICES = (
 EYE_ANGLE_STORAGE_PLAN_ATTR = "eye_angle_storage_plan"
 EYE_ANGLE_STORAGE_CANDIDATE_ATTR = "eye_angle_storage_candidate"
 
+EYE_ANGLE_NAN_FILL_PATHS = frozenset(
+    {
+        "roi_angles",
+        "frame_angles",
+        "roi_vectors",
+        "support/ellipse_major",
+        "support/ellipse_minor",
+        "support/ellipse_ratio",
+        "support/body_frame/origin_xy",
+        "support/body_frame/forward_axis_xy",
+        "support/body_frame/left_axis_xy",
+        "support/body_frame/heading_deg",
+    }
+)
+EYE_ANGLE_FALSE_FILL_PATHS = frozenset(
+    {
+        "angle_channel_index/roi_available",
+        "angle_channel_index/frame_available",
+        "vector_channel_index/roi_available",
+        "vector_channel_index/frame_available",
+        "qa_channel_index/roi_available",
+        "qa_channel_index/frame_available",
+        "support/body_frame/valid",
+    }
+)
+EYE_ANGLE_ZERO_FILL_PATHS = frozenset(
+    {
+        "roi_qa",
+        "frame_qa",
+        "angle_channel_index/name",
+        "angle_channel_index/representation",
+        "angle_channel_index/eye",
+        "angle_channel_index/value_kind",
+        "angle_channel_index/units",
+        "angle_channel_index/source_channel",
+        "angle_channel_index/formula",
+        "angle_channel_index/compatibility_alias_of",
+        "vector_channel_index/name",
+        "vector_channel_index/representation",
+        "vector_channel_index/eye",
+        "vector_channel_index/value_kind",
+        "vector_channel_index/units",
+        "qa_channel_index/name",
+        "qa_channel_index/value_kind",
+        "qa_channel_index/dtype",
+        "support/instance_key",
+        "support/source_acquisition_frame_index",
+        "support/frame_indices",
+        "support/time_seconds",
+        "support/frame_time_seconds",
+        "support/body_frame/failure_reason_bytes",
+    }
+)
+
 
 # This profile is intentionally local to the eye-angle writer.  It is not a
 # registered or promoted production profile.  Complete logical rows remain
@@ -91,6 +145,24 @@ def build_eye_angle_candidate_storage_plan(
     """Derive the exact 41-array candidate plan from bytes, not row literals."""
 
     declarations = build_eye_angle_array_declarations(byte_planner_adopted=True)
+    declared_paths = {declaration.path for declaration in declarations}
+    fill_paths = (
+        EYE_ANGLE_NAN_FILL_PATHS
+        | EYE_ANGLE_FALSE_FILL_PATHS
+        | EYE_ANGLE_ZERO_FILL_PATHS
+    )
+    if fill_paths != declared_paths:
+        raise RuntimeError(
+            "Eye-angle physical fill inventory differs from the exact 41-array "
+            f"schema: missing={sorted(declared_paths - fill_paths)!r}, "
+            f"unexpected={sorted(fill_paths - declared_paths)!r}."
+        )
+    if (
+        EYE_ANGLE_NAN_FILL_PATHS & EYE_ANGLE_FALSE_FILL_PATHS
+        or EYE_ANGLE_NAN_FILL_PATHS & EYE_ANGLE_ZERO_FILL_PATHS
+        or EYE_ANGLE_FALSE_FILL_PATHS & EYE_ANGLE_ZERO_FILL_PATHS
+    ):
+        raise RuntimeError("Eye-angle physical fill classes overlap.")
     resolved = dimensions.contract_dimensions
     facts = {
         declaration.path: AnalysisArrayStorageFacts(
@@ -121,18 +193,44 @@ def eye_angle_storage_entries_by_path(
 
 
 def eye_angle_planned_fill_value(entry: AnalysisArrayStoragePlanReceipt) -> Any:
-    """Return the stable physical fill used by the candidate array factory.
+    """Return the exact frozen semantic fill for one maintained array."""
 
-    Every maintained eye-angle array is fully populated before completion.
-    Scientific invalidity remains encoded in the logical payload (for example
-    explicit NaNs in float channels), so a numeric zero physical fill does not
-    change logical values and avoids non-finite JSON metadata.
-    """
-
+    path = entry.declaration.path
     dtype = np.dtype(entry.facts.dtype)
-    if dtype == np.dtype(bool):
+    if path in EYE_ANGLE_NAN_FILL_PATHS:
+        if dtype.kind != "f":
+            raise ValueError(f"{path}: NaN fill requires a floating dtype.")
+        return float("nan")
+    if path in EYE_ANGLE_FALSE_FILL_PATHS:
+        if dtype != np.dtype(bool):
+            raise ValueError(f"{path}: false fill requires the bool dtype.")
         return False
-    return 0
+    if path in EYE_ANGLE_ZERO_FILL_PATHS:
+        if dtype == np.dtype(bool):
+            raise ValueError(f"{path}: bool arrays must use the false fill class.")
+        return 0
+    raise ValueError(f"{path}: no exact eye-angle physical fill is declared.")
+
+
+def _metadata_json_copy(array: Any) -> dict[str, Any]:
+    return json.loads(json.dumps(array.metadata.to_dict()))
+
+
+def _is_zarr_v3_nan_fill(value: Any) -> bool:
+    return (type(value) is float and np.isnan(value)) or value == "NaN"
+
+
+def _normalize_nan_fill_for_comparison(
+    declaration: Mapping[str, Any],
+    *,
+    path: str,
+) -> dict[str, Any]:
+    normalized = dict(declaration)
+    if path in EYE_ANGLE_NAN_FILL_PATHS and _is_zarr_v3_nan_fill(
+        normalized.get("fill_value")
+    ):
+        normalized["fill_value"] = "NaN"
+    return normalized
 
 
 def create_eye_angle_array_from_entry(
@@ -209,7 +307,7 @@ def validate_eye_angle_candidate_storage(
             continue
         entry = entries[path]
         try:
-            declaration = json.loads(json.dumps(array.metadata.to_dict()))
+            declaration = _metadata_json_copy(array)
         except (AttributeError, TypeError, ValueError) as exc:
             issues.append(
                 EyeAngleStorageIssue(
@@ -219,11 +317,29 @@ def validate_eye_angle_candidate_storage(
                 )
             )
             continue
+        expected_fill = eye_angle_planned_fill_value(entry)
+        declaration_for_plan = dict(declaration)
+        validation_fill = expected_fill
+        if path in EYE_ANGLE_NAN_FILL_PATHS:
+            if not _is_zarr_v3_nan_fill(declaration.get("fill_value")):
+                issues.append(
+                    EyeAngleStorageIssue(
+                        "storage_fill_value_mismatch",
+                        path,
+                        "Physical fill_value must be the Zarr-v3 NaN representation.",
+                    )
+                )
+            # The shared metadata comparator uses Python equality, where NaN
+            # is intentionally unequal to itself. Validate the semantic NaN
+            # above, then substitute one inert sentinel on both sides solely
+            # for comparison of every other declaration field.
+            declaration_for_plan["fill_value"] = 0
+            validation_fill = 0
         errors = validate_array_metadata_declaration_from_plan(
-            declaration,
+            declaration_for_plan,
             contract=entry.declaration.contract,
             plan=entry.plan,
-            fill_value=eye_angle_planned_fill_value(entry),
+            fill_value=validation_fill,
         )
         issues.extend(
             EyeAngleStorageIssue("storage_metadata_mismatch", path, error)
@@ -267,9 +383,13 @@ def validate_eye_angle_direct_consolidated_storage(
         )
         return tuple(issues)
     for path in sorted(direct_arrays):
-        direct = json.loads(json.dumps(direct_arrays[path].metadata.to_dict()))
-        consolidated = json.loads(
-            json.dumps(consolidated_arrays[path].metadata.to_dict())
+        direct = _normalize_nan_fill_for_comparison(
+            _metadata_json_copy(direct_arrays[path]),
+            path=path,
+        )
+        consolidated = _normalize_nan_fill_for_comparison(
+            _metadata_json_copy(consolidated_arrays[path]),
+            path=path,
         )
         if direct != consolidated:
             issues.append(
@@ -286,9 +406,12 @@ __all__ = [
     "EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID",
     "EYE_ANGLE_ACCESS_AWARE_CANDIDATE_V1",
     "EYE_ANGLE_LEGACY_EXPLICIT_STORAGE",
+    "EYE_ANGLE_FALSE_FILL_PATHS",
+    "EYE_ANGLE_NAN_FILL_PATHS",
     "EYE_ANGLE_STORAGE_CANDIDATE_ATTR",
     "EYE_ANGLE_STORAGE_PLAN_ATTR",
     "EYE_ANGLE_STORAGE_PROFILE_CHOICES",
+    "EYE_ANGLE_ZERO_FILL_PATHS",
     "EyeAngleStorageIssue",
     "build_eye_angle_candidate_storage_plan",
     "create_eye_angle_array_from_entry",

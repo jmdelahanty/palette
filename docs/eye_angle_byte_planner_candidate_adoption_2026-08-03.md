@@ -33,6 +33,10 @@ profile.
 - Small eager semantic tables: one ordinary chunk/object, no shard.
 - Codec: Zarr v3 bytes + Zstd level 0; indexed shards use bytes + CRC32C for
   the index at the end.
+- Physical fill is a closed path-aware contract across all 41 arrays: NaN for
+  float payload/support arrays whose frozen invalid or unavailable sentinel is
+  NaN; false for boolean availability/validity arrays; and zero for fixed-width
+  text, QA bit fields, and mandatory identity/time coordinates.
 - Access unit: one complete logical record. Fixed trailing semantic axes are
   never split merely to hit a byte target.
 - Ownership: immutable whole-shard, single serial writer. Parallel logical row
@@ -66,8 +70,10 @@ The run stores `eye_angle_storage_plan`, an exact
 Completion recomputes the plan from the executable schema and runtime
 dimensions, requires exact receipt equality even after an attacker recomputes
 the payload digest, and validates every direct Zarr array declaration against
-the resolved plan. Ordinary compact-v7 logical and value-alias validation still
-runs unchanged.
+the resolved plan, including the exact semantic fill class. Zarr-v3's direct
+JSON string `"NaN"` and its decoded in-memory float NaN are normalized only for
+that top-level metadata field; other metadata remains exact. Ordinary
+compact-v7 logical and value-alias validation still runs unchanged.
 
 The active writer does not consolidate the recording root because it is
 mutating an existing archive and the candidate is not selector-visible. A

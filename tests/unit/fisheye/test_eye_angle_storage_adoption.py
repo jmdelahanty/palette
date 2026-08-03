@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 
 import numpy as np
 import pytest
@@ -9,9 +10,13 @@ import zarr
 from fisheye.analysis.eye_angle_schema import EyeAngleDimensions
 from fisheye.analysis.eye_angle_storage import (
     EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    EYE_ANGLE_FALSE_FILL_PATHS,
+    EYE_ANGLE_NAN_FILL_PATHS,
     EYE_ANGLE_STORAGE_PLAN_ATTR,
+    EYE_ANGLE_ZERO_FILL_PATHS,
     build_eye_angle_candidate_storage_plan,
     create_eye_angle_array_from_entry,
+    eye_angle_planned_fill_value,
     eye_angle_storage_entries_by_path,
     validate_eye_angle_candidate_storage,
     validate_eye_angle_direct_consolidated_storage,
@@ -60,6 +65,55 @@ def test_candidate_plan_is_byte_derived_for_short_and_million_row_runs() -> None
     assert entries["roi_angles"].plan.write_ownership == "whole_shard_single_writer"
 
 
+def test_exact_semantic_fill_map_partitions_all_41_arrays() -> None:
+    receipt = build_eye_angle_candidate_storage_plan(EyeAngleDimensions(5, 7))
+    entries = eye_angle_storage_entries_by_path(receipt)
+    assert len(entries) == 41
+    assert (
+        EYE_ANGLE_NAN_FILL_PATHS
+        | EYE_ANGLE_FALSE_FILL_PATHS
+        | EYE_ANGLE_ZERO_FILL_PATHS
+    ) == set(entries)
+    assert not (EYE_ANGLE_NAN_FILL_PATHS & EYE_ANGLE_FALSE_FILL_PATHS)
+    assert not (EYE_ANGLE_NAN_FILL_PATHS & EYE_ANGLE_ZERO_FILL_PATHS)
+    assert not (EYE_ANGLE_FALSE_FILL_PATHS & EYE_ANGLE_ZERO_FILL_PATHS)
+    for path, entry in entries.items():
+        fill = eye_angle_planned_fill_value(entry)
+        if path in EYE_ANGLE_NAN_FILL_PATHS:
+            assert type(fill) is float and np.isnan(fill)
+        elif path in EYE_ANGLE_FALSE_FILL_PATHS:
+            assert fill is False
+        else:
+            assert fill == 0 and fill is not False
+
+
+def test_created_metadata_uses_exact_nan_false_and_zero_fills(tmp_path) -> None:
+    dimensions = EyeAngleDimensions(5, 7)
+    archive = tmp_path / "fills.zarr"
+    root = zarr.open_group(str(archive), mode="w", zarr_format=3)
+    run = _create_planned_run(root, dimensions)
+
+    assert run["roi_angles"].metadata.to_dict()["fill_value"] == "NaN"
+    assert (
+        run["support/body_frame/heading_deg"].metadata.to_dict()["fill_value"] == "NaN"
+    )
+    assert run["support/body_frame/valid"].metadata.to_dict()["fill_value"] is False
+    assert run["roi_qa"].metadata.to_dict()["fill_value"] == 0
+    assert run["support/instance_key"].metadata.to_dict()["fill_value"] == 0
+
+    direct_nan = json.loads(
+        (
+            archive
+            / "analysis"
+            / "eye_angle_runs"
+            / "candidate"
+            / "roi_angles"
+            / "zarr.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert direct_nan["fill_value"] == "NaN"
+
+
 def test_candidate_receipt_rejects_rehashed_plan_tampering(tmp_path) -> None:
     dimensions = EyeAngleDimensions(5, 7)
     root = zarr.open_group(str(tmp_path / "tampered.zarr"), mode="w", zarr_format=3)
@@ -91,6 +145,25 @@ def test_candidate_rejects_array_not_created_from_resolved_plan(tmp_path) -> Non
     assert any(
         issue.code == "storage_metadata_mismatch"
         and issue.path == "support/instance_key"
+        for issue in issues
+    )
+
+
+def test_candidate_rejects_zero_fill_for_nan_semantic_array(tmp_path) -> None:
+    dimensions = EyeAngleDimensions(5, 7)
+    root = zarr.open_group(str(tmp_path / "wrong-fill.zarr"), mode="w", zarr_format=3)
+    run = _create_planned_run(root, dimensions)
+    del run["roi_angles"]
+    run.create_array(
+        "roi_angles",
+        data=np.zeros((5, 141), dtype=np.float32),
+        chunks=(5, 141),
+        fill_value=0,
+    )
+
+    issues = validate_eye_angle_candidate_storage(run, dimensions=dimensions)
+    assert any(
+        issue.code == "storage_fill_value_mismatch" and issue.path == "roi_angles"
         for issue in issues
     )
 
