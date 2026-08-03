@@ -53,9 +53,28 @@ selected consumer.
 - Exact atomic-publication root and nested field sets, owner, target, policy,
   physical-copy evidence, all four complete validation phases, materialization
   and source-revision bindings, visibility policy, unchanged parent-selector
-  snapshot, and nonpromotion policy.
+  snapshot, and nonpromotion policy. The materialization check reuses the
+  installed canonical staged-input receipt validator and exact-checks the
+  compute, source-staging, inventory, capacity, algorithm, and output
+  subcontracts with cross-envelope digest/identity binding.
 - Direct and root-inline consolidated metadata equivalence for both runs,
   including the exact installed receipt schema ID and version.
+
+Historical timestamps, elapsed times, throughput, host/job identity, measured
+free space, and the free-form invocation string are exact-shaped immutable
+runtime observations. The benchmark rejects additions, type changes, and
+cross-envelope divergence in those fields, but does not claim it can reproduce
+their historical truth. They are not scientific or coordinate authority;
+scientific inputs, compute parameters, logical schemas, and contract identities
+remain executable and digest-bound.
+
+The atomic publisher's physical-copy file count, byte count, inventory digest,
+and content digest are also exact-shaped immutable publisher observations. They
+describe the copied tree before owner and publication-receipt metadata were
+added, so they are not presented as a replayable hash of the final run tree.
+Executable final evidence comes from strict decoded equality, reconstructed
+array declarations, contract validation, and direct/consolidated metadata
+equivalence.
 
 ## Safety and evidence rules
 
@@ -92,7 +111,8 @@ selected consumer.
 - [x] Guard archive metadata read-only before/after the matrix.
 - [x] Freeze diagnostic-only adapter and hard nonpromotion fields.
 - [x] Cover coordinated storage, publication, metadata-identity, source
-  declaration, and lineage rehash attempts.
+  declaration, lineage, nested materialization, staged-receipt, and
+  cross-envelope rehash attempts.
 - [x] Cover aliases, unsafe outputs, symlink archives, order errors, and false
   physical-I/O claims.
 - [ ] Run a five-repetition full-duration matrix on a published matched pair.

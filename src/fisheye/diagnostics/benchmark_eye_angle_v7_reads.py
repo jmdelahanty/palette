@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 import zarr
 
+from fisheye.analysis import eye_angle_analysis as eye_writer
 from fisheye.analysis import eye_angle_io
 from fisheye.analysis.eye_angle_analysis import (
     validate_eye_angle_persisted_contract_manifests,
@@ -61,6 +62,7 @@ from fisheye.analysis_workflows.materializers.atomic_run_publisher import (
 )
 from fisheye.analysis_workflows.materializers.eye_angles import (
     MATERIALIZATION_SCHEMA_ID,
+    NATIVE_THREAD_ENV_VARS,
     PUBLISH_SCHEMA_ID,
     SOURCE_REVISION_AUDIT_SCHEMA_ID,
     STAGING_SCHEMA_ID,
@@ -561,16 +563,16 @@ def _require_source_array_declarations(
         and declaration.get("node_type") == "array"
     }
     if set(observed) != set(expected):
-        raise ValueError("Source array declaration inventory differs from executable v7.")
+        raise ValueError(
+            "Source array declaration inventory differs from executable v7."
+        )
     resolved_dimensions = dimensions.contract_dimensions
     for path, contract in expected.items():
         declaration = observed[path]
         try:
             observed_dtype = np.dtype(declaration.get("data_type")).str
         except TypeError as exc:
-            raise ValueError(
-                f"Source array dtype is invalid at {path!r}."
-            ) from exc
+            raise ValueError(f"Source array dtype is invalid at {path!r}.") from exc
         expected_dtype = np.dtype(contract.contract.dtype.numpy_dtype).str
         expected_shape = _resolved_source_shape(
             contract.contract.shape_template,
@@ -589,11 +591,8 @@ def _require_source_array_declarations(
             not isinstance(chunk_grid, Mapping)
             or chunk_grid.get("name") != "regular"
             or not isinstance(chunk_grid.get("configuration"), Mapping)
-            or not isinstance(
-                chunk_grid["configuration"].get("chunk_shape"), list
-            )
-            or len(chunk_grid["configuration"]["chunk_shape"])
-            != len(expected_shape)
+            or not isinstance(chunk_grid["configuration"].get("chunk_shape"), list)
+            or len(chunk_grid["configuration"]["chunk_shape"]) != len(expected_shape)
             or not isinstance(codecs, list)
             or not codecs
         ):
@@ -966,6 +965,420 @@ def _require_metadata_guard(value: object) -> None:
         raise ValueError("Eye-angle metadata guard digest mismatch.")
 
 
+def _require_nonnegative_number(value: object, *, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise ValueError(f"{label} is invalid.")
+    return float(value)
+
+
+def _require_source_inventory(value: object) -> Mapping[str, Any]:
+    fields_ = {
+        "valid",
+        "expected_file_count",
+        "observed_file_count",
+        "expected_bytes",
+        "observed_bytes",
+        "expected_inventory_sha256",
+        "observed_inventory_sha256",
+        "expected_revision_inventory_sha256",
+        "observed_revision_inventory_sha256",
+        "missing",
+        "size_mismatches",
+        "mtime_mismatches",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields_:
+        raise ValueError("Candidate source inventory field set is not exact.")
+    if (
+        value.get("valid") is not True
+        or value.get("missing") != []
+        or value.get("size_mismatches") != []
+        or value.get("mtime_mismatches") != []
+        or type(value.get("expected_file_count")) is not int
+        or value["expected_file_count"] < 1
+        or value.get("observed_file_count") != value["expected_file_count"]
+        or type(value.get("expected_bytes")) is not int
+        or value["expected_bytes"] < 1
+        or value.get("observed_bytes") != value["expected_bytes"]
+        or value.get("expected_inventory_sha256")
+        != value.get("observed_inventory_sha256")
+        or value.get("expected_revision_inventory_sha256")
+        != value.get("observed_revision_inventory_sha256")
+        or not _is_sha256(value.get("expected_inventory_sha256"))
+        or not _is_sha256(value.get("expected_revision_inventory_sha256"))
+    ):
+        raise ValueError("Candidate source inventory is not complete and exact.")
+    return value
+
+
+def _require_source_revision_audit(
+    value: object,
+    *,
+    archive: Path,
+    expected_contract_sha256: str,
+    expected_metadata_sha256: str,
+) -> Mapping[str, Any]:
+    fields_ = {
+        "schema_id",
+        "status",
+        "checked_at_utc",
+        "authoritative_source_zarr",
+        "subject_shape_run",
+        "keypoint_run",
+        "inventory",
+        "expected_source_metadata_sha256",
+        "observed_source_metadata_sha256",
+        "expected_source_contract_sha256",
+        "observed_source_contract_sha256",
+        "full_selected_scientific_input_content_hash",
+        "errors",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != fields_
+        or value.get("schema_id") != SOURCE_REVISION_AUDIT_SCHEMA_ID
+        or value.get("status") != "current"
+        or type(value.get("checked_at_utc")) is not str
+        or not value["checked_at_utc"]
+        or value.get("authoritative_source_zarr") != str(archive)
+        or type(value.get("subject_shape_run")) is not str
+        or not value["subject_shape_run"]
+        or type(value.get("keypoint_run")) is not str
+        or not value["keypoint_run"]
+        or value.get("errors") != []
+        or value.get("full_selected_scientific_input_content_hash") is not True
+        or value.get("expected_source_metadata_sha256") != expected_metadata_sha256
+        or value.get("observed_source_metadata_sha256") != expected_metadata_sha256
+        or value.get("expected_source_contract_sha256") != expected_contract_sha256
+        or value.get("observed_source_contract_sha256") != expected_contract_sha256
+    ):
+        raise ValueError("Candidate source-revision receipt is invalid.")
+    _require_source_inventory(value.get("inventory"))
+    return value
+
+
+def _require_staged_input_receipt(
+    value: object,
+    *,
+    expected_sha256: object,
+    expected_contract_sha256: str,
+    dimensions: EyeAngleDimensions,
+) -> Mapping[str, Any]:
+    try:
+        canonical = eye_writer._canonical_staged_input_integrity_receipt(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Candidate staged-input integrity receipt is invalid."
+        ) from exc
+    if (
+        canonical != _strict_json_copy(value)
+        or canonical.get("record_sha256") != expected_sha256
+        or canonical.get("source_contract_sha256") != expected_contract_sha256
+        or canonical.get("row_count") != dimensions.n_roi_rows
+    ):
+        raise ValueError("Candidate staged-input integrity receipt binding differs.")
+    return canonical
+
+
+def _require_materialization_contracts(
+    materialization: Mapping[str, Any],
+    *,
+    archive: Path,
+    local_staged: Path,
+    candidate_attrs: Mapping[str, Any],
+    dimensions: EyeAngleDimensions,
+    final_validation: Mapping[str, Any],
+    publication_revision: Mapping[str, Any],
+) -> None:
+    expected_contract_sha256 = canonical_json_sha256(
+        candidate_attrs.get("eye_angle_source_contracts")
+    )
+    source_metadata_sha256 = materialization.get("source_metadata_sha256")
+    if materialization.get(
+        "source_contract_sha256"
+    ) != expected_contract_sha256 or not _is_sha256(source_metadata_sha256):
+        raise ValueError("Candidate materialization source binding is invalid.")
+    staged_receipt = _require_staged_input_receipt(
+        materialization.get("staged_input_integrity_receipt"),
+        expected_sha256=materialization.get("staged_input_integrity_receipt_sha256"),
+        expected_contract_sha256=expected_contract_sha256,
+        dimensions=dimensions,
+    )
+    if (
+        candidate_attrs.get("staged_input_integrity_receipt_sha256")
+        != staged_receipt["record_sha256"]
+    ):
+        raise ValueError("Candidate persisted staged-input digest differs.")
+
+    compute = materialization.get("compute")
+    compute_fields = {
+        "writer",
+        "writer_arguments",
+        "stage_command",
+        "duration_seconds",
+        "chunk_rows",
+        "angle_chunk_rows",
+        "angle_chunk_columns",
+        "execution_backend",
+        "scheduler",
+        "num_workers",
+        "native_thread_environment",
+        "fps",
+        "fps_source",
+        "smoothing_window",
+        "layout",
+        "storage_profile_id",
+        "angle_column_order_profile",
+    }
+    if not isinstance(compute, Mapping) or set(compute) != compute_fields:
+        raise ValueError("Candidate materialization compute field set is not exact.")
+    writer_arguments = compute.get("writer_arguments")
+    native_environment = compute.get("native_thread_environment")
+    fps = compute.get("fps")
+    smoothing_window = compute.get("smoothing_window")
+    if (
+        compute.get("writer") != "fisheye.analysis.eye_angle_analysis"
+        or not isinstance(writer_arguments, list)
+        or not writer_arguments
+        or any(type(item) is not str for item in writer_arguments)
+        or writer_arguments[0] != str(local_staged)
+        or type(compute.get("stage_command")) is not str
+        or not compute["stage_command"]
+        or type(compute.get("chunk_rows")) is not int
+        or compute["chunk_rows"] <= 0
+        or type(compute.get("angle_chunk_rows")) is not int
+        or compute["angle_chunk_rows"] <= 0
+        or type(compute.get("angle_chunk_columns")) is not int
+        or compute["angle_chunk_columns"] <= 0
+        or compute["angle_chunk_columns"]
+        != dimensions.contract_dimensions["angle_block_width"]
+        or compute.get("execution_backend") not in eye_writer.EXECUTION_BACKENDS
+        or compute.get("scheduler") not in eye_writer.SUPPORTED_SCHEDULERS
+        or type(compute.get("num_workers")) is not int
+        or compute["num_workers"] <= 0
+        or not isinstance(native_environment, Mapping)
+        or set(native_environment) != set(NATIVE_THREAD_ENV_VARS)
+        or any(
+            type(native_environment.get(name)) is not str
+            or not native_environment[name].isdigit()
+            or int(native_environment[name]) <= 0
+            for name in NATIVE_THREAD_ENV_VARS
+        )
+        or (
+            fps is not None
+            and (
+                isinstance(fps, bool)
+                or not isinstance(fps, (int, float))
+                or not math.isfinite(float(fps))
+                or float(fps) <= 0
+            )
+        )
+        or compute.get("fps_source")
+        not in {"cli_override", "authoritative_recording_metadata", "unavailable"}
+        or (fps is None) != (compute.get("fps_source") == "unavailable")
+        or (
+            smoothing_window is not None
+            and (type(smoothing_window) is not int or smoothing_window <= 0)
+        )
+        or compute.get("layout") != EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+        or compute.get("storage_profile_id")
+        != EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+        or compute.get("angle_column_order_profile")
+        != eye_writer.EYE_ANGLE_COLUMN_ORDER_PROFILE
+    ):
+        raise ValueError("Candidate materialization compute contract is invalid.")
+    _require_nonnegative_number(
+        compute.get("duration_seconds"),
+        label="Candidate materialization compute duration",
+    )
+    required_arguments = {
+        "--chunk-size": str(compute["chunk_rows"]),
+        "--dense-chunk-rows": str(compute["angle_chunk_rows"]),
+        "--dense-chunk-columns": str(compute["angle_chunk_columns"]),
+        "--execution-backend": str(compute["execution_backend"]),
+        "--scheduler": str(compute["scheduler"]),
+        "--num-workers": str(compute["num_workers"]),
+        "--layout": EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+        "--storage-profile": EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    }
+    for flag, expected in required_arguments.items():
+        if (
+            writer_arguments.count(flag) != 1
+            or writer_arguments.index(flag) + 1 >= len(writer_arguments)
+            or writer_arguments[writer_arguments.index(flag) + 1] != expected
+        ):
+            raise ValueError("Candidate materialization writer arguments differ.")
+
+    for name, schema_id, schema_version, attr_name, digest_name in (
+        (
+            "algorithm_contract",
+            eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID,
+            eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION,
+            "eye_angle_algorithm_contract",
+            "algorithm_contract_sha256",
+        ),
+        (
+            "output_contract",
+            eye_writer.EYE_ANGLE_OUTPUT_SCHEMA_ID,
+            eye_writer.EYE_ANGLE_OUTPUT_SCHEMA_VERSION,
+            "eye_angle_output_schema",
+            "output_schema_sha256",
+        ),
+    ):
+        contract = materialization.get(name)
+        expected_digest = canonical_json_sha256(candidate_attrs.get(attr_name))
+        if (
+            not isinstance(contract, Mapping)
+            or set(contract)
+            != {"schema_id", "schema_version", "persisted_run_attr", "sha256"}
+            or contract.get("schema_id") != schema_id
+            or contract.get("schema_version") != schema_version
+            or contract.get("persisted_run_attr") != attr_name
+            or contract.get("sha256") != expected_digest
+            or final_validation.get(digest_name) != expected_digest
+        ):
+            raise ValueError(f"Candidate materialization {name} is invalid.")
+
+    staging = materialization.get("source_staging")
+    staging_fields = {
+        "schema_id",
+        "status",
+        "started_at_utc",
+        "completed_at_utc",
+        "duration_seconds",
+        "mib_per_second",
+        "copy_backend",
+        "host",
+        "lsb_jobid",
+        "authoritative_source_zarr",
+        "node_local_staged_zarr",
+        "subject_shape_run",
+        "keypoint_run",
+        "source_keypoint_run",
+        "row_count",
+        "frame_count",
+        "selected_arrays",
+        "source_contracts",
+        "source_contract_sha256",
+        "source_authority_mode",
+        "staged_input_integrity_receipt_sha256",
+        "staged_input_integrity_receipt",
+        "source_metadata_sha256",
+        "inventory",
+        "source_revision_audit",
+        "capacity",
+    }
+    if not isinstance(staging, Mapping) or set(staging) != staging_fields:
+        raise ValueError("Candidate source-staging receipt field set is not exact.")
+    selected_arrays = staging.get("selected_arrays")
+    if (
+        staging.get("schema_id") != STAGING_SCHEMA_ID
+        or staging.get("status") != "complete"
+        or any(
+            type(staging.get(field)) is not str or not staging[field]
+            for field in ("started_at_utc", "completed_at_utc", "host")
+        )
+        or staging.get("lsb_jobid") is not None
+        and type(staging.get("lsb_jobid")) is not str
+        or staging.get("copy_backend") not in {"python", "rsync"}
+        or staging.get("authoritative_source_zarr") != str(archive)
+        or Path(str(staging.get("node_local_staged_zarr"))) != local_staged
+        or type(staging.get("subject_shape_run")) is not str
+        or not staging["subject_shape_run"]
+        or type(staging.get("keypoint_run")) is not str
+        or not staging["keypoint_run"]
+        or staging.get("source_keypoint_run") is not None
+        and type(staging.get("source_keypoint_run")) is not str
+        or staging.get("row_count") != dimensions.n_roi_rows
+        or staging.get("frame_count") != dimensions.n_frames
+        or not isinstance(selected_arrays, list)
+        or not selected_arrays
+        or any(type(item) is not str or not item for item in selected_arrays)
+        or selected_arrays != sorted(set(selected_arrays))
+        or staging.get("source_contracts")
+        != candidate_attrs.get("eye_angle_source_contracts")
+        or staging.get("source_contract_sha256") != expected_contract_sha256
+        or staging.get("source_authority_mode") != "digest_bound_staged_subset"
+        or staging.get("staged_input_integrity_receipt_sha256")
+        != staged_receipt["record_sha256"]
+        or staging.get("staged_input_integrity_receipt") != staged_receipt
+        or staging.get("source_metadata_sha256") != source_metadata_sha256
+    ):
+        raise ValueError("Candidate source-staging receipt is invalid.")
+    duration = _require_nonnegative_number(
+        staging.get("duration_seconds"), label="Candidate source-staging duration"
+    )
+    throughput = staging.get("mib_per_second")
+    if throughput is not None:
+        _require_nonnegative_number(
+            throughput, label="Candidate source-staging throughput"
+        )
+        if duration == 0:
+            raise ValueError("Candidate source-staging throughput has zero duration.")
+    inventory = _require_source_inventory(staging.get("inventory"))
+    staging_revision = _require_source_revision_audit(
+        staging.get("source_revision_audit"),
+        archive=archive,
+        expected_contract_sha256=expected_contract_sha256,
+        expected_metadata_sha256=str(source_metadata_sha256),
+    )
+    for field in (
+        "subject_shape_run",
+        "keypoint_run",
+        "inventory",
+        "expected_source_metadata_sha256",
+        "observed_source_metadata_sha256",
+        "expected_source_contract_sha256",
+        "observed_source_contract_sha256",
+        "full_selected_scientific_input_content_hash",
+        "errors",
+    ):
+        if staging_revision.get(field) != publication_revision.get(field):
+            raise ValueError("Candidate source-revision envelopes diverge.")
+    if staging_revision.get("inventory") != inventory:
+        raise ValueError("Candidate staging inventory and revision audit differ.")
+
+    capacity = staging.get("capacity")
+    capacity_fields = {
+        "check_enabled",
+        "free_bytes_before_copy",
+        "required_bytes_estimate",
+        "source_bytes",
+        "estimated_output_bytes_per_copy",
+        "estimated_output_copy_count",
+        "margin_bytes",
+    }
+    if (
+        not isinstance(capacity, Mapping)
+        or set(capacity) != capacity_fields
+        or type(capacity.get("check_enabled")) is not bool
+        or any(
+            type(capacity.get(field)) is not int or capacity[field] < 0
+            for field in (
+                "free_bytes_before_copy",
+                "required_bytes_estimate",
+                "source_bytes",
+                "estimated_output_bytes_per_copy",
+                "margin_bytes",
+            )
+        )
+        or capacity.get("estimated_output_copy_count") != 2
+        or capacity.get("source_bytes") != inventory["expected_bytes"]
+        or capacity.get("required_bytes_estimate")
+        != capacity["source_bytes"]
+        + capacity["estimated_output_copy_count"]
+        * capacity["estimated_output_bytes_per_copy"]
+        + capacity["margin_bytes"]
+        or capacity.get("check_enabled") is True
+        and capacity["free_bytes_before_copy"] < capacity["required_bytes_estimate"]
+    ):
+        raise ValueError("Candidate source-staging capacity receipt is invalid.")
+
+
 def _require_publication_receipt(
     value: object,
     *,
@@ -1153,6 +1566,8 @@ def _require_publication_receipt(
         }
         or materialization.get("schema_id") != MATERIALIZATION_SCHEMA_ID
         or materialization.get("status") != "complete"
+        or type(materialization.get("completed_at_utc")) is not str
+        or not materialization["completed_at_utc"]
         or materialization.get("authoritative_source_zarr") != str(archive)
         or Path(str(materialization.get("node_local_staged_zarr"))) != local_staged
         or materialization.get("source_access_policy")
@@ -1207,47 +1622,28 @@ def _require_publication_receipt(
         or regular_validation != final_physical_validation
     ):
         raise ValueError("Candidate materialization validation phases differ.")
-    staging = materialization.get("source_staging")
-    if (
-        not isinstance(staging, Mapping)
-        or staging.get("schema_id") != STAGING_SCHEMA_ID
-        or staging.get("status") != "complete"
-        or staging.get("authoritative_source_zarr") != str(archive)
-        or Path(str(staging.get("node_local_staged_zarr"))) != local_staged
-    ):
-        raise ValueError("Candidate source-staging receipt is invalid.")
     revision = value.get("source_revision_audit")
-    if (
-        not isinstance(revision, Mapping)
-        or set(revision)
-        != {
-            "schema_id",
-            "status",
-            "checked_at_utc",
-            "authoritative_source_zarr",
-            "subject_shape_run",
-            "keypoint_run",
-            "inventory",
-            "expected_source_metadata_sha256",
-            "observed_source_metadata_sha256",
-            "expected_source_contract_sha256",
-            "observed_source_contract_sha256",
-            "full_selected_scientific_input_content_hash",
-            "errors",
-        }
-        or revision.get("schema_id") != SOURCE_REVISION_AUDIT_SCHEMA_ID
-        or revision.get("status") != "current"
-        or revision.get("authoritative_source_zarr") != str(archive)
-        or revision.get("errors") != []
-        or revision.get("full_selected_scientific_input_content_hash") is not True
-        or revision.get("expected_source_metadata_sha256")
-        != revision.get("observed_source_metadata_sha256")
-        or revision.get("expected_source_contract_sha256")
-        != revision.get("observed_source_contract_sha256")
-        or not _is_sha256(revision.get("expected_source_metadata_sha256"))
-        or not _is_sha256(revision.get("expected_source_contract_sha256"))
-    ):
-        raise ValueError("Candidate source-revision receipt is invalid.")
+    expected_contract_sha256 = canonical_json_sha256(
+        candidate_attrs.get("eye_angle_source_contracts")
+    )
+    source_metadata_sha256 = materialization.get("source_metadata_sha256")
+    if not _is_sha256(source_metadata_sha256):
+        raise ValueError("Candidate materialization source-metadata digest is invalid.")
+    revision = _require_source_revision_audit(
+        revision,
+        archive=archive,
+        expected_contract_sha256=expected_contract_sha256,
+        expected_metadata_sha256=str(source_metadata_sha256),
+    )
+    _require_materialization_contracts(
+        materialization,
+        archive=archive,
+        local_staged=local_staged,
+        candidate_attrs=candidate_attrs,
+        dimensions=dimensions,
+        final_validation=final_physical_validation,
+        publication_revision=revision,
+    )
     visibility = value.get("metadata_visibility_policy")
     if visibility != {
         "authoritative_root_consolidation": "after_final_publisher_metadata_write",
@@ -1785,11 +2181,16 @@ def require_workload(value: Mapping[str, Any]) -> None:
         != payload["dependency_metadata_declarations"]
     ):
         raise ValueError("Eye-angle dependency metadata binding differs.")
-    if _metadata_declarations(
-        archive,
-        run_path=payload["source_run_path"],
-    ) != source_declarations:
-        raise ValueError("Source physical metadata declarations changed or were rehashed.")
+    if (
+        _metadata_declarations(
+            archive,
+            run_path=payload["source_run_path"],
+        )
+        != source_declarations
+    ):
+        raise ValueError(
+            "Source physical metadata declarations changed or were rehashed."
+        )
     if (
         payload["candidate_selector_eligible"] is not False
         or payload["promotion_authorized"] is not False

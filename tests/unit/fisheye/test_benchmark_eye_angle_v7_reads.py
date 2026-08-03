@@ -31,6 +31,27 @@ def _resign(value: dict[str, object], schema_id: str) -> dict[str, object]:
     }
 
 
+def _tamper_staged_receipt_with_coordinated_rehash(
+    publication: dict[str, object],
+) -> None:
+    materialization = publication["materialization"]
+    assert isinstance(materialization, dict)
+    staged_receipt = materialization["staged_input_integrity_receipt"]
+    assert isinstance(staged_receipt, dict)
+    staged_receipt["unexpected_authority"] = True
+    body = {
+        key: value for key, value in staged_receipt.items() if key != "record_sha256"
+    }
+    staged_receipt["record_sha256"] = canonical_json_sha256(body)
+    materialization["staged_input_integrity_receipt_sha256"] = staged_receipt[
+        "record_sha256"
+    ]
+    staging = materialization["source_staging"]
+    assert isinstance(staging, dict)
+    staging["staged_input_integrity_receipt"] = deepcopy(staged_receipt)
+    staging["staged_input_integrity_receipt_sha256"] = staged_receipt["record_sha256"]
+
+
 @pytest.fixture(scope="module")
 def eye_angle_pair(tmp_path_factory: pytest.TempPathFactory) -> Path:
     directory = tmp_path_factory.mktemp("eye-angle-v7-benchmark")
@@ -183,7 +204,9 @@ def test_dependency_lineage_coordinated_rehash_is_rejected(
             canonical_json_sha256(declarations)
         )
     tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
-    with pytest.raises(ValueError, match="dependency identity differs"):
+    with pytest.raises(
+        ValueError, match="dependency identity differs|source-revision receipt"
+    ):
         benchmark.require_workload(tampered)
 
 
@@ -192,11 +215,25 @@ def test_dependency_lineage_coordinated_rehash_is_rejected(
     (
         lambda receipt: receipt.__setitem__("unexpected_authority", True),
         lambda receipt: receipt.__setitem__("policy", "hostile.policy"),
-        lambda receipt: receipt["physical_copy"].__setitem__(
-            "unverified_bytes", 1
-        ),
+        lambda receipt: receipt["physical_copy"].__setitem__("unverified_bytes", 1),
         lambda receipt: receipt["final_validation"].__setitem__(
             "unexpected_phase_claim", True
+        ),
+        lambda receipt: receipt["materialization"]["compute"].__setitem__(
+            "unexpected_authority", True
+        ),
+        lambda receipt: receipt["materialization"]["compute"].__setitem__(
+            "writer", "hostile.writer"
+        ),
+        lambda receipt: receipt["materialization"]["source_staging"].__setitem__(
+            "unexpected_authority", True
+        ),
+        _tamper_staged_receipt_with_coordinated_rehash,
+        lambda receipt: receipt["materialization"]["algorithm_contract"].__setitem__(
+            "unexpected_authority", True
+        ),
+        lambda receipt: receipt["materialization"]["output_contract"].__setitem__(
+            "sha256", "0" * 64
         ),
     ),
 )
@@ -218,14 +255,45 @@ def test_atomic_publication_coordinated_rehash_is_rejected(
     payload["candidate_publication_receipt_digest"] = canonical_json_sha256(receipt)
     candidate_path = payload["candidate_run_path"]
     declarations = payload["candidate_metadata_declarations"]
-    declarations[candidate_path]["attributes"]["cluster_output_staging"] = deepcopy(
-        receipt
-    )
+    candidate_attrs = declarations[candidate_path]["attributes"]
+    candidate_attrs["cluster_output_staging"] = deepcopy(receipt)
+    candidate_attrs["node_local_materialization"] = deepcopy(receipt["materialization"])
+    candidate_attrs["staged_input_integrity_receipt_sha256"] = receipt[
+        "materialization"
+    ]["staged_input_integrity_receipt_sha256"]
     payload["candidate_metadata_equivalence"]["declarations_sha256"] = (
         canonical_json_sha256(declarations)
     )
     tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
-    with pytest.raises(ValueError, match="publication|physical-copy|validation"):
+    with pytest.raises(
+        ValueError,
+        match="publication|physical-copy|validation|materialization|staging|staged-input",
+    ):
+        benchmark.require_workload(tampered)
+
+
+def test_materialization_cross_envelope_divergence_is_rejected(
+    eye_angle_pair: Path,
+) -> None:
+    workload = benchmark._preflight(
+        eye_angle_pair,
+        source_run_name="eye_source",
+        candidate_run_name="eye_candidate",
+        seed=37,
+        repetitions=1,
+    )
+    tampered = deepcopy(workload)
+    payload = tampered["payload"]
+    candidate_path = payload["candidate_run_path"]
+    declarations = payload["candidate_metadata_declarations"]
+    declarations[candidate_path]["attributes"]["node_local_materialization"]["compute"][
+        "writer"
+    ] = "hostile.persisted.writer"
+    payload["candidate_metadata_equivalence"]["declarations_sha256"] = (
+        canonical_json_sha256(declarations)
+    )
+    tampered = _resign(tampered, benchmark.WORKLOAD_SCHEMA_ID)
+    with pytest.raises(ValueError, match="materialization receipt is not exact"):
         benchmark.require_workload(tampered)
 
 
