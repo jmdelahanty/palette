@@ -3,8 +3,8 @@
 Date: 2026-08-03
 
 Status: active implementation checklist; read-only census and correctness
-phases 1-2 complete; no production profile or scientific selector authority
-changed by these checkpoints
+phases 1-2 complete; initial phase-3 catalog closure complete; no production
+profile or scientific selector authority changed by these checkpoints
 
 ## Purpose
 
@@ -17,16 +17,18 @@ upstream observation families are not re-audited here, except for the
 `body_frame_runs` and `keypoint_quality_runs` companion analytics that already
 demonstrate the newer shared schema and byte-planner design.
 
-The audit used the `sun` checkout at commit `83ac49be` and made no repository or
-production-data changes.
+The audit used the `sun` checkout at commit `83ac49be`. Implementation proceeds
+on the isolated coordination branch named below; it has made repository changes
+but no production-data, registry-authority, profile-promotion, or scientific
+selector changes.
 
 ## Executive Decision
 
 Palette does **not** yet have uniform production-grade storage contracts for
 all analytics outputs.
 
-Seven maintained array-bearing derived families have an executable catalog,
-scientific schemas, source-lineage validation, and shared atomic publication:
+Nine maintained array-bearing derived families now have executable catalog
+entries. Seven use the shared atomic materializer boundary:
 
 - track kinematics;
 - swim bouts;
@@ -36,11 +38,11 @@ scientific schemas, source-lineage validation, and shared atomic publication:
 - tail kinematics; and
 - stimulus response.
 
-However, none of those seven derives every array's physical layout through the
+Tail-posture views and bout classification are also cataloged, truthfully, as
+guarded direct writers rather than falsely claiming atomic-materializer
+ownership. None of the nine derives every array's physical layout through the
 shared byte-budgeted storage planner. Only track kinematics and eye angles have
-serialized registry publication. Tail-posture views and bout classification are
-maintained derived stages with meaningful individual contracts but sit outside
-the executable storage catalog. Stimulus epochs, occupancy outputs, and the
+serialized registry publication. Stimulus epochs, occupancy outputs, and the
 chaser analysis suite use additional stage-local schemas and writers. Several
 legacy or in-place writers remain unclassified.
 
@@ -109,8 +111,8 @@ true.
 | Stimulus response | Cataloged and atomically published | Freeze exact compact table fields and dtypes; current output is data-dependent |
 | Body frame | Exact ten-array schema, byte planner, strict manifest, and consolidated publication | Move from selector-ineligible companion evidence to an explicitly governed production lifecycle when authorized |
 | Keypoint quality | Exact diagnostic schema, byte planner, strict manifest, and consolidated publication | Add explicit production lifecycle/registry policy when authorized |
-| Tail-posture view | Exact typed arrays and guarded candidate lifecycle | Add to the executable catalog/materializer boundary and replace mask-derived row chunk helpers |
-| Bout classification | Frozen required fields and guarded activation | Freeze exact per-field storage declarations and add to catalog/DAG/materializer boundary |
+| Tail-posture view | Exact typed arrays, guarded candidate lifecycle, and truthful direct-writer catalog ownership | Replace mask-derived row chunk helpers, adopt the planner, and decide whether to migrate to the atomic materializer |
+| Bout classification | Frozen required fields, guarded activation, and truthful direct-writer catalog ownership | Freeze exact per-field storage declarations, adopt the planner, and add registry publication |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
@@ -125,14 +127,16 @@ true.
 The executable catalog explicitly says physical policy remains stage-owned and
 exposes `byte_planner_adopted` as the migration boundary
 (`src/fisheye/analysis_workflows/storage_contract_catalog.py:1-10,20-35`). Its
-seven entries are at
-`src/fisheye/analysis_workflows/storage_contract_catalog.py:75-175`.
+nine entries are at
+`src/fisheye/analysis_workflows/storage_contract_catalog.py:208-348`.
 
-The registry catalog contains three additional derived stages—track-kinematics
-visualization, tail-posture view, and bout classification—outside that storage
-catalog (`src/fisheye/registry/stage_catalog.py:194-255`). Availability patches
-tail-posture and classification in separately
-(`src/fisheye/analysis_workflows/availability.py:16-23`).
+The storage catalog now includes tail-posture view and bout classification with
+their real guarded-direct-writer owners
+(`src/fisheye/analysis_workflows/storage_contract_catalog.py:294-335`). Their
+canonical parent mappings live in the shared run-parent catalog
+(`src/fisheye/shared/stage_run_groups.py:41-42`) rather than availability-local
+patches. Track-kinematics visualization remains intentionally classified as a
+byte artifact rather than an array-bearing scientific run.
 
 The shared columnar helper is an earlier-generation physical policy: it uses
 4,096-row one-dimensional chunks, 1,024-row multidimensional chunks, and
@@ -147,9 +151,10 @@ payload (`src/fisheye/analysis/stimulus_response.py:1730-1817`). The older
 variants, not the exact compact persisted surface
 (`src/fisheye/shared/zarr/analysis_stage_arrays.py:1-7`).
 
-The canonical analytics matrix currently documents the seven maintained
-families (`docs/analytics_storage_schema_matrix.md:31-49`). That description is
-useful but incomplete as a full writer census. The earlier reconciliation
+The older canonical analytics matrix documents seven maintained families
+(`docs/analytics_storage_schema_matrix.md:31-49`). It now trails the executable
+nine-family catalog and remains incomplete as a full writer census. The earlier
+reconciliation
 correctly leaves the per-array inventory, byte-planner migration, and consumer
 benchmarks open
 (`docs/derived_analytics_storage_reconciliation_2026-08-01.md:102-124`).
@@ -212,8 +217,8 @@ Evidence:
 
 ### Implemented checkpoints
 
-The first two correctness phases are now implemented on the coordination
-branch:
+The first two correctness phases and the initial catalog-closure checkpoint are
+now implemented on the coordination branch:
 
 - fail-closed completion, eligibility, swim-bout, eye-angle, visualization,
   and explicit legacy-selection boundaries: `bf98bea4`, `1f57eea6`, and
@@ -223,12 +228,17 @@ branch:
   registry and consumer selection, and snapshot-bound downstream provenance:
   `f6f541b6`;
 - run-parent initialization guard repair: `7d155423`.
+- truthful catalog ownership and canonical parent mappings for tail-posture and
+  bout-classification runs: `73b3888b`;
+- strict completed/eligible swim-bout test fixtures for the catalog integration
+  matrix: `209bc52e`.
 
-The integrated regression matrix passed 359 tests with 14 expected legacy
-compatibility xfails. The atomic-publication lane also received an independent
-adversarial review with no remaining correctness or publication-safety
-blockers. Physical-profile promotion and production selector activation remain
-out of scope.
+The integrated lifecycle/publication regression matrix passed 359 tests with 14
+expected legacy compatibility xfails. The atomic-publication lane also received
+an independent adversarial review with no remaining correctness or
+publication-safety blockers. The exact catalog/stage-array matrix passed 88
+tests after integration. Physical-profile promotion and production selector
+activation remain out of scope.
 
 ### Phase 0 — Preserve the audit baseline
 
@@ -271,9 +281,9 @@ out of scope.
 
 ### Phase 3 — Complete the executable analytics catalog
 
-- [ ] Add `tail_posture_view` with its exact parent, schema, method, materializer,
-      physical owner, registry mode, and planner status.
-- [ ] Add `bout_classification` with the same executable declarations.
+- [x] Add `tail_posture_view` with its exact parent, schema, method, publication
+      owner, physical owner, registry mode, and planner status.
+- [x] Add `bout_classification` with the same executable declarations.
 - [ ] Decide and record whether each of the following is a maintained
       scientific authority, an embedded component, a visualization/cache, an
       export, maintenance output, or legacy:
@@ -285,10 +295,12 @@ out of scope.
     - [ ] speed runs;
     - [ ] swim-bout statistics;
     - [ ] in-place chaser-state interpolation.
-- [ ] Add canonical run-parent mappings for maintained families.
-- [ ] Remove availability-only local parent declarations after catalog adoption.
-- [ ] Add tests proving stage catalog, storage catalog, run-parent catalog, and
-      materializer ownership agree.
+- [x] Add canonical run-parent mappings for currently cataloged maintained
+      families.
+- [x] Remove tail-posture and bout-classification availability-only local parent
+      declarations after catalog adoption.
+- [x] Add tests proving the currently cataloged stage catalog, storage catalog,
+      run-parent catalog, and materializer ownership agree.
 
 ### Phase 4 — Freeze exact logical schemas
 
