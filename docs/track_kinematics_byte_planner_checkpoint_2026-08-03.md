@@ -1,7 +1,8 @@
 # Track-Kinematics Byte-Planner Checkpoint — 2026-08-03
 
-Status: exact logical inventory frozen; byte-planned writer adoption blocked and
-not enabled.
+Status: exact v1 logical inventory frozen; the v1 structured-dtype writer path
+remains unchanged, while a separately versioned, selector-ineligible v2
+flat-lineage candidate is now implemented. It is not promoted.
 
 This checkpoint deliberately leaves the established track-kinematics writer,
 activation, registry, and physical layout unchanged. It adds no production
@@ -96,10 +97,12 @@ Using a track-local creation bypass would produce a nominal candidate that is
 not governed by the shared factory. Reinterpreting the structures as opaque
 `V24`/`V9` bytes would discard field semantics. Both options are rejected.
 
-Therefore the exact simple declarations remain marked
+Therefore the exact v1 simple declarations remain marked
 `byte_planner_adopted=false`, and conversion of either structured declaration
 to `AnalysisArrayDeclaration` raises a dedicated fail-closed error. No writer
-candidate exists at this checkpoint.
+can smuggle the v1 records through the primitive factory. The implemented v2
+candidate and its safety boundary are recorded in
+`docs/track_kinematics_flat_lineage_candidate_decision_2026-08-03.md`.
 
 ## Proposed Versioned Resolution
 
@@ -135,20 +138,21 @@ and all consumers agree. Until then, track publication must preserve float64.
 - [x] Exclude dynamic swim-bout mirrors and legacy chaser auxiliaries explicitly.
 - [x] Fail closed when structured declarations are converted to the current
       shared `AnalysisArrayDeclaration` boundary.
-- [ ] Approve a versioned flattened-lineage contract.
-- [ ] Update track readers, coordinate binding, publication manifest, and
-      payload validation for that version.
+- [x] Approve a versioned flattened-lineage candidate contract.
+- [x] Add an explicit v1/v2 lineage reader, candidate manifest, storage receipt,
+      and payload validation for that version.
 - [ ] Decide whether future position authority remains float64 or transitions
       to a separately versioned float32 coordinate contract.
-- [ ] Build the selector-ineligible byte-planned writer only after every exact
+- [x] Build the selector-ineligible byte-planned writer only after every exact
       declaration is representable by the shared factory.
-- [ ] Persist and recompute one complete storage-plan receipt.
-- [ ] Validate direct and consolidated metadata equivalence.
+- [x] Persist and recompute one complete storage-plan receipt.
+- [x] Validate direct and consolidated metadata equivalence.
 - [ ] Benchmark publication and consumer reads before promotion.
 
 ## Safety Result
 
-This worktree contains schema, tests, and this document only. It does not edit
-the shared planner, shared profiles, storage catalog, registry, selectors, or
-production archives. The default track writer remains the only writer and its
-behavior is unchanged.
+The v2 candidate implementation does not edit the shared planner, shared
+profiles, storage catalog, registry, selectors, or production writer. It
+requires an explicit source and candidate name, stages on scratch, imports with
+the common atomic non-promoting publisher, and leaves the default track writer
+and v1 authority unchanged.

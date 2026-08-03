@@ -5,7 +5,9 @@ that the shared byte-planned array factory can publish it yet.  Two required
 lineage arrays use NumPy structured dtypes, which the current shared
 ``DTypeContract``/``StoragePlan`` boundary cannot round-trip.  Callers can turn
 every other declaration into an ``AnalysisArrayDeclaration``; attempting that
-conversion for either structured array fails closed.
+conversion for either structured array fails closed.  The separately versioned
+flat-lineage candidate replaces those two records with five primitive arrays;
+it does not reinterpret or silently upgrade the v1 authority.
 """
 
 from __future__ import annotations
@@ -28,11 +30,22 @@ from fisheye.shared.zarr.storage_intent import AccessPattern, WriteMode
 
 TRACK_KINEMATICS_ARRAY_SCHEMA_ID = "palette.analysis.track_kinematics.motion_arrays"
 TRACK_KINEMATICS_ARRAY_SCHEMA_VERSION = 1
+TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION = 2
 TRACK_KINEMATICS_PHYSICAL_POLICY_OWNER = "track_kinematics_rechunk_v3"
+TRACK_KINEMATICS_FLAT_PHYSICAL_POLICY_OWNER = "analysis_storage_planning_v1"
 
 TRACK_KINEMATICS_CORE_BUNDLE = "core_motion_v1"
 TRACK_KINEMATICS_PHYSICAL_BUNDLE = "physical_motion_v1"
 TRACK_KINEMATICS_ARENA_BUNDLE = "track_arena_inventory_v1"
+TRACK_KINEMATICS_FLAT_LINEAGE_BUNDLE = "flat_source_lineage_v2"
+
+TRACK_KINEMATICS_FLAT_LINEAGE_PATHS = (
+    "source_frame_interpolation/left_source_frame_index",
+    "source_frame_interpolation/right_source_frame_index",
+    "source_frame_interpolation/right_weight",
+    "source_instance_key/valid",
+    "source_instance_key/value",
+)
 
 TRACK_KINEMATICS_LEGACY_EXCLUDED_PREFIXES = ("tracks/id_<track_id>/swim_bouts/",)
 TRACK_KINEMATICS_LEGACY_EXCLUDED_RUN_ARRAYS = (
@@ -133,6 +146,25 @@ class TrackKinematicsExactArrayDeclaration:
             scope="run",
         )
 
+    def bind_track_dimensions(
+        self,
+        track_id: int,
+    ) -> TrackKinematicsExactArrayDeclaration:
+        """Bind path and per-track dimensions for one run-wide plan receipt."""
+
+        bound = self.bind_track(track_id)
+        suffix = str(track_id).replace("-", "neg_")
+        dimensions = {
+            "n_track_samples": f"n_track_samples_id_{suffix}",
+            "n_track_seconds": f"n_track_seconds_id_{suffix}",
+        }
+        return replace(
+            bound,
+            shape_template=tuple(
+                dimensions.get(value, value) for value in bound.shape_template
+            ),
+        )
+
     def as_manifest(self) -> dict[str, object]:
         dtype_record: dict[str, object] = {
             "dtype_id": (
@@ -160,7 +192,7 @@ class TrackKinematicsExactArrayDeclaration:
                 "shape_template": list(self.shape_template),
                 "axis_names": list(self.axis_names),
                 "description": (
-                    "Maintained exact track-kinematics array " f"{self.relative_path}."
+                    f"Maintained exact track-kinematics array {self.relative_path}."
                 ),
                 "units": self.units,
                 "coordinate_space": self.coordinate_space,
@@ -174,7 +206,13 @@ class TrackKinematicsExactArrayDeclaration:
             "byte_planner_adopted": False,
         }
 
-    def to_analysis_array_declaration(self) -> AnalysisArrayDeclaration:
+    def to_analysis_array_declaration(
+        self,
+        *,
+        schema_version: int = TRACK_KINEMATICS_ARRAY_SCHEMA_VERSION,
+        byte_planner_adopted: bool = False,
+        physical_policy_owner: str = TRACK_KINEMATICS_PHYSICAL_POLICY_OWNER,
+    ) -> AnalysisArrayDeclaration:
         """Convert simple fixed dtypes; fail closed for structured lineage."""
 
         if self.is_structured:
@@ -189,12 +227,12 @@ class TrackKinematicsExactArrayDeclaration:
                 f"{TRACK_KINEMATICS_ARRAY_SCHEMA_ID}."
                 f"{self.relative_path.replace('/', '.')}"
             ),
-            schema_version=TRACK_KINEMATICS_ARRAY_SCHEMA_VERSION,
+            schema_version=schema_version,
             dtype=dtype,
             shape_template=self.shape_template,
             axis_names=self.axis_names,
             description=(
-                "Maintained exact track-kinematics array " f"{self.relative_path}."
+                f"Maintained exact track-kinematics array {self.relative_path}."
             ),
             units=self.units,
             coordinate_space=self.coordinate_space,
@@ -208,8 +246,8 @@ class TrackKinematicsExactArrayDeclaration:
             authority_role=self.authority_role,
             fill_semantics=self.fill_semantics,
             null_semantics=self.null_semantics,
-            physical_policy_owner=TRACK_KINEMATICS_PHYSICAL_POLICY_OWNER,
-            byte_planner_adopted=False,
+            physical_policy_owner=physical_policy_owner,
+            byte_planner_adopted=byte_planner_adopted,
         )
 
 
@@ -301,6 +339,15 @@ _STRUCTURED_DTYPES = {
     "source_frame_interpolation": TRACK_SAMPLE_INTERPOLATION_DTYPE,
     "source_instance_key": TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE,
 }
+_FLAT_INT64_PATHS = frozenset(
+    {
+        "source_frame_interpolation/left_source_frame_index",
+        "source_frame_interpolation/right_source_frame_index",
+    }
+)
+_FLAT_FLOAT64_PATHS = frozenset({"source_frame_interpolation/right_weight"})
+_FLAT_BOOL_PATHS = frozenset({"source_instance_key/valid"})
+_FLAT_UINT64_PATHS = frozenset({"source_instance_key/value"})
 _BOOL_PATHS = frozenset(
     {
         "heading_usable",
@@ -383,7 +430,7 @@ def _alias_target(path: str) -> str | None:
         if path == f"acceleration_{suffix}":
             return f"speed_derivatives/speed_smoothed/acceleration_{suffix}"
         if path == f"smoothed_acceleration_{suffix}":
-            return "speed_derivatives/speed_smoothed/" f"smoothed_acceleration_{suffix}"
+            return f"speed_derivatives/speed_smoothed/smoothed_acceleration_{suffix}"
     parts = path.split("/")
     if (
         len(parts) == 4
@@ -405,17 +452,19 @@ def _alias_target(path: str) -> str | None:
 def _dtype_for_path(path: str) -> np.dtype[Any]:
     if path in _STRUCTURED_DTYPES:
         return np.dtype(_STRUCTURED_DTYPES[path])
-    if path in _BOOL_PATHS:
+    if path in _BOOL_PATHS or path in _FLAT_BOOL_PATHS:
         return np.dtype(bool)
-    if path in _INT64_PATHS:
+    if path in _INT64_PATHS or path in _FLAT_INT64_PATHS:
         return np.dtype("int64")
+    if path in _FLAT_UINT64_PATHS:
+        return np.dtype("uint64")
     if path in _INT32_PATHS:
         return np.dtype("int32")
     if path in _INT16_PATHS:
         return np.dtype("int16")
     if path in _INT8_PATHS:
         return np.dtype("int8")
-    if path in _FLOAT64_PATHS:
+    if path in _FLOAT64_PATHS or path in _FLAT_FLOAT64_PATHS:
         return np.dtype("float64")
     return np.dtype("float32")
 
@@ -446,6 +495,21 @@ def _units_for_path(path: str) -> str | None:
 
 
 def _fill_and_null(path: str, dtype: np.dtype[Any]) -> tuple[str, str]:
+    if path == "source_instance_key/valid":
+        return (
+            "false",
+            "false is the only null source-observation discriminator",
+        )
+    if path == "source_instance_key/value":
+        return (
+            "zero",
+            "value must be zero whenever sibling valid is false",
+        )
+    if path.startswith("source_frame_interpolation/"):
+        return (
+            "zero_all_rows_written",
+            "no null; every row carries one exact interpolation field",
+        )
     if path == "source_instance_key":
         return (
             "structured_null_record_valid_false_instance_key_zero",
@@ -478,7 +542,7 @@ def _shape_for_track_path(path: str) -> tuple[tuple[str | int, ...], tuple[str, 
 def _role_for_path(path: str) -> AnalysisAuthorityRole:
     if _alias_target(path) is not None:
         return AnalysisAuthorityRole.COMPATIBILITY_ALIAS
-    if path in _LINEAGE_PATHS:
+    if path in _LINEAGE_PATHS or path in TRACK_KINEMATICS_FLAT_LINEAGE_PATHS:
         return AnalysisAuthorityRole.LINEAGE_INDEX
     if path in _QUALITY_PATHS:
         return AnalysisAuthorityRole.QUALITY_DIAGNOSTIC
@@ -536,6 +600,15 @@ TRACK_KINEMATICS_PHYSICAL_TRACK_DECLARATIONS = tuple(
     for path in sorted(_PHYSICAL_TRACK_PATHS)
 )
 
+TRACK_KINEMATICS_FLAT_LINEAGE_TRACK_DECLARATIONS = tuple(
+    _track_declaration(
+        path,
+        bundle=TRACK_KINEMATICS_FLAT_LINEAGE_BUNDLE,
+        required=True,
+    )
+    for path in TRACK_KINEMATICS_FLAT_LINEAGE_PATHS
+)
+
 
 def _run_declaration(
     path: str,
@@ -589,6 +662,53 @@ def build_track_kinematics_track_declarations(
     )
 
 
+def build_track_kinematics_flat_lineage_declarations(
+    *,
+    track_ids: Iterable[int],
+    include_physical: bool,
+    include_arena_inventory: bool,
+) -> tuple[AnalysisArrayDeclaration, ...]:
+    """Return the closed v2 primitive inventory for one complete candidate."""
+
+    normalized_ids: list[int] = []
+    for raw_track_id in track_ids:
+        if isinstance(raw_track_id, bool) or not isinstance(raw_track_id, int):
+            raise TypeError("track_ids must contain exact integers.")
+        normalized_ids.append(raw_track_id)
+    if normalized_ids != sorted(set(normalized_ids)) or not normalized_ids:
+        raise ValueError("track_ids must be nonempty, strictly increasing, and unique.")
+
+    run_declarations = tuple(
+        declaration.to_analysis_array_declaration(
+            schema_version=TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION,
+            byte_planner_adopted=True,
+            physical_policy_owner=TRACK_KINEMATICS_FLAT_PHYSICAL_POLICY_OWNER,
+        )
+        for declaration in TRACK_KINEMATICS_RUN_DECLARATIONS
+        if declaration.relative_path != "track_arena_ids" or include_arena_inventory
+    )
+    primitive_core = (
+        tuple(
+            declaration
+            for declaration in TRACK_KINEMATICS_CORE_TRACK_DECLARATIONS
+            if declaration.relative_path not in _STRUCTURED_DTYPES
+        )
+        + TRACK_KINEMATICS_FLAT_LINEAGE_TRACK_DECLARATIONS
+    )
+    track_declarations = primitive_core + (
+        TRACK_KINEMATICS_PHYSICAL_TRACK_DECLARATIONS if include_physical else ()
+    )
+    return run_declarations + tuple(
+        declaration.bind_track_dimensions(track_id).to_analysis_array_declaration(
+            schema_version=TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION,
+            byte_planner_adopted=True,
+            physical_policy_owner=TRACK_KINEMATICS_FLAT_PHYSICAL_POLICY_OWNER,
+        )
+        for track_id in normalized_ids
+        for declaration in track_declarations
+    )
+
+
 def declaration_paths(
     declarations: Iterable[TrackKinematicsExactArrayDeclaration],
 ) -> frozenset[str]:
@@ -601,6 +721,11 @@ __all__ = [
     "TRACK_KINEMATICS_ARRAY_SCHEMA_VERSION",
     "TRACK_KINEMATICS_CORE_BUNDLE",
     "TRACK_KINEMATICS_CORE_TRACK_DECLARATIONS",
+    "TRACK_KINEMATICS_FLAT_LINEAGE_BUNDLE",
+    "TRACK_KINEMATICS_FLAT_LINEAGE_PATHS",
+    "TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION",
+    "TRACK_KINEMATICS_FLAT_LINEAGE_TRACK_DECLARATIONS",
+    "TRACK_KINEMATICS_FLAT_PHYSICAL_POLICY_OWNER",
     "TRACK_KINEMATICS_LEGACY_EXCLUDED_PREFIXES",
     "TRACK_KINEMATICS_LEGACY_EXCLUDED_RUN_ARRAYS",
     "TRACK_KINEMATICS_PHYSICAL_BUNDLE",
@@ -609,6 +734,7 @@ __all__ = [
     "TRACK_KINEMATICS_RUN_DECLARATIONS",
     "TrackKinematicsExactArrayDeclaration",
     "TrackKinematicsStructuredDTypeBlockedError",
+    "build_track_kinematics_flat_lineage_declarations",
     "build_track_kinematics_track_declarations",
     "declaration_paths",
 ]
