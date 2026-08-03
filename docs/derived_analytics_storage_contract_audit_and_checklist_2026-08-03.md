@@ -767,8 +767,9 @@ Recommended benchmark and promotion-review order:
       read matrices and records writer, publication, physical-I/O, Palette,
       required Crimson, short-scale, and full-scale evidence independently.
       Measured/executed claims require an immutable receipt digest and
-      versioned passing gate. No current record has complete coverage, and the
-      catalog never serves as profile-promotion authorization.
+      versioned passing gate. All thirteen current families now resolve an
+      executable read matrix; none yet claims complete benchmark coverage, and
+      the catalog never serves as profile-promotion authorization.
 - [x] Add a deterministic suite planner that binds every array workload and
       the whole-run publication workload to the exact logical declaration,
       storage-plan receipt, logical dimensions, seed, and safety policy. It
@@ -778,9 +779,10 @@ Recommended benchmark and promotion-review order:
       maintained family.
 - [x] Implement the deterministic read-side source/candidate matrix for exact
       swim-bout and bout-kinematics candidates. It exercises receipt-bound
-      access selections and full scans in rotated fresh processes; publication
-      phase timings come from the existing candidate receipt. Physical request
-      and transfer counts remain explicitly unavailable until tracing is added.
+      access selections and full scans in rotated fresh processes. Publication
+      timing remains unmeasured: opaque publisher provenance is not treated as
+      replayable timing evidence. Physical request and transfer counts remain
+      explicitly unavailable until tracing is added.
 - [x] Implement the family-local sealed chaser-distance source/candidate matrix.
       It binds the exact source authority, candidate manifest, storage receipt,
       atomic publication owner, full decoded values, access-class selections,
@@ -814,6 +816,30 @@ Recommended benchmark and promotion-review order:
       selectors, matched source/candidate logical workloads, fresh processes,
       and replay against the live immutable archive. The optional 35-array
       physical bundle is explicitly not covered.
+- [x] Implement the family-local tail-kinematics v2 source/candidate matrix.
+      It closes the exact 21-array core and atomic 23-array revision bundle,
+      pins the complete registered `published_http_v1` profile, independently
+      reconstructs stable scientific identity from both runs, binds the real
+      atomic publisher/staged-source authority, and rejects coordinated
+      re-signing while keeping publisher copy facts explicitly non-replayable.
+- [x] Implement the family-local tail-posture-view v3 source/candidate matrix.
+      It enforces exact ten-array row semantics (including canonical reasons,
+      finite valid rows, all-NaN invalid rows, and radian/degree agreement),
+      exact profile and scientific identity, balanced fresh processes, live
+      selector/metadata replay, honest diagnostic-only payload adapters, and
+      self-validation before immutable matrix evidence is written. The full
+      Megabouts input-pack consumer remains a separate dependency-complete
+      gate.
+- [x] Implement the family-local bout-classification v2 source/candidate
+      matrix. It freezes all twenty arrays and semantic sentinels, binds the
+      complete tail/shape/track/swim dependency identity, enforces classified
+      HB1 frame arithmetic, pins the exact registered profile, and exercises
+      first/middle/final row windows plus eager reads in balanced fresh
+      processes. The candidate reader remains truthfully diagnostic-only.
+- [x] Register all thirteen read matrices in the executable coverage catalog.
+      Catalog tests resolve every adapter while leaving writer, publication,
+      physical-I/O, Palette/Crimson consumer, representative-scale, and
+      promotion fields false and unbound.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,

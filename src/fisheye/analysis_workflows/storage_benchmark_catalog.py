@@ -271,8 +271,20 @@ _READ_MATRIX_ADAPTERS = {
         "fisheye.diagnostics.benchmark_track_kinematics_v2_candidate",
         "run_benchmark_matrix",
     ),
+    "tail_kinematics": (
+        "fisheye.diagnostics.benchmark_tail_kinematics_candidate_reads",
+        "run_matrix",
+    ),
     "subject_shape": (
         "fisheye.diagnostics.benchmark_subject_shape_v4_candidate",
+        "run_benchmark_matrix",
+    ),
+    "tail_posture_view": (
+        "fisheye.diagnostics.benchmark_tail_posture_view_v3_candidate",
+        "run_benchmark_matrix",
+    ),
+    "bout_classification": (
+        "fisheye.diagnostics.benchmark_bout_classification_v2_reads",
         "run_benchmark_matrix",
     ),
 }

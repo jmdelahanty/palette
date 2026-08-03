@@ -26,7 +26,10 @@ READ_MATRIX_STAGES = {
     "stimulus_response",
     "eye_angles",
     "track_kinematics",
+    "tail_kinematics",
     "subject_shape",
+    "tail_posture_view",
+    "bout_classification",
 }
 
 
@@ -103,22 +106,41 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         "fisheye.diagnostics.benchmark_track_kinematics_v2_candidate"
     )
     assert track_kinematics.adapter_entrypoint == "run_benchmark_matrix"
+    tail_kinematics = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE[
+        "tail_kinematics"
+    ]
+    assert tail_kinematics.adapter_module == (
+        "fisheye.diagnostics.benchmark_tail_kinematics_candidate_reads"
+    )
+    assert tail_kinematics.adapter_entrypoint == "run_matrix"
     subject_shape = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["subject_shape"]
     assert subject_shape.adapter_module == (
         "fisheye.diagnostics.benchmark_subject_shape_v4_candidate"
     )
     assert subject_shape.adapter_entrypoint == "run_benchmark_matrix"
+    tail_posture = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE[
+        "tail_posture_view"
+    ]
+    assert tail_posture.adapter_module == (
+        "fisheye.diagnostics.benchmark_tail_posture_view_v3_candidate"
+    )
+    assert tail_posture.adapter_entrypoint == "run_benchmark_matrix"
+    bout_classification = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE[
+        "bout_classification"
+    ]
+    assert bout_classification.adapter_module == (
+        "fisheye.diagnostics.benchmark_bout_classification_v2_reads"
+    )
+    assert bout_classification.adapter_entrypoint == "run_benchmark_matrix"
 
 
-def test_plan_only_families_have_no_fabricated_adapter_or_execution_evidence() -> None:
-    for stage_id, record in DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE.items():
-        if stage_id in READ_MATRIX_STAGES:
-            continue
-        assert record.adapter_status is StorageBenchmarkAdapterStatus.PLAN_ONLY
-        assert record.adapter_module is None
-        assert record.adapter_entrypoint is None
-        assert record.resolves_adapter() is False
-        assert record.as_record()["benchmark_coverage_complete"] is False
+def test_all_cataloged_families_now_have_read_matrices() -> None:
+    assert READ_MATRIX_STAGES == set(DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE)
+    assert all(
+        record.adapter_status
+        is StorageBenchmarkAdapterStatus.READ_MATRIX_IMPLEMENTED
+        for record in DERIVED_ANALYSIS_STORAGE_BENCHMARKS
+    )
 
 
 def test_resolved_records_are_strict_json() -> None:
@@ -151,7 +173,17 @@ def test_implemented_declaration_fails_closed(
 
 
 def test_plan_only_declaration_cannot_claim_adapter_or_execution() -> None:
-    base = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["tail_kinematics"]
+    implemented = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["tail_kinematics"]
+    base = replace(
+        implemented,
+        adapter_status=StorageBenchmarkAdapterStatus.PLAN_ONLY,
+        adapter_module=None,
+        adapter_entrypoint=None,
+        reader_workload_implemented=False,
+        decoded_equality_implemented=False,
+        metadata_equivalence_implemented=False,
+    )
+    assert base.resolves_adapter() is False
     with pytest.raises(ValueError, match="must not claim an adapter"):
         replace(base, adapter_module="fisheye.diagnostics.some_benchmark")
     with pytest.raises(ValueError, match="requires an implemented adapter"):
