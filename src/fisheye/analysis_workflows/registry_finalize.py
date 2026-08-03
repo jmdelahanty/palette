@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.derived_analysis_registry_status import (
+    emit_derived_analysis_stage_completion,
     emit_eye_angle_stage_completion,
     emit_track_kinematics_stage_completion,
 )
@@ -25,7 +26,10 @@ from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
-from .storage_contract_catalog import SERIALIZED_REGISTRY_STAGE_IDS
+from .storage_contract_catalog import (
+    DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE,
+    SERIALIZED_REGISTRY_STAGE_IDS,
+)
 
 
 REPORT_SCHEMA = "palette.derived_analysis_registry_finalizer.v1"
@@ -170,9 +174,11 @@ def _target_receipt_requests(
             raise RuntimeError(
                 f"Target receipt did not defer registry writes: {receipt_path}"
             )
-        zarr_path = Path(
-            _require_text(payload.get("zarr_path"), field="zarr_path")
-        ).expanduser().resolve()
+        zarr_path = (
+            Path(_require_text(payload.get("zarr_path"), field="zarr_path"))
+            .expanduser()
+            .resolve()
+        )
         if zarr_path in receipts_by_target:
             raise RuntimeError(f"Duplicate target receipt for {zarr_path}")
         receipts_by_target[zarr_path] = (receipt_path, digest, payload)
@@ -197,15 +203,17 @@ def _target_receipt_requests(
             )
         for stage_id, run_name in selectors:
             stage_receipt = requested_publications.get(stage_id)
-            if not isinstance(stage_receipt, Mapping) or stage_receipt.get(
-                "requested"
-            ) is not True:
+            if (
+                not isinstance(stage_receipt, Mapping)
+                or stage_receipt.get("requested") is not True
+            ):
                 raise RuntimeError(
                     f"Target receipt did not request {stage_id}: {receipt_path}"
                 )
-            if stage_id == "track_kinematics" and str(
-                stage_receipt.get("run_name") or ""
-            ) != run_name:
+            if (
+                stage_id == "track_kinematics"
+                and str(stage_receipt.get("run_name") or "") != run_name
+            ):
                 raise RuntimeError(
                     "Track selector differs from the target receipt: "
                     f"selector={run_name!r}, receipt={stage_receipt.get('run_name')!r}"
@@ -229,7 +237,9 @@ def _prepare(request: RequestedPublication) -> PreparedPublication:
         if parent is None:
             raise RuntimeError(f"Missing eye-angle parent in {request.zarr_path}")
         selected = resolve_authoritative_run_name(parent)
-        requested = selected if request.requested_run == "latest" else request.requested_run
+        requested = (
+            selected if request.requested_run == "latest" else request.requested_run
+        )
         if not selected or requested != selected:
             raise RuntimeError(
                 "Eye-angle receipt does not name the selected canonical run: "
@@ -247,29 +257,70 @@ def _prepare(request: RequestedPublication) -> PreparedPublication:
             run_type=None,
         )
 
-    parent = root.get("analysis/track_kinematics_runs")
+    if request.stage_id == "track_kinematics":
+        parent = root.get("analysis/track_kinematics_runs")
+        if parent is None:
+            raise RuntimeError(
+                f"Missing track-kinematics parent in {request.zarr_path}"
+            )
+        selected = resolve_authoritative_run_name(parent)
+        requested = (
+            selected if request.requested_run == "latest" else request.requested_run
+        )
+        if not selected or requested != selected:
+            raise RuntimeError(
+                "Track-kinematics receipt does not name the selected canonical run: "
+                f"requested={requested!r}, selected={selected!r}, "
+                f"zarr={request.zarr_path}"
+            )
+        run_type, separator, leaf_name = requested.partition("/")
+        if not separator or run_type not in {"online", "offline"} or not leaf_name:
+            raise RuntimeError(f"Invalid selected track run identity: {requested!r}")
+        if (
+            "/" in leaf_name
+            or run_type not in parent
+            or leaf_name not in parent[run_type]
+        ):
+            raise RuntimeError(f"Missing selected track run {requested!r}")
+        return PreparedPublication(
+            request=request,
+            root=root,
+            run_group=parent[run_type][leaf_name],
+            registry_run_name=requested,
+            leaf_run_name=leaf_name,
+            run_type=run_type,
+        )
+
+    contract = DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE.get(request.stage_id)
+    if contract is None:
+        raise RuntimeError(f"Unsupported derived-analysis stage: {request.stage_id}")
+    parent = root.get(contract.run_parent)
     if parent is None:
-        raise RuntimeError(f"Missing track-kinematics parent in {request.zarr_path}")
+        raise RuntimeError(
+            f"Missing {request.stage_id} parent {contract.run_parent!r} "
+            f"in {request.zarr_path}"
+        )
     selected = resolve_authoritative_run_name(parent)
     requested = selected if request.requested_run == "latest" else request.requested_run
     if not selected or requested != selected:
         raise RuntimeError(
-            "Track-kinematics receipt does not name the selected canonical run: "
+            f"{request.stage_id} receipt does not name the selected canonical run: "
             f"requested={requested!r}, selected={selected!r}, "
             f"zarr={request.zarr_path}"
         )
-    run_type, separator, leaf_name = requested.partition("/")
-    if not separator or run_type not in {"online", "offline"} or not leaf_name:
-        raise RuntimeError(f"Invalid selected track run identity: {requested!r}")
-    if "/" in leaf_name or run_type not in parent or leaf_name not in parent[run_type]:
-        raise RuntimeError(f"Missing selected track run {requested!r}")
+    if not requested or "/" in requested or requested in {".", ".."}:
+        raise RuntimeError(
+            f"Invalid selected {request.stage_id} run identity: {requested!r}"
+        )
+    if requested not in parent:
+        raise RuntimeError(f"Missing selected {request.stage_id} run {requested!r}")
     return PreparedPublication(
         request=request,
         root=root,
-        run_group=parent[run_type][leaf_name],
+        run_group=parent[requested],
         registry_run_name=requested,
-        leaf_run_name=leaf_name,
-        run_type=run_type,
+        leaf_run_name=requested,
+        run_type=None,
     )
 
 
@@ -286,7 +337,9 @@ def _deduplicate(
                 f"{prior.requested_run!r} versus {request.requested_run!r}"
             )
         by_key[key] = request
-    return [by_key[key] for key in sorted(by_key, key=lambda item: (str(item[0]), item[1]))]
+    return [
+        by_key[key] for key in sorted(by_key, key=lambda item: (str(item[0]), item[1]))
+    ]
 
 
 def finalize_registry(
@@ -318,7 +371,7 @@ def finalize_registry(
                         registry=registry,
                         invalidate_on_ok=True,
                     )
-                else:
+                elif item.request.stage_id == "track_kinematics":
                     assert item.run_type is not None
                     wrote = emit_track_kinematics_stage_completion(
                         item.root,
@@ -326,6 +379,17 @@ def finalize_registry(
                         run_group=item.run_group,
                         run_name=item.leaf_run_name,
                         run_type=item.run_type,
+                        source="serial_derived_analysis_registry_finalizer",
+                        registry=registry,
+                        invalidate_on_ok=True,
+                    )
+                else:
+                    wrote = emit_derived_analysis_stage_completion(
+                        item.root,
+                        item.request.zarr_path,
+                        stage_id=item.request.stage_id,
+                        run_group=item.run_group,
+                        run_name=item.leaf_run_name,
                         source="serial_derived_analysis_registry_finalizer",
                         registry=registry,
                         invalidate_on_ok=True,
@@ -347,7 +411,9 @@ def finalize_registry(
             )
         integrity = "not_checked"
         if registry is not None:
-            integrity = str(registry.conn.execute("PRAGMA integrity_check;").fetchone()[0])
+            integrity = str(
+                registry.conn.execute("PRAGMA integrity_check;").fetchone()[0]
+            )
             if integrity != "ok":
                 raise RuntimeError(f"Registry integrity_check failed: {integrity}")
     finally:
@@ -410,7 +476,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output_json is not None:
         output_path = args.output_json.expanduser().resolve()
         if output_path.exists():
-            raise FileExistsError(f"Refusing to overwrite finalizer report: {output_path}")
+            raise FileExistsError(
+                f"Refusing to overwrite finalizer report: {output_path}"
+            )
         write_json_atomic(output_path, report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

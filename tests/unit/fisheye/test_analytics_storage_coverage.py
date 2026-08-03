@@ -53,9 +53,7 @@ def test_live_report_covers_every_maintained_derived_stage_exactly_once() -> Non
 
 def test_report_preserves_live_storage_and_classification_statuses() -> None:
     report = build_analytics_storage_coverage_report()
-    contracts = {
-        record["stage_id"]: record for record in report["storage_contracts"]
-    }
+    contracts = {record["stage_id"]: record for record in report["storage_contracts"]}
     surfaces = {
         record["surface_id"]: record for record in report["classified_surfaces"]
     }
@@ -69,7 +67,7 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         "classified_surface_count": 22,
         "additional_classified_surface_count": 21,
         "byte_planner_adopted_count": 0,
-        "serialized_registry_publication_count": 2,
+        "serialized_registry_publication_count": 9,
         "exact_contract_required_surface_count": 18,
         "central_catalog_adoption_pending_surface_count": 4,
     }
@@ -78,9 +76,10 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         "serialized_finalizer_v1"
     )
     assert surfaces["chaser_distance"]["central_storage_catalog_required"] is True
-    assert surfaces["track_kinematics_visualization"][
-        "exact_storage_contract_status"
-    ] == "not_applicable"
+    assert (
+        surfaces["track_kinematics_visualization"]["exact_storage_contract_status"]
+        == "not_applicable"
+    )
 
 
 def test_report_contains_every_additional_classified_surface() -> None:
@@ -200,9 +199,7 @@ def test_classified_fallback_cannot_hide_required_central_adoption() -> None:
             "report has wrong fields",
         ),
         (
-            lambda report: report["summary"].__setitem__(
-                "derived_stage_count", True
-            ),
+            lambda report: report["summary"].__setitem__("derived_stage_count", True),
             "derived_stage_count must be an exact nonnegative int",
         ),
         (

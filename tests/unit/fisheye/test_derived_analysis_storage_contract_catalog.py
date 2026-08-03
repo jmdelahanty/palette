@@ -100,9 +100,7 @@ def test_publication_ownership_is_explicit_and_executable() -> None:
 
 
 def test_direct_writer_ownership_and_physical_policy_are_exact() -> None:
-    resolved = {
-        record["stage_id"]: record for record in resolved_storage_contracts()
-    }
+    resolved = {record["stage_id"]: record for record in resolved_storage_contracts()}
     for stage_id, (
         owner_module,
         entrypoint,
@@ -116,7 +114,7 @@ def test_direct_writer_ownership_and_physical_policy_are_exact() -> None:
         assert record["publication_entrypoint"] == entrypoint
         assert record["method"] == method
         assert record["physical_policy_owner"] == physical_policy
-        assert record["registry_publication"] == "not_implemented"
+        assert record["registry_publication"] == "serialized_finalizer_v1"
         assert record["byte_planner_adopted"] is False
 
 
@@ -190,12 +188,7 @@ def test_byte_planner_migration_boundary_is_explicit() -> None:
         assert record["physical_policy_owner"]
 
 
-def test_serialized_registry_scope_is_explicit_and_narrow() -> None:
-    assert SERIALIZED_REGISTRY_STAGE_IDS == {"eye_angles", "track_kinematics"}
+def test_serialized_registry_scope_covers_every_maintained_contract() -> None:
+    assert SERIALIZED_REGISTRY_STAGE_IDS == set(EXPECTED_SCHEMA_IDENTITIES)
     for record in resolved_storage_contracts():
-        expected = (
-            "serialized_finalizer_v1"
-            if record["stage_id"] in SERIALIZED_REGISTRY_STAGE_IDS
-            else "not_implemented"
-        )
-        assert record["registry_publication"] == expected
+        assert record["registry_publication"] == "serialized_finalizer_v1"

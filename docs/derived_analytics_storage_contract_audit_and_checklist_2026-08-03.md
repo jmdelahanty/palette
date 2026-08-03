@@ -104,16 +104,16 @@ true.
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
 | Track kinematics | Strong logical, lineage, materializer, and registry contract | Replace stage-specific fixed row grids with byte planning and benchmark the real consumer |
-| Subject shape | Strong typed semantic surface, content manifest, lineage, and atomic sharded publication | Byte-plan heterogeneous semantic arrays; add registry projection |
-| Tail kinematics | Strong typed surface, coordinate manifest, and whole-shard worker ownership | Replace fixed 262,144-row policy; add registry projection |
+| Subject shape | Strong typed semantic surface, content manifest, lineage, atomic sharded publication, and serialized registry projection | Byte-plan heterogeneous semantic arrays |
+| Tail kinematics | Strong typed surface, coordinate manifest, whole-shard worker ownership, and serialized registry projection | Replace fixed 262,144-row policy |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, atomic publication, and registry publication | Migrate the still-fixed semantic chunk/shard grid to byte planning and benchmark the real consumers |
-| Swim bouts | Strong event/frame-axis semantics and compact tables | Add a closed whole-run array manifest, authoritative reader selection, byte planning, and registry projection |
-| Bout kinematics | Exact structured table builders and compact columnar storage | Add a closed manifest, byte planning, registry projection, and consumer benchmark |
+| Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, and serialized registry projection | Adopt byte planning and benchmark the real consumer |
+| Bout kinematics | Exact compact-v7 manifest, authoritative selection, and serialized registry projection | Adopt byte planning and add a consumer benchmark |
 | Stimulus response | Cataloged and atomically published | Freeze exact compact table fields and dtypes; current output is data-dependent |
 | Body frame | Exact ten-array schema, byte planner, strict manifest, and consolidated publication | Move from selector-ineligible companion evidence to an explicitly governed production lifecycle when authorized |
 | Keypoint quality | Exact diagnostic schema, byte planner, strict manifest, and consolidated publication | Add explicit production lifecycle/registry policy when authorized |
 | Tail-posture view | Exact typed arrays, guarded candidate lifecycle, and truthful direct-writer catalog ownership | Replace mask-derived row chunk helpers, adopt the planner, and decide whether to migrate to the atomic materializer |
-| Bout classification | Frozen required fields, guarded activation, and truthful direct-writer catalog ownership | Freeze exact per-field storage declarations, adopt the planner, and add registry publication |
+| Bout classification | Exact compact-v2 manifest, guarded activation, truthful direct-writer catalog ownership, and serialized registry projection | Adopt the byte planner and benchmark the real consumer |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
@@ -448,8 +448,11 @@ Recommended migration order:
 
 ### Phase 7 — Complete publication and registry projection
 
-- [ ] Add serialized registry completion/invalidation projection for swim bouts,
-      bout kinematics, subject shape, tail kinematics, and stimulus response.
+- [x] Add serialized registry completion/invalidation projection for all nine
+      maintained catalog stages. The finalizer reopens each archive directly,
+      requires matching `latest`/`latest_complete`, completion, and selector
+      eligibility, and dispatches registry writes serially; no worker owns the
+      SQLite transaction.
 - [ ] Decide production selection policy for body frame and keypoint quality;
       do not infer activation from their selector-ineligible canaries.
 - [ ] Standardize copy-integrity policy across maintained families.

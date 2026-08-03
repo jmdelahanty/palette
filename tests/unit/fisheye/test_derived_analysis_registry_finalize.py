@@ -9,6 +9,20 @@ from fisheye.analysis_workflows import registry_finalize as mod
 from fisheye.registry.db import Registry
 
 
+GENERIC_STAGE_RUNS = {
+    "swim_bouts": ("analysis/swim_bout_runs", "bouts_1"),
+    "bout_kinematics": ("analysis/bout_kinematics_runs", "bout_kin_1"),
+    "subject_shape": ("analysis/subject_shape_runs", "shape_1"),
+    "tail_kinematics": ("analysis/tail_kinematics_runs", "tail_kin_1"),
+    "tail_posture_view": ("analysis/tail_posture_view_runs", "tail_view_1"),
+    "bout_classification": (
+        "analysis/bout_classification_runs",
+        "classify_1",
+    ),
+    "stimulus_response": ("analysis/stimulus_response_runs", "stimulus_1"),
+}
+
+
 def _selected_derived_runs(path: Path) -> None:
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
     eye_parent = root.require_group("analysis/eye_angle_runs")
@@ -41,6 +55,22 @@ def _selected_derived_runs(path: Path) -> None:
             "stage_selector_eligible": True,
         }
     )
+    for parent_path, run_name in GENERIC_STAGE_RUNS.values():
+        parent = root.require_group(parent_path)
+        parent.attrs.update(
+            {
+                "palette_completion_epoch": 1,
+                "latest": run_name,
+                "latest_complete": run_name,
+            }
+        )
+        run = parent.require_group(run_name)
+        run.attrs.update(
+            {
+                "palette_run_completion_status": "complete",
+                "stage_selector_eligible": True,
+            }
+        )
 
 
 def _execution_receipt(path: Path, zarr_path: Path) -> None:
@@ -145,6 +175,76 @@ def test_finalizer_rejects_receipt_for_nonselected_run(tmp_path: Path) -> None:
         raise AssertionError("nonselected receipt unexpectedly validated")
 
 
+def test_finalizer_dispatches_every_generic_derived_stage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _selected_derived_runs(zarr_path)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    requests = [
+        mod.RequestedPublication(
+            zarr_path=zarr_path,
+            stage_id=stage_id,
+            requested_run=run_name,
+            receipt_path=receipt_path,
+            receipt_sha256="a" * 64,
+        )
+        for stage_id, (_parent_path, run_name) in GENERIC_STAGE_RUNS.items()
+    ]
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+    events: list[tuple[str, str]] = []
+
+    def emit_generic(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        events.append((kwargs["stage_id"], kwargs["run_name"]))
+        return True
+
+    monkeypatch.setattr(
+        mod,
+        "emit_derived_analysis_stage_completion",
+        emit_generic,
+    )
+
+    report = mod.finalize_registry(
+        requests,
+        registry_path=registry_path,
+        apply=True,
+    )
+
+    assert report["publication_count"] == len(GENERIC_STAGE_RUNS)
+    assert set(events) == {
+        (stage_id, run_name)
+        for stage_id, (_parent_path, run_name) in GENERIC_STAGE_RUNS.items()
+    }
+
+
+def test_generic_finalizer_rejects_selector_ineligible_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _selected_derived_runs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="r+")
+    root["analysis/swim_bout_runs/bouts_1"].attrs["stage_selector_eligible"] = False
+    request = mod.RequestedPublication(
+        zarr_path=zarr_path,
+        stage_id="swim_bouts",
+        requested_run="bouts_1",
+        receipt_path=tmp_path / "receipt.json",
+        receipt_sha256="b" * 64,
+    )
+
+    try:
+        mod.finalize_registry(
+            [request],
+            registry_path=tmp_path / "unused.sqlite",
+            apply=False,
+        )
+    except RuntimeError as exc:
+        assert "selected canonical run" in str(exc)
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("selector-ineligible run unexpectedly validated")
+
+
 def test_target_receipts_must_exactly_cover_manifest(tmp_path: Path) -> None:
     first = (tmp_path / "first.zarr").resolve()
     second = (tmp_path / "second.zarr").resolve()
@@ -160,9 +260,7 @@ def test_target_receipts_must_exactly_cover_manifest(tmp_path: Path) -> None:
                 "status": "complete",
                 "registry_write_mode": "deferred_to_serial_finalizer",
                 "zarr_path": str(first),
-                "requested_publications": {
-                    "eye_angles": {"requested": True}
-                },
+                "requested_publications": {"eye_angles": {"requested": True}},
             }
         )
         + "\n",

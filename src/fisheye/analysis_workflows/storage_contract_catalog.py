@@ -91,7 +91,10 @@ class DerivedAnalysisStorageContract:
                 "physical_policy_owner must be one canonical policy identifier"
             )
         require_relative_path(self.run_parent, field="run_parent")
-        if not isinstance(self.availability_parents, tuple) or not self.availability_parents:
+        if (
+            not isinstance(self.availability_parents, tuple)
+            or not self.availability_parents
+        ):
             raise ValueError("availability_parents must be one nonempty tuple")
         for parent in self.availability_parents:
             if type(parent) is not str:
@@ -129,9 +132,8 @@ class DerivedAnalysisStorageContract:
                 "publication_owner_kind must name one supported exact owner mode"
             )
         if self.publication_owner_kind == "shared_atomic_materializer_v1":
-            if (
-                type(self.materializer_module) is not str
-                or not _MODULE.fullmatch(self.materializer_module)
+            if type(self.materializer_module) is not str or not _MODULE.fullmatch(
+                self.materializer_module
             ):
                 raise ValueError(
                     "shared atomic publication requires materializer_module"
@@ -149,16 +151,16 @@ class DerivedAnalysisStorageContract:
                 raise ValueError(
                     "guarded direct publication must not claim a materializer"
                 )
-            if (
-                type(self.publication_owner_module) is not str
-                or not _MODULE.fullmatch(self.publication_owner_module)
+            if type(self.publication_owner_module) is not str or not _MODULE.fullmatch(
+                self.publication_owner_module
             ):
                 raise ValueError(
                     "guarded direct publication requires an exact owner module"
                 )
-            if (
-                type(self.publication_entrypoint_attr) is not str
-                or not _CALLABLE_ATTR.fullmatch(self.publication_entrypoint_attr)
+            if type(
+                self.publication_entrypoint_attr
+            ) is not str or not _CALLABLE_ATTR.fullmatch(
+                self.publication_entrypoint_attr
             ):
                 raise ValueError(
                     "guarded direct publication requires an exact entrypoint attr"
@@ -249,7 +251,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
         layout_attr="SWIM_BOUT_STORED_LAYOUT_COMPACT_V2",
         materializer_module="fisheye.analysis_workflows.materializers.swim_bouts",
         physical_policy_owner="swim_bout_compact_tabular_v2",
-        registry_publication="not_implemented",
+        registry_publication="serialized_finalizer_v1",
     ),
     DerivedAnalysisStorageContract(
         stage_id="bout_kinematics",
@@ -264,7 +266,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
             "fisheye.analysis_workflows.materializers.bout_kinematics"
         ),
         physical_policy_owner="shared_columnar_v1",
-        registry_publication="not_implemented",
+        registry_publication="serialized_finalizer_v1",
     ),
     DerivedAnalysisStorageContract(
         stage_id="eye_angles",
@@ -290,7 +292,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
         layout_attr=None,
         materializer_module="fisheye.analysis_workflows.materializers.subject_shape",
         physical_policy_owner="subject_shape_indexed_shards_v1",
-        registry_publication="not_implemented",
+        registry_publication="serialized_finalizer_v1",
     ),
     DerivedAnalysisStorageContract(
         stage_id="tail_kinematics",
@@ -305,7 +307,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
             "fisheye.analysis_workflows.materializers.tail_kinematics"
         ),
         physical_policy_owner="tail_kinematics_process_shards_v1",
-        registry_publication="not_implemented",
+        registry_publication="serialized_finalizer_v1",
     ),
     DerivedAnalysisStorageContract(
         stage_id="tail_posture_view",
@@ -318,7 +320,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
         layout_attr=None,
         materializer_module=None,
         physical_policy_owner="refined_subject_mask_metric_row_chunk_compatibility",
-        registry_publication="not_implemented",
+        registry_publication="serialized_finalizer_v1",
         byte_planner_adopted=False,
         method_attr="TAIL_POSTURE_VIEW_METHOD",
         publication_owner_kind="guarded_direct_writer_v1",
@@ -336,7 +338,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
         layout_attr=None,
         materializer_module=None,
         physical_policy_owner="columnar_store_array_v1",
-        registry_publication="not_implemented",
+        registry_publication="serialized_finalizer_v1",
         byte_planner_adopted=False,
         method_attr="ADAPTER_METHOD",
         publication_owner_kind="guarded_direct_writer_v1",
@@ -356,7 +358,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
             "fisheye.analysis_workflows.materializers.stimulus_response"
         ),
         physical_policy_owner="stimulus_response_compact_tabular_v2",
-        registry_publication="not_implemented",
+        registry_publication="serialized_finalizer_v1",
     ),
 )
 
@@ -381,8 +383,7 @@ def resolved_storage_contracts() -> tuple[dict[str, object], ...]:
     """Return current writer-backed declarations in stable catalog order."""
 
     return tuple(
-        contract.resolved_schema()
-        for contract in DERIVED_ANALYSIS_STORAGE_CONTRACTS
+        contract.resolved_schema() for contract in DERIVED_ANALYSIS_STORAGE_CONTRACTS
     )
 
 

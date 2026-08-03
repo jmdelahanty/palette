@@ -111,3 +111,59 @@ def test_track_completion_rejects_ambiguous_identity(
             run_type=run_type,
             source="unit_test",
         )
+
+
+def test_generic_completion_projects_exact_maintained_stage(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_emit(root, zarr_path, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update({"root": root, "zarr_path": zarr_path, **kwargs})
+        return True
+
+    monkeypatch.setattr(mod, "emit_stage_completion", fake_emit)
+    run = _Run(
+        {
+            "schema_id": "palette.swim_bout_runs",
+            "schema_version": 8,
+            "layout": "compact_tabular_v2",
+            "method": "multi_level_bout_detection",
+            "source_refs": {"track_kinematics_run": "track_1"},
+            "array_schema_manifest_sha256": "a" * 64,
+        }
+    )
+
+    wrote = mod.emit_derived_analysis_stage_completion(
+        object(),  # type: ignore[arg-type]
+        Path("/archive.zarr"),
+        stage_id="swim_bouts",
+        run_group=run,  # type: ignore[arg-type]
+        run_name="bouts_1",
+        source="unit_test",
+    )
+
+    assert wrote is True
+    assert captured["step_name"] == "swim_bouts"
+    assert captured["run_name"] == "bouts_1"
+    assert captured["method"] == "multi_level_bout_detection"
+    assert captured["details_json"] == {
+        "reason": "present",
+        "latest_selector": "serialized_derived_analysis_finalizer",
+        "artifact_path": "analysis/swim_bout_runs/bouts_1",
+        "schema_id": "palette.swim_bout_runs",
+        "schema_version": 8,
+        "layout": "compact_tabular_v2",
+        "source_refs": {"track_kinematics_run": "track_1"},
+        "array_schema_manifest_digest": "a" * 64,
+    }
+
+
+def test_generic_completion_rejects_non_derived_stage() -> None:
+    with pytest.raises(ValueError, match="not a derived-analysis stage"):
+        mod.emit_derived_analysis_stage_completion(
+            object(),  # type: ignore[arg-type]
+            Path("/archive.zarr"),
+            stage_id="refined_keypoints",
+            run_group=_Run({}),  # type: ignore[arg-type]
+            run_name="kp_1",
+            source="unit_test",
+        )
