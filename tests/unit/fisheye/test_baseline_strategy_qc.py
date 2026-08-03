@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from fisheye.analytics_exports.publication import sha256_file
 from fisheye.baseline_strategy.contracts import SCHEMA_ID, SCHEMA_VERSION
 from fisheye.baseline_strategy.qc import (
     discover_strategy_catalog,
@@ -111,8 +113,11 @@ def _fixture_roots(tmp_path: Path) -> tuple[Path, Path, str]:
     sample_part = (
         export_root
         / "v1"
-        / "baseline_kinematic_samples"
+        / ".generations"
         / f"export_run_id={export_run_id}"
+        / "generation=test"
+        / "tables"
+        / "baseline_kinematic_samples"
         / "part-recording_001.parquet"
     )
     _write_part(
@@ -145,13 +150,42 @@ def _fixture_roots(tmp_path: Path) -> tuple[Path, Path, str]:
     export_manifest_path = (
         export_root / "v1" / "manifests" / f"export_run_id={export_run_id}.json"
     )
+    generation_path = (
+        Path("v1")
+        / ".generations"
+        / f"export_run_id={export_run_id}"
+        / "generation=test"
+    )
+    relative_sample = (
+        generation_path
+        / "tables"
+        / "baseline_kinematic_samples"
+        / sample_part.name
+    ).as_posix()
     export_manifest_path.write_text(
         json.dumps(
             {
                 "export_run_id": export_run_id,
                 "collection_manifest": {"path": str(collection_path)},
                 "part_files_by_table": {
-                    "baseline_kinematic_samples": [str(sample_part)]
+                    "baseline_kinematic_samples": [relative_sample]
+                },
+                "publication": {
+                    "schema_id": "palette.analytics_export.publication",
+                    "schema_version": 1,
+                    "state": "complete",
+                    "generation_id": "test",
+                    "generation_path": generation_path.as_posix(),
+                    "parts_by_table": {
+                        "baseline_kinematic_samples": [
+                            {
+                                "path": relative_sample,
+                                "sha256": sha256_file(sample_part),
+                                "size_bytes": sample_part.stat().st_size,
+                                "row_count": 2,
+                            }
+                        ]
+                    },
                 },
             }
         ),
@@ -194,6 +228,51 @@ def test_recording_sample_scan_pushes_filter_to_lazy_source(tmp_path: Path) -> N
     rows = lazy.collect().to_dicts()
     assert len(rows) == 1
     assert rows[0]["source_frame"] == 10
+
+
+def test_source_context_binds_parsed_manifest_and_digest_to_same_bytes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    strategy_root, export_root, run_id = _fixture_roots(tmp_path)
+    export_manifest_path = (
+        export_root
+        / "v1"
+        / "manifests"
+        / "export_run_id=export_001.json"
+    )
+    expected_digest = hashlib.sha256(export_manifest_path.read_bytes()).hexdigest()
+    strategy_manifest_path = (
+        strategy_root / "v1" / "manifests" / f"analysis_run_id={run_id}.json"
+    )
+    strategy_payload = json.loads(
+        strategy_manifest_path.read_text(encoding="utf-8")
+    )
+    strategy_payload["source_export_manifest_sha256"] = expected_digest
+    strategy_manifest_path.write_text(json.dumps(strategy_payload), encoding="utf-8")
+    import fisheye.baseline_strategy.qc as qc
+
+    real_load = qc._load_object_snapshot
+
+    def replace_after_snapshot(path: Path):
+        snapshot = real_load(path)
+        replacement = json.loads(path.read_text(encoding="utf-8"))
+        replacement["replacement_generation"] = "newer"
+        path.write_text(json.dumps(replacement), encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(qc, "_load_object_snapshot", replace_after_snapshot)
+    context = source_export_context(
+        strategy_root,
+        run_id,
+        authorized_export_root=export_root,
+    )
+
+    assert context.manifest.get("replacement_generation") is None
+    assert scan_recording_baseline_samples(
+        context,
+        "recording_001",
+    ).collect().height == 1
 
 
 def test_source_context_rejects_unapproved_export_root(tmp_path: Path) -> None:

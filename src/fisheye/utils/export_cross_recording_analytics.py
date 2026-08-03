@@ -16,7 +16,9 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +59,19 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
     validate_table_columns,
 )
+from fisheye.analytics_exports.publication import (
+    PUBLICATION_SCHEMA_ID,
+    PUBLICATION_SCHEMA_VERSION,
+    export_manifest_path,
+    generation_relative_path,
+    manifest_commit_lock,
+    manifest_identity,
+    publication_generation_root,
+    publication_staging_root,
+    safe_component,
+    sha256_file,
+    validate_staged_publication,
+)
 from fisheye.analytics_exports.baseline import (
     BaselineArrays,
     BaselineWindow,
@@ -86,6 +101,11 @@ from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe, strict_json_dumps
 from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+    resolve_latest_complete_run_name,
+)
 from fisheye.utils.index_analytics_manifests import index_export_manifest
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.virtual_collection_manifest import load_manifest, verify_manifest_sha256
@@ -610,6 +630,28 @@ def _array_mapping_rows(mapping: Mapping[str, np.ndarray]) -> list[dict[str, Any
 
 
 def _latest_run(root: Any, parent_path: str, requested: str | None = None) -> tuple[Any | None, str | None, str | None]:
+    if str(parent_path).strip("/") == "analysis/swim_bout_runs":
+        try:
+            parent = root[parent_path]
+            selector = str(requested or "latest").strip() or "latest"
+            if selector == "latest":
+                name = resolve_latest_complete_run_name(parent, legacy_default=False)
+                if name is None:
+                    raise ValueError(
+                        "no complete, selector-eligible swim-bout run is selected"
+                    )
+            else:
+                name = selector
+                child = parent[name]
+                if not is_run_selector_eligible(child) or not is_run_complete_in_parent(
+                    parent, child, legacy_default=False
+                ):
+                    raise ValueError(
+                        f"swim-bout run {name!r} is incomplete or selector-ineligible"
+                    )
+            return parent[name], name, None
+        except Exception as exc:
+            return None, None, f"canonical swim-bout selection failed closed: {exc}"
     if str(parent_path).strip("/") == "analysis/chaser_distance_runs":
         # This compatibility-shaped helper must never return a raw canonical
         # chaser-distance child.  Direct callers still cross the exact typed
@@ -1107,8 +1149,22 @@ def _load_swim_bout_metrics(
     if "swim_bout_metrics" not in tables:
         return []
 
+    _swim_group, selected_swim_run, selection_error = _latest_run(
+        root,
+        "analysis/swim_bout_runs",
+    )
+    if selected_swim_run is None:
+        diagnostics.append({
+            "table": "swim_bout_metrics",
+            "status": "skipped",
+            "reason": selection_error or "no canonical swim-bout run is selected",
+        })
+        return []
     try:
-        swim_payload = load_default_swim_bout_tables(root)
+        swim_payload = load_default_swim_bout_tables(
+            root,
+            run_name=selected_swim_run,
+        )
     except SwimBoutIOError as exc:
         diagnostics.append({
             "table": "swim_bout_metrics",
@@ -5381,18 +5437,14 @@ def _infer_schema(rows: Sequence[Mapping[str, Any]], *, table: str):
 
 def _write_table_parts(
     *,
-    output_root: Path,
-    export_run_id: str,
+    generation_root: Path,
     table: str,
     rows_by_source: Sequence[tuple[str, Sequence[Mapping[str, Any]]]],
-    overwrite: bool,
 ) -> tuple[int, list[str]]:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    table_dir = output_root / "v1" / table / f"export_run_id={export_run_id}"
-    if table_dir.exists() and any(table_dir.iterdir()) and not overwrite:
-        raise FileExistsError(f"Export table directory already exists: {table_dir}")
+    table_dir = generation_root / "tables" / table
     table_dir.mkdir(parents=True, exist_ok=True)
 
     all_rows: list[Mapping[str, Any]] = []
@@ -5432,6 +5484,43 @@ def _write_table_parts(
     return row_count, part_paths
 
 
+def _staged_part_inventory(
+    *,
+    staging_root: Path,
+    final_generation_path: Path,
+    tables: Sequence[str],
+) -> tuple[
+    dict[str, list[str]],
+    dict[str, list[dict[str, Any]]],
+]:
+    """Build the exact manifest-exclusive staged inventory."""
+
+    import pyarrow.parquet as pq
+
+    logical_parts: dict[str, list[str]] = {}
+    inventory: dict[str, list[dict[str, Any]]] = {}
+    for table in tables:
+        table_root = staging_root / "tables" / table
+        staged_parts = tuple(sorted(table_root.glob("*.parquet")))
+        entries: list[dict[str, Any]] = []
+        paths: list[str] = []
+        for staged_part in staged_parts:
+            relative = final_generation_path / "tables" / table / staged_part.name
+            parquet_file = pq.ParquetFile(staged_part)
+            row_count = int(parquet_file.metadata.num_rows)
+            entry = {
+                "path": relative.as_posix(),
+                "sha256": sha256_file(staged_part),
+                "size_bytes": int(staged_part.stat().st_size),
+                "row_count": row_count,
+            }
+            entries.append(entry)
+            paths.append(relative.as_posix())
+        logical_parts[table] = paths
+        inventory[table] = entries
+    return logical_parts, inventory
+
+
 def export_sources(
     zarr_paths: Sequence[Path],
     *,
@@ -5448,7 +5537,10 @@ def export_sources(
 ) -> dict[str, Any]:
     tables = _parse_tables(tables)
     output_root = Path(output_root).expanduser().resolve()
-    export_run_id = export_run_id or "run_" + utc_now_compact()
+    export_run_id = safe_component(
+        export_run_id or "run_" + utc_now_compact(),
+        label="export run ID",
+    )
     zarr_paths = [Path(path).expanduser().resolve() for path in zarr_paths]
     if not zarr_paths:
         raise ValueError("No analysis Zarr sources were provided or discovered.")
@@ -5464,6 +5556,11 @@ def export_sources(
         raise ValueError("baseline_sample_rate_hz must be positive and finite")
     if int(baseline_spatial_grid_size) < 2:
         raise ValueError("baseline_spatial_grid_size must be at least 2")
+    manifest_path = export_manifest_path(output_root, export_run_id)
+    manifest_dir = manifest_path.parent
+    baseline_manifest_identity = manifest_identity(manifest_path)
+    if manifest_path.exists() and not overwrite:
+        raise FileExistsError(f"Export manifest already exists: {manifest_path}")
     collection_summary = (
         _collection_manifest_summary(Path(collection_manifest_path))
         if collection_manifest_path is not None
@@ -5536,18 +5633,46 @@ def export_sources(
     capability_statuses = resolve_capabilities(columns_by_table)
 
     output_root.mkdir(parents=True, exist_ok=True)
+    generation_id = uuid.uuid4().hex
+    final_generation_path = generation_relative_path(export_run_id, generation_id)
+    staging_root = publication_staging_root(
+        output_root,
+        export_run_id,
+        generation_id,
+    )
+    final_generation_root = publication_generation_root(
+        output_root,
+        export_run_id,
+        generation_id,
+    )
+    if staging_root.exists() or final_generation_root.exists():
+        raise FileExistsError(f"Analytics export generation already exists: {generation_id}")
     row_counts: dict[str, int] = {}
-    part_files: dict[str, list[str]] = {}
-    for table in tables:
-        count, parts = _write_table_parts(
-            output_root=output_root,
-            export_run_id=export_run_id,
-            table=table,
-            rows_by_source=rows_by_table_source[table],
-            overwrite=overwrite,
+    try:
+        for table in tables:
+            count, _parts = _write_table_parts(
+                generation_root=staging_root,
+                table=table,
+                rows_by_source=rows_by_table_source[table],
+            )
+            row_counts[table] = count
+        part_files, part_inventory = _staged_part_inventory(
+            staging_root=staging_root,
+            final_generation_path=final_generation_path,
+            tables=tables,
         )
-        row_counts[table] = count
-        part_files[table] = parts
+        inventory_rows = {
+            table: sum(int(entry["row_count"]) for entry in entries)
+            for table, entries in part_inventory.items()
+        }
+        if inventory_rows != row_counts:
+            raise ValueError(
+                "Staged analytics export row counts differ from the exact part inventory"
+            )
+    except Exception:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        raise
 
     git = get_git_info(Path(__file__).resolve().parents[3])
     manifest = {
@@ -5569,6 +5694,14 @@ def export_sources(
         "capability_statuses": [status.to_dict() for status in capability_statuses],
         "row_counts_by_table": row_counts,
         "part_files_by_table": part_files,
+        "publication": {
+            "schema_id": PUBLICATION_SCHEMA_ID,
+            "schema_version": PUBLICATION_SCHEMA_VERSION,
+            "state": "complete",
+            "generation_id": generation_id,
+            "generation_path": final_generation_path.as_posix(),
+            "parts_by_table": part_inventory,
+        },
         "diagnostics": diagnostics,
         "collection_manifest": (
             {
@@ -5603,14 +5736,34 @@ def export_sources(
             },
         },
     }
-    manifest_dir = output_root / "v1" / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = manifest_dir / f"export_run_id={export_run_id}.json"
-    if manifest_path.exists() and not overwrite:
-        raise FileExistsError(f"Export manifest already exists: {manifest_path}")
-    tmp_manifest = manifest_path.with_suffix(".json.tmp")
-    tmp_manifest.write_text(json.dumps(_json_safe(manifest), indent=2, sort_keys=True) + "\n")
-    os.replace(tmp_manifest, manifest_path)
+    try:
+        validate_staged_publication(staging_root, manifest)
+    except Exception:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        raise
+    tmp_manifest = manifest_dir / (
+        f".export_run_id={export_run_id}.generation={generation_id}.json.tmp"
+    )
+    final_generation_root.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging_root, final_generation_root)
+    try:
+        tmp_manifest.write_text(
+            json.dumps(_json_safe(manifest), indent=2, sort_keys=True) + "\n"
+        )
+        with manifest_commit_lock(manifest_path):
+            if manifest_identity(manifest_path) != baseline_manifest_identity:
+                raise RuntimeError(
+                    "Analytics export manifest changed during publication; "
+                    "the staged generation was not committed"
+                )
+            os.replace(tmp_manifest, manifest_path)
+    except Exception:
+        tmp_manifest.unlink(missing_ok=True)
+        if final_generation_root.exists():
+            shutil.rmtree(final_generation_root)
+        raise
     manifest["manifest_path"] = str(manifest_path)
     return manifest
 

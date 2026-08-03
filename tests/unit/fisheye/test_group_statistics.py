@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import concurrent.futures
+import hashlib
+import os
 from pathlib import Path
+import threading
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -13,6 +17,8 @@ from fisheye.analytics_exports.contracts import (
     TABLE_CONTRACTS,
     contract_snapshot,
 )
+from fisheye.analytics_exports.publication import manifest_selected_part_files
+from fisheye.analytics_exports.validation import validate_export_run
 from fisheye.group_statistics.goodcopbadcop import (
     DESCRIPTIVE_TABLE,
     GoodCopBadCopStatisticsConfig,
@@ -324,6 +330,7 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
         bootstrap_iterations=0,
         minimum_recordings=3,
         random_seed=0,
+        allow_legacy_export_layout=True,
     )
 
     rows, manifest = compute_goodcopbadcop_statistics(config)
@@ -337,6 +344,7 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert manifest["parameters"]["role_mapping_table"] == (
         "chaser_quadrant_occupancy_chaser_phase"
     )
+    assert manifest["parameters"]["allow_legacy_export_layout"] is True
     assert manifest["row_counts_by_table"][SUMMARY_TABLE] == 18
     assert len(descriptive_rows) == 18
     descriptive_target = next(
@@ -365,6 +373,9 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert target["p_value"] == pytest.approx(0.25)
     assert target["q_value"] is not None
     assert target["test_method"] == "paired_sign_flip_exact"
+    assert json.loads(target["parameters_json"])[
+        "allow_legacy_export_layout"
+    ] is True
 
     written = write_goodcopbadcop_statistics(
         rows,
@@ -374,7 +385,7 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
         descriptive_rows=descriptive_rows,
     )
     assert Path(written["manifest_path"]).is_file()
-    part = export_root / "v1" / SUMMARY_TABLE / "export_run_id=stats_test" / "part-00000.parquet"
+    part = manifest_selected_part_files(export_root, "stats_test", SUMMARY_TABLE)[0]
     assert part.is_file()
     table = pq.read_table(part).to_pylist()
     assert len(table) == 18
@@ -385,7 +396,11 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert json.loads(summary_metadata[b"palette.table_contract"]) == TABLE_CONTRACTS[
         SUMMARY_TABLE
     ].to_dict()
-    descriptive_part = export_root / "v1" / DESCRIPTIVE_TABLE / "export_run_id=stats_test" / "part-00000.parquet"
+    descriptive_part = manifest_selected_part_files(
+        export_root,
+        "stats_test",
+        DESCRIPTIVE_TABLE,
+    )[0]
     assert descriptive_part.is_file()
     descriptive_table = pq.read_table(descriptive_part).to_pylist()
     assert len(descriptive_table) == 18
@@ -406,6 +421,7 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
         bootstrap_iterations=0,
         minimum_recordings=3,
         random_seed=0,
+        allow_legacy_export_layout=True,
     )
 
     rows, manifest = compute_goodcopbadcop_statistics(config)
@@ -452,6 +468,7 @@ def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path
         bootstrap_iterations=0,
         minimum_recordings=3,
         random_seed=0,
+        allow_legacy_export_layout=True,
     )
 
     rows, manifest = compute_goodcopbadcop_statistics(config)
@@ -501,6 +518,7 @@ def test_compute_group_statistics_cli_dry_run_and_apply(tmp_path: Path, capsys) 
         "0",
         "--minimum-recordings",
         "3",
+        "--allow-legacy-export-layout",
     ]
 
     assert compute_group_statistics_main(args) == 0
@@ -512,5 +530,308 @@ def test_compute_group_statistics_cli_dry_run_and_apply(tmp_path: Path, capsys) 
     assert compute_group_statistics_main([*args, "--apply"]) == 0
     apply_output = capsys.readouterr().out
     assert "manifest\t" in apply_output
-    assert (export_root / "v1" / SUMMARY_TABLE / "export_run_id=stats_cli" / "part-00000.parquet").is_file()
-    assert (export_root / "v1" / DESCRIPTIVE_TABLE / "export_run_id=stats_cli" / "part-00000.parquet").is_file()
+    assert manifest_selected_part_files(export_root, "stats_cli", SUMMARY_TABLE)
+    assert manifest_selected_part_files(export_root, "stats_cli", DESCRIPTIVE_TABLE)
+
+
+def test_statistics_concurrent_first_publication_uses_compare_and_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_race",
+        metrics=metric_specs_for_families(("chaser_distance",)),
+        bootstrap_iterations=0,
+        minimum_recordings=3,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+    rows, manifest = compute_goodcopbadcop_statistics(config)
+    import fisheye.group_statistics.goodcopbadcop as statistics
+
+    real_validate = statistics.validate_staged_publication
+    ready_to_commit = threading.Barrier(2)
+
+    def synchronized_validate(staging_root: Path, payload: object) -> None:
+        real_validate(staging_root, payload)
+        ready_to_commit.wait(timeout=10)
+
+    monkeypatch.setattr(statistics, "validate_staged_publication", synchronized_validate)
+
+    def publish() -> dict[str, object]:
+        return write_goodcopbadcop_statistics(
+            rows,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_race",
+        )
+
+    outcomes: list[object] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(publish) for _index in range(2)]
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except Exception as exc:
+                outcomes.append(exc)
+
+    assert sum(isinstance(item, dict) for item in outcomes) == 1
+    assert sum(
+        isinstance(item, RuntimeError) and "changed during publication" in str(item)
+        for item in outcomes
+    ) == 1
+    assert validate_export_run(export_root, "stats_race")["status"] == "valid"
+
+
+def test_statistics_manifest_commit_failure_preserves_previous_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_commit_failure",
+        metrics=metric_specs_for_families(("chaser_distance",)),
+        bootstrap_iterations=0,
+        minimum_recordings=3,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+    rows, manifest = compute_goodcopbadcop_statistics(config)
+    first = write_goodcopbadcop_statistics(
+        rows,
+        manifest,
+        export_root=export_root,
+        stats_run_id="stats_commit_failure",
+    )
+    manifest_path = Path(first["manifest_path"])
+    first_generation = first["publication"]["generation_id"]
+    import fisheye.group_statistics.goodcopbadcop as statistics
+
+    real_replace = os.replace
+
+    def fail_manifest(source: object, destination: object) -> None:
+        if Path(destination) == manifest_path:
+            raise OSError("injected statistics manifest commit failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(statistics.os, "replace", fail_manifest)
+    with pytest.raises(OSError, match="statistics manifest commit failure"):
+        write_goodcopbadcop_statistics(
+            rows,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_commit_failure",
+            overwrite=True,
+        )
+
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert persisted["publication"]["generation_id"] == first_generation
+    assert validate_export_run(export_root, "stats_commit_failure")["status"] == "valid"
+
+
+def test_statistics_inventory_failure_cleans_hidden_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_inventory_failure",
+        metrics=metric_specs_for_families(("chaser_distance",)),
+        bootstrap_iterations=0,
+        minimum_recordings=3,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+    rows, manifest = compute_goodcopbadcop_statistics(config)
+    import fisheye.group_statistics.goodcopbadcop as statistics
+
+    monkeypatch.setattr(
+        statistics,
+        "sha256_file",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("injected inventory failure")),
+    )
+    with pytest.raises(RuntimeError, match="inventory failure"):
+        write_goodcopbadcop_statistics(
+            rows,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_inventory_failure",
+        )
+
+    assert not list((export_root / "v1" / ".staging").glob("*"))
+
+
+def test_statistics_table_reads_bind_one_loaded_source_manifest_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    source_path = export_root / "v1" / "manifests" / "export_run_id=source_export.json"
+    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    payload["snapshot_marker"] = "original"
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    import fisheye.group_statistics.goodcopbadcop as statistics
+
+    real_read = statistics._read_export_table
+    seen_markers: list[object] = []
+
+    def read_from_snapshot(
+        root: Path,
+        source_manifest: dict[str, object],
+        table: str,
+        *,
+        allow_legacy_layout: bool = False,
+    ):
+        seen_markers.append(source_manifest.get("snapshot_marker"))
+        if len(seen_markers) == 1:
+            replaced = json.loads(source_path.read_text(encoding="utf-8"))
+            replaced["snapshot_marker"] = "replacement"
+            source_path.write_text(json.dumps(replaced), encoding="utf-8")
+        return real_read(
+            root,
+            source_manifest,
+            table,
+            allow_legacy_layout=allow_legacy_layout,
+        )
+
+    monkeypatch.setattr(statistics, "_read_export_table", read_from_snapshot)
+    compute_goodcopbadcop_statistics(
+        GoodCopBadCopStatisticsConfig(
+            export_root=export_root,
+            source_export_run_id="source_export",
+            stats_run_id="stats_snapshot",
+            metrics=metric_specs_for_families(("chaser_distance",)),
+            bootstrap_iterations=0,
+            minimum_recordings=3,
+            random_seed=0,
+            allow_legacy_export_layout=True,
+        )
+    )
+
+    assert len(seen_markers) >= 2
+    assert set(seen_markers) == {"original"}
+
+
+def test_statistics_cli_binds_summary_and_descriptive_to_one_source_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    source_path = (
+        export_root
+        / "v1"
+        / "manifests"
+        / "export_run_id=source_export.json"
+    )
+    original_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    import fisheye.group_statistics.goodcopbadcop as statistics
+
+    real_load = statistics._load_json_snapshot
+    load_count = 0
+
+    def replace_after_snapshot(path: Path):
+        nonlocal load_count
+        load_count += 1
+        snapshot = real_load(path)
+        replacement = dict(snapshot[0])
+        replacement["replacement_generation"] = load_count
+        path.write_text(json.dumps(replacement), encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(statistics, "_load_json_snapshot", replace_after_snapshot)
+    assert compute_group_statistics_main(
+        [
+            "--profile",
+            "chaser",
+            "--source-export-run-id",
+            "source_export",
+            "--export-root",
+            str(export_root),
+            "--stats-run-id",
+            "stats_one_snapshot",
+            "--metrics",
+            "chaser_distance",
+            "--bootstrap-iterations",
+            "0",
+            "--minimum-recordings",
+            "3",
+            "--allow-legacy-export-layout",
+            "--apply",
+        ]
+    ) == 0
+
+    assert load_count == 1
+    published_manifest = json.loads(
+        (
+            export_root
+            / "v1"
+            / "manifests"
+            / "export_run_id=stats_one_snapshot.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert published_manifest["source_export_manifest_sha256"] == original_digest
+    for table_name in (SUMMARY_TABLE, DESCRIPTIVE_TABLE):
+        rows = pq.read_table(
+            manifest_selected_part_files(
+                export_root,
+                "stats_one_snapshot",
+                table_name,
+            )[0]
+        ).to_pylist()
+        assert rows
+        assert {
+            row["source_export_manifest_sha256"] for row in rows
+        } == {original_digest}
+
+
+@pytest.mark.parametrize(
+    "source_run_id",
+    ["../escape", "bad\nrun", "bad:run", "café"],
+)
+def test_statistics_rejects_nonportable_source_run_before_manifest_read(
+    tmp_path: Path,
+    source_run_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="Invalid source export run ID"):
+        compute_goodcopbadcop_statistics(
+            GoodCopBadCopStatisticsConfig(
+                export_root=tmp_path / "exports",
+                source_export_run_id=source_run_id,
+                stats_run_id="stats_safe",
+                metrics=metric_specs_for_families(("chaser_distance",)),
+                allow_legacy_export_layout=True,
+            )
+        )
+
+
+def test_statistics_legacy_mode_rejects_unsafe_payload_run_identity(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    source_path = (
+        export_root
+        / "v1"
+        / "manifests"
+        / "export_run_id=source_export.json"
+    )
+    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    payload["export_run_id"] = "../escape"
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="run identity"):
+        compute_goodcopbadcop_statistics(
+            GoodCopBadCopStatisticsConfig(
+                export_root=export_root,
+                source_export_run_id="source_export",
+                stats_run_id="stats_safe",
+                metrics=metric_specs_for_families(("chaser_distance",)),
+                allow_legacy_export_layout=True,
+            )
+        )

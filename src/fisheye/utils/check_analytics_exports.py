@@ -88,14 +88,23 @@ def _check_row_files(row: dict[str, Any]) -> dict[str, Any]:
                 "actual_parquet_count": 0,
                 "missing_part_count": len(part_files),
                 "missing_part_files": part_files,
+                "unlisted_part_count": 0,
+                "unlisted_part_files": [],
             }
         )
         return row
 
     table_path = Path(str(table_path_raw))
     table_dir_exists = table_path.is_dir()
-    actual_parquet_count = len(list(table_path.glob("*.parquet"))) if table_dir_exists else 0
+    actual_parts = tuple(sorted(table_path.glob("*.parquet"))) if table_dir_exists else ()
+    actual_parquet_count = len(actual_parts)
     missing_part_files = [path for path in part_files if not Path(path).is_file()]
+    listed_resolved = {Path(path).resolve() for path in part_files}
+    unlisted_part_files = [
+        str(path)
+        for path in actual_parts
+        if path.resolve() not in listed_resolved
+    ]
     expected_part_count = row.get("part_count")
     count_mismatch = (
         expected_part_count is not None
@@ -112,6 +121,8 @@ def _check_row_files(row: dict[str, Any]) -> dict[str, Any]:
         check_status = "missing_table_dir"
     elif missing_part_files:
         check_status = "missing_part_files"
+    elif unlisted_part_files:
+        check_status = "unlisted_part_files"
     elif count_mismatch or actual_count_mismatch:
         check_status = "part_count_mismatch"
     else:
@@ -124,6 +135,8 @@ def _check_row_files(row: dict[str, Any]) -> dict[str, Any]:
             "actual_parquet_count": actual_parquet_count,
             "missing_part_count": len(missing_part_files),
             "missing_part_files": missing_part_files,
+            "unlisted_part_count": len(unlisted_part_files),
+            "unlisted_part_files": unlisted_part_files,
         }
     )
     return row
@@ -143,6 +156,8 @@ def _annotate_rows(rows: list[dict[str, Any]], *, check_files: bool) -> list[dic
             row["actual_parquet_count"] = None
             row["missing_part_count"] = None
             row["missing_part_files"] = []
+            row["unlisted_part_count"] = None
+            row["unlisted_part_files"] = []
             annotated.append(row)
     return annotated
 

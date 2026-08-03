@@ -10,6 +10,11 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import polars as pl
 
+from fisheye.analytics_exports.publication import manifest_selected_part_files
+from fisheye.group_analytics_viewer.catalog import (
+    discover_export_catalog,
+    select_export_run_id,
+)
 from fisheye.utils.analytics_export_resolution import resolve_latest_export_table
 
 
@@ -39,13 +44,7 @@ FIELD_TITLES = {
 def resolve_export_run_id(export_root: Path, export_run_id: str) -> str:
     """Resolve ``latest`` against export manifests."""
 
-    if export_run_id != "latest":
-        return export_run_id
-    manifest_dir = export_root / "v1" / "manifests"
-    manifests = sorted(manifest_dir.glob("export_run_id=*.json"))
-    if not manifests:
-        raise FileNotFoundError(f"No export manifests found under {manifest_dir}")
-    return manifests[-1].name.removeprefix("export_run_id=").removesuffix(".json")
+    return select_export_run_id(discover_export_catalog(export_root), export_run_id)
 
 
 def load_bout_kinematics_metrics_from_table_dir(
@@ -72,6 +71,26 @@ def load_bout_kinematics_metrics_from_table_dir(
     return frame
 
 
+def _load_bout_kinematics_metrics_from_parts(
+    files: Sequence[Path | str],
+    *,
+    measurement_level: str,
+) -> pl.DataFrame:
+    if not files:
+        raise FileNotFoundError(f"No {BOUT_KINEMATICS_TABLE} Parquet files selected")
+    frame = (
+        pl.scan_parquet([str(path) for path in files], hive_partitioning=False)
+        .filter(pl.col("measurement_level") == measurement_level)
+        .collect()
+    )
+    if frame.is_empty():
+        raise ValueError(
+            f"No {BOUT_KINEMATICS_TABLE} rows for "
+            f"measurement_level={measurement_level!r}."
+        )
+    return frame
+
+
 def load_bout_kinematics_metrics(
     export_root: Path,
     export_run_id: str,
@@ -80,9 +99,13 @@ def load_bout_kinematics_metrics(
 ) -> pl.DataFrame:
     """Load one measurement level from the standard export-root layout."""
 
-    table_dir = export_root / "v1" / BOUT_KINEMATICS_TABLE / f"export_run_id={export_run_id}"
-    return load_bout_kinematics_metrics_from_table_dir(
-        table_dir,
+    files = manifest_selected_part_files(
+        export_root,
+        export_run_id,
+        BOUT_KINEMATICS_TABLE,
+    )
+    return _load_bout_kinematics_metrics_from_parts(
+        files,
         measurement_level=measurement_level,
     )
 
@@ -326,6 +349,7 @@ def plot_export(
     dpi: int = 180,
 ) -> dict[str, Any]:
     table_dir: Path
+    frame: pl.DataFrame
     registry_metadata: dict[str, Any] = {}
     if parquet_root is not None:
         table_dir = parquet_root.expanduser().resolve()
@@ -333,6 +357,10 @@ def plot_export(
             table_dir.name.removeprefix("export_run_id=")
             if export_run_id == "latest" and table_dir.name.startswith("export_run_id=")
             else export_run_id
+        )
+        frame = load_bout_kinematics_metrics_from_table_dir(
+            table_dir,
+            measurement_level=measurement_level,
         )
     elif registry_path is not None or collection_id is not None or collection_manifest_sha256 is not None:
         resolution = resolve_latest_export_table(
@@ -345,6 +373,10 @@ def plot_export(
         )
         table_dir = resolution.table_path
         resolved_run_id = resolution.export_run_id
+        frame = _load_bout_kinematics_metrics_from_parts(
+            resolution.part_files,
+            measurement_level=measurement_level,
+        )
         registry_metadata = {
             "registry_path": str(resolution.registry_path),
             "collection_id": resolution.collection_id,
@@ -354,12 +386,16 @@ def plot_export(
         }
     else:
         resolved_run_id = resolve_export_run_id(export_root, export_run_id)
-        table_dir = export_root / "v1" / BOUT_KINEMATICS_TABLE / f"export_run_id={resolved_run_id}"
-
-    frame = load_bout_kinematics_metrics_from_table_dir(
-        table_dir,
-        measurement_level=measurement_level,
-    )
+        frame = load_bout_kinematics_metrics(
+            export_root,
+            resolved_run_id,
+            measurement_level=measurement_level,
+        )
+        table_dir = manifest_selected_part_files(
+            export_root,
+            resolved_run_id,
+            BOUT_KINEMATICS_TABLE,
+        )[0].parent
     summary = summarize_heading_metrics(frame)
     summary.update({
         "export_run_id": resolved_run_id,

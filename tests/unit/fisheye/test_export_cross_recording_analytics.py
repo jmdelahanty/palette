@@ -27,6 +27,7 @@ from fisheye.analytics_exports.contracts import (
     CHASER_SPATIAL_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
 )
+from fisheye.analytics_exports.publication import manifest_selected_part_files
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.stimulus_response import (
@@ -180,9 +181,12 @@ def _make_source_zarr(path: Path) -> Path:
 
     swim_parent = analysis.create_group("swim_bout_runs")
     swim_parent.attrs["latest"] = "bouts_test"
+    swim_parent.attrs["latest_complete"] = "bouts_test"
     swim = swim_parent.create_group("bouts_test")
     swim.attrs.update(
         {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
             "default_level": "speed_exponential",
             "track_id": 0,
             "source_track_kinematics_run": "tk_test",
@@ -487,10 +491,9 @@ def _convert_bout_kinematics_fixture_to_compact_v2(path: Path) -> None:
 
 
 def _read_dataset(output_root: Path, table: str, export_run_id: str):
-    table_dir = output_root / "v1" / table / f"export_run_id={export_run_id}"
-    files = sorted(table_dir.glob("*.parquet"))
+    files = manifest_selected_part_files(output_root, export_run_id, table)
     assert files, f"no parquet files for {table}"
-    return pq.read_table(files).to_pylist()
+    return pq.read_table([str(path) for path in files]).to_pylist()
 
 
 def _write_collection_manifest(path: Path, source: Path) -> dict:
@@ -758,7 +761,7 @@ def test_export_cross_recording_analytics_can_limit_tables(tmp_path: Path) -> No
     )
 
     assert manifest["row_counts_by_table"] == {"recording_summary": 1}
-    assert (output / "v1" / "recording_summary" / "export_run_id=summary_only").is_dir()
+    assert manifest_selected_part_files(output, "summary_only", "recording_summary")
     assert not (output / "v1" / "swim_bout_metrics").exists()
     rows = _read_dataset(output, "recording_summary", "summary_only")
     assert rows[0]["protocol_signature_schema"] == "palette_protocol_signature_v1"

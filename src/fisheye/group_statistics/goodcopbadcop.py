@@ -9,8 +9,10 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import socket
 from typing import Any, Mapping, Sequence
+import uuid
 
 import numpy as np
 import polars as pl
@@ -34,6 +36,21 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
     validate_table_columns,
 )
+from fisheye.analytics_exports.publication import (
+    PUBLICATION_SCHEMA_ID,
+    PUBLICATION_SCHEMA_VERSION,
+    export_manifest_path,
+    generation_relative_path,
+    manifest_commit_lock,
+    manifest_identity,
+    manifest_selected_part_files_from_payload,
+    publication_generation_root,
+    publication_staging_root,
+    safe_component,
+    sha256_file,
+    validate_staged_publication,
+)
+from fisheye.analytics_exports.validation import validate_export_payload
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.system_metadata import get_git_info
 
@@ -346,6 +363,7 @@ class GoodCopBadCopStatisticsConfig:
     minimum_recordings: int = 3
     random_seed: int = 0
     overwrite: bool = False
+    allow_legacy_export_layout: bool = False
 
 
 def utc_run_id() -> str:
@@ -353,7 +371,7 @@ def utc_run_id() -> str:
 
 
 def source_manifest_path(export_root: Path, source_export_run_id: str) -> Path:
-    return export_root / "v1" / "manifests" / f"export_run_id={source_export_run_id}.json"
+    return export_manifest_path(export_root, source_export_run_id)
 
 
 def _sha256_file(path: Path) -> str:
@@ -362,6 +380,14 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _load_json_snapshot(path: Path) -> tuple[dict[str, Any], str]:
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return payload, hashlib.sha256(raw).hexdigest()
 
 
 def _json_file(path: Path) -> dict[str, Any]:
@@ -392,11 +418,24 @@ def _table_dir(export_root: Path, source_export_run_id: str, table: str) -> Path
     return export_root / "v1" / table / f"export_run_id={source_export_run_id}"
 
 
-def _read_export_table(export_root: Path, source_export_run_id: str, table: str) -> pl.DataFrame:
-    table_dir = _table_dir(export_root, source_export_run_id, table)
-    files = sorted(table_dir.glob("*.parquet"))
+def _read_export_table(
+    export_root: Path,
+    source_manifest: Mapping[str, Any],
+    table: str,
+    *,
+    allow_legacy_layout: bool = False,
+) -> pl.DataFrame:
+    files = manifest_selected_part_files_from_payload(
+        export_root,
+        source_manifest,
+        table,
+        allow_legacy_layout=allow_legacy_layout,
+    )
     if not files:
-        raise FileNotFoundError(f"No Parquet parts found for {table}: {table_dir}")
+        raise FileNotFoundError(
+            f"Manifest selects no Parquet parts for {table}: "
+            f"{source_manifest.get('export_run_id')}"
+        )
     return pl.scan_parquet([str(path) for path in files]).collect()
 
 
@@ -809,6 +848,7 @@ def _base_descriptive_row(
     if not isinstance(source_row_counts, Mapping):
         source_row_counts = {}
     parameters = {
+        "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
         "minimum_recordings": int(config.minimum_recordings),
         "missing_policy": "complete_recording_values_by_condition",
         "random_seed": int(config.random_seed),
@@ -975,6 +1015,7 @@ def _rows_for_metric(
             )
             group_key = _group_key_payload(group_row, spec.group_keys)
             parameters = {
+                "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
                 "confidence_level": float(config.confidence_level),
                 "minimum_recordings": int(config.minimum_recordings),
                 "missing_policy": "paired_complete_recordings",
@@ -1074,6 +1115,7 @@ def _rows_for_cra_summary_metric(
         source_row_counts = {}
 
     parameters = {
+        "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
         "confidence_level": float(config.confidence_level),
         "minimum_recordings": int(config.minimum_recordings),
         "missing_policy": "one_row_per_recording_complete_cases",
@@ -1139,20 +1181,66 @@ def apply_fdr(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+@dataclass(frozen=True)
+class _GoodCopBadCopInputSnapshot:
+    export_root: Path
+    source_manifest: Mapping[str, Any]
+    source_manifest_sha256: str
+    frames: Mapping[str, pl.DataFrame]
+
+
+def _load_goodcopbadcop_input_snapshot(
+    config: GoodCopBadCopStatisticsConfig,
+) -> _GoodCopBadCopInputSnapshot:
+    """Bind one manifest byte identity, validated inventory, and table scan."""
+
     export_root = Path(config.export_root).expanduser().resolve()
-    source_manifest_file = source_manifest_path(export_root, config.source_export_run_id)
-    source_manifest = _json_file(source_manifest_file)
+    source_run_id = safe_component(
+        config.source_export_run_id,
+        label="source export run ID",
+    )
+    source_manifest_file = source_manifest_path(export_root, source_run_id)
+    source_manifest, source_manifest_sha256 = _load_json_snapshot(source_manifest_file)
     _require_v2_source_manifest(source_manifest, path=source_manifest_file)
-    source_manifest_sha256 = _sha256_file(source_manifest_file)
-    rng = np.random.default_rng(int(config.random_seed))
+    if source_manifest.get("export_run_id") != source_run_id:
+        raise ValueError(
+            "source export manifest run identity does not match the requested run"
+        )
+    if not config.allow_legacy_export_layout:
+        validate_export_payload(
+            export_root,
+            source_run_id,
+            source_manifest,
+        )
     tables = _statistics_input_tables(config.metrics)
     frames = {
-        table: _read_export_table(export_root, config.source_export_run_id, table)
+        table: _read_export_table(
+            export_root,
+            source_manifest,
+            table,
+            allow_legacy_layout=config.allow_legacy_export_layout,
+        )
         for table in tables
     }
     _enrich_role_grouped_frames(frames, config.metrics)
     _derive_profile_role_contrasts(frames, config.metrics)
+    return _GoodCopBadCopInputSnapshot(
+        export_root=export_root,
+        source_manifest=source_manifest,
+        source_manifest_sha256=source_manifest_sha256,
+        frames=frames,
+    )
+
+
+def _compute_goodcopbadcop_statistics_from_snapshot(
+    config: GoodCopBadCopStatisticsConfig,
+    snapshot: _GoodCopBadCopInputSnapshot,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    export_root = snapshot.export_root
+    source_manifest = snapshot.source_manifest
+    source_manifest_sha256 = snapshot.source_manifest_sha256
+    frames = snapshot.frames
+    rng = np.random.default_rng(int(config.random_seed))
 
     rows: list[dict[str, Any]] = []
     for spec in config.metrics:
@@ -1168,6 +1256,7 @@ def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> t
             minimum_recordings=config.minimum_recordings,
             random_seed=config.random_seed,
             overwrite=config.overwrite,
+            allow_legacy_export_layout=config.allow_legacy_export_layout,
         )
         if spec.source_table in {CRA_SUMMARY_TABLE, CRA_NEAR_FIELD_SUMMARY_TABLE}:
             rows.extend(
@@ -1207,6 +1296,7 @@ def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> t
             minimum_recordings=config.minimum_recordings,
             random_seed=config.random_seed,
             overwrite=config.overwrite,
+            allow_legacy_export_layout=config.allow_legacy_export_layout,
         ),
         rows=rows,
         source_manifest=source_manifest,
@@ -1215,19 +1305,14 @@ def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> t
     return rows, manifest
 
 
-def compute_goodcopbadcop_descriptive_summaries(config: GoodCopBadCopStatisticsConfig) -> list[dict[str, Any]]:
-    export_root = Path(config.export_root).expanduser().resolve()
-    source_manifest_file = source_manifest_path(export_root, config.source_export_run_id)
-    source_manifest = _json_file(source_manifest_file)
-    _require_v2_source_manifest(source_manifest, path=source_manifest_file)
-    source_manifest_sha256 = _sha256_file(source_manifest_file)
-    tables = _statistics_input_tables(config.metrics)
-    frames = {
-        table: _read_export_table(export_root, config.source_export_run_id, table)
-        for table in tables
-    }
-    _enrich_role_grouped_frames(frames, config.metrics)
-    _derive_profile_role_contrasts(frames, config.metrics)
+def _compute_goodcopbadcop_descriptive_from_snapshot(
+    config: GoodCopBadCopStatisticsConfig,
+    snapshot: _GoodCopBadCopInputSnapshot,
+) -> list[dict[str, Any]]:
+    export_root = snapshot.export_root
+    source_manifest = snapshot.source_manifest
+    source_manifest_sha256 = snapshot.source_manifest_sha256
+    frames = snapshot.frames
 
     rows: list[dict[str, Any]] = []
     for spec in config.metrics:
@@ -1243,6 +1328,7 @@ def compute_goodcopbadcop_descriptive_summaries(config: GoodCopBadCopStatisticsC
             minimum_recordings=config.minimum_recordings,
             random_seed=config.random_seed,
             overwrite=config.overwrite,
+            allow_legacy_export_layout=config.allow_legacy_export_layout,
         )
         if spec.source_table in {CRA_SUMMARY_TABLE, CRA_NEAR_FIELD_SUMMARY_TABLE}:
             rows.extend(
@@ -1265,6 +1351,34 @@ def compute_goodcopbadcop_descriptive_summaries(config: GoodCopBadCopStatisticsC
                 )
             )
     return [canonicalize_export_row(DESCRIPTIVE_TABLE, row) for row in rows]
+
+
+def compute_goodcopbadcop_statistics(
+    config: GoodCopBadCopStatisticsConfig,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    snapshot = _load_goodcopbadcop_input_snapshot(config)
+    return _compute_goodcopbadcop_statistics_from_snapshot(config, snapshot)
+
+
+def compute_goodcopbadcop_descriptive_summaries(
+    config: GoodCopBadCopStatisticsConfig,
+) -> list[dict[str, Any]]:
+    snapshot = _load_goodcopbadcop_input_snapshot(config)
+    return _compute_goodcopbadcop_descriptive_from_snapshot(config, snapshot)
+
+
+def compute_goodcopbadcop_outputs(
+    config: GoodCopBadCopStatisticsConfig,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Compute both published tables from one immutable input snapshot."""
+
+    snapshot = _load_goodcopbadcop_input_snapshot(config)
+    rows, manifest = _compute_goodcopbadcop_statistics_from_snapshot(config, snapshot)
+    descriptive_rows = _compute_goodcopbadcop_descriptive_from_snapshot(
+        config,
+        snapshot,
+    )
+    return rows, descriptive_rows, manifest
 
 
 def _build_stats_manifest(
@@ -1327,6 +1441,7 @@ def _build_stats_manifest(
             for contrast in config.contrasts
         ],
         "parameters": {
+            "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
             "bootstrap_iterations": int(config.bootstrap_iterations),
             "permutation_iterations": int(config.permutation_iterations),
             "confidence_level": float(config.confidence_level),
@@ -1360,6 +1475,24 @@ def write_goodcopbadcop_statistics(
     import pyarrow.parquet as pq
 
     output_root = Path(export_root).expanduser().resolve()
+    stats_run_id = safe_component(stats_run_id, label="statistics run ID")
+    manifest_path = export_manifest_path(output_root, stats_run_id)
+    manifest_dir = manifest_path.parent
+    baseline_manifest_identity = manifest_identity(manifest_path)
+    if manifest_path.exists() and not overwrite:
+        raise FileExistsError(f"Statistics manifest already exists: {manifest_path}")
+    generation_id = uuid.uuid4().hex
+    generation_path = generation_relative_path(stats_run_id, generation_id)
+    staging_root = publication_staging_root(
+        output_root,
+        stats_run_id,
+        generation_id,
+    )
+    final_generation_root = publication_generation_root(
+        output_root,
+        stats_run_id,
+        generation_id,
+    )
 
     canonical_rows_by_table = {
         SUMMARY_TABLE: [canonicalize_export_row(SUMMARY_TABLE, row) for row in rows],
@@ -1370,9 +1503,7 @@ def write_goodcopbadcop_statistics(
         ]
 
     def write_table(table_name: str, table_rows: Sequence[Mapping[str, Any]]) -> list[str]:
-        table_dir = output_root / "v1" / table_name / f"export_run_id={stats_run_id}"
-        if table_dir.exists() and any(table_dir.iterdir()) and not overwrite:
-            raise FileExistsError(f"Statistics table directory already exists: {table_dir}")
+        table_dir = staging_root / "tables" / table_name
         table_dir.mkdir(parents=True, exist_ok=True)
         normalized = _normalize_rows(table_rows)
         part_files: list[str] = []
@@ -1406,54 +1537,124 @@ def write_goodcopbadcop_statistics(
             part_files.append(str(part_path))
         return part_files
 
-    part_files_by_table: dict[str, list[str]] = {
-        SUMMARY_TABLE: write_table(SUMMARY_TABLE, canonical_rows_by_table[SUMMARY_TABLE]),
-    }
-    if descriptive_rows:
-        part_files_by_table[DESCRIPTIVE_TABLE] = write_table(
-            DESCRIPTIVE_TABLE,
-            canonical_rows_by_table[DESCRIPTIVE_TABLE],
-        )
+    try:
+        part_files_by_table: dict[str, list[str]] = {
+            SUMMARY_TABLE: write_table(SUMMARY_TABLE, canonical_rows_by_table[SUMMARY_TABLE]),
+        }
+        if descriptive_rows:
+            part_files_by_table[DESCRIPTIVE_TABLE] = write_table(
+                DESCRIPTIVE_TABLE,
+                canonical_rows_by_table[DESCRIPTIVE_TABLE],
+            )
+    except Exception:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        raise
 
-    manifest_dir = output_root / "v1" / "manifests"
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = manifest_dir / f"export_run_id={stats_run_id}.json"
-    if manifest_path.exists() and not overwrite:
-        raise FileExistsError(f"Statistics manifest already exists: {manifest_path}")
-    payload = dict(manifest)
-    output_tables = list(payload.get("output_tables") or [])
-    if SUMMARY_TABLE not in output_tables:
-        output_tables.append(SUMMARY_TABLE)
-    row_counts_by_table = dict(payload.get("row_counts_by_table") or {})
-    row_counts_by_table[SUMMARY_TABLE] = len(rows)
-    if descriptive_rows:
-        if DESCRIPTIVE_TABLE not in output_tables:
-            output_tables.append(DESCRIPTIVE_TABLE)
-        row_counts_by_table[DESCRIPTIVE_TABLE] = len(descriptive_rows)
-    payload["output_tables"] = output_tables
-    payload["row_counts_by_table"] = row_counts_by_table
-    payload["part_files_by_table"] = part_files_by_table
-    payload["schema_id"] = EXPORT_SCHEMA_ID
-    payload["schema_version"] = EXPORT_SCHEMA_VERSION
-    payload["table_contracts"] = contract_snapshot(output_tables)
-    columns_by_table = {
-        SUMMARY_TABLE: sorted(
-            {key for row in canonical_rows_by_table[SUMMARY_TABLE] for key in row}
-        ),
-    }
-    if descriptive_rows:
-        columns_by_table[DESCRIPTIVE_TABLE] = sorted(
-            {key for row in canonical_rows_by_table[DESCRIPTIVE_TABLE] for key in row}
+    def prepare_payload() -> dict[str, Any]:
+        payload = dict(manifest)
+        output_tables = list(payload.get("output_tables") or [])
+        if SUMMARY_TABLE not in output_tables:
+            output_tables.append(SUMMARY_TABLE)
+        row_counts_by_table = dict(payload.get("row_counts_by_table") or {})
+        row_counts_by_table[SUMMARY_TABLE] = len(rows)
+        if descriptive_rows:
+            if DESCRIPTIVE_TABLE not in output_tables:
+                output_tables.append(DESCRIPTIVE_TABLE)
+            row_counts_by_table[DESCRIPTIVE_TABLE] = len(descriptive_rows)
+        payload["output_tables"] = output_tables
+        payload["row_counts_by_table"] = row_counts_by_table
+        part_inventory: dict[str, list[dict[str, Any]]] = {}
+        relative_part_files: dict[str, list[str]] = {}
+        for table_name, staged_paths in part_files_by_table.items():
+            entries: list[dict[str, Any]] = []
+            relative_paths: list[str] = []
+            for staged_value in staged_paths:
+                staged_path = Path(staged_value)
+                relative = generation_path / "tables" / table_name / staged_path.name
+                entries.append(
+                    {
+                        "path": relative.as_posix(),
+                        "sha256": sha256_file(staged_path),
+                        "size_bytes": int(staged_path.stat().st_size),
+                        "row_count": int(
+                            pq.ParquetFile(staged_path).metadata.num_rows
+                        ),
+                    }
+                )
+                relative_paths.append(relative.as_posix())
+            part_inventory[table_name] = entries
+            relative_part_files[table_name] = relative_paths
+        payload["part_files_by_table"] = relative_part_files
+        payload["publication"] = {
+            "schema_id": PUBLICATION_SCHEMA_ID,
+            "schema_version": PUBLICATION_SCHEMA_VERSION,
+            "state": "complete",
+            "generation_id": generation_id,
+            "generation_path": generation_path.as_posix(),
+            "parts_by_table": part_inventory,
+        }
+        payload["schema_id"] = EXPORT_SCHEMA_ID
+        payload["schema_version"] = EXPORT_SCHEMA_VERSION
+        payload["table_contracts"] = contract_snapshot(output_tables)
+        columns_by_table = {
+            SUMMARY_TABLE: sorted(
+                {
+                    key
+                    for row in canonical_rows_by_table[SUMMARY_TABLE]
+                    for key in row
+                }
+            ),
+        }
+        if descriptive_rows:
+            columns_by_table[DESCRIPTIVE_TABLE] = sorted(
+                {
+                    key
+                    for row in canonical_rows_by_table[DESCRIPTIVE_TABLE]
+                    for key in row
+                }
+            )
+        capability_statuses = resolve_capabilities(columns_by_table)
+        payload["capabilities"] = [
+            status.capability_id
+            for status in capability_statuses
+            if status.available
+        ]
+        payload["capability_statuses"] = [
+            status.to_dict() for status in capability_statuses
+        ]
+        payload["manifest_path"] = str(manifest_path)
+        return payload
+
+    try:
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        payload = prepare_payload()
+        validate_staged_publication(staging_root, payload)
+    except Exception:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        raise
+    tmp_manifest = manifest_dir / (
+        f".export_run_id={stats_run_id}.generation={generation_id}.json.tmp"
+    )
+    final_generation_root.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging_root, final_generation_root)
+    try:
+        tmp_manifest.write_text(
+            json.dumps(json_attr_safe(payload), indent=2, sort_keys=True) + "\n"
         )
-    capability_statuses = resolve_capabilities(columns_by_table)
-    payload["capabilities"] = [
-        status.capability_id for status in capability_statuses if status.available
-    ]
-    payload["capability_statuses"] = [status.to_dict() for status in capability_statuses]
-    payload["manifest_path"] = str(manifest_path)
-    tmp_manifest = manifest_path.with_suffix(".json.tmp")
-    tmp_manifest.write_text(json.dumps(json_attr_safe(payload), indent=2, sort_keys=True) + "\n")
-    os.replace(tmp_manifest, manifest_path)
+        with manifest_commit_lock(manifest_path):
+            if manifest_identity(manifest_path) != baseline_manifest_identity:
+                raise RuntimeError(
+                    "Statistics manifest changed during publication; "
+                    "the staged generation was not committed"
+                )
+            os.replace(tmp_manifest, manifest_path)
+    except Exception:
+        tmp_manifest.unlink(missing_ok=True)
+        if final_generation_root.exists():
+            shutil.rmtree(final_generation_root)
+        raise
     return payload
 
 

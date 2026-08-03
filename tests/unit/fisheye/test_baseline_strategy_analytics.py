@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
@@ -15,6 +17,7 @@ from fisheye.analytics_exports.contracts import (
     TABLE_CONTRACTS,
     contract_snapshot,
 )
+from fisheye.analytics_exports.publication import sha256_file
 from fisheye.baseline_strategy.cohort import (
     classify_strategy_features,
     discover_strategy_clusters,
@@ -254,6 +257,12 @@ def test_build_strategy_tables_returns_all_four_derived_tables() -> None:
 
 def _write_summary_only_export(root: Path, run_id: str) -> Path:
     table_name = BASELINE_BEHAVIOR_SUMMARY_TABLE
+    generation_path = (
+        Path("v1")
+        / ".generations"
+        / f"export_run_id={run_id}"
+        / "generation=test"
+    )
     rows = []
     for index in range(6):
         row = {column: None for column in TABLE_CONTRACTS[table_name].required_columns}
@@ -274,7 +283,7 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
         row["export_schema_version"] = EXPORT_SCHEMA_VERSION
         row["table_name"] = table_name
         rows.append(row)
-    part = root / "v1" / table_name / f"export_run_id={run_id}" / "part-00000.parquet"
+    part = root / generation_path / "tables" / table_name / "part-00000.parquet"
     part.parent.mkdir(parents=True)
     table = pa.Table.from_pylist(rows).replace_schema_metadata(
         {
@@ -290,6 +299,7 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
     pq.write_table(table, part)
     manifest = root / "v1" / "manifests" / f"export_run_id={run_id}.json"
     manifest.parent.mkdir(parents=True)
+    relative_part = (generation_path / "tables" / table_name / part.name).as_posix()
     manifest.write_text(
         json.dumps(
             {
@@ -299,8 +309,25 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
                 "tables_requested": [table_name],
                 "table_contracts": contract_snapshot([table_name]),
                 "row_counts_by_table": {table_name: len(rows)},
-                "part_files_by_table": {table_name: [str(part)]},
+                "part_files_by_table": {table_name: [relative_part]},
                 "capabilities": ["core.baseline.behavior_summary"],
+                "publication": {
+                    "schema_id": "palette.analytics_export.publication",
+                    "schema_version": 1,
+                    "state": "complete",
+                    "generation_id": "test",
+                    "generation_path": generation_path.as_posix(),
+                    "parts_by_table": {
+                        table_name: [
+                            {
+                                "path": relative_part,
+                                "sha256": sha256_file(part),
+                                "size_bytes": part.stat().st_size,
+                                "row_count": len(rows),
+                            }
+                        ]
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -351,6 +378,66 @@ def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_pat
         columns=("recording_id", "feature_status"),
     )
     assert lazy.collect().shape == (6, 2)
+
+
+def test_workflow_binds_manifest_digest_to_loaded_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "source_export"
+    output_root = tmp_path / "derived_analytics"
+    _write_summary_only_export(source_root, "source_001")
+    manifest_path = (
+        source_root
+        / "v1"
+        / "manifests"
+        / "export_run_id=source_001.json"
+    )
+    expected_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    import fisheye.baseline_strategy.workflow as workflow
+
+    real_load = workflow._load_manifest_snapshot
+
+    def replace_after_snapshot(root: Path, run_id: str):
+        snapshot = real_load(root, run_id)
+        replacement = json.loads(manifest_path.read_text(encoding="utf-8"))
+        replacement["replacement_generation"] = "newer"
+        manifest_path.write_text(json.dumps(replacement), encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(workflow, "_load_manifest_snapshot", replace_after_snapshot)
+    result = run_strategy_analytics(
+        source_export_root=source_root,
+        source_export_run_id="source_001",
+        output_root=output_root,
+        analysis_run_id="strategy_snapshot",
+        config=StrategyFeatureConfig(cluster_stability_resamples=2),
+    )
+
+    assert result["source_export_manifest_sha256"] == expected_digest
+
+
+def test_strategy_workflow_rejects_symlinked_source_manifest_namespace(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (source_root / "v1").mkdir(parents=True)
+    (source_root / "v1" / "manifests").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        run_strategy_analytics(
+            source_export_root=source_root,
+            source_export_run_id="source_001",
+            output_root=tmp_path / "output",
+            analysis_run_id="strategy_001",
+        )
+
+    assert not any(outside.iterdir())
 
 
 def test_workflow_rejects_conflicting_source_export_identity(tmp_path: Path) -> None:

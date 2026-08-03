@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -39,6 +40,14 @@ from fisheye.analytics_exports.contracts import (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     STATISTICS_TABLE,
 )
+from fisheye.analytics_exports.publication import (
+    export_manifest_directory,
+    export_manifest_path,
+    manifest_selected_part_files,
+    manifest_selected_part_files_from_payload,
+    validate_publication_envelope,
+)
+from fisheye.analytics_exports.validation import validate_export_payload
 from fisheye.group_statistics.paired import bootstrap_median_ci, wilcoxon_signed_rank_p_value
 
 from .catalog import discover_export_catalog, select_export_run_id
@@ -288,11 +297,7 @@ def _json_file(path: Path) -> dict[str, Any]:
 
 
 def _manifest_path(export_root: Path, export_run_id: str) -> Path:
-    safe_run_id = _validate_path_component(export_run_id, label="export run ID")
-    path = export_root / "v1" / "manifests" / f"export_run_id={safe_run_id}.json"
-    if not _is_within(path.resolve(), export_root.resolve()):
-        raise PermissionError(f"Export manifest resolves outside the authorized root: {path}")
-    return path
+    return export_manifest_path(export_root, export_run_id)
 
 
 def _validate_path_component(value: str, *, label: str) -> str:
@@ -311,6 +316,8 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 def resolve_export_run_id(export_root: Path, export_run_id: str) -> str:
+    if export_run_id != "latest":
+        _validate_path_component(export_run_id, label="export run ID")
     catalog = discover_export_catalog(export_root)
     return select_export_run_id(catalog, export_run_id)
 
@@ -339,18 +346,20 @@ def table_dir(context: ViewerContext, table_name: str, *, export_run_id: str | N
 
 
 def parquet_files(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> tuple[Path, ...]:
-    root = table_dir(context, table_name, export_run_id=export_run_id)
-    authorized_root = context.export_root.resolve()
-    if not _is_within(root.resolve(), authorized_root):
-        raise PermissionError(f"Export table resolves outside the authorized root: {root}")
-    if not root.is_dir():
-        raise FileNotFoundError(f"Export table directory not found: {root}")
-    files = tuple(sorted(root.glob("*.parquet")))
+    safe_table_name = _validate_path_component(table_name, label="table name")
+    safe_run_id = _validate_path_component(
+        export_run_id or context.export_run_id,
+        label="export run ID",
+    )
+    files = manifest_selected_part_files(
+        context.export_root,
+        safe_run_id,
+        safe_table_name,
+    )
     if not files:
-        raise FileNotFoundError(f"No parquet parts found under {root}")
-    unsafe = next((path for path in files if not _is_within(path.resolve(), authorized_root)), None)
-    if unsafe is not None:
-        raise PermissionError(f"Parquet part resolves outside the authorized root: {unsafe}")
+        raise FileNotFoundError(
+            f"Manifest selects no parquet parts for {safe_table_name!r} in {safe_run_id!r}"
+        )
     return files
 
 
@@ -391,8 +400,66 @@ def _table_schema(context: ViewerContext, table_name: str, *, export_run_id: str
     return [{"name": name, "type": str(dtype)} for name, dtype in schema.items()]
 
 
+def _validate_statistics_manifest(
+    context: ViewerContext,
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+) -> str:
+    stats_run_id = manifest_path.name.removeprefix("export_run_id=").removesuffix(
+        ".json"
+    )
+    if manifest.get("export_run_id") != stats_run_id:
+        raise ValueError("Statistics manifest identity does not match its filename")
+    if (
+        manifest.get("schema_id") != EXPORT_SCHEMA_ID
+        or manifest.get("schema_version") != EXPORT_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"Statistics manifest is not {EXPORT_SCHEMA_ID} version "
+            f"{EXPORT_SCHEMA_VERSION}: {manifest_path}"
+        )
+    if manifest.get("source_export_run_id") != context.export_run_id:
+        raise ValueError(
+            "Statistics manifest source_export_run_id does not match viewed export: "
+            f"{manifest.get('source_export_run_id')} != {context.export_run_id}"
+        )
+    source_manifest = _manifest_path(context.export_root, context.export_run_id)
+    source_manifest_sha256 = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
+    if manifest.get("source_export_manifest_sha256") != source_manifest_sha256:
+        raise ValueError(
+            "Statistics manifest source_export_manifest_sha256 does not match "
+            "the selected base export manifest"
+        )
+    outputs = manifest.get("output_tables")
+    row_counts = manifest.get("row_counts_by_table")
+    has_stats_table = (
+        isinstance(outputs, list)
+        and STATISTICS_TABLE in {str(item) for item in outputs}
+    ) or (
+        isinstance(row_counts, Mapping)
+        and STATISTICS_TABLE in row_counts
+    )
+    if not has_stats_table:
+        raise ValueError(f"Statistics manifest does not declare {STATISTICS_TABLE}")
+    validate_export_payload(context.export_root, stats_run_id, manifest)
+    validate_publication_envelope(manifest)
+    selected = manifest_selected_part_files_from_payload(
+        context.export_root,
+        manifest,
+        STATISTICS_TABLE,
+    )
+    expected_rows = _safe_int(row_counts.get(STATISTICS_TABLE)) if isinstance(
+        row_counts, Mapping
+    ) else None
+    if expected_rows and not selected:
+        raise ValueError("Statistics publication selects no summary part files")
+    if any(not path.is_file() for path in selected):
+        raise ValueError("Statistics publication selects a missing summary part")
+    return stats_run_id
+
+
 def _stats_manifest_candidates(context: ViewerContext) -> list[tuple[str, dict[str, Any]]]:
-    manifest_dir = context.export_root / "v1" / "manifests"
+    manifest_dir = export_manifest_directory(context.export_root)
     candidates: list[tuple[str, dict[str, Any]]] = []
     for manifest_path in sorted(manifest_dir.glob("export_run_id=*.json")):
         if not _is_within(manifest_path.resolve(), context.export_root.resolve()):
@@ -401,25 +468,14 @@ def _stats_manifest_candidates(context: ViewerContext) -> list[tuple[str, dict[s
             manifest = _json_file(manifest_path)
         except Exception:
             continue
-        if (
-            manifest.get("schema_id") != EXPORT_SCHEMA_ID
-            or manifest.get("schema_version") != EXPORT_SCHEMA_VERSION
-        ):
+        try:
+            stats_run_id = _validate_statistics_manifest(
+                context,
+                manifest_path,
+                manifest,
+            )
+        except (OSError, ValueError):
             continue
-        if manifest.get("source_export_run_id") != context.export_run_id:
-            continue
-        outputs = manifest.get("output_tables")
-        row_counts = manifest.get("row_counts_by_table")
-        has_stats_table = (
-            isinstance(outputs, list)
-            and STATISTICS_TABLE in {str(item) for item in outputs}
-        ) or (
-            isinstance(row_counts, Mapping)
-            and STATISTICS_TABLE in row_counts
-        )
-        if not has_stats_table:
-            continue
-        stats_run_id = manifest_path.name.removeprefix("export_run_id=").removesuffix(".json")
         candidates.append((stats_run_id, manifest))
     candidates.sort(key=lambda item: (str(item[1].get("created_at_utc") or ""), item[0]))
     return candidates
@@ -431,30 +487,7 @@ def resolve_statistics_run_id(context: ViewerContext) -> str | None:
         if not manifest.is_file():
             raise FileNotFoundError(f"Statistics manifest not found: {manifest}")
         payload = _json_file(manifest)
-        if (
-            payload.get("schema_id") != EXPORT_SCHEMA_ID
-            or payload.get("schema_version") != EXPORT_SCHEMA_VERSION
-        ):
-            raise ValueError(
-                f"Statistics manifest is not {EXPORT_SCHEMA_ID} version {EXPORT_SCHEMA_VERSION}: {manifest}"
-            )
-        if payload.get("source_export_run_id") != context.export_run_id:
-            raise ValueError(
-                "Statistics manifest source_export_run_id does not match viewed export: "
-                f"{payload.get('source_export_run_id')} != {context.export_run_id}"
-            )
-        outputs = payload.get("output_tables")
-        row_counts = payload.get("row_counts_by_table")
-        has_stats_table = (
-            isinstance(outputs, list)
-            and STATISTICS_TABLE in {str(item) for item in outputs}
-        ) or (
-            isinstance(row_counts, Mapping)
-            and STATISTICS_TABLE in row_counts
-        )
-        if not has_stats_table:
-            raise ValueError(f"Statistics manifest does not declare {STATISTICS_TABLE}")
-        return context.stats_run_id
+        return _validate_statistics_manifest(context, manifest, payload)
     candidates = _stats_manifest_candidates(context)
     return candidates[-1][0] if candidates else None
 
@@ -471,7 +504,7 @@ def build_health_report(context: ViewerContext) -> HealthReport:
         try:
             files = parquet_files(context, table_name)
             details["tables"][table_name] = {
-                "path": str(table_dir(context, table_name)),
+                "path": str(files[0].parent),
                 "part_count": len(files),
             }
         except Exception as exc:
@@ -503,24 +536,20 @@ def query_export_summary(context: ViewerContext) -> dict[str, Any]:
     row_counts = manifest.get("row_counts_by_table")
     if not isinstance(row_counts, Mapping):
         row_counts = {}
-    part_files = manifest.get("part_files_by_table")
-    if not isinstance(part_files, Mapping):
-        part_files = {}
-
     tables: list[dict[str, Any]] = []
     for table_name in CHASER_TABLES:
-        parts = part_files.get(table_name)
-        if not isinstance(parts, list):
-            try:
-                parts = [str(path) for path in parquet_files(context, table_name)]
-            except FileNotFoundError:
-                parts = []
+        try:
+            selected_parts = parquet_files(context, table_name)
+        except FileNotFoundError:
+            selected_parts = ()
         tables.append(
             {
                 "table_name": table_name,
                 "row_count": _safe_int(row_counts.get(table_name)),
-                "part_count": len(parts),
-                "table_path": str(table_dir(context, table_name)),
+                "part_count": len(selected_parts),
+                "table_path": (
+                    str(selected_parts[0].parent) if selected_parts else None
+                ),
             }
         )
 

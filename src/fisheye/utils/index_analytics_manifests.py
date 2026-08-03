@@ -7,6 +7,11 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from fisheye.analytics_exports.publication import (
+    has_exclusive_inventory,
+    manifest_selected_part_files_from_payload,
+)
+from fisheye.analytics_exports.validation import validate_export_run
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.utils.virtual_collection_manifest import (
     compute_manifest_sha256,
@@ -93,6 +98,13 @@ def _export_output_root(manifest: Mapping[str, Any], manifest_path: Path) -> Pat
     explicit = manifest.get("output_root")
     if isinstance(explicit, str) and explicit:
         return Path(explicit)
+    # Published manifests are authoritative at <root>/v1/manifests/<file>.
+    # Prefer that stable location before interpreting legacy part paths.
+    try:
+        if manifest_path.parent.name == "manifests" and manifest_path.parent.parent.name == "v1":
+            return manifest_path.parent.parent.parent
+    except Exception:
+        return None
     part_files = manifest.get("part_files_by_table")
     if isinstance(part_files, Mapping):
         for files in part_files.values():
@@ -103,12 +115,6 @@ def _export_output_root(manifest: Mapping[str, Any], manifest_path: Path) -> Pat
                     return path.parents[3]
                 except Exception:
                     return None
-    # Fall back to the current exporter layout: <output_root>/v1/manifests/<file>.
-    try:
-        if manifest_path.parent.name == "manifests" and manifest_path.parent.parent.name == "v1":
-            return manifest_path.parent.parent.parent
-    except Exception:
-        return None
     return None
 
 
@@ -118,11 +124,41 @@ def index_export_manifest(
     *,
     status: str = "active",
     auto_index_collection: bool = True,
+    allow_legacy_unvalidated: bool = False,
 ) -> str:
     """Index one immutable analytics export manifest and return export run id."""
 
     manifest_path = manifest_path.expanduser().resolve()
     manifest = _load_json_object(manifest_path)
+    output_root = _export_output_root(manifest, manifest_path)
+    if output_root is None:
+        raise ValueError(f"Cannot resolve analytics export root from {manifest_path}")
+    output_root = output_root.expanduser().resolve()
+    export_run_id = str(manifest["export_run_id"])
+    is_strict_publication = has_exclusive_inventory(manifest)
+    if not is_strict_publication and not allow_legacy_unvalidated:
+        raise ValueError(
+            "Analytics export lacks publication-v1; use the explicit legacy "
+            "compatibility option to index it as non-active history"
+        )
+    if is_strict_publication:
+        validate_export_run(output_root, export_run_id)
+    effective_status = status if is_strict_publication else "legacy_compatibility"
+    raw_part_tables = manifest.get("part_files_by_table")
+    if not isinstance(raw_part_tables, Mapping):
+        raise ValueError("Analytics export part_files_by_table is missing or invalid")
+    indexed_parts = {
+        str(table_name): [
+            str(path.resolve())
+            for path in manifest_selected_part_files_from_payload(
+                output_root,
+                manifest,
+                str(table_name),
+                allow_legacy_layout=allow_legacy_unvalidated,
+            )
+        ]
+        for table_name in raw_part_tables
+    }
     collection = manifest.get("collection_manifest")
     collection_id = None
     collection_manifest_sha256 = None
@@ -145,11 +181,11 @@ def index_export_manifest(
 
     diagnostics = manifest.get("diagnostics")
     registry.upsert_analytics_export(
-        export_run_id=str(manifest["export_run_id"]),
+        export_run_id=export_run_id,
         collection_id=collection_id,
         collection_manifest_sha256=collection_manifest_sha256,
         export_manifest_path=manifest_path,
-        output_root=_export_output_root(manifest, manifest_path),
+        output_root=output_root,
         schema_version=_int_or_none(manifest.get("schema_version")),
         tool=str(manifest.get("tool")) if manifest.get("tool") is not None else None,
         palette_git_commit=(
@@ -168,25 +204,26 @@ def index_export_manifest(
             if isinstance(manifest.get("row_counts_by_table"), Mapping)
             else {}
         ),
-        part_files_by_table=(
-            manifest.get("part_files_by_table")
-            if isinstance(manifest.get("part_files_by_table"), Mapping)
-            else {}
-        ),
+        part_files_by_table=indexed_parts,
         created_at_utc=(
             str(manifest.get("created_at_utc"))
             if manifest.get("created_at_utc") is not None
             else None
         ),
         diagnostics_count=len(diagnostics) if isinstance(diagnostics, list) else None,
-        status=status,
+        status=effective_status,
         metadata={
             "tables_requested": manifest.get("tables_requested"),
             "export_parameters": manifest.get("export_parameters"),
             "source_zarrs": manifest.get("source_zarrs"),
+            "publication_policy": (
+                "manifest_exclusive_v1"
+                if is_strict_publication
+                else "explicit_legacy_compatibility"
+            ),
         },
     )
-    return str(manifest["export_run_id"])
+    return export_run_id
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -207,6 +244,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Export manifest JSON path. May be repeated.",
     )
     parser.add_argument("--status", default="active", help="Registry status to assign to indexed manifests.")
+    parser.add_argument(
+        "--allow-legacy-unvalidated",
+        action="store_true",
+        help=(
+            "Explicitly index a historical non-publication-v1 export as "
+            "legacy_compatibility rather than active."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     return parser
 
@@ -233,7 +278,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         for path in export_paths:
             indexed_exports.append(
-                index_export_manifest(registry, path, status=str(args.status))
+                index_export_manifest(
+                    registry,
+                    path,
+                    status=str(args.status),
+                    allow_legacy_unvalidated=bool(args.allow_legacy_unvalidated),
+                )
             )
     finally:
         registry.close()

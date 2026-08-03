@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from fisheye.analytics_exports.contracts import (
     TABLE_CONTRACTS,
     contract_snapshot,
 )
+from fisheye.analytics_exports.publication import sha256_file
 from fisheye.training_response.cohort import (
     classify_training_response_features,
     discover_training_response_clusters,
@@ -294,6 +296,12 @@ def _source_rows(recording_ids: list[str]):
 
 def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
     rows_by_table = _source_rows([f"recording_{index}" for index in range(6)])
+    generation_path = (
+        Path("v1")
+        / ".generations"
+        / f"export_run_id={run_id}"
+        / "generation=test"
+    )
     parts: dict[str, Path] = {}
     schemas: dict[str, tuple[str, ...]] = {}
     for table_name, raw_rows in rows_by_table.items():
@@ -315,7 +323,7 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                 ).encode(),
             }
         )
-        part = root / "v1" / table_name / f"export_run_id={run_id}" / "part-00000.parquet"
+        part = root / generation_path / "tables" / table_name / "part-00000.parquet"
         part.parent.mkdir(parents=True)
         pq.write_table(table, part)
         parts[table_name] = part
@@ -325,6 +333,10 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
     ]
     manifest = root / "v1" / "manifests" / f"export_run_id={run_id}.json"
     manifest.parent.mkdir(parents=True)
+    relative_parts = {
+        name: (generation_path / "tables" / name / path.name).as_posix()
+        for name, path in parts.items()
+    }
     manifest.write_text(
         json.dumps(
             {
@@ -337,9 +349,27 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                     name: len(rows) for name, rows in rows_by_table.items()
                 },
                 "part_files_by_table": {
-                    name: [str(path)] for name, path in parts.items()
+                    name: [relative_parts[name]] for name in parts
                 },
                 "capabilities": capabilities,
+                "publication": {
+                    "schema_id": "palette.analytics_export.publication",
+                    "schema_version": 1,
+                    "state": "complete",
+                    "generation_id": "test",
+                    "generation_path": generation_path.as_posix(),
+                    "parts_by_table": {
+                        name: [
+                            {
+                                "path": relative_parts[name],
+                                "sha256": sha256_file(path),
+                                "size_bytes": path.stat().st_size,
+                                "row_count": len(rows_by_table[name]),
+                            }
+                        ]
+                        for name, path in parts.items()
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -384,10 +414,70 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
             source_export_run_id="source_001",
             source_export_manifest_sha256="not-the-published-hash",
         )
-    qc_rows = scan_training_response_qc_rows(output_root, "training_001").collect()
+
+
+def test_training_workflow_binds_digest_to_loaded_manifest_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "source"
+    output_root = tmp_path / "training"
+    _write_source_export(source_root, "source_001")
+    manifest_path = (
+        source_root
+        / "v1"
+        / "manifests"
+        / "export_run_id=source_001.json"
+    )
+    expected_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    import fisheye.training_response.workflow as workflow
+
+    real_load = workflow._load_object_snapshot
+
+    def replace_after_snapshot(path: Path):
+        snapshot = real_load(path)
+        replacement = json.loads(path.read_text(encoding="utf-8"))
+        replacement["replacement_generation"] = "newer"
+        path.write_text(json.dumps(replacement), encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(workflow, "_load_object_snapshot", replace_after_snapshot)
+    result = run_training_response_analytics(
+        source_export_root=source_root,
+        source_export_run_id="source_001",
+        output_root=output_root,
+        analysis_run_id="training_snapshot",
+        config=TrainingResponseConfig(cluster_stability_resamples=2),
+    )
+
+    assert result["source_export_manifest_sha256"] == expected_digest
+    qc_rows = scan_training_response_qc_rows(output_root, "training_snapshot").collect()
     assert qc_rows.shape[0] == 6
     assert "primary_training_profile" in qc_rows.columns
     assert "selected_component_count" in qc_rows.columns
+
+
+def test_training_workflow_rejects_symlinked_source_manifest_namespace(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (source_root / "v1").mkdir(parents=True)
+    (source_root / "v1" / "manifests").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        run_training_response_analytics(
+            source_export_root=source_root,
+            source_export_run_id="source_001",
+            output_root=tmp_path / "output",
+            analysis_run_id="training_001",
+        )
+
+    assert not any(outside.iterdir())
 
 
 def test_training_response_component_filters_and_labels_noncausal_axes() -> None:

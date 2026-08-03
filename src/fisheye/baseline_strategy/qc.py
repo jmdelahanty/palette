@@ -12,6 +12,10 @@ from typing import Any, Mapping, Sequence
 import polars as pl
 
 from fisheye.analytics_exports.contracts import BASELINE_KINEMATIC_SAMPLES_TABLE
+from fisheye.analytics_exports.publication import (
+    export_manifest_path,
+    manifest_selected_part_files_from_payload,
+)
 from fisheye.utils.virtual_collection_manifest import verify_manifest_sha256
 
 from .contracts import (
@@ -94,6 +98,14 @@ def _load_object(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("manifest must contain an object")
     return payload
+
+
+def _load_object_snapshot(path: Path) -> tuple[dict[str, Any], str]:
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("manifest must contain an object")
+    return payload, hashlib.sha256(raw).hexdigest()
 
 
 def load_strategy_manifest(output_root: Path, analysis_run_id: str) -> dict[str, Any]:
@@ -205,19 +217,17 @@ def _source_table_parts(
     table_name: str,
 ) -> tuple[Path, ...]:
     table = _safe_component(table_name, label="table name")
-    raw_parts = manifest.get("part_files_by_table", {}).get(table, [])
-    if not isinstance(raw_parts, list):
-        raise ValueError(f"source part list is not an array for {table}")
-    table_root = export_root / "v1" / table / f"export_run_id={export_run_id}"
-    parts: list[Path] = []
-    for raw_part in raw_parts:
-        path = (table_root / Path(str(raw_part)).name).resolve()
-        if not _within(path, export_root):
-            raise PermissionError(f"source part resolves outside export root: {raw_part}")
+    if manifest.get("export_run_id") != export_run_id:
+        raise ValueError("source manifest run identity mismatch")
+    parts = manifest_selected_part_files_from_payload(
+        export_root,
+        manifest,
+        table,
+    )
+    for path in parts:
         if not path.is_file():
             raise FileNotFoundError(path)
-        parts.append(path)
-    return tuple(parts)
+    return parts
 
 
 def source_export_context(
@@ -242,19 +252,14 @@ def source_export_context(
     export_run_id = _safe_component(
         strategy_manifest.get("source_export_run_id"), label="source export run ID"
     )
-    manifest_path = (
-        export_root / "v1" / "manifests" / f"export_run_id={export_run_id}.json"
-    ).resolve()
-    if not _within(manifest_path, export_root):
-        raise PermissionError("source export manifest resolves outside export root")
-    manifest = _load_object(manifest_path)
+    manifest_path = export_manifest_path(export_root, export_run_id)
+    manifest, observed_export_sha256 = _load_object_snapshot(manifest_path)
     if manifest.get("export_run_id") != export_run_id:
         raise ValueError("source export manifest run ID mismatch")
     expected_export_sha256 = str(
         strategy_manifest.get("source_export_manifest_sha256") or ""
     ).strip()
     if expected_export_sha256:
-        observed_export_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         if observed_export_sha256 != expected_export_sha256:
             raise ValueError("source export manifest SHA-256 mismatch")
 

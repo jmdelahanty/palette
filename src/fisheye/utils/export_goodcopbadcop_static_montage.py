@@ -19,6 +19,11 @@ from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadError,
     load_chaser_distance_run,
 )
+from fisheye.analytics_exports.publication import export_manifest_path
+from fisheye.group_analytics_viewer.catalog import (
+    discover_export_catalog,
+    select_export_run_id,
+)
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
@@ -75,17 +80,14 @@ def _recording_id_from_zarr_path(zarr_path: Path) -> str:
 
 
 def _manifest_path(export_root: Path, export_run_id: str) -> Path:
-    return export_root / "v1" / "manifests" / f"export_run_id={export_run_id}.json"
+    return export_manifest_path(export_root, export_run_id)
 
 
 def _resolve_export_run_id(export_root: Path, export_run_id: str) -> str:
-    if export_run_id != "latest":
-        return export_run_id
-    manifest_dir = export_root / "v1" / "manifests"
-    manifests = sorted(manifest_dir.glob("export_run_id=*.json"))
-    if not manifests:
-        raise FileNotFoundError(f"No export manifests found under {manifest_dir}")
-    return manifests[-1].name.removeprefix("export_run_id=").removesuffix(".json")
+    return select_export_run_id(
+        discover_export_catalog(export_root),
+        export_run_id,
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:

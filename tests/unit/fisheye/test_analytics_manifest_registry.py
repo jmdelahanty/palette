@@ -3,6 +3,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+from fisheye.analytics_exports.contracts import (
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    RECORDING_SUMMARY_TABLE,
+    SWIM_BOUT_METRICS_TABLE,
+    TABLE_CONTRACTS,
+    canonicalize_export_row,
+    contract_snapshot,
+)
+from fisheye.analytics_exports.publication import sha256_file
 from fisheye.registry.db import Registry
 from fisheye.utils.analytics_export_resolution import resolve_latest_export_table
 from fisheye.utils.check_analytics_exports import main as check_main
@@ -96,22 +110,87 @@ def _write_collection_manifest(path: Path) -> dict:
 
 def _write_export_manifest(path: Path, collection_manifest: dict, collection_path: Path) -> dict:
     export_root = path.parent.parent.parent
-    part_a = export_root / "v1" / "swim_bout_metrics" / "export_run_id=run_test" / "part-00000.parquet"
-    part_b = export_root / "v1" / "recording_summary" / "export_run_id=run_test" / "part-00000.parquet"
+    generation_path = (
+        Path("v1")
+        / ".generations"
+        / "export_run_id=run_test"
+        / "generation=test"
+    )
+    parts: dict[str, Path] = {}
+    rows_by_table = {
+        RECORDING_SUMMARY_TABLE: [
+            canonicalize_export_row(
+                RECORDING_SUMMARY_TABLE,
+                {"recording_id": f"recording_{index}"},
+            )
+            for index in range(2)
+        ],
+        SWIM_BOUT_METRICS_TABLE: [
+            canonicalize_export_row(
+                SWIM_BOUT_METRICS_TABLE,
+                {"recording_id": "recording_0", "bout_id": index},
+            )
+            for index in range(42)
+        ],
+    }
+    for table_name, rows in rows_by_table.items():
+        part = export_root / generation_path / "tables" / table_name / "part-00000.parquet"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        arrow = pa.Table.from_pylist(rows)
+        arrow = arrow.replace_schema_metadata(
+            {
+                b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
+                b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
+                b"palette.table_contract": json.dumps(
+                    TABLE_CONTRACTS[table_name].to_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
+            }
+        )
+        pq.write_table(arrow, part)
+        parts[table_name] = part
     manifest = {
         "export_run_id": "run_test",
         "created_at_utc": "2026-05-08T00:10:00+00:00",
-        "schema_version": 1,
+        "schema_id": EXPORT_SCHEMA_ID,
+        "schema_version": EXPORT_SCHEMA_VERSION,
         "tool": "fisheye.utils.export_cross_recording_analytics",
         "palette_git_commit": "abc123",
         "palette_git_dirty": False,
         "source_recording_count": 2,
         "source_zarrs": ["/tmp/a.zarr", "/tmp/b.zarr"],
-        "tables_requested": ["recording_summary", "swim_bout_metrics"],
-        "row_counts_by_table": {"recording_summary": 2, "swim_bout_metrics": 42},
+        "tables_requested": [RECORDING_SUMMARY_TABLE, SWIM_BOUT_METRICS_TABLE],
+        "table_contracts": contract_snapshot(
+            [RECORDING_SUMMARY_TABLE, SWIM_BOUT_METRICS_TABLE]
+        ),
+        "capabilities": [],
+        "row_counts_by_table": {RECORDING_SUMMARY_TABLE: 2, SWIM_BOUT_METRICS_TABLE: 42},
         "part_files_by_table": {
-            "recording_summary": [str(part_b)],
-            "swim_bout_metrics": [str(part_a)],
+            table_name: [
+                (generation_path / "tables" / table_name / part.name).as_posix()
+            ]
+            for table_name, part in parts.items()
+        },
+        "publication": {
+            "schema_id": "palette.analytics_export.publication",
+            "schema_version": 1,
+            "state": "complete",
+            "generation_id": "test",
+            "generation_path": generation_path.as_posix(),
+            "parts_by_table": {
+                table_name: [
+                    {
+                        "path": (
+                            generation_path / "tables" / table_name / part.name
+                        ).as_posix(),
+                        "sha256": sha256_file(part),
+                        "size_bytes": part.stat().st_size,
+                        "row_count": len(rows_by_table[table_name]),
+                    }
+                ]
+                for table_name, part in parts.items()
+            },
         },
         "diagnostics": [],
         "collection_manifest": {
@@ -136,8 +215,35 @@ def _touch_indexed_parts(export_manifest: dict) -> None:
     for files in part_files.values():
         for filename in files:
             path = Path(filename)
+            if not path.is_absolute():
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"PAR1")
+
+
+def test_legacy_export_requires_explicit_non_active_index_policy(tmp_path: Path) -> None:
+    collection_path = tmp_path / "collection.manifest.json"
+    collection = _write_collection_manifest(collection_path)
+    export_path = tmp_path / "exports" / "v1" / "manifests" / "export_run_id=run_test.json"
+    payload = _write_export_manifest(export_path, collection, collection_path)
+    payload.pop("publication")
+    export_path.write_text(json.dumps(payload), encoding="utf-8")
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        with pytest.raises(ValueError, match="explicit legacy compatibility"):
+            index_export_manifest(registry, export_path)
+        assert index_export_manifest(
+            registry,
+            export_path,
+            allow_legacy_unvalidated=True,
+        ) == "run_test"
+        row = registry.conn.execute(
+            "SELECT status FROM analytics_exports WHERE export_run_id = ?",
+            ("run_test",),
+        ).fetchone()
+        assert row["status"] == "legacy_compatibility"
+    finally:
+        registry.close()
 
 
 def test_index_collection_and_export_manifest_tables(tmp_path: Path) -> None:
@@ -187,10 +293,47 @@ def test_index_collection_and_export_manifest_tables(tmp_path: Path) -> None:
         assert resolution.row_count == 42
         assert resolution.part_count == 1
         assert resolution.table_path == (
-            tmp_path / "exports" / "v1" / "swim_bout_metrics" / "export_run_id=run_test"
+            tmp_path
+            / "exports"
+            / "v1"
+            / ".generations"
+            / "export_run_id=run_test"
+            / "generation=test"
+            / "tables"
+            / "swim_bout_metrics"
         )
     finally:
         registry.close()
+
+
+def test_active_registry_resolution_rechecks_publication_v1_manifest(
+    tmp_path: Path,
+) -> None:
+    collection_path = tmp_path / "collection.manifest.json"
+    collection = _write_collection_manifest(collection_path)
+    export_path = (
+        tmp_path
+        / "exports"
+        / "v1"
+        / "manifests"
+        / "export_run_id=run_test.json"
+    )
+    payload = _write_export_manifest(export_path, collection, collection_path)
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        assert index_export_manifest(registry, export_path) == "run_test"
+    finally:
+        registry.close()
+
+    payload.pop("publication")
+    export_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(LookupError, match="publication envelope is missing"):
+        resolve_latest_export_table(
+            registry_path=tmp_path / "registry.sqlite",
+            table_name=SWIM_BOUT_METRICS_TABLE,
+            export_run_id="run_test",
+        )
 
 
 def test_index_and_query_analytics_manifests_cli(tmp_path: Path, capsys) -> None:
@@ -255,8 +398,11 @@ def test_index_and_query_analytics_manifests_cli(tmp_path: Path, capsys) -> None
             tmp_path
             / "exports"
             / "v1"
-            / "swim_bout_metrics"
+            / ".generations"
             / "export_run_id=run_test"
+            / "generation=test"
+            / "tables"
+            / "swim_bout_metrics"
         )
     ]
 
@@ -330,6 +476,14 @@ def test_check_analytics_exports_inventory_and_file_validation(tmp_path: Path, c
     assert {row["table_name"] for row in inventory} == {"recording_summary", "swim_bout_metrics"}
     assert {row["check_status"] for row in inventory} == {"not_checked"}
 
+    export_root = export_path.parent.parent.parent
+    moved_parts: list[tuple[Path, Path]] = []
+    for files in export_manifest["part_files_by_table"].values():
+        for relative in files:
+            part = export_root / relative
+            hidden = part.with_suffix(".missing")
+            part.rename(hidden)
+            moved_parts.append((part, hidden))
     assert check_main(
         [
             "--registry",
@@ -342,9 +496,32 @@ def test_check_analytics_exports_inventory_and_file_validation(tmp_path: Path, c
         ]
     ) == 1
     missing = json.loads(capsys.readouterr().out)
-    assert {row["check_status"] for row in missing} == {"missing_table_dir"}
+    assert {row["check_status"] for row in missing} == {"missing_part_files"}
 
-    _touch_indexed_parts(export_manifest)
+    for part, hidden in moved_parts:
+        hidden.rename(part)
+    first_part = (
+        export_root
+        / export_manifest["part_files_by_table"][RECORDING_SUMMARY_TABLE][0]
+    )
+    extra_part = first_part.parent / "unlisted.parquet"
+    extra_part.write_bytes(first_part.read_bytes())
+    assert check_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--collection-id",
+            "movement_bouts_test_v001",
+            "--table",
+            RECORDING_SUMMARY_TABLE,
+            "--check-files",
+            "--format",
+            "json",
+        ]
+    ) == 1
+    unlisted = json.loads(capsys.readouterr().out)
+    assert {row["check_status"] for row in unlisted} == {"unlisted_part_files"}
+    extra_part.unlink()
     assert check_main(
         [
             "--registry",

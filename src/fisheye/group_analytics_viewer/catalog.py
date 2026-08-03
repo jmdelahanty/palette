@@ -14,6 +14,11 @@ from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_VERSION,
     TABLE_CONTRACTS,
 )
+from fisheye.analytics_exports.publication import (
+    has_exclusive_inventory,
+    manifest_selected_part_files_from_payload,
+    validate_publication_envelope,
+)
 
 
 @dataclass(frozen=True)
@@ -253,7 +258,43 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
             )
             continue
 
+        if not has_exclusive_inventory(payload):
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="legacy_publication_not_selectable",
+                    message=(
+                        "Manifest lacks the exact publication-v1 inventory and is "
+                        "available only through an explicit legacy adapter."
+                    ),
+                )
+            )
+            continue
+        try:
+            inventory = validate_publication_envelope(payload)
+        except ValueError as exc:
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="invalid_publication",
+                    message=str(exc),
+                )
+            )
+            continue
+
         table_names = _table_names(payload)
+        if set(inventory) != set(table_names):
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="invalid_publication",
+                    message=(
+                        "Publication inventory table set does not match the "
+                        "manifest's logical table declarations."
+                    ),
+                )
+            )
+            continue
         unknown_tables = tuple(sorted(set(table_names) - set(TABLE_CONTRACTS)))
         if unknown_tables:
             diagnostics.append(
@@ -301,27 +342,29 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
         unsafe_part: str | None = None
         columns_by_table: dict[str, tuple[str, ...]] = {}
         first_part_by_table: dict[str, Path] = {}
-        for table_name, raw_part in _referenced_parts(payload):
-            # Export manifests historically stored absolute paths. Rebase each
-            # filename onto the schema-defined location so a copied export can
-            # be mounted at a new root without granting access to its old host
-            # path. Table names must remain one safe path component.
+        for table_name in table_names:
             if Path(table_name).name != table_name or table_name in {"", ".", ".."}:
-                unsafe_part = raw_part
+                unsafe_part = table_name
                 break
-            part_name = Path(raw_part).name
-            if part_name in {"", ".", ".."}:
-                unsafe_part = raw_part
+            try:
+                selected_parts = manifest_selected_part_files_from_payload(
+                    root,
+                    payload,
+                    table_name,
+                )
+            except ValueError as exc:
+                unsafe_part = str(exc)
                 break
-            part = root / "v1" / table_name / f"export_run_id={payload_run_id}" / part_name
-            resolved_part = part.resolve()
-            if not _is_within(resolved_part, root):
-                unsafe_part = raw_part
+            for resolved_part in selected_parts:
+                if not _is_within(resolved_part, root):
+                    unsafe_part = str(resolved_part)
+                    break
+                if not resolved_part.is_file():
+                    missing_parts += 1
+                else:
+                    first_part_by_table.setdefault(table_name, resolved_part)
+            if unsafe_part is not None:
                 break
-            if not resolved_part.is_file():
-                missing_parts += 1
-            else:
-                first_part_by_table.setdefault(table_name, resolved_part)
         if unsafe_part is not None:
             diagnostics.append(
                 ExportCatalogDiagnostic(
@@ -428,10 +471,20 @@ def select_export_run_id(catalog: ExportCatalog, requested: str = "latest") -> s
         raise FileNotFoundError(f"No selectable analytics exports found under {catalog.export_root}")
     requested = str(requested).strip()
     if requested in {"", "auto", "latest"}:
-        return catalog.entries[0].export_run_id
-    if catalog.entry(requested) is None:
+        ready = next((entry for entry in catalog.entries if entry.ready), None)
+        if ready is None:
+            raise FileNotFoundError(
+                f"No ready analytics exports found under {catalog.export_root}"
+            )
+        return ready.export_run_id
+    selected = catalog.entry(requested)
+    if selected is None:
         raise ValueError(
             f"Export run {requested!r} is not a selectable export under {catalog.export_root}"
+        )
+    if not selected.ready:
+        raise ValueError(
+            f"Export run {requested!r} is incomplete under {catalog.export_root}"
         )
     return requested
 

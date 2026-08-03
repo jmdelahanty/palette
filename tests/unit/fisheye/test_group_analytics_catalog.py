@@ -13,6 +13,7 @@ from fisheye.analytics_exports.contracts import (
     RECORDING_SUMMARY_TABLE,
     contract_snapshot,
 )
+from fisheye.analytics_exports.publication import sha256_file
 from fisheye.group_analytics_viewer.catalog import (
     discover_export_catalog,
     select_export_run_id,
@@ -38,8 +39,15 @@ def _write_export_manifest(
     write_part: bool = True,
     payload_run_id: str | None = None,
     source_export_run_id: str | None = None,
+    publication_v1: bool = True,
 ) -> Path:
-    part = root / "v1" / TABLE / f"export_run_id={export_run_id}" / "part-00000.parquet"
+    generation_path = (
+        Path("v1")
+        / ".generations"
+        / f"export_run_id={export_run_id}"
+        / "generation=test"
+    )
+    part = root / generation_path / "tables" / TABLE / "part-00000.parquet"
     if write_part:
         part.parent.mkdir(parents=True, exist_ok=True)
         table = pa.Table.from_pylist(
@@ -76,8 +84,14 @@ def _write_export_manifest(
         "source_recording_count": 2,
         "tables_requested": [TABLE],
         "table_contracts": contract_snapshot([TABLE]),
-        "row_counts_by_table": {TABLE: 4},
-        "part_files_by_table": {TABLE: [declared_part or str(part)]},
+        "row_counts_by_table": {TABLE: 1},
+        "part_files_by_table": {
+            TABLE: [
+                declared_part
+                or (generation_path / "tables" / TABLE / part.name).as_posix()
+            ]
+        },
+        "capabilities": [],
         "diagnostics": [],
         "collection_manifest": {
             "collection_id": "protocol_alpha",
@@ -86,6 +100,26 @@ def _write_export_manifest(
     }
     if source_export_run_id is not None:
         payload["source_export_run_id"] = source_export_run_id
+    if publication_v1:
+        relative_part = (generation_path / "tables" / TABLE / part.name).as_posix()
+        payload["part_files_by_table"] = {TABLE: [relative_part]}
+        payload["publication"] = {
+            "schema_id": "palette.analytics_export.publication",
+            "schema_version": 1,
+            "state": "complete",
+            "generation_id": "test",
+            "generation_path": generation_path.as_posix(),
+            "parts_by_table": {
+                TABLE: [
+                    {
+                        "path": relative_part,
+                        "sha256": sha256_file(part) if write_part else "0" * 64,
+                        "size_bytes": part.stat().st_size if write_part else 0,
+                        "row_count": 1,
+                    }
+                ]
+            },
+        }
     manifest = manifest_dir / f"export_run_id={export_run_id}.json"
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     return manifest
@@ -135,12 +169,13 @@ def test_catalog_rebases_historical_absolute_part_paths_to_mounted_root(tmp_path
         created_at_utc="2025-02-01T00:00:00+00:00",
         declared_part="/old/workstation/exports/v1/recording_summary/"
         "export_run_id=portable_export/part-00000.parquet",
+        publication_v1=False,
     )
 
     catalog = discover_export_catalog(root)
 
-    assert [entry.export_run_id for entry in catalog.entries] == ["portable_export"]
-    assert catalog.entries[0].ready is True
+    assert catalog.entries == ()
+    assert catalog.diagnostics[0].code == "legacy_publication_not_selectable"
 
 
 def test_catalog_reports_missing_in_root_parts_without_hiding_export(tmp_path: Path) -> None:
@@ -154,9 +189,11 @@ def test_catalog_reports_missing_in_root_parts_without_hiding_export(tmp_path: P
 
     catalog = discover_export_catalog(root)
 
-    assert catalog.entries[0].export_run_id == "incomplete_export"
+    assert len(catalog.entries) == 1
     assert catalog.entries[0].ready is False
     assert catalog.entries[0].missing_part_count == 1
+    with pytest.raises(FileNotFoundError, match="No ready analytics exports"):
+        select_export_run_id(catalog, "latest")
 
 
 def test_catalog_rejects_mismatched_manifest_identity(tmp_path: Path) -> None:
@@ -213,6 +250,27 @@ def test_catalog_rejects_v2_manifest_with_mismatched_contract_snapshot(tmp_path:
     assert catalog.diagnostics[0].code == "mismatched_table_contract_snapshot"
 
 
+def test_catalog_discovery_does_not_hash_every_published_part(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "analytics"
+    _write_export_manifest(
+        root,
+        "metadata_only",
+        created_at_utc="2025-02-01T00:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        "fisheye.analytics_exports.validation.sha256_file",
+        lambda _path: (_ for _ in ()).throw(AssertionError("catalog hashed payload")),
+    )
+
+    catalog = discover_export_catalog(root)
+
+    assert [entry.export_run_id for entry in catalog.entries] == ["metadata_only"]
+    assert catalog.entries[0].ready is True
+
+
 def test_catalog_and_query_reject_part_symlink_that_escapes_root(tmp_path: Path) -> None:
     root = tmp_path / "analytics"
     manifest = _write_export_manifest(
@@ -223,7 +281,16 @@ def test_catalog_and_query_reject_part_symlink_that_escapes_root(tmp_path: Path)
     )
     outside = tmp_path / "outside.parquet"
     outside.write_bytes(b"outside")
-    part = root / "v1" / TABLE / "export_run_id=unsafe_export" / "part-00000.parquet"
+    part = (
+        root
+        / "v1"
+        / ".generations"
+        / "export_run_id=unsafe_export"
+        / "generation=test"
+        / "tables"
+        / TABLE
+        / "part-00000.parquet"
+    )
     part.parent.mkdir(parents=True, exist_ok=True)
     part.symlink_to(outside)
 
@@ -234,7 +301,7 @@ def test_catalog_and_query_reject_part_symlink_that_escapes_root(tmp_path: Path)
         "part_file_outside_root"
     ]
     context = ViewerContext(export_root=root.resolve(), export_run_id="unsafe_export")
-    with pytest.raises(PermissionError, match="Parquet part resolves outside"):
+    with pytest.raises(ValueError, match="symbolic-link alias"):
         parquet_files(context, TABLE)
     assert manifest.is_file()
 
@@ -262,7 +329,7 @@ def test_context_and_table_helpers_reject_path_component_traversal(tmp_path: Pat
         created_at_utc="2025-02-01T00:00:00+00:00",
     )
 
-    with pytest.raises(ValueError, match="not a selectable export"):
+    with pytest.raises(ValueError, match="Invalid export run ID"):
         build_context(export_root=root, export_run_id="../outside")
     with pytest.raises(ValueError, match="Invalid statistics run ID"):
         build_context(

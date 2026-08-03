@@ -10,8 +10,7 @@ from fisheye.group_statistics.goodcopbadcop import (
     GoodCopBadCopStatisticsConfig,
     DESCRIPTIVE_TABLE,
     SUMMARY_TABLE,
-    compute_goodcopbadcop_descriptive_summaries,
-    compute_goodcopbadcop_statistics,
+    compute_goodcopbadcop_outputs,
     contrast_definitions,
     metric_specs_for_families,
     utc_run_id,
@@ -67,6 +66,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--apply", action="store_true", help="Write statistics Parquet/manifest.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing stats run id.")
+    parser.add_argument(
+        "--allow-legacy-export-layout",
+        action="store_true",
+        help="Explicitly read a historical export without publication-v1.",
+    )
     return parser
 
 
@@ -87,9 +91,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         minimum_recordings=int(args.minimum_recordings),
         random_seed=int(args.random_seed),
         overwrite=bool(args.overwrite),
+        allow_legacy_export_layout=bool(args.allow_legacy_export_layout),
     )
-    rows, manifest = compute_goodcopbadcop_statistics(config)
-    descriptive_rows = compute_goodcopbadcop_descriptive_summaries(config)
+    rows, descriptive_rows, manifest = compute_goodcopbadcop_outputs(config)
     status_counts = manifest.get("status_counts", {})
     print(f"stats_run_id\t{stats_run_id}")
     print(f"source_export_run_id\t{args.source_export_run_id}")

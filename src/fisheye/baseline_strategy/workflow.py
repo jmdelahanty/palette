@@ -21,7 +21,11 @@ from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
 )
-from fisheye.analytics_exports.validation import validate_export_run
+from fisheye.analytics_exports.publication import (
+    export_manifest_path,
+    manifest_selected_part_files_from_payload,
+)
+from fisheye.analytics_exports.validation import validate_export_payload
 
 from .cohort import classify_strategy_features, discover_strategy_clusters
 from .contracts import (
@@ -57,16 +61,16 @@ def _identity_key(row: Mapping[str, Any]) -> tuple[object, object, object]:
     return row.get("recording_id"), row.get("track_id"), row.get("baseline_window_id")
 
 
-def _load_manifest(source_root: Path, source_run_id: str) -> dict[str, Any]:
-    path = source_root / "v1" / "manifests" / f"export_run_id={source_run_id}.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def _load_manifest_snapshot(
+    source_root: Path,
+    source_run_id: str,
+) -> tuple[dict[str, Any], str]:
+    path = export_manifest_path(source_root, source_run_id)
+    raw = path.read_bytes()
+    payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise ValueError(f"source manifest is not an object: {path}")
-    return payload
-
-
-def _source_manifest_path(source_root: Path, source_run_id: str) -> Path:
-    return source_root / "v1" / "manifests" / f"export_run_id={source_run_id}.json"
+    return payload, hashlib.sha256(raw).hexdigest()
 
 
 def _with_source_export_identity(
@@ -93,25 +97,17 @@ def _declared_parts(
     manifest: Mapping[str, Any],
     table_name: str,
 ) -> tuple[Path, ...]:
-    raw_by_table = manifest.get("part_files_by_table")
-    if not isinstance(raw_by_table, Mapping):
-        return ()
-    raw_parts = raw_by_table.get(table_name)
-    if not isinstance(raw_parts, list):
-        return ()
-    table_root = source_root / "v1" / table_name / f"export_run_id={source_run_id}"
-    output = []
-    for raw_part in raw_parts:
-        part_name = Path(str(raw_part)).name
-        path = (table_root / part_name).resolve()
-        try:
-            path.relative_to(source_root)
-        except ValueError as exc:
-            raise PermissionError(f"source part resolves outside export root: {raw_part}") from exc
+    if manifest.get("export_run_id") != source_run_id:
+        raise ValueError("source manifest run identity mismatch")
+    output = manifest_selected_part_files_from_payload(
+        source_root,
+        manifest,
+        table_name,
+    )
+    for path in output:
         if not path.is_file():
             raise FileNotFoundError(path)
-        output.append(path)
-    return tuple(output)
+    return output
 
 
 def _read_rows(paths: Iterable[Path]) -> list[dict[str, Any]]:
@@ -247,9 +243,11 @@ def run_strategy_analytics(
         raise ValueError(
             "output_root must not equal, contain, or be contained by the immutable source_export_root"
         )
-    validation = validate_export_run(source_root, source_run_id)
-    manifest_path_source = _source_manifest_path(source_root, source_run_id)
-    manifest = _load_manifest(source_root, source_run_id)
+    manifest, source_manifest_sha256 = _load_manifest_snapshot(
+        source_root,
+        source_run_id,
+    )
+    validation = validate_export_payload(source_root, source_run_id, manifest)
     summary_parts = _declared_parts(
         source_root, source_run_id, manifest, BASELINE_BEHAVIOR_SUMMARY_TABLE
     )
@@ -354,9 +352,7 @@ def run_strategy_analytics(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_export_root": str(source_root),
         "source_export_run_id": source_run_id,
-        "source_export_manifest_sha256": hashlib.sha256(
-            manifest_path_source.read_bytes()
-        ).hexdigest(),
+        "source_export_manifest_sha256": source_manifest_sha256,
         "source_collection_manifest_sha256": (
             manifest.get("collection_manifest", {}).get("manifest_sha256")
             if isinstance(manifest.get("collection_manifest"), Mapping)

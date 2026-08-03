@@ -18,7 +18,11 @@ from fisheye.analytics_exports.contracts import (
     CHASER_EPOCH_BEHAVIOR_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
 )
-from fisheye.analytics_exports.validation import validate_export_run
+from fisheye.analytics_exports.publication import (
+    export_manifest_path,
+    manifest_selected_part_files_from_payload,
+)
+from fisheye.analytics_exports.validation import validate_export_payload
 from fisheye.utils.virtual_collection_manifest import verify_manifest_sha256
 
 from .cohort import (
@@ -59,27 +63,31 @@ def _load_object(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _load_object_snapshot(path: Path) -> tuple[dict[str, Any], str]:
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError(f"manifest is not an object: {path}")
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
 def _declared_parts(
     source_root: Path,
     source_run_id: str,
     manifest: Mapping[str, Any],
     table_name: str,
 ) -> tuple[Path, ...]:
-    raw_parts = manifest.get("part_files_by_table", {}).get(table_name, [])
-    if not isinstance(raw_parts, list):
-        raise ValueError(f"source part list is not an array for {table_name}")
-    table_root = source_root / "v1" / table_name / f"export_run_id={source_run_id}"
-    parts: list[Path] = []
-    for raw_part in raw_parts:
-        path = (table_root / Path(str(raw_part)).name).resolve()
-        try:
-            path.relative_to(source_root)
-        except ValueError as exc:
-            raise PermissionError(f"source part resolves outside root: {raw_part}") from exc
+    if manifest.get("export_run_id") != source_run_id:
+        raise ValueError("source manifest run identity mismatch")
+    parts = manifest_selected_part_files_from_payload(
+        source_root,
+        manifest,
+        table_name,
+    )
+    for path in parts:
         if not path.is_file():
             raise FileNotFoundError(path)
-        parts.append(path)
-    return tuple(parts)
+    return parts
 
 
 def _read_rows(paths: Iterable[Path]) -> list[dict[str, Any]]:
@@ -241,11 +249,15 @@ def run_training_response_analytics(
         except ValueError:
             continue
         raise ValueError("output root and immutable source export root must not overlap")
-    source_validation = validate_export_run(source_root, source_run_id)
-    source_manifest_path = (
-        source_root / "v1" / "manifests" / f"export_run_id={source_run_id}.json"
+    source_manifest_path = export_manifest_path(source_root, source_run_id)
+    source_manifest, source_manifest_sha256 = _load_object_snapshot(
+        source_manifest_path
     )
-    source_manifest = _load_object(source_manifest_path)
+    source_validation = validate_export_payload(
+        source_root,
+        source_run_id,
+        source_manifest,
+    )
     required_tables = (
         CHASER_EPOCH_BEHAVIOR_TABLE,
         CHASER_DISTANCE_SUMMARY_TABLE,
@@ -304,9 +316,7 @@ def run_training_response_analytics(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_export_root": str(source_root),
         "source_export_run_id": source_run_id,
-        "source_export_manifest_sha256": hashlib.sha256(
-            source_manifest_path.read_bytes()
-        ).hexdigest(),
+        "source_export_manifest_sha256": source_manifest_sha256,
         "source_collection_manifest_sha256": (
             collection.get("manifest_sha256")
             if isinstance(collection, Mapping)

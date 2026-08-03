@@ -130,7 +130,9 @@ def test_export_validator_checks_every_part_and_manifest_row_count(tmp_path: Pat
     root = tmp_path / "analytics"
     manifest = _write_valid_export(root, "valid_export")
 
-    report = validate_export_run(root, "valid_export")
+    with pytest.raises(ExportValidationError, match="explicit legacy compatibility"):
+        validate_export_run(root, "valid_export")
+    report = validate_export_run(root, "valid_export", allow_legacy_layout=True)
 
     assert report["status"] == "valid"
     assert report["part_count"] == 1
@@ -140,4 +142,4 @@ def test_export_validator_checks_every_part_and_manifest_row_count(tmp_path: Pat
     payload["row_counts_by_table"][RECORDING_SUMMARY_TABLE] = 2
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ExportValidationError, match="row count 1 does not match manifest 2"):
-        validate_export_run(root, "valid_export")
+        validate_export_run(root, "valid_export", allow_legacy_layout=True)
