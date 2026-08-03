@@ -3,7 +3,7 @@
 Date: 2026-08-03
 
 Status: active implementation checklist; read-only census and correctness
-phases 1-2 complete; initial phase-3 catalog closure complete; no production
+phases 1-3 complete; initial phase-4 exact-schema work in review; no production
 profile or scientific selector authority changed by these checkpoints
 
 ## Purpose
@@ -229,7 +229,7 @@ production archives, selectors, or registries:
 | Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
 | --- | --- | --- | --- | --- |
 | Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | `4923757f` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
-| Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | May land before exact schemas because it classifies rather than promotes |
+| Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | Integrated as `a2668075` and `f178e315`; it classifies rather than promotes |
 | Eye-angle exact schema | `/tmp/palette-eye-angle-exact-schema-20260803` / `agent/palette/eye-angle-exact-schema-20260803` | `eeacc13f` | Reusable analytics array declaration, exact eye-angle schema, writer/validator hook, focused tests | Land only after adversarial review; its shared declaration becomes the base for later exact-schema lanes |
 
 After the reusable declaration lands, the next safe parallel wave is:
@@ -276,7 +276,10 @@ now implemented on the coordination branch:
 - truthful catalog ownership and canonical parent mappings for tail-posture and
   bout-classification runs: `73b3888b`;
 - strict completed/eligible swim-bout test fixtures for the catalog integration
-  matrix: `209bc52e`.
+  matrix: `209bc52e`;
+- closed semantic classification of 22 additional maintained, embedded,
+  artifact, maintenance, active-legacy-shaped, and legacy surfaces:
+  `a2668075` and `f178e315`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
@@ -329,17 +332,17 @@ activation remain out of scope.
 - [x] Add `tail_posture_view` with its exact parent, schema, method, publication
       owner, physical owner, registry mode, and planner status.
 - [x] Add `bout_classification` with the same executable declarations.
-- [ ] Decide and record whether each of the following is a maintained
+- [x] Decide and record whether each of the following is a maintained
       scientific authority, an embedded component, a visualization/cache, an
       export, maintenance output, or legacy:
-    - [ ] stimulus epochs;
-    - [ ] detection/session occupancy;
-    - [ ] chaser-distance base;
-    - [ ] each chaser component in the versioned analysis profile;
-    - [ ] registered-detection gate/QC outputs;
-    - [ ] speed runs;
-    - [ ] swim-bout statistics;
-    - [ ] in-place chaser-state interpolation.
+    - [x] stimulus epochs;
+    - [x] detection/session occupancy;
+    - [x] chaser-distance base;
+    - [x] each chaser component in the versioned analysis profile;
+    - [x] registered-detection gate/QC outputs;
+    - [x] speed runs;
+    - [x] swim-bout statistics;
+    - [x] in-place chaser-state interpolation.
 - [x] Add canonical run-parent mappings for currently cataloged maintained
       families.
 - [x] Remove tail-posture and bout-classification availability-only local parent
@@ -485,11 +488,9 @@ gates pass:
 
 Continue correctness work before rechunking:
 
-1. land the closed classification catalog for maintained, embedded, artifact,
-   maintenance, active-legacy-shaped, and legacy analytics surfaces;
-2. land the reusable exact-array declaration and the first complete eye-angle
+1. land the reusable exact-array declaration and the first complete eye-angle
    schema only after its adversarial validator/publication review is green;
-3. branch the stimulus-response and swim/bout exact-schema lanes from that
+2. branch the stimulus-response and swim/bout exact-schema lanes from that
    reviewed shared declaration; and
-4. integrate each lane serially and run the combined catalog, lifecycle, and
+3. integrate each lane serially and run the combined catalog, lifecycle, and
    exact-schema matrix before beginning physical-profile migrations.
