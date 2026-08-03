@@ -8,6 +8,13 @@ import pytest
 import zarr
 
 from fisheye.analysis import bout_kinematics_schema, swim_bout_schema
+from fisheye.analysis.detection_occupancy_runs import (
+    OccupancyWindow,
+    build_detection_occupancy_result,
+    build_session_occupancy_result,
+    write_detection_occupancy_run,
+    write_session_occupancy_run,
+)
 from fisheye.analysis.exact_tabular_storage import (
     ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
 )
@@ -60,6 +67,8 @@ def _set_columnar_attrs(
 
 
 def _archive(path: Path, *, family: str) -> Path:
+    if family in {"detection_occupancy", "session_occupancy"}:
+        return _occupancy_archive(path, family=family)
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
     analysis = root.create_group("analysis")
     if family == "swim_bouts":
@@ -118,7 +127,81 @@ def _archive(path: Path, *, family: str) -> Path:
     return path
 
 
-@pytest.mark.parametrize("family", ["swim_bouts", "bout_kinematics"])
+def _occupancy_archive(path: Path, *, family: str) -> Path:
+    root = zarr.open_group(str(path), mode="w", zarr_format=3)
+    root.attrs.update(
+        {
+            "recording_id": "occupancy_benchmark",
+            "width": 100,
+            "height": 80,
+            "fps": 10.0,
+            "total_frames": 8,
+        }
+    )
+    instances = (
+        root.require_group("refined_detect_runs")
+        .require_group("refined_1")
+        .require_group("instances")
+    )
+    frames = np.asarray([0, 1, 2, 4, 5, 7], dtype=np.int64)
+    centers = np.asarray(
+        [[10.0, 10.0], [75.0, 10.0], [10.0, 60.0], [75.0, 60.0], [50.0, 10.0], [10.0, 40.0]],
+        dtype=np.float32,
+    )
+    boxes = np.column_stack(
+        [centers[:, 0] - 1, centers[:, 1] - 1, centers[:, 0] + 1, centers[:, 1] + 1]
+    ).astype(np.float32)
+    instances.create_array("frame_indices", data=frames)
+    instances.create_array("bbox_img_xyxy", data=boxes)
+    instances.create_array(
+        "confidence_scores",
+        data=np.linspace(0.5, 1.0, frames.size, dtype=np.float32),
+    )
+    if family == "detection_occupancy":
+        result = build_detection_occupancy_result(
+            path,
+            run_name="source",
+            stimulus_epoch_run="epoch_source",
+            epoch_windows=(
+                OccupancyWindow(0, "first", 0, 3, 0.0, 0.4, 0.4),
+                OccupancyWindow(1, "second", 4, 7, 0.4, 0.8, 0.4),
+            ),
+            detection_path="refined_detect_runs/refined_1/instances",
+            bin_size=50,
+            smooth_sigma=0.0,
+        )
+        write_detection_occupancy_run(path, result, write_png=False)
+    else:
+        result = build_session_occupancy_result(
+            path,
+            run_name="source",
+            detection_path="refined_detect_runs/refined_1/instances",
+            bin_size=50,
+            smooth_sigma=0.0,
+        )
+        write_session_occupancy_run(path, result, write_png=False)
+    published = materialize_exact_tabular_candidate(
+        path,
+        family_id=family,
+        source_run="source",
+        run_name="candidate",
+        scratch_root=path.parent / f"scratch-{family}",
+        copy_backend="python",
+        apply=True,
+    )
+    assert published["status"] == "complete"
+    return path
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        "swim_bouts",
+        "bout_kinematics",
+        "detection_occupancy",
+        "session_occupancy",
+    ],
+)
 def test_preflight_binds_both_families_to_executable_candidate_receipt(
     tmp_path: Path,
     family: str,
@@ -248,7 +331,7 @@ def test_trial_rejects_stale_consolidated_candidate_metadata(tmp_path: Path) -> 
     ] = True
 
     with pytest.raises(
-        ValueError, match="Direct and consolidated run attributes differ"
+        RuntimeError, match="Direct/consolidated declaration differs"
     ):
         benchmark.run_single_trial(
             archive,

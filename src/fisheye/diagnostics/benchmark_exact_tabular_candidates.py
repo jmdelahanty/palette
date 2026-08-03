@@ -1,4 +1,4 @@
-"""Benchmark exact swim-bout or bout-kinematics storage candidates read-only.
+"""Benchmark exact compact analysis storage candidates read-only.
 
 The matrix controller launches one fresh Python process for every source or
 candidate trial.  Trial order rotates by repetition, while every logical read
@@ -38,6 +38,10 @@ from fisheye.analysis.exact_tabular_storage import (
     ANALYSIS_STORAGE_PROFILE_ROLE_ATTR,
     validate_exact_tabular_storage_receipt,
 )
+from fisheye.analysis.detection_occupancy_schema import (
+    build_occupancy_array_declarations,
+    validate_occupancy_array_manifest,
+)
 from fisheye.analysis.swim_bout_schema import (
     build_swim_bout_array_declarations,
     validate_swim_bout_array_manifest,
@@ -56,6 +60,9 @@ from fisheye.shared.zarr.benchmark_environment import (
 )
 from fisheye.shared.zarr.benchmark_runtime import peak_rss_bytes, storage_stats, utc_now
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -94,6 +101,26 @@ _FAMILIES = {
         parent_path="analysis/bout_kinematics_runs",
         validate_manifest=validate_bout_kinematics_array_manifest,
         build_declarations=build_bout_kinematics_array_declarations,
+    ),
+    "detection_occupancy": _Family(
+        family_id="detection_occupancy",
+        parent_path="analysis/detection_occupancy_runs",
+        validate_manifest=lambda group, **kwargs: validate_occupancy_array_manifest(
+            group, session=False, **kwargs
+        ),
+        build_declarations=lambda group, **kwargs: build_occupancy_array_declarations(
+            group, session=False, **kwargs
+        ),
+    ),
+    "session_occupancy": _Family(
+        family_id="session_occupancy",
+        parent_path="analysis/session_occupancy_runs",
+        validate_manifest=lambda group, **kwargs: validate_occupancy_array_manifest(
+            group, session=True, **kwargs
+        ),
+        build_declarations=lambda group, **kwargs: build_occupancy_array_declarations(
+            group, session=True, **kwargs
+        ),
     ),
 }
 
@@ -881,19 +908,21 @@ def run_single_trial(
     (declarations, validation), validation_timing = _measure(validate)
 
     def compare_metadata() -> dict[str, Any]:
-        direct_attrs = _normalize_metadata(dict(direct_group.attrs))
-        consolidated_attrs = _normalize_metadata(dict(consolidated_group.attrs))
-        direct_arrays = _metadata_declarations(direct_group, paths)
-        consolidated_arrays = _metadata_declarations(consolidated_group, paths)
-        if direct_attrs != consolidated_attrs:
-            raise ValueError("Direct and consolidated run attributes differ.")
-        if direct_arrays != consolidated_arrays:
-            raise ValueError("Direct and consolidated array declarations differ.")
+        receipt = validate_direct_consolidated_subtree(
+            archive,
+            subtree_path=run_path,
+        )
+        if receipt.array_count < len(paths):
+            raise ValueError(
+                "Persisted metadata subtree omits benchmark arrays: "
+                f"expected at least {len(paths)}, got {receipt.array_count}."
+            )
         return {
             "equivalent": True,
-            "array_count": len(paths),
-            "run_attributes_digest": canonical_json_sha256(direct_attrs),
-            "array_declarations_digest": canonical_json_sha256(direct_arrays),
+            "array_count": receipt.array_count,
+            "group_count": receipt.group_count,
+            "node_count": receipt.node_count,
+            "subtree_declarations_digest": receipt.declarations_sha256,
         }
 
     metadata, metadata_comparison_timing = _measure(compare_metadata)
