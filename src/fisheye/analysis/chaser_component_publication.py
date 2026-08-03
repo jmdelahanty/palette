@@ -20,8 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import copy
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -116,6 +118,31 @@ class ChaserComponentPublicationError(ValueError):
 
 def _fail(message: str) -> None:
     raise ChaserComponentPublicationError(message)
+
+
+@dataclass(frozen=True)
+class VerifiedChaserComponent:
+    """Detached, read-only payload from one digest-bound selected component."""
+
+    base_run_path: str
+    component_family: str
+    component_name: str
+    component_path: str
+    semantic_schema_id: str
+    semantic_schema_version: int
+    method_id: str
+    method_version: str
+    manifest_sha256: str
+    manifest: Mapping[str, Any]
+    arrays: Mapping[str, np.ndarray]
+    group_attributes: Mapping[str, Mapping[str, Any]]
+
+    def array(self, relative_path: str) -> np.ndarray:
+        path = _relative_path(relative_path, label="component array path")
+        try:
+            return self.arrays[path]
+        except KeyError:
+            _fail(f"Verified component has no declared array {path!r}.")
 
 
 def _controlled_name(value: Any, *, label: str) -> str:
@@ -614,6 +641,96 @@ def validate_chaser_component_selector(
     return selector
 
 
+def load_selected_chaser_component(
+    root: Any,
+    *,
+    snapshot: Any,
+    component_family: str,
+    expected_semantic_schema_id: str,
+    expected_semantic_schema_version: int,
+) -> VerifiedChaserComponent:
+    """Load one selected component with no latest, scan, or raw-child fallback."""
+
+    family = _controlled_name(component_family, label="component family")
+    parent_path = f"{_relative_path(snapshot.run_path, label='base run path')}/{family}"
+    try:
+        parent = root[parent_path]
+    except Exception as exc:
+        _fail(f"Selected component family {parent_path!r} is unavailable: {exc}.")
+    raw_selector = _exact_fields(
+        parent.attrs.get(COMPONENT_SELECTOR_ATTR),
+        _SELECTOR_FIELDS,
+        label="component selector",
+    )
+    if raw_selector.get("component_family") != family:
+        _fail("Component selector belongs to a different component family.")
+    name = _controlled_name(
+        raw_selector.get("selected_component"), label="selected component"
+    )
+    try:
+        component = parent[name]
+    except Exception as exc:
+        _fail(f"Selected component {family}/{name!s} is unavailable: {exc}.")
+    selector = validate_chaser_component_selector(
+        parent,
+        component=component,
+        snapshot=snapshot,
+        expected_family=family,
+    )
+    manifest = component.attrs[COMPONENT_MANIFEST_ATTR]
+    identity = manifest["component"]
+    expected_schema_id = _schema_id(
+        expected_semantic_schema_id,
+        label="expected semantic schema id",
+    )
+    expected_schema_version = _positive_version(
+        expected_semantic_schema_version,
+        label="expected semantic schema version",
+    )
+    if (
+        identity["semantic_schema_id"] != expected_schema_id
+        or identity["semantic_schema_version"] != expected_schema_version
+    ):
+        _fail("Selected component has an incompatible semantic schema identity.")
+
+    arrays: dict[str, np.ndarray] = {}
+    for declaration in manifest["payload"]["arrays"]:
+        path = declaration["path"]
+        try:
+            node = component[path]
+            values = np.array(node[:], copy=True, order="C")
+        except Exception as exc:
+            _fail(f"Unable to copy selected component array {path!r}: {exc}.")
+        if (
+            list(values.shape) != declaration["shape"]
+            or np.dtype(values.dtype).str != declaration["dtype"]
+            or array_values_sha256(values) != declaration["content_sha256"]
+        ):
+            _fail(f"Selected component array {path!r} changed while being copied.")
+        values.setflags(write=False)
+        arrays[path] = values
+    group_attributes = {
+        declaration["path"]: MappingProxyType(
+            copy.deepcopy(dict(declaration["attributes"]))
+        )
+        for declaration in manifest["payload"]["groups"]
+    }
+    return VerifiedChaserComponent(
+        base_run_path=snapshot.run_path,
+        component_family=family,
+        component_name=name,
+        component_path=f"{snapshot.run_path}/{family}/{name}",
+        semantic_schema_id=identity["semantic_schema_id"],
+        semantic_schema_version=identity["semantic_schema_version"],
+        method_id=identity["method_id"],
+        method_version=identity["method_version"],
+        manifest_sha256=selector["component_manifest_sha256"],
+        manifest=MappingProxyType(copy.deepcopy(dict(manifest))),
+        arrays=MappingProxyType(arrays),
+        group_attributes=MappingProxyType(group_attributes),
+    )
+
+
 __all__ = [
     "COMPONENT_MANIFEST_ATTR",
     "COMPONENT_MANIFEST_DIGEST_ATTR",
@@ -626,12 +743,14 @@ __all__ = [
     "NON_AUTHORITATIVE_PUBLISHER_ATTRS",
     "ChaserComponentContract",
     "ChaserComponentPublicationError",
+    "VerifiedChaserComponent",
     "build_chaser_component_manifest",
     "build_chaser_component_selector",
     "canonical_component_json_bytes",
     "component_record_sha256",
     "persist_chaser_component_manifest",
     "persist_chaser_component_selector",
+    "load_selected_chaser_component",
     "validate_chaser_component_manifest",
     "validate_chaser_component_selector",
 ]

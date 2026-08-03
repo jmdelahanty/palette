@@ -14,6 +14,7 @@ from fisheye.analysis.chaser_component_publication import (
     ChaserComponentContract,
     ChaserComponentPublicationError,
     component_record_sha256,
+    load_selected_chaser_component,
     persist_chaser_component_manifest,
     persist_chaser_component_selector,
     validate_chaser_component_manifest,
@@ -51,6 +52,11 @@ class _Group:
         return self.groups.keys()
 
     def __getitem__(self, name):
+        if "/" in name:
+            current = self
+            for part in name.split("/"):
+                current = current[part]
+            return current
         if name in self.arrays:
             return self.arrays[name]
         return self.groups[name]
@@ -369,4 +375,95 @@ def test_object_arrays_are_forbidden() -> None:
             snapshot=_snapshot(),
             relative_path="chaser_escape_events/escape_v2",
             contract=_contract(),
+        )
+
+
+def test_selected_reader_returns_detached_exact_payload_without_latest_fallback() -> (
+    None
+):
+    component = _component()
+    snapshot = _snapshot()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    parent = _Group(
+        attrs={"latest": "unsealed_newer_child"},
+        groups={"escape_v2": component},
+    )
+    persist_chaser_component_selector(
+        parent,
+        component=component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+    )
+    root = _Group(
+        groups={
+            "analysis": _Group(
+                groups={
+                    "chaser_distance_runs": _Group(
+                        groups={
+                            "canonical": _Group(groups={"chaser_escape_events": parent})
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+    selected = load_selected_chaser_component(
+        root,
+        snapshot=snapshot,
+        component_family="chaser_escape_events",
+        expected_semantic_schema_id="palette.chaser_escape_events",
+        expected_semantic_schema_version=2,
+    )
+
+    assert selected.component_name == "escape_v2"
+    assert selected.array("events/distance_mm").tolist() == [1.25, 3.5]
+    assert selected.array("events/distance_mm").flags.writeable is False
+    assert selected.group_attributes["events"]["row_axis"] == "event"
+    with pytest.raises(TypeError):
+        selected.manifest["publication_state"] = "tampered"
+
+
+def test_selected_reader_rejects_schema_mismatch() -> None:
+    component = _component()
+    snapshot = _snapshot()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    parent = _Group(groups={"escape_v2": component})
+    persist_chaser_component_selector(
+        parent,
+        component=component,
+        snapshot=snapshot,
+        relative_path="chaser_escape_events/escape_v2",
+    )
+    root = _Group(
+        groups={
+            "analysis": _Group(
+                groups={
+                    "chaser_distance_runs": _Group(
+                        groups={
+                            "canonical": _Group(groups={"chaser_escape_events": parent})
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+    with pytest.raises(ChaserComponentPublicationError, match="incompatible"):
+        load_selected_chaser_component(
+            root,
+            snapshot=snapshot,
+            component_family="chaser_escape_events",
+            expected_semantic_schema_id="palette.chaser_escape_events",
+            expected_semantic_schema_version=3,
         )

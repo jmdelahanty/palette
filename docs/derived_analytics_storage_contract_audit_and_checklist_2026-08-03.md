@@ -375,7 +375,11 @@ production selector activation remain out of scope.
 - [ ] Reject data-dependent schema expansion in current stimulus-response
       publication.
 - [x] Complete exact dtype validation for every eye-angle semantic array.
-- [ ] Add closed whole-run manifests for swim bouts and bout kinematics.
+- [x] Add closed whole-run manifests for swim bouts and bout kinematics.
+      Swim-bout v8 binds 132 required arrays plus its optional embedded frame
+      axis; bout-kinematics v7 binds 111 required arrays plus an optional
+      45-array eye-gaze bundle. Both validate before publication and require an
+      explicit compatibility mode for historical layouts.
 - [x] Freeze exact per-field bout-classification storage declarations.
       Maintained schema v2 contains 20 exact arrays, fixed 64/128-byte text
       matrices, an executable manifest, and explicit v1 compatibility.
@@ -387,8 +391,9 @@ production selector activation remain out of scope.
       requires them.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
       bout-classification, and tail-posture manifests completed so far.
-- [ ] Add equivalent adversarial coverage for every remaining new
-      manifest.
+- [ ] Add equivalent adversarial coverage for every remaining new manifest.
+      Swim-bout and bout-kinematics now have this coverage; stimulus-response
+      and later families remain.
 
 ### Phase 5 — Seal chaser components independently
 
