@@ -267,6 +267,10 @@ _READ_MATRIX_ADAPTERS = {
         "fisheye.diagnostics.benchmark_eye_angle_v7_reads",
         "run_benchmark_matrix",
     ),
+    "track_kinematics": (
+        "fisheye.diagnostics.benchmark_track_kinematics_v2_candidate",
+        "run_benchmark_matrix",
+    ),
     "subject_shape": (
         "fisheye.diagnostics.benchmark_subject_shape_v4_candidate",
         "run_benchmark_matrix",

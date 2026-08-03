@@ -25,6 +25,7 @@ READ_MATRIX_STAGES = {
     "stimulus_epochs",
     "stimulus_response",
     "eye_angles",
+    "track_kinematics",
     "subject_shape",
 }
 
@@ -95,6 +96,13 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         "fisheye.diagnostics.benchmark_eye_angle_v7_reads"
     )
     assert eye_angles.adapter_entrypoint == "run_benchmark_matrix"
+    track_kinematics = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE[
+        "track_kinematics"
+    ]
+    assert track_kinematics.adapter_module == (
+        "fisheye.diagnostics.benchmark_track_kinematics_v2_candidate"
+    )
+    assert track_kinematics.adapter_entrypoint == "run_benchmark_matrix"
     subject_shape = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["subject_shape"]
     assert subject_shape.adapter_module == (
         "fisheye.diagnostics.benchmark_subject_shape_v4_candidate"
