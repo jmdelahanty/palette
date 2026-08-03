@@ -13,13 +13,20 @@ import hashlib
 import json
 from typing import Any, Mapping, Sequence
 
-from .contracts import POSITION_OCCUPANCY_HISTOGRAM_TABLE, TABLE_CONTRACTS
+from .contracts import (
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
+    RECORDING_SUMMARY_TABLE,
+    TABLE_CONTRACTS,
+)
 
 
 ARROW_CONTRACT_ENVELOPE_SCHEMA_ID = "palette.analytics_export.arrow_contracts"
 ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION = 1
 ARROW_TABLE_SCHEMA_VERSION = 1
-EXACT_ARROW_SCHEMA_TABLES = (POSITION_OCCUPANCY_HISTOGRAM_TABLE,)
+EXACT_ARROW_SCHEMA_TABLES = (
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
+    RECORDING_SUMMARY_TABLE,
+)
 
 _ENVELOPE_FIELDS = {
     "schema_id",
@@ -169,10 +176,56 @@ _POSITION_OCCUPANCY_FIELDS = (
 )
 
 
+# Recording-summary has one closed producer row shape even when its source
+# capabilities are absent.  The five shared identity fields and the always
+# computed stimulus-step count are required.  Every other field depends on an
+# optional stimulus, response, swim-bout, or collection source.  The derived
+# protocol hash is a deprecated alias retained in physical v1 so this exact
+# contract does not silently change the producer's current row vocabulary.
+_RECORDING_SUMMARY_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("stimulus_run", "string", nullable=True),
+    _field("stimulus_response_run", "string", nullable=True),
+    _field("swim_bout_run", "string", nullable=True),
+    _field("stimulus_step_count", "int64"),
+    _field("protocol_signature_schema", "string", nullable=True),
+    _field("protocol_signature_hash", "string", nullable=True),
+    _field("derived_protocol_hash", "string", nullable=True),
+    _field("protocol_mode_sequence", "string", nullable=True),
+    _field("protocol_duration_sequence_s", "string", nullable=True),
+    _field("protocol_step_count", "int64", nullable=True),
+    _field("source_track_kinematics_run", "string", nullable=True),
+    _field("source_track_kinematics_type", "string", nullable=True),
+    _field("source_bout_run", "string", nullable=True),
+    _field("n_fish", "int64", nullable=True),
+    _field("n_steps", "int64", nullable=True),
+    _field("global_fish_count", "int64", nullable=True),
+    _field("total_distance_mm_sum", "float64", nullable=True),
+    _field("mean_speed_mm_s_mean", "float64", nullable=True),
+    _field("fraction_moving_mean", "float64", nullable=True),
+    _field("total_active_s_sum", "float64", nullable=True),
+    _field("swim_bout_default_level", "string", nullable=True),
+    _field("swim_bout_default_n_bouts", "int64", nullable=True),
+    _field("swim_bout_default_mean_duration_s", "float64", nullable=True),
+    _field("swim_bout_default_total_path_length_mm", "float64", nullable=True),
+    _field("collection_id", "string", nullable=True),
+    _field("collection_manifest_sha256", "string", nullable=True),
+    _field("collection_manifest_path", "string", nullable=True),
+)
+
+
 ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     POSITION_OCCUPANCY_HISTOGRAM_TABLE: ArrowTableContract(
         table_name=POSITION_OCCUPANCY_HISTOGRAM_TABLE,
         fields=_POSITION_OCCUPANCY_FIELDS,
+    ),
+    RECORDING_SUMMARY_TABLE: ArrowTableContract(
+        table_name=RECORDING_SUMMARY_TABLE,
+        fields=_RECORDING_SUMMARY_FIELDS,
     ),
 }
 

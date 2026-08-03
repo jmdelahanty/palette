@@ -7,7 +7,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
+from fisheye.analytics_exports.arrow_contracts import (
+    arrow_contract_envelope,
+    exact_arrow_schema,
+)
 from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
@@ -18,6 +21,7 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
 )
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.validation import ExportValidationError
 from fisheye.registry.db import Registry
 from fisheye.utils.analytics_export_resolution import resolve_latest_export_table
 from fisheye.utils.check_analytics_exports import main as check_main
@@ -109,7 +113,13 @@ def _write_collection_manifest(path: Path) -> dict:
     return manifest
 
 
-def _write_export_manifest(path: Path, collection_manifest: dict, collection_path: Path) -> dict:
+def _write_export_manifest(
+    path: Path,
+    collection_manifest: dict,
+    collection_path: Path,
+    *,
+    inferred_minimal_recording_summary: bool = False,
+) -> dict:
     export_root = path.parent.parent.parent
     generation_path = (
         Path("v1")
@@ -122,7 +132,12 @@ def _write_export_manifest(path: Path, collection_manifest: dict, collection_pat
         RECORDING_SUMMARY_TABLE: [
             canonicalize_export_row(
                 RECORDING_SUMMARY_TABLE,
-                {"recording_id": f"recording_{index}"},
+                {
+                    "recording_id": f"recording_{index}",
+                    "zarr_path": f"/recordings/recording_{index}_analysis.zarr",
+                    "source_lineage_hash": f"{index + 1:064x}",
+                    "stimulus_step_count": 0,
+                },
             )
             for index in range(2)
         ],
@@ -137,19 +152,42 @@ def _write_export_manifest(path: Path, collection_manifest: dict, collection_pat
     for table_name, rows in rows_by_table.items():
         part = export_root / generation_path / "tables" / table_name / "part-00000.parquet"
         part.parent.mkdir(parents=True, exist_ok=True)
-        arrow = pa.Table.from_pylist(rows)
-        arrow = arrow.replace_schema_metadata(
-            {
-                b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
-                b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
-                b"palette.table_contract": json.dumps(
-                    TABLE_CONTRACTS[table_name].to_dict(),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode(),
-                b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
-            }
-        )
+        metadata = {
+            b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
+            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
+            b"palette.table_contract": json.dumps(
+                TABLE_CONTRACTS[table_name].to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        }
+        if table_name == RECORDING_SUMMARY_TABLE:
+            if inferred_minimal_recording_summary:
+                minimal_rows = [
+                    canonicalize_export_row(
+                        RECORDING_SUMMARY_TABLE,
+                        {"recording_id": f"recording_{index}"},
+                    )
+                    for index in range(2)
+                ]
+                arrow = pa.Table.from_pylist(minimal_rows).replace_schema_metadata(
+                    {
+                        **metadata,
+                        b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
+                    }
+                )
+            else:
+                arrow = pa.Table.from_pylist(
+                    rows,
+                    schema=exact_arrow_schema(table_name, metadata=metadata),
+                )
+        else:
+            arrow = pa.Table.from_pylist(rows).replace_schema_metadata(
+                {
+                    **metadata,
+                    b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
+                }
+            )
         pq.write_table(arrow, part)
         parts[table_name] = part
     manifest = {
@@ -247,6 +285,35 @@ def test_legacy_export_requires_explicit_non_active_index_policy(tmp_path: Path)
             ("run_test",),
         ).fetchone()
         assert row["status"] == "legacy_compatibility"
+    finally:
+        registry.close()
+
+
+def test_strict_registry_rejects_inferred_minimal_recording_summary(
+    tmp_path: Path,
+) -> None:
+    collection_path = tmp_path / "collection.manifest.json"
+    collection = _write_collection_manifest(collection_path)
+    export_path = (
+        tmp_path
+        / "exports"
+        / "v1"
+        / "manifests"
+        / "export_run_id=run_test.json"
+    )
+    _write_export_manifest(
+        export_path,
+        collection,
+        collection_path,
+        inferred_minimal_recording_summary=True,
+    )
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        with pytest.raises(
+            ExportValidationError,
+            match="recording_summary: physical Arrow fields differ",
+        ):
+            index_export_manifest(registry, export_path)
     finally:
         registry.close()
 

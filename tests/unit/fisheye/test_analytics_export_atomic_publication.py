@@ -59,7 +59,14 @@ def _stub_source(path: Path, **_kwargs: object) -> SourceExportResult:
             RECORDING_SUMMARY_TABLE: [
                 canonicalize_export_row(
                     RECORDING_SUMMARY_TABLE,
-                    {"recording_id": recording_id},
+                    {
+                        "recording_id": recording_id,
+                        "zarr_path": str(path),
+                        "source_lineage_hash": hashlib.sha256(
+                            str(path).encode("utf-8")
+                        ).hexdigest(),
+                        "stimulus_step_count": 0,
+                    },
                 )
             ]
         },
