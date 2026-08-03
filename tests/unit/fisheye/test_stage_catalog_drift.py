@@ -21,6 +21,10 @@ KNOWN_PIPELINE_DEPENDENCY_OVERRIDES = {
     # INTENT: keep until the traditional keypoint path is retired or split.
     # Traditional keypoints historically required background as an extra input.
     "keypoints": (("crop", "background"), ("crop",)),
+    # INTENT: converge. The frozen pipeline has no keypoint-quality stage and
+    # still launches refinement directly from raw keypoints; the canonical DAG
+    # requires the explicit quality snapshot before refined keypoints.
+    "refined_keypoints": (("keypoints",), ("keypoint_quality",)),
     # INTENT: converge. Subject-mask refinement is exposed without its raw
     # subject-mask stage in the legacy pipeline launcher.
     "refined_subject_masks": ((), ("subject_masks",)),
