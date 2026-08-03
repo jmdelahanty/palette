@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis import bout_kinematics as bout_writer_module
 from fisheye.analysis.bout_kinematics import LAYOUT_COMPACT_TABULAR_V2
+from fisheye.analysis.bout_kinematics_schema import (
+    write_bout_kinematics_array_manifest,
+)
 from fisheye.analysis_workflows.materializers.bout_kinematics import (
     build_bout_kinematics_compute_plan,
     build_bout_kinematics_storage_plan,
@@ -22,7 +26,6 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 from fisheye.shared.zarr_sharded_copy import SHARD_POLICY_MULTI_CHUNK_CAPPED
-from fisheye.shared.zarr_sharded_copy import copy_completed_run_to_sharded
 
 
 def _make_archive(tmp_path: Path) -> Path:
@@ -266,22 +269,60 @@ def test_compute_materializer_publishes_and_promotes_local_run(
     def fake_writer_main(argv: list[str]) -> int:
         output_zarr = Path(argv[argv.index("--output-zarr-path") + 1])
         run_name = argv[argv.index("--run-name") + 1]
-        local_run = (
-            output_zarr
-            / "analysis"
-            / "bout_kinematics_runs"
-            / run_name
+        root = zarr.open_group(str(output_zarr), mode="w", zarr_format=3)
+        parent = require_runs_parent(
+            root.require_group("analysis"), "bout_kinematics_runs"
         )
-        copy_completed_run_to_sharded(
-            source / "analysis/bout_kinematics_runs/bout_source",
-            local_run,
-            row_count_array=None,
-            shard_rows=8_192,
-            shard_policy=SHARD_POLICY_MULTI_CHUNK_CAPPED,
-            workers=1,
+        group = parent.create_group(run_name)
+        mark_run_started(group, run_name=run_name, stage="bout_kinematics")
+        group.attrs.update(
+            {
+                "status": "complete",
+                "schema_id": "analysis.bout_kinematics_runs",
+                "schema_version": 7,
+                "method": "linked_per_bout_heading_kinematics",
+                "method_version": "bout_kinematics.v7",
+                "layout": LAYOUT_COMPACT_TABULAR_V2,
+                "heading_levels": ["heading_smoothed"],
+                "analysis_levels": ["movement", "heading_smoothed"],
+                "default_heading_level": "heading_smoothed",
+                "parameters": {"fixture": True},
+                "source_refs": {"source_swim_bout_run": "bouts_fixture"},
+                "physical_storage_layout": {
+                    "shard_policy": SHARD_POLICY_MULTI_CHUNK_CAPPED
+                },
+            }
         )
-        group = zarr.open_group(str(local_run), mode="a", use_consolidated=False)
-        group.attrs["palette_run_name"] = run_name
+        rows = 5_000
+        movement = np.zeros(rows, dtype=bout_writer_module._movement_metrics_dtype())
+        movement["bout_id"] = np.arange(rows, dtype=np.int32)
+        heading = np.zeros(rows, dtype=bout_writer_module._metrics_dtype())
+        heading["bout_id"] = np.arange(rows, dtype=np.int32)
+        bout_writer_module._write_compact_bout_kinematics_tables(
+            group,
+            movement_metrics=movement,
+            movement_attrs={},
+            metrics_by_level={"heading_smoothed": heading},
+            heading_levels=["heading_smoothed"],
+            default_heading_level="heading_smoothed",
+            heading_table_attrs={},
+            eye_gaze_metrics=None,
+            eye_gaze_attrs=None,
+            output_shard_rows=8_192,
+        )
+        write_bout_kinematics_array_manifest(group)
+        provenance = build_writer_run_provenance(
+            command="fixture",
+            params={"fixture": True},
+            input_run_ids={"source": "fixture"},
+        )
+        group.attrs["run_provenance"] = provenance
+        mark_run_complete(
+            group,
+            parent_group=parent,
+            run_name=run_name,
+            run_provenance=provenance,
+        )
         return 0
 
     monkeypatch.setattr(

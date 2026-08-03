@@ -29,6 +29,12 @@ from fisheye.shared.zarr_helpers import (
     normalize_zarr_path as _normalize_path,
     zarr_group_keys,
 )
+from fisheye.analysis.swim_bout_schema import (
+    SWIM_BOUT_LAYOUT,
+    SWIM_BOUT_RUN_SCHEMA_ID,
+    SWIM_BOUT_RUN_SCHEMA_VERSION,
+    validate_swim_bout_array_manifest,
+)
 
 
 COMPACT_V2_LAYOUT = "compact_tabular_v2"
@@ -194,6 +200,12 @@ def discover_swim_bout_candidates(
         ):
             continue
         attrs = _attrs_dict(run_group)
+        try:
+            _require_read_contract(
+                run_group, legacy_compatibility=legacy_compatibility
+            )
+        except SwimBoutIOError:
+            continue
         if not _matches_track(attrs, track_run_name=track_run_name, track_id=track_id):
             continue
         for candidate in _candidates_from_run_group(
@@ -240,11 +252,15 @@ def resolve_swim_bout_run_name(
     """Resolve one exact complete selector-eligible swim-bout child name."""
 
     parent = _require_child(root, "analysis/swim_bout_runs")
-    return _resolve_run_name(
+    resolved = _resolve_run_name(
         parent,
         run_name,
         legacy_compatibility=legacy_compatibility,
     )
+    _require_read_contract(
+        parent[resolved], legacy_compatibility=legacy_compatibility
+    )
+    return resolved
 
 
 def resolve_swim_bout_candidate(
@@ -260,6 +276,9 @@ def resolve_swim_bout_candidate(
         parent,
         run_name,
         legacy_compatibility=legacy_compatibility,
+    )
+    _require_read_contract(
+        parent[resolved_name], legacy_compatibility=legacy_compatibility
     )
     candidate = _default_candidate_from_run_group(
         parent[resolved_name],
@@ -295,6 +314,9 @@ def load_swim_bout_tables(
         legacy_compatibility=legacy_compatibility,
     )
     run_group = parent[resolved_name]
+    _require_read_contract(
+        run_group, legacy_compatibility=legacy_compatibility
+    )
     is_latest = (
         resolve_latest_complete_run_name(
             parent,
@@ -370,6 +392,9 @@ def load_swim_bout_events(
         legacy_compatibility=legacy_compatibility,
     )
     run_group = _require_child(parent, resolved_name)
+    _require_read_contract(
+        run_group, legacy_compatibility=legacy_compatibility
+    )
     if _is_compact_v2_group(run_group):
         tables = _require_child(run_group, "tables")
         bouts = _filter_records(
@@ -409,6 +434,40 @@ def load_swim_bout_events(
 def _is_compact_v2_group(run_group: zarr.Group) -> bool:
     attrs = _attrs_dict(run_group)
     return attrs.get("layout") == COMPACT_V2_LAYOUT or _get_child(run_group, "indexes/candidates") is not None
+
+
+def _require_read_contract(
+    run_group: zarr.Group,
+    *,
+    legacy_compatibility: bool,
+) -> None:
+    attrs = _attrs_dict(run_group)
+    is_current = (
+        attrs.get("schema_id") == SWIM_BOUT_RUN_SCHEMA_ID
+        and type(attrs.get("schema_version")) is int
+        and attrs.get("schema_version") == SWIM_BOUT_RUN_SCHEMA_VERSION
+        and attrs.get("layout") == SWIM_BOUT_LAYOUT
+    )
+    if is_current:
+        if "array_schema_manifest" not in attrs:
+            if legacy_compatibility:
+                return
+            raise SwimBoutIOError(
+                "Unmanifested compact swim-bout v8 runs require "
+                "legacy_compatibility=True."
+            )
+        errors = validate_swim_bout_array_manifest(run_group)
+        if errors:
+            raise SwimBoutIOError(
+                "Current swim-bout run violates its exact array contract: "
+                + "; ".join(errors)
+            )
+        return
+    if not legacy_compatibility:
+        raise SwimBoutIOError(
+            "Historical swim-bout schemas/layouts require "
+            "legacy_compatibility=True."
+        )
 
 
 def _candidates_from_run_group(

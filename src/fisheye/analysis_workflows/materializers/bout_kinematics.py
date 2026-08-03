@@ -32,6 +32,9 @@ from ...analysis.bout_kinematics import (
     LAYOUT_COMPACT_TABULAR_V2,
     resolve_bout_kinematics_tables,
 )
+from ...analysis.bout_kinematics_schema import (
+    validate_bout_kinematics_array_manifest,
+)
 from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance
 from ...shared.zarr_io import open_zarr_root
@@ -319,7 +322,8 @@ def _records_digest(records: np.ndarray) -> str:
 
 def _logical_fingerprint(group: zarr.Group) -> dict[str, Any]:
     records_by_level, _level_attrs, table_attrs = resolve_bout_kinematics_tables(
-        group
+        group,
+        legacy_compatibility=True,
     )
     levels: dict[str, Any] = {}
     for level, records in sorted(records_by_level.items()):
@@ -358,6 +362,7 @@ def _validate_bout_run(
     expected_logical_sha256: str,
     expected_run_name: str | None,
     require_small_run_profile: bool,
+    require_exact_schema: bool = False,
 ) -> dict[str, Any]:
     errors: list[str] = []
     group = open_zarr_root(path, mode="r")
@@ -369,6 +374,9 @@ def _validate_bout_run(
         group.attrs.get("palette_run_name", "")
     ) != str(expected_run_name):
         errors.append("palette_run_name mismatch")
+    exact_schema_errors = validate_bout_kinematics_array_manifest(group)
+    if require_exact_schema or "array_schema_manifest" in dict(group.attrs):
+        errors.extend(exact_schema_errors)
 
     logical = _logical_fingerprint(group)
     if str(logical["logical_sha256"]) != str(expected_logical_sha256):
@@ -684,6 +692,7 @@ def materialize_bout_kinematics_compute(
             expected_logical_sha256=str(logical["logical_sha256"]),
             expected_run_name=plan.run_name,
             require_small_run_profile=True,
+            require_exact_schema=True,
         )
         if not local_validation["valid"]:
             raise RuntimeError(

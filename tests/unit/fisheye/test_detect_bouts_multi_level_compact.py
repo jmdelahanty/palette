@@ -289,7 +289,7 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
         frame_axis_contract=frame_axis_contract,
     )
 
-    payload = load_default_swim_bout_tables(root)
+    payload = load_default_swim_bout_tables(root, legacy_compatibility=True)
 
     assert run.attrs["layout"] == SWIM_BOUT_STORED_LAYOUT_COMPACT_V2
     assert "speed_exponential" not in run

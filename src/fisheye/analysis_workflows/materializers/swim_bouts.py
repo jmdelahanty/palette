@@ -20,6 +20,7 @@ from ...analysis.swim_bout_frame_axis import (
     canonical_frame_axis_sha256,
     resolve_swim_bout_frame_axis,
 )
+from ...analysis.swim_bout_schema import validate_swim_bout_array_manifest
 from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
@@ -132,6 +133,7 @@ def _validate_swim_bout_run(path: Path, *, source_zarr: Path) -> dict[str, Any]:
         errors.append("invalid method_version")
     if str(attrs.get("row_axis")) != "swim_bout_rows":
         errors.append("invalid row_axis")
+    errors.extend(validate_swim_bout_array_manifest(group))
     if not isinstance(attrs.get("parameters"), dict):
         errors.append("missing parameters")
     if not isinstance(attrs.get("source_refs"), dict):

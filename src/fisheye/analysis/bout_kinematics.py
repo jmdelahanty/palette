@@ -308,6 +308,7 @@ def resolve_bout_kinematics_tables(
     run_group: zarr.Group,
     *,
     heading_level: Optional[str] = None,
+    legacy_compatibility: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, dict[str, object]], dict[str, dict[str, object]]]:
     """Return logical bout-kinematics tables independent of physical layout.
 
@@ -319,7 +320,35 @@ def resolve_bout_kinematics_tables(
 
     layout = str(run_group.attrs.get("layout", LAYOUT_HIERARCHICAL_V1))
     if layout == LAYOUT_COMPACT_TABULAR_V2:
+        from fisheye.analysis.bout_kinematics_schema import (
+            BOUT_KINEMATICS_RUN_SCHEMA_ID,
+            BOUT_KINEMATICS_RUN_SCHEMA_VERSION,
+            validate_bout_kinematics_array_manifest,
+        )
+
+        attrs = dict(run_group.attrs)
+        is_current = (
+            attrs.get("schema_id") == BOUT_KINEMATICS_RUN_SCHEMA_ID
+            and type(attrs.get("schema_version")) is int
+            and attrs.get("schema_version") == BOUT_KINEMATICS_RUN_SCHEMA_VERSION
+        )
+        if is_current and "array_schema_manifest" in attrs:
+            errors = validate_bout_kinematics_array_manifest(run_group)
+            if errors:
+                raise ValueError(
+                    "Current bout-kinematics run violates its exact array contract: "
+                    + "; ".join(errors)
+                )
+        elif not legacy_compatibility:
+            raise ValueError(
+                "Unmanifested compact bout-kinematics runs require "
+                "legacy_compatibility=True."
+            )
         return _resolve_compact_bout_kinematics_tables(run_group, heading_level=heading_level)
+    if not legacy_compatibility:
+        raise ValueError(
+            "Hierarchical bout-kinematics runs require legacy_compatibility=True."
+        )
     return _resolve_hierarchical_bout_kinematics_tables(run_group, heading_level=heading_level)
 
 
@@ -3503,6 +3532,13 @@ def compute_and_save_bout_kinematics(
         run_group.attrs["failure_reason"] = f"{type(exc).__name__}: {exc}"
         mark_run_failed(run_group, error=f"{type(exc).__name__}: {exc}")
         raise
+
+    if layout == LAYOUT_COMPACT_TABULAR_V2:
+        from fisheye.analysis.bout_kinematics_schema import (
+            write_bout_kinematics_array_manifest,
+        )
+
+        write_bout_kinematics_array_manifest(run_group)
 
     run_group.attrs["status"] = "complete"
     mark_run_complete(

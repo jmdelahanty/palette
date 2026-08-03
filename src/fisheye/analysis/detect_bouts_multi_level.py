@@ -1597,6 +1597,16 @@ def _bytes_dtype(values: List[object], *, minimum: int = 16) -> str:
     return f"S{max_len}"
 
 
+def _fixed_utf8_bytes(value: object, *, width: int, label: str) -> bytes:
+    encoded = str(value).encode("utf-8")
+    if len(encoded) >= int(width):
+        raise ValueError(
+            f"{label} exceeds the exact fixed-width UTF-8 contract "
+            f"({len(encoded)} must be < {int(width)} bytes)."
+        )
+    return encoded
+
+
 def _add_fields(records: np.ndarray, fields: Mapping[str, tuple[Any, Any]]) -> np.ndarray:
     """Return a structured array with extra fields prepended."""
 
@@ -1647,7 +1657,6 @@ def _summary_metrics_rows(
     signal_id_by_level: Mapping[str, int],
 ) -> np.ndarray:
     rows: list[tuple[int, int, bytes, float, bytes, bytes]] = []
-    metric_names: list[str] = []
     units: list[str] = []
     for level, metrics in global_metrics_by_level.items():
         if metrics.size == 0 or metrics.dtype.names is None:
@@ -1660,14 +1669,22 @@ def _summary_metrics_rows(
                 numeric_value = float(value)
             except (TypeError, ValueError):
                 continue
-            metric_names.append(name)
             unit = _metric_units(name)
             units.append(unit)
-            rows.append((0, signal_id, name.encode("utf-8"), numeric_value, unit.encode("utf-8"), b"global_metrics"))
+            rows.append(
+                (
+                    0,
+                    signal_id,
+                    _fixed_utf8_bytes(name, width=64, label="summary metric name"),
+                    numeric_value,
+                    unit.encode("utf-8"),
+                    b"global_metrics",
+                )
+            )
     dtype = np.dtype([
         ("candidate_id", "i4"),
         ("signal_id", "i4"),
-        ("metric_name", _bytes_dtype(metric_names, minimum=32)),
+        ("metric_name", "S64"),
         ("value", "f8"),
         ("units", _bytes_dtype(units, minimum=8)),
         ("source_table", "S32"),
@@ -1842,7 +1859,7 @@ def _write_compact_v2_swim_bout_payloads(
     parameters_json = _strict_json_dumps(parameters)
     candidate_dtype = np.dtype([
         ("candidate_id", "i4"),
-        ("candidate_name", _bytes_dtype([run_name], minimum=32)),
+        ("candidate_name", "S256"),
         ("is_default", "?"),
         ("detection_method", "S32"),
         ("boundary_mode", "S32"),
@@ -1853,7 +1870,7 @@ def _write_compact_v2_swim_bout_payloads(
         ("min_gap_duration_s", "f8"),
         ("min_gap_frames", "i4"),
         ("parameter_hash", "S64"),
-        ("parameters_json", _bytes_dtype([parameters_json], minimum=256)),
+        ("parameters_json", "S8192"),
         ("provenance_json", "S1"),
     ])
     candidates = np.zeros(1, dtype=candidate_dtype)
@@ -1862,7 +1879,7 @@ def _write_compact_v2_swim_bout_payloads(
     min_gap_duration_value = parameters.get("min_gap_duration_s")
     candidates[0] = (
         0,
-        run_name.encode("utf-8"),
+        _fixed_utf8_bytes(run_name, width=256, label="swim-bout candidate name"),
         True,
         str(method).encode("utf-8"),
         str(parameters.get("boundary_mode", "")).encode("utf-8"),
@@ -1873,12 +1890,15 @@ def _write_compact_v2_swim_bout_payloads(
         float(min_gap_duration_value) if min_gap_duration_value is not None else float("nan"),
         int(parameters.get("min_gap_frames")) if parameters.get("min_gap_frames") is not None else -1,
         _sha256_json(parameters).encode("utf-8"),
-        parameters_json.encode("utf-8"),
+        _fixed_utf8_bytes(
+            parameters_json,
+            width=8192,
+            label="swim-bout candidate parameters_json",
+        ),
         b"",
     )
 
     signal_rows = []
-    signal_parameters_json: list[str] = []
     for level in speed_levels:
         signal_id = int(signal_id_by_level[level])
         attrs = _detection_signal_attrs(
@@ -1896,7 +1916,6 @@ def _write_compact_v2_swim_bout_payloads(
             "detection_signal_attrs": attrs,
         }
         signal_json = _strict_json_dumps(signal_params)
-        signal_parameters_json.append(signal_json)
         is_exponential = level == "speed_exponential"
         source_level = exponential_source_key if is_exponential else level
         transform_source_signal_id = (
@@ -1914,7 +1933,11 @@ def _write_compact_v2_swim_bout_payloads(
                 float(exponential_tau_s) if is_exponential else float("nan"),
                 b"mm/s",
                 path_distance_level_source[level].encode("utf-8"),
-                signal_json.encode("utf-8"),
+                _fixed_utf8_bytes(
+                    signal_json,
+                    width=8192,
+                    label=f"swim-bout signal {level} parameters_json",
+                ),
             )
         )
     signal_dtype = np.dtype([
@@ -1928,7 +1951,7 @@ def _write_compact_v2_swim_bout_payloads(
         ("tau_s", "f8"),
         ("units", "S16"),
         ("path_distance_source_level", "S32"),
-        ("parameters_json", _bytes_dtype(signal_parameters_json, minimum=256)),
+        ("parameters_json", "S8192"),
     ])
     signal_variants = np.zeros(len(signal_rows), dtype=signal_dtype)
     for idx, row in enumerate(signal_rows):
@@ -3549,6 +3572,13 @@ def detect_and_save_bouts(
         f"unattributed_s={phase_timing['unattributed_elapsed_s']:.6f}",
         flush=True,
     )
+
+    if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
+        from fisheye.analysis.swim_bout_schema import (
+            write_swim_bout_array_manifest,
+        )
+
+        write_swim_bout_array_manifest(run_group)
 
     mark_run_complete(
         run_group,

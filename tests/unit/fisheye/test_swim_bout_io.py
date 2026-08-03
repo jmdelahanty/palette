@@ -287,6 +287,7 @@ def test_discover_swim_bout_candidates_maps_v1_levels_to_signals() -> None:
         root,
         track_run_name="offline/tk_hyst4_low2_s005",
         track_id=0,
+        legacy_compatibility=True,
     )
 
     assert len(candidates) == 1
@@ -309,7 +310,7 @@ def test_discover_swim_bout_candidates_maps_v1_levels_to_signals() -> None:
 def test_load_default_swim_bout_tables_uses_default_level() -> None:
     root = _build_v1_swim_bout_root()
 
-    payload = load_default_swim_bout_tables(root)
+    payload = load_default_swim_bout_tables(root, legacy_compatibility=True)
 
     assert payload.run_name == "bouts_canary"
     assert payload.signal.speed_level == "speed_exponential"
@@ -450,7 +451,9 @@ def test_open_zarr_swim_bout_resolution_normalizes_explicit_run(
     )
 
     assert (
-        resolve_swim_bout_run_name(root, run_name=requested_run)
+        resolve_swim_bout_run_name(
+            root, run_name=requested_run, legacy_compatibility=True
+        )
         == "bouts_canary"
     )
 
@@ -458,7 +461,9 @@ def test_open_zarr_swim_bout_resolution_normalizes_explicit_run(
 def test_load_swim_bout_tables_can_select_non_default_speed_level() -> None:
     root = _build_v1_swim_bout_root()
 
-    payload = load_swim_bout_tables(root, speed_level="filtered")
+    payload = load_swim_bout_tables(
+        root, speed_level="filtered", legacy_compatibility=True
+    )
 
     assert payload.signal.speed_level == "speed_filtered"
     assert payload.signal.role == "physical_estimator"
@@ -508,7 +513,7 @@ def test_load_swim_bout_tables_requires_bouts_table() -> None:
     run.create_group("speed_filtered")
 
     with pytest.raises(SwimBoutIOError, match="Missing required swim-bout table"):
-        load_default_swim_bout_tables(root)
+        load_default_swim_bout_tables(root, legacy_compatibility=True)
 
 
 def test_discovery_counts_structured_array_bouts_without_n_bouts_attr() -> None:
@@ -524,7 +529,7 @@ def test_discovery_counts_structured_array_bouts_without_n_bouts_attr() -> None:
     filtered = run.create_group("speed_filtered")
     filtered.create_array("bouts", data=_bout_records(), overwrite=True)
 
-    candidates = discover_swim_bout_candidates(root)
+    candidates = discover_swim_bout_candidates(root, legacy_compatibility=True)
 
     assert candidates[0].signals[0].n_bouts == 2
 
@@ -544,21 +549,19 @@ def test_cross_recording_export_uses_swim_bout_resolver() -> None:
         diagnostics=[],
     )
 
-    assert len(rows) == 2
-    assert rows[0]["swim_bout_run"] == "bouts_canary"
-    assert rows[0]["speed_level"] == "speed_exponential"
-    assert rows[0]["candidate_id"] == 0
-    assert rows[0]["signal_id"] == 1
-    assert rows[0]["signal_role"] == "detector_response"
-    assert rows[0]["signal_source_level"] == "filtered"
-    assert rows[0]["bout_id"] == 0
+    assert rows == []
 
 
 def test_discover_and_load_compact_v2_swim_bout_tables() -> None:
     root = _build_compact_v2_swim_bout_root()
 
-    candidates = discover_swim_bout_candidates(root, track_run_name="tk_hyst4_low2_s005", track_id=0)
-    payload = load_default_swim_bout_tables(root)
+    candidates = discover_swim_bout_candidates(
+        root,
+        track_run_name="tk_hyst4_low2_s005",
+        track_id=0,
+        legacy_compatibility=True,
+    )
+    payload = load_default_swim_bout_tables(root, legacy_compatibility=True)
 
     assert len(candidates) == 1
     assert candidates[0].candidate_id == 0
@@ -580,7 +583,12 @@ def test_discover_and_load_compact_v2_swim_bout_tables() -> None:
 def test_load_compact_v2_tables_can_select_physical_signal() -> None:
     root = _build_compact_v2_swim_bout_root()
 
-    payload = load_swim_bout_tables(root, run_name="bouts_compact", speed_level="filtered")
+    payload = load_swim_bout_tables(
+        root,
+        run_name="bouts_compact",
+        speed_level="filtered",
+        legacy_compatibility=True,
+    )
 
     assert payload.signal.signal_id == 0
     assert payload.signal.role == "physical_estimator"
@@ -594,12 +602,26 @@ def test_load_compact_v2_bout_events_skips_companion_tables() -> None:
         track_run_name="tk_hyst4_low2_s005",
         track_id=0,
         include_bout_counts=False,
+        legacy_compatibility=True,
     )[0]
     signal = next(item for item in candidate.signals if item.is_default)
 
-    payload = load_swim_bout_events(root, candidate=candidate, signal=signal)
+    payload = load_swim_bout_events(
+        root, candidate=candidate, signal=signal, legacy_compatibility=True
+    )
 
     assert [item.n_bouts for item in candidate.signals] == [0, 0]
     assert payload.bouts["bout_id"].tolist() == [20, 21]
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.level_path.endswith("candidate_id=0&signal_id=1")
+
+
+def test_unmanifested_v8_compact_run_is_an_explicit_legacy_surface() -> None:
+    root = _build_compact_v2_swim_bout_root()
+    root["analysis/swim_bout_runs/bouts_compact"].attrs["schema_version"] = 8
+
+    with pytest.raises(SwimBoutIOError, match="Unmanifested compact swim-bout v8"):
+        load_default_swim_bout_tables(root)
+
+    payload = load_default_swim_bout_tables(root, legacy_compatibility=True)
+    assert payload.bouts["bout_id"].tolist() == [20, 21]

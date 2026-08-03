@@ -8,6 +8,7 @@ import zarr
 
 from fisheye.analysis import detect_bouts_multi_level as bout_writer
 from fisheye.analysis.swim_bout_frame_axis import build_frame_axis_contract
+from fisheye.analysis import swim_bout_schema
 from fisheye.analysis_workflows.materializers import swim_bouts as mod
 
 
@@ -85,21 +86,34 @@ def _fake_writer(argv) -> int:
             },
         }
     )
-    indexes = run.create_group("indexes")
-    indexes.create_group("candidates")
-    indexes.create_group("signal_variants")
-    run.create_group("tables").create_group("bouts")
-    signals = run.create_group("signals")
-    signals.create_array(
-        "detector_signal_mm_s",
-        data=np.zeros((1, frames.size), dtype=np.float32),
-        chunks=(1, frames.size),
-    )
-    signals.create_array(
-        "detector_signal_signal_ids",
-        data=np.asarray([4], dtype=np.int16),
-        chunks=(1,),
-    )
+    required = swim_bout_schema._required_specs()
+    for spec in required.values():
+        parent = run
+        parts = spec.path.split("/")
+        for part in parts[:-1]:
+            parent = parent.require_group(part)
+        if spec.path == "signals/detector_signal_mm_s":
+            data = np.zeros((1, frames.size), dtype=np.float32)
+        elif spec.path == "signals/detector_signal_signal_ids":
+            data = np.asarray([4], dtype=np.int32)
+        else:
+            shape = (1,) if len(spec.axes) == 1 else (1, 64)
+            data = np.zeros(shape, dtype=np.dtype(spec.dtype))
+        parent.create_array(parts[-1], data=data)
+    for table_path in swim_bout_schema._COLUMNAR_TABLE_PATHS:
+        prefix = table_path + "/"
+        fields = [
+            (path[len(prefix) :], spec)
+            for path, spec in required.items()
+            if path.startswith(prefix) and "/" not in path[len(prefix) :]
+        ]
+        table = run[table_path]
+        table.attrs["storage_layout"] = "columnar"
+        table.attrs["field_names"] = [name for name, _spec in fields]
+        table.attrs["field_dtypes"] = {
+            name: spec.logical_dtype for name, spec in fields
+        }
+    swim_bout_schema.write_swim_bout_array_manifest(run)
     return 0
 
 
