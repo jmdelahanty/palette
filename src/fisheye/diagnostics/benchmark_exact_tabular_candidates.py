@@ -72,7 +72,7 @@ from fisheye.shared.zarr_run_completion import (
 TRIAL_SCHEMA_ID = "palette.exact_tabular_candidate_read_trial"
 TRIAL_SCHEMA_VERSION = 1
 MATRIX_SCHEMA_ID = "palette.exact_tabular_candidate_read_matrix"
-MATRIX_SCHEMA_VERSION = 1
+MATRIX_SCHEMA_VERSION = 2
 BENCHMARK_ID = "exact_tabular_candidate_reads_v1"
 DEFAULT_SEED = 17
 DEFAULT_REPETITIONS = 5
@@ -260,7 +260,7 @@ def require_matrix_result(value: Mapping[str, Any]) -> None:
         "performance_summary",
         "archive_read_only_guard",
         "physical_io",
-        "promotion_evidence",
+        "balanced_read_matrix_complete",
     }
     if set(payload) != expected:
         raise ValueError("Benchmark matrix payload has an unexpected field set.")
@@ -343,11 +343,11 @@ def require_matrix_result(value: Mapping[str, Any]) -> None:
         or physical.get("transferred_bytes") is not None
     ):
         raise ValueError("Benchmark matrix must not fabricate physical I/O telemetry.")
-    if payload["promotion_evidence"] is not (
+    if payload["balanced_read_matrix_complete"] is not (
         payload["repetitions"] == DEFAULT_REPETITIONS
     ):
         raise ValueError(
-            "Benchmark matrix promotion-evidence classification is invalid."
+            "Benchmark balanced-read-matrix classification is invalid."
         )
 
 
@@ -1244,7 +1244,11 @@ def run_benchmark_matrix(
                 "object inventory, apparent/allocated bytes, and decoded bytes only"
             ),
         },
-        "promotion_evidence": repetitions == DEFAULT_REPETITIONS,
+        # Five balanced repetitions complete this read-only matrix contract.
+        # This is deliberately not a profile-promotion verdict: the adapter
+        # has no writer, publication, physical-I/O, representative-scale, or
+        # real-consumer evidence.
+        "balanced_read_matrix_complete": repetitions == DEFAULT_REPETITIONS,
     }
     result = _strict_envelope(MATRIX_SCHEMA_ID, MATRIX_SCHEMA_VERSION, payload)
     require_matrix_result(result)

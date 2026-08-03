@@ -92,7 +92,10 @@ The controller launches two new Python processes per repetition: one source
 trial and one candidate trial. Their order alternates deterministically by
 repetition. The default five-repetition matrix therefore produces ten trial
 documents. An overridden repetition count is useful for integration tests, but
-the result records `promotion_evidence=false` unless it used all five.
+the result records `balanced_read_matrix_complete=false` unless it used all
+five. Even a complete balanced read matrix is not profile-promotion evidence:
+this adapter does not measure writer/publication phases, physical transfer,
+representative short/full scales, or real consumers.
 
 Fresh processes isolate Python/Zarr decoded state and process RSS. They do not
 clear the operating-system or mounted-filesystem cache. Trial order rotation

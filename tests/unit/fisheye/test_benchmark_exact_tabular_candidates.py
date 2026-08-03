@@ -249,7 +249,7 @@ def test_matrix_uses_fresh_processes_and_preserves_archive_metadata(
     payload = result["payload"]
     assert payload["correctness"]["all_passed"] is True
     assert payload["archive_read_only_guard"]["unchanged"] is True
-    assert payload["promotion_evidence"] is False
+    assert payload["balanced_read_matrix_complete"] is False
     assert [trial["payload"]["role"] for trial in payload["trials"]] == [
         "candidate",
         "source",

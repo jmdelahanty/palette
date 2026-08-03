@@ -10,6 +10,16 @@ have explicit unpromoted physical candidates. No production profile,
 scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
+Benchmark coverage is now separately executable rather than inferred from
+candidate presence. Four of thirteen families have a generic source/candidate
+read matrix; none yet has the complete writer, publication, physical-I/O,
+representative-scale, and real-consumer evidence required for promotion. The
+catalog binds any future measured/executed claims to an immutable evidence
+receipt and versioned passing gate; complete catalog coverage still does not
+authorize profile activation. The initial policy conservatively requires a
+Crimson gate for every current family; that requirement may be narrowed only
+by a later explicit consumer census, not by the absence of an adapter today.
+
 ## Purpose
 
 This document records the current contract coverage for Palette analytics
@@ -125,11 +135,11 @@ true.
 | Tail-posture view | Exact typed arrays, guarded lifecycle, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate and decide whether to migrate to the atomic materializer |
 | Bout classification | Exact compact-v2 manifest, guarded activation, serialized registry projection, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate through its real consumer |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
-| Stimulus epochs | Current v1 direct authority is centrally cataloged; an exact 12-array v2, candidate-owned lineage/manifest, shared byte plan, atomic publication, and failure repair are implemented as a selector-ineligible candidate | Add a strict v2 consumer and real archive benchmark before any writer/default promotion |
+| Stimulus epochs | Current v1 direct authority is centrally cataloged; an exact 12-array v2, candidate-owned lineage/manifest, shared byte plan, atomic publication, failure repair, and a strict named-run v2 consumer are implemented without changing selection | Run real source/candidate archive benchmarks before any writer/default promotion |
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes the exact 62-field position-occupancy schema across writing, staging, and manifest-selected reads | Freeze the remaining 36 explicitly enumerated compatibility schemas where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
@@ -140,6 +150,9 @@ exposes `byte_planner_adopted` as the migration boundary
 (`src/fisheye/analysis_workflows/storage_contract_catalog.py`). Its thirteen
 entries include the current chaser-distance v1 authority while the separate
 candidate catalog records its unpromoted 30-array sealed-base projection.
+`src/fisheye/analysis_workflows/storage_benchmark_catalog.py` independently
+records benchmark-adapter and execution evidence, preventing a candidate from
+being mistaken for measured or promotable storage.
 
 The storage catalog now includes tail-posture view and bout classification with
 their real guarded-direct-writer owners
@@ -279,6 +292,8 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Subject-shape byte candidate | `/tmp/palette-subject-shape-byte-candidate-20260803` / `agent/palette/subject-shape-byte-candidate-20260803` | integrated as `ce6fdfc9`, `b9da5d36`, and `039eccc7` | Producer-sealed full-v4 inventory, exact semantic fills, byte-planned rematerialization, atomic publication, and persisted metadata equivalence | Independently reviewed ACCEPT; benchmarks remain pending |
 | Stimulus epoch and occupancy candidates | isolated family lanes plus coordination catalog work | integrated before `f273be11` | Exact 12/30/29-array contracts, byte-planned candidates, atomic rematerialization, and benchmark-harness coverage | Integrated; strict stimulus-v2 consumer and representative benchmarks remain pending |
 | Chaser-distance sealed-base candidate | `/tmp/palette-chaser-distance-storage-candidate-20260803` / `agent/palette/chaser-distance-storage-candidate-20260803` | integrated as `563d7720` | Exact source-sealed 30-array projection, byte-aware plan, source/candidate hashes, persisted metadata equality, and atomic non-promoting publication | Independently reviewed ACCEPT; full-duration benchmark remains pending |
+| Stimulus-epoch v2 consumer | `/tmp/palette-stimulus-epoch-v2-consumer-20260803` / `agent/palette/stimulus-epoch-v2-consumer-20260803` | integrated as `72d59c84` | Explicit named selector-ineligible v2 read, complete direct/consolidated metadata gate, exact lifecycle/schema/lineage/manifest/receipt validation, eager backend-neutral rows, and typed explicit-only v1 compatibility | Independently reviewed ACCEPT; source/candidate benchmark and any selection change remain pending |
+| First exact Arrow export schema | `/tmp/palette-analytics-arrow-dtype-contracts-20260803` / `agent/palette/analytics-arrow-dtype-contracts-20260803` | integrated as `379b9262` | Closed digest-bound Arrow envelope, exact 62-field position-occupancy schema, writer/staging/read validation, and an explicit census of 36 inferred compatibility schemas | Independently reviewed ACCEPT; remaining exact schemas, zero-row hardening, and production evidence remain pending |
 
 The next safe parallel wave assigns disjoint consumer/benchmark ownership as
 follows. The coordination lane remains the only owner of shared catalogs,
@@ -287,8 +302,8 @@ this checklist.
 
 | Proposed lane | Exclusive family-owned modules | Stop/return boundary |
 | --- | --- | --- |
-| Stimulus-epoch v2 consumer | stimulus-epoch strict reader, focused fixtures/tests, and family doc | Return instead of changing the writer, shared catalog, selector, or candidate profile |
-| Chaser consumer/recovery | exact embedded-component consumers, interruption tests, and chaser family docs | Do not change the sealed base, catalog, selectors, or shared publisher |
+| Stimulus-epoch benchmark | family-local source/candidate reader matrix, focused fixtures/tests, and family doc | Use the integrated strict consumer; return instead of changing the writer, shared catalog, selector, or candidate profile |
+| Chaser-distance benchmark | family-local sealed-base source/candidate reader matrix and focused tests | Do not change the sealed base, catalog, selectors, or shared publisher |
 | Export dtype closure | cross-recording Arrow declarations and export-only tests | Do not change recording-local Zarr schemas or registry selection |
 | Family benchmark adapters | one disjoint family adapter and evidence schema extension per lane | Return any shared runner/result-format change to coordination; never publish production artifacts |
 
@@ -546,6 +561,12 @@ a v3 storage-candidate regression.
       paths, and complete group/array topology are fail-closed.
 - [ ] Define exact Arrow dtypes for export columns where cross-language stability
       requires them.
+    - [x] Freeze and enforce the exact ordered 62-field
+          `position_occupancy_histogram_2d` schema through writer, staged
+          publication, and manifest-selected validation.
+    - [ ] Replace the explicitly enumerated 29 other canonical/group-statistics,
+          four baseline-strategy, and three training-response inferred schemas
+          only after their producer semantics and nullability are frozen.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
       bout-classification, and tail-posture manifests completed so far.
 - [ ] Add equivalent adversarial coverage for every remaining new manifest.
@@ -707,6 +728,13 @@ Recommended benchmark and promotion-review order:
 
 ### Phase 9 — Benchmark and promote one family at a time
 
+- [x] Add a closed benchmark-coverage catalog with exactly one record per
+      physical candidate. It distinguishes plan-only families from executable
+      read matrices and records writer, publication, physical-I/O, Palette,
+      required Crimson, short-scale, and full-scale evidence independently.
+      Measured/executed claims require an immutable receipt digest and
+      versioned passing gate. No current record has complete coverage, and the
+      catalog never serves as profile-promotion authorization.
 - [x] Add a deterministic suite planner that binds every array workload and
       the whole-run publication workload to the exact logical declaration,
       storage-plan receipt, logical dimensions, seed, and safety policy. It
@@ -767,15 +795,13 @@ gates pass:
 
 Continue consumer closure and measurement without promoting defaults:
 
-1. add the strict stimulus-epoch-v2 consumer and validate its exact declarations
-   without weakening the current v1 compatibility boundary;
-2. extend deterministic per-family writer/rematerialization/publication/read
+1. extend deterministic per-family writer/rematerialization/publication/read
    benchmarks, first for stimulus response/epochs, occupancy, subject shape,
    track kinematics, and chaser distance;
-3. run representative short and full-duration matrices with physical I/O,
+2. run representative short and full-duration matrices with physical I/O,
    object count, phase timing, CPU, and RSS evidence;
-4. close remaining chaser component consumer/recovery and cross-recording Arrow
+3. close remaining chaser component consumer/recovery and cross-recording Arrow
    dtype gaps in isolated worktrees, returning shared-format changes to this
    coordination lane; and
-5. review promotion one family at a time, retaining the current production
+4. review promotion one family at a time, retaining the current production
    writer/profile and selector as the rollback boundary until every gate passes.
