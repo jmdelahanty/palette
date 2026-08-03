@@ -46,9 +46,15 @@ from fisheye.shared.stage_provenance import (
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.zarr_helpers import resolve_zarr_run
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr.storage_profiles import StorageProfile, get_storage_profile
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
@@ -86,6 +92,14 @@ from fisheye.analysis.stimulus_response_concentric_omr import (
 from fisheye.analysis.stimulus_response_coordinate_authority import (
     StimulusResponseCoordinateAuthority,
     load_stimulus_response_coordinate_authority,
+)
+from fisheye.analysis.stimulus_response_storage import (
+    STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,
+    build_stimulus_response_storage_receipt,
+    consolidate_and_validate_stimulus_response_metadata,
+    create_stimulus_response_arrays_from_receipt,
+    persist_stimulus_response_storage_receipt,
+    validate_stimulus_response_storage_receipt,
 )
 # OMR metrics are implemented in a dedicated module, but re-exported here so
 # existing callers can keep importing from fisheye.analysis.stimulus_response.
@@ -1899,16 +1913,11 @@ def _write_exact_rows_table(
 ) -> None:
     """Write all declared columns, including a typed zero-row table."""
 
-    table = table_contract(name, bundles=bundles)
-    expected_fields = set(table.field_names)
-    for row_index, row in enumerate(rows):
-        observed = set(row)
-        if observed != expected_fields:
-            raise ValueError(
-                f"{name} row {row_index} fields must be exact; "
-                f"missing={sorted(expected_fields-observed)!r}, "
-                f"unexpected={sorted(observed-expected_fields)!r}."
-            )
+    table, arrays = _exact_rows_table_arrays(
+        name,
+        rows,
+        bundles=bundles,
+    )
     if name in parent:
         del parent[name]
     group = parent.create_group(name)
@@ -1923,6 +1932,29 @@ def _write_exact_rows_table(
             **_json_safe_attrs(attrs or {}),
         }
     )
+    for field_name, data in arrays.items():
+        store_array(group, field_name, data)
+
+
+def _exact_rows_table_arrays(
+    name: str,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    bundles: Sequence[str],
+) -> tuple[Any, dict[str, np.ndarray]]:
+    """Validate and encode one complete exact table without creating storage."""
+
+    table = table_contract(name, bundles=bundles)
+    expected_fields = set(table.field_names)
+    for row_index, row in enumerate(rows):
+        observed = set(row)
+        if observed != expected_fields:
+            raise ValueError(
+                f"{name} row {row_index} fields must be exact; "
+                f"missing={sorted(expected_fields-observed)!r}, "
+                f"unexpected={sorted(observed-expected_fields)!r}."
+            )
+    arrays: dict[str, np.ndarray] = {}
     for field_name, table_field in table.fields:
         values = [row[field_name] for row in rows]
         if table_field.string_width is not None:
@@ -1933,7 +1965,8 @@ def _write_exact_rows_table(
             )
         else:
             data = np.asarray(values, dtype=table_field.logical_dtype)
-        store_array(group, field_name, data)
+        arrays[field_name] = data
+    return table, arrays
 
 
 def _with_fish_ids(
@@ -2215,6 +2248,7 @@ def _write_stimulus_response_compact_v3(
     step_concentric_data: Optional[Mapping[int, ConcentricStepData]],
     step_loom_data: Optional[Mapping[int, LoomStepData]],
     global_omr_metrics: Optional[Mapping[str, np.ndarray]],
+    storage_profile: StorageProfile | None = None,
 ) -> None:
     """Write exact compact-tabular-v3 tables without inferred fields/dtypes."""
 
@@ -2482,9 +2516,20 @@ def _write_stimulus_response_compact_v3(
                 )
             )
 
+    byte_planner_candidate = storage_profile is not None
+    if byte_planner_candidate and (
+        storage_profile.profile_id != STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID
+    ):
+        raise ValueError(
+            "compact-tabular-v3 supports only the explicit "
+            f"{STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID!r} storage candidate."
+        )
     expected_tables = {
         declaration["path"].split("/", 1)[0]
-        for declaration in stimulus_response_array_manifest(bundles=bundles)["arrays"]
+        for declaration in stimulus_response_array_manifest(
+            bundles=bundles,
+            byte_planner_adopted=byte_planner_candidate,
+        )["arrays"]
     }
     table_attrs = {
         "global_omr_per_fish": {
@@ -2492,20 +2537,66 @@ def _write_stimulus_response_compact_v3(
             "scope": "aggregate_across_moving_grating_steps",
         }
     }
+    arrays_by_path: dict[str, np.ndarray] = {}
     for table_name in sorted(expected_tables):
-        _write_exact_rows_table(
-            run_group,
+        attrs = {"table_role": table_name, **table_attrs.get(table_name, {})}
+        if not byte_planner_candidate:
+            _write_exact_rows_table(
+                run_group,
+                table_name,
+                table_rows[table_name],
+                bundles=bundles,
+                attrs=attrs,
+            )
+            continue
+        table, arrays = _exact_rows_table_arrays(
             table_name,
             table_rows[table_name],
             bundles=bundles,
-            attrs={"table_role": table_name, **table_attrs.get(table_name, {})},
+        )
+        if table_name in run_group:
+            raise ValueError(
+                f"Stimulus-response destination table {table_name!r} already exists."
+            )
+        group = run_group.create_group(table_name)
+        group.attrs.update(
+            {
+                "storage_layout": "columnar",
+                "field_names": list(table.field_names),
+                "field_dtypes": {
+                    field_name: str(table_field.logical_dtype)
+                    for field_name, table_field in table.fields
+                },
+                **_json_safe_attrs(attrs),
+            }
+        )
+        arrays_by_path.update(
+            {
+                f"{table_name}/{field_name}": values
+                for field_name, values in arrays.items()
+            }
+        )
+    if byte_planner_candidate:
+        assert storage_profile is not None
+        receipt = build_stimulus_response_storage_receipt(
+            arrays_by_path=arrays_by_path,
+            bundles=bundles,
+            profile=storage_profile,
+        )
+        persist_stimulus_response_storage_receipt(run_group, receipt)
+        create_stimulus_response_arrays_from_receipt(
+            run_group,
+            receipt=receipt,
+            arrays_by_path=arrays_by_path,
+            bundles=bundles,
         )
     run_group.attrs.update(
         _json_safe_attrs(
             {
                 STIMULUS_RESPONSE_BUNDLES_ATTR: bundles,
                 STIMULUS_RESPONSE_ARRAY_SCHEMA_ATTR: stimulus_response_array_manifest(
-                    bundles=bundles
+                    bundles=bundles,
+                    byte_planner_adopted=byte_planner_candidate,
                 ),
                 "compact_table_names": sorted(expected_tables),
                 "compact_omitted_tables": [
@@ -2527,6 +2618,13 @@ def _write_stimulus_response_compact_v3(
             "Stimulus-response v3 writer produced an invalid run: "
             + "; ".join(errors)
         )
+    if byte_planner_candidate:
+        storage_errors = validate_stimulus_response_storage_receipt(run_group)
+        if storage_errors:
+            raise ValueError(
+                "Stimulus-response v3 storage candidate is invalid: "
+                + "; ".join(storage_errors)
+            )
 
 
 def build_frame_annotations(
@@ -2576,6 +2674,7 @@ def write_stimulus_response_run(
     run_name: Optional[str] = None,
     overwrite: bool = False,
     layout: str = STIMULUS_RESPONSE_LAYOUT_DEFAULT,
+    storage_profile: StorageProfile | None = None,
     archive_identity_root: Optional[zarr.Group] = None,
     console: Optional[Console] = None,
 ) -> str:
@@ -2663,6 +2762,18 @@ def write_stimulus_response_run(
             f", {STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}, or "
             f"{STIMULUS_RESPONSE_LAYOUT_COMPACT_V3}."
         )
+    if storage_profile is not None:
+        if not isinstance(storage_profile, StorageProfile):
+            raise TypeError("storage_profile must be an explicit StorageProfile.")
+        if layout != STIMULUS_RESPONSE_LAYOUT_COMPACT_V3:
+            raise ValueError(
+                "Stimulus-response storage candidates require compact-tabular-v3."
+            )
+        if storage_profile.profile_id != STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID:
+            raise ValueError(
+                "Stimulus-response compact-v3 supports only the explicit "
+                f"{STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID!r} storage candidate."
+            )
 
     analysis = root.require_group("analysis")
     parent = require_runs_parent(analysis, "stimulus_response_runs")
@@ -2680,6 +2791,10 @@ def write_stimulus_response_run(
             "by a production stimulus-response selector."
         )
 
+    if run_name in parent and storage_profile is not None:
+        raise ValueError(
+            "Refusing to overwrite an immutable stimulus-response storage candidate."
+        )
     if run_name in parent and not overwrite:
         raise ValueError(f"Stimulus response run '{run_name}' already exists.")
     if run_name in parent:
@@ -2691,7 +2806,11 @@ def write_stimulus_response_run(
         run_group.attrs.update(
             {
                 "stage_selector_eligible": False,
-                "publication_scope": "selector_ineligible_contract_checkpoint",
+                "publication_scope": (
+                    "selector_ineligible_byte_planned_candidate"
+                    if storage_profile is not None
+                    else "selector_ineligible_contract_checkpoint"
+                ),
             }
         )
 
@@ -2781,18 +2900,25 @@ def write_stimulus_response_run(
             if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V3
             else _write_stimulus_response_compact_v2
         )
-        compact_writer(
-            run_group,
-            global_metrics=global_metrics,
-            steps=steps,
-            step_metrics=step_metrics,
-            frame_annotations=frame_annotations,
-            step_bout_metrics=step_bout_metrics,
-            step_grating_data=step_grating_data,
-            step_concentric_data=step_concentric_data,
-            step_loom_data=step_loom_data,
-            global_omr_metrics=global_omr_metrics,
-        )
+        compact_kwargs = {
+            "global_metrics": global_metrics,
+            "steps": steps,
+            "step_metrics": step_metrics,
+            "frame_annotations": frame_annotations,
+            "step_bout_metrics": step_bout_metrics,
+            "step_grating_data": step_grating_data,
+            "step_concentric_data": step_concentric_data,
+            "step_loom_data": step_loom_data,
+            "global_omr_metrics": global_omr_metrics,
+        }
+        if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V3:
+            compact_writer(
+                run_group,
+                **compact_kwargs,
+                storage_profile=storage_profile,
+            )
+        else:
+            compact_writer(run_group, **compact_kwargs)
         console.print(
             f"  Wrote stimulus_response_runs/{run_name}/ "
             f"({len(steps)} steps, {len(fish_ids)} fish, layout {layout})"
@@ -2805,6 +2931,20 @@ def write_stimulus_response_run(
             run_name=run_name,
             run_provenance=build_run_provenance_from_stage_record(provenance),
         )
+        if storage_profile is not None:
+            try:
+                consolidate_and_validate_stimulus_response_metadata(
+                    root,
+                    run_path=f"analysis/stimulus_response_runs/{run_name}",
+                )
+            except BaseException as exc:
+                mark_run_failed(
+                    run_group,
+                    parent_group=parent,
+                    run_name=run_name,
+                    error=f"candidate metadata sealing failed: {exc}",
+                )
+                raise
         return run_name
 
     # Global group.
@@ -3179,6 +3319,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         ),
     )
     parser.add_argument(
+        "--storage-profile",
+        choices=(STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,),
+        default=None,
+        help=(
+            "Explicitly opt compact-tabular-v3 into the unpromoted shared "
+            "byte-planner candidate. The candidate is serially written and "
+            "never updates latest/latest_complete."
+        ),
+    )
+    parser.add_argument(
         "--write-zarr-artifacts",
         dest="write_zarr_artifacts",
         action="store_true",
@@ -3201,6 +3351,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="DPI for PNG artifacts written with --write-zarr-artifacts (default: 150).",
     )
     args = parser.parse_args(argv)
+    if (
+        args.storage_profile is not None
+        and args.layout != STIMULUS_RESPONSE_LAYOUT_COMPACT_V3
+    ):
+        parser.error("--storage-profile requires --layout compact_tabular_v3")
+    if args.storage_profile is not None and args.write_zarr_artifacts:
+        parser.error(
+            "--storage-profile requires --no-write-zarr-artifacts; candidate "
+            "runs are closed immutable array bundles"
+        )
 
     console = Console()
     console.print("\n[bold]Stimulus Response Analysis[/bold]")
@@ -3533,6 +3693,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     # Write output.
     parameters = {
         "layout": args.layout,
+        "storage_profile_id": args.storage_profile,
         "moving_threshold_mm_s": args.moving_threshold_mm_s,
         "fps": fps,
         "n_frames": n_frames,
@@ -3590,6 +3751,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         run_name=args.run_name,
         overwrite=args.overwrite,
         layout=args.layout,
+        storage_profile=(
+            get_storage_profile(args.storage_profile)
+            if args.storage_profile is not None
+            else None
+        ),
         archive_identity_root=root,
         console=console,
     )

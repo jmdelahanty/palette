@@ -28,9 +28,40 @@ STIMULUS_RESPONSE_SCHEMA_VERSION = 3
 STIMULUS_RESPONSE_LAYOUT = "compact_tabular_v3"
 STIMULUS_RESPONSE_ARRAY_SCHEMA_ID = "palette.stimulus_response.compact_tabular_arrays"
 STIMULUS_RESPONSE_ARRAY_SCHEMA_VERSION = 1
+STIMULUS_RESPONSE_BYTE_PLANNED_ARRAY_SCHEMA_VERSION = 2
 STIMULUS_RESPONSE_ARRAY_SCHEMA_ATTR = "stimulus_response_array_schema"
 STIMULUS_RESPONSE_BUNDLES_ATTR = "stimulus_response_v3_bundles"
 STIMULUS_RESPONSE_PHYSICAL_POLICY_OWNER = "stimulus_response_compact_tabular_v3"
+STIMULUS_RESPONSE_BYTE_PLANNER_POLICY_OWNER = "analysis_storage_planning_v1"
+STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE_ATTR = "analysis_storage_profile_role"
+STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE = "explicit_unpromoted_candidate"
+
+_BYTE_PLANNED_ROW_AXES = {
+    "grating_per_fish": "grating_fish_rows",
+    "moving_grating_omr_per_fish": "moving_grating_omr_fish_rows",
+    "moving_grating_omr_per_bout": "moving_grating_omr_bout_rows",
+    "moving_grating_omr_windows": "moving_grating_omr_window_rows",
+    "moving_grating_omr_early_windows": "moving_grating_omr_early_window_rows",
+    "concentric_per_fish": "concentric_fish_rows",
+    "concentric_radial_omr_per_fish": "concentric_radial_omr_fish_rows",
+    "concentric_radial_omr_per_bout": "concentric_radial_omr_bout_rows",
+    "concentric_radial_omr_windows": "concentric_radial_omr_window_rows",
+    "concentric_radial_omr_early_windows": "concentric_radial_omr_early_window_rows",
+    "looming_trials": "looming_trial_rows",
+    "looming_per_trial_per_fish": "looming_trial_fish_rows",
+    "looming_per_fish": "looming_fish_rows",
+}
+
+_CANDIDATE_REQUIRED_ATTRS = frozenset(
+    {
+        STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE_ATTR,
+        "analysis_storage_profile_id",
+        "analysis_storage_plan_receipt",
+        "analysis_storage_plan_payload_sha256",
+        "stimulus_response_storage_candidate",
+    }
+)
+_CANDIDATE_EQUIVALENCE_ATTR = "analysis_storage_direct_consolidated_equivalence"
 
 
 @dataclass(frozen=True)
@@ -678,9 +709,87 @@ def expected_table_names(bundles: Sequence[str]) -> tuple[str, ...]:
     )
 
 
+def stimulus_response_candidate_fill_value(
+    field_name: str,
+    field: StimulusResponseField,
+) -> object:
+    """Return the exact v2 byte-planned physical fill for one field."""
+
+    if field.string_width is not None:
+        return 0
+    if field.dtype is FLOAT32:
+        return float("nan")
+    if field.dtype is BOOL:
+        return False
+    if field_name == "quality_flag":
+        return 1
+    if field.dtype is INT8:
+        return 0
+    if (
+        field_name.startswith("n_")
+        or field_name.startswith("num_")
+        or "_count" in field_name
+        or field_name == "total_bouts"
+        or field_name.startswith("total_bout_")
+    ):
+        return 0
+    return -1
+
+
+def _candidate_fill_semantics(
+    field_name: str,
+    field: StimulusResponseField,
+) -> str:
+    fill = stimulus_response_candidate_fill_value(field_name, field)
+    if field.string_width is not None:
+        return (
+            "Physical fill is uint8 zero. Text is zero-padded, null-terminated "
+            "UTF-8; empty text is an all-zero row."
+        )
+    if field.dtype is FLOAT32:
+        return "Physical fill is float32 NaN, the unavailable-metric sentinel."
+    if field.dtype is BOOL:
+        return "Physical fill is false."
+    if field_name == "quality_flag":
+        return "Physical fill is int8 1: no valid transitions or invalid bout."
+    if field.dtype is INT8:
+        return "Physical fill is int8 zero, the ambiguous/unclassified label."
+    if fill == 0:
+        return "Physical fill is integer zero for an empty count."
+    return (
+        "Physical fill is integer -1 for an unavailable identity, index, "
+        "or frame coordinate."
+    )
+
+
+def _legacy_fill_semantics(field_name: str, field: StimulusResponseField) -> str:
+    if field.string_width is not None:
+        return (
+            "Zero-padded, null-terminated UTF-8; empty text is represented "
+            "by an all-zero row."
+        )
+    if field.dtype is FLOAT32:
+        return (
+            "Float32 metric; NaN represents an unavailable metric only where "
+            "the named computation defines that state."
+        )
+    if field.dtype is BOOL:
+        return "Exact boolean value; no implicit fill state."
+    if field_name == "quality_flag":
+        return "Exact stage-defined int8 quality code."
+    return (
+        "Exact integer value; negative sentinels are valid only where the "
+        "named field computation explicitly defines them."
+    )
+
+
 def stimulus_response_array_declarations(
-    *, bundles: Sequence[str]
+    *,
+    bundles: Sequence[str],
+    byte_planner_adopted: bool = False,
 ) -> tuple[AnalysisArrayDeclaration, ...]:
+    if type(byte_planner_adopted) is not bool:
+        raise TypeError("byte_planner_adopted must be an exact bool.")
     declarations: list[AnalysisArrayDeclaration] = []
     for table_name in expected_table_names(bundles):
         table = table_contract(table_name, bundles=bundles)
@@ -693,41 +802,36 @@ def stimulus_response_array_declarations(
                 authority_role = AnalysisAuthorityRole.LINEAGE_INDEX
             else:
                 authority_role = AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY
-            if field.string_width is not None:
-                fill_semantics = (
-                    "Zero-padded, null-terminated UTF-8; empty text is represented "
-                    "by an all-zero row."
-                )
-            elif field.dtype is FLOAT32:
-                fill_semantics = (
-                    "Float32 metric; NaN represents an unavailable metric only where "
-                    "the named computation defines that state."
-                )
-            elif field.dtype is BOOL:
-                fill_semantics = "Exact boolean value; no implicit fill state."
-            elif field_name == "quality_flag":
-                fill_semantics = "Exact stage-defined int8 quality code."
-            else:
-                fill_semantics = (
-                    "Exact integer value; negative sentinels are valid only where the "
-                    "named field computation explicitly defines them."
-                )
+            fill_semantics = (
+                _candidate_fill_semantics(field_name, field)
+                if byte_planner_adopted
+                else _legacy_fill_semantics(field_name, field)
+            )
+            row_axis = (
+                _BYTE_PLANNED_ROW_AXES.get(table.name, table.row_axis)
+                if byte_planner_adopted
+                else table.row_axis
+            )
             shape = (
-                (table.row_axis, field.string_width)
+                (row_axis, field.string_width)
                 if field.string_width is not None
-                else (table.row_axis,)
+                else (row_axis,)
             )
             axes = (
-                (table.row_axis, "utf8_byte")
+                (row_axis, "utf8_byte")
                 if field.string_width is not None
-                else (table.row_axis,)
+                else (row_axis,)
             )
             declarations.append(
                 AnalysisArrayDeclaration(
                     path=f"{table.name}/{field_name}",
                     contract=ArrayContract(
                         schema_id=f"{STIMULUS_RESPONSE_ARRAY_SCHEMA_ID}.{table.name}.{field_name}",
-                        schema_version=STIMULUS_RESPONSE_ARRAY_SCHEMA_VERSION,
+                        schema_version=(
+                            STIMULUS_RESPONSE_BYTE_PLANNED_ARRAY_SCHEMA_VERSION
+                            if byte_planner_adopted
+                            else STIMULUS_RESPONSE_ARRAY_SCHEMA_VERSION
+                        ),
                         dtype=field.dtype,
                         shape_template=shape,
                         axis_names=axes,
@@ -737,33 +841,51 @@ def stimulus_response_array_declarations(
                     required=True,
                     access_pattern=(
                         AccessPattern.WINDOWED
-                        if table.row_axis == "camera_frames"
+                        if row_axis == "camera_frames"
                         else AccessPattern.EAGER
                     ),
                     write_mode=WriteMode.IMMUTABLE,
                     authority_role=authority_role,
                     fill_semantics=fill_semantics,
                     null_semantics="No nullable fields; fixed text is null-terminated UTF-8.",
-                    physical_policy_owner=STIMULUS_RESPONSE_PHYSICAL_POLICY_OWNER,
-                    byte_planner_adopted=False,
+                    physical_policy_owner=(
+                        STIMULUS_RESPONSE_BYTE_PLANNER_POLICY_OWNER
+                        if byte_planner_adopted
+                        else STIMULUS_RESPONSE_PHYSICAL_POLICY_OWNER
+                    ),
+                    byte_planner_adopted=byte_planner_adopted,
                 )
             )
     return tuple(declarations)
 
 
-def stimulus_response_array_manifest(*, bundles: Sequence[str]) -> dict[str, Any]:
-    return {
+def stimulus_response_array_manifest(
+    *,
+    bundles: Sequence[str],
+    byte_planner_adopted: bool = False,
+) -> dict[str, Any]:
+    manifest = {
         "schema_id": STIMULUS_RESPONSE_ARRAY_SCHEMA_ID,
-        "schema_version": STIMULUS_RESPONSE_ARRAY_SCHEMA_VERSION,
+        "schema_version": (
+            STIMULUS_RESPONSE_BYTE_PLANNED_ARRAY_SCHEMA_VERSION
+            if byte_planner_adopted
+            else STIMULUS_RESPONSE_ARRAY_SCHEMA_VERSION
+        ),
         "run_schema_id": STIMULUS_RESPONSE_SCHEMA_ID,
         "run_schema_version": STIMULUS_RESPONSE_SCHEMA_VERSION,
         "layout": STIMULUS_RESPONSE_LAYOUT,
         "bundles": sorted(set(bundles)),
         "arrays": [
             item.as_manifest()
-            for item in stimulus_response_array_declarations(bundles=bundles)
+            for item in stimulus_response_array_declarations(
+                bundles=bundles,
+                byte_planner_adopted=byte_planner_adopted,
+            )
         ],
     }
+    if byte_planner_adopted:
+        manifest["byte_planner_adopted"] = True
+    return manifest
 
 
 def validate_mapping(
@@ -835,8 +957,30 @@ def validate_stimulus_response_v3_run(run_group: Any) -> tuple[str, ...]:
     except ValueError as exc:
         errors.append(str(exc))
         return tuple(errors)
+    present_candidate_markers = {
+        name for name in _CANDIDATE_REQUIRED_ATTRS if name in attrs
+    }
+    candidate_markers_complete = (
+        present_candidate_markers == _CANDIDATE_REQUIRED_ATTRS
+    )
+    if present_candidate_markers and not candidate_markers_complete:
+        errors.append(
+            "stimulus-response storage candidate marker set is incomplete"
+        )
+    profile_role = attrs.get(STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE_ATTR)
+    if profile_role not in {None, STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE}:
+        errors.append("invalid stimulus-response storage profile role")
+    byte_planner_adopted = (
+        candidate_markers_complete
+        and profile_role == STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE
+    )
+    if _CANDIDATE_EQUIVALENCE_ATTR in attrs and not byte_planner_adopted:
+        errors.append(
+            "metadata-equivalence evidence requires the exact candidate marker set"
+        )
+    ignored_groups = set() if byte_planner_adopted else {"visualizations"}
     observed_tables = {
-        str(name) for name in run_group.group_keys() if str(name) != "visualizations"
+        str(name) for name in run_group.group_keys() if str(name) not in ignored_groups
     }
     if observed_tables != set(expected_tables):
         errors.append(
@@ -845,7 +989,10 @@ def validate_stimulus_response_v3_run(run_group: Any) -> tuple[str, ...]:
     root_arrays = {str(name) for name in run_group.array_keys()}
     if root_arrays:
         errors.append(f"unexpected root arrays: {sorted(root_arrays)!r}")
-    expected_manifest = stimulus_response_array_manifest(bundles=bundles)
+    expected_manifest = stimulus_response_array_manifest(
+        bundles=bundles,
+        byte_planner_adopted=byte_planner_adopted,
+    )
     if attrs.get(STIMULUS_RESPONSE_ARRAY_SCHEMA_ATTR) != expected_manifest:
         errors.append("stimulus-response array manifest is not exact")
     for table_name in expected_tables:
@@ -870,6 +1017,14 @@ def validate_stimulus_response_v3_run(run_group: Any) -> tuple[str, ...]:
             if field_name not in group:
                 continue
             arr = group[field_name]
+            if (
+                "storage_profile_id" in dict(arr.attrs)
+                and not byte_planner_adopted
+            ):
+                errors.append(
+                    f"{table_name}/{field_name} has byte-planner metadata "
+                    "without the exact candidate marker set"
+                )
             expected_dtype = (
                 np.dtype("uint8")
                 if field.string_width is not None
@@ -976,8 +1131,14 @@ def validate_stimulus_response_v3_run(run_group: Any) -> tuple[str, ...]:
 
 __all__ = [
     "STIMULUS_RESPONSE_ARRAY_SCHEMA_ATTR",
+    "STIMULUS_RESPONSE_ARRAY_SCHEMA_ID",
+    "STIMULUS_RESPONSE_ARRAY_SCHEMA_VERSION",
+    "STIMULUS_RESPONSE_BYTE_PLANNED_ARRAY_SCHEMA_VERSION",
+    "STIMULUS_RESPONSE_BYTE_PLANNER_POLICY_OWNER",
     "STIMULUS_RESPONSE_BUNDLES_ATTR",
     "STIMULUS_RESPONSE_LAYOUT",
+    "STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE",
+    "STIMULUS_RESPONSE_STORAGE_PROFILE_ROLE_ATTR",
     "STIMULUS_RESPONSE_SCHEMA_ID",
     "STIMULUS_RESPONSE_SCHEMA_VERSION",
     "STIMULUS_RESPONSE_TABLES",
@@ -986,6 +1147,7 @@ __all__ = [
     "expected_table_names",
     "stimulus_response_array_declarations",
     "stimulus_response_array_manifest",
+    "stimulus_response_candidate_fill_value",
     "table_contract",
     "validate_mapping",
     "validate_stimulus_response_v3_run",

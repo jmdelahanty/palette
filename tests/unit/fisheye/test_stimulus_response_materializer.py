@@ -10,8 +10,14 @@ from fisheye.analysis.stimulus_response import (
     ProtocolStep,
     _write_stimulus_response_compact_v3,
 )
+from fisheye.analysis.stimulus_response_storage import (
+    STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,
+    STIMULUS_RESPONSE_METADATA_EQUIVALENCE_ATTR,
+    STIMULUS_RESPONSE_STORAGE_PLAN_RECEIPT_ATTR,
+)
 from fisheye.analysis_workflows.materializers import stimulus_response as mod
 from fisheye.shared.stimulus_coordinate_contract import canonical_mapping_digest
+from fisheye.shared.zarr.storage_profiles import get_storage_profile
 from fisheye.shared.zarr.stimulus_response_schema import (
     STIMULUS_RESPONSE_LAYOUT,
     STIMULUS_RESPONSE_SCHEMA_VERSION,
@@ -31,6 +37,13 @@ def _fake_writer(argv) -> None:
         if "--layout" in argv
         else "compact_tabular_v2"
     )
+    storage_profile_id = (
+        argv[argv.index("--storage-profile") + 1]
+        if "--storage-profile" in argv
+        else None
+    )
+    if storage_profile_id is not None:
+        assert "--no-write-zarr-artifacts" in argv
     root = zarr.open_group(str(output), mode="a", zarr_format=3)
     run = (
         root.require_group("analysis")
@@ -68,6 +81,7 @@ def _fake_writer(argv) -> None:
             },
             "n_steps": 1,
             "n_fish": 1,
+            "stage_selector_eligible": layout != STIMULUS_RESPONSE_LAYOUT,
             "provenance": {
                 "stage": "stimulus_response",
                 "parameters": {},
@@ -101,6 +115,11 @@ def _fake_writer(argv) -> None:
             step_concentric_data=None,
             step_loom_data=None,
             global_omr_metrics=None,
+            storage_profile=(
+                get_storage_profile(storage_profile_id)
+                if storage_profile_id is not None
+                else None
+            ),
         )
     else:
         run.create_group("step_index")
@@ -138,6 +157,52 @@ def test_plan_rejects_forwarded_layout_override(tmp_path: Path) -> None:
             run_name="response_1",
             layout=STIMULUS_RESPONSE_LAYOUT,
             writer_arguments=("--layout=compact_tabular_v2",),
+        )
+
+
+def test_plan_rejects_invalid_storage_profile_boundaries(tmp_path: Path) -> None:
+    source = tmp_path / "source.zarr"
+    _build_source(source)
+
+    with pytest.raises(ValueError, match="requires compact-tabular-v3"):
+        mod.build_stimulus_response_materialization_plan(
+            source,
+            scratch_root=tmp_path / "scratch-v2",
+            run_name="response_1",
+            storage_profile_id=STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,
+        )
+    with pytest.raises(ValueError, match="Unsupported stimulus-response"):
+        mod.build_stimulus_response_materialization_plan(
+            source,
+            scratch_root=tmp_path / "scratch-profile",
+            run_name="response_1",
+            layout=STIMULUS_RESPONSE_LAYOUT,
+            storage_profile_id="unknown_profile",
+        )
+    with pytest.raises(
+        ValueError,
+        match="materializer owns these writer arguments: --storage-profile",
+    ):
+        mod.build_stimulus_response_materialization_plan(
+            source,
+            scratch_root=tmp_path / "scratch-forwarded",
+            run_name="response_1",
+            layout=STIMULUS_RESPONSE_LAYOUT,
+            storage_profile_id=STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,
+            writer_arguments=("--storage-profile=published_http_v1",),
+        )
+
+
+def test_candidate_cli_requires_closed_no_artifact_bundle() -> None:
+    with pytest.raises(SystemExit):
+        mod.response_writer.main(
+            [
+                "missing.zarr",
+                "--layout",
+                STIMULUS_RESPONSE_LAYOUT,
+                "--storage-profile",
+                STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,
+            ]
         )
 
 
@@ -200,6 +265,62 @@ def test_v3_materializer_publishes_selector_ineligible_without_pointers(
     run = parent["response_v3"]
     assert run.attrs["stage_selector_eligible"] is False
     assert run.attrs["palette_run_completion_status"] == "complete"
+
+
+def test_candidate_materializer_consolidates_without_selector_activation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    _build_source(source)
+    mutable_root = zarr.open_group(str(source), mode="a", zarr_format=3)
+    existing_parent = mutable_root.require_group("analysis").require_group(
+        "stimulus_response_runs"
+    )
+    existing_parent.create_group("existing")
+    existing_parent.attrs.update(
+        {"latest": "existing", "latest_complete": "existing"}
+    )
+    monkeypatch.setattr(mod.response_writer, "main", _fake_writer)
+
+    result = mod.materialize_stimulus_response(
+        source,
+        scratch_root=tmp_path / "scratch",
+        run_name="response_candidate",
+        layout=STIMULUS_RESPONSE_LAYOUT,
+        storage_profile_id=STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+    )
+
+    assert result["status"] == "complete"
+    direct_root = zarr.open_group(
+        str(source),
+        mode="r",
+        use_consolidated=False,
+    )
+    consolidated_root = zarr.open_group(
+        str(source),
+        mode="r",
+        use_consolidated=True,
+    )
+    direct_parent = direct_root["analysis/stimulus_response_runs"]
+    assert direct_parent.attrs["latest"] == "existing"
+    assert direct_parent.attrs["latest_complete"] == "existing"
+    direct_run = direct_parent["response_candidate"]
+    consolidated_run = consolidated_root[
+        "analysis/stimulus_response_runs/response_candidate"
+    ]
+    assert direct_run.attrs["stage_selector_eligible"] is False
+    assert direct_run.attrs["palette_run_completion_status"] == "complete"
+    assert direct_run.attrs["analysis_storage_profile_id"] == (
+        STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID
+    )
+    assert STIMULUS_RESPONSE_STORAGE_PLAN_RECEIPT_ATTR in direct_run.attrs
+    assert direct_run.attrs[STIMULUS_RESPONSE_METADATA_EQUIVALENCE_ATTR] == (
+        consolidated_run.attrs[STIMULUS_RESPONSE_METADATA_EQUIVALENCE_ATTR]
+    )
 
 
 def test_validator_rejects_stale_stimulus_coordinate_lineage(

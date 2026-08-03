@@ -14,6 +14,12 @@ from typing import Any, Optional, Sequence
 import zarr
 
 from ...analysis import stimulus_response as response_writer
+from ...analysis.stimulus_response_storage import (
+    STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,
+    consolidate_and_validate_stimulus_response_metadata,
+    validate_stimulus_response_metadata_equivalence,
+    validate_stimulus_response_storage_receipt,
+)
 from ...analysis.stimulus_response_coordinate_authority import (
     STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_ID,
     STIMULUS_RESPONSE_COORDINATE_LINEAGE_SCHEMA_VERSION,
@@ -29,6 +35,7 @@ from ...shared.zarr.stimulus_response_schema import (
     STIMULUS_RESPONSE_SCHEMA_VERSION,
     validate_stimulus_response_v3_run,
 )
+from ...shared.zarr.storage_profiles import get_storage_profile
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 MATERIALIZATION_SCHEMA_ID = "palette.stimulus_response_materialization.v1"
@@ -38,6 +45,7 @@ MANAGED_WRITER_ARGUMENTS = {
     "--output-zarr-path",
     "--overwrite",
     "--run-name",
+    "--storage-profile",
 }
 
 
@@ -48,6 +56,7 @@ class StimulusResponseMaterializationPlan:
     local_zarr: Path
     run_name: str
     layout: str
+    storage_profile_id: str | None
     writer_arguments: tuple[str, ...]
 
     @property
@@ -68,6 +77,7 @@ class StimulusResponseMaterializationPlan:
             "target_run_path": str(self.target_run_path),
             "run_name": self.run_name,
             "layout": self.layout,
+            "storage_profile_id": self.storage_profile_id,
             "writer_arguments": list(self.writer_arguments),
         }
 
@@ -85,6 +95,7 @@ def build_stimulus_response_materialization_plan(
     scratch_root: str | Path,
     run_name: str,
     layout: str = "compact_tabular_v2",
+    storage_profile_id: str | None = None,
     writer_arguments: Sequence[str] = (),
 ) -> StimulusResponseMaterializationPlan:
     source = Path(source_zarr).expanduser().resolve()
@@ -104,6 +115,18 @@ def build_stimulus_response_materialization_plan(
         raise ValueError(
             f"Unsupported stimulus-response materializer layout: {layout!r}."
         )
+    if storage_profile_id is not None:
+        if type(storage_profile_id) is not str:
+            raise TypeError("storage_profile_id must be an exact string or None.")
+        if layout != STIMULUS_RESPONSE_LAYOUT:
+            raise ValueError(
+                "Stimulus-response storage candidate requires compact-tabular-v3."
+            )
+        if storage_profile_id != STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID:
+            raise ValueError(
+                "Unsupported stimulus-response storage candidate profile: "
+                f"{storage_profile_id!r}."
+            )
     forwarded = tuple(str(value) for value in writer_arguments)
     forbidden = sorted(
         argument.split("=", 1)[0]
@@ -126,6 +149,7 @@ def build_stimulus_response_materialization_plan(
         local_zarr=scratch / "stimulus-response-output.zarr",
         run_name=name,
         layout=layout,
+        storage_profile_id=storage_profile_id,
         writer_arguments=forwarded,
     )
 
@@ -134,6 +158,8 @@ def _validate_stimulus_response_run(
     path: Path,
     *,
     required_layout: str = "compact_tabular_v2",
+    required_storage_profile_id: str | None = None,
+    require_metadata_equivalence: bool = False,
 ) -> dict[str, Any]:
     errors: list[str] = []
     group = open_zarr_root(path, mode="r")
@@ -182,6 +208,19 @@ def _validate_stimulus_response_run(
         errors.append("missing parameters")
     if required_layout == STIMULUS_RESPONSE_LAYOUT:
         errors.extend(validate_stimulus_response_v3_run(group))
+        if required_storage_profile_id is not None:
+            if (
+                attrs.get("analysis_storage_profile_id")
+                != required_storage_profile_id
+            ):
+                errors.append("invalid analysis_storage_profile_id")
+            errors.extend(validate_stimulus_response_storage_receipt(group))
+            if require_metadata_equivalence:
+                errors.extend(
+                    validate_stimulus_response_metadata_equivalence(group)
+                )
+        elif attrs.get("analysis_storage_profile_role") is not None:
+            errors.append("unexpected stimulus-response storage candidate metadata")
     else:
         for required in ("step_index", "global_per_fish"):
             if group.get(required) is None:
@@ -193,6 +232,7 @@ def _validate_stimulus_response_run(
         "layout": attrs.get("layout"),
         "n_steps": attrs.get("n_steps"),
         "n_fish": attrs.get("n_fish"),
+        "storage_profile_id": attrs.get("analysis_storage_profile_id"),
     }
 
 
@@ -203,11 +243,17 @@ def publish_stimulus_response_run(
     copy_backend: str,
 ) -> dict[str, Any]:
     selector_ineligible = plan.layout == STIMULUS_RESPONSE_LAYOUT
+    byte_planner_candidate = plan.storage_profile_id is not None
 
     def validate(path: Path) -> dict[str, Any]:
         return _validate_stimulus_response_run(
             path,
             required_layout=plan.layout,
+            required_storage_profile_id=plan.storage_profile_id,
+            # Atomic publication adds owner/completion/provenance metadata after
+            # each validation pass. The final candidate callback below owns
+            # reconsolidation and the strict current-generation equality gate.
+            require_metadata_equivalence=False,
         )
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
@@ -279,6 +325,37 @@ def publish_stimulus_response_run(
                 return
             raise
 
+    def finalize_candidate_metadata(
+        root: zarr.Group,
+        _parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
+        if not byte_planner_candidate:
+            raise RuntimeError("Non-candidate reached candidate metadata finalization.")
+        if run_group.attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError(
+                "Stimulus-response storage candidate became selector eligible."
+            )
+        consolidate_and_validate_stimulus_response_metadata(
+            root,
+            run_path=f"analysis/stimulus_response_runs/{plan.run_name}",
+        )
+        final_direct_root = zarr.open_group(
+            root.store,
+            mode="r",
+            use_consolidated=False,
+        )
+        final_errors = validate_stimulus_response_metadata_equivalence(
+            final_direct_root[
+                f"analysis/stimulus_response_runs/{plan.run_name}"
+            ]
+        )
+        if final_errors:
+            raise RuntimeError(
+                "Final stimulus-response candidate metadata equality failed: "
+                + "; ".join(final_errors)
+            )
+
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
@@ -297,7 +374,13 @@ def publish_stimulus_response_run(
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
-        activate_run=None if selector_ineligible else activate,
+        activate_run=(
+            finalize_candidate_metadata
+            if byte_planner_candidate
+            else None
+            if selector_ineligible
+            else activate
+        ),
         payload_metadata={
             "copy_backend": copy_backend,
             "promotion_policy": (
@@ -305,6 +388,7 @@ def publish_stimulus_response_run(
                 if selector_ineligible
                 else "complete_ineligible_then_pointers_then_eligibility_final"
             ),
+            "storage_profile_id": plan.storage_profile_id,
             "materialization": json_attr_safe(materialization_payload),
         },
     )
@@ -316,6 +400,7 @@ def materialize_stimulus_response(
     scratch_root: str | Path,
     run_name: str,
     layout: str = "compact_tabular_v2",
+    storage_profile_id: str | None = None,
     writer_arguments: Sequence[str] = (),
     copy_backend: str = "rsync",
     apply: bool = False,
@@ -326,6 +411,7 @@ def materialize_stimulus_response(
         scratch_root=scratch_root,
         run_name=run_name,
         layout=layout,
+        storage_profile_id=storage_profile_id,
         writer_arguments=writer_arguments,
     )
     result: dict[str, Any] = {
@@ -349,14 +435,27 @@ def materialize_stimulus_response(
             plan.run_name,
             "--layout",
             plan.layout,
-            *plan.writer_arguments,
         ]
+        if plan.storage_profile_id is not None:
+            # Resolve now as a second fail-closed check against the shared,
+            # versioned profile registry before invoking the scientific writer.
+            get_storage_profile(plan.storage_profile_id)
+            writer_argv.extend(
+                [
+                    "--storage-profile",
+                    plan.storage_profile_id,
+                    "--no-write-zarr-artifacts",
+                ]
+            )
+        writer_argv.extend(plan.writer_arguments)
         started = time.perf_counter()
         response_writer.main(writer_argv)
         compute_seconds = float(time.perf_counter() - started)
         validation = _validate_stimulus_response_run(
             plan.local_run_path,
             required_layout=plan.layout,
+            required_storage_profile_id=plan.storage_profile_id,
+            require_metadata_equivalence=False,
         )
         if not validation["valid"]:
             raise RuntimeError(f"Local stimulus-response run is invalid: {validation}")
@@ -369,6 +468,25 @@ def materialize_stimulus_response(
         }
         local_group = open_zarr_root(plan.local_run_path, mode="a")
         local_group.attrs["node_local_materialization"] = json_attr_safe(payload)
+        if plan.storage_profile_id is not None:
+            local_root = open_zarr_root(plan.local_zarr, mode="a")
+            equivalence = consolidate_and_validate_stimulus_response_metadata(
+                local_root,
+                run_path=f"analysis/stimulus_response_runs/{plan.run_name}",
+            )
+            payload["local_metadata_equivalence"] = equivalence
+            final_local_validation = _validate_stimulus_response_run(
+                plan.local_run_path,
+                required_layout=plan.layout,
+                required_storage_profile_id=plan.storage_profile_id,
+                require_metadata_equivalence=True,
+            )
+            if not final_local_validation["valid"]:
+                raise RuntimeError(
+                    "Local stimulus-response candidate metadata is invalid: "
+                    f"{final_local_validation}"
+                )
+            payload["local_validation"] = final_local_validation
         publish = publish_stimulus_response_run(
             plan,
             materialization_payload=payload,
@@ -410,6 +528,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "checkpoint; compact_tabular_v2 retains legacy materializer behavior"
         ),
     )
+    parser.add_argument(
+        "--storage-profile",
+        choices=(STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID,),
+        default=None,
+        help=(
+            "Opt compact-tabular-v3 into the explicit selector-ineligible "
+            "byte-planned candidate."
+        ),
+    )
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--copy-backend", choices=("rsync", "python"), default="rsync")
     parser.add_argument("--apply", action="store_true")
@@ -432,6 +559,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         scratch_root=args.scratch_root or _default_scratch_root(args.run_name),
         run_name=args.run_name,
         layout=args.layout,
+        storage_profile_id=args.storage_profile,
         writer_arguments=writer_arguments,
         copy_backend=args.copy_backend,
         apply=args.apply,

@@ -57,6 +57,12 @@ from fisheye.analysis.stimulus_response_concentric_omr import (
 from fisheye.analysis.stimulus_response_coordinate_authority import (
     StimulusResponseCoordinateAuthority,
 )
+from fisheye.analysis.stimulus_response_io import resolve_stimulus_response_v3_tables
+from fisheye.analysis.stimulus_response_storage import (
+    validate_stimulus_response_metadata_equivalence,
+)
+from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
+from fisheye.shared.zarr.stimulus_response_schema import STIMULUS_RESPONSE_LAYOUT
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +887,59 @@ class TestWriteStimulusResponseRun:
         assert sr.attrs["layout"] == STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
         assert "step_index" in sr
         assert "steps" not in sr
+
+    def test_direct_candidate_is_complete_consolidated_and_immutable(self) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs.update(
+            {
+                "layout": STIMULUS_RESPONSE_LAYOUT,
+                "storage_profile": PUBLISHED_HTTP_V1,
+                "run_name": "candidate",
+            }
+        )
+
+        run_name = write_stimulus_response_run(root, **kwargs)
+
+        run = root[f"analysis/stimulus_response_runs/{run_name}"]
+        assert run.attrs["palette_run_completion_status"] == "complete"
+        assert run.attrs["stage_selector_eligible"] is False
+        assert validate_stimulus_response_metadata_equivalence(run) == ()
+        assert resolve_stimulus_response_v3_tables(run).layout == (
+            STIMULUS_RESPONSE_LAYOUT
+        )
+        with pytest.raises(ValueError, match="Refusing to overwrite an immutable"):
+            write_stimulus_response_run(root, **kwargs, overwrite=True)
+
+    def test_direct_candidate_sealing_failure_is_terminal_failed(
+        self,
+        monkeypatch,
+    ) -> None:
+        root = zarr.group()
+        kwargs = self._minimal_write_kwargs()
+        kwargs.update(
+            {
+                "layout": STIMULUS_RESPONSE_LAYOUT,
+                "storage_profile": PUBLISHED_HTTP_V1,
+                "run_name": "failed_candidate",
+            }
+        )
+
+        def _fail_seal(*_args, **_kwargs):
+            raise RuntimeError("forced consolidation failure")
+
+        monkeypatch.setattr(
+            stimulus_response_module,
+            "consolidate_and_validate_stimulus_response_metadata",
+            _fail_seal,
+        )
+        with pytest.raises(RuntimeError, match="forced consolidation failure"):
+            write_stimulus_response_run(root, **kwargs)
+
+        run = root["analysis/stimulus_response_runs/failed_candidate"]
+        assert run.attrs["palette_run_completion_status"] == "failed"
+        assert "palette_run_completed_at_utc" not in run.attrs
+        assert run.attrs["stage_selector_eligible"] is False
 
     def test_roundtrip(self) -> None:
         root = zarr.group()

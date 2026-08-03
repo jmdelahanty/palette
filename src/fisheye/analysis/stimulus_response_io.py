@@ -21,6 +21,10 @@ from fisheye.shared.zarr.stimulus_response_schema import (
     STIMULUS_RESPONSE_SCHEMA_VERSION,
     validate_stimulus_response_v3_run,
 )
+from fisheye.analysis.stimulus_response_storage import (
+    validate_stimulus_response_metadata_equivalence,
+    validate_stimulus_response_storage_receipt,
+)
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_helpers import (
     read_zarr_array_mapping,
@@ -429,6 +433,11 @@ def resolve_stimulus_response_v3_tables(
             "Strict stimulus-response v3 reads require exact schema and layout identity."
         )
     errors = validate_stimulus_response_v3_run(run_group)
+    if attrs.get("analysis_storage_profile_role") is not None:
+        if attrs.get("palette_run_completion_status") != "complete":
+            errors = (*errors, "storage candidate is not terminal complete")
+        errors = (*errors, *validate_stimulus_response_storage_receipt(run_group))
+        errors = (*errors, *validate_stimulus_response_metadata_equivalence(run_group))
     if errors:
         raise ValueError("Invalid stimulus-response v3 run: " + "; ".join(errors))
     return _resolve_compact_tabular_v2(run_group, layout=STIMULUS_RESPONSE_LAYOUT)

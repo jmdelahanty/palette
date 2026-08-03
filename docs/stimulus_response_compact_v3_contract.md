@@ -23,6 +23,14 @@ The complete standard surface has 19 tables and at most 310 arrays: 34 core,
 90 radial-OMR, and 25 looming arrays. Family and metric identity are encoded by
 the closed table path rather than duplicated as fixed strings on every row.
 
+The existing non-byte-planned compact-v3 compatibility surface retains array
+declaration schema version 1 exactly. The opt-in byte-planned candidate uses
+array declaration schema version 2, which gives every independent table its
+own symbolic row axis. Tables such as moving-OMR bouts and looming trials no
+longer claim false cardinality equality merely because both are joined to a
+protocol step. Candidate markers are an exact all-or-none set; deleting the
+profile-role marker cannot downgrade v2 arrays into the compatibility path.
+
 ## Required core
 
 Every v3 run contains these columnar tables, including typed zero-row tables
@@ -88,16 +96,72 @@ migrate to the strict v3 entry point before v3 can become the default.
 When explicitly asked to materialize v3, the node-local stimulus-response
 materializer accepts only an exact v3 run before atomic publication. Its v2
 default retains the existing compatibility validation and selector behavior.
+The compatibility reader continues to accept declaration-schema-v1 compact-v3
+runs. It does not reinterpret their historical Zarr default fills as the
+candidate's stronger semantic-fill contract.
 
 ## Physical policy and promotion
 
-This checkpoint deliberately retains the existing columnar physical writer;
-the declarations say `byte_planner_adopted=false`. It does not change the
-production layout default, selectors, codec profile, or registry state.
-Promotion requires a selector-ineligible canary, direct/consolidated metadata
-equivalence, exact Palette round-trip validation, consumer review, and a
-separate storage-plan benchmark. The shared byte planner should replace the
-legacy columnar physical owner only after that evidence exists.
+The default compact-v2 writer and compact-v3 compatibility writer remain
+unchanged. A new explicit candidate is selected only by the complete pair:
+
+```text
+--layout compact_tabular_v3 --storage-profile published_http_v1 \
+  --no-write-zarr-artifacts
+```
+
+The materializer supplies the no-artifact flag itself. A direct CLI invocation
+must supply it explicitly. Review PNG/plot arrays are intentionally outside the
+scientific table contract and cannot be written beneath a candidate after it
+is complete; candidate validation rejects a `visualizations` group. Review
+artifacts can remain external sidecars until they receive their own closed
+byte-planned cache contract.
+
+That candidate resolves every concrete shape and dtype through
+`plan_analysis_storage()` and creates every array through
+`create_array_from_plan()`. It therefore derives first-axis chunk and shard
+extents from uncompressed bytes rather than a family-wide row constant. The
+profile starts from approximately 1 MiB inner chunks and 32 MiB outer shards;
+small eager tables become a single whole-array access unit when they fit. A
+fixed-width text record is indivisible: its full byte width remains the trailing
+access-unit axis. Exact Zarr-v3 codec and indexed-sharding declarations come
+from the shared versioned profile and factory.
+
+Physical fills are part of the declaration contract rather than Zarr defaults:
+
+- float metrics use float32 NaN for unavailable values;
+- fixed-width text uses uint8 zero padding;
+- booleans use false;
+- counts use integer zero;
+- int8 labels use zero and `quality_flag` uses one;
+- identities, indexes, and frame coordinates use integer -1.
+
+The run persists the complete planner receipt, its digest, the exact profile,
+and an explicit unpromoted-candidate envelope. Publication reparses and
+replans that receipt from live arrays, compares the physical chunks, shards,
+codecs, fills, and metadata, and rejects recomputed-digest tampering. Candidate
+writes are serial and every sharded plan must declare whole-shard single-writer
+ownership; parallel logical row writers are not authorized by this contract.
+
+After all payload, provenance, and completion metadata are final, both the
+direct writer and node-local materializer consolidate the archive root and
+prove direct versus consolidated equality for the run group, all table groups,
+and all arrays. The atomic publisher repeats consolidation and equality on the
+destination after its final metadata writes. The exact receipt contains a
+digest of normalized current metadata plus its own canonical payload digest;
+strict candidate reads recompute it and reject missing, forged, or stale
+evidence. Mutable/incomplete reads continue to use direct metadata.
+
+The candidate always remains `stage_selector_eligible=false`, never writes
+`latest` or `latest_complete`, and does not register or activate anything. It
+cannot overwrite an existing immutable candidate of the same name. It
+transitions to terminal `failed` and removes its completion timestamp if final
+metadata consolidation or equality validation raises, so a failed seal cannot
+leave a direct run marked complete.
+It does not change production defaults, selectors, codec profiles, or registry
+state. Promotion still requires a selector-ineligible canary, Palette
+round-trip evidence, consumer review, and a workload-specific producer/read
+benchmark.
 
 ## Implementation checklist
 
@@ -111,6 +175,11 @@ legacy columnar physical owner only after that evidence exists.
 - [x] Deepen reader and materializer validation.
 - [ ] Migrate every maintained downstream consumer to explicit v3 or explicit
   legacy compatibility.
-- [ ] Adopt the shared byte planner and benchmark the complete v3 writer.
+- [x] Add explicit shared-byte-planner and array-factory adoption.
+- [x] Freeze semantic fill values and whole-shard-safe serial ownership.
+- [x] Persist and executably validate the full physical-plan receipt.
+- [x] Prove direct/consolidated metadata equality at local and destination
+  publication boundaries.
+- [ ] Benchmark the complete v3 writer and its maintained read patterns.
 - [ ] Publish and review one selector-ineligible canary.
 - [ ] Change the production writer default only after the canary gate.
