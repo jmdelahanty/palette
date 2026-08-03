@@ -1,8 +1,8 @@
 # Bout Classification Runs Contract
 <!-- contract-meta
-version: 1
-status: draft
-last_verified: 2026-05-01
+version: 2
+status: implemented
+last_verified: 2026-08-03
 -->
 
 Purpose: define the stable Palette Zarr contract for per-bout classifier
@@ -166,6 +166,14 @@ classified
 valid
 failure_reason_bytes
 ```
+
+Schema v2 freezes exact physical dtypes for every field. In particular,
+`category_label_bytes` is `uint8[n_bouts,64]` and `failure_reason_bytes` is
+`uint8[n_bouts,128]`; their widths no longer depend on the longest string in a
+particular run. The complete executable declaration is persisted in
+`bout_classification_array_schema` with a SHA-256 binding. Historical v1 is an
+explicit compatibility surface and is never accepted by the v2 publication
+gate.
 
 Field semantics:
 

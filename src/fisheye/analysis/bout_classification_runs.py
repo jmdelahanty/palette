@@ -19,9 +19,17 @@ from fisheye.shared.zarr_run_completion import (
     is_run_selector_eligible,
     resolve_latest_complete_run_name,
 )
+from .bout_classification_schema import (
+    BOUT_CLASSIFICATION_FIELD_NAMES,
+    BOUT_CLASSIFICATION_LEGACY_SCHEMA_VERSION,
+    BOUT_CLASSIFICATION_RUN_SCHEMA_ID,
+    BOUT_CLASSIFICATION_RUN_SCHEMA_VERSION,
+    BoutClassificationDimensions,
+    validate_bout_classification_arrays,
+)
 
-BOUT_CLASSIFICATION_SCHEMA_ID = "analysis.bout_classification_runs"
-BOUT_CLASSIFICATION_SCHEMA_VERSION = 1
+BOUT_CLASSIFICATION_SCHEMA_ID = BOUT_CLASSIFICATION_RUN_SCHEMA_ID
+BOUT_CLASSIFICATION_SCHEMA_VERSION = BOUT_CLASSIFICATION_RUN_SCHEMA_VERSION
 PER_BOUT_SCHEMA_ID = f"{BOUT_CLASSIFICATION_SCHEMA_ID}.per_bout"
 BOUT_CLASSIFICATION_RUN_PARENT = "analysis/bout_classification_runs"
 
@@ -67,6 +75,9 @@ REQUIRED_PER_BOUT_FIELDS = (
     "valid",
     "failure_reason_bytes",
 )
+
+if REQUIRED_PER_BOUT_FIELDS != BOUT_CLASSIFICATION_FIELD_NAMES:
+    raise RuntimeError("Bout-classification field inventory drifted from exact schema.")
 
 
 _json_safe = json_attr_safe
@@ -193,6 +204,7 @@ def _validate_bout_classification_run(
     *,
     strict: bool = False,
     staged_candidate: bool,
+    legacy_compatibility: bool,
 ) -> dict[str, object]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -223,13 +235,25 @@ def _validate_bout_classification_run(
         errors.append(
             f"schema_id {attrs.get('schema_id')!r} != {BOUT_CLASSIFICATION_SCHEMA_ID!r}"
         )
-    if int(attrs.get("schema_version", -1)) != BOUT_CLASSIFICATION_SCHEMA_VERSION:
+    observed_version = attrs.get("schema_version")
+    maintained = (
+        type(observed_version) is int
+        and observed_version == BOUT_CLASSIFICATION_SCHEMA_VERSION
+    )
+    legacy = (
+        legacy_compatibility
+        and type(observed_version) is int
+        and observed_version == BOUT_CLASSIFICATION_LEGACY_SCHEMA_VERSION
+    )
+    if not maintained and not legacy:
         errors.append(
             "schema_version "
-            f"{attrs.get('schema_version')!r} != {BOUT_CLASSIFICATION_SCHEMA_VERSION}"
+            f"{observed_version!r} is not maintained v{BOUT_CLASSIFICATION_SCHEMA_VERSION}"
         )
     if attrs.get("row_axis") not in {None, "swim_bout_rows"}:
-        errors.append(f"row_axis must be 'swim_bout_rows', got {attrs.get('row_axis')!r}")
+        errors.append(
+            f"row_axis must be 'swim_bout_rows', got {attrs.get('row_axis')!r}"
+        )
 
     per_bout = run_group.get("per_bout")
     table: Optional[np.ndarray] = None
@@ -239,7 +263,9 @@ def _validate_bout_classification_run(
         field_names = list(per_bout.attrs.get("field_names", []))
         if per_bout.attrs.get("storage_layout") != "columnar":
             errors.append("per_bout.storage_layout must be 'columnar'")
-        missing_fields = [field for field in REQUIRED_PER_BOUT_FIELDS if field not in field_names]
+        missing_fields = [
+            field for field in REQUIRED_PER_BOUT_FIELDS if field not in field_names
+        ]
         for field in missing_fields:
             errors.append(f"missing required per_bout field: {field}")
         for field in field_names:
@@ -250,6 +276,22 @@ def _validate_bout_classification_run(
                 table = read_columnar_dataset(per_bout)
             except Exception as exc:
                 errors.append(f"failed to read per_bout table: {exc}")
+
+    if maintained and isinstance(per_bout, zarr.Group):
+        source_bout_count = attrs.get("source_bout_count")
+        if type(source_bout_count) is not int or source_bout_count < 0:
+            errors.append("source_bout_count must be an exact nonnegative integer")
+        else:
+            schema_issues = validate_bout_classification_arrays(
+                run_group,
+                dimensions=BoutClassificationDimensions(
+                    n_bouts=source_bout_count,
+                ),
+            )
+            errors.extend(
+                f"{issue.code}: {issue.path}: {issue.message}"
+                for issue in schema_issues
+            )
 
     if table is not None:
         row_count = int(table.shape[0])
@@ -266,15 +308,28 @@ def _validate_bout_classification_run(
             errors.append("valid rows must have classified=true")
         if np.any(classified & (np.asarray(table["category_id"]) < 0)):
             errors.append("classified rows must have non-negative category_id")
-        if np.any(classified & ~np.isfinite(np.asarray(table["probability"], dtype=np.float64))):
+        if np.any(
+            classified
+            & ~np.isfinite(np.asarray(table["probability"], dtype=np.float64))
+        ):
             errors.append("classified rows must have finite probability")
         skipped = ~classified
         if np.any(skipped & (np.asarray(table["category_id"]) != -1)):
             warnings.append("unclassified rows should use category_id=-1")
-        if int(attrs.get("classified_bout_count", int(np.count_nonzero(classified)))) != int(np.count_nonzero(classified)):
-            errors.append("classified_bout_count attr does not match per_bout classified rows")
-        if int(attrs.get("valid_source_window_count", int(np.count_nonzero(source_window_valid)))) != int(np.count_nonzero(source_window_valid)):
-            errors.append("valid_source_window_count attr does not match per_bout source_window_valid rows")
+        if int(
+            attrs.get("classified_bout_count", int(np.count_nonzero(classified)))
+        ) != int(np.count_nonzero(classified)):
+            errors.append(
+                "classified_bout_count attr does not match per_bout classified rows"
+            )
+        if int(
+            attrs.get(
+                "valid_source_window_count", int(np.count_nonzero(source_window_valid))
+            )
+        ) != int(np.count_nonzero(source_window_valid)):
+            errors.append(
+                "valid_source_window_count attr does not match per_bout source_window_valid rows"
+            )
 
     strict_errors = errors + warnings if strict else errors
     return {
@@ -294,6 +349,7 @@ def validate_bout_classification_run(
     run_name: str = "latest",
     *,
     strict: bool = False,
+    legacy_compatibility: bool = False,
 ) -> dict[str, object]:
     """Validate one complete selector-eligible classification publication.
 
@@ -307,6 +363,7 @@ def validate_bout_classification_run(
         run_name,
         strict=strict,
         staged_candidate=False,
+        legacy_compatibility=legacy_compatibility,
     )
 
 
@@ -327,6 +384,7 @@ def validate_staged_bout_classification_run(
         run_name,
         strict=strict,
         staged_candidate=True,
+        legacy_compatibility=False,
     )
 
 
@@ -335,10 +393,16 @@ def summarize_bout_classification_run(
     run_name: str = "latest",
     *,
     strict: bool = False,
+    legacy_compatibility: bool = False,
 ) -> dict[str, object]:
     """Return a JSON-safe summary plus validation result for one run."""
 
-    validation = validate_bout_classification_run(root, run_name, strict=strict)
+    validation = validate_bout_classification_run(
+        root,
+        run_name,
+        strict=strict,
+        legacy_compatibility=legacy_compatibility,
+    )
     if not validation["ok"] and validation.get("run_path") is None:
         return validation
     run_group, resolved_name, run_path = resolve_bout_classification_run(root, run_name)
@@ -374,10 +438,21 @@ def summarize_bout_classification_run(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate and summarize Palette bout-classification runs.")
+    parser = argparse.ArgumentParser(
+        description="Validate and summarize Palette bout-classification runs."
+    )
     parser.add_argument("zarr_path", type=Path, help="Palette Zarr archive.")
     parser.add_argument("--run", default="latest", help="Run name/path or latest.")
-    parser.add_argument("--strict", action="store_true", help="Treat recommended contract fields as required.")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat recommended contract fields as required.",
+    )
+    parser.add_argument(
+        "--legacy-compatibility",
+        action="store_true",
+        help="Explicitly permit historical schema v1 without the exact v2 manifest.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser
 
@@ -386,7 +461,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     root = open_zarr_root(args.zarr_path, mode="r")
-    summary = summarize_bout_classification_run(root, args.run, strict=bool(args.strict))
+    summary = summarize_bout_classification_run(
+        root,
+        args.run,
+        strict=bool(args.strict),
+        legacy_compatibility=bool(args.legacy_compatibility),
+    )
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0 if summary.get("ok") else 1
 

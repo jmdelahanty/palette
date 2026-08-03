@@ -9,12 +9,24 @@ from fisheye.analysis.bout_classification_runs import (
     summarize_bout_classification_run,
     validate_bout_classification_run,
 )
+from fisheye.analysis.bout_classification_schema import (
+    BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR,
+    BOUT_CLASSIFICATION_ARRAY_SCHEMA_DIGEST_ATTR,
+    BoutClassificationDimensions,
+    bout_classification_manifest_digest,
+    validate_bout_classification_arrays,
+)
 from fisheye.analysis.megabouts_classifier import (
     classify_megabouts_input_pack,
     write_megabouts_classification_run,
 )
-from fisheye.analysis.megabouts_classifier_inputs import build_megabouts_classifier_input_pack
-from tests.unit.fisheye.test_megabouts_classifier import _build_classifier_root, _fake_runtime
+from fisheye.analysis.megabouts_classifier_inputs import (
+    build_megabouts_classifier_input_pack,
+)
+from tests.unit.fisheye.test_megabouts_classifier import (
+    _build_classifier_root,
+    _fake_runtime,
+)
 from tests.unit.fisheye.test_megabouts_classifier_inputs import (
     _install_verified_source_readers,
 )
@@ -72,6 +84,77 @@ def test_validate_bout_classification_run_accepts_writer_output() -> None:
     assert validation["warnings"] == []
 
 
+def test_writer_freezes_exact_v2_array_inventory_and_text_widths() -> None:
+    root = _classification_root()
+    run = root["analysis/bout_classification_runs/classification_001"]
+    per_bout = run["per_bout"]
+
+    assert run.attrs["schema_version"] == 2
+    manifest = run.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR]
+    assert manifest["byte_planner_adopted"] is False
+    assert len(manifest["arrays"]) == 20
+    assert run.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_DIGEST_ATTR] == (
+        bout_classification_manifest_digest(manifest)
+    )
+    assert per_bout["category_label_bytes"].dtype == np.dtype("uint8")
+    assert per_bout["category_label_bytes"].shape == (2, 64)
+    assert per_bout["failure_reason_bytes"].dtype == np.dtype("uint8")
+    assert per_bout["failure_reason_bytes"].shape == (2, 128)
+
+
+def test_recomputed_digest_cannot_authorize_tampered_array_manifest() -> None:
+    root = _classification_root()
+    run = root["analysis/bout_classification_runs/classification_001"]
+    manifest = run.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR]
+    manifest["arrays"][0]["logical_contract"]["dtype"]["dtype_id"] = "float64"
+    run.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR] = manifest
+    run.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_DIGEST_ATTR] = (
+        bout_classification_manifest_digest(manifest)
+    )
+
+    issues = validate_bout_classification_arrays(
+        run,
+        dimensions=BoutClassificationDimensions(n_bouts=2),
+    )
+
+    assert {issue.code for issue in issues} == {
+        "array_schema_manifest_mismatch",
+        "array_schema_digest_mismatch",
+    }
+
+
+def test_wrong_physical_dtype_fails_exact_array_validation() -> None:
+    root = _classification_root()
+    run = root["analysis/bout_classification_runs/classification_001"]
+    per_bout = run["per_bout"]
+    values = np.asarray(per_bout["source_bout_id"][:], dtype=np.float64)
+    del per_bout["source_bout_id"]
+    per_bout.create_array("source_bout_id", data=values)
+
+    validation = validate_bout_classification_run(root, "classification_001")
+
+    assert validation["ok"] is False
+    assert any("dtype mismatch" in error for error in validation["errors"])
+
+
+def test_legacy_v1_requires_explicit_compatibility_opt_in() -> None:
+    root = _classification_root()
+    run = root["analysis/bout_classification_runs/classification_001"]
+    run.attrs["schema_version"] = 1
+    del run.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR]
+    del run.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_DIGEST_ATTR]
+
+    assert validate_bout_classification_run(root, "classification_001")["ok"] is False
+    assert (
+        validate_bout_classification_run(
+            root,
+            "classification_001",
+            legacy_compatibility=True,
+        )["ok"]
+        is True
+    )
+
+
 def test_summarize_bout_classification_run_counts_labels_and_skips() -> None:
     root = _classification_root()
 
@@ -100,7 +183,9 @@ def test_validate_bout_classification_run_reports_missing_per_bout_field() -> No
     validation = validate_bout_classification_run(root, "classification_001")
 
     assert validation["ok"] is False
-    assert "per_bout field listed but missing array: probability" in validation["errors"]
+    assert (
+        "per_bout field listed but missing array: probability" in validation["errors"]
+    )
 
 
 def test_validate_bout_classification_run_strict_promotes_recommended_attrs() -> None:

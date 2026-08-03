@@ -9,6 +9,13 @@ import zarr
 
 from fisheye.analysis import tail_posture_view_runs as mod
 from fisheye.analysis import subject_shape_io
+from fisheye.analysis.tail_posture_view_schema import (
+    TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR,
+    TAIL_POSTURE_VIEW_ARRAY_SCHEMA_DIGEST_ATTR,
+    TailPostureViewDimensions,
+    tail_posture_view_manifest_digest,
+    validate_tail_posture_view_arrays,
+)
 from fisheye.shared.detect_reason_codec import decode_reason_bytes
 
 
@@ -62,9 +69,10 @@ def _patch_provenance(monkeypatch) -> None:
         expected_publication_owner_uuid,
         additional_selector_attrs=(),
     ):
-        assert expected_publication_owner_uuid == run_group.attrs[
-            mod.TAIL_PUBLICATION_OWNER_ATTR
-        ]
+        assert (
+            expected_publication_owner_uuid
+            == run_group.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR]
+        )
         assert run_group.attrs["palette_run_completion_status"] == "complete"
         assert run_group.attrs["stage_selector_eligible"] is False
         parent.attrs["latest_complete"] = run_name
@@ -92,7 +100,9 @@ def _source_arrays() -> dict[str, np.ndarray]:
 def test_cumulative_segment_angles_straight_tail_are_zero() -> None:
     sources = _source_arrays()
 
-    batch = mod.compute_tail_posture_view_from_subject_shape_arrays(**sources, keypoint_count=11)
+    batch = mod.compute_tail_posture_view_from_subject_shape_arrays(
+        **sources, keypoint_count=11
+    )
 
     assert batch.valid.tolist() == [True, True]
     assert batch.tail_keypoints_xy.shape == (2, 11, 2)
@@ -165,13 +175,25 @@ def _build_shape_root() -> zarr.Group:
     components = shape.create_group("components")
     body = components.create_group("subject_body")
     sources = _source_arrays()
-    body.create_array("tail_sample_s", data=sources["source_tail_sample_s"], overwrite=True)
+    body.create_array(
+        "tail_sample_s", data=sources["source_tail_sample_s"], overwrite=True
+    )
     body.create_array("tail_sample_xy", data=sources["tail_sample_xy"], overwrite=True)
     body.create_array("head_endpoint_xy", data=sources["head_xy"], overwrite=True)
-    body.create_array("tail_sample_valid", data=sources["tail_sample_valid"], overwrite=True)
+    body.create_array(
+        "tail_sample_valid", data=sources["tail_sample_valid"], overwrite=True
+    )
     body.create_array("bspline_valid", data=sources["bspline_valid"], overwrite=True)
-    body.create_array("tail_sample_failure_reason_bytes", data=mod._encode_reasons(["ok", "ok"]), overwrite=True)
-    body.create_array("bspline_failure_reason_bytes", data=mod._encode_reasons(["ok", "ok"]), overwrite=True)
+    body.create_array(
+        "tail_sample_failure_reason_bytes",
+        data=mod._encode_reasons(["ok", "ok"]),
+        overwrite=True,
+    )
+    body.create_array(
+        "bspline_failure_reason_bytes",
+        data=mod._encode_reasons(["ok", "ok"]),
+        overwrite=True,
+    )
     return root
 
 
@@ -199,9 +221,7 @@ def test_tail_posture_existing_name_is_immutable_and_unchanged(
     existing = parent.create_group("posture_existing")
     existing.attrs.update(
         {
-            mod.TAIL_PUBLICATION_OWNER_ATTR: (
-                "11111111-1111-4111-8111-111111111111"
-            ),
+            mod.TAIL_PUBLICATION_OWNER_ATTR: ("11111111-1111-4111-8111-111111111111"),
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
             "sentinel": "preserve",
@@ -237,7 +257,9 @@ def test_tail_posture_existing_name_is_immutable_and_unchanged(
     np.testing.assert_array_equal(existing["sentinel_values"][:], before_values)
 
 
-def test_write_tail_posture_view_run_group_writes_schema_and_arrays(monkeypatch) -> None:
+def test_write_tail_posture_view_run_group_writes_schema_and_arrays(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
 
@@ -255,6 +277,7 @@ def test_write_tail_posture_view_run_group_writes_schema_and_arrays(monkeypatch)
     assert parent.attrs["latest_megabouts_compatible"] == "megabouts_view_001"
     run = parent["megabouts_view_001"]
     assert run.attrs["schema_id"] == "analysis.tail_posture_view_runs"
+    assert run.attrs["schema_version"] == 3
     assert run.attrs["view_family"] == "megabouts_compatible"
     assert run.attrs["dependency_policy"] == "no_megabouts_dependency_required"
     assert run.attrs["angle_convention"] == "megabouts_cumulative_segment_angle"
@@ -267,7 +290,9 @@ def test_write_tail_posture_view_run_group_writes_schema_and_arrays(monkeypatch)
     assert run["instance_key"][:].tolist() == [1000, 1001]
     assert np.asarray(run["tail_keypoints_xy"][:], dtype=np.float32).shape == (2, 11, 2)
     assert np.asarray(run["tail_angle_rad"][:], dtype=np.float32).shape == (2, 10)
-    np.testing.assert_allclose(np.asarray(run["tail_angle_rad"][:], dtype=np.float32), 0.0, atol=1e-7)
+    np.testing.assert_allclose(
+        np.asarray(run["tail_angle_rad"][:], dtype=np.float32), 0.0, atol=1e-7
+    )
     assert run.attrs["provenance"]["stage"] == "analysis.tail_posture_view_runs"
     assert (
         run.attrs["provenance"]["inputs"][
@@ -275,6 +300,85 @@ def test_write_tail_posture_view_run_group_writes_schema_and_arrays(monkeypatch)
         ]
         == "a" * 64
     )
+
+
+def test_tail_posture_writer_freezes_exact_array_contract(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    mod.write_tail_posture_view_run_group(
+        root,
+        subject_shape_run="shape_001",
+        run_name="posture_exact",
+    )
+    run = root["analysis/tail_posture_view_runs/posture_exact"]
+    manifest = run.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR]
+
+    assert len(manifest["arrays"]) == 10
+    assert manifest["byte_planner_adopted"] is False
+    assert run.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_DIGEST_ATTR] == (
+        tail_posture_view_manifest_digest(manifest)
+    )
+    assert run["source_crop_row_ids"].dtype == np.dtype("int64")
+    assert run["source_acquisition_frame_index"].dtype == np.dtype("int64")
+    assert run["failure_reason_bytes"].shape == (2, 64)
+
+
+def test_tail_posture_recomputed_digest_does_not_authorize_manifest_tampering(
+    monkeypatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    mod.write_tail_posture_view_run_group(
+        root,
+        subject_shape_run="shape_001",
+        run_name="posture_tampered",
+    )
+    run = root["analysis/tail_posture_view_runs/posture_tampered"]
+    manifest = run.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR]
+    manifest["arrays"][0]["logical_contract"]["axis_names"] = ["wrong_axis"]
+    run.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR] = manifest
+    run.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_DIGEST_ATTR] = (
+        tail_posture_view_manifest_digest(manifest)
+    )
+
+    issues = validate_tail_posture_view_arrays(
+        run,
+        dimensions=TailPostureViewDimensions(
+            n_rows=2,
+            n_keypoints=11,
+            n_angles=10,
+        ),
+    )
+
+    assert {issue.code for issue in issues} == {
+        "array_schema_manifest_mismatch",
+        "array_schema_digest_mismatch",
+    }
+
+
+def test_tail_posture_wrong_dtype_fails_exact_array_validation(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    mod.write_tail_posture_view_run_group(
+        root,
+        subject_shape_run="shape_001",
+        run_name="posture_wrong_dtype",
+    )
+    run = root["analysis/tail_posture_view_runs/posture_wrong_dtype"]
+    values = np.asarray(run["head_yaw_rad"][:], dtype=np.float64)
+    del run["head_yaw_rad"]
+    run.create_array("head_yaw_rad", data=values)
+
+    issues = validate_tail_posture_view_arrays(
+        run,
+        dimensions=TailPostureViewDimensions(
+            n_rows=2,
+            n_keypoints=11,
+            n_angles=10,
+        ),
+    )
+
+    assert any("dtype mismatch" in issue.message for issue in issues)
 
 
 @pytest.mark.parametrize("overwrite", [False, True])
@@ -461,12 +565,18 @@ def test_tail_posture_failure_cleanup_never_clobbers_recreated_successor(
     assert mod.TAIL_PUBLICATION_TOMBSTONE_ATTR not in successor.attrs
 
 
-def test_write_tail_posture_view_run_group_copies_instance_key_lineage(monkeypatch) -> None:
+def test_write_tail_posture_view_run_group_copies_instance_key_lineage(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
     shape = root["analysis"]["subject_shape_runs"]["shape_001"]
-    shape.create_array("instance_key", data=np.asarray([11, 22], dtype=np.uint64), overwrite=True)
-    shape.create_array("source_crop_row_ids", data=np.asarray([5, 6], dtype=np.int64), overwrite=True)
+    shape.create_array(
+        "instance_key", data=np.asarray([11, 22], dtype=np.uint64), overwrite=True
+    )
+    shape.create_array(
+        "source_crop_row_ids", data=np.asarray([5, 6], dtype=np.int64), overwrite=True
+    )
 
     mod.write_tail_posture_view_run_group(
         root,
@@ -482,13 +592,17 @@ def test_write_tail_posture_view_run_group_copies_instance_key_lineage(monkeypat
     assert "source_crop_row_ids" in run.attrs["row_lineage_copied"]
 
 
-def test_write_tail_posture_view_run_group_rejects_missing_direct_instance_key(monkeypatch) -> None:
+def test_write_tail_posture_view_run_group_rejects_missing_direct_instance_key(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
 
     del root["analysis/subject_shape_runs/shape_001/instance_key"]
 
-    with pytest.raises(subject_shape_io.SubjectShapeIOError, match="direct 'instance_key'"):
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError, match="direct 'instance_key'"
+    ):
         mod.write_tail_posture_view_run_group(
             root,
             subject_shape_run="shape_001",

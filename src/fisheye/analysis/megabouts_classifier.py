@@ -18,12 +18,17 @@ import uuid
 import numpy as np
 import zarr
 
-from fisheye.shared.zarr.columnar import write_columnar_dataset
+from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
 from fisheye.analysis.bout_classification_runs import (
     BOUT_CLASSIFICATION_SCHEMA_ID,
     BOUT_CLASSIFICATION_SCHEMA_VERSION,
     PER_BOUT_SCHEMA_ID,
     validate_staged_bout_classification_run,
+)
+from fisheye.analysis.bout_classification_schema import (
+    CATEGORY_LABEL_BYTES_WIDTH,
+    FAILURE_REASON_BYTES_WIDTH,
+    write_bout_classification_array_schema_manifest,
 )
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
 from fisheye.shared.coordinate_reference import canonical_node_path
@@ -46,7 +51,10 @@ from fisheye.shared.selector_activation import (
     SelectorActivationError,
     activate_selector_eligible_run,
 )
-from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.stage_provenance import (
+    build_stage_provenance,
+    write_stage_provenance,
+)
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
@@ -75,8 +83,6 @@ SOURCE_MODE = "palette_bouts"
 INVALID_WINDOW_POLICY = "skip_invalid_windows"
 PALETTE_PREPARED_INPUT_MODE = "palette_prepared_fixed_windows"
 MEGABOUTS_PREPROCESSED_INPUT_MODE = "megabouts_preprocessed_full_timeseries"
-CATEGORY_LABEL_BYTES_WIDTH = 64
-FAILURE_REASON_BYTES_WIDTH = 128
 BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR = (
     "bout_classification_publication_owner_uuid"
 )
@@ -91,6 +97,25 @@ BOUT_CLASSIFICATION_PUBLICATION_POLICY = (
 BOUT_CLASSIFICATION_PUBLICATION_TOMBSTONE_ATTR = (
     "bout_classification_publication_tombstone"
 )
+
+
+def _fixed_text_matrix(values: np.ndarray, *, width: int) -> np.ndarray:
+    """Encode one fixed-string field to its exact cross-language uint8 surface."""
+
+    source = np.asarray(values)
+    if source.ndim != 1 or source.dtype.kind != "S":
+        raise ValueError(
+            "Exact text fields must be one-dimensional fixed byte strings."
+        )
+    encoded = np.zeros((int(source.shape[0]), int(width)), dtype=np.uint8)
+    for row_index, value in enumerate(source):
+        payload = bytes(value).split(b"\x00", 1)[0]
+        if len(payload) >= int(width):
+            raise ValueError(
+                f"Text row {row_index} does not leave room for a NUL terminator."
+            )
+        encoded[row_index, : len(payload)] = np.frombuffer(payload, dtype=np.uint8)
+    return encoded
 
 
 @dataclass(frozen=True)
@@ -129,7 +154,11 @@ _json_safe = json_attr_safe
 
 
 def _resolve_megabouts_repo(megabouts_repo: Optional[str | Path]) -> Optional[Path]:
-    raw = megabouts_repo if megabouts_repo is not None else os.environ.get("MEGABOUTS_REPO")
+    raw = (
+        megabouts_repo
+        if megabouts_repo is not None
+        else os.environ.get("MEGABOUTS_REPO")
+    )
     if raw is None or str(raw).strip() == "":
         return None
     path = Path(raw).expanduser().resolve()
@@ -157,7 +186,9 @@ def _git_commit_for_repo(repo_path: Optional[Path]) -> Optional[str]:
     return commit or None
 
 
-def _load_megabouts_runtime(megabouts_repo: Optional[str | Path] = None) -> MegaboutsRuntime:
+def _load_megabouts_runtime(
+    megabouts_repo: Optional[str | Path] = None,
+) -> MegaboutsRuntime:
     repo_path = _resolve_megabouts_repo(megabouts_repo)
     if repo_path is not None and str(repo_path) not in sys.path:
         sys.path.insert(0, str(repo_path))
@@ -256,13 +287,17 @@ def classify_megabouts_input_pack(
             runtime=runtime,
         )
 
-    resolved_runtime = runtime if runtime is not None else _load_megabouts_runtime(megabouts_repo)
+    resolved_runtime = (
+        runtime if runtime is not None else _load_megabouts_runtime(megabouts_repo)
+    )
     fps = _resolve_fps(pack)
     window_frames = int(pack.tail_array.shape[2])
     # Add a tiny epsilon because Megabouts converts milliseconds with int(),
     # and we need the segmentation mask length to match our fixed window.
     bout_duration_ms = (float(window_frames) + 1e-6) * 1000.0 / float(fps)
-    tracking_cfg = resolved_runtime.tracking_config_class(fps=fps, tracking="full_tracking")
+    tracking_cfg = resolved_runtime.tracking_config_class(
+        fps=fps, tracking="full_tracking"
+    )
     segmentation_cfg = resolved_runtime.segmentation_config_class(
         fps=fps,
         bout_duration_ms=bout_duration_ms,
@@ -278,7 +313,9 @@ def classify_megabouts_input_pack(
         try:
             import torch
         except Exception as exc:  # pragma: no cover - optional external package path
-            raise RuntimeError("A Megabouts device was requested but torch is not importable.") from exc
+            raise RuntimeError(
+                "A Megabouts device was requested but torch is not importable."
+            ) from exc
         device_obj = torch.device(str(device))
 
     classifier = resolved_runtime.classifier_class(
@@ -296,7 +333,9 @@ def classify_megabouts_input_pack(
         "subcat": np.asarray(classif_results["subcat"], dtype=np.int32),
         "sign": np.asarray(classif_results["sign"], dtype=np.int32),
         "proba": np.asarray(classif_results["proba"], dtype=np.float32),
-        "first_half_beat": np.asarray(classif_results["first_half_beat"], dtype=np.int32),
+        "first_half_beat": np.asarray(
+            classif_results["first_half_beat"], dtype=np.int32
+        ),
     }
     expected = int(classified_indices.size)
     for name, values in normalized_results.items():
@@ -363,20 +402,34 @@ def build_per_bout_classification_table(
     table["HB1_frame"] = -1
     table["HB1_offset_frames"] = -1
     table["category_id"] = -1
-    table["category_label_bytes"] = _as_bytes("skipped_invalid_window", width=CATEGORY_LABEL_BYTES_WIDTH)
+    table["category_label_bytes"] = _as_bytes(
+        "skipped_invalid_window", width=CATEGORY_LABEL_BYTES_WIDTH
+    )
     table["subcategory_id"] = -1
     table["sign"] = 0
     table["probability"] = np.nan
-    table["tail_valid_fraction"] = np.asarray(pack.tail_valid_fraction, dtype=np.float32)
-    table["traj_valid_fraction"] = np.asarray(pack.traj_valid_fraction, dtype=np.float32)
-    table["max_consecutive_tail_invalid"] = np.asarray(pack.max_consecutive_tail_invalid, dtype=np.int32)
-    table["max_consecutive_traj_invalid"] = np.asarray(pack.max_consecutive_traj_invalid, dtype=np.int32)
+    table["tail_valid_fraction"] = np.asarray(
+        pack.tail_valid_fraction, dtype=np.float32
+    )
+    table["traj_valid_fraction"] = np.asarray(
+        pack.traj_valid_fraction, dtype=np.float32
+    )
+    table["max_consecutive_tail_invalid"] = np.asarray(
+        pack.max_consecutive_tail_invalid, dtype=np.int32
+    )
+    table["max_consecutive_traj_invalid"] = np.asarray(
+        pack.max_consecutive_traj_invalid, dtype=np.int32
+    )
     source_valid = np.asarray(pack.valid_bout, dtype=bool)
     table["source_window_valid"] = source_valid
     table["classified"] = False
     table["valid"] = False
-    for idx, reason in enumerate(np.asarray(pack.failure_reason, dtype=object).tolist()):
-        table["failure_reason_bytes"][idx] = _as_bytes(reason, width=FAILURE_REASON_BYTES_WIDTH)
+    for idx, reason in enumerate(
+        np.asarray(pack.failure_reason, dtype=object).tolist()
+    ):
+        table["failure_reason_bytes"][idx] = _as_bytes(
+            reason, width=FAILURE_REASON_BYTES_WIDTH
+        )
 
     classified_indices = np.asarray(result.classified_indices, dtype=np.int64)
     if classified_indices.size == 0:
@@ -394,10 +447,9 @@ def build_per_bout_classification_table(
     table["sign"][classified_indices] = sign
     table["probability"][classified_indices] = proba
     table["HB1_offset_frames"][classified_indices] = hb1_offset
-    table["HB1_frame"][classified_indices] = (
-        np.asarray(pack.window_start_frame, dtype=np.int64)[classified_indices]
-        + hb1_offset.astype(np.int64)
-    )
+    table["HB1_frame"][classified_indices] = np.asarray(
+        pack.window_start_frame, dtype=np.int64
+    )[classified_indices] + hb1_offset.astype(np.int64)
     table["classified"][classified_indices] = True
     table["valid"][classified_indices] = True
     for source_idx, cat_id in zip(classified_indices.tolist(), category.tolist()):
@@ -405,7 +457,9 @@ def build_per_bout_classification_table(
             _category_label(int(cat_id), category_names),
             width=CATEGORY_LABEL_BYTES_WIDTH,
         )
-        table["failure_reason_bytes"][source_idx] = _as_bytes("ok", width=FAILURE_REASON_BYTES_WIDTH)
+        table["failure_reason_bytes"][source_idx] = _as_bytes(
+            "ok", width=FAILURE_REASON_BYTES_WIDTH
+        )
 
     return table
 
@@ -452,9 +506,7 @@ def _require_fresh_candidate_initialization(
         expected_publication_owner_uuid=expected_publication_owner_uuid,
     )
     expected = {
-        BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR: (
-            expected_publication_owner_uuid
-        ),
+        BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR: (expected_publication_owner_uuid),
         "stage_selector_eligible": False,
         RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
         RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
@@ -612,8 +664,12 @@ def _populate_megabouts_classification_run(
     runtime_attrs = _runtime_attrs(result.runtime)
     table = build_per_bout_classification_table(pack, result)
     source_refs = dict(pack.source_refs)
-    classifier_input_mode = str(pack.parameters.get("classifier_input_mode") or PALETTE_PREPARED_INPUT_MODE)
-    megabouts_preprocessing = bool(pack.parameters.get("megabouts_preprocessing", False))
+    classifier_input_mode = str(
+        pack.parameters.get("classifier_input_mode") or PALETTE_PREPARED_INPUT_MODE
+    )
+    megabouts_preprocessing = bool(
+        pack.parameters.get("megabouts_preprocessing", False)
+    )
     megabouts_segmentation = bool(pack.parameters.get("megabouts_segmentation", False))
     source_fps = float(pack.parameters.get("fps", math.nan))
     window_frames = int(pack.tail_array.shape[2])
@@ -638,7 +694,9 @@ def _populate_megabouts_classification_run(
         "classified_bout_count": int(result.classified_indices.size),
         "source_bout_count": int(table.shape[0]),
         "valid_source_window_count": int(np.count_nonzero(pack.valid_bout)),
-        "invalid_source_window_count": int(table.shape[0] - np.count_nonzero(pack.valid_bout)),
+        "invalid_source_window_count": int(
+            table.shape[0] - np.count_nonzero(pack.valid_bout)
+        ),
     }
     tail_angle_conversion = {
         "source_array": source_refs.get("tail_angle_rad"),
@@ -660,8 +718,12 @@ def _populate_megabouts_classification_run(
         "policy": INVALID_WINDOW_POLICY,
         "min_tail_valid_fraction": pack.parameters.get("min_tail_valid_fraction"),
         "min_traj_valid_fraction": pack.parameters.get("min_traj_valid_fraction"),
-        "max_consecutive_invalid_frames": pack.parameters.get("max_consecutive_invalid_frames"),
-        "requires_traj_reference_valid": pack.parameters.get("requires_traj_reference_valid"),
+        "max_consecutive_invalid_frames": pack.parameters.get(
+            "max_consecutive_invalid_frames"
+        ),
+        "requires_traj_reference_valid": pack.parameters.get(
+            "requires_traj_reference_valid"
+        ),
     }
     attrs = {
         "schema_id": SCHEMA_ID,
@@ -689,7 +751,9 @@ def _populate_megabouts_classification_run(
         "parameters": _json_safe(parameters),
         "source_bout_count": int(table.shape[0]),
         "valid_source_window_count": int(np.count_nonzero(pack.valid_bout)),
-        "invalid_source_window_count": int(table.shape[0] - np.count_nonzero(pack.valid_bout)),
+        "invalid_source_window_count": int(
+            table.shape[0] - np.count_nonzero(pack.valid_bout)
+        ),
         "classified_bout_count": int(result.classified_indices.size),
         **runtime_attrs,
     }
@@ -711,7 +775,20 @@ def _populate_megabouts_classification_run(
             "failure_reason_bytes_width": FAILURE_REASON_BYTES_WIDTH,
         },
     )
+    for field_name, width in (
+        ("category_label_bytes", CATEGORY_LABEL_BYTES_WIDTH),
+        ("failure_reason_bytes", FAILURE_REASON_BYTES_WIDTH),
+    ):
+        store_array(
+            per_bout,
+            field_name,
+            _fixed_text_matrix(table[field_name], width=width),
+        )
     per_bout.attrs["source_swim_bout_path"] = source_refs.get("swim_bout_level")
+    write_bout_classification_array_schema_manifest(
+        run_group,
+        n_bouts=int(table.shape[0]),
+    )
 
     zarr_path = getattr(root, "_palette_fs_path", None)
     env_info = get_environment_info(
@@ -773,8 +850,7 @@ def _activate_megabouts_classification_run(
             != expected_publication_owner_uuid
             or run_group.attrs.get(BOUT_CLASSIFICATION_PUBLICATION_OWNER_ATTR)
             != expected_publication_owner_uuid
-            or candidate.attrs.get(RUN_COMPLETION_STATUS_ATTR)
-            != RUN_STATUS_COMPLETE
+            or candidate.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
             or candidate.attrs.get("stage_selector_eligible") is not False
         ):
             raise RuntimeError(
@@ -875,12 +951,12 @@ def write_megabouts_classification_run(
     parent = _resolve_parent(root)
     resolved_run_name = str(run_name or _default_run_name()).strip()
     if not resolved_run_name or "/" in resolved_run_name:
-        raise ValueError("Bout classification run name must be one non-empty child token.")
+        raise ValueError(
+            "Bout classification run name must be one non-empty child token."
+        )
     if resolved_run_name in parent:
         suffix = (
-            " --overwrite cannot replace an immutable public run."
-            if overwrite
-            else ""
+            " --overwrite cannot replace an immutable public run." if overwrite else ""
         )
         raise ValueError(
             f"Bout classification run {resolved_run_name!r} already exists; "
@@ -1016,10 +1092,16 @@ def run_megabouts_classifier(
                 "classifier_family": CLASSIFIER_FAMILY,
                 "classifier_name": CLASSIFIER_NAME,
                 "classifier_input_mode": mode,
-                "megabouts_preprocessing": bool(pack.parameters.get("megabouts_preprocessing", False)),
-                "megabouts_segmentation": bool(pack.parameters.get("megabouts_segmentation", False)),
+                "megabouts_preprocessing": bool(
+                    pack.parameters.get("megabouts_preprocessing", False)
+                ),
+                "megabouts_segmentation": bool(
+                    pack.parameters.get("megabouts_segmentation", False)
+                ),
                 "source_fps": float(pack.parameters.get("fps", math.nan)),
-                "window_duration_s": float(pack.parameters.get("bout_duration_s", math.nan)),
+                "window_duration_s": float(
+                    pack.parameters.get("bout_duration_s", math.nan)
+                ),
                 "window_frames": int(pack.tail_array.shape[2]),
                 "megabouts_time_sampling": True,
                 "calls_megabouts_classifier": False,
@@ -1029,7 +1111,9 @@ def run_megabouts_classifier(
         summary["would_write_run_family"] = "analysis/bout_classification_runs"
         summary["adapter_method"] = ADAPTER_METHOD
         summary["classifier_input_mode"] = mode
-        summary["calls_megabouts_preprocessing"] = bool(pack.parameters.get("megabouts_preprocessing", False))
+        summary["calls_megabouts_preprocessing"] = bool(
+            pack.parameters.get("megabouts_preprocessing", False)
+        )
         summary["calls_megabouts_classifier"] = False
         return summary
 
@@ -1086,7 +1170,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Run optional Megabouts bout classification over Palette swim-bout windows."
     )
     parser.add_argument("zarr_path", type=Path, help="Palette zarr archive.")
-    parser.add_argument("--run-name", default=None, help="Output analysis/bout_classification_runs/<run> name.")
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Output analysis/bout_classification_runs/<run> name.",
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -1102,19 +1190,37 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--swim-bout-run", default="latest")
     parser.add_argument("--speed-level", default="default")
     parser.add_argument("--heading-source", default=DEFAULT_HEADING_SOURCE)
-    parser.add_argument("--bout-duration-s", type=float, default=DEFAULT_BOUT_DURATION_S)
+    parser.add_argument(
+        "--bout-duration-s", type=float, default=DEFAULT_BOUT_DURATION_S
+    )
     parser.add_argument("--bout-duration-frames", type=int, default=None)
-    parser.add_argument("--min-tail-valid-fraction", type=float, default=DEFAULT_MIN_TAIL_VALID_FRACTION)
-    parser.add_argument("--min-traj-valid-fraction", type=float, default=DEFAULT_MIN_TRAJ_VALID_FRACTION)
-    parser.add_argument("--max-consecutive-invalid-frames", type=int, default=DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES)
+    parser.add_argument(
+        "--min-tail-valid-fraction", type=float, default=DEFAULT_MIN_TAIL_VALID_FRACTION
+    )
+    parser.add_argument(
+        "--min-traj-valid-fraction", type=float, default=DEFAULT_MIN_TRAJ_VALID_FRACTION
+    )
+    parser.add_argument(
+        "--max-consecutive-invalid-frames",
+        type=int,
+        default=DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES,
+    )
     parser.add_argument(
         "--no-align-traj-to-onset",
         action="store_true",
         help="Disable Megabouts-style onset-frame translation/rotation for trajectory windows.",
     )
-    parser.add_argument("--traj-reference-index", type=int, default=DEFAULT_TRAJ_REFERENCE_INDEX)
-    parser.add_argument("--exclude-CS", action="store_true", help="Pass exclude_CS=True to Megabouts.")
-    parser.add_argument("--device", default="auto", help="Megabouts torch device: auto, cpu, cuda, cuda:0, etc.")
+    parser.add_argument(
+        "--traj-reference-index", type=int, default=DEFAULT_TRAJ_REFERENCE_INDEX
+    )
+    parser.add_argument(
+        "--exclude-CS", action="store_true", help="Pass exclude_CS=True to Megabouts."
+    )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Megabouts torch device: auto, cpu, cuda, cuda:0, etc.",
+    )
     parser.add_argument(
         "--megabouts-repo",
         default=None,
@@ -1144,7 +1250,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    command = " ".join([Path(sys.argv[0]).name, *sys.argv[1:]]) if argv is None else None
+    command = (
+        " ".join([Path(sys.argv[0]).name, *sys.argv[1:]]) if argv is None else None
+    )
     summary = run_megabouts_classifier(
         args.zarr_path,
         run_name=args.run_name,

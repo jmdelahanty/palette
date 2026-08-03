@@ -50,15 +50,23 @@ from .subject_shape_io import (
     load_subject_shape_run_tables,
     resolve_canonical_subject_shape_run,
 )
+from .tail_posture_view_schema import (
+    TAIL_POSTURE_FAILURE_REASON_BYTES_WIDTH,
+    TAIL_POSTURE_VIEW_RUN_SCHEMA_ID,
+    TAIL_POSTURE_VIEW_RUN_SCHEMA_VERSION,
+    TailPostureViewDimensions,
+    validate_tail_posture_view_arrays,
+    write_tail_posture_view_array_schema_manifest,
+)
 
-TAIL_POSTURE_VIEW_SCHEMA_ID = "analysis.tail_posture_view_runs"
-TAIL_POSTURE_VIEW_SCHEMA_VERSION = 2
+TAIL_POSTURE_VIEW_SCHEMA_ID = TAIL_POSTURE_VIEW_RUN_SCHEMA_ID
+TAIL_POSTURE_VIEW_SCHEMA_VERSION = TAIL_POSTURE_VIEW_RUN_SCHEMA_VERSION
 TAIL_POSTURE_VIEW_STAGE_NAME = "analysis.tail_posture_view_runs"
 TAIL_POSTURE_VIEW_METHOD = "tail_posture_view_from_subject_shape"
 TAIL_POSTURE_VIEW_METHOD_VERSION = 1
 DEFAULT_VIEW_FAMILY = "megabouts_compatible"
 DEFAULT_KEYPOINT_COUNT = 11
-REASON_BYTES_WIDTH = 64
+REASON_BYTES_WIDTH = TAIL_POSTURE_FAILURE_REASON_BYTES_WIDTH
 TAIL_PUBLICATION_TOMBSTONE_ATTR = "tail_publication_tombstone"
 
 
@@ -88,16 +96,22 @@ def _default_run_name(view_family: str) -> str:
 _json_safe = json_attr_safe
 
 
-def _encode_reasons(reasons: Sequence[object], *, width: int = REASON_BYTES_WIDTH) -> np.ndarray:
+def _encode_reasons(
+    reasons: Sequence[object], *, width: int = REASON_BYTES_WIDTH
+) -> np.ndarray:
     out = np.zeros((len(reasons), int(width)), dtype=np.uint8)
     for idx, reason in enumerate(reasons):
-        payload = str(reason or "").encode("utf-8", errors="replace")[: max(0, int(width) - 1)]
+        payload = str(reason or "").encode("utf-8", errors="replace")[
+            : max(0, int(width) - 1)
+        ]
         if payload:
             out[int(idx), : len(payload)] = np.frombuffer(payload, dtype=np.uint8)
     return out
 
 
-def _set_reason_bytes_attrs(group: zarr.Group, *, width: int = REASON_BYTES_WIDTH) -> None:
+def _set_reason_bytes_attrs(
+    group: zarr.Group, *, width: int = REASON_BYTES_WIDTH
+) -> None:
     group.attrs["reason_encoding"] = "utf8-null-terminated"
     group.attrs["reason_bytes_width"] = int(width)
     group.attrs["reason_bytes_null_terminated"] = True
@@ -164,11 +178,15 @@ def _resolve_subject_shape_tables(
     return tables.run_name, shape_group, tables
 
 
-def _read_optional_reason_labels(group: zarr.Group | Mapping[str, np.ndarray], name: str, row_count: int) -> np.ndarray:
+def _read_optional_reason_labels(
+    group: zarr.Group | Mapping[str, np.ndarray], name: str, row_count: int
+) -> np.ndarray:
     arr = group.get(name)
     if arr is None:
         return np.full((int(row_count),), "", dtype=object)
-    data = np.asarray(arr[:] if hasattr(arr, "shape") and not isinstance(arr, np.ndarray) else arr)
+    data = np.asarray(
+        arr[:] if hasattr(arr, "shape") and not isinstance(arr, np.ndarray) else arr
+    )
     if data.ndim == 2 and np.issubdtype(data.dtype, np.integer):
         return decode_reason_bytes(data)
     return np.asarray(data, dtype=object).reshape(-1)
@@ -248,7 +266,9 @@ def compute_cumulative_segment_angles_from_keypoints(
                 segments_valid[:, idx + 1, :],
             )
         angles[valid, :] = np.cumsum(relative, axis=1).astype(np.float32)
-        head_yaw[valid] = np.arctan2(-start_valid[:, 1], -start_valid[:, 0]).astype(np.float32)
+        head_yaw[valid] = np.arctan2(-start_valid[:, 1], -start_valid[:, 0]).astype(
+            np.float32
+        )
     return angles, head_yaw, valid
 
 
@@ -274,7 +294,10 @@ def compute_tail_posture_view_from_subject_shape_arrays(
         raise ValueError("head_xy must have shape (N, 2).")
     sample_valid = np.asarray(tail_sample_valid, dtype=bool).reshape(-1)
     spline_valid = np.asarray(bspline_valid, dtype=bool).reshape(-1)
-    if int(sample_valid.shape[0]) != row_count or int(spline_valid.shape[0]) != row_count:
+    if (
+        int(sample_valid.shape[0]) != row_count
+        or int(spline_valid.shape[0]) != row_count
+    ):
         raise ValueError("validity arrays must have the same row count as tail arrays.")
 
     source_valid = sample_valid & spline_valid & _finite_rows(head)
@@ -284,9 +307,11 @@ def compute_tail_posture_view_from_subject_shape_arrays(
         target_count=int(keypoint_count),
         valid=source_valid,
     )
-    tail_angle, head_yaw, geometry_valid = compute_cumulative_segment_angles_from_keypoints(
-        head_xy=head,
-        tail_keypoints_xy=tail_keypoints,
+    tail_angle, head_yaw, geometry_valid = (
+        compute_cumulative_segment_angles_from_keypoints(
+            head_xy=head,
+            tail_keypoints_xy=tail_keypoints,
+        )
     )
 
     valid = source_valid & geometry_valid
@@ -341,15 +366,21 @@ def _read_sources(
     tail_xy = np.asarray(body.require_array("tail_sample_xy"), dtype=np.float32)
     row_count = int(tail_xy.shape[0])
     sources = {
-        "source_tail_sample_s": np.asarray(body.require_array("tail_sample_s"), dtype=np.float32),
+        "source_tail_sample_s": np.asarray(
+            body.require_array("tail_sample_s"), dtype=np.float32
+        ),
         "tail_sample_xy": tail_xy,
         "head_xy": np.asarray(body.require_array(head_source), dtype=np.float32),
-        "tail_sample_valid": np.asarray(body.require_array("tail_sample_valid"), dtype=bool),
+        "tail_sample_valid": np.asarray(
+            body.require_array("tail_sample_valid"), dtype=bool
+        ),
         "bspline_valid": np.asarray(body.require_array("bspline_valid"), dtype=bool),
         "tail_sample_failure_reason": _read_optional_reason_labels(
             body.arrays, "tail_sample_failure_reason_bytes", row_count
         ),
-        "bspline_failure_reason": _read_optional_reason_labels(body.arrays, "bspline_failure_reason_bytes", row_count),
+        "bspline_failure_reason": _read_optional_reason_labels(
+            body.arrays, "bspline_failure_reason_bytes", row_count
+        ),
     }
     return sources, row_count
 
@@ -414,16 +445,14 @@ def _fresh_owned_tail_posture_candidate(
     if not isinstance(candidate, zarr.Group):
         return None
     try:
-        exact_binding = (
-            canonical_node_path(candidate) == run_path
-            and archive_identity(candidate) == archive_identity(root)
-        )
+        exact_binding = canonical_node_path(candidate) == run_path and archive_identity(
+            candidate
+        ) == archive_identity(root)
     except Exception:
         return None
     if (
         not exact_binding
-        or candidate.attrs.get(TAIL_PUBLICATION_OWNER_ATTR)
-        != publication_owner_uuid
+        or candidate.attrs.get(TAIL_PUBLICATION_OWNER_ATTR) != publication_owner_uuid
     ):
         return None
     return candidate
@@ -614,8 +643,7 @@ def _prepare_run_group(
     run_group = fresh
     mark_run_started(run_group, run_name=target_run, stage="tail_posture_view")
     if (
-        run_group.attrs.get(TAIL_PUBLICATION_OWNER_ATTR)
-        != publication_owner_uuid
+        run_group.attrs.get(TAIL_PUBLICATION_OWNER_ATTR) != publication_owner_uuid
         or run_group.attrs.get("stage_selector_eligible") is not False
     ):
         raise RuntimeError(
@@ -641,14 +669,27 @@ def _prepare_run_group(
                 f"Canonical subject-shape {name!r} must be one-dimensional and row aligned."
             )
         if name == "instance_key":
-            if values.dtype != np.dtype("uint64") or np.unique(values).size != values.size:
+            if (
+                values.dtype != np.dtype("uint64")
+                or np.unique(values).size != values.size
+            ):
                 raise SubjectShapeIOError(
                     "Canonical subject-shape instance_key must be unique uint64."
                 )
-        elif values.dtype.kind not in {"i", "u"} or np.any(values < 0):
-            raise SubjectShapeIOError(
-                f"Canonical subject-shape {name!r} must be non-negative integer identity."
-            )
+        else:
+            if values.dtype.kind not in {"i", "u"} or np.any(values < 0):
+                raise SubjectShapeIOError(
+                    f"Canonical subject-shape {name!r} must be non-negative integer identity."
+                )
+            if (
+                values.dtype.kind == "u"
+                and values.size
+                and int(values.max()) > np.iinfo(np.int64).max
+            ):
+                raise SubjectShapeIOError(
+                    f"Canonical subject-shape {name!r} exceeds exact int64 range."
+                )
+            values = values.astype(np.int64, copy=False)
         _write_array(
             run_group,
             name,
@@ -665,7 +706,9 @@ def _prepare_run_group(
         "subject_shape_body_component": f"analysis/subject_shape_runs/{shape_run_name}/components/subject_body",
     }
     if source_tail_kinematics_run:
-        source_refs["tail_kinematics_run"] = f"analysis/tail_kinematics_runs/{source_tail_kinematics_run}"
+        source_refs["tail_kinematics_run"] = (
+            f"analysis/tail_kinematics_runs/{source_tail_kinematics_run}"
+        )
 
     run_group.attrs.update(
         {
@@ -677,15 +720,21 @@ def _prepare_run_group(
             "created_utc": created,
             "row_axis": "observation_instance",
             "view_family": str(view_family),
-            "compatible_tool": "megabouts" if str(view_family) == DEFAULT_VIEW_FAMILY else None,
+            "compatible_tool": (
+                "megabouts" if str(view_family) == DEFAULT_VIEW_FAMILY else None
+            ),
             "dependency_policy": "no_megabouts_dependency_required",
             "source_subject_shape_run": str(shape_run_name),
             "source_subject_shape_path": f"analysis/subject_shape_runs/{shape_run_name}",
             "source_subject_shape_publication_manifest_sha256": str(
                 source_subject_shape_publication_manifest_sha256
             ),
-            "source_refined_subject_masks_run": str(source_refined_run) if source_refined_run is not None else None,
-            "source_tail_kinematics_run": str(source_tail_kinematics_run) if source_tail_kinematics_run else None,
+            "source_refined_subject_masks_run": (
+                str(source_refined_run) if source_refined_run is not None else None
+            ),
+            "source_tail_kinematics_run": (
+                str(source_tail_kinematics_run) if source_tail_kinematics_run else None
+            ),
             "source_tail_geometry_kind": "subject_shape_tail_curve_resample",
             "head_source": str(head_source),
             "keypoint_count": int(keypoint_count),
@@ -761,15 +810,29 @@ def _write_batch(run_group: zarr.Group, batch: TailPostureViewBatch) -> None:
     row_count = int(batch.valid.shape[0])
     keypoint_count = int(batch.tail_keypoints_xy.shape[1])
     angle_count = int(batch.tail_angle_rad.shape[1])
-    _write_array(run_group, "valid", batch.valid.astype(bool), chunks=_metric_chunks(row_count))
+    _write_array(
+        run_group, "valid", batch.valid.astype(bool), chunks=_metric_chunks(row_count)
+    )
     _write_array(
         run_group,
         "failure_reason_bytes",
         batch.failure_reason_bytes,
-        chunks=_metric_chunks_lastdim(row_count, int(batch.failure_reason_bytes.shape[1])),
+        chunks=_metric_chunks_lastdim(
+            row_count, int(batch.failure_reason_bytes.shape[1])
+        ),
     )
-    _write_array(run_group, "head_xy", batch.head_xy.astype(np.float32), chunks=_metric_chunks_lastdim(row_count, 2))
-    _write_array(run_group, "head_yaw_rad", batch.head_yaw_rad.astype(np.float32), chunks=_metric_chunks(row_count))
+    _write_array(
+        run_group,
+        "head_xy",
+        batch.head_xy.astype(np.float32),
+        chunks=_metric_chunks_lastdim(row_count, 2),
+    )
+    _write_array(
+        run_group,
+        "head_yaw_rad",
+        batch.head_yaw_rad.astype(np.float32),
+        chunks=_metric_chunks(row_count),
+    )
     _write_array(
         run_group,
         "tail_keypoints_xy",
@@ -861,6 +924,28 @@ def write_tail_posture_view_run_group(
             overwrite=overwrite,
         )
         _write_batch(run_group, batch)
+        dimensions = TailPostureViewDimensions(
+            n_rows=row_count,
+            n_keypoints=int(batch.tail_keypoints_xy.shape[1]),
+            n_angles=int(batch.tail_angle_rad.shape[1]),
+        )
+        write_tail_posture_view_array_schema_manifest(
+            run_group,
+            n_rows=dimensions.n_rows,
+            n_keypoints=dimensions.n_keypoints,
+            n_angles=dimensions.n_angles,
+        )
+        schema_issues = validate_tail_posture_view_arrays(
+            run_group,
+            dimensions=dimensions,
+        )
+        if schema_issues:
+            detail = "; ".join(
+                f"{issue.code}:{issue.path}:{issue.message}" for issue in schema_issues
+            )
+            raise RuntimeError(
+                f"Tail-posture exact array contract failed before publication: {detail}."
+            )
 
         duration_seconds = float(time.perf_counter() - started)
         valid_count = int(np.count_nonzero(batch.valid))
@@ -870,9 +955,7 @@ def write_tail_posture_view_run_group(
             key = str(reason or "")
             reason_counts[key] = int(reason_counts.get(key, 0) + 1)
         rows_per_second = (
-            float(row_count / duration_seconds)
-            if duration_seconds > 0.0
-            else math.inf
+            float(row_count / duration_seconds) if duration_seconds > 0.0 else math.inf
         )
 
         run_group.attrs["duration_seconds"] = duration_seconds
@@ -971,9 +1054,17 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Write analysis/tail_posture_view_runs from subject-shape tail geometry."
     )
     parser.add_argument("zarr_path", type=Path, help="Palette zarr archive.")
-    parser.add_argument("--subject-shape-run", help="analysis/subject_shape_runs/<run> to consume; defaults to latest.")
-    parser.add_argument("--run-name", help="Target analysis/tail_posture_view_runs/<run>; defaults to timestamped.")
-    parser.add_argument("--view-family", default=DEFAULT_VIEW_FAMILY, help="Tool/view family label.")
+    parser.add_argument(
+        "--subject-shape-run",
+        help="analysis/subject_shape_runs/<run> to consume; defaults to latest.",
+    )
+    parser.add_argument(
+        "--run-name",
+        help="Target analysis/tail_posture_view_runs/<run>; defaults to timestamped.",
+    )
+    parser.add_argument(
+        "--view-family", default=DEFAULT_VIEW_FAMILY, help="Tool/view family label."
+    )
     parser.add_argument(
         "--head-source",
         default="head_endpoint_xy",
@@ -998,7 +1089,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "and an existing child cannot be reused."
         ),
     )
-    parser.add_argument("--dry-run", action="store_true", help="Resolve inputs without mutating the archive.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve inputs without mutating the archive.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser
 
