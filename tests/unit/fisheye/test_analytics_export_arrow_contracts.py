@@ -23,6 +23,7 @@ from fisheye.analytics_exports.arrow_contracts import (
 from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+    BASELINE_KINEMATIC_SAMPLES_TABLE,
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
@@ -166,6 +167,33 @@ def _valid_baseline_time_bin_row() -> dict[str, object]:
     return row
 
 
+def _valid_baseline_sample_row() -> dict[str, object]:
+    contract = ARROW_TABLE_CONTRACTS[BASELINE_KINEMATIC_SAMPLES_TABLE]
+    row: dict[str, object] = {}
+    for field in contract.fields:
+        if field.nullable:
+            row[field.name] = None
+        elif field.arrow_type in {"int32", "int64"}:
+            row[field.name] = 1
+        elif field.arrow_type == "float64":
+            row[field.name] = 1.5
+        elif field.arrow_type == "bool":
+            row[field.name] = True
+        else:
+            row[field.name] = "value"
+    row.update(
+        {
+            "export_schema_version": EXPORT_SCHEMA_VERSION,
+            "table_name": BASELINE_KINEMATIC_SAMPLES_TABLE,
+            "recording_id": "recording-1",
+            "zarr_path": "/recordings/recording-1_analysis.zarr",
+            "source_lineage_hash": "d" * 64,
+            "source_refs_json": "{}",
+        }
+    )
+    return row
+
+
 def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> None:
     envelope = arrow_contract_envelope(
         (
@@ -173,6 +201,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
             RECORDING_SUMMARY_TABLE,
             BASELINE_BEHAVIOR_SUMMARY_TABLE,
             BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+            BASELINE_KINEMATIC_SAMPLES_TABLE,
         )
     )
 
@@ -181,6 +210,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
         RECORDING_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+        BASELINE_KINEMATIC_SAMPLES_TABLE,
     )
     assert envelope["inferred_v2_compatibility_tables"] == []
     assert (
@@ -191,6 +221,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
                 RECORDING_SUMMARY_TABLE,
                 BASELINE_BEHAVIOR_SUMMARY_TABLE,
                 BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+                BASELINE_KINEMATIC_SAMPLES_TABLE,
             ),
         )
         == envelope
@@ -203,6 +234,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         RECORDING_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+        BASELINE_KINEMATIC_SAMPLES_TABLE,
     )
     fields = ARROW_TABLE_CONTRACTS[RECORDING_SUMMARY_TABLE].fields
     assert tuple(field.name for field in fields) == (
@@ -439,6 +471,85 @@ def test_baseline_time_bins_contract_freezes_all_77_fields_in_order() -> None:
     )
 
 
+def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
+    fields = ARROW_TABLE_CONTRACTS[BASELINE_KINEMATIC_SAMPLES_TABLE].fields
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("recording_id", "string", False),
+        ("zarr_path", "string", False),
+        ("source_lineage_hash", "string", False),
+        ("chaser_distance_run", "string", False),
+        ("chaser_distance_path", "string", False),
+        ("chaser_distance_schema_id", "string", True),
+        ("chaser_distance_schema_version", "int64", True),
+        ("chaser_distance_method", "string", True),
+        ("chaser_distance_method_version", "string", True),
+        ("source_detection_path", "string", True),
+        ("source_detection_kind", "string", True),
+        ("source_stimulus_run", "string", True),
+        ("source_stimulus_path", "string", True),
+        ("source_stimulus_epoch_run", "string", True),
+        ("source_stimulus_epoch_path", "string", True),
+        ("source_refs_json", "string", False),
+        ("coordinate_frame", "string", False),
+        ("coordinate_origin", "string", False),
+        ("fps", "float64", True),
+        ("total_frames", "int64", True),
+        ("pixels_per_mm_projector", "float64", False),
+        ("source_chaser_distance_run", "string", False),
+        ("source_chaser_distance_path", "string", False),
+        ("source_epoch_behavior_component", "string", False),
+        ("source_epoch_behavior_path", "string", False),
+        ("source_track_kinematics_run", "string", False),
+        ("source_track_kinematics_scope", "string", False),
+        ("source_track_kinematics_path", "string", False),
+        ("source_track_kinematics_track_path", "string", False),
+        ("source_speed_level", "string", False),
+        ("source_swim_bout_run", "string", True),
+        ("source_swim_bout_path", "string", True),
+        ("track_id", "int64", False),
+        ("arena_center_x_px", "float64", False),
+        ("arena_center_y_px", "float64", False),
+        ("arena_radius_px", "float64", False),
+        ("baseline_method", "string", False),
+        ("baseline_method_version", "string", False),
+        ("baseline_window_id", "int64", False),
+        ("baseline_window_label", "string", False),
+        ("source_sample_index", "int64", False),
+        ("source_frame", "int64", False),
+        ("source_time_s", "float64", False),
+        ("relative_time_s", "float64", False),
+        ("x_arena_mm", "float64", True),
+        ("y_arena_mm", "float64", True),
+        ("x_arena_fraction", "float64", True),
+        ("y_arena_fraction", "float64", True),
+        ("speed_mm_s", "float64", True),
+        ("heading_deg", "float64", True),
+        ("frame_path_distance_mm", "float64", True),
+        ("center_distance_mm", "float64", True),
+        ("distance_to_arena_boundary_mm", "float64", True),
+        ("wall", "bool", True),
+        ("experimental_area_geometry_type", "string", False),
+        ("boundary_distance_method", "string", False),
+        ("position_valid", "bool", False),
+        ("sample_valid", "bool", False),
+        ("sampling_policy", "string", False),
+        ("sampling_stride_frames", "int64", False),
+        ("requested_sample_rate_hz", "float64", True),
+        ("source_sample_rate_hz", "float64", False),
+        ("nominal_sample_rate_hz", "float64", False),
+        ("effective_sample_rate_hz", "float64", False),
+        ("x_axis_direction", "string", False),
+        ("y_axis_direction", "string", False),
+        ("collection_id", "string", True),
+        ("collection_manifest_sha256", "string", True),
+        ("collection_manifest_path", "string", True),
+    )
+
+
 @pytest.mark.parametrize(
     "table_name",
     (
@@ -446,6 +557,7 @@ def test_baseline_time_bins_contract_freezes_all_77_fields_in_order() -> None:
         RECORDING_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+        BASELINE_KINEMATIC_SAMPLES_TABLE,
     ),
 )
 @pytest.mark.parametrize(
@@ -544,6 +656,26 @@ def test_baseline_time_bins_exact_writer_uses_declared_schema(tmp_path: Path) ->
         generation_root=tmp_path / "generation",
         table=table_name,
         rows_by_source=(("source-1", [_valid_baseline_time_bin_row()]),),
+    )
+
+    assert count == 1
+    schema = pq.ParquetFile(parts[0]).schema_arrow
+    validate_arrow_schema(table_name, schema)
+    assert schema.remove_metadata() == exact_arrow_schema(
+        table_name,
+        metadata={},
+    ).remove_metadata()
+    assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
+        ARROW_TABLE_CONTRACTS[table_name].payload_sha256
+    )
+
+
+def test_baseline_samples_exact_writer_uses_declared_schema(tmp_path: Path) -> None:
+    table_name = BASELINE_KINEMATIC_SAMPLES_TABLE
+    count, parts = _write_table_parts(
+        generation_root=tmp_path / "generation",
+        table=table_name,
+        rows_by_source=(("source-1", [_valid_baseline_sample_row()]),),
     )
 
     assert count == 1
@@ -666,6 +798,34 @@ def test_baseline_time_bins_writer_rejects_unexpected_and_missing_required_field
             )
 
 
+def test_baseline_samples_writer_rejects_unexpected_and_missing_required_fields(
+    tmp_path: Path,
+) -> None:
+    row = _valid_baseline_sample_row()
+    row["surprise"] = 1
+    with pytest.raises(ValueError, match="unexpected fields"):
+        _write_table_parts(
+            generation_root=tmp_path / "unexpected",
+            table=BASELINE_KINEMATIC_SAMPLES_TABLE,
+            rows_by_source=(("source", [row]),),
+        )
+
+    required = {
+        field.name
+        for field in ARROW_TABLE_CONTRACTS[BASELINE_KINEMATIC_SAMPLES_TABLE].fields
+        if not field.nullable
+    }
+    for field_name in sorted(required):
+        row = _valid_baseline_sample_row()
+        del row[field_name]
+        with pytest.raises(ValueError, match="null/missing non-nullable"):
+            _write_table_parts(
+                generation_root=tmp_path / f"missing-{field_name}",
+                table=BASELINE_KINEMATIC_SAMPLES_TABLE,
+                rows_by_source=(("source", [row]),),
+            )
+
+
 def test_recording_summary_zero_rows_publish_no_parts_but_retain_exact_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -778,6 +938,43 @@ def test_baseline_time_bins_zero_rows_retain_exact_contract_without_parts(
     )
     assert manifest["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
     assert validate_export_run(root, "empty-baseline-time-bins")["status"] == "valid"
+
+
+def test_baseline_samples_zero_rows_retain_exact_contract_without_parts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        return SourceExportResult(
+            zarr_path=str(path),
+            recording_id="recording-1",
+            rows_by_table={BASELINE_KINEMATIC_SAMPLES_TABLE: []},
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.export_one_zarr",
+        source,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.get_git_info",
+        lambda _path: {"commit_hash": "test", "is_dirty": False},
+    )
+    root = tmp_path / "exports"
+    manifest = export_sources(
+        [tmp_path / "source.zarr"],
+        output_root=root,
+        export_run_id="empty-baseline-samples",
+        tables=(BASELINE_KINEMATIC_SAMPLES_TABLE,),
+        jobs=1,
+    )
+
+    assert manifest["row_counts_by_table"] == {BASELINE_KINEMATIC_SAMPLES_TABLE: 0}
+    assert manifest["part_files_by_table"] == {BASELINE_KINEMATIC_SAMPLES_TABLE: []}
+    assert tuple(manifest["arrow_schema_contracts"]["exact_tables"]) == (
+        BASELINE_KINEMATIC_SAMPLES_TABLE,
+    )
+    assert manifest["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
+    assert validate_export_run(root, "empty-baseline-samples")["status"] == "valid"
 
 
 def test_real_detection_occupancy_export_uses_exact_arrow_contract(
@@ -1050,6 +1247,42 @@ def test_real_baseline_time_bins_export_uses_exact_closed_representation(
     )
 
 
+def test_real_baseline_samples_export_uses_exact_closed_representation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _make_baseline_representation_source(tmp_path, monkeypatch)
+    export_root = tmp_path / "sample-exports"
+    manifest = export_sources(
+        [source],
+        output_root=export_root,
+        export_run_id="baseline-samples-arrow",
+        tables=(BASELINE_KINEMATIC_SAMPLES_TABLE,),
+        jobs=1,
+        baseline_full_resolution_samples=True,
+    )
+
+    assert manifest["row_counts_by_table"] == {BASELINE_KINEMATIC_SAMPLES_TABLE: 10}
+    part = (
+        export_root
+        / manifest["part_files_by_table"][BASELINE_KINEMATIC_SAMPLES_TABLE][0]
+    )
+    parquet_file = pq.ParquetFile(part)
+    table = parquet_file.read()
+    validate_arrow_schema(BASELINE_KINEMATIC_SAMPLES_TABLE, parquet_file.schema_arrow)
+    assert parquet_file.schema_arrow.names == [
+        field.name
+        for field in ARROW_TABLE_CONTRACTS[BASELINE_KINEMATIC_SAMPLES_TABLE].fields
+    ]
+    rows = table.to_pylist()
+    assert [row["source_sample_index"] for row in rows] == list(range(10))
+    assert [row["source_frame"] for row in rows] == list(range(10))
+    assert all(row["requested_sample_rate_hz"] is None for row in rows)
+    assert all(row["fps"] is None for row in rows)
+    assert all("future_source_metric" not in row for row in rows)
+    assert validate_export_run(export_root, "baseline-samples-arrow")["status"] == "valid"
+
+
 def test_manifest_selected_reader_rejects_rehashed_wrong_physical_type(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1204,6 +1437,11 @@ def test_recording_summary_manifest_reader_rejects_rehashed_physical_tampering(
             BASELINE_BEHAVIOR_TIME_BINS_TABLE,
             _valid_baseline_time_bin_row,
             "expected_frame_count",
+        ),
+        (
+            BASELINE_KINEMATIC_SAMPLES_TABLE,
+            _valid_baseline_sample_row,
+            "source_sample_index",
         ),
     ),
 )

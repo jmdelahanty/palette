@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from fisheye.analytics_exports.baseline import (
@@ -195,6 +197,40 @@ def test_baseline_samples_are_deterministic_and_support_full_resolution() -> Non
         full_resolution=True,
     )
 
+    assert tuple(sampled[0]) == (
+        "baseline_method",
+        "baseline_method_version",
+        "baseline_window_id",
+        "baseline_window_label",
+        "source_sample_index",
+        "source_frame",
+        "source_time_s",
+        "relative_time_s",
+        "x_arena_mm",
+        "y_arena_mm",
+        "x_arena_fraction",
+        "y_arena_fraction",
+        "speed_mm_s",
+        "heading_deg",
+        "frame_path_distance_mm",
+        "center_distance_mm",
+        "distance_to_arena_boundary_mm",
+        "wall",
+        "experimental_area_geometry_type",
+        "boundary_distance_method",
+        "position_valid",
+        "sample_valid",
+        "sampling_policy",
+        "sampling_stride_frames",
+        "requested_sample_rate_hz",
+        "source_sample_rate_hz",
+        "nominal_sample_rate_hz",
+        "effective_sample_rate_hz",
+        "coordinate_frame",
+        "coordinate_origin",
+        "x_axis_direction",
+        "y_axis_direction",
+    )
     assert [row["source_frame"] for row in sampled] == [0, 5]
     assert all(row["sampling_policy"] == SAMPLE_POLICY for row in sampled)
     assert all(row["sampling_stride_frames"] == 5 for row in sampled)
@@ -211,6 +247,31 @@ def test_baseline_samples_are_deterministic_and_support_full_resolution() -> Non
     assert len(full) == 10
     assert all(row["sampling_policy"] == FULL_SAMPLE_POLICY for row in full)
     assert all(row["sampling_stride_frames"] == 1 for row in full)
+    assert all(row["requested_sample_rate_hz"] is None for row in full)
+
+
+def test_baseline_samples_use_nulls_not_sentinels_for_invalid_measurements() -> None:
+    inputs = _inputs()
+    invalid = replace(
+        inputs,
+        position_valid=np.zeros(20, dtype=bool),
+        speed_mm_s=np.full(20, np.nan, dtype=np.float64),
+        heading_deg=np.full(20, np.nan, dtype=np.float64),
+        frame_path_distance_mm=np.full(20, np.nan, dtype=np.float64),
+    )
+
+    rows = build_sample_metrics(invalid, _window(), target_sample_rate_hz=2.0)
+
+    assert rows
+    for row in rows:
+        assert row["position_valid"] is False
+        assert row["sample_valid"] is True
+        assert row["wall"] is None
+        assert row["x_arena_mm"] is None
+        assert row["y_arena_mm"] is None
+        assert row["speed_mm_s"] is None
+        assert row["heading_deg"] is None
+        assert row["frame_path_distance_mm"] is None
 
 
 def test_baseline_capabilities_require_their_strict_table_contracts() -> None:

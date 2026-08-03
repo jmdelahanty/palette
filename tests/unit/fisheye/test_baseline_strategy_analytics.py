@@ -18,6 +18,7 @@ from fisheye.analytics_exports.arrow_contracts import (
 from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+    BASELINE_KINEMATIC_SAMPLES_TABLE,
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
     TABLE_CONTRACTS,
@@ -267,6 +268,7 @@ def _write_summary_only_export(
     run_id: str,
     *,
     include_time_bins: bool = False,
+    include_samples: bool = False,
 ) -> Path:
     table_name = BASELINE_BEHAVIOR_SUMMARY_TABLE
     generation_path = (
@@ -403,6 +405,81 @@ def _write_summary_only_export(
         parts_by_table[time_table] = [time_part]
         row_counts[time_table] = len(time_rows)
         capabilities.append("core.baseline.behavior_time_bins")
+
+    if include_samples:
+        sample_table = BASELINE_KINEMATIC_SAMPLES_TABLE
+        sample_rows = []
+        for recording_index in range(6):
+            recording_id = f"recording_{recording_index}"
+            for source_sample_index, payload in enumerate(_samples()):
+                row = {}
+                for field in ARROW_TABLE_CONTRACTS[sample_table].fields:
+                    if field.nullable:
+                        row[field.name] = None
+                    elif field.arrow_type in {"int32", "int64"}:
+                        row[field.name] = 1
+                    elif field.arrow_type == "float64":
+                        row[field.name] = 1.0
+                    elif field.arrow_type == "bool":
+                        row[field.name] = True
+                    else:
+                        row[field.name] = "value"
+                row.update(payload)
+                row.update(
+                    {
+                        "export_schema_version": EXPORT_SCHEMA_VERSION,
+                        "table_name": sample_table,
+                        "recording_id": recording_id,
+                        "zarr_path": f"/{recording_id}_analysis.zarr",
+                        "source_lineage_hash": hashlib.sha256(
+                            recording_id.encode("utf-8")
+                        ).hexdigest(),
+                        "source_refs_json": "{}",
+                        "track_id": 0,
+                        "baseline_window_id": 0,
+                        "baseline_window_label": "pre",
+                        "source_sample_index": source_sample_index,
+                        "source_time_s": float(payload["relative_time_s"]),
+                        "sampling_policy": "all_source_samples_v1",
+                        "sampling_stride_frames": 1,
+                        "requested_sample_rate_hz": None,
+                        "source_sample_rate_hz": 10.0,
+                        "nominal_sample_rate_hz": 10.0,
+                        "effective_sample_rate_hz": 10.0,
+                    }
+                )
+                sample_rows.append(row)
+        sample_part = (
+            root
+            / generation_path
+            / "tables"
+            / sample_table
+            / "part-00000.parquet"
+        )
+        sample_part.parent.mkdir(parents=True)
+        pq.write_table(
+            pa.Table.from_pylist(
+                sample_rows,
+                schema=exact_arrow_schema(
+                    sample_table,
+                    metadata={
+                        b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
+                        b"palette.export_schema_version": str(
+                            EXPORT_SCHEMA_VERSION
+                        ).encode(),
+                        b"palette.table_contract": json.dumps(
+                            TABLE_CONTRACTS[sample_table].to_dict(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode(),
+                    },
+                ),
+            ),
+            sample_part,
+        )
+        parts_by_table[sample_table] = [sample_part]
+        row_counts[sample_table] = len(sample_rows)
+        capabilities.append("core.baseline.kinematic_samples")
 
     manifest = root / "v1" / "manifests" / f"export_run_id={run_id}.json"
     manifest.parent.mkdir(parents=True)
@@ -552,6 +629,66 @@ def test_workflow_rejects_rehashed_unexpected_time_bin_column(tmp_path: Path) ->
             source_export_run_id=run_id,
             output_root=output_root,
             analysis_run_id="strategy_rejects_tampering",
+        )
+
+
+def test_workflow_consumes_manifest_selected_exact_samples(tmp_path: Path) -> None:
+    source_root = tmp_path / "source_export"
+    output_root = tmp_path / "derived_analytics"
+    _write_summary_only_export(
+        source_root,
+        "source_with_samples",
+        include_samples=True,
+    )
+
+    result = run_strategy_analytics(
+        source_export_root=source_root,
+        source_export_run_id="source_with_samples",
+        output_root=output_root,
+        analysis_run_id="strategy_with_samples",
+        config=StrategyFeatureConfig(
+            min_sample_count=10,
+            cluster_stability_resamples=2,
+        ),
+    )
+
+    feature_part = Path(result["part_files_by_table"]["baseline_strategy_features"][0])
+    feature_rows = pq.ParquetFile(feature_part).read().to_pylist()
+    assert len(feature_rows) == 6
+    assert all(row["sample_features_available"] is True for row in feature_rows)
+    assert result["row_counts_by_table"]["baseline_exploration_episodes"] == 12
+
+
+def test_workflow_rejects_rehashed_unexpected_sample_column(tmp_path: Path) -> None:
+    source_root = tmp_path / "source_export"
+    output_root = tmp_path / "derived_analytics"
+    run_id = "tampered_samples"
+    _write_summary_only_export(source_root, run_id, include_samples=True)
+    manifest_path = (
+        source_root / "v1" / "manifests" / f"export_run_id={run_id}.json"
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    relative_part = payload["part_files_by_table"][BASELINE_KINEMATIC_SAMPLES_TABLE][0]
+    part = source_root / relative_part
+    table = pq.ParquetFile(part).read()
+    table = table.append_column(
+        "future_source_metric",
+        pa.array([999.0] * table.num_rows, type=pa.float64()),
+    )
+    pq.write_table(table, part)
+    entry = payload["publication"]["parts_by_table"][
+        BASELINE_KINEMATIC_SAMPLES_TABLE
+    ][0]
+    entry["sha256"] = sha256_file(part)
+    entry["size_bytes"] = part.stat().st_size
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ExportValidationError, match="physical Arrow fields"):
+        run_strategy_analytics(
+            source_export_root=source_root,
+            source_export_run_id=run_id,
+            output_root=output_root,
+            analysis_run_id="strategy_rejects_sample_tampering",
         )
 
 
