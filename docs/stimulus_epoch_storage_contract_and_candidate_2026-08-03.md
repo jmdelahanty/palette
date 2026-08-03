@@ -1,7 +1,8 @@
 # Stimulus-Epoch Exact Storage Contract and Candidate — 2026-08-03
 
-Status: implemented selector-ineligible candidate contract and strict maintained
-v2 consumer; not a production writer, selector, registry, or profile promotion.
+Status: implemented selector-ineligible candidate contract, strict maintained
+v2 consumer, and read-only source/candidate benchmark harness; not a production
+writer, selector, registry, or profile promotion.
 
 ## Census and authority boundary
 
@@ -151,6 +152,75 @@ The candidate records `storage_candidate_profile_promoted=false` and
 `stage_selector_eligible=false`. It is not registry authority, production
 selection evidence, or permission to change the v1 writer.
 
+## Read-only source/candidate benchmark contract
+
+`fisheye.diagnostics.benchmark_stimulus_epoch_reads` benchmarks exactly one
+explicit v1 source and its explicitly named selector-ineligible v2 candidate.
+It never resolves `latest`, performs compatibility probing, opens an archive in
+write mode, or treats a completed benchmark as profile-promotion evidence.
+
+Preflight executes both family validators before creating the output
+directory. The source must be an exact complete v1 run with canonical lineage
+and cannot be explicitly selector-ineligible. The candidate is opened only
+through the strict integrated v2 consumer. Its complete logical manifest,
+candidate lineage, storage-plan receipt, run manifest, lifecycle booleans, and
+persisted direct/consolidated declaration tree must validate. The candidate's
+persisted source name, source path, source lineage, and complete source-content
+digest must bind the exact selected v1 source.
+
+The versioned workload records:
+
+- the absolute archive path and both explicit immutable child names;
+- the deterministic eager access order for all twelve arrays;
+- exact dtype, shape, decoded-byte digest, logical-table digest, and decoded
+  segment digest expectations;
+- the complete canonical source and candidate lineage payloads, their hashes,
+  and their canonical payload digests;
+- the complete executable candidate storage receipt and complete scientific
+  run manifest, plus their recomputed payload digests;
+- the persisted candidate materializer commit/dirty identity, cross-bound to
+  the candidate lineage's code document;
+- exact direct/consolidated metadata-equivalence receipts for both runs; and
+- explicit null physical request/transfer telemetry when no external file or
+  HTTP tracer is active.
+
+Each repetition uses two new Python processes. Source/candidate order rotates
+deterministically, and the matrix rejects reused child PIDs or a child PID equal
+to the controller. Every child performs its role-specific strict validation,
+then eagerly reads and hashes all twelve complete arrays. The controller binds
+each result back to the workload, requires complete source/candidate decoded
+equality, and recomputes medians for validation, full-scan, total wall/CPU time,
+peak process RSS, object counts, and apparent/allocated bytes.
+
+A read-only guard hashes every direct `zarr.json` in the root, `analysis`, run
+parent, and both complete selected run subtrees before and after the matrix. A
+changed size, modification time, content hash, path inventory, or tree digest
+fails the run. Evidence is strict finite JSON with closed field sets and
+canonical payload digests. Offline validation reconstructs the full byte plan
+from the embedded profile, declarations, dimensions, and observed array facts.
+It cross-binds the run manifest's source identity, source lineage, logical
+content, storage receipt, child-group declaration, and exact false publication
+state. The embedded candidate lineage is additionally bound to those same
+source identities and fingerprints, protocol parameters, dimensions, profile,
+method, and persisted materializer code identity. Rehashing only edited outer
+envelopes and matching bare digest fields therefore does not permit fabricated
+transfer counts, receipt rebinding, workload/access drift, PID reuse, guard
+drift, or profile-promotion authorization.
+
+The JSON evidence is digest-bound but not cryptographically signed. A party
+that replaces every embedded scientific document and every matching digest can
+create a different internally consistent document. Long-lived or exchanged
+evidence must therefore publish the top-level matrix digest in an external
+immutable manifest (or add a signature) if authenticity against total evidence
+replacement is required.
+
+Benchmark evidence must live in a new path containing `benchmark` and outside
+the source archive. The hard-coded evidence boundary states that it cannot
+authorize writer, selector, registry, or physical-profile changes. A complete
+five-repetition matrix is therefore read evidence only; it still requires a
+representative archive execution, genuine physical-I/O tracing, real consumer
+review, and a separate versioned promotion decision.
+
 ## Implementation checklist
 
 - [x] Census the current v1 producer and permissive consumers.
@@ -174,6 +244,19 @@ selection evidence, or permission to change the v1 writer.
   failure-visibility tests, plus recomputed-digest manifest/lineage probes.
 - [x] Add a strict v2 consumer adapter; keep current v1 readers explicitly
   legacy-compatible.
+- [x] Add a deterministic explicit-source/candidate workload covering all
+  twelve complete arrays and decoded segments.
+- [x] Add rotated fresh-process trials with strict workload, receipt, manifest,
+  lineage, and metadata bindings.
+- [x] Embed and executably reconstruct the complete source/candidate lineage
+  payloads, storage-plan receipt, and scientific run manifest; reject
+  coordinated bare digest rebinding after every outer envelope is rehashed.
+- [x] Record wall/CPU time, peak RSS, object counts, apparent/allocated bytes,
+  and explicit null request/transfer telemetry when tracing is absent.
+- [x] Add a complete direct-metadata read-only guard and hard nonpromotion
+  boundary.
+- [x] Add adversarial workload/trial/matrix, receipt, metadata-staleness,
+  decoded-mismatch, PID-reuse, unsafe-path, and rehashed-evidence tests.
 - [ ] Run a real archive canary and record read/open/object-count telemetry.
 - [ ] Obtain consumer review before considering writer adoption.
 - [ ] If adoption is approved, make the scientific writer emit v2 directly on
@@ -187,7 +270,8 @@ The implementation is covered by:
 
 - `tests/unit/fisheye/test_stimulus_epoch_schema.py`;
 - `tests/unit/fisheye/test_stimulus_epoch_candidate_materializer.py`;
-- `tests/unit/fisheye/test_stimulus_epoch_consumer.py`.
+- `tests/unit/fisheye/test_stimulus_epoch_consumer.py`;
+- `tests/unit/fisheye/test_benchmark_stimulus_epoch_reads.py`.
 
 The suite includes a real post-consolidation injected failure and verifies that
 the resulting public child is failed and selector-ineligible in both direct and
@@ -196,3 +280,7 @@ consumer suite additionally covers explicit legacy opt-in, stale consolidated
 metadata, missing/unexpected arrays, wrong dtype/rank, lifecycle violations,
 rehashed manifest tampering, receipt-digest tampering, and terminal v2 failure
 without legacy fallback.
+The benchmark suite additionally executes child processes and covers exact
+source/candidate equality, rotated order, complete persisted metadata guards,
+explicit unavailable physical-I/O telemetry, strict evidence rebinding, and
+the nonpromotion boundary.
