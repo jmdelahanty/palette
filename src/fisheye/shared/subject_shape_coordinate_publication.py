@@ -156,6 +156,32 @@ SUBJECT_SHAPE_SCALAR_SURFACE_INVENTORY_SCHEMA_ID = (
 SUBJECT_SHAPE_PUBLICATION_POLICY = (
     "immutable_complete_ineligible_validate_selectors_then_eligibility_v1"
 )
+CANONICAL_SUBJECT_SHAPE_PROFILE_ID = "analysis.subject_shape.full_anatomy_v4"
+CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID = "analysis.subject_shape_runs"
+CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION = 4
+CANONICAL_SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v11"
+CANONICAL_SUBJECT_SHAPE_METHOD_VERSION = 11
+CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER = (
+    "subject_body",
+    "swim_bladder",
+    "eye_left",
+    "eye_right",
+)
+CANONICAL_SUBJECT_SHAPE_RELATION_ORDER = (
+    "eye_pair",
+    "swim_bladder_to_body",
+    "eyes_to_body",
+)
+CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS = (
+    "source_crop_row_ids",
+    "instance_key",
+)
+CANONICAL_SUBJECT_SHAPE_ROW_LINEAGE_MISSING = (
+    "frame_indices",
+    "detection_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
+)
 BODY_FRAME_IMPLEMENTATION_VERSION = "subject_shape_from_refined_masks_v11"
 
 _OWNER_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -477,8 +503,11 @@ def _create_array(group: Any, name: str, values: np.ndarray) -> Any:
 
 def _component_schema_record(component_names: Sequence[str]) -> dict[str, Any]:
     names = [str(value) for value in component_names]
-    if not names or len(names) != len(set(names)):
-        _fail("Subject-shape component schema must contain unique labels.")
+    if tuple(names) != CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER:
+        _fail(
+            "Maintained subject-shape component order differs from the exact "
+            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile."
+        )
     return {
         "schema_id": SUBJECT_SHAPE_COMPONENT_SCHEMA_ID,
         "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
@@ -745,6 +774,128 @@ _SOURCE_REVISION_ATTRS = frozenset(
     }
 )
 
+
+def subject_shape_maintained_profile_record() -> dict[str, Any]:
+    """Return the one closed logical bundle accepted by maintained readers."""
+
+    return {
+        "profile_id": CANONICAL_SUBJECT_SHAPE_PROFILE_ID,
+        "run_schema_id": CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID,
+        "run_schema_version": CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION,
+        "method": CANONICAL_SUBJECT_SHAPE_METHOD,
+        "method_version": CANONICAL_SUBJECT_SHAPE_METHOD_VERSION,
+        "component_order": list(CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER),
+        "relation_order": list(CANONICAL_SUBJECT_SHAPE_RELATION_ORDER),
+        "row_index_arrays": list(CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS),
+        "row_lineage_copied": list(CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS),
+        "row_lineage_missing": list(CANONICAL_SUBJECT_SHAPE_ROW_LINEAGE_MISSING),
+        "historical_variant_policy": "explicit_historical_inspection_only",
+        "closed_component_inventory": True,
+        "closed_relation_inventory": True,
+        "closed_row_index_inventory": True,
+    }
+
+
+def _require_subject_shape_maintained_profile(run: Any) -> dict[str, Any]:
+    profile = subject_shape_maintained_profile_record()
+    if (
+        run.attrs.get("schema_id") != CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID
+        or run.attrs.get("schema_version")
+        != CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION
+        or run.attrs.get("method") != CANONICAL_SUBJECT_SHAPE_METHOD
+        or run.attrs.get("method_version")
+        != CANONICAL_SUBJECT_SHAPE_METHOD_VERSION
+        or run.attrs.get("row_axis") != "refined_subject_mask_rows"
+    ):
+        _fail(
+            "Maintained subject-shape run identity differs from the exact "
+            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile."
+        )
+    component_names = tuple(
+        str(value) for value in (run.attrs.get("component_names") or ())
+    )
+    relation_names = tuple(
+        str(value) for value in (run.attrs.get("relation_names") or ())
+    )
+    if component_names != CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER:
+        _fail(
+            "Maintained subject-shape component order differs from the exact "
+            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile: "
+            f"expected={CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER!r}, "
+            f"observed={component_names!r}."
+        )
+    if relation_names != CANONICAL_SUBJECT_SHAPE_RELATION_ORDER:
+        _fail(
+            "Maintained subject-shape relation order differs from the exact "
+            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile: "
+            f"expected={CANONICAL_SUBJECT_SHAPE_RELATION_ORDER!r}, "
+            f"observed={relation_names!r}."
+        )
+    row_index = run.get("row_index")
+    observed_row_arrays = (
+        frozenset(str(value) for value in row_index.array_keys())
+        if row_index is not None
+        else frozenset()
+    )
+    expected_row_arrays = frozenset(CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS)
+    if observed_row_arrays != expected_row_arrays:
+        _fail(
+            "Maintained subject-shape row_index bundle differs from the exact "
+            f"{CANONICAL_SUBJECT_SHAPE_PROFILE_ID!r} profile: "
+            f"expected={sorted(expected_row_arrays)!r}, "
+            f"observed={sorted(observed_row_arrays)!r}."
+        )
+    row_specs = {
+        "source_crop_row_ids": np.dtype("int64"),
+        "instance_key": np.dtype("uint64"),
+    }
+    row_count: int | None = None
+    for name, dtype in row_specs.items():
+        node = row_index[name]
+        shape = tuple(int(value) for value in node.shape)
+        if len(shape) != 1 or np.dtype(node.dtype) != dtype:
+            _fail(
+                f"Maintained subject-shape row_index/{name} requires exact "
+                f"rank-1 {dtype.name}; got shape={shape!r}, dtype={node.dtype!r}."
+            )
+        if row_count is None:
+            row_count = shape[0]
+        elif shape[0] != row_count:
+            _fail("Maintained subject-shape row_index arrays are not row aligned.")
+    if tuple(run.attrs.get("row_lineage_copied") or ()) != (
+        CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS
+    ):
+        _fail("Maintained subject-shape row_lineage_copied declaration is not exact.")
+    if tuple(run.attrs.get("row_lineage_missing") or ()) != (
+        CANONICAL_SUBJECT_SHAPE_ROW_LINEAGE_MISSING
+    ):
+        _fail("Maintained subject-shape row_lineage_missing declaration is not exact.")
+    source_revisions = run.get("source_refined_subject_masks")
+    source_component_names = (
+        tuple(
+            str(value)
+            for value in (source_revisions.attrs.get("component_names") or ())
+        )
+        if source_revisions is not None
+        else ()
+    )
+    if source_component_names != CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER:
+        _fail(
+            "Maintained subject-shape source-revision component order is not exact."
+        )
+    revision = source_revisions["row_revision"]
+    revision_available = source_revisions["row_revision_available"]
+    if (
+        tuple(int(value) for value in revision.shape)
+        != (row_count, len(CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER))
+        or np.dtype(revision.dtype) != np.dtype("int64")
+        or tuple(int(value) for value in revision_available.shape)
+        != (len(CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER),)
+        or np.dtype(revision_available.dtype) != np.dtype("bool")
+    ):
+        _fail("Maintained subject-shape source-revision arrays are not exact.")
+    return profile
+
 _RUN_OPERATIONAL_ATTRS = frozenset(
     {
         "stage_selector_eligible",
@@ -860,6 +1011,7 @@ def build_subject_shape_scientific_configuration_record(run: Any) -> dict[str, A
     copying arbitrary live attrs into provenance.
     """
 
+    maintained_profile = _require_subject_shape_maintained_profile(run)
     run_attrs = _require_selected_attrs(
         run,
         _SCIENTIFIC_RUN_ATTRS,
@@ -909,6 +1061,7 @@ def build_subject_shape_scientific_configuration_record(run: Any) -> dict[str, A
     return {
         "schema_id": SUBJECT_SHAPE_SCIENTIFIC_CONFIGURATION_SCHEMA_ID,
         "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
+        "maintained_profile": maintained_profile,
         "run_ref": f"/{canonical_node_path(run)}",
         "run_attrs": run_attrs,
         "group_attrs": groups,
@@ -1222,6 +1375,7 @@ def build_subject_shape_schema_inventory_record(
     the schema merely because it exists.
     """
 
+    maintained_profile = _require_subject_shape_maintained_profile(run)
     group_paths = _expected_subject_shape_group_paths(run, phase=phase)
     array_paths = _expected_subject_shape_array_paths(run, phase=phase)
     observed_groups = tuple(sorted(_iter_group_paths(run)))
@@ -1322,6 +1476,7 @@ def build_subject_shape_schema_inventory_record(
     return {
         "schema_id": SUBJECT_SHAPE_SCHEMA_INVENTORY_SCHEMA_ID,
         "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
+        "maintained_profile": maintained_profile,
         "phase": phase,
         "run_ref": f"/{canonical_node_path(run)}",
         "groups": list(group_paths),
@@ -1388,6 +1543,8 @@ def _validate_retained_unbound_schema(run: Any, record: Mapping[str, Any]) -> No
         not isinstance(inventory, Mapping)
         or inventory.get("schema_id") != SUBJECT_SHAPE_SCHEMA_INVENTORY_SCHEMA_ID
         or inventory.get("schema_version") != SUBJECT_SHAPE_SCHEMA_VERSION
+        or inventory.get("maintained_profile")
+        != subject_shape_maintained_profile_record()
         or inventory.get("phase") != "unbound"
         or inventory.get("run_ref") != expected_run_ref
         or inventory.get("groups") != list(expected_groups)
@@ -3006,9 +3163,8 @@ def _load_subject_shape_publication(
         != SUBJECT_SHAPE_BOUND_CANONICAL_STATUS
     ):
         _fail("Subject-shape run lacks exact bound canonical coordinate status.")
+    _require_subject_shape_maintained_profile(run)
     component_names = tuple(str(value) for value in (run.attrs.get("component_names") or ()))
-    if not component_names or len(component_names) != len(set(component_names)):
-        _fail("Subject-shape component inventory is invalid.")
     source = load_exact_subject_shape_refined_source(root, run)
     identity = load_bound_row_identity_contract(run, run["instance_key"])
     if not np.array_equal(
@@ -3022,6 +3178,15 @@ def _load_subject_shape_publication(
             np.asarray(source.context._run_group[name][:]),
         ):
             _fail(f"Subject-shape {name} differs from selected refined rows.")
+    for name in CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS:
+        if not np.array_equal(
+            np.asarray(run[f"row_index/{name}"][:]),
+            np.asarray(run[name][:]),
+        ):
+            _fail(
+                f"Subject-shape row_index/{name} differs from its canonical "
+                "direct row-identity array."
+            )
     temporal = load_subject_shape_temporal_authority(run, source, identity)
     schema_node = run["coordinate_records/component_schema"]
     component_schema = bind_persisted_coordinate_record(
@@ -4024,6 +4189,15 @@ def rollback_deferred_subject_shape_coordinate_activation(
 
 
 __all__ = [
+    "CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER",
+    "CANONICAL_SUBJECT_SHAPE_METHOD",
+    "CANONICAL_SUBJECT_SHAPE_METHOD_VERSION",
+    "CANONICAL_SUBJECT_SHAPE_PROFILE_ID",
+    "CANONICAL_SUBJECT_SHAPE_RELATION_ORDER",
+    "CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS",
+    "CANONICAL_SUBJECT_SHAPE_ROW_LINEAGE_MISSING",
+    "CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID",
+    "CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION",
     "SUBJECT_SHAPE_COMPONENT_SCHEMA_ATTR",
     "SUBJECT_SHAPE_BOUND_CANONICAL_STATUS",
     "SUBJECT_SHAPE_COMPUTING_UNBOUND_STATUS",
@@ -4065,6 +4239,7 @@ __all__ = [
     "rollback_subject_shape_activation",
     "rollback_deferred_subject_shape_coordinate_activation",
     "selector_snapshot",
+    "subject_shape_maintained_profile_record",
     "stamp_subject_shape_derivation",
     "stamp_subject_shape_temporal_authority",
     "transform_subject_shape_geometry_to_source_camera",

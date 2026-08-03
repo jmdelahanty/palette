@@ -370,6 +370,150 @@ def canonical_refined_archive(
     return root, root["refined_subject_masks_runs/r1"]
 
 
+@pytest.fixture(scope="session")
+def canonical_subject_shape_profile_template(
+    tmp_path_factory: pytest.TempPathFactory,
+    canonical_refined_template: Path,
+) -> Path:
+    destination = tmp_path_factory.mktemp("subject-shape-profile") / "canonical.zarr"
+    shutil.copytree(canonical_refined_template, destination)
+    root = zarr.open_group(str(destination), mode="r+", use_consolidated=False)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _patch_provenance(monkeypatch)
+        subject_shape_writer.write_subject_shape_run_group(
+            root,
+            refined_run="r1",
+            run_name="shape_profile_attack",
+            chunk_size=2,
+        )
+    return destination
+
+
+@pytest.fixture
+def canonical_subject_shape_profile_root(
+    tmp_path: Path,
+    canonical_subject_shape_profile_template: Path,
+) -> zarr.Group:
+    destination = tmp_path / "canonical-subject-shape.zarr"
+    shutil.copytree(canonical_subject_shape_profile_template, destination)
+    return zarr.open_group(str(destination), mode="r+", use_consolidated=False)
+
+
+def _restamp_tampered_subject_shape_manifest(
+    run: Any,
+    *,
+    profile_field: str,
+    value: Any,
+    array_paths: tuple[str, ...] = (),
+) -> str:
+    """Recompute the outer digest so exact-profile tests are not stale-hash tests."""
+
+    manifest = copy.deepcopy(run.attrs[module.SUBJECT_SHAPE_MANIFEST_ATTR])
+    manifest["schema_inventory"]["maintained_profile"][profile_field] = value
+    for path in array_paths:
+        manifest["arrays"][path] = module._array_record(path, run[path])
+        manifest["schema_inventory"]["arrays"][path] = {
+            "role": "compatibility_row_lineage"
+        }
+    digest = module._canonical_sha256(manifest)
+    run.attrs[module.SUBJECT_SHAPE_MANIFEST_ATTR] = manifest
+    run.attrs[f"{module.SUBJECT_SHAPE_MANIFEST_ATTR}_sha256"] = digest
+    run.attrs["publication_manifest_sha256"] = digest
+    return digest
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_error"),
+    (
+        ("component_reorder", "component order"),
+        ("relation_reduction", "relation order"),
+        ("optional_lineage", "row_index bundle"),
+        ("row_index_dtype", "rank-1 uint64"),
+        ("row_index_value", "canonical direct row-identity array"),
+        ("schema_version", "run identity"),
+    ),
+)
+def test_maintained_subject_shape_profile_rejects_self_declared_variants_with_recomputed_digest(
+    canonical_subject_shape_profile_root: zarr.Group,
+    variant: str,
+    expected_error: str,
+) -> None:
+    root = canonical_subject_shape_profile_root
+    run = root["analysis/subject_shape_runs/shape_profile_attack"]
+
+    if variant == "component_reorder":
+        reordered = ["swim_bladder", "subject_body", "eye_left", "eye_right"]
+        run.attrs["component_names"] = reordered
+        digest = _restamp_tampered_subject_shape_manifest(
+            run,
+            profile_field="component_order",
+            value=reordered,
+        )
+    elif variant == "relation_reduction":
+        reduced = ["eye_pair", "swim_bladder_to_body"]
+        run.attrs["relation_names"] = reduced
+        digest = _restamp_tampered_subject_shape_manifest(
+            run,
+            profile_field="relation_order",
+            value=reduced,
+        )
+    elif variant == "optional_lineage":
+        frame_indices = run["source_acquisition_frame_index"]
+        run["row_index"].create_array(
+            "frame_indices",
+            data=np.asarray(frame_indices[:], dtype=np.int32),
+        )
+        copied = ["frame_indices", "source_crop_row_ids", "instance_key"]
+        run.attrs["row_lineage_copied"] = copied
+        run.attrs["row_lineage_missing"] = [
+            "detection_indices",
+            "source_refined_row_ids",
+            "source_detect_row_index",
+        ]
+        digest = _restamp_tampered_subject_shape_manifest(
+            run,
+            profile_field="row_index_arrays",
+            value=copied,
+            array_paths=("row_index/frame_indices",),
+        )
+    elif variant == "row_index_dtype":
+        row_index = run["row_index"]
+        values = np.asarray(row_index["instance_key"][:], dtype=np.int64)
+        del row_index["instance_key"]
+        row_index.create_array("instance_key", data=values)
+        digest = _restamp_tampered_subject_shape_manifest(
+            run,
+            profile_field="row_index_arrays",
+            value=list(module.CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS),
+            array_paths=("row_index/instance_key",),
+        )
+    elif variant == "row_index_value":
+        row_index = run["row_index"]
+        values = np.asarray(row_index["instance_key"][:], dtype=np.uint64)
+        values[0] = values[0] + np.uint64(1)
+        row_index["instance_key"][:] = values
+        digest = _restamp_tampered_subject_shape_manifest(
+            run,
+            profile_field="row_index_arrays",
+            value=list(module.CANONICAL_SUBJECT_SHAPE_ROW_INDEX_ARRAYS),
+            array_paths=("row_index/instance_key",),
+        )
+    else:
+        run.attrs["schema_version"] = 999
+        digest = _restamp_tampered_subject_shape_manifest(
+            run,
+            profile_field="run_schema_version",
+            value=999,
+        )
+
+    assert run.attrs["publication_manifest_sha256"] == digest
+    with pytest.raises(SubjectShapeCoordinatePublicationError, match=expected_error):
+        load_persisted_subject_shape_coordinate_publication(
+            root,
+            "analysis/subject_shape_runs/shape_profile_attack",
+        )
+
+
 def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -505,6 +649,12 @@ def test_subject_shape_writer_publishes_exact_source_camera_geometry_and_authori
         "component_qc_inventory"
     ]["record_sha256"] == loaded.source.component_qc_inventory.record_sha256
     assert loaded.scientific_configuration.record["run_attrs"]["method_version"] == 11
+    assert loaded.scientific_configuration.record["maintained_profile"] == (
+        module.subject_shape_maintained_profile_record()
+    )
+    assert loaded.manifest.record["schema_inventory"]["maintained_profile"] == (
+        module.subject_shape_maintained_profile_record()
+    )
     assert loaded.heading_semantics.record["formula"] == (
         "degrees(atan2(-forward_y, forward_x))"
     )

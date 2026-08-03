@@ -72,6 +72,12 @@ from ..shared.subject_mask_chunks import (
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.subject_shape_coordinate_publication import (
+    CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER,
+    CANONICAL_SUBJECT_SHAPE_METHOD,
+    CANONICAL_SUBJECT_SHAPE_METHOD_VERSION,
+    CANONICAL_SUBJECT_SHAPE_RELATION_ORDER,
+    CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID,
+    CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION,
     SUBJECT_SHAPE_BOUND_CANONICAL_STATUS,
     SUBJECT_SHAPE_COMPUTING_UNBOUND_STATUS,
     SUBJECT_SHAPE_COORDINATE_CONTRACT,
@@ -105,13 +111,14 @@ from .subject_shape_spline import (
     tail_sample_positions,
 )
 
-SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
-SUBJECT_SHAPE_SCHEMA_VERSION = 4
+SUBJECT_SHAPE_SCHEMA_ID = CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID
+SUBJECT_SHAPE_SCHEMA_VERSION = CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION
 SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID = "analysis.subject_shape.source_refined_subject_masks_v1"
-SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v11"
-SUBJECT_SHAPE_METHOD_VERSION = 11
+SUBJECT_SHAPE_METHOD = CANONICAL_SUBJECT_SHAPE_METHOD
+SUBJECT_SHAPE_METHOD_VERSION = CANONICAL_SUBJECT_SHAPE_METHOD_VERSION
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
-COMPONENT_ORDER = ("subject_body", "swim_bladder", "eye_left", "eye_right")
+COMPONENT_ORDER = CANONICAL_SUBJECT_SHAPE_COMPONENT_ORDER
+RELATION_ORDER = CANONICAL_SUBJECT_SHAPE_RELATION_ORDER
 ELLIPSE_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
 EYE_COMPONENTS = ("eye_left", "eye_right")
 BODY_FRAME_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
@@ -323,7 +330,17 @@ def _resolve_components_from_refined_tables(
     refined_tables: RefinedSubjectMasksRunTables,
     components: Optional[Sequence[str]],
 ) -> tuple[tuple[str, int], ...]:
-    requested = [str(value) for value in components] if components else [name for name in COMPONENT_ORDER if name in refined_tables.label_to_index]
+    requested = (
+        [str(value) for value in components]
+        if components
+        else [name for name in COMPONENT_ORDER if name in refined_tables.label_to_index]
+    )
+    if tuple(requested) != COMPONENT_ORDER:
+        raise ValueError(
+            "Canonical subject-shape publication requires the exact component "
+            f"order {COMPONENT_ORDER!r}; got {tuple(requested)!r}. Use explicit "
+            "historical inspection for older subset or reordered variants."
+        )
     resolved = refined_tables.resolve_components(requested)
     ordered = tuple((name, idx) for name, idx in resolved if name in requested)
     if not ordered:
@@ -855,7 +872,13 @@ def _prepare_relation_groups(run_group: zarr.Group, components: Sequence[str], *
                 chunks=chunks_1d,
                 fill_value=np.nan,
             )
-    return tuple(relation_names)
+    resolved_relations = tuple(relation_names)
+    if resolved_relations != RELATION_ORDER:
+        raise ValueError(
+            "Canonical subject-shape relation bundle differs from the exact "
+            f"maintained order {RELATION_ORDER!r}; got {resolved_relations!r}."
+        )
+    return resolved_relations
 
 
 def _read_refined_component_row_revision(
@@ -2907,6 +2930,15 @@ def bind_staged_subject_shape_run(
         raise ValueError(
             "Subject-shape unbound receipt changed between validation and consumption."
         )
+
+    # The unbound receipt hashes ROI-local numeric arrays that binding is about
+    # to transform in place. Close that immutable-input proof phase before the
+    # first final-path mutation, then start a fresh phase for the canonical
+    # source-camera payload. Otherwise the proof cache correctly reports the
+    # intentional transform as input drift at completion time.
+    finish_proof_verification()
+    restart_proof_verification()
+
     records = final_run_group.require_group("coordinate_records")
     consumed_node = records.require_group("consumed_unbound_stage")
     consumed = stamp_and_bind_persisted_coordinate_record(

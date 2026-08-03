@@ -220,6 +220,12 @@ def build_subject_shape_materialization_plan(
     )
     if not selected:
         raise ValueError("No known subject-shape components are available in the refined run.")
+    if selected != COMPONENT_ORDER:
+        raise ValueError(
+            "Canonical subject-shape materialization requires the exact component "
+            f"order {COMPONENT_ORDER!r}; got {selected!r}. Historical component "
+            "variants are inspection/migration inputs, not maintained publications."
+        )
     missing_required = sorted(set(COMPONENT_ORDER) - set(selected))
     if missing_required:
         raise ValueError(

@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 4
 status: active
-last_verified: 2026-07-19
+last_verified: 2026-08-03
 -->
 
 Purpose: define the downstream deterministic analysis layer for biological
@@ -144,6 +144,34 @@ New subject-shape runs publish one strict coordinate framework; coordinate
 meaning is never inferred from a path suffix, array shape, value range, or
 historical helper name.
 
+### Maintained full-anatomy profile
+
+Schema-v4 maintained publication has one closed logical bundle identified as
+`analysis.subject_shape.full_anatomy_v4`. These sequences are semantic and
+their order is exact:
+
+```text
+component_names = [subject_body, swim_bladder, eye_left, eye_right]
+relation_names  = [eye_pair, swim_bladder_to_body, eyes_to_body]
+row_index       = [source_crop_row_ids, instance_key]
+```
+
+The component groups contain the exact component-specific arrays implemented
+by method v11, all three relation groups are required, `body_frame` is
+required, and `source_refined_subject_masks/component_names` has the same exact
+component order. The closed schema inventory records this maintained profile;
+a reduced or reordered known bundle is not another valid v4 profile. Adding
+legacy convenience lineage such as `frame_indices`, `detection_indices`,
+`source_refined_row_ids`, or `source_detect_row_index` under `row_index` also
+makes the run noncanonical, even if a tool recomputes its manifest digest.
+
+Older subset, reordered, or lineage-expanded archives remain readable only
+through the explicitly nonauthoritative `historical_inspection=True` policy.
+That policy is for audit and migration and returns no coordinate-publication
+authority. New writers and normal scientific readers must never negotiate a
+profile from mutable `component_names`, `relation_names`, or observed child
+arrays.
+
 - The selected refined-mask run and subject-shape output must be in the same
   archive. Cross-archive publication and overwrite-in-place are rejected.
 - `instance_key`, `source_crop_row_ids`, and
@@ -247,6 +275,13 @@ the explicitly non-scientific `cluster_output_staging` operational receipt,
 which is outside the immutable scientific manifest. Any post-rename failure,
 including an operational-receipt failure, removes only the UUID-owned target
 and restores the UUID-owned selector epoch.
+
+The unbound ROI-local payload and the bound source-camera payload are separate
+proof phases. Palette closes and freshly reverifies every unbound input proof
+before the first intentional in-place coordinate transformation, then starts a
+new proof phase for the bound arrays. A verifier must not retain an ROI-local
+payload snapshot across that transform and later misclassify the intentional
+binding operation as source drift.
 
 Subject-shape activation owns an exact structured `latest_pending` receipt and
 compares the complete selector/lifecycle epoch: selectors, publication
@@ -363,9 +398,8 @@ analysis/subject_shape_runs/
     coordinate_records/            exact component/body-frame authorities
       scalar_surface_inventory/    closed typed scalar/profile inventory
     row_index/
-      frame_indices                (N,)
-      detection_indices            (N,) optional
-      source_refined_row_ids        (N,) optional
+      source_crop_row_ids           (N,) exact unbound-stage lineage copy
+      instance_key                  (N,) exact unbound-stage identity copy
     source_refined_subject_masks/
       attrs:
         schema_id                   "analysis.subject_shape.source_refined_subject_masks_v1"
@@ -375,7 +409,7 @@ analysis/subject_shape_runs/
         row_revision_semantics      historical compatibility description
       row_revision                  (N, C) legacy compatibility snapshot
       row_revision_available        (C,) false for future-normal canonical sources
-    body_frame/                     optional shared fish anatomical frame
+    body_frame/                     required shared fish anatomical frame
       origin_xy                     (N, 2)
       forward_axis_xy               (N, 2)
       left_axis_xy                  (N, 2)
@@ -609,14 +643,23 @@ source_crop_row_ids
 source_acquisition_frame_index
 ```
 
-It may additionally preserve historical or convenience lineage under
-`row_index/` when available:
+Historical archives may contain additional convenience lineage under
+`row_index/`:
 
 ```text
 row_index/frame_indices
 row_index/detection_indices
 row_index/source_refined_row_ids
 row_index/source_detect_row_index
+```
+
+Those additional arrays are forbidden in the maintained full-anatomy v4
+profile and are visible only through explicit historical inspection. The
+maintained `row_index/` bundle is exactly:
+
+```text
+row_index/source_crop_row_ids
+row_index/instance_key
 ```
 
 Those arrays answer lineage questions, not fast viewer lookup questions. For

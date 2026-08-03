@@ -215,6 +215,25 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert run.attrs["centerline_snout_check_method"] == "head_endpoint_to_snout_distance_v1"
     assert run.attrs["source_refined_subject_masks_run"] == "r1"
     assert run.attrs["component_names"] == ["subject_body", "swim_bladder", "eye_left", "eye_right"]
+    assert run.attrs["relation_names"] == [
+        "eye_pair",
+        "swim_bladder_to_body",
+        "eyes_to_body",
+    ]
+    assert set(run["row_index"].array_keys()) == {
+        "source_crop_row_ids",
+        "instance_key",
+    }
+    assert run.attrs["row_lineage_copied"] == [
+        "source_crop_row_ids",
+        "instance_key",
+    ]
+    assert run.attrs["row_lineage_missing"] == [
+        "frame_indices",
+        "detection_indices",
+        "source_refined_row_ids",
+        "source_detect_row_index",
+    ]
     np.testing.assert_array_equal(run["instance_key"][:], root["refined_subject_masks_runs/r1/instance_key"][:])
     np.testing.assert_array_equal(
         run["source_acquisition_frame_index"][:],
@@ -344,6 +363,40 @@ def test_direct_canonical_writer_rejects_separate_root(
             execution_backend="dask_worker_chunks",
             scheduler="single-threaded",
             centerline_crop_to_foreground=True,
+            native_threads=1,
+        )
+
+
+def test_canonical_subject_shape_writer_and_materializer_reject_reordered_components(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    canonical_refined_root: zarr.Group,
+) -> None:
+    _patch_provenance(monkeypatch)
+    reordered = ("swim_bladder", "subject_body", "eye_left", "eye_right")
+    with pytest.raises(ValueError, match="exact component order"):
+        mod.write_subject_shape_run_group(
+            canonical_refined_root,
+            refined_run="r1",
+            run_name="shape_reordered",
+            components=reordered,
+            chunk_size=2,
+        )
+    assert canonical_refined_root.get("analysis/subject_shape_runs") is None
+
+    with pytest.raises(ValueError, match="exact component order"):
+        materializer.build_subject_shape_materialization_plan(
+            tmp_path / "canonical.zarr",
+            scratch_root=tmp_path / "scratch-reordered",
+            refined_run="r1",
+            run_name="shape_reordered",
+            components=reordered,
+            block_rows=2,
+            output_shard_rows=4,
+            execution_backend="serial_driver",
+            scheduler="single-threaded",
+            num_workers=1,
+            shard_copy_workers=1,
             native_threads=1,
         )
 
