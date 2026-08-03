@@ -21,6 +21,7 @@ from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_intent import StoragePlan, WriteMode
 from fisheye.shared.zarr.storage_planner import plan_storage
 from fisheye.shared.zarr.storage_profiles import StorageProfile
+from fisheye.shared.zarr.storage_profiles import storage_profile_from_manifest
 
 
 ANALYSIS_STORAGE_PLAN_SCHEMA_ID = "palette.analysis_storage_plan_receipt"
@@ -583,6 +584,92 @@ def plan_analysis_storage(
     )
 
 
+def analysis_storage_plan_receipt_from_manifest(
+    value: Mapping[str, Any],
+) -> AnalysisStoragePlanReceipt:
+    """Parse and executably reconstruct one exact persisted plan receipt.
+
+    Replanning from declarations, observed facts, dimensions, and the embedded
+    profile avoids treating self-consistent but invented chunk/shard metadata
+    as authoritative after an attacker recomputes the outer digest.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_id",
+        "schema_version",
+        "payload",
+        "payload_digest",
+    }:
+        raise ValueError("Analysis storage receipt has an unexpected field set.")
+    if (
+        value.get("schema_id") != ANALYSIS_STORAGE_PLAN_SCHEMA_ID
+        or value.get("schema_version") != ANALYSIS_STORAGE_PLAN_SCHEMA_VERSION
+    ):
+        raise ValueError("Analysis storage receipt schema identity mismatch.")
+    payload = value.get("payload")
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "storage_profile",
+        "dimensions",
+        "object_estimate",
+        "arrays",
+    }:
+        raise ValueError("Analysis storage receipt payload is not exact.")
+    if value.get("payload_digest") != canonical_json_sha256(payload):
+        raise ValueError("Analysis storage receipt payload digest mismatch.")
+    profile_value = payload.get("storage_profile")
+    dimensions_value = payload.get("dimensions")
+    arrays_value = payload.get("arrays")
+    if not isinstance(profile_value, Mapping):
+        raise TypeError("Analysis storage receipt profile must be an object.")
+    if not isinstance(dimensions_value, Mapping):
+        raise TypeError("Analysis storage receipt dimensions must be an object.")
+    if not isinstance(arrays_value, list):
+        raise TypeError("Analysis storage receipt arrays must be a JSON array.")
+    profile = storage_profile_from_manifest(profile_value)
+    dimensions = _normalize_dimensions(dimensions_value)
+    declarations: list[AnalysisArrayDeclaration] = []
+    facts_by_path: dict[str, AnalysisArrayStorageFacts] = {}
+    for entry in arrays_value:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "path",
+            "declaration",
+            "observed_facts",
+            "resolved_dimensions",
+            "lifecycle_classification",
+            "access_unit_semantics",
+            "object_estimate",
+            "plan",
+        }:
+            raise ValueError("Analysis storage receipt array entry is not exact.")
+        declaration_value = entry.get("declaration")
+        facts_value = entry.get("observed_facts")
+        if not isinstance(declaration_value, Mapping) or not isinstance(
+            facts_value, Mapping
+        ):
+            raise TypeError(
+                "Analysis storage receipt declaration/facts must be objects."
+            )
+        declaration = analysis_array_declaration_from_manifest(declaration_value)
+        facts = AnalysisArrayStorageFacts.from_manifest(facts_value)
+        if entry.get("path") != declaration.path or facts.path != declaration.path:
+            raise ValueError("Analysis storage receipt array path binding mismatch.")
+        declarations.append(declaration)
+        if facts.path in facts_by_path:
+            raise ValueError(f"Duplicate analysis storage path {facts.path!r}.")
+        facts_by_path[facts.path] = facts
+    reconstructed = plan_analysis_storage(
+        declarations,
+        facts_by_path,
+        profile=profile,
+        dimensions=dimensions,
+    )
+    if reconstructed.as_manifest() != dict(value):
+        raise ValueError(
+            "Analysis storage receipt differs from executable byte planning."
+        )
+    return reconstructed
+
+
 __all__ = [
     "ANALYSIS_STORAGE_PLAN_SCHEMA_ID",
     "ANALYSIS_STORAGE_PLAN_SCHEMA_VERSION",
@@ -590,6 +677,7 @@ __all__ = [
     "AnalysisArrayStoragePlanReceipt",
     "AnalysisStoragePlanReceipt",
     "analysis_array_declaration_from_manifest",
+    "analysis_storage_plan_receipt_from_manifest",
     "plan_analysis_array_storage",
     "plan_analysis_storage",
 ]

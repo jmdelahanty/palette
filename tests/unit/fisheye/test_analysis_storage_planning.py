@@ -13,6 +13,7 @@ from fisheye.shared.zarr.analysis_storage_planning import (
     ANALYSIS_STORAGE_PLAN_SCHEMA_ID,
     AnalysisArrayStorageFacts,
     analysis_array_declaration_from_manifest,
+    analysis_storage_plan_receipt_from_manifest,
     plan_analysis_array_storage,
     plan_analysis_storage,
 )
@@ -307,3 +308,23 @@ def test_receipt_is_deterministic_across_input_mapping_order() -> None:
 
     assert forward == reverse
     assert forward.as_manifest() == reverse.as_manifest()
+
+
+def test_receipt_parser_replans_and_rejects_rehashed_physical_tampering() -> None:
+    receipt = plan_analysis_storage(
+        [_declaration("scores"), _declaration("valid", dtype=BOOL)],
+        {
+            "scores": _facts("scores", (200_000,), np.float32),
+            "valid": _facts("valid", (200_000,), np.bool_),
+        },
+        profile=PUBLISHED_HTTP_V1,
+    )
+    manifest = receipt.as_manifest()
+
+    assert analysis_storage_plan_receipt_from_manifest(manifest) == receipt
+
+    tampered = json.loads(json.dumps(manifest))
+    tampered["payload"]["arrays"][0]["plan"]["chunk_shape"][0] = 1
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+    with pytest.raises(ValueError, match="differs from executable byte planning"):
+        analysis_storage_plan_receipt_from_manifest(tampered)
