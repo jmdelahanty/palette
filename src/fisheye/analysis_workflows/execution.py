@@ -362,6 +362,82 @@ def _tail_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _tail_posture_view_command(context: StageCommandContext) -> tuple[str, ...]:
+    command = _module_command(
+        context,
+        "fisheye.analysis.tail_posture_view_runs",
+    )
+    command.extend(
+        (
+            "--subject-shape-run",
+            context.dependency_run("subject_shape"),
+            "--run-name",
+            context.output_run,
+        )
+    )
+    tail_run = context.dependency_runs.get("tail_kinematics")
+    if tail_run is not None:
+        command.extend(("--source-tail-kinematics-run", tail_run))
+    command.append("--json")
+    return tuple(command)
+
+
+def _bout_classification_command(context: StageCommandContext) -> tuple[str, ...]:
+    command = _module_command(
+        context,
+        "fisheye.analysis.megabouts_classifier",
+    )
+    command.extend(
+        (
+            "--run-name",
+            context.output_run,
+            "--tail-posture-view-run",
+            context.dependency_run("tail_posture_view"),
+            "--track-kinematics-run",
+            context.dependency_run("track_kinematics"),
+            "--track-scope",
+            "offline",
+            "--track-id",
+            "0",
+            "--swim-bout-run",
+            context.dependency_run("swim_bouts"),
+            "--speed-level",
+            "exponential",
+            "--device",
+            "auto",
+            "--json",
+        )
+    )
+    return tuple(command)
+
+
+def _stimulus_response_command(context: StageCommandContext) -> tuple[str, ...]:
+    command = _module_command(
+        context,
+        "fisheye.analysis_workflows.materializers.stimulus_response",
+    )
+    command.extend(
+        (
+            "--run-name",
+            context.output_run,
+            "--layout",
+            "compact_tabular_v3",
+            "--copy-backend",
+            "rsync",
+            "--apply",
+            "--json",
+            "--",
+            "--track-kinematics-run",
+            context.dependency_run("track_kinematics"),
+            "--stimulus-run",
+            context.dependency_run("stimulus"),
+            "--bout-run",
+            context.dependency_run("swim_bouts"),
+        )
+    )
+    return tuple(command)
+
+
 STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "track_kinematics": _track_kinematics_command,
@@ -371,6 +447,9 @@ STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
         "eye_angles": _eye_angle_command,
         "subject_shape": _subject_shape_command,
         "tail_kinematics": _tail_kinematics_command,
+        "tail_posture_view": _tail_posture_view_command,
+        "bout_classification": _bout_classification_command,
+        "stimulus_response": _stimulus_response_command,
     }
 )
 
@@ -402,10 +481,10 @@ def build_workflow_execution_plan(
     if int(num_workers) < 1:
         raise WorkflowExecutionError("num_workers must be a positive integer")
     if not workflow_plan.ready:
-        blocked = [node.node_id for node in workflow_plan.nodes if node.action == "blocked"]
-        raise WorkflowExecutionError(
-            "workflow plan is blocked: " + ", ".join(blocked)
-        )
+        blocked = [
+            node.node_id for node in workflow_plan.nodes if node.action == "blocked"
+        ]
+        raise WorkflowExecutionError("workflow plan is blocked: " + ", ".join(blocked))
 
     planned_by_id = workflow_plan.node_by_id
     workflow_nodes = workflow.node_by_id
@@ -421,9 +500,7 @@ def build_workflow_execution_plan(
             label=f"output run for {stage_id}",
         )
     run_nodes = [node for node in workflow_plan.nodes if node.action == "run"]
-    run_stage_ids = {
-        node.stage_id for node in run_nodes if node.stage_id is not None
-    }
+    run_stage_ids = {node.stage_id for node in run_nodes if node.stage_id is not None}
     unused_overrides = sorted(set(overrides) - run_stage_ids)
     if unused_overrides:
         raise WorkflowExecutionError(

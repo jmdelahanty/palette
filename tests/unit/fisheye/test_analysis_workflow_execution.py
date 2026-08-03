@@ -15,9 +15,16 @@ from fisheye.analysis_workflows import (
     plan_analysis_workflow,
 )
 from fisheye.utils.execute_analysis_workflow import execute_workflow_plan, main
+from fisheye.analysis_workflows.dag import NodePlan
+from fisheye.analysis_workflows.execution import (
+    STAGE_COMMAND_BUILDERS,
+    StageCommandContext,
+)
 
 
-def _status(stage_id: str, *, available: bool, run_name: str | None = None) -> StageAvailability:
+def _status(
+    stage_id: str, *, available: bool, run_name: str | None = None
+) -> StageAvailability:
     return StageAvailability(
         stage_id=stage_id,
         available=available,
@@ -38,6 +45,103 @@ def _write_group(path: Path, attributes: dict[str, object] | None = None) -> Non
         ),
         encoding="utf-8",
     )
+
+
+def _command_context(
+    tmp_path: Path,
+    *,
+    stage_id: str,
+    dependencies: dict[str, str],
+) -> StageCommandContext:
+    return StageCommandContext(
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        node=NodePlan(
+            node_id=stage_id,
+            kind="analysis",
+            stage_id=stage_id,
+            action="run",
+            depends_on=tuple(dependencies),
+            output_run_from=None,
+            artifact_path=None,
+            selected_run=None,
+            reason="unit test",
+            execution_policy="unit_test",
+            temporal_policy={},
+        ),
+        output_run=f"{stage_id}_candidate",
+        dependency_runs=dependencies,
+        python_executable="/palette/python",
+        num_workers=8,
+    )
+
+
+def test_extended_analysis_command_adapters_are_exact_and_dependency_bound(
+    tmp_path: Path,
+) -> None:
+    tail = STAGE_COMMAND_BUILDERS["tail_posture_view"](
+        _command_context(
+            tmp_path,
+            stage_id="tail_posture_view",
+            dependencies={
+                "subject_shape": "shape_v4",
+                "tail_kinematics": "tail_v2",
+            },
+        )
+    )
+    assert tail[:4] == (
+        "/palette/python",
+        "-m",
+        "fisheye.analysis.tail_posture_view_runs",
+        str(tmp_path / "recording_analysis.zarr"),
+    )
+    assert tail[tail.index("--subject-shape-run") + 1] == "shape_v4"
+    assert tail[tail.index("--source-tail-kinematics-run") + 1] == "tail_v2"
+    assert tail[tail.index("--run-name") + 1] == "tail_posture_view_candidate"
+
+    classification = STAGE_COMMAND_BUILDERS["bout_classification"](
+        _command_context(
+            tmp_path,
+            stage_id="bout_classification",
+            dependencies={
+                "tail_posture_view": "posture_v3",
+                "track_kinematics": "track_v1",
+                "swim_bouts": "bouts_v8",
+            },
+        )
+    )
+    assert classification[:3] == (
+        "/palette/python",
+        "-m",
+        "fisheye.analysis.megabouts_classifier",
+    )
+    assert classification[classification.index("--tail-posture-view-run") + 1] == (
+        "posture_v3"
+    )
+    assert classification[classification.index("--track-kinematics-run") + 1] == (
+        "track_v1"
+    )
+    assert classification[classification.index("--swim-bout-run") + 1] == "bouts_v8"
+
+    stimulus = STAGE_COMMAND_BUILDERS["stimulus_response"](
+        _command_context(
+            tmp_path,
+            stage_id="stimulus_response",
+            dependencies={
+                "stimulus": "stimulus_v2",
+                "track_kinematics": "track_v1",
+                "swim_bouts": "bouts_v8",
+            },
+        )
+    )
+    assert stimulus[:3] == (
+        "/palette/python",
+        "-m",
+        "fisheye.analysis_workflows.materializers.stimulus_response",
+    )
+    assert stimulus[stimulus.index("--layout") + 1] == "compact_tabular_v3"
+    assert stimulus[stimulus.index("--stimulus-run") + 1] == "stimulus_v2"
+    assert stimulus[stimulus.index("--track-kinematics-run") + 1] == "track_v1"
+    assert stimulus[stimulus.index("--bout-run") + 1] == "bouts_v8"
 
 
 def _analysis_execution_plan(tmp_path: Path):
@@ -108,9 +212,7 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
         str(tmp_path / "recording_analysis.zarr"),
     )
     assert swim[swim.index("--track-kinematics-run") + 1] == "track_a"
-    assert swim[swim.index("--run-name") + 1] == (
-        "swim_bouts_canary_20260713_01"
-    )
+    assert swim[swim.index("--run-name") + 1] == ("swim_bouts_canary_20260713_01")
 
     visualization = commands["track_kinematics_visualization"]
     view = visualization.argv
@@ -121,9 +223,7 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
         str(tmp_path / "recording_analysis.zarr"),
     )
     assert view[view.index("--track-kinematics-run") + 1] == "track_a"
-    assert view[view.index("--swim-bout-run") + 1] == (
-        "swim_bouts_canary_20260713_01"
-    )
+    assert view[view.index("--swim-bout-run") + 1] == ("swim_bouts_canary_20260713_01")
     assert view[view.index("--speed-level") + 1] == "exponential"
     assert visualization.output_run == "track_a"
     assert execution.output_runs["track_kinematics_visualization"] == "track_a"
@@ -139,14 +239,10 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert "--apply" in bout
     assert bout[bout.index("--output-shard-rows") + 1] == "262144"
     assert "--" in bout
-    assert bout[bout.index("--swim-bout-run") + 1] == (
-        "swim_bouts_canary_20260713_01"
-    )
+    assert bout[bout.index("--swim-bout-run") + 1] == ("swim_bouts_canary_20260713_01")
     assert bout[bout.index("--track-kinematics-run") + 1] == "track_a"
     assert "--include-eye-gaze" in bout
-    assert bout[bout.index("--eye-angle-run") + 1] == (
-        "eye_angles_canary_20260713_01"
-    )
+    assert bout[bout.index("--eye-angle-run") + 1] == ("eye_angles_canary_20260713_01")
     assert bout[bout.index("--eye-angle-family") + 1] == "gaze"
 
     eyes = commands["eye_angles"].argv
@@ -199,9 +295,7 @@ def test_output_run_override_is_used_by_downstream_commands(tmp_path: Path) -> N
             "track_kinematics", available=True, run_name="track_a"
         ),
         "swim_bouts": _status("swim_bouts", available=False),
-        "eye_angles": _status(
-            "eye_angles", available=True, run_name="eye_angles_a"
-        ),
+        "eye_angles": _status("eye_angles", available=True, run_name="eye_angles_a"),
         "bout_kinematics": _status("bout_kinematics", available=False),
     }
     plan = plan_analysis_workflow(
@@ -234,9 +328,7 @@ def test_visualization_refuses_independent_output_run_override(tmp_path: Path) -
         "track_kinematics": _status(
             "track_kinematics", available=True, run_name="track_a"
         ),
-        "swim_bouts": _status(
-            "swim_bouts", available=True, run_name="swim_a"
-        ),
+        "swim_bouts": _status("swim_bouts", available=True, run_name="swim_a"),
         "track_kinematics_visualization": _status(
             "track_kinematics_visualization", available=False
         ),
@@ -344,7 +436,9 @@ def test_execution_renders_staged_track_kinematics_materializer(tmp_path: Path) 
 
     command = execution.commands[0]
     assert "fisheye.analysis_workflows.materializers.track_kinematics" in command.argv
-    assert command.argv[command.argv.index("--keypoint-run") + 1] == "refined/refined_kp_a"
+    assert (
+        command.argv[command.argv.index("--keypoint-run") + 1] == "refined/refined_kp_a"
+    )
     assert command.argv[command.argv.index("--output-shard-rows") + 1] == "262144"
     assert command.argv[command.argv.index("--shard-workers") + 1] == "5"
     assert "--apply" in command.argv
@@ -368,12 +462,15 @@ def test_dry_run_writes_report_without_creating_stage_outputs(tmp_path: Path) ->
     assert payload["status"] == "planned"
     assert report_path.is_file()
     assert not (zarr_path / "analysis").exists()
-    assert {
-        result["status"] for result in payload["node_results"]
-    } == {"reused", "planned"}
+    assert {result["status"] for result in payload["node_results"]} == {
+        "reused",
+        "planned",
+    }
 
 
-def test_apply_is_rejected_outside_lsf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_is_rejected_outside_lsf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workflow, execution = _analysis_execution_plan(tmp_path)
     zarr_path = tmp_path / "recording_analysis.zarr"
     _write_group(zarr_path)
@@ -461,16 +558,40 @@ def test_cli_renders_sleepyfish_style_swim_bout_command(
     zarr_path = tmp_path / "sleepyfish_analysis.zarr"
     _write_group(zarr_path)
     refined_parent = zarr_path / "refined_keypoints_runs"
-    _write_group(refined_parent, {"latest_complete": "refined_kp_a"})
+    _write_group(
+        refined_parent,
+        {"latest": "refined_kp_a", "latest_complete": "refined_kp_a"},
+    )
     _write_group(
         refined_parent / "refined_kp_a",
-        {"palette_run_completion_status": "complete"},
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
+    )
+    tracks_parent = zarr_path / "tracking_runs"
+    _write_group(
+        tracks_parent,
+        {"latest": "tracking_a", "latest_complete": "tracking_a"},
+    )
+    _write_group(
+        tracks_parent / "tracking_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
     )
     track_parent = zarr_path / "analysis" / "track_kinematics_runs" / "offline"
-    _write_group(track_parent, {"latest_complete": "track_a"})
+    _write_group(
+        track_parent,
+        {"latest": "track_a", "latest_complete": "track_a"},
+    )
     _write_group(
         track_parent / "track_a",
-        {"palette_run_completion_status": "complete"},
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
     )
 
     exit_code = main(
@@ -484,7 +605,7 @@ def test_cli_renders_sleepyfish_style_swim_bout_command(
     )
 
     captured = capsys.readouterr()
-    assert exit_code == 0
+    assert exit_code == 0, (captured.out, captured.err)
     assert "status=planned" in captured.out
     assert "fisheye.analysis_workflows.materializers.swim_bouts" in captured.out
     assert "--track-kinematics-run track_a" in captured.out

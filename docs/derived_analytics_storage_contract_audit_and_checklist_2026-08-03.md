@@ -370,10 +370,13 @@ production selector activation remain out of scope.
       binds concrete paths to versioned `ArrayContract` identities.
 - [ ] Require exact dtype, axes, shape, units, coordinates, null/fill semantics,
       access class, mutability, and authority role for every array.
-- [ ] Freeze a new compact stimulus-response schema with exact tables, columns,
-      dtypes, required/optional fields, and string encodings.
-- [ ] Reject data-dependent schema expansion in current stimulus-response
-      publication.
+- [x] Freeze a new opt-in compact stimulus-response v3 schema with 19 exact
+      tables, up to 310 unique arrays, fixed dtypes/string widths, and closed
+      required/all-or-none optional bundles.
+- [x] Reject data-dependent schema expansion, silent multidimensional field
+      loss, and lossy text truncation in compact v3 publication. Production v2
+      remains unchanged behind its compatibility/default boundary until a v3
+      canary and promotion gate pass.
 - [x] Complete exact dtype validation for every eye-angle semantic array.
 - [x] Add closed whole-run manifests for swim bouts and bout kinematics.
       Swim-bout v8 binds 132 required arrays plus its optional embedded frame
@@ -392,8 +395,8 @@ production selector activation remain out of scope.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
       bout-classification, and tail-posture manifests completed so far.
 - [ ] Add equivalent adversarial coverage for every remaining new manifest.
-      Swim-bout and bout-kinematics now have this coverage; stimulus-response
-      and later families remain.
+      Stimulus-response, swim-bout, and bout-kinematics now have this coverage;
+      later families remain.
 
 ### Phase 5 — Seal chaser components independently
 
@@ -457,8 +460,12 @@ Recommended migration order:
 
 ### Phase 8 — Implement declared workflow outputs
 
-- [ ] Add the missing stimulus-response execution adapter.
-- [ ] Add execution adapters for tail-posture view and bout classification.
+- [x] Add the stimulus-response execution adapter. It explicitly requests the
+      selector-ineligible compact-v3 materializer path and binds the selected
+      stimulus, track-kinematics, and swim-bout dependencies.
+- [x] Add dependency-bound execution adapters for tail-posture view and bout
+      classification. Workflow-profile adoption remains a separate policy
+      choice; registering a command builder does not activate either stage.
 - [ ] Implement exact contracts and publishers for:
     - [ ] sampled kinematic exports;
     - [ ] activity/spatial summaries;
