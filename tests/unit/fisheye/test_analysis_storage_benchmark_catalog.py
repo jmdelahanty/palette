@@ -22,6 +22,7 @@ READ_MATRIX_STAGES = {
     "detection_occupancy",
     "session_occupancy",
     "chaser_distance",
+    "stimulus_epochs",
 }
 
 
@@ -69,6 +70,11 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         "fisheye.diagnostics.benchmark_chaser_distance_base_candidate"
     )
     assert chaser.adapter_entrypoint == "run_benchmark_matrix"
+    stimulus_epochs = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["stimulus_epochs"]
+    assert stimulus_epochs.adapter_module == (
+        "fisheye.diagnostics.benchmark_stimulus_epoch_reads"
+    )
+    assert stimulus_epochs.adapter_entrypoint == "run_benchmark_matrix"
 
 
 def test_plan_only_families_have_no_fabricated_adapter_or_execution_evidence() -> None:
