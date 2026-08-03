@@ -24,9 +24,11 @@ from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
+    DESCRIPTIVE_TABLE,
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    STATISTICS_TABLE,
     STIMULUS_STEP_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
     TABLE_CONTRACTS,
@@ -277,6 +279,8 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
             BASELINE_BEHAVIOR_SUMMARY_TABLE,
             BASELINE_BEHAVIOR_TIME_BINS_TABLE,
             BASELINE_KINEMATIC_SAMPLES_TABLE,
+            STATISTICS_TABLE,
+            DESCRIPTIVE_TABLE,
         )
     )
 
@@ -288,6 +292,8 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
+        STATISTICS_TABLE,
+        DESCRIPTIVE_TABLE,
     )
     assert envelope["inferred_v2_compatibility_tables"] == []
     assert (
@@ -301,6 +307,8 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
                 BASELINE_BEHAVIOR_SUMMARY_TABLE,
                 BASELINE_BEHAVIOR_TIME_BINS_TABLE,
                 BASELINE_KINEMATIC_SAMPLES_TABLE,
+                STATISTICS_TABLE,
+                DESCRIPTIVE_TABLE,
             ),
         )
         == envelope
@@ -316,6 +324,8 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
+        STATISTICS_TABLE,
+        DESCRIPTIVE_TABLE,
     )
     fields = ARROW_TABLE_CONTRACTS[RECORDING_SUMMARY_TABLE].fields
     assert tuple(field.name for field in fields) == (
@@ -362,6 +372,97 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         "stimulus_step_count",
     }
     assert next(field for field in fields if field.name == "derived_protocol_hash").nullable
+
+
+def test_group_statistics_contract_freezes_all_45_fields_in_order() -> None:
+    fields = ARROW_TABLE_CONTRACTS[STATISTICS_TABLE].fields
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("stat_result_id", "string", False),
+        ("stats_run_id", "string", False),
+        ("source_export_run_id", "string", False),
+        ("source_export_manifest_path", "string", False),
+        ("source_export_manifest_sha256", "string", False),
+        ("collection_id", "string", True),
+        ("collection_manifest_sha256", "string", True),
+        ("source_table", "string", False),
+        ("source_row_count", "int64", False),
+        ("metric_family", "string", False),
+        ("metric_name", "string", False),
+        ("metric_unit", "string", False),
+        ("contrast_name", "string", False),
+        ("condition_a", "string", False),
+        ("condition_b", "string", False),
+        ("group_key_json", "string", False),
+        ("primary", "bool", False),
+        ("exploratory", "bool", False),
+        ("unit", "string", False),
+        ("unit_count", "int64", False),
+        ("paired_unit_count", "int64", False),
+        ("excluded_unit_count", "int64", False),
+        ("missing_policy", "string", False),
+        ("mean_a", "float64", True),
+        ("mean_b", "float64", True),
+        ("mean_difference", "float64", True),
+        ("median_difference", "float64", True),
+        ("std_difference", "float64", True),
+        ("effect_size", "float64", True),
+        ("effect_size_kind", "string", False),
+        ("ci_estimand", "string", False),
+        ("ci_low", "float64", True),
+        ("ci_high", "float64", True),
+        ("p_value", "float64", True),
+        ("q_value", "float64", True),
+        ("multiple_comparison_family", "string", False),
+        ("test_method", "string", False),
+        ("bootstrap_iterations", "int64", False),
+        ("permutation_iterations", "int64", False),
+        ("status", "string", False),
+        ("skip_reason", "string", True),
+        ("parameters_json", "string", False),
+        ("created_at_utc", "string", False),
+    )
+
+
+def test_group_descriptive_contract_freezes_all_30_fields_in_order() -> None:
+    fields = ARROW_TABLE_CONTRACTS[DESCRIPTIVE_TABLE].fields
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("descriptive_result_id", "string", False),
+        ("stats_run_id", "string", False),
+        ("source_export_run_id", "string", False),
+        ("source_export_manifest_path", "string", False),
+        ("source_export_manifest_sha256", "string", False),
+        ("collection_id", "string", True),
+        ("collection_manifest_sha256", "string", True),
+        ("source_table", "string", False),
+        ("source_row_count", "int64", False),
+        ("metric_family", "string", False),
+        ("metric_name", "string", False),
+        ("metric_unit", "string", False),
+        ("condition_name", "string", False),
+        ("group_key_json", "string", False),
+        ("primary", "bool", False),
+        ("exploratory", "bool", False),
+        ("unit", "string", False),
+        ("unit_count", "int64", False),
+        ("sum", "float64", True),
+        ("mean", "float64", True),
+        ("median", "float64", True),
+        ("std_dev", "float64", True),
+        ("sem", "float64", True),
+        ("min", "float64", True),
+        ("max", "float64", True),
+        ("missing_policy", "string", False),
+        ("parameters_json", "string", False),
+        ("created_at_utc", "string", False),
+    )
 
 
 def test_stimulus_steps_contract_freezes_all_60_maintained_fields_in_order() -> None:
@@ -767,6 +868,8 @@ def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
+        STATISTICS_TABLE,
+        DESCRIPTIVE_TABLE,
     ),
 )
 @pytest.mark.parametrize(

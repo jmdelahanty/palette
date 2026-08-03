@@ -65,6 +65,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-legacy-statistics",
+        action="store_true",
+        help=(
+            "Explicitly permit historical inferred-v2 group-statistics parts. "
+            "Current exact statistics remain preferred and the fallback is "
+            "read-only."
+        ),
+    )
+    parser.add_argument(
         "--registry",
         type=Path,
         help="Accepted for command symmetry; the MVP reads the export manifest and Parquet files directly.",
@@ -82,6 +91,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             export_root=args.export_root,
             export_run_id=str(args.export_run_id),
             stats_run_id=str(args.stats_run_id),
+            allow_legacy_statistics=bool(args.allow_legacy_statistics),
             host=str(args.host),
             port=int(args.port),
         )

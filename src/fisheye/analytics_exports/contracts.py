@@ -87,6 +87,8 @@ def _contract(
     primary_key: Sequence[str],
     required_columns: Sequence[str],
     units: Mapping[str, str] | None = None,
+    *,
+    contract_version: int = TABLE_CONTRACT_VERSION,
 ) -> TableContract:
     base = ("export_schema_version", "table_name", *primary_key)
     return TableContract(
@@ -95,6 +97,7 @@ def _contract(
         primary_key=tuple(primary_key),
         required_columns=tuple(dict.fromkeys((*base, *required_columns))),
         units=dict(units or {}),
+        contract_version=contract_version,
     )
 
 
@@ -468,7 +471,18 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
         STATISTICS_TABLE,
         "statistical_result",
         ("stat_result_id",),
-        ("stat_result_id", "source_export_run_id", "source_table", "metric_name", "status"),
+        (
+            "stat_result_id",
+            "source_export_run_id",
+            "source_export_manifest_sha256",
+            "source_table",
+            "metric_name",
+            "metric_unit",
+            "effect_size_kind",
+            "ci_estimand",
+            "status",
+        ),
+        contract_version=2,
     ),
     DESCRIPTIVE_TABLE: _contract(
         DESCRIPTIVE_TABLE,
@@ -477,10 +491,13 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
         (
             "descriptive_result_id",
             "source_export_run_id",
+            "source_export_manifest_sha256",
             "source_table",
             "metric_name",
+            "metric_unit",
             "unit_count",
         ),
+        contract_version=2,
     ),
 }
 

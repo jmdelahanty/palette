@@ -47,7 +47,16 @@ from fisheye.analytics_exports.publication import (
     manifest_selected_part_files_from_payload,
     validate_publication_envelope,
 )
-from fisheye.analytics_exports.validation import validate_export_payload
+from fisheye.analytics_exports.validation import (
+    ExportValidationError,
+    validate_export_payload,
+)
+from fisheye.group_statistics.legacy_arrow import (
+    validate_legacy_group_statistics_payload,
+)
+from fisheye.group_statistics.goodcopbadcop import (
+    validate_goodcopbadcop_result_rows,
+)
 from fisheye.group_statistics.paired import bootstrap_median_ci, wilcoxon_signed_rank_p_value
 
 from .catalog import discover_export_catalog, select_export_run_id
@@ -211,6 +220,7 @@ class ViewerContext:
     export_root: Path
     export_run_id: str
     stats_run_id: str | None = None
+    allow_legacy_statistics: bool = False
 
 
 def _utc_now() -> str:
@@ -322,7 +332,13 @@ def resolve_export_run_id(export_root: Path, export_run_id: str) -> str:
     return select_export_run_id(catalog, export_run_id)
 
 
-def build_context(*, export_root: Path, export_run_id: str, stats_run_id: str | None = None) -> ViewerContext:
+def build_context(
+    *,
+    export_root: Path,
+    export_run_id: str,
+    stats_run_id: str | None = None,
+    allow_legacy_statistics: bool = False,
+) -> ViewerContext:
     resolved_root = export_root.expanduser().resolve()
     resolved_run = resolve_export_run_id(resolved_root, export_run_id)
     manifest = _manifest_path(resolved_root, resolved_run)
@@ -333,7 +349,12 @@ def build_context(*, export_root: Path, export_run_id: str, stats_run_id: str | 
         resolved_stats = None
     if resolved_stats is not None:
         resolved_stats = _validate_path_component(resolved_stats, label="statistics run ID")
-    return ViewerContext(export_root=resolved_root, export_run_id=resolved_run, stats_run_id=resolved_stats)
+    return ViewerContext(
+        export_root=resolved_root,
+        export_run_id=resolved_run,
+        stats_run_id=resolved_stats,
+        allow_legacy_statistics=bool(allow_legacy_statistics),
+    )
 
 
 def table_dir(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> Path:
@@ -404,7 +425,7 @@ def _validate_statistics_manifest(
     context: ViewerContext,
     manifest_path: Path,
     manifest: Mapping[str, Any],
-) -> str:
+) -> tuple[str, bool]:
     stats_run_id = manifest_path.name.removeprefix("export_run_id=").removesuffix(
         ".json"
     )
@@ -441,7 +462,24 @@ def _validate_statistics_manifest(
     )
     if not has_stats_table:
         raise ValueError(f"Statistics manifest does not declare {STATISTICS_TABLE}")
-    validate_export_payload(context.export_root, stats_run_id, manifest)
+    is_current_exact = True
+    try:
+        validate_export_payload(context.export_root, stats_run_id, manifest)
+    except ExportValidationError:
+        if not context.allow_legacy_statistics:
+            raise
+        is_current_exact = False
+        try:
+            validate_legacy_group_statistics_payload(
+                context.export_root,
+                stats_run_id,
+                manifest,
+            )
+        except ValueError as legacy_error:
+            raise ValueError(
+                "Statistics publication satisfies neither the current exact "
+                "contract nor the explicit legacy inferred contract"
+            ) from legacy_error
     validate_publication_envelope(manifest)
     selected = manifest_selected_part_files_from_payload(
         context.export_root,
@@ -455,12 +493,39 @@ def _validate_statistics_manifest(
         raise ValueError("Statistics publication selects no summary part files")
     if any(not path.is_file() for path in selected):
         raise ValueError("Statistics publication selects a missing summary part")
-    return stats_run_id
+    if is_current_exact:
+        summary_rows = _load_table_rows_for_run(
+            context,
+            STATISTICS_TABLE,
+            stats_run_id,
+        )
+        validate_goodcopbadcop_result_rows(
+            STATISTICS_TABLE,
+            summary_rows,
+            manifest,
+        )
+        if (
+            isinstance(outputs, list)
+            and DESCRIPTIVE_TABLE in {str(item) for item in outputs}
+        ):
+            descriptive_rows = _load_table_rows_for_run(
+                context,
+                DESCRIPTIVE_TABLE,
+                stats_run_id,
+            )
+            validate_goodcopbadcop_result_rows(
+                DESCRIPTIVE_TABLE,
+                descriptive_rows,
+                manifest,
+            )
+    return stats_run_id, is_current_exact
 
 
-def _stats_manifest_candidates(context: ViewerContext) -> list[tuple[str, dict[str, Any]]]:
+def _stats_manifest_candidates(
+    context: ViewerContext,
+) -> list[tuple[str, dict[str, Any], bool]]:
     manifest_dir = export_manifest_directory(context.export_root)
-    candidates: list[tuple[str, dict[str, Any]]] = []
+    candidates: list[tuple[str, dict[str, Any], bool]] = []
     for manifest_path in sorted(manifest_dir.glob("export_run_id=*.json")):
         if not _is_within(manifest_path.resolve(), context.export_root.resolve()):
             continue
@@ -469,15 +534,21 @@ def _stats_manifest_candidates(context: ViewerContext) -> list[tuple[str, dict[s
         except Exception:
             continue
         try:
-            stats_run_id = _validate_statistics_manifest(
+            stats_run_id, is_current_exact = _validate_statistics_manifest(
                 context,
                 manifest_path,
                 manifest,
             )
         except (OSError, ValueError):
             continue
-        candidates.append((stats_run_id, manifest))
-    candidates.sort(key=lambda item: (str(item[1].get("created_at_utc") or ""), item[0]))
+        candidates.append((stats_run_id, manifest, is_current_exact))
+    candidates.sort(
+        key=lambda item: (
+            item[2],
+            str(item[1].get("created_at_utc") or ""),
+            item[0],
+        )
+    )
     return candidates
 
 
@@ -487,7 +558,7 @@ def resolve_statistics_run_id(context: ViewerContext) -> str | None:
         if not manifest.is_file():
             raise FileNotFoundError(f"Statistics manifest not found: {manifest}")
         payload = _json_file(manifest)
-        return _validate_statistics_manifest(context, manifest, payload)
+        return _validate_statistics_manifest(context, manifest, payload)[0]
     candidates = _stats_manifest_candidates(context)
     return candidates[-1][0] if candidates else None
 
@@ -755,6 +826,7 @@ def query_group_statistics(
             {
                 "metric_family": row.get("metric_family"),
                 "metric_name": row.get("metric_name"),
+                "metric_unit": row.get("metric_unit"),
                 "contrast_name": row.get("contrast_name"),
                 "condition_a": row.get("condition_a"),
                 "condition_b": row.get("condition_b"),
@@ -769,11 +841,15 @@ def query_group_statistics(
                 "median_difference": _round(_safe_float(row.get("median_difference"))),
                 "std_difference": _round(_safe_float(row.get("std_difference"))),
                 "effect_size": _round(_safe_float(row.get("effect_size"))),
+                "effect_size_kind": row.get("effect_size_kind"),
                 "ci_low": _round(_safe_float(row.get("ci_low"))),
                 "ci_high": _round(_safe_float(row.get("ci_high"))),
+                "ci_estimand": row.get("ci_estimand"),
                 "p_value": _round(_safe_float(row.get("p_value"))),
                 "q_value": _round(_safe_float(row.get("q_value"))),
                 "test_method": row.get("test_method"),
+                "missing_policy": row.get("missing_policy"),
+                "parameters_json": row.get("parameters_json"),
                 "status": row.get("status"),
                 "skip_reason": row.get("skip_reason"),
                 "primary": bool(row.get("primary")),

@@ -17,8 +17,10 @@ from .contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
+    DESCRIPTIVE_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    STATISTICS_TABLE,
     STIMULUS_STEP_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
     TABLE_CONTRACTS,
@@ -36,6 +38,8 @@ EXACT_ARROW_SCHEMA_TABLES = (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
+    STATISTICS_TABLE,
+    DESCRIPTIVE_TABLE,
 )
 
 _ENVELOPE_FIELDS = {
@@ -643,6 +647,99 @@ _BASELINE_KINEMATIC_SAMPLES_FIELDS = (
 )
 
 
+# Group statistics are published by one closed producer.  Statistical values
+# are nullable because insufficient complete recordings, disabled bootstrap
+# work, or an unavailable test legitimately produce nulls; status and
+# skip_reason explain that state.  Identity, source binding, grouping, method,
+# and iteration counts are always present.  Timestamps remain strings in
+# physical v1 to preserve the producer's current RFC-3339 representation.
+_GROUP_STATISTICS_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("stat_result_id", "string"),
+    _field("stats_run_id", "string"),
+    _field("source_export_run_id", "string"),
+    _field("source_export_manifest_path", "string"),
+    _field("source_export_manifest_sha256", "string"),
+    _field("collection_id", "string", nullable=True),
+    _field("collection_manifest_sha256", "string", nullable=True),
+    _field("source_table", "string"),
+    _field("source_row_count", "int64"),
+    _field("metric_family", "string"),
+    _field("metric_name", "string"),
+    _field("metric_unit", "string"),
+    _field("contrast_name", "string"),
+    _field("condition_a", "string"),
+    _field("condition_b", "string"),
+    _field("group_key_json", "string"),
+    _field("primary", "bool"),
+    _field("exploratory", "bool"),
+    _field("unit", "string"),
+    _field("unit_count", "int64"),
+    _field("paired_unit_count", "int64"),
+    _field("excluded_unit_count", "int64"),
+    _field("missing_policy", "string"),
+    _field("mean_a", "float64", nullable=True),
+    _field("mean_b", "float64", nullable=True),
+    _field("mean_difference", "float64", nullable=True),
+    _field("median_difference", "float64", nullable=True),
+    _field("std_difference", "float64", nullable=True),
+    _field("effect_size", "float64", nullable=True),
+    _field("effect_size_kind", "string"),
+    _field("ci_estimand", "string"),
+    _field("ci_low", "float64", nullable=True),
+    _field("ci_high", "float64", nullable=True),
+    _field("p_value", "float64", nullable=True),
+    _field("q_value", "float64", nullable=True),
+    _field("multiple_comparison_family", "string"),
+    _field("test_method", "string"),
+    _field("bootstrap_iterations", "int64"),
+    _field("permutation_iterations", "int64"),
+    _field("status", "string"),
+    _field("skip_reason", "string", nullable=True),
+    _field("parameters_json", "string"),
+    _field("created_at_utc", "string"),
+)
+
+
+# Descriptive rows use the same immutable source and grouping identity but do
+# not carry a contrast.  All seven descriptive statistics are nullable: an
+# empty finite-value set has no numerical summary, and sample standard
+# deviation/SEM are unavailable for a singleton.
+_GROUP_DESCRIPTIVE_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("descriptive_result_id", "string"),
+    _field("stats_run_id", "string"),
+    _field("source_export_run_id", "string"),
+    _field("source_export_manifest_path", "string"),
+    _field("source_export_manifest_sha256", "string"),
+    _field("collection_id", "string", nullable=True),
+    _field("collection_manifest_sha256", "string", nullable=True),
+    _field("source_table", "string"),
+    _field("source_row_count", "int64"),
+    _field("metric_family", "string"),
+    _field("metric_name", "string"),
+    _field("metric_unit", "string"),
+    _field("condition_name", "string"),
+    _field("group_key_json", "string"),
+    _field("primary", "bool"),
+    _field("exploratory", "bool"),
+    _field("unit", "string"),
+    _field("unit_count", "int64"),
+    _field("sum", "float64", nullable=True),
+    _field("mean", "float64", nullable=True),
+    _field("median", "float64", nullable=True),
+    _field("std_dev", "float64", nullable=True),
+    _field("sem", "float64", nullable=True),
+    _field("min", "float64", nullable=True),
+    _field("max", "float64", nullable=True),
+    _field("missing_policy", "string"),
+    _field("parameters_json", "string"),
+    _field("created_at_utc", "string"),
+)
+
+
 ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     POSITION_OCCUPANCY_HISTOGRAM_TABLE: ArrowTableContract(
         table_name=POSITION_OCCUPANCY_HISTOGRAM_TABLE,
@@ -671,6 +768,14 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     BASELINE_KINEMATIC_SAMPLES_TABLE: ArrowTableContract(
         table_name=BASELINE_KINEMATIC_SAMPLES_TABLE,
         fields=_BASELINE_KINEMATIC_SAMPLES_FIELDS,
+    ),
+    STATISTICS_TABLE: ArrowTableContract(
+        table_name=STATISTICS_TABLE,
+        fields=_GROUP_STATISTICS_FIELDS,
+    ),
+    DESCRIPTIVE_TABLE: ArrowTableContract(
+        table_name=DESCRIPTIVE_TABLE,
+        fields=_GROUP_DESCRIPTIVE_FIELDS,
     ),
 }
 

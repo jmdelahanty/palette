@@ -17,7 +17,11 @@ import uuid
 import numpy as np
 import polars as pl
 
-from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
+from fisheye.analytics_exports.arrow_contracts import (
+    ARROW_TABLE_CONTRACTS,
+    arrow_contract_envelope,
+    exact_arrow_schema,
+)
 from fisheye.analytics_exports.capabilities import resolve_capabilities
 from fisheye.analytics_exports.contracts import (
     CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
@@ -85,6 +89,62 @@ class MetricSpec:
     group_keys: tuple[str, ...]
     primary: bool = True
     exploratory: bool = False
+
+
+_METRIC_UNITS: dict[tuple[str, str], str] = {
+    (CHASER_DISTANCE_SUMMARY_TABLE, "mean_distance_mm"): "mm",
+    (CHASER_DISTANCE_SUMMARY_TABLE, "p50_distance_mm"): "mm",
+    (CHASER_DISTANCE_SUMMARY_TABLE, "fraction_within_threshold"): "fraction",
+    (CHASER_SPATIAL_TABLE, "time_s"): "s",
+    (CHASER_SPATIAL_TABLE, "fraction_of_epoch"): "fraction",
+    (CHASER_SPATIAL_TABLE, "fraction_of_detected"): "fraction",
+    (EPOCH_BEHAVIOR_TABLE, "mean_speed_mm_s"): "mm/s",
+    (EPOCH_BEHAVIOR_TABLE, "bout_rate_per_min"): "1/min",
+    (EPOCH_BEHAVIOR_TABLE, "mean_bout_duration_s"): "s",
+    (EPOCH_BEHAVIOR_TABLE, "mean_bout_path_length_mm"): "mm",
+    (EPOCH_BEHAVIOR_TABLE, "mean_bout_net_heading_change_deg"): "deg",
+    (EPOCH_BEHAVIOR_TABLE, "mean_abs_bout_net_heading_change_deg"): "deg",
+    (EPOCH_BEHAVIOR_TABLE, "mean_bout_heading_path_deg"): "deg",
+    (EPOCH_BEHAVIOR_TABLE, "inter_bout_interval_count"): "count",
+    (EPOCH_BEHAVIOR_TABLE, "wall_fraction"): "fraction",
+    (EPOCH_BEHAVIOR_TABLE, "median_distance_from_arena_center_mm"): "mm",
+    (EPOCH_BEHAVIOR_TABLE, "mean_inter_bout_interval_s"): "s",
+    (EPOCH_BEHAVIOR_TABLE, "median_inter_bout_interval_s"): "s",
+    (CRA_SUMMARY_TABLE, "delta_agg"): "mm",
+    (CRA_SUMMARY_TABLE, "delta_occ_agg"): "fraction",
+    (CRA_SUMMARY_TABLE, "specificity_distance"): "mm",
+    (CRA_SUMMARY_TABLE, "specificity_occupancy"): "fraction",
+    (CRA_SUMMARY_TABLE, "delta_inert"): "mm",
+    (CRA_SUMMARY_TABLE, "delta_occ_inert"): "fraction",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "approach_p05_delta_agg"): "mm",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "approach_p05_specificity"): "mm",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "nearzone_occ_delta_agg"): "fraction",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "nearzone_occ_specificity"): "fraction",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "nearzone_entry_rate_delta_agg"): "1/min",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "nearzone_entry_rate_specificity"): "1/min",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "approach_p05_delta_inert"): "mm",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "nearzone_occ_delta_inert"): "fraction",
+    (CRA_NEAR_FIELD_SUMMARY_TABLE, "nearzone_entry_rate_delta_inert"): "1/min",
+    (CHASER_EGOCENTRIC_SUMMARY_TABLE, "mean_alignment_cos"): "dimensionless",
+    (CHASER_EGOCENTRIC_SUMMARY_TABLE, "mean_lateral_sin"): "dimensionless",
+    (CHASER_EGOCENTRIC_SUMMARY_TABLE, "fraction_front_45"): "fraction",
+    (CHASER_EGOCENTRIC_SUMMARY_TABLE, "fraction_lateral_45"): "fraction",
+    (CHASER_EGOCENTRIC_SUMMARY_TABLE, "fraction_behind_45"): "fraction",
+}
+
+
+def _metric_unit(spec: MetricSpec) -> str:
+    return _metric_unit_for_values(spec.source_table, spec.metric_name)
+
+
+def _metric_unit_for_values(source_table: object, metric_name: object) -> str:
+    try:
+        return _METRIC_UNITS[(str(source_table), str(metric_name))]
+    except KeyError as exc:
+        raise ValueError(
+            "No exact measurement unit is registered for "
+            f"{source_table}.{metric_name}"
+        ) from exc
 
 
 DEFAULT_METRICS: tuple[MetricSpec, ...] = (
@@ -365,6 +425,10 @@ class GoodCopBadCopStatisticsConfig:
     random_seed: int = 0
     overwrite: bool = False
     allow_legacy_export_layout: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.minimum_recordings) is not int or self.minimum_recordings < 1:
+            raise ValueError("minimum_recordings must be an integer >= 1")
 
 
 def utc_run_id() -> str:
@@ -753,9 +817,24 @@ def _result_id(row: Mapping[str, Any]) -> str:
     payload = {
         "metric_family": row.get("metric_family"),
         "metric_name": row.get("metric_name"),
+        "metric_unit": row.get("metric_unit"),
+        "source_table": row.get("source_table"),
         "contrast_name": row.get("contrast_name"),
+        "condition_a": row.get("condition_a"),
+        "condition_b": row.get("condition_b"),
         "group_key_json": row.get("group_key_json"),
+        "effect_size_kind": row.get("effect_size_kind"),
+        "ci_estimand": row.get("ci_estimand"),
+        "missing_policy": row.get("missing_policy"),
+        "multiple_comparison_family": row.get("multiple_comparison_family"),
+        "parameters_json": row.get("parameters_json"),
+        "test_method": row.get("test_method"),
+        "bootstrap_iterations": row.get("bootstrap_iterations"),
+        "permutation_iterations": row.get("permutation_iterations"),
         "source_export_run_id": row.get("source_export_run_id"),
+        "source_export_manifest_sha256": row.get(
+            "source_export_manifest_sha256"
+        ),
     }
     return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
 
@@ -764,11 +843,606 @@ def _descriptive_result_id(row: Mapping[str, Any]) -> str:
     payload = {
         "metric_family": row.get("metric_family"),
         "metric_name": row.get("metric_name"),
+        "metric_unit": row.get("metric_unit"),
+        "source_table": row.get("source_table"),
         "condition_name": row.get("condition_name"),
         "group_key_json": row.get("group_key_json"),
+        "unit": row.get("unit"),
+        "missing_policy": row.get("missing_policy"),
+        "parameters_json": row.get("parameters_json"),
         "source_export_run_id": row.get("source_export_run_id"),
+        "source_export_manifest_sha256": row.get(
+            "source_export_manifest_sha256"
+        ),
     }
     return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def _validate_result_rows(
+    table_name: str,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    expected_stats_run_id: str | None = None,
+    expected_source_export_run_id: str | None = None,
+    expected_source_manifest_sha256: str | None = None,
+) -> None:
+    if table_name not in {SUMMARY_TABLE, DESCRIPTIVE_TABLE}:
+        raise ValueError(f"Unsupported group-statistics result table: {table_name}")
+    id_field = (
+        "stat_result_id" if table_name == SUMMARY_TABLE else "descriptive_result_id"
+    )
+    seen: set[str] = set()
+    for row_index, row in enumerate(rows):
+        for field_name, expected in (
+            ("stats_run_id", expected_stats_run_id),
+            ("source_export_run_id", expected_source_export_run_id),
+            (
+                "source_export_manifest_sha256",
+                expected_source_manifest_sha256,
+            ),
+        ):
+            if expected is not None and row.get(field_name) != expected:
+                raise ValueError(
+                    f"{table_name}: row {row_index} has an invalid {field_name}"
+                )
+        source_digest = row.get("source_export_manifest_sha256")
+        if (
+            not isinstance(source_digest, str)
+            or len(source_digest) != 64
+            or source_digest != source_digest.lower()
+        ):
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid source manifest digest"
+            )
+        try:
+            int(source_digest, 16)
+        except ValueError as exc:
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid source manifest digest"
+            ) from exc
+        expected_unit = _metric_unit_for_values(
+            row.get("source_table"), row.get("metric_name")
+        )
+        if row.get("metric_unit") != expected_unit:
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid metric_unit"
+            )
+        if row.get("unit") != "recording":
+            raise ValueError(f"{table_name}: row {row_index} has invalid unit")
+        try:
+            group_key = json.loads(str(row.get("group_key_json")))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid group_key_json"
+            ) from exc
+        if not isinstance(group_key, dict) or _json_dumps(group_key) != row.get(
+            "group_key_json"
+        ):
+            raise ValueError(
+                f"{table_name}: row {row_index} has noncanonical group_key_json"
+            )
+        expected_id = (
+            _result_id(row)
+            if table_name == SUMMARY_TABLE
+            else _descriptive_result_id(row)
+        )
+        actual_id = row.get(id_field)
+        if actual_id != expected_id:
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid {id_field}"
+            )
+        if expected_id in seen:
+            raise ValueError(f"{table_name}: duplicate {id_field} {expected_id}")
+        seen.add(expected_id)
+
+        if table_name == DESCRIPTIVE_TABLE:
+            if row.get("missing_policy") != (
+                "available_recording_values_by_condition"
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has an invalid missing_policy"
+                )
+            unit_count = row.get("unit_count")
+            if type(unit_count) is not int or unit_count < 0:
+                raise ValueError(
+                    f"{table_name}: row {row_index} has an invalid unit_count"
+                )
+            values = tuple(
+                row.get(name)
+                for name in ("sum", "mean", "median", "std_dev", "sem", "min", "max")
+            )
+            if any(
+                value is not None
+                and (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float, np.number))
+                    or not math.isfinite(float(value))
+                )
+                for value in values
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has a nonfinite descriptive value"
+                )
+            if unit_count == 0 and any(value is not None for value in values):
+                raise ValueError(
+                    f"{table_name}: empty row {row_index} has descriptive values"
+                )
+            required_location = ("sum", "mean", "median", "min", "max")
+            if unit_count > 0 and any(
+                row.get(name) is None for name in required_location
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} lacks descriptive location values"
+                )
+            if unit_count < 2 and any(
+                row.get(name) is not None for name in ("std_dev", "sem")
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has singleton dispersion values"
+                )
+            if unit_count >= 2 and any(
+                row.get(name) is None for name in ("std_dev", "sem")
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} lacks descriptive dispersion values"
+                )
+            continue
+
+        status = row.get("status")
+        if status not in {"computed", "skipped"}:
+            raise ValueError(f"{table_name}: row {row_index} has invalid status")
+        if (status == "computed") != (row.get("skip_reason") is None):
+            raise ValueError(
+                f"{table_name}: row {row_index} has inconsistent skip_reason"
+            )
+        if status != "computed" and row.get("q_value") is not None:
+            raise ValueError(
+                f"{table_name}: row {row_index} has q_value for skipped result"
+            )
+        one_sample = (
+            row.get("contrast_name") == "vs-zero"
+            and row.get("condition_a") == "zero"
+        )
+        expected_missing_policy = (
+            "one_row_per_recording_complete_cases"
+            if one_sample
+            else "paired_complete_recordings"
+        )
+        if row.get("missing_policy") != expected_missing_policy:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid missing_policy"
+            )
+        counts = tuple(
+            row.get(name)
+            for name in ("unit_count", "paired_unit_count", "excluded_unit_count")
+        )
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise ValueError(f"{table_name}: row {row_index} has invalid counts")
+        if counts[1] + counts[2] != counts[0]:
+            raise ValueError(
+                f"{table_name}: row {row_index} has inconsistent counts"
+            )
+        for field_name in ("bootstrap_iterations", "permutation_iterations"):
+            value = row.get(field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(
+                    f"{table_name}: row {row_index} has invalid {field_name}"
+                )
+        numeric_names = (
+            "mean_a",
+            "mean_b",
+            "mean_difference",
+            "median_difference",
+            "std_difference",
+            "effect_size",
+            "ci_low",
+            "ci_high",
+            "p_value",
+            "q_value",
+        )
+        if any(
+            row.get(name) is not None
+            and (
+                isinstance(row.get(name), bool)
+                or not isinstance(row.get(name), (int, float, np.number))
+                or not math.isfinite(float(row[name]))
+            )
+            for name in numeric_names
+        ):
+            raise ValueError(
+                f"{table_name}: row {row_index} has a nonfinite statistical value"
+            )
+        for field_name in ("p_value", "q_value"):
+            value = row.get(field_name)
+            if value is not None and not 0.0 <= float(value) <= 1.0:
+                raise ValueError(
+                    f"{table_name}: row {row_index} has invalid {field_name}"
+                )
+        ci_low = row.get("ci_low")
+        ci_high = row.get("ci_high")
+        if (ci_low is None) != (ci_high is None) or (
+            ci_low is not None and float(ci_low) > float(ci_high)
+        ):
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid CI bounds"
+            )
+        allowed_methods = (
+            {
+                "skipped",
+                "wilcoxon_signed_rank_all_zero",
+                "wilcoxon_signed_rank_exact",
+                "wilcoxon_signed_rank_normal",
+                "wilcoxon_signed_rank_unavailable",
+            }
+            if one_sample
+            else {
+                "skipped",
+                "paired_sign_flip_exact",
+                "paired_sign_flip_random",
+                "paired_sign_flip_unavailable",
+            }
+        )
+        if row.get("test_method") not in allowed_methods:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid test_method"
+            )
+        test_method = row.get("test_method")
+        if test_method == "skipped":
+            if status != "skipped":
+                raise ValueError(
+                    f"{table_name}: row {row_index} has inconsistent skipped method"
+                )
+            unavailable_fields = (
+                "mean_difference",
+                "median_difference",
+                "std_difference",
+                "effect_size",
+                "ci_low",
+                "ci_high",
+                "p_value",
+                "q_value",
+            )
+            if any(row.get(name) is not None for name in unavailable_fields):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has inferential values for a low-count skip"
+                )
+            if row.get("bootstrap_iterations") != 0 or row.get(
+                "permutation_iterations"
+            ) != 0:
+                raise ValueError(
+                    f"{table_name}: row {row_index} has iterations for a low-count skip"
+                )
+        elif status == "skipped":
+            if not (
+                one_sample
+                and test_method == "wilcoxon_signed_rank_unavailable"
+                and row.get("skip_reason") == "wilcoxon_unavailable"
+                and row.get("p_value") is None
+                and row.get("q_value") is None
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has inconsistent skipped inference"
+                )
+        elif test_method == "wilcoxon_signed_rank_unavailable":
+            raise ValueError(
+                f"{table_name}: row {row_index} has unavailable method for a computed result"
+            )
+        expected_effect = (
+            "rank_biserial_correlation"
+            if one_sample
+            else "paired_mean_difference_over_sample_sd"
+        )
+        expected_estimand = (
+            "one_sample_median" if one_sample else "paired_mean_difference"
+        )
+        if row.get("effect_size_kind") != expected_effect:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid effect_size_kind"
+            )
+        if row.get("ci_estimand") != expected_estimand:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid ci_estimand"
+            )
+
+    if table_name == SUMMARY_TABLE:
+        by_family: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
+        for row_index, row in enumerate(rows):
+            if row.get("status") == "computed":
+                family = str(row.get("multiple_comparison_family") or "")
+                by_family.setdefault(family, []).append((row_index, row))
+        for family_rows in by_family.values():
+            expected_q_values = benjamini_hochberg(
+                [_safe_float(row.get("p_value")) for _index, row in family_rows]
+            )
+            for (row_index, row), expected_q in zip(
+                family_rows,
+                expected_q_values,
+                strict=True,
+            ):
+                actual_q = row.get("q_value")
+                if expected_q is None:
+                    valid = actual_q is None
+                else:
+                    valid = actual_q is not None and math.isclose(
+                        float(actual_q),
+                        float(expected_q),
+                        rel_tol=1e-12,
+                        abs_tol=1e-12,
+                    )
+                if not valid:
+                    raise ValueError(
+                        f"{table_name}: row {row_index} has an invalid FDR q_value"
+                    )
+
+
+def _validate_result_rows_against_manifest(
+    table_name: str,
+    rows: Sequence[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
+) -> None:
+    raw_metrics = manifest.get("metrics")
+    if not isinstance(raw_metrics, list):
+        raise ValueError("Statistics manifest lacks an exact metric registry")
+    metric_fields = {
+        "metric_family",
+        "source_table",
+        "metric_name",
+        "metric_unit",
+        "group_keys",
+        "primary",
+        "exploratory",
+    }
+    metric_specs: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for item in raw_metrics:
+        if not isinstance(item, Mapping) or set(item) != metric_fields:
+            raise ValueError("Statistics manifest metric registry is invalid")
+        key = (str(item.get("source_table")), str(item.get("metric_name")))
+        if key in metric_specs:
+            raise ValueError("Statistics manifest metric registry is not unique")
+        group_keys = item.get("group_keys")
+        if not isinstance(group_keys, list) or any(
+            not isinstance(value, str) or not value for value in group_keys
+        ):
+            raise ValueError("Statistics manifest metric group keys are invalid")
+        if item.get("metric_unit") != _metric_unit_for_values(*key):
+            raise ValueError("Statistics manifest metric unit is invalid")
+        if type(item.get("primary")) is not bool or type(
+            item.get("exploratory")
+        ) is not bool:
+            raise ValueError("Statistics manifest metric flags are invalid")
+        metric_specs[key] = item
+
+    raw_contrasts = manifest.get("contrasts")
+    if not isinstance(raw_contrasts, list):
+        raise ValueError("Statistics manifest lacks exact contrast declarations")
+    contrast_fields = {"name", "condition_a", "condition_b"}
+    contrasts: dict[str, tuple[str, str]] = {}
+    for item in raw_contrasts:
+        if not isinstance(item, Mapping) or set(item) != contrast_fields:
+            raise ValueError("Statistics manifest contrast registry is invalid")
+        name = item.get("name")
+        conditions = (item.get("condition_a"), item.get("condition_b"))
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in contrasts
+            or any(not isinstance(value, str) or not value for value in conditions)
+        ):
+            raise ValueError("Statistics manifest contrast registry is invalid")
+        contrasts[name] = (str(conditions[0]), str(conditions[1]))
+
+    manifest_parameters = manifest.get("parameters")
+    if not isinstance(manifest_parameters, Mapping):
+        raise ValueError("Statistics manifest parameters are invalid")
+    required_parameters = {
+        "allow_legacy_export_layout",
+        "bootstrap_iterations",
+        "confidence_level",
+        "fdr_method",
+        "minimum_recordings",
+        "permutation_iterations",
+        "random_seed",
+        "role_mapping_table",
+    }
+    if set(manifest_parameters) != required_parameters:
+        raise ValueError("Statistics manifest parameters have an invalid field set")
+    if manifest_parameters.get("fdr_method") != "benjamini_hochberg":
+        raise ValueError("Statistics manifest FDR method is invalid")
+    if type(manifest_parameters.get("allow_legacy_export_layout")) is not bool:
+        raise ValueError("Statistics manifest legacy-layout policy is invalid")
+    for parameter_name in (
+        "bootstrap_iterations",
+        "permutation_iterations",
+        "random_seed",
+    ):
+        if type(manifest_parameters.get(parameter_name)) is not int or int(
+            manifest_parameters[parameter_name]
+        ) < 0:
+            raise ValueError(
+                f"Statistics manifest parameter {parameter_name} is invalid"
+            )
+    if type(manifest_parameters.get("minimum_recordings")) is not int or int(
+        manifest_parameters["minimum_recordings"]
+    ) < 1:
+        raise ValueError("Statistics manifest minimum_recordings is invalid")
+    confidence = manifest_parameters.get("confidence_level")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 < float(confidence) < 1.0
+    ):
+        raise ValueError("Statistics manifest confidence level is invalid")
+
+    expected_input_tables = {source_table for source_table, _metric in metric_specs}
+    if CRA_SUMMARY_TABLE in expected_input_tables:
+        expected_input_tables.add(CRA_OBJECT_PHASE_TABLE)
+    if CRA_NEAR_FIELD_SUMMARY_TABLE in expected_input_tables:
+        expected_input_tables.add(CRA_NEAR_FIELD_OBJECT_PHASE_TABLE)
+    if any(
+        str(item.get("source_table")) in ROLE_GROUPED_SOURCE_TABLES
+        and "behavior_class" in (item.get("group_keys") or ())
+        for item in metric_specs.values()
+    ):
+        expected_input_tables.add(CRA_OBJECT_PHASE_TABLE)
+    if manifest.get("input_tables") != sorted(expected_input_tables):
+        raise ValueError("Statistics manifest input table registry is invalid")
+    expected_role_mapping = (
+        CRA_OBJECT_PHASE_TABLE
+        if CRA_OBJECT_PHASE_TABLE in expected_input_tables
+        else None
+    )
+    if manifest_parameters.get("role_mapping_table") != expected_role_mapping:
+        raise ValueError("Statistics manifest role mapping table is invalid")
+
+    source_path = manifest.get("source_export_manifest_path")
+    source_counts = manifest.get("source_row_counts_by_table")
+    if not isinstance(source_path, str) or not source_path:
+        raise ValueError("Statistics manifest source path is invalid")
+    if not isinstance(source_counts, Mapping):
+        source_counts = {}
+    collection = manifest.get("source_collection_manifest")
+    if not isinstance(collection, Mapping):
+        collection = {}
+    expected_collection = (
+        collection.get("collection_id"),
+        collection.get("manifest_sha256"),
+    )
+
+    for row_index, row in enumerate(rows):
+        key = (str(row.get("source_table")), str(row.get("metric_name")))
+        spec = metric_specs.get(key)
+        if spec is None:
+            raise ValueError(
+                f"{table_name}: row {row_index} is absent from manifest metrics"
+            )
+        if row.get("metric_family") != spec.get("metric_family"):
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid metric_family"
+            )
+        if row.get("metric_unit") != spec.get("metric_unit"):
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid metric_unit"
+            )
+        if row.get("primary") != spec.get("primary") or row.get(
+            "exploratory"
+        ) != spec.get("exploratory"):
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid metric flags"
+            )
+        group_key = json.loads(str(row.get("group_key_json")))
+        if set(group_key) != set(spec.get("group_keys") or ()):
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid grouping keys"
+            )
+        if row.get("source_export_manifest_path") != source_path:
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid source manifest path"
+            )
+        if (
+            row.get("collection_id"),
+            row.get("collection_manifest_sha256"),
+        ) != expected_collection:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid collection binding"
+            )
+        declared_count = source_counts.get(key[0])
+        if declared_count is not None and row.get("source_row_count") != declared_count:
+            raise ValueError(
+                f"{table_name}: row {row_index} has an invalid source_row_count"
+            )
+        try:
+            parameters = json.loads(str(row.get("parameters_json")))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid parameters_json"
+            ) from exc
+        one_sample = (
+            table_name == SUMMARY_TABLE
+            and row.get("contrast_name") == "vs-zero"
+            and row.get("condition_a") == "zero"
+        )
+        expected_parameters: dict[str, object] = {
+            "allow_legacy_export_layout": bool(
+                manifest_parameters["allow_legacy_export_layout"]
+            ),
+            "bootstrap_iterations_requested": int(
+                manifest_parameters["bootstrap_iterations"]
+            ),
+            "confidence_level": float(manifest_parameters["confidence_level"]),
+            "minimum_recordings": int(manifest_parameters["minimum_recordings"]),
+            "missing_policy": row.get("missing_policy"),
+            "permutation_iterations_requested": int(
+                manifest_parameters["permutation_iterations"]
+            ),
+            "random_seed": int(manifest_parameters["random_seed"]),
+        }
+        if one_sample:
+            expected_parameters["test_target"] = 0.0
+        if parameters != expected_parameters:
+            raise ValueError(
+                f"{table_name}: row {row_index} has invalid parameters_json"
+            )
+        if table_name == SUMMARY_TABLE:
+            expected_family = "|".join(
+                (
+                    str(row.get("metric_family")),
+                    str(row.get("metric_name")),
+                    str(row.get("contrast_name")),
+                )
+            )
+            if row.get("multiple_comparison_family") != expected_family:
+                raise ValueError(
+                    f"{table_name}: row {row_index} has invalid multiple-comparison binding"
+                )
+            if row.get("contrast_name") == "vs-zero":
+                if (row.get("condition_a"), row.get("condition_b")) != (
+                    "zero",
+                    "observed",
+                ) or key[0] not in {CRA_SUMMARY_TABLE, CRA_NEAR_FIELD_SUMMARY_TABLE}:
+                    raise ValueError(
+                        f"{table_name}: row {row_index} has invalid one-sample contrast"
+                    )
+            elif contrasts.get(str(row.get("contrast_name"))) != (
+                row.get("condition_a"),
+                row.get("condition_b"),
+            ):
+                raise ValueError(
+                    f"{table_name}: row {row_index} has invalid contrast binding"
+                )
+
+
+def validate_goodcopbadcop_result_rows(
+    table_name: str,
+    rows: Sequence[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
+) -> None:
+    """Validate persisted exact rows against their semantic publication manifest."""
+
+    stats_run_id = manifest.get("export_run_id")
+    source_run_id = manifest.get("source_export_run_id")
+    source_digest = manifest.get("source_export_manifest_sha256")
+    if not isinstance(stats_run_id, str) or not stats_run_id:
+        raise ValueError("Statistics manifest lacks a statistics run identity")
+    if not isinstance(source_run_id, str) or not source_run_id:
+        raise ValueError("Statistics manifest lacks a source export run identity")
+    if (
+        not isinstance(source_digest, str)
+        or len(source_digest) != 64
+        or source_digest != source_digest.lower()
+    ):
+        raise ValueError("Statistics manifest lacks a source manifest digest")
+    try:
+        int(source_digest, 16)
+    except ValueError as exc:
+        raise ValueError("Statistics manifest lacks a source manifest digest") from exc
+    _validate_result_rows(
+        table_name,
+        rows,
+        expected_stats_run_id=stats_run_id,
+        expected_source_export_run_id=source_run_id,
+        expected_source_manifest_sha256=source_digest,
+    )
+    _validate_result_rows_against_manifest(table_name, rows, manifest)
 
 
 def _finite_values(values: Sequence[Any]) -> np.ndarray:
@@ -850,8 +1524,11 @@ def _base_descriptive_row(
         source_row_counts = {}
     parameters = {
         "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
+        "bootstrap_iterations_requested": int(config.bootstrap_iterations),
+        "confidence_level": float(config.confidence_level),
         "minimum_recordings": int(config.minimum_recordings),
-        "missing_policy": "complete_recording_values_by_condition",
+        "missing_policy": "available_recording_values_by_condition",
+        "permutation_iterations_requested": int(config.permutation_iterations),
         "random_seed": int(config.random_seed),
     }
     row: dict[str, Any] = {
@@ -866,6 +1543,7 @@ def _base_descriptive_row(
         "source_row_count": int(source_row_counts.get(spec.source_table) or source_row_count),
         "metric_family": spec.metric_family,
         "metric_name": spec.metric_name,
+        "metric_unit": _metric_unit(spec),
         "condition_name": condition_name,
         "group_key_json": _json_dumps(dict(group_key)),
         "primary": bool(spec.primary),
@@ -879,7 +1557,7 @@ def _base_descriptive_row(
         "sem": stats.get("sem"),
         "min": stats.get("min"),
         "max": stats.get("max"),
-        "missing_policy": "complete_recording_values_by_condition",
+        "missing_policy": "available_recording_values_by_condition",
         "parameters_json": _json_dumps(parameters),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
     }
@@ -1017,9 +1695,13 @@ def _rows_for_metric(
             group_key = _group_key_payload(group_row, spec.group_keys)
             parameters = {
                 "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
+                "bootstrap_iterations_requested": int(config.bootstrap_iterations),
                 "confidence_level": float(config.confidence_level),
                 "minimum_recordings": int(config.minimum_recordings),
                 "missing_policy": "paired_complete_recordings",
+                "permutation_iterations_requested": int(
+                    config.permutation_iterations
+                ),
                 "random_seed": int(config.random_seed),
             }
             multiple_comparison_family = "|".join(
@@ -1041,6 +1723,7 @@ def _rows_for_metric(
                 "source_row_count": int(source_row_counts.get(spec.source_table) or source_row_count),
                 "metric_family": spec.metric_family,
                 "metric_name": spec.metric_name,
+                "metric_unit": _metric_unit(spec),
                 "contrast_name": contrast.name,
                 "condition_a": contrast.condition_a,
                 "condition_b": contrast.condition_b,
@@ -1058,6 +1741,8 @@ def _rows_for_metric(
                 "median_difference": stats.median_difference,
                 "std_difference": stats.std_difference,
                 "effect_size": stats.effect_size,
+                "effect_size_kind": "paired_mean_difference_over_sample_sd",
+                "ci_estimand": "paired_mean_difference",
                 "ci_low": stats.ci_low,
                 "ci_high": stats.ci_high,
                 "p_value": stats.p_value,
@@ -1117,9 +1802,11 @@ def _rows_for_cra_summary_metric(
 
     parameters = {
         "allow_legacy_export_layout": bool(config.allow_legacy_export_layout),
+        "bootstrap_iterations_requested": int(config.bootstrap_iterations),
         "confidence_level": float(config.confidence_level),
         "minimum_recordings": int(config.minimum_recordings),
         "missing_policy": "one_row_per_recording_complete_cases",
+        "permutation_iterations_requested": int(config.permutation_iterations),
         "random_seed": int(config.random_seed),
         "test_target": 0.0,
     }
@@ -1135,6 +1822,7 @@ def _rows_for_cra_summary_metric(
         "source_row_count": int(source_row_counts.get(spec.source_table) or int(frame.height)),
         "metric_family": spec.metric_family,
         "metric_name": spec.metric_name,
+        "metric_unit": _metric_unit(spec),
         "contrast_name": "vs-zero",
         "condition_a": "zero",
         "condition_b": "observed",
@@ -1152,6 +1840,8 @@ def _rows_for_cra_summary_metric(
         "median_difference": stats.median_difference,
         "std_difference": stats.std_difference,
         "effect_size": stats.effect_size,
+        "effect_size_kind": "rank_biserial_correlation",
+        "ci_estimand": "one_sample_median",
         "ci_low": stats.ci_low,
         "ci_high": stats.ci_high,
         "p_value": stats.p_value,
@@ -1283,6 +1973,13 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
             )
     apply_fdr(rows)
     rows = [canonicalize_export_row(SUMMARY_TABLE, row) for row in rows]
+    _validate_result_rows(
+        SUMMARY_TABLE,
+        rows,
+        expected_stats_run_id=config.stats_run_id,
+        expected_source_export_run_id=config.source_export_run_id,
+        expected_source_manifest_sha256=source_manifest_sha256,
+    )
 
     manifest = _build_stats_manifest(
         config=GoodCopBadCopStatisticsConfig(
@@ -1303,6 +2000,7 @@ def _compute_goodcopbadcop_statistics_from_snapshot(
         source_manifest=source_manifest,
         source_manifest_sha256=source_manifest_sha256,
     )
+    _validate_result_rows_against_manifest(SUMMARY_TABLE, rows, manifest)
     return rows, manifest
 
 
@@ -1351,7 +2049,15 @@ def _compute_goodcopbadcop_descriptive_from_snapshot(
                     source_manifest_sha256=source_manifest_sha256,
                 )
             )
-    return [canonicalize_export_row(DESCRIPTIVE_TABLE, row) for row in rows]
+    result = [canonicalize_export_row(DESCRIPTIVE_TABLE, row) for row in rows]
+    _validate_result_rows(
+        DESCRIPTIVE_TABLE,
+        result,
+        expected_stats_run_id=config.stats_run_id,
+        expected_source_export_run_id=config.source_export_run_id,
+        expected_source_manifest_sha256=source_manifest_sha256,
+    )
+    return result
 
 
 def compute_goodcopbadcop_statistics(
@@ -1378,6 +2084,11 @@ def compute_goodcopbadcop_outputs(
     descriptive_rows = _compute_goodcopbadcop_descriptive_from_snapshot(
         config,
         snapshot,
+    )
+    _validate_result_rows_against_manifest(
+        DESCRIPTIVE_TABLE,
+        descriptive_rows,
+        manifest,
     )
     return rows, descriptive_rows, manifest
 
@@ -1428,6 +2139,7 @@ def _build_stats_manifest(
                 "metric_family": spec.metric_family,
                 "source_table": spec.source_table,
                 "metric_name": spec.metric_name,
+                "metric_unit": _metric_unit(spec),
                 "group_keys": list(spec.group_keys),
                 "primary": spec.primary,
                 "exploratory": spec.exploratory,
@@ -1459,11 +2171,6 @@ def _build_stats_manifest(
     }
 
 
-def _normalize_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    columns = sorted({key for row in rows for key in row.keys()})
-    return [{column: row.get(column) for column in columns} for row in rows]
-
-
 def write_goodcopbadcop_statistics(
     rows: Sequence[Mapping[str, Any]],
     manifest: Mapping[str, Any],
@@ -1478,6 +2185,24 @@ def write_goodcopbadcop_statistics(
 
     output_root = Path(export_root).expanduser().resolve()
     stats_run_id = safe_component(stats_run_id, label="statistics run ID")
+    if manifest.get("export_run_id") != stats_run_id:
+        raise ValueError(
+            "Statistics manifest export_run_id does not match the requested run"
+        )
+    source_run_id = manifest.get("source_export_run_id")
+    source_manifest_sha256 = manifest.get("source_export_manifest_sha256")
+    if not isinstance(source_run_id, str) or not source_run_id:
+        raise ValueError("Statistics manifest lacks a source export run identity")
+    if (
+        not isinstance(source_manifest_sha256, str)
+        or len(source_manifest_sha256) != 64
+        or source_manifest_sha256 != source_manifest_sha256.lower()
+    ):
+        raise ValueError("Statistics manifest lacks a source manifest digest")
+    try:
+        int(source_manifest_sha256, 16)
+    except ValueError as exc:
+        raise ValueError("Statistics manifest lacks a source manifest digest") from exc
     manifest_path = export_manifest_path(output_root, stats_run_id)
     manifest_dir = manifest_path.parent
     baseline_manifest_identity = manifest_identity(manifest_path)
@@ -1499,46 +2224,93 @@ def write_goodcopbadcop_statistics(
     canonical_rows_by_table = {
         SUMMARY_TABLE: [canonicalize_export_row(SUMMARY_TABLE, row) for row in rows],
     }
+    _validate_result_rows(
+        SUMMARY_TABLE,
+        canonical_rows_by_table[SUMMARY_TABLE],
+        expected_stats_run_id=stats_run_id,
+        expected_source_export_run_id=source_run_id,
+        expected_source_manifest_sha256=source_manifest_sha256,
+    )
+    _validate_result_rows_against_manifest(
+        SUMMARY_TABLE,
+        canonical_rows_by_table[SUMMARY_TABLE],
+        manifest,
+    )
     if descriptive_rows:
         canonical_rows_by_table[DESCRIPTIVE_TABLE] = [
             canonicalize_export_row(DESCRIPTIVE_TABLE, row) for row in descriptive_rows
         ]
+        _validate_result_rows(
+            DESCRIPTIVE_TABLE,
+            canonical_rows_by_table[DESCRIPTIVE_TABLE],
+            expected_stats_run_id=stats_run_id,
+            expected_source_export_run_id=source_run_id,
+            expected_source_manifest_sha256=source_manifest_sha256,
+        )
+        _validate_result_rows_against_manifest(
+            DESCRIPTIVE_TABLE,
+            canonical_rows_by_table[DESCRIPTIVE_TABLE],
+            manifest,
+        )
 
     def write_table(table_name: str, table_rows: Sequence[Mapping[str, Any]]) -> list[str]:
         table_dir = staging_root / "tables" / table_name
         table_dir.mkdir(parents=True, exist_ok=True)
-        normalized = _normalize_rows(table_rows)
-        part_files: list[str] = []
-        if normalized:
-            columns = tuple(normalized[0])
-            missing = validate_table_columns(table_name, columns)
+        contract = ARROW_TABLE_CONTRACTS[table_name]
+        columns = tuple(field.name for field in contract.fields)
+        expected = set(columns)
+        unexpected = sorted(
+            {str(key) for row in table_rows for key in row} - expected
+        )
+        if unexpected:
+            raise ValueError(
+                f"{table_name}: unexpected fields for exact Arrow schema: "
+                f"{unexpected}"
+            )
+        nonnullable = {
+            field.name for field in contract.fields if not field.nullable
+        }
+        for row_index, row in enumerate(table_rows):
+            missing = sorted(
+                name for name in nonnullable if row.get(name) is None
+            )
             if missing:
                 raise ValueError(
-                    f"{table_name} does not satisfy its V2 table contract; "
-                    f"missing columns: {list(missing)}"
+                    f"{table_name}: row {row_index} has null/missing "
+                    f"non-nullable fields: {missing}"
                 )
-            part_path = table_dir / "part-00000.parquet"
-            tmp_path = table_dir / ".part-00000.parquet.tmp"
-            if tmp_path.exists():
-                tmp_path.unlink()
-            arrow_table = pa.Table.from_pylist(normalized)
-            metadata = dict(arrow_table.schema.metadata or {})
-            metadata.update(
-                {
-                    b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
-                    b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("utf-8"),
-                    b"palette.table_contract": json.dumps(
-                        TABLE_CONTRACTS[table_name].to_dict(),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8"),
-                    b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
-                }
+        missing = validate_table_columns(table_name, columns)
+        if missing:
+            raise ValueError(
+                f"{table_name} does not satisfy its V2 table contract; "
+                f"missing columns: {list(missing)}"
             )
-            pq.write_table(arrow_table.replace_schema_metadata(metadata), tmp_path)
-            os.replace(tmp_path, part_path)
-            part_files.append(str(part_path))
-        return part_files
+        normalized = [
+            {column: row.get(column) for column in columns}
+            for row in table_rows
+        ]
+        part_path = table_dir / "part-00000.parquet"
+        tmp_path = table_dir / ".part-00000.parquet.tmp"
+        if tmp_path.exists():
+            tmp_path.unlink()
+        schema = exact_arrow_schema(
+            table_name,
+            metadata={
+                b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
+                b"palette.export_schema_version": str(
+                    EXPORT_SCHEMA_VERSION
+                ).encode("utf-8"),
+                b"palette.table_contract": json.dumps(
+                    TABLE_CONTRACTS[table_name].to_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            },
+        )
+        arrow_table = pa.Table.from_pylist(normalized, schema=schema)
+        pq.write_table(arrow_table, tmp_path)
+        os.replace(tmp_path, part_path)
+        return [str(part_path)]
 
     try:
         part_files_by_table: dict[str, list[str]] = {
@@ -1602,22 +2374,11 @@ def write_goodcopbadcop_statistics(
         payload["table_contracts"] = contract_snapshot(output_tables)
         payload["arrow_schema_contracts"] = arrow_contract_envelope(output_tables)
         columns_by_table = {
-            SUMMARY_TABLE: sorted(
-                {
-                    key
-                    for row in canonical_rows_by_table[SUMMARY_TABLE]
-                    for key in row
-                }
-            ),
+            table_name: [
+                field.name for field in ARROW_TABLE_CONTRACTS[table_name].fields
+            ]
+            for table_name in part_files_by_table
         }
-        if descriptive_rows:
-            columns_by_table[DESCRIPTIVE_TABLE] = sorted(
-                {
-                    key
-                    for row in canonical_rows_by_table[DESCRIPTIVE_TABLE]
-                    for key in row
-                }
-            )
         capability_statuses = resolve_capabilities(columns_by_table)
         payload["capabilities"] = [
             status.capability_id

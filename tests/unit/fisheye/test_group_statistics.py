@@ -11,22 +11,50 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from fisheye.analytics_exports.arrow_contracts import (
+    ARROW_TABLE_CONTRACTS,
+    exact_arrow_schema,
+)
 from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
     TABLE_CONTRACTS,
     contract_snapshot,
 )
-from fisheye.analytics_exports.publication import manifest_selected_part_files
-from fisheye.analytics_exports.validation import validate_export_run
+from fisheye.analytics_exports.publication import (
+    PUBLICATION_SCHEMA_ID,
+    PUBLICATION_SCHEMA_VERSION,
+    export_manifest_path,
+    generation_relative_path,
+    manifest_selected_part_files,
+    publication_generation_root,
+    sha256_file,
+)
+from fisheye.analytics_exports.validation import (
+    ExportValidationError,
+    validate_export_run,
+)
+from fisheye.group_analytics_viewer.query import (
+    ViewerContext,
+    query_group_statistics,
+    resolve_statistics_run_id,
+)
 from fisheye.group_statistics.goodcopbadcop import (
     DESCRIPTIVE_TABLE,
     GoodCopBadCopStatisticsConfig,
     SUMMARY_TABLE,
+    compute_goodcopbadcop_outputs,
     compute_goodcopbadcop_descriptive_summaries,
     compute_goodcopbadcop_statistics,
     metric_specs_for_families,
     write_goodcopbadcop_statistics,
+    _descriptive_result_id,
+    _result_id,
+)
+from fisheye.group_statistics.legacy_arrow import (
+    legacy_group_statistics_arrow_envelope,
+    legacy_group_statistics_contract_snapshot,
+    validate_legacy_group_statistics_payload,
 )
 from fisheye.group_statistics.paired import (
     benjamini_hochberg,
@@ -123,6 +151,111 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
         encoding="utf-8",
     )
     return export_root
+
+
+def _publish_legacy_group_statistics_copy(
+    export_root: Path,
+    exact_payload: dict[str, object],
+    *,
+    legacy_run_id: str,
+) -> dict[str, object]:
+    """Create a test-only copy of the historical inferred-v2 publication."""
+
+    generation_id = "legacy-inferred-v2"
+    generation_root = publication_generation_root(
+        export_root,
+        legacy_run_id,
+        generation_id,
+    )
+    generation_relative = generation_relative_path(
+        legacy_run_id,
+        generation_id,
+    )
+    output_tables = [str(value) for value in exact_payload["output_tables"]]
+    contracts = legacy_group_statistics_contract_snapshot(output_tables)
+    part_files: dict[str, list[str]] = {}
+    row_counts: dict[str, int] = {}
+    inventory: dict[str, list[dict[str, object]]] = {}
+    removed_by_table = {
+        SUMMARY_TABLE: {"metric_unit", "effect_size_kind", "ci_estimand"},
+        DESCRIPTIVE_TABLE: {"metric_unit"},
+    }
+
+    for table_name in output_tables:
+        source_parts = manifest_selected_part_files(
+            export_root,
+            str(exact_payload["export_run_id"]),
+            table_name,
+        )
+        rows: list[dict[str, object]] = []
+        for source_part in source_parts:
+            for source_row in pq.read_table(source_part).to_pylist():
+                row = {
+                    key: value
+                    for key, value in source_row.items()
+                    if key not in removed_by_table[table_name]
+                }
+                row["stats_run_id"] = legacy_run_id
+                rows.append(row)
+        table = pa.Table.from_pylist(rows)
+        metadata = {
+            b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
+            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(
+                "ascii"
+            ),
+            b"palette.table_contract": json.dumps(
+                contracts[table_name],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
+        }
+        table = table.replace_schema_metadata(metadata)
+        part_path = generation_root / "tables" / table_name / "part-00000.parquet"
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, part_path)
+        relative_path = (
+            generation_relative / "tables" / table_name / part_path.name
+        ).as_posix()
+        part_files[table_name] = [relative_path]
+        row_counts[table_name] = len(rows)
+        inventory[table_name] = [
+            {
+                "path": relative_path,
+                "sha256": sha256_file(part_path),
+                "size_bytes": part_path.stat().st_size,
+                "row_count": len(rows),
+            }
+        ]
+
+    legacy_payload = json.loads(json.dumps(exact_payload))
+    legacy_payload.update(
+        {
+            "export_run_id": legacy_run_id,
+            "manifest_path": str(export_manifest_path(export_root, legacy_run_id)),
+            "table_contracts": contracts,
+            "arrow_schema_contracts": legacy_group_statistics_arrow_envelope(
+                output_tables
+            ),
+            "row_counts_by_table": row_counts,
+            "part_files_by_table": part_files,
+            "publication": {
+                "schema_id": PUBLICATION_SCHEMA_ID,
+                "schema_version": PUBLICATION_SCHEMA_VERSION,
+                "state": "complete",
+                "generation_id": generation_id,
+                "generation_path": generation_relative.as_posix(),
+                "parts_by_table": inventory,
+            },
+        }
+    )
+    manifest_path = export_manifest_path(export_root, legacy_run_id)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(legacy_payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return legacy_payload
 
 
 def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_export") -> Path:
@@ -320,6 +453,16 @@ def test_benjamini_hochberg_adjusts_with_monotonicity() -> None:
     assert benjamini_hochberg([0.01, 0.04, 0.03, None]) == pytest.approx([0.03, 0.04, 0.04, None])
 
 
+def test_group_statistics_rejects_zero_minimum_recordings(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="minimum_recordings must be an integer >= 1"):
+        GoodCopBadCopStatisticsConfig(
+            export_root=tmp_path,
+            source_export_run_id="source_export",
+            stats_run_id="stats_invalid",
+            minimum_recordings=0,
+        )
+
+
 def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) -> None:
     export_root = _make_goodcopbadcop_export(tmp_path)
     config = GoodCopBadCopStatisticsConfig(
@@ -366,6 +509,11 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     )
     assert target["source_export_run_id"] == "source_export"
     assert target["collection_id"] == "collection_test"
+    assert target["metric_unit"] == "mm"
+    assert target["effect_size_kind"] == (
+        "paired_mean_difference_over_sample_sd"
+    )
+    assert target["ci_estimand"] == "paired_mean_difference"
     assert target["paired_unit_count"] == 3
     assert target["mean_a"] == pytest.approx(7.0 / 3.0)
     assert target["mean_b"] == pytest.approx(13.0 / 3.0)
@@ -393,6 +541,11 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert all(row["table_name"] == SUMMARY_TABLE for row in table)
     summary_metadata = pq.ParquetFile(part).schema_arrow.metadata or {}
     assert summary_metadata[b"palette.export_schema_id"].decode() == EXPORT_SCHEMA_ID
+    assert summary_metadata[b"palette.arrow_schema_mode"] == b"exact"
+    assert pq.ParquetFile(part).schema_arrow.remove_metadata() == exact_arrow_schema(
+        SUMMARY_TABLE,
+        metadata={},
+    ).remove_metadata()
     assert json.loads(summary_metadata[b"palette.table_contract"]) == TABLE_CONTRACTS[
         SUMMARY_TABLE
     ].to_dict()
@@ -404,11 +557,379 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert descriptive_part.is_file()
     descriptive_table = pq.read_table(descriptive_part).to_pylist()
     assert len(descriptive_table) == 18
+    descriptive_schema = pq.ParquetFile(descriptive_part).schema_arrow
+    assert descriptive_schema.remove_metadata() == exact_arrow_schema(
+        DESCRIPTIVE_TABLE,
+        metadata={},
+    ).remove_metadata()
+    assert descriptive_schema.metadata[b"palette.arrow_schema_mode"] == b"exact"
+    assert written["arrow_schema_contracts"][
+        "inferred_v2_compatibility_tables"
+    ] == []
     assert written["schema_version"] == EXPORT_SCHEMA_VERSION
     assert set(written["capabilities"]) == {
         "group.statistics",
         "group.descriptive_statistics",
     }
+
+
+def test_group_statistics_legacy_reader_is_explicit_and_exact_is_preferred(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_exact",
+        metrics=metric_specs_for_families(("chaser_distance",)),
+        bootstrap_iterations=0,
+        minimum_recordings=3,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+    rows, descriptive_rows, manifest = compute_goodcopbadcop_outputs(config)
+    exact_payload = write_goodcopbadcop_statistics(
+        rows,
+        manifest,
+        export_root=export_root,
+        stats_run_id="stats_exact",
+        descriptive_rows=descriptive_rows,
+    )
+    exact_context = ViewerContext(
+        export_root=export_root,
+        export_run_id="source_export",
+        stats_run_id="stats_exact",
+    )
+    projected = query_group_statistics(
+        exact_context,
+        metric_name="p50_distance_mm",
+    )
+    assert projected["rows"]
+    assert {
+        "metric_unit",
+        "effect_size_kind",
+        "ci_estimand",
+        "missing_policy",
+        "parameters_json",
+    } <= set(projected["rows"][0])
+    assert projected["rows"][0]["metric_unit"] == "mm"
+    assert projected["rows"][0]["effect_size_kind"] == (
+        "paired_mean_difference_over_sample_sd"
+    )
+    assert projected["rows"][0]["ci_estimand"] == "paired_mean_difference"
+    legacy_payload = _publish_legacy_group_statistics_copy(
+        export_root,
+        exact_payload,
+        legacy_run_id="stats_legacy",
+    )
+    legacy_payload["created_at_utc"] = "9999-12-31T23:59:59+00:00"
+    export_manifest_path(export_root, "stats_legacy").write_text(
+        json.dumps(legacy_payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    validate_legacy_group_statistics_payload(
+        export_root,
+        "stats_legacy",
+        legacy_payload,
+    )
+    strict_context = ViewerContext(
+        export_root=export_root,
+        export_run_id="source_export",
+        stats_run_id="stats_legacy",
+    )
+    with pytest.raises(ExportValidationError):
+        resolve_statistics_run_id(strict_context)
+    opted_in = ViewerContext(
+        export_root=export_root,
+        export_run_id="source_export",
+        stats_run_id="stats_legacy",
+        allow_legacy_statistics=True,
+    )
+    assert resolve_statistics_run_id(opted_in) == "stats_legacy"
+    auto = ViewerContext(
+        export_root=export_root,
+        export_run_id="source_export",
+        allow_legacy_statistics=True,
+    )
+    assert resolve_statistics_run_id(auto) == "stats_exact"
+
+    legacy_payload["arrow_schema_contracts"] = {"tampered": True}
+    export_manifest_path(export_root, "stats_legacy").write_text(
+        json.dumps(legacy_payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="neither the current exact contract"):
+        resolve_statistics_run_id(opted_in)
+
+
+def test_group_statistics_exact_writer_rejects_row_shape_and_identity_tampering(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_shape",
+        metrics=metric_specs_for_families(("chaser_distance",)),
+        bootstrap_iterations=0,
+        minimum_recordings=3,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+    rows, descriptive_rows, manifest = compute_goodcopbadcop_outputs(config)
+
+    unexpected = [dict(row) for row in rows]
+    unexpected[0]["surprise"] = 1
+    with pytest.raises(ValueError, match="unexpected fields"):
+        write_goodcopbadcop_statistics(
+            unexpected,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+    missing = [dict(row) for row in rows]
+    del missing[0]["created_at_utc"]
+    with pytest.raises(ValueError, match="null/missing non-nullable"):
+        write_goodcopbadcop_statistics(
+            missing,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+    bad_identity = [dict(row) for row in rows]
+    bad_identity[0]["source_export_manifest_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="invalid source_export_manifest_sha256"):
+        write_goodcopbadcop_statistics(
+            bad_identity,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+    with pytest.raises(ValueError, match="duplicate stat_result_id"):
+        write_goodcopbadcop_statistics(
+            [*rows, dict(rows[0])],
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+    resigned = [dict(row) for row in rows]
+    resigned[0]["metric_family"] = "tampered_family"
+    resigned[0]["source_export_manifest_path"] = "/wrong/source.json"
+    resigned[0]["stat_result_id"] = _result_id(resigned[0])
+    with pytest.raises(ValueError, match="invalid metric_family"):
+        write_goodcopbadcop_statistics(
+            resigned,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+    computed_with_skipped_method = [dict(row) for row in rows]
+    computed_with_skipped_method[0]["test_method"] = "skipped"
+    computed_with_skipped_method[0]["stat_result_id"] = _result_id(
+        computed_with_skipped_method[0]
+    )
+    with pytest.raises(ValueError, match="inconsistent skipped method"):
+        write_goodcopbadcop_statistics(
+            computed_with_skipped_method,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+    for invalid_q_value in (None, 0.123456789):
+        invalid_fdr = [dict(row) for row in rows]
+        invalid_fdr[0]["q_value"] = invalid_q_value
+        with pytest.raises(ValueError, match="invalid FDR q_value"):
+            write_goodcopbadcop_statistics(
+                invalid_fdr,
+                manifest,
+                export_root=export_root,
+                stats_run_id="stats_shape",
+                descriptive_rows=descriptive_rows,
+            )
+
+    reversed_ci = [dict(row) for row in rows]
+    reversed_ci[0]["ci_low"] = 2.0
+    reversed_ci[0]["ci_high"] = 1.0
+    with pytest.raises(ValueError, match="invalid CI bounds"):
+        write_goodcopbadcop_statistics(
+            reversed_ci,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+    bad_descriptive_unit = [dict(row) for row in descriptive_rows]
+    bad_descriptive_unit[0]["unit"] = "fish"
+    with pytest.raises(ValueError, match="invalid unit"):
+        write_goodcopbadcop_statistics(
+            rows,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=bad_descriptive_unit,
+        )
+
+    absent_descriptive_values = [dict(row) for row in descriptive_rows]
+    for field_name in ("sum", "mean", "median", "min", "max"):
+        absent_descriptive_values[0][field_name] = None
+    absent_descriptive_values[0]["descriptive_result_id"] = (
+        _descriptive_result_id(absent_descriptive_values[0])
+    )
+    with pytest.raises(ValueError, match="lacks descriptive location values"):
+        write_goodcopbadcop_statistics(
+            rows,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=absent_descriptive_values,
+        )
+
+    absent_dispersion = [dict(row) for row in descriptive_rows]
+    assert absent_dispersion[0]["unit_count"] >= 2
+    absent_dispersion[0]["std_dev"] = None
+    absent_dispersion[0]["sem"] = None
+    absent_dispersion[0]["descriptive_result_id"] = _descriptive_result_id(
+        absent_dispersion[0]
+    )
+    with pytest.raises(ValueError, match="lacks descriptive dispersion values"):
+        write_goodcopbadcop_statistics(
+            rows,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=absent_dispersion,
+        )
+
+    wrong_fdr_manifest = json.loads(json.dumps(manifest))
+    wrong_fdr_manifest["parameters"]["fdr_method"] = "bonferroni"
+    with pytest.raises(ValueError, match="FDR method is invalid"):
+        write_goodcopbadcop_statistics(
+            rows,
+            wrong_fdr_manifest,
+            export_root=export_root,
+            stats_run_id="stats_shape",
+            descriptive_rows=descriptive_rows,
+        )
+
+
+def test_group_statistics_all_null_inference_columns_keep_exact_physical_types(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_skipped",
+        metrics=metric_specs_for_families(("chaser_distance",)),
+        bootstrap_iterations=0,
+        minimum_recordings=100,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+    rows, descriptive_rows, manifest = compute_goodcopbadcop_outputs(config)
+    assert rows
+    assert all(row["status"] == "skipped" for row in rows)
+    assert all(row["q_value"] is None for row in rows)
+    assert all(row["effect_size"] is None for row in rows)
+
+    tampered_skipped = [dict(row) for row in rows]
+    tampered_skipped[0]["effect_size"] = 1.0
+    tampered_skipped[0]["stat_result_id"] = _result_id(tampered_skipped[0])
+    with pytest.raises(ValueError, match="inferential values for a low-count skip"):
+        write_goodcopbadcop_statistics(
+            tampered_skipped,
+            manifest,
+            export_root=export_root,
+            stats_run_id="stats_skipped",
+            descriptive_rows=descriptive_rows,
+        )
+
+    payload = write_goodcopbadcop_statistics(
+        rows,
+        manifest,
+        export_root=export_root,
+        stats_run_id="stats_skipped",
+        descriptive_rows=descriptive_rows,
+    )
+    summary_part = manifest_selected_part_files(
+        export_root,
+        "stats_skipped",
+        SUMMARY_TABLE,
+    )[0]
+    schema = pq.ParquetFile(summary_part).schema_arrow
+    assert schema.field("q_value").type == pa.float64()
+    assert schema.field("effect_size").type == pa.float64()
+    assert schema.field("skip_reason").type == pa.string()
+    assert schema.remove_metadata() == exact_arrow_schema(
+        SUMMARY_TABLE,
+        metadata={},
+    ).remove_metadata()
+    assert payload["arrow_schema_contracts"][
+        "inferred_v2_compatibility_tables"
+    ] == []
+
+
+def test_group_statistics_zero_rows_publish_schema_bearing_empty_part(
+    tmp_path: Path,
+) -> None:
+    export_root = _make_goodcopbadcop_export(tmp_path)
+    config = GoodCopBadCopStatisticsConfig(
+        export_root=export_root,
+        source_export_run_id="source_export",
+        stats_run_id="stats_empty",
+        metrics=(),
+        bootstrap_iterations=0,
+        permutation_iterations=0,
+        minimum_recordings=3,
+        random_seed=0,
+        allow_legacy_export_layout=True,
+    )
+    rows, descriptive_rows, manifest = compute_goodcopbadcop_outputs(config)
+    assert rows == []
+    assert descriptive_rows == []
+
+    payload = write_goodcopbadcop_statistics(
+        rows,
+        manifest,
+        export_root=export_root,
+        stats_run_id="stats_empty",
+    )
+    parts = manifest_selected_part_files(
+        export_root,
+        "stats_empty",
+        SUMMARY_TABLE,
+    )
+    assert len(parts) == 1
+    parquet_file = pq.ParquetFile(parts[0])
+    assert parquet_file.metadata.num_rows == 0
+    assert parquet_file.schema_arrow.remove_metadata() == exact_arrow_schema(
+        SUMMARY_TABLE,
+        metadata={},
+    ).remove_metadata()
+    assert payload["row_counts_by_table"][SUMMARY_TABLE] == 0
+
+
+@pytest.mark.parametrize("table_name", (SUMMARY_TABLE, DESCRIPTIVE_TABLE))
+def test_group_statistics_exact_contract_has_unique_ordered_fields(
+    table_name: str,
+) -> None:
+    fields = ARROW_TABLE_CONTRACTS[table_name].fields
+    names = tuple(field.name for field in fields)
+    assert len(names) == len(set(names))
 
 
 def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_path: Path) -> None:
@@ -451,6 +972,9 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
     assert occupancy_specificity["primary"] is False
     assert target["p_value"] == pytest.approx(0.25)
     assert target["test_method"] == "wilcoxon_signed_rank_exact"
+    assert target["metric_unit"] == "mm"
+    assert target["effect_size_kind"] == "rank_biserial_correlation"
+    assert target["ci_estimand"] == "one_sample_median"
 
     inert = next(row for row in rows if row["metric_name"] == "delta_inert")
     assert inert["primary"] is False
