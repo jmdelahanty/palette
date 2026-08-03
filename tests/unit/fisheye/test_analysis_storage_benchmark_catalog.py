@@ -24,6 +24,7 @@ READ_MATRIX_STAGES = {
     "chaser_distance",
     "stimulus_epochs",
     "stimulus_response",
+    "subject_shape",
 }
 
 
@@ -88,6 +89,11 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         "fisheye.diagnostics.benchmark_stimulus_response_reads"
     )
     assert stimulus_response.adapter_entrypoint == "run_benchmark_matrix"
+    subject_shape = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["subject_shape"]
+    assert subject_shape.adapter_module == (
+        "fisheye.diagnostics.benchmark_subject_shape_v4_candidate"
+    )
+    assert subject_shape.adapter_entrypoint == "run_benchmark_matrix"
 
 
 def test_plan_only_families_have_no_fabricated_adapter_or_execution_evidence() -> None:

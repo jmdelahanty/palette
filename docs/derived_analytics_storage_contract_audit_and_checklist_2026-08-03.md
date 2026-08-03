@@ -3,7 +3,8 @@
 Date: 2026-08-03
 
 Status: active implementation checklist; reconciled through the reviewed
-baseline-summary Arrow checkpoint `55cd2797`; correctness, executable
+baseline-samples Arrow and subject-shape benchmark checkpoints `359f072b` and
+`fa37a16f`; correctness, executable
 catalog, shared planner, serialized registry, compact rematerialization, and
 benchmark foundations are integrated. All thirteen current catalog families
 have explicit unpromoted physical candidates. No production profile,
@@ -11,7 +12,7 @@ scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
 Benchmark coverage is now separately executable rather than inferred from
-candidate presence. Seven of thirteen families have an executable
+candidate presence. Eight of thirteen families have an executable
 source/candidate read matrix; none yet has the complete writer, publication, physical-I/O,
 representative-scale, and real-consumer evidence required for promotion. The
 catalog binds any future measured/executed claims to an immutable evidence
@@ -123,7 +124,7 @@ true.
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
 | Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract; the v2 candidate flattens the two structured lineage records into five exact primitive arrays while retaining float64 position authority | Benchmark the selector-ineligible v2 candidate through its real readers before any writer/profile promotion |
-| Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, producer-sealed source binding, lineage, atomic publication, strict reload, serialized registry projection, and an explicit selector-ineligible byte-planned candidate preserving every dtype, fill, and decoded payload | Benchmark node-local publication and mounted consumer access before any profile promotion |
+| Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, producer-sealed source binding, lineage, atomic publication, strict reload, serialized registry projection, an explicit selector-ineligible byte-planned candidate, and a hardened fresh-process source/candidate read matrix preserving every dtype, fill, decoded payload, and installed transform | Run representative publication, physical-I/O, Palette-consumer, and Crimson-consumer gates before any profile promotion |
 | Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an atomic selector-ineligible byte-planned candidate with exact failure-visibility repair | Benchmark through Palette and Crimson before profile promotion |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
@@ -139,7 +140,7 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes exact position-occupancy, recording-summary, and baseline-behavior-summary schemas across writing, staging, and manifest-selected reads | Freeze the remaining 34 explicitly enumerated compatibility schemas where cross-language stability requires them |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes exact position-occupancy, recording-summary, baseline-behavior-summary, baseline-time-bin, and baseline-kinematic-sample schemas across writing, staging, and manifest-selected reads | Freeze the remaining 32 explicitly enumerated compatibility schemas where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
@@ -273,7 +274,7 @@ worktree is evidence to reconcile, not a safe base for new work.
 
 | Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
 | --- | --- | --- | --- | --- |
-| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `563d7720` plus this catalog checkpoint | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
+| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `fa37a16f` plus this catalog checkpoint | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
 | Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | Integrated as `a2668075` and `f178e315`; it classifies rather than promotes |
 | Eye-angle exact schema | `/tmp/palette-eye-v7-clean-20260803` / `agent/palette/eye-v7-clean-20260803` | `dd4c0f74` | Reusable analytics array declaration, exact 41-array eye-angle schema, deep writer/reader/readiness validation, and explicit v2-v6 compatibility boundaries | Reviewed as ready, committed as `3025d66e`, and integrated as `c1976300` |
 | Eye-angle byte candidate | historical isolated lane | `28f0132c` through `ac6b8bc3` | Exact 41-array planner/factory candidate and semantic fills | Integrated; remains explicit and selector-ineligible |
@@ -299,6 +300,9 @@ worktree is evidence to reconcile, not a safe base for new work.
 | First exact Arrow export schema | `/tmp/palette-analytics-arrow-dtype-contracts-20260803` / `agent/palette/analytics-arrow-dtype-contracts-20260803` | integrated as `379b9262` | Closed digest-bound Arrow envelope, exact 62-field position-occupancy schema, writer/staging/read validation, and an explicit census of 36 inferred compatibility schemas | Independently reviewed ACCEPT; remaining exact schemas, zero-row hardening, and production evidence remain pending |
 | Second exact Arrow export schema | `/tmp/palette-recording-summary-arrow-contract-20260803` / `agent/palette/recording-summary-arrow-contract-20260803` | integrated as `9da4de70` | Exact ordered 32-field recording-summary schema, stable nullable capability columns, manifest-exact zero-row behavior, strict writer/footer/selected-reader validation, and registry rejection of inferred minimal summaries | Independently reviewed ACCEPT; remaining 35 schemas and production consumer evidence remain pending |
 | Third exact Arrow export schema | `/tmp/palette-baseline-summary-arrow-contract-20260803` / `agent/palette/baseline-summary-arrow-contract-20260803` | integrated as `55cd2797` | Exact ordered 95-field baseline-behavior-summary schema, fixed eight-key source projection, nullable FPS discrepancy, strict writer/footer/selected-reader validation, and representation-only source test doubles | Independently reviewed ACCEPT; source authority remains quarantined and the remaining 34 schemas and cross-language evidence remain pending |
+| Fourth exact Arrow export schema | `/tmp/palette-baseline-time-bins-arrow-contract-20260803` / `agent/palette/baseline-time-bins-arrow-contract-20260803` | integrated as `cc75c755` | Exact ordered 77-field baseline-behavior-time-bin schema, fixed 38-key metric vocabulary, nullable FPS discrepancy, strict writer/footer/selected-reader validation, and representation-only source test doubles | Independently reviewed ACCEPT; source authority remains quarantined and the remaining 33 schemas and cross-language evidence remain pending |
+| Fifth exact Arrow export schema | `/tmp/palette-baseline-samples-arrow-contract-20260803` / `agent/palette/baseline-samples-arrow-contract-20260803` | integrated as `359f072b` | Exact ordered 71-field baseline-kinematic-samples schema, fixed 32-key sample vocabulary, explicit null-not-sentinel semantics, strict writer/footer/selected-reader validation, and representation-only full-resolution source test doubles | Independently reviewed ACCEPT; source authority and physical part-size benchmarking remain pending, with 32 inferred schemas left |
+| Subject-shape v4 source/candidate read matrix | `/tmp/palette-subject-shape-v4-read-benchmark-20260803` / `agent/palette/subject-shape-v4-read-benchmark-20260803` | integrated as `fa37a16f` | Exact transformed/untransformed logical equality, executable candidate plan and metadata replay, distinct PID/role/order binding, componentwise path containment, rotated fresh processes, and hard nonpromotion | Independently re-reviewed ACCEPT after four blocker fixes; representative execution, physical-I/O tracing, real consumers, and promotion remain pending |
 
 The next safe parallel wave assigns disjoint consumer/benchmark ownership as
 follows. The coordination lane remains the only owner of shared catalogs,
@@ -575,7 +579,13 @@ a v3 storage-candidate regression.
     - [x] Freeze the exact ordered 95-field `baseline_behavior_summary` schema,
           including the closed eight-key source-summary projection, nullable
           FPS discrepancy, and representation-only authority boundary.
-    - [ ] Replace the explicitly enumerated 27 other canonical/group-statistics,
+    - [x] Freeze the exact ordered 77-field `baseline_behavior_time_bins` schema,
+          including its closed 38-key metric vocabulary and exact selected
+          baseline-strategy consumer boundary.
+    - [x] Freeze the exact ordered 71-field `baseline_kinematic_samples` schema,
+          including its closed 32-key sample vocabulary, null-not-sentinel
+          semantics, and exact selected baseline-strategy consumer boundary.
+    - [ ] Replace the explicitly enumerated 25 other canonical/group-statistics,
           four baseline-strategy, and three training-response inferred schemas
           only after their producer semantics and nullability are frozen.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
@@ -776,6 +786,11 @@ Recommended benchmark and promotion-review order:
       processes, records null physical-I/O fields until external tracing exists,
       and requires an externally pinned outer evidence digest before later gate
       claims.
+- [x] Implement the family-local subject-shape v4 source/candidate matrix. It
+      embeds normalized source/candidate declarations, reconstructs the
+      candidate physical plan and installed transform exemptions offline,
+      binds every child to an exact driver/role/order position, rejects
+      component symlinks before reads, and remains explicitly nonpromoting.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
