@@ -160,6 +160,13 @@ population is a versioned `analysis/experiment_setup_runs/<run>` authority. See
 compatibility surfaces only. This keeps downstream tooling independent of the
 H5 file while preserving the H5 as the source of truth.
 
+Capture-time subject metadata is immutable. If acquisition recorded an
+incorrect subject UUID, do not rewrite the H5, either completed canonical run,
+or registry identities directly. The future correction publisher must create a
+new lineage-bound subject/setup authority pair after the replacement UUID is
+registered in MetaZebrobot. See
+[`subject_metadata_identity_corrections.md`](subject_metadata_identity_corrections.md).
+
 ## Implementation notes
 
 - Parse cross.parents from a JSON string to a list of objects.

@@ -82,6 +82,21 @@ and `recording_subjects`, with dish/cross entities when those IDs are present.
 A count without identity remains useful setup metadata but does not manufacture
 membership rows.
 
+## Subject identity corrections
+
+Capture-time subject metadata is immutable provenance. An incorrect biological
+subject ID must be corrected by publishing a new, lineage-bound immutable
+subject/setup authority pair, not by rewriting the H5, editing a completed run,
+adding an unconsumed compatibility overlay, or directly mutating registry
+identity rows.
+
+The pair cannot be activated until Palette has a single pair selector or a
+recovery-safe offline transition protocol; the current independent parent
+selectors could otherwise expose a temporary subject/setup mismatch. Registry
+state must then be refreshed from the selected pair. The complete design
+boundary and implementation checklist are in
+[Subject identity correction boundary](subject_metadata_identity_corrections.md).
+
 ## Historical H5 backfill
 
 `fisheye.utils.backfill_subject_experiment_setup` is the canonical migration
@@ -128,6 +143,7 @@ historical compatibility and should not be used for production.
 
 Changes to the acquisition plan create a new immutable setup run and select it
 only after validation; they do not edit a published run. Biological identity
-updates should similarly be versioned rather than silently changing the setup.
+updates must follow the versioned correction boundary above rather than
+silently changing the setup.
 Tracking identity (`track_id`) and observation identity (`instance_key`) remain
 separate contracts.
