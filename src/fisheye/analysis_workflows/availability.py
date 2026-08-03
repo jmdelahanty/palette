@@ -22,8 +22,6 @@ STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
     "refined_keypoints": ("refined_keypoints_runs",),
     "refined_subject_masks": ("refined_subject_masks_runs",),
     "tracks": ("tracking_runs",),
-    "tail_posture_view": ("analysis/tail_posture_view_runs",),
-    "bout_classification": ("analysis/bout_classification_runs",),
     **DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
 }
 TRACK_KINEMATICS_VISUALIZATION_STAGE = "track_kinematics_visualization"

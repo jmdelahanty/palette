@@ -38,6 +38,8 @@ STAGE_RUN_PARENTS: dict[str, tuple[str, ...]] = {
     "eye_angles": ("analysis/eye_angle_runs",),
     "subject_shape": ("analysis/subject_shape_runs",),
     "tail_kinematics": ("analysis/tail_kinematics_runs",),
+    "tail_posture_view": ("analysis/tail_posture_view_runs",),
+    "bout_classification": ("analysis/bout_classification_runs",),
     "stimulus_response": ("analysis/stimulus_response_runs",),
 }
 

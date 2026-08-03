@@ -1,9 +1,16 @@
+from dataclasses import replace
+
+import pytest
+
 from fisheye.analysis_workflows.storage_contract_catalog import (
     DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
     DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE,
     DERIVED_ANALYSIS_STORAGE_CONTRACTS,
     SERIALIZED_REGISTRY_STAGE_IDS,
     resolved_storage_contracts,
+)
+from fisheye.analysis_workflows.availability import (
+    STAGE_RUN_PARENTS as AVAILABILITY_STAGE_RUN_PARENTS,
 )
 from fisheye.registry.stage_catalog import get_stage_spec
 from fisheye.shared.stage_run_groups import stage_run_parent_paths
@@ -16,7 +23,27 @@ EXPECTED_SCHEMA_IDENTITIES = {
     "eye_angles": ("analysis.eye_angle_runs", 6),
     "subject_shape": ("analysis.subject_shape_runs", 4),
     "tail_kinematics": ("analysis.tail_kinematics_runs", 2),
+    "tail_posture_view": ("analysis.tail_posture_view_runs", 2),
+    "bout_classification": ("analysis.bout_classification_runs", 1),
     "stimulus_response": ("palette.stimulus_response", 2),
+}
+
+EXPECTED_DIRECT_WRITERS = {
+    "tail_posture_view": (
+        "fisheye.analysis.tail_posture_view_runs",
+        "write_tail_posture_view_run",
+        "tail_posture_view_from_subject_shape",
+        (
+            "fisheye.shared.subject_mask_chunks."
+            "refined_subject_mask_metric_row_chunk"
+        ),
+    ),
+    "bout_classification": (
+        "fisheye.analysis.megabouts_classifier",
+        "write_megabouts_classification_run",
+        "palette_megabouts_direct_classifier",
+        "shared_columnar_v1",
+    ),
 }
 
 
@@ -44,13 +71,16 @@ def test_catalog_resolves_live_writer_schema_constants() -> None:
 def test_catalog_run_parents_agree_with_registry_stage_catalog() -> None:
     for contract in DERIVED_ANALYSIS_STORAGE_CONTRACTS:
         stage = get_stage_spec(contract.stage_id)
-        assert contract.run_parent in stage.artifact_families
-        assert contract.run_parent in stage_run_parent_paths(contract.stage_id)
+        assert stage.artifact_families == (contract.run_parent,)
+        assert stage_run_parent_paths(contract.stage_id) == (contract.run_parent,)
 
 
 def test_availability_parents_are_derived_from_the_storage_catalog() -> None:
     for contract in DERIVED_ANALYSIS_STORAGE_CONTRACTS:
         assert DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS[contract.stage_id] == (
+            contract.availability_parents
+        )
+        assert AVAILABILITY_STAGE_RUN_PARENTS[contract.stage_id] == (
             contract.availability_parents
         )
         assert contract.availability_parents
@@ -61,9 +91,82 @@ def test_availability_parents_are_derived_from_the_storage_catalog() -> None:
         )
 
 
-def test_every_cataloged_materializer_uses_shared_atomic_publisher() -> None:
+def test_publication_ownership_is_explicit_and_executable() -> None:
     for contract in DERIVED_ANALYSIS_STORAGE_CONTRACTS:
-        assert contract.uses_shared_atomic_publisher(), contract.stage_id
+        if contract.publication_owner_kind == "shared_atomic_materializer_v1":
+            assert contract.uses_shared_atomic_publisher(), contract.stage_id
+            assert contract.publication_entrypoint_attr is None
+        else:
+            assert contract.publication_owner_kind == "guarded_direct_writer_v1"
+            assert not contract.uses_shared_atomic_publisher(), contract.stage_id
+            assert contract.resolves_publication_entrypoint(), contract.stage_id
+
+
+def test_direct_writer_ownership_and_physical_policy_are_exact() -> None:
+    resolved = {
+        record["stage_id"]: record for record in resolved_storage_contracts()
+    }
+    for stage_id, (
+        owner_module,
+        entrypoint,
+        method,
+        physical_policy,
+    ) in EXPECTED_DIRECT_WRITERS.items():
+        contract = DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[stage_id]
+        record = resolved[stage_id]
+        assert contract.materializer_module is None
+        assert record["publication_owner_module"] == owner_module
+        assert record["publication_entrypoint"] == entrypoint
+        assert record["method"] == method
+        assert record["physical_policy_owner"] == physical_policy
+        assert record["registry_publication"] == "not_implemented"
+        assert record["byte_planner_adopted"] is False
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    (
+        ({"publication_owner_kind": "best_effort"}, "supported exact owner mode"),
+        ({"materializer_module": None}, "requires materializer_module"),
+        ({"publication_owner_module": "some.writer"}, "derives its owner"),
+        ({"publication_entrypoint_attr": "write"}, "forbids a direct-writer"),
+        ({"byte_planner_adopted": 1}, "exact bool"),
+        ({"registry_publication": "eventually"}, "supported exact mode"),
+        ({"stage_id": "analysis/eye_angles"}, "canonical identifier"),
+        ({"run_parent": "/analysis/runs"}, "canonical relative path"),
+        (
+            {"availability_parents": ("analysis/other_runs",)},
+            "equal or be nested below",
+        ),
+    ),
+)
+def test_catalog_declaration_rejects_invalid_shared_owner_state(
+    changes: dict[str, object],
+    error: str,
+) -> None:
+    base = DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE["eye_angles"]
+    with pytest.raises((TypeError, ValueError), match=error):
+        replace(base, **changes)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    (
+        (
+            {"materializer_module": "fisheye.analysis.writer"},
+            "must not claim a materializer",
+        ),
+        ({"publication_owner_module": None}, "requires an exact owner module"),
+        ({"publication_entrypoint_attr": None}, "requires an exact entrypoint"),
+    ),
+)
+def test_catalog_declaration_rejects_invalid_direct_owner_state(
+    changes: dict[str, object],
+    error: str,
+) -> None:
+    base = DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE["tail_posture_view"]
+    with pytest.raises(ValueError, match=error):
+        replace(base, **changes)
 
 
 def test_byte_planner_migration_boundary_is_explicit() -> None:
