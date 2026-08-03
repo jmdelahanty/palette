@@ -163,6 +163,46 @@ state. Promotion still requires a selector-ineligible canary, Palette
 round-trip evidence, consumer review, and a workload-specific producer/read
 benchmark.
 
+## Source/candidate read benchmark
+
+`fisheye.diagnostics.benchmark_stimulus_response_reads` provides the exact
+read-only comparison harness for one explicitly named compact-v3 compatibility
+source and one explicitly named byte-planned candidate. It rejects aliases,
+symlinked runs, same-name pairs, existing evidence destinations, and output
+paths that are not both benchmark-labelled and disjoint from the archive.
+
+Preflight validates the direct and consolidated form of both runs through the
+strict maintained reader. It binds the full executable declaration manifests,
+all decoded array shapes/dtypes/hashes, the complete candidate storage receipt,
+the candidate metadata-equivalence receipt, and independent persisted-subtree
+metadata-equivalence receipts into one immutable workload. Offline workload
+validation reconstructs the candidate storage plan from those exact array facts
+and the versioned `published_http_v1` profile; merely recomputing JSON digests
+cannot authorize a different chunk, shard, codec, fill, or declaration.
+
+The matrix rotates source/candidate order and starts each role in a distinct
+fresh process. Every trial opens consolidated metadata, executes the strict
+logical reader, scans every declared array in deterministic path order, and
+records timings, decoded bytes, object/storage facts, and peak RSS. A before and
+after digest guard covers the root, parent, run, group, and array `zarr.json`
+files, proving the archive was not mutated. Five repetitions constitute the
+balanced process matrix; shorter runs are integration smokes only.
+
+This harness has no filesystem range-read tracer. Physical read operations,
+range counts, and transferred bytes are therefore recorded as null with
+`not_collected_requires_external_trace`; they must not be inferred from logical
+bytes or file sizes. All workload, trial, and matrix evidence is hard-coded as
+selector-ineligible and nonpromoting. The benchmark proves reader correctness
+and captures timing/storage evidence, but it neither publishes a candidate nor
+changes production policy. A representative-scale writer/publication run and
+an externally traced consumer canary remain separate gates.
+
+The embedded workload and self-digested trial/matrix envelopes prove executable
+internal consistency, not external authenticity. Before representative evidence
+can support a catalog, gate, or promotion claim, its outer workload and matrix
+artifact SHA-256 values (or an equivalent signature) must be published and
+pinned outside those self-digested documents.
+
 ## Implementation checklist
 
 - [x] Freeze schema ID/version and layout.
@@ -180,6 +220,10 @@ benchmark.
 - [x] Persist and executably validate the full physical-plan receipt.
 - [x] Prove direct/consolidated metadata equality at local and destination
   publication boundaries.
-- [ ] Benchmark the complete v3 writer and its maintained read patterns.
+- [x] Add a fresh-process, balanced source/candidate benchmark for the strict
+  maintained reader and complete decoded-array workload.
+- [ ] Run the complete v3 writer/publication benchmark and the five-repetition
+  read matrix on a representative recording with physical I/O tracing where
+  required.
 - [ ] Publish and review one selector-ineligible canary.
 - [ ] Change the production writer default only after the canary gate.
