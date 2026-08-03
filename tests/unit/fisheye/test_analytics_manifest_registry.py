@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
 from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
@@ -146,6 +147,7 @@ def _write_export_manifest(path: Path, collection_manifest: dict, collection_pat
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode(),
+                b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
             }
         )
         pq.write_table(arrow, part)
@@ -162,6 +164,9 @@ def _write_export_manifest(path: Path, collection_manifest: dict, collection_pat
         "source_zarrs": ["/tmp/a.zarr", "/tmp/b.zarr"],
         "tables_requested": [RECORDING_SUMMARY_TABLE, SWIM_BOUT_METRICS_TABLE],
         "table_contracts": contract_snapshot(
+            [RECORDING_SUMMARY_TABLE, SWIM_BOUT_METRICS_TABLE]
+        ),
+        "arrow_schema_contracts": arrow_contract_envelope(
             [RECORDING_SUMMARY_TABLE, SWIM_BOUT_METRICS_TABLE]
         ),
         "capabilities": [],

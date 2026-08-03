@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
 from apps.marimo.components.training_response import (
     filter_training_response_rows,
     strategy_transition_sankey_figure,
@@ -321,6 +322,7 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode(),
+                b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
             }
         )
         part = root / generation_path / "tables" / table_name / "part-00000.parquet"
@@ -345,6 +347,7 @@ def _write_source_export(root: Path, run_id: str) -> dict[str, Path]:
                 "schema_version": EXPORT_SCHEMA_VERSION,
                 "tables_requested": list(rows_by_table),
                 "table_contracts": contract_snapshot(list(rows_by_table)),
+                "arrow_schema_contracts": arrow_contract_envelope(list(rows_by_table)),
                 "row_counts_by_table": {
                     name: len(rows) for name, rows in rows_by_table.items()
                 },

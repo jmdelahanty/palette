@@ -59,6 +59,11 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
     validate_table_columns,
 )
+from fisheye.analytics_exports.arrow_contracts import (
+    ARROW_TABLE_CONTRACTS,
+    arrow_contract_envelope,
+    exact_arrow_schema,
+)
 from fisheye.analytics_exports.publication import (
     PUBLICATION_SCHEMA_ID,
     PUBLICATION_SCHEMA_VERSION,
@@ -5416,23 +5421,47 @@ def _normalize_rows(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -
     return [{column: row.get(column) for column in columns} for row in rows]
 
 
-def _infer_schema(rows: Sequence[Mapping[str, Any]], *, table: str):
+def _arrow_footer_metadata(*, table: str) -> dict[bytes, bytes]:
+    return {
+        b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
+        b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("utf-8"),
+        b"palette.table_contract": json.dumps(
+            TABLE_CONTRACTS[table].to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    }
+
+
+def _build_arrow_schema(rows: Sequence[Mapping[str, Any]], *, table: str):
     import pyarrow as pa
 
+    metadata = _arrow_footer_metadata(table=table)
+    exact_contract = ARROW_TABLE_CONTRACTS.get(table)
+    if exact_contract is not None:
+        expected_names = tuple(field.name for field in exact_contract.fields)
+        expected_set = set(expected_names)
+        unexpected = sorted({key for row in rows for key in row} - expected_set)
+        if unexpected:
+            raise ValueError(f"{table}: unexpected fields for exact Arrow schema: {unexpected}")
+        nonnullable = {
+            field.name for field in exact_contract.fields if not field.nullable
+        }
+        for row_index, row in enumerate(rows):
+            missing = sorted(name for name in nonnullable if row.get(name) is None)
+            if missing:
+                raise ValueError(
+                    f"{table}: row {row_index} has null/missing non-nullable fields: {missing}"
+                )
+        return exact_arrow_schema(table, metadata=metadata)
+
     schema = pa.Table.from_pylist([dict(row) for row in rows]).schema
-    metadata = dict(schema.metadata or {})
-    metadata.update(
+    return schema.with_metadata(
         {
-            b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
-            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("utf-8"),
-            b"palette.table_contract": json.dumps(
-                TABLE_CONTRACTS[table].to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8"),
+            **metadata,
+            b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
         }
     )
-    return schema.with_metadata(metadata)
 
 
 def _write_table_parts(
@@ -5453,14 +5482,26 @@ def _write_table_parts(
     if not all_rows:
         return 0, []
 
-    columns = sorted({key for row in all_rows for key in row.keys()})
+    exact_contract = ARROW_TABLE_CONTRACTS.get(table)
+    if exact_contract is not None:
+        exact_names = {field.name for field in exact_contract.fields}
+        unexpected = sorted({key for row in all_rows for key in row} - exact_names)
+        if unexpected:
+            raise ValueError(
+                f"{table}: unexpected fields for exact Arrow schema: {unexpected}"
+            )
+    columns = (
+        [field.name for field in exact_contract.fields]
+        if exact_contract is not None
+        else sorted({key for row in all_rows for key in row.keys()})
+    )
     missing = validate_table_columns(table, columns)
     if missing:
         raise ValueError(
             f"{table} does not satisfy its V2 table contract; missing columns: {list(missing)}"
         )
     normalized_all = _normalize_rows(all_rows, columns)
-    schema = _infer_schema(normalized_all, table=table)
+    schema = _build_arrow_schema(normalized_all, table=table)
 
     row_count = 0
     part_paths: list[str] = []
@@ -5688,6 +5729,7 @@ def export_sources(
         "source_zarrs": [str(path) for path in zarr_paths],
         "tables_requested": list(tables),
         "table_contracts": contract_snapshot(tables),
+        "arrow_schema_contracts": arrow_contract_envelope(tables),
         "capabilities": [
             status.capability_id for status in capability_statuses if status.available
         ],

@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
 from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     EXPORT_SCHEMA_ID,
@@ -294,6 +295,7 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode(),
+            b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
         }
     )
     pq.write_table(table, part)
@@ -308,6 +310,7 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
                 "schema_version": EXPORT_SCHEMA_VERSION,
                 "tables_requested": [table_name],
                 "table_contracts": contract_snapshot([table_name]),
+                "arrow_schema_contracts": arrow_contract_envelope([table_name]),
                 "row_counts_by_table": {table_name: len(rows)},
                 "part_files_by_table": {table_name: [relative_part]},
                 "capabilities": ["core.baseline.behavior_summary"],

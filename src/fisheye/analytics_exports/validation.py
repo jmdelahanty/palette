@@ -6,6 +6,10 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .arrow_contracts import (
+    validate_arrow_contract_envelope,
+    validate_arrow_schema,
+)
 from .capabilities import resolve_capabilities
 from .contracts import (
     EXPORT_SCHEMA_ID,
@@ -99,6 +103,22 @@ def validate_export_payload(
     unknown_tables = sorted(set(tables) - set(TABLE_CONTRACTS))
     if unknown_tables:
         errors.append(f"unknown table contracts: {unknown_tables}")
+
+    arrow_contracts_valid = False
+    arrow_contracts = payload.get("arrow_schema_contracts")
+    if arrow_contracts is None:
+        if not allow_legacy_layout:
+            errors.append(
+                "missing exact Arrow-contract envelope; use the explicit legacy "
+                "compatibility option only for historical exports"
+            )
+    else:
+        try:
+            validate_arrow_contract_envelope(arrow_contracts, tables)
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            arrow_contracts_valid = True
 
     declared_contracts = payload.get("table_contracts")
     if not isinstance(declared_contracts, Mapping):
@@ -259,6 +279,11 @@ def validate_export_payload(
                 errors.append(f"{table}/{part_name}: invalid footer schema version")
             if footer_contract != TABLE_CONTRACTS[table].to_dict():
                 errors.append(f"{table}/{part_name}: invalid footer table contract")
+            if arrow_contracts_valid:
+                try:
+                    validate_arrow_schema(table, schema)
+                except ValueError as exc:
+                    errors.append(f"{table}/{part_name}: {exc}")
             columns = tuple(field.name for field in schema)
             missing = validate_table_columns(table, columns)
             if missing:

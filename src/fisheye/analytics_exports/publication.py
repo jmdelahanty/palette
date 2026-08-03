@@ -340,6 +340,10 @@ def validate_staged_publication(
     import pyarrow.parquet as pq
 
     from .capabilities import resolve_capabilities
+    from .arrow_contracts import (
+        validate_arrow_contract_envelope,
+        validate_arrow_schema,
+    )
     from .contracts import (
         EXPORT_SCHEMA_ID,
         EXPORT_SCHEMA_VERSION,
@@ -365,6 +369,10 @@ def validate_staged_publication(
             declared_tables.update(str(item) for item in value)
     if set(inventory) != declared_tables:
         raise ValueError("Staged publication inventory does not match declared tables")
+    validate_arrow_contract_envelope(
+        payload.get("arrow_schema_contracts"),
+        tuple(sorted(declared_tables)),
+    )
 
     part_files = payload.get("part_files_by_table")
     row_counts = payload.get("row_counts_by_table")
@@ -435,6 +443,7 @@ def validate_staged_publication(
             )
             if footer_contract != TABLE_CONTRACTS[table].to_dict():
                 raise ValueError(f"{table}: staged footer table contract is invalid")
+            validate_arrow_schema(table, schema)
             columns = tuple(field.name for field in schema)
             missing = validate_table_columns(table, columns)
             if missing:

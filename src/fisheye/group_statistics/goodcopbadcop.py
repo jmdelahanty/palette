@@ -17,6 +17,7 @@ import uuid
 import numpy as np
 import polars as pl
 
+from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
 from fisheye.analytics_exports.capabilities import resolve_capabilities
 from fisheye.analytics_exports.contracts import (
     CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
@@ -1419,6 +1420,7 @@ def _build_stats_manifest(
         "source_row_counts_by_table": source_manifest.get("row_counts_by_table"),
         "output_tables": output_tables,
         "table_contracts": contract_snapshot(output_tables),
+        "arrow_schema_contracts": arrow_contract_envelope(output_tables),
         "row_counts_by_table": row_counts_by_table,
         "status_counts": status_counts,
         "metrics": [
@@ -1530,6 +1532,7 @@ def write_goodcopbadcop_statistics(
                         sort_keys=True,
                         separators=(",", ":"),
                     ).encode("utf-8"),
+                    b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
                 }
             )
             pq.write_table(arrow_table.replace_schema_metadata(metadata), tmp_path)
@@ -1597,6 +1600,7 @@ def write_goodcopbadcop_statistics(
         payload["schema_id"] = EXPORT_SCHEMA_ID
         payload["schema_version"] = EXPORT_SCHEMA_VERSION
         payload["table_contracts"] = contract_snapshot(output_tables)
+        payload["arrow_schema_contracts"] = arrow_contract_envelope(output_tables)
         columns_by_table = {
             SUMMARY_TABLE: sorted(
                 {

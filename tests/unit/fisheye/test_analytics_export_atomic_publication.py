@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from fisheye.analytics_exports.capabilities import resolve_capabilities
+from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
 from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
@@ -520,6 +521,7 @@ def test_statistics_latest_skips_newer_legacy_manifest(
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode(),
+            b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
         }
     )
     pq.write_table(stats_table, stats_part)
@@ -537,6 +539,7 @@ def test_statistics_latest_skips_newer_legacy_manifest(
         ).hexdigest(),
         "output_tables": [STATISTICS_TABLE],
         "table_contracts": contract_snapshot([STATISTICS_TABLE]),
+        "arrow_schema_contracts": arrow_contract_envelope([STATISTICS_TABLE]),
         "row_counts_by_table": {STATISTICS_TABLE: 1},
         "part_files_by_table": {STATISTICS_TABLE: [relative_part]},
         "capabilities": [
