@@ -65,7 +65,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 import math
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import matplotlib
 
@@ -75,10 +75,16 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_bout_response import (
+    SCHEMA_ID as BOUT_RESPONSE_SCHEMA_ID,
+    SCHEMA_VERSION as BOUT_RESPONSE_SCHEMA_VERSION,
     REFERENCE_KIND_DISH_CENTER,
     REFERENCE_KIND_OBJECT,
     REFERENCE_KIND_VIRTUAL,
     BoutReference,
+)
+from fisheye.analysis.chaser_component_publication import (
+    load_chaser_component_handle_json,
+    open_explicit_chaser_component_group,
 )
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
 from fisheye.analysis.chaser_component_writer import (
@@ -137,6 +143,7 @@ class ChaserEscapeEventsResult:
     chaser_distance_run_path: str
     source_bout_response_component: str
     source_bout_response_path: str
+    source_bout_response_manifest_sha256: str | None
     fps: float
     total_frames: int
     pixels_per_mm_projector: float
@@ -219,7 +226,32 @@ class ChaserEscapeEventsResult:
 # ----------------------------------------------------------------------------------------
 
 
-def _resolve_bout_response(run_group: zarr.Group, run_path: str, name: str) -> tuple[zarr.Group, str, str]:
+def _resolve_bout_response(
+    root: zarr.Group,
+    *,
+    snapshot: Any,
+    run_group: zarr.Group,
+    run_path: str,
+    name: str,
+    dependency_handle: Mapping[str, Any] | None,
+) -> tuple[zarr.Group, str, str, str | None]:
+    if dependency_handle is not None:
+        verified = open_explicit_chaser_component_group(
+            root,
+            snapshot=snapshot,
+            handle=dependency_handle,
+            expected_semantic_schema_id=BOUT_RESPONSE_SCHEMA_ID,
+            expected_semantic_schema_version=BOUT_RESPONSE_SCHEMA_VERSION,
+        )
+        requested = str(name or "latest").strip()
+        if requested not in {"", "latest"} and requested != verified.component_name:
+            raise ValueError("Explicit bout-response name differs from its dependency handle.")
+        return (
+            verified.group,
+            verified.component_name,
+            verified.component_path,
+            verified.manifest_sha256,
+        )
     parent = run_group.get(BOUT_RESPONSE_PARENT)
     if parent is None or not len(list(parent.keys())):
         raise ValueError(
@@ -233,7 +265,7 @@ def _resolve_bout_response(run_group: zarr.Group, run_path: str, name: str) -> t
             resolved = sorted(parent.keys())[-1]
     if resolved not in parent:
         raise ValueError(f"chaser_bout_response component not found: {resolved}")
-    return parent[resolved], resolved, f"{run_path}/{BOUT_RESPONSE_PARENT}/{resolved}"
+    return parent[resolved], resolved, f"{run_path}/{BOUT_RESPONSE_PARENT}/{resolved}", None
 
 
 def _read_references(component: zarr.Group) -> tuple[BoutReference, ...]:
@@ -339,6 +371,7 @@ def build_chaser_escape_events_result(
     *,
     chaser_distance_run: str = "latest",
     bout_response_component: str = "latest",
+    bout_response_dependency_handle: Mapping[str, Any] | None = None,
     component_name: str = DEFAULT_COMPONENT_NAME,
     peak_speed_threshold_mm_s: float = DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
     high_turn_threshold_deg: float = DEFAULT_HIGH_TURN_THRESHOLD_DEG,
@@ -356,15 +389,19 @@ def build_chaser_escape_events_result(
         root,
         chaser_distance_run,
     )
-    distance_run.require_derived_surface_authority("chaser_bout_response")
+    if bout_response_dependency_handle is None:
+        distance_run.require_derived_surface_authority("chaser_bout_response")
 
     pixels_per_mm = float(distance_run.pixels_per_mm_projector)
     fps = float(distance_run.fps)
 
-    bout_component, bout_name, bout_path = _resolve_bout_response(
-        root[run_path],
-        run_path,
-        bout_response_component,
+    bout_component, bout_name, bout_path, bout_manifest_sha256 = _resolve_bout_response(
+        root,
+        snapshot=distance_run,
+        run_group=root[run_path],
+        run_path=run_path,
+        name=bout_response_component,
+        dependency_handle=bout_response_dependency_handle,
     )
     references = _read_references(bout_component)
     epochs = _read_epochs_from_component(bout_component)
@@ -820,6 +857,7 @@ def build_chaser_escape_events_result(
         chaser_distance_run_path=run_path,
         source_bout_response_component=str(bout_name),
         source_bout_response_path=str(bout_path),
+        source_bout_response_manifest_sha256=bout_manifest_sha256,
         fps=float(fps),
         total_frames=int(total_frames),
         pixels_per_mm_projector=float(pixels_per_mm),
@@ -1126,6 +1164,7 @@ def write_chaser_escape_events_component(
             "source_chaser_distance_path": result.chaser_distance_run_path,
             "source_bout_response_component": result.source_bout_response_component,
             "source_bout_response_path": result.source_bout_response_path,
+            "source_bout_response_manifest_sha256": result.source_bout_response_manifest_sha256,
             "summary": result.summary,
             "diagnostics": result.diagnostics,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1144,6 +1183,7 @@ def write_chaser_escape_events_component(
                 "source_chaser_distance_path": result.chaser_distance_run_path,
                 "source_bout_response_component": result.source_bout_response_component,
                 "source_bout_response_path": result.source_bout_response_path,
+                "source_bout_response_manifest_sha256": result.source_bout_response_manifest_sha256,
             },
             parameters={
                 "peak_speed_threshold_mm_s": float(result.peak_speed_threshold_mm_s),
@@ -1181,6 +1221,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("zarr_path", type=Path)
     p.add_argument("--chaser-distance-run", default="latest")
     p.add_argument("--bout-response-component", default="latest")
+    p.add_argument(
+        "--bout-response-dependency-handle-json",
+        type=Path,
+        help="Strict JSON dependency handle for an immutable selector-ineligible bout-response candidate.",
+    )
     p.add_argument("--component-name", default=DEFAULT_COMPONENT_NAME)
     p.add_argument("--peak-speed-threshold-mm-s", type=float, default=DEFAULT_PEAK_SPEED_THRESHOLD_MM_S)
     p.add_argument("--high-turn-threshold-deg", type=float, default=DEFAULT_HIGH_TURN_THRESHOLD_DEG)
@@ -1197,10 +1242,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    dependency_handle = (
+        load_chaser_component_handle_json(args.bout_response_dependency_handle_json)
+        if args.bout_response_dependency_handle_json is not None
+        else None
+    )
     result = build_chaser_escape_events_result(
         args.zarr_path,
         chaser_distance_run=args.chaser_distance_run,
         bout_response_component=args.bout_response_component,
+        bout_response_dependency_handle=dependency_handle,
         component_name=args.component_name,
         peak_speed_threshold_mm_s=args.peak_speed_threshold_mm_s,
         high_turn_threshold_deg=args.high_turn_threshold_deg,

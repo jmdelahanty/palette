@@ -16,17 +16,32 @@ import numpy as np
 import pytest
 import zarr
 from fisheye.analysis.chaser_bout_response import (
+    DEFAULT_COMPONENT_NAME as DEFAULT_BOUT_RESPONSE_COMPONENT_NAME,
     REFERENCE_KIND_OBJECT,
     REFERENCE_KIND_VIRTUAL,
-    build_chaser_bout_response_result,
+    build_chaser_bout_response_result as _build_chaser_bout_response_result,
     write_chaser_bout_response_component,
 )
+from fisheye.analysis.chaser_component_publication import (
+    COMPONENT_MANIFEST_ATTR,
+    COMPONENT_MANIFEST_DIGEST_ATTR,
+    ChaserComponentContract,
+    build_chaser_component_handle,
+    persist_chaser_component_manifest,
+)
+from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
+from fisheye.analysis.chaser_egocentric_bearing import (
+    METHOD as EGOCENTRIC_METHOD,
+    METHOD_VERSION as EGOCENTRIC_METHOD_VERSION,
+    SCHEMA_ID as EGOCENTRIC_SCHEMA_ID,
+    SCHEMA_VERSION as EGOCENTRIC_SCHEMA_VERSION,
+)
 from fisheye.analysis.chaser_escape_events import (
     COMPONENT_PARENT_NAME,
     DEFAULT_COMPONENT_NAME,
     SCHEMA_ID,
-    build_chaser_escape_events_result,
+    build_chaser_escape_events_result as _build_chaser_escape_events_result,
     render_escape_events_png,
     write_chaser_escape_events_component,
 )
@@ -154,7 +169,28 @@ def _build(tmp_path: Path, *, name: str = "escape.zarr",
     frames = ego.require_group("frames")
     frames.create_array("fish_heading_deg", data=np.zeros(n, dtype=np.float32), overwrite=True)
     frames.create_array("fish_heading_valid", data=np.ones(n, dtype=bool), overwrite=True)
-    run["egocentric_bearing"].attrs["latest"] = "track_test"
+    ego.attrs.update({
+        "schema_id": EGOCENTRIC_SCHEMA_ID,
+        "schema_version": EGOCENTRIC_SCHEMA_VERSION,
+        "method": EGOCENTRIC_METHOD,
+        "method_version": EGOCENTRIC_METHOD_VERSION,
+    })
+    snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
+    persist_chaser_component_manifest(
+        ego,
+        snapshot=snapshot,
+        relative_path="egocentric_bearing/track_test",
+        contract=ChaserComponentContract(
+            component_family="egocentric_bearing",
+            component_name="track_test",
+            semantic_schema_id=EGOCENTRIC_SCHEMA_ID,
+            semantic_schema_version=EGOCENTRIC_SCHEMA_VERSION,
+            method_id=EGOCENTRIC_METHOD,
+            method_version=EGOCENTRIC_METHOD_VERSION,
+            parameters={"fixture": "heading_on_camera_frame_axis"},
+            source_authorities={"fixture": "sealed_test_egocentric"},
+        ),
+    )
 
     if with_trials:
         _write_chase_trials(root, n)
@@ -191,10 +227,76 @@ def _build(tmp_path: Path, *, name: str = "escape.zarr",
     bouts.create_array("path_length_mm", data=np.full(k, 4.0), overwrite=True)
     bouts.create_array("net_displacement_mm", data=np.full(k, 3.0), overwrite=True)
     root["analysis/swim_bout_runs"].attrs["latest"] = "bouts_1"
+    root["analysis/swim_bout_runs"].attrs["latest_complete"] = "bouts_1"
+    root["analysis/swim_bout_runs/bouts_1"].attrs["palette_run_completion_status"] = "complete"
+    root["analysis/swim_bout_runs/bouts_1"].attrs["stage_selector_eligible"] = True
 
-    r = build_chaser_bout_response_result(z, chaser_distance_run="chaser_distance_1", min_bin_bouts=2)
+    r = _build_chaser_bout_response_result(
+        z, chaser_distance_run="chaser_distance_1", min_bin_bouts=2,
+        swim_bout_legacy_compatibility=True,
+        egocentric_dependency_handle=_component_handle(
+            z, family="egocentric_bearing", name="track_test"
+        ),
+    )
     write_chaser_bout_response_component(z, r, overwrite=True, write_png=False, write_interactive_spec=False)
     return z
+
+
+def _component_handle(zarr_path: Path, *, family: str, name: str) -> dict[str, object]:
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
+    return build_chaser_component_handle(
+        root[f"analysis/chaser_distance_runs/chaser_distance_1/{family}/{name}"],
+        snapshot=snapshot,
+        relative_path=f"{family}/{name}",
+    )
+
+
+def _reseal_fixture_bout_response(zarr_path: Path) -> None:
+    """Re-seal an intentionally mutated test payload as a new fixture authority."""
+
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    component = root[
+        "analysis/chaser_distance_runs/chaser_distance_1/"
+        f"chaser_bout_response/{DEFAULT_BOUT_RESPONSE_COMPONENT_NAME}"
+    ]
+    previous = dict(component.attrs[COMPONENT_MANIFEST_ATTR])
+    identity = dict(previous["component"])
+    contract = ChaserComponentContract(
+        component_family=str(identity["component_family"]),
+        component_name=str(identity["component_name"]),
+        semantic_schema_id=str(identity["semantic_schema_id"]),
+        semantic_schema_version=int(identity["semantic_schema_version"]),
+        method_id=str(identity["method_id"]),
+        method_version=str(identity["method_version"]),
+        parameters=dict(previous["parameters"]),
+        source_authorities=dict(previous["source_authorities"]),
+    )
+    del component.attrs[COMPONENT_MANIFEST_ATTR]
+    del component.attrs[COMPONENT_MANIFEST_DIGEST_ATTR]
+    persist_chaser_component_manifest(
+        component,
+        snapshot=load_chaser_distance_run(root, run_name="chaser_distance_1"),
+        relative_path=f"chaser_bout_response/{DEFAULT_BOUT_RESPONSE_COMPONENT_NAME}",
+        contract=contract,
+    )
+
+
+def build_chaser_escape_events_result(zarr_path: Path, **kwargs):
+    """Exercise the maintained explicit-candidate dependency path when available."""
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    parent = root["analysis/chaser_distance_runs/chaser_distance_1"].get("chaser_bout_response")
+    handle = None
+    if parent is not None and DEFAULT_BOUT_RESPONSE_COMPONENT_NAME in parent:
+        handle = _component_handle(
+            zarr_path,
+            family="chaser_bout_response",
+            name=DEFAULT_BOUT_RESPONSE_COMPONENT_NAME,
+        )
+    return _build_chaser_escape_events_result(
+        zarr_path, bout_response_dependency_handle=handle, **kwargs
+    )
 
 
 def _result(z: Path, **kw):
@@ -277,6 +379,7 @@ def test_high_turn_tier_flags_turny_escapes_without_changing_which_bouts_are_esc
     turn = np.zeros(int(bouts["turn_deg"].shape[0]), dtype=np.float64)
     turn[::2] = 90.0
     bouts["turn_deg"][:] = turn
+    _reseal_fixture_bout_response(z)
 
     r = build_chaser_escape_events_result(z, chaser_distance_run="chaser_distance_1",
                                           peak_speed_threshold_mm_s=THRESHOLD, high_turn_threshold_deg=45.0)
@@ -299,6 +402,7 @@ def test_high_turn_threshold_moves_the_tier_but_not_the_escapes(tmp_path: Path) 
                  "chaser_bout_response_v1/bouts"]
     turn = np.full(int(bouts["turn_deg"].shape[0]), 50.0)   # all bouts turn 50 deg
     bouts["turn_deg"][:] = turn
+    _reseal_fixture_bout_response(z)
 
     lenient = build_chaser_escape_events_result(z, chaser_distance_run="chaser_distance_1",
                                                 peak_speed_threshold_mm_s=THRESHOLD, high_turn_threshold_deg=45.0)
@@ -414,7 +518,7 @@ def test_missing_bout_response_component_is_a_clear_error(tmp_path: Path) -> Non
 
 
 def test_no_escapes_is_a_status_not_a_crash(tmp_path: Path) -> None:
-    r = _result(_build(tmp_path, name="none.zarr"), )
+    _result(_build(tmp_path, name="none.zarr"), )
     high = build_chaser_escape_events_result(
         _build(tmp_path, name="none2.zarr"), chaser_distance_run="chaser_distance_1",
         peak_speed_threshold_mm_s=500.0,
@@ -434,12 +538,16 @@ def test_no_escapes_is_a_status_not_a_crash(tmp_path: Path) -> None:
 def test_component_round_trips(tmp_path: Path) -> None:
     z = _build(tmp_path)
     r = _result(z)
+    assert r.source_bout_response_manifest_sha256 == _component_handle(
+        z, family="chaser_bout_response", name=DEFAULT_BOUT_RESPONSE_COMPONENT_NAME,
+    )["component_manifest_sha256"]
     path = write_chaser_escape_events_component(z, r, overwrite=True, write_png=False)
 
     root = zarr.open_group(str(z), mode="r", use_consolidated=False)
     c = root[path]
     assert c.attrs["schema_id"] == SCHEMA_ID
     assert c.attrs["source_bout_response_component"]
+    assert c.attrs["source_bout_response_manifest_sha256"] == r.source_bout_response_manifest_sha256
     assert COMPONENT_PARENT_NAME in path and DEFAULT_COMPONENT_NAME in path
 
     e = [bytes(v).split(b"\x00")[0].decode() for v in np.asarray(c["epochs/label_bytes"][:])]

@@ -125,7 +125,7 @@ true.
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
-| Chaser components | Protocol-neutral schemas, payload-bound manifests, selector and explicit dependency-handle readers, all ten maintained writers routed through node-local sealed immutable publication, and exact cluster runner receipts | Propagate handles into scientific consumers; add consolidated activation, export adoption, and chained recovery coverage |
+| Chaser components | Protocol-neutral schemas, payload-bound manifests, selector and explicit dependency-handle readers, all ten maintained writers routed through node-local sealed immutable publication, exact cluster runner receipts, and explicit egocentric-to-bout-to-escape consumption | Propagate handles through the remaining scientific consumers/exports; add consolidated activation and chained recovery coverage |
 | Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
@@ -216,12 +216,14 @@ Evidence:
 ### Chaser component dependency selection
 
 All ten maintained component writers now publish independently sealed,
-selector-ineligible immutable candidates. The remaining correctness boundary
-is consumption and orchestration: historical chained workflows try to
-rediscover a just-written candidate through legacy `latest`, while exports and
-runner receipts do not yet carry an explicit validated component handle.
-Candidates remain intentionally undiscoverable until those consumers bind an
-exact component manifest digest or a separately reviewed selector activation.
+selector-ineligible immutable candidates, and writer plus runner receipts carry
+an explicit validated component handle. Bout response now consumes an exact
+egocentric-bearing handle, and escape events consumes an exact bout-response
+handle; both persist the upstream component-manifest digest in their lineage.
+The remaining correctness boundary is the rest of the chained consumers and
+exports. Candidates remain intentionally undiscoverable until each such
+consumer binds an exact component manifest digest or a separately reviewed
+selector activation.
 
 Evidence:
 
@@ -503,6 +505,12 @@ a v3 storage-candidate regression.
       state in the chaser runner receipt. Individual writer receipt v2 returns
       the handle, and cluster target receipt v2 embeds a self-digested receipt
       rebuilt from the read-only authoritative archive after all steps finish.
+- [x] Migrate the egocentric-bearing -> bout-response -> escape-events chain to
+      explicit selector-ineligible dependency handles and bind upstream
+      manifest digests into downstream lineage. Historical swim-bout input is
+      permitted only through an explicit compatibility flag.
+- [ ] Migrate the remaining chained scientific consumers and exports to exact
+      component handles.
 - [ ] Keep export of unsealed component tables fail closed.
 - [ ] Add recovery tests for interrupted component publication and stale
       pointers. Post-selector failure rollback is covered; add interruption
@@ -672,8 +680,9 @@ gates pass:
 
 Continue exact-contract and opt-in candidate work without promoting defaults:
 
-1. finish subject-shape exact closure and migrate chaser scientific consumers
-   to the explicit dependency handles now present in writer/runner receipts;
+1. integrate subject-shape exact closure, finish the eye-angle atomic candidate
+   boundary, and continue migrating remaining chaser scientific consumers to
+   the explicit dependency handles now used by bout response and escape events;
 2. keep shared catalog/planner/registry/selector edits in this serial
    coordination lane;
 3. integrate each family lane serially and run the combined catalog, lifecycle,

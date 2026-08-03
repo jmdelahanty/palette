@@ -167,6 +167,24 @@ class VerifiedChaserComponent:
             _fail(f"Verified component has no declared array {path!r}.")
 
 
+@dataclass(frozen=True)
+class VerifiedChaserComponentGroup:
+    """Read-only group handle validated against one explicit dependency record."""
+
+    base_run_path: str
+    component_family: str
+    component_name: str
+    component_path: str
+    semantic_schema_id: str
+    semantic_schema_version: int
+    method_id: str
+    method_version: str
+    manifest_sha256: str
+    manifest: Mapping[str, Any]
+    dependency_handle: Mapping[str, Any]
+    group: Any
+
+
 def _controlled_name(value: Any, *, label: str) -> str:
     if not isinstance(value, str):
         _fail(f"{label} must be one non-empty controlled name.")
@@ -754,6 +772,24 @@ def validate_chaser_component_handle(
     return record
 
 
+def load_chaser_component_handle_json(path: Path | str) -> Mapping[str, Any]:
+    """Read one strict JSON handle document without resolving archive state."""
+
+    source = Path(path).expanduser().resolve()
+    try:
+        value = json.loads(
+            source.read_text(encoding="utf-8"),
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON token {token}")
+            ),
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        _fail(f"Unable to read strict component dependency handle JSON: {exc}.")
+    if not isinstance(value, Mapping):
+        _fail("Component dependency handle JSON must contain one object.")
+    return MappingProxyType(copy.deepcopy(dict(value)))
+
+
 def _copy_verified_chaser_component(
     component: Any,
     *,
@@ -834,6 +870,34 @@ def load_explicit_chaser_component(
 ) -> VerifiedChaserComponent:
     """Load one digest-bound candidate without selector or child fallback."""
 
+    verified = open_explicit_chaser_component_group(
+        root,
+        snapshot=snapshot,
+        handle=handle,
+        expected_semantic_schema_id=expected_semantic_schema_id,
+        expected_semantic_schema_version=expected_semantic_schema_version,
+    )
+    relative_path = f"{verified.component_family}/{verified.component_name}"
+    return _copy_verified_chaser_component(
+        verified.group,
+        snapshot=snapshot,
+        relative_path=relative_path,
+        expected_manifest_sha256=verified.manifest_sha256,
+        expected_semantic_schema_id=expected_semantic_schema_id,
+        expected_semantic_schema_version=expected_semantic_schema_version,
+    )
+
+
+def open_explicit_chaser_component_group(
+    root: Any,
+    *,
+    snapshot: Any,
+    handle: Any,
+    expected_semantic_schema_id: str,
+    expected_semantic_schema_version: int,
+) -> VerifiedChaserComponentGroup:
+    """Open one exact group after validating its handle and sealed payload."""
+
     record = validate_chaser_component_handle(handle, snapshot=snapshot)
     if (
         record["semantic_schema_id"] != expected_semantic_schema_id
@@ -847,13 +911,33 @@ def load_explicit_chaser_component(
             f"Explicit component {record['component_path']!r} is unavailable: {exc}."
         )
     relative_path = f"{record['component_family']}/{record['component_name']}"
-    return _copy_verified_chaser_component(
+    manifest = validate_chaser_component_manifest(
         component,
         snapshot=snapshot,
-        relative_path=relative_path,
+        expected_relative_path=relative_path,
         expected_manifest_sha256=record["component_manifest_sha256"],
-        expected_semantic_schema_id=expected_semantic_schema_id,
-        expected_semantic_schema_version=expected_semantic_schema_version,
+    )
+    identity = manifest["component"]
+    if (
+        identity["semantic_schema_id"] != expected_semantic_schema_id
+        or identity["semantic_schema_version"] != expected_semantic_schema_version
+        or identity["method_id"] != record["method_id"]
+        or identity["method_version"] != record["method_version"]
+    ):
+        _fail("Explicit component semantic identity differs from its handle.")
+    return VerifiedChaserComponentGroup(
+        base_run_path=snapshot.run_path,
+        component_family=record["component_family"],
+        component_name=record["component_name"],
+        component_path=record["component_path"],
+        semantic_schema_id=record["semantic_schema_id"],
+        semantic_schema_version=record["semantic_schema_version"],
+        method_id=record["method_id"],
+        method_version=record["method_version"],
+        manifest_sha256=record["component_manifest_sha256"],
+        manifest=MappingProxyType(copy.deepcopy(dict(manifest))),
+        dependency_handle=MappingProxyType(copy.deepcopy(dict(record))),
+        group=component,
     )
 
 
@@ -918,6 +1002,7 @@ __all__ = [
     "ChaserComponentContract",
     "ChaserComponentPublicationError",
     "VerifiedChaserComponent",
+    "VerifiedChaserComponentGroup",
     "build_chaser_component_manifest",
     "build_chaser_component_selector",
     "build_chaser_component_handle",
@@ -926,6 +1011,8 @@ __all__ = [
     "persist_chaser_component_manifest",
     "persist_chaser_component_selector",
     "load_explicit_chaser_component",
+    "load_chaser_component_handle_json",
+    "open_explicit_chaser_component_group",
     "load_selected_chaser_component",
     "validate_chaser_component_handle",
     "validate_chaser_component_manifest",

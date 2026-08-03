@@ -43,7 +43,7 @@ from io import BytesIO
 import json
 import math
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import matplotlib
 
@@ -60,6 +60,14 @@ from fisheye.analysis.swim_bout_io import (
 from fisheye.analysis.chaser_component_writer import (
     require_chaser_component_staging_capability,
     sealed_chaser_component_writer,
+)
+from fisheye.analysis.chaser_component_publication import (
+    load_chaser_component_handle_json,
+    open_explicit_chaser_component_group,
+)
+from fisheye.analysis.chaser_egocentric_bearing import (
+    SCHEMA_ID as EGOCENTRIC_SCHEMA_ID,
+    SCHEMA_VERSION as EGOCENTRIC_SCHEMA_VERSION,
 )
 from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
@@ -136,6 +144,7 @@ class ChaserBoutResponseResult:
     source_swim_bout_run: str
     source_swim_bout_path: str
     source_egocentric_component: str
+    source_egocentric_manifest_sha256: str | None
     fps: float
     total_frames: int
     pixels_per_mm_projector: float
@@ -243,12 +252,21 @@ def bearing_deg(rel_xy: np.ndarray, heading_deg: np.ndarray) -> np.ndarray:
     return _wrap_deg(angle - np.asarray(heading_deg, dtype=np.float64).reshape(-1)[:, None])
 
 
-def _resolve_swim_bout_run(root: zarr.Group, run_name: str) -> tuple[zarr.Group, str, str]:
+def _resolve_swim_bout_run(
+    root: zarr.Group,
+    run_name: str,
+    *,
+    legacy_compatibility: bool = False,
+) -> tuple[zarr.Group, str, str]:
     parent = root.get("analysis/swim_bout_runs")
     if parent is None:
         raise ValueError("Archive has no analysis/swim_bout_runs group; run bout detection first.")
     try:
-        resolved = resolve_swim_bout_run_name(root, run_name=run_name)
+        resolved = resolve_swim_bout_run_name(
+            root,
+            run_name=run_name,
+            legacy_compatibility=legacy_compatibility,
+        )
     except SwimBoutIOError as exc:
         raise ValueError(
             "No stable complete selector-eligible swim-bout run was resolved; "
@@ -288,7 +306,14 @@ def _select_bout_row_mask(
     return keep, source_signal_id, bout_level_note
 
 
-def _resolve_heading(run_group: zarr.Group, *, total_frames: int) -> tuple[np.ndarray, np.ndarray, str]:
+def _resolve_heading(
+    root: zarr.Group,
+    *,
+    snapshot: Any,
+    run_group: zarr.Group,
+    total_frames: int,
+    dependency_handle: Mapping[str, Any] | None,
+) -> tuple[np.ndarray, np.ndarray, str, str | None]:
     """Per-camera-frame fish heading, taken from the egocentric-bearing component.
 
     That component already resolves heading onto the camera-frame axis of this distance run,
@@ -296,19 +321,32 @@ def _resolve_heading(run_group: zarr.Group, *, total_frames: int) -> tuple[np.nd
     duplicate the alignment logic and risk drifting from it.
     """
 
-    parent = run_group.get("egocentric_bearing")
-    if parent is None:
-        raise ValueError(
-            "chaser_bout_response requires an egocentric_bearing component on the chaser-distance "
-            "run (it supplies fish heading on the camera-frame axis). Run "
-            "fisheye.analysis.chaser_egocentric_bearing first."
+    manifest_sha256: str | None = None
+    if dependency_handle is not None:
+        verified = open_explicit_chaser_component_group(
+            root,
+            snapshot=snapshot,
+            handle=dependency_handle,
+            expected_semantic_schema_id=EGOCENTRIC_SCHEMA_ID,
+            expected_semantic_schema_version=EGOCENTRIC_SCHEMA_VERSION,
         )
-    resolved = resolve_authoritative_run_name(parent, legacy_default=False)
-    if not resolved or resolved not in parent:
-        raise ValueError(
-            "No stable complete selector-eligible egocentric_bearing component found."
-        )
-    component = parent[resolved]
+        component = verified.group
+        resolved = verified.component_name
+        manifest_sha256 = verified.manifest_sha256
+    else:
+        parent = run_group.get("egocentric_bearing")
+        if parent is None:
+            raise ValueError(
+                "chaser_bout_response requires an egocentric_bearing component on the chaser-distance "
+                "run (it supplies fish heading on the camera-frame axis). Run "
+                "fisheye.analysis.chaser_egocentric_bearing first."
+            )
+        resolved = resolve_authoritative_run_name(parent, legacy_default=False)
+        if not resolved or resolved not in parent:
+            raise ValueError(
+                "No stable complete selector-eligible egocentric_bearing component found."
+            )
+        component = parent[resolved]
     frames = component.get("frames")
     if frames is None or "fish_heading_deg" not in frames or "fish_heading_valid" not in frames:
         raise ValueError("egocentric_bearing component lacks frames/fish_heading_deg.")
@@ -319,7 +357,7 @@ def _resolve_heading(run_group: zarr.Group, *, total_frames: int) -> tuple[np.nd
             f"egocentric_bearing heading length {heading.shape[0]} does not match distance-run "
             f"total_frames {total_frames}."
         )
-    return heading, valid, resolved
+    return heading, valid, resolved, manifest_sha256
 
 
 def _build_references(
@@ -883,6 +921,8 @@ def build_chaser_bout_response_result(
     *,
     chaser_distance_run: str = "latest",
     swim_bout_run: str = "latest",
+    swim_bout_legacy_compatibility: bool = False,
+    egocentric_dependency_handle: Mapping[str, Any] | None = None,
     component_name: str = DEFAULT_COMPONENT_NAME,
     distance_bin_edges_mm: Sequence[float] = DEFAULT_DISTANCE_BIN_EDGES_MM,
     near_distance_mm: float = DEFAULT_NEAR_DISTANCE_MM,
@@ -903,7 +943,8 @@ def build_chaser_bout_response_result(
         root,
         chaser_distance_run,
     )
-    distance.require_derived_surface_authority("egocentric_bearing")
+    if egocentric_dependency_handle is None:
+        distance.require_derived_surface_authority("egocentric_bearing")
 
     if distance.coordinate_space_id != "arena_relative_canvas_px":
         raise ValueError(
@@ -950,12 +991,19 @@ def build_chaser_bout_response_result(
         motion_spread_threshold_mm=float(motion_spread_threshold_mm),
     )
 
-    heading, heading_valid, ego_name = _resolve_heading(
-        root[run_path],
+    heading, heading_valid, ego_name, ego_manifest_sha256 = _resolve_heading(
+        root,
+        snapshot=distance,
+        run_group=root[run_path],
         total_frames=total_frames,
+        dependency_handle=egocentric_dependency_handle,
     )
 
-    bout_group, bout_name, bout_path = _resolve_swim_bout_run(root, swim_bout_run)
+    bout_group, bout_name, bout_path = _resolve_swim_bout_run(
+        root,
+        swim_bout_run,
+        legacy_compatibility=swim_bout_legacy_compatibility,
+    )
     table = bout_group.get("tables/bouts") if "tables" in bout_group else None
     if table is None:
         raise ValueError(f"Swim-bout run {bout_name} lacks tables/bouts.")
@@ -1081,6 +1129,7 @@ def build_chaser_bout_response_result(
         source_swim_bout_run=bout_name,
         source_swim_bout_path=bout_path,
         source_egocentric_component=ego_name,
+        source_egocentric_manifest_sha256=ego_manifest_sha256,
         fps=float(fps),
         total_frames=total_frames,
         pixels_per_mm_projector=float(pixels_per_mm),
@@ -1205,6 +1254,7 @@ def _source_refs(result: ChaserBoutResponseResult) -> dict[str, Any]:
         "source_swim_bout_run": result.source_swim_bout_run,
         "source_swim_bout_path": result.source_swim_bout_path,
         "source_egocentric_bearing_component": result.source_egocentric_component,
+        "source_egocentric_bearing_manifest_sha256": result.source_egocentric_manifest_sha256,
     }
 
 
@@ -1490,6 +1540,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--chaser-distance-run", default="latest")
     parser.add_argument("--swim-bout-run", default="latest")
+    parser.add_argument(
+        "--legacy-swim-bout-compatibility",
+        action="store_true",
+        help="Explicitly permit historical swim-bout layouts; exact current contracts remain the default.",
+    )
+    parser.add_argument(
+        "--egocentric-dependency-handle-json",
+        type=Path,
+        help="Strict JSON dependency handle for an immutable selector-ineligible egocentric-bearing candidate.",
+    )
     parser.add_argument("--component-name", default=DEFAULT_COMPONENT_NAME)
     parser.add_argument("--distance-bin-edges-mm", default=",".join(f"{v:g}" for v in DEFAULT_DISTANCE_BIN_EDGES_MM))
     parser.add_argument("--near-distance-mm", type=float, default=DEFAULT_NEAR_DISTANCE_MM)
@@ -1513,10 +1573,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    egocentric_dependency_handle = (
+        load_chaser_component_handle_json(args.egocentric_dependency_handle_json)
+        if args.egocentric_dependency_handle_json is not None
+        else None
+    )
     result = build_chaser_bout_response_result(
         Path(args.zarr_path),
         chaser_distance_run=str(args.chaser_distance_run),
         swim_bout_run=str(args.swim_bout_run),
+        swim_bout_legacy_compatibility=bool(args.legacy_swim_bout_compatibility),
+        egocentric_dependency_handle=egocentric_dependency_handle,
         component_name=str(args.component_name),
         distance_bin_edges_mm=_parse_float_list(str(args.distance_bin_edges_mm)),
         near_distance_mm=float(args.near_distance_mm),

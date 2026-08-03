@@ -9,9 +9,20 @@ import pytest
 import zarr
 
 import fisheye.analysis.chaser_bout_response as chaser_bout_response_module
-from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
+from fisheye.analysis.chaser_component_publication import (
+    ChaserComponentContract,
+    build_chaser_component_handle,
+    persist_chaser_component_manifest,
+)
+from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
-from fisheye.analysis.chaser_egocentric_bearing import compute_egocentric_chaser_bearing
+from fisheye.analysis.chaser_egocentric_bearing import (
+    METHOD as EGOCENTRIC_METHOD,
+    METHOD_VERSION as EGOCENTRIC_METHOD_VERSION,
+    SCHEMA_ID as EGOCENTRIC_SCHEMA_ID,
+    SCHEMA_VERSION as EGOCENTRIC_SCHEMA_VERSION,
+    compute_egocentric_chaser_bearing,
+)
 from fisheye.analysis.chaser_bout_response import (
     COMPONENT_PARENT_NAME,
     DEFAULT_COMPONENT_NAME,
@@ -24,7 +35,7 @@ from fisheye.analysis.chaser_bout_response import (
     _resolve_swim_bout_run,
     _select_bout_row_mask,
     bearing_deg,
-    build_chaser_bout_response_result,
+    build_chaser_bout_response_result as _build_chaser_bout_response_result,
     write_chaser_bout_response_component,
 )
 from fisheye.shared.plot_artifacts import PNG_ARTIFACT_SCHEMA_ID
@@ -37,15 +48,7 @@ from tests.unit.fisheye.test_chaser_radial_occupancy import (
 FPS = 10.0
 CX = CY = ARENA_CENTER_MM  # 50 mm
 
-_DEFERRED_CHASER_BOUT_RESPONSE_REASON = (
-    "chaser bout-response integration requires independently sealed "
-    "egocentric and component authority"
-)
-_REQUIRES_SEALED_CHASER_BOUT_RESPONSE = pytest.mark.xfail(
-    raises=ChaserDistanceReadError,
-    reason=_DEFERRED_CHASER_BOUT_RESPONSE_REASON,
-    strict=True,
-)
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 class _SelectionGroup(dict[str, object]):
@@ -127,10 +130,28 @@ def _build_archive(
     frames = ego.require_group("frames")
     frames.create_array("fish_heading_deg", data=np.asarray(heading_deg, dtype=np.float32), overwrite=True)
     frames.create_array("fish_heading_valid", data=np.ones(n, dtype=bool), overwrite=True)
-    run["egocentric_bearing"].attrs["latest"] = "track_test"
-    run["egocentric_bearing"].attrs["latest_complete"] = "track_test"
-    ego.attrs["palette_run_completion_status"] = "complete"
-    ego.attrs["stage_selector_eligible"] = True
+    ego.attrs.update({
+        "schema_id": EGOCENTRIC_SCHEMA_ID,
+        "schema_version": EGOCENTRIC_SCHEMA_VERSION,
+        "method": EGOCENTRIC_METHOD,
+        "method_version": EGOCENTRIC_METHOD_VERSION,
+    })
+    snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
+    persist_chaser_component_manifest(
+        ego,
+        snapshot=snapshot,
+        relative_path="egocentric_bearing/track_test",
+        contract=ChaserComponentContract(
+            component_family="egocentric_bearing",
+            component_name="track_test",
+            semantic_schema_id=EGOCENTRIC_SCHEMA_ID,
+            semantic_schema_version=EGOCENTRIC_SCHEMA_VERSION,
+            method_id=EGOCENTRIC_METHOD,
+            method_version=EGOCENTRIC_METHOD_VERSION,
+            parameters={"fixture": "heading_on_camera_frame_axis"},
+            source_authorities={"fixture": "sealed_test_egocentric"},
+        ),
+    )
 
     bouts = root.require_group("analysis/swim_bout_runs/bouts_1/tables/bouts")
     k = len(bout_start)
@@ -151,6 +172,27 @@ def _build_archive(
         "stage_selector_eligible"
     ] = True
     return z
+
+
+def _egocentric_handle(zarr_path: Path) -> dict[str, object]:
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
+    return build_chaser_component_handle(
+        root["analysis/chaser_distance_runs/chaser_distance_1/egocentric_bearing/track_test"],
+        snapshot=snapshot,
+        relative_path="egocentric_bearing/track_test",
+    )
+
+
+def build_chaser_bout_response_result(zarr_path: Path, **kwargs):
+    """Exercise the maintained explicit-candidate dependency path in this suite."""
+
+    return _build_chaser_bout_response_result(
+        zarr_path,
+        egocentric_dependency_handle=_egocentric_handle(zarr_path),
+        swim_bout_legacy_compatibility=True,
+        **kwargs,
+    )
 
 
 def _orbit(center: np.ndarray, radius: float, n: int, *, turns: float = 2.0) -> tuple[np.ndarray, np.ndarray]:
@@ -227,10 +269,10 @@ def test_swim_bout_selection_routes_through_canonical_reader(
     parent["bouts_current"] = run_group
     root = _SelectionGroup()
     root["analysis/swim_bout_runs"] = parent
-    calls: list[tuple[object, str]] = []
+    calls: list[tuple[object, str, bool]] = []
 
-    def _fake_resolve(candidate_root, *, run_name):
-        calls.append((candidate_root, run_name))
+    def _fake_resolve(candidate_root, *, run_name, legacy_compatibility=False):
+        calls.append((candidate_root, run_name, legacy_compatibility))
         return "bouts_current"
 
     monkeypatch.setattr(
@@ -247,7 +289,7 @@ def test_swim_bout_selection_routes_through_canonical_reader(
     assert resolved_group is run_group
     assert resolved_name == "bouts_current"
     assert resolved_path == "analysis/swim_bout_runs/bouts_current"
-    assert calls == [(root, "latest")]
+    assert calls == [(root, "latest", False)]
 
 
 def test_heading_selection_rejects_intermediate_selector_handoff() -> None:
@@ -270,7 +312,10 @@ def test_heading_selection_rejects_intermediate_selector_handoff() -> None:
     run_group["egocentric_bearing"] = parent
 
     with pytest.raises(ValueError, match="No stable complete selector-eligible"):
-        _resolve_heading(run_group, total_frames=10)
+        _resolve_heading(
+            _SelectionGroup(), snapshot=object(), run_group=run_group,
+            total_frames=10, dependency_handle=None,
+        )
 
 
 # --------------------------------------------------------------------------------------
@@ -278,7 +323,6 @@ def test_heading_selection_rejects_intermediate_selector_handoff() -> None:
 # --------------------------------------------------------------------------------------
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_fish_orbiting_the_arena_centre_shows_no_object_specific_circling(tmp_path: Path) -> None:
     """A fish circling the arena centre (the wall-following null) sweeps around a wall-adjacent
     object for free. The raw circling index is high, but the object must show NO excess over
@@ -301,7 +345,6 @@ def test_fish_orbiting_the_arena_centre_shows_no_object_specific_circling(tmp_pa
     assert any(ref.kind == REFERENCE_KIND_VIRTUAL for ref in r.references)
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_fish_orbiting_the_object_shows_a_large_circling_excess(tmp_path: Path) -> None:
     """Now the fish circles the object itself, off-centre in the arena. The virtual twins sit
     elsewhere and are not orbited, so the excess must be large and positive."""
@@ -330,7 +373,6 @@ def test_fish_orbiting_the_object_shows_a_large_circling_excess(tmp_path: Path) 
     assert float(r.circling_excess_vs_virtual[0, 0]) > 0.1
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_excess_is_nan_when_no_virtual_twin_has_near_band_support(tmp_path: Path) -> None:
     """Push the object far enough out that the fish never comes near any virtual twin. With no
     control data there is no wall null, so the excess must be NaN rather than a bare number."""
@@ -351,7 +393,6 @@ def test_excess_is_nan_when_no_virtual_twin_has_near_band_support(tmp_path: Path
     assert math.isnan(float(r.circling_excess_vs_virtual[0, 0]))
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_virtual_reference_on_top_of_a_real_object_is_dropped(tmp_path: Path) -> None:
     """Two objects on opposite corners: a 90 deg rotation lands a 'virtual' control straight on
     the other real object. Such a reference is not a null and must be dropped."""
@@ -367,12 +408,12 @@ def test_virtual_reference_on_top_of_a_real_object_is_dropped(tmp_path: Path) ->
     r = build_chaser_bout_response_result(
         z, chaser_distance_run="chaser_distance_1", virtual_rotations_deg=(90.0, 180.0), min_bin_bouts=5
     )
-    labels = [ref.label for ref in r.references if ref.kind == REFERENCE_KIND_VIRTUAL]
+    virtuals = [ref for ref in r.references if ref.kind == REFERENCE_KIND_VIRTUAL]
     # Rotating `a` by 90 deg lands exactly on `b`, so that twin must be dropped. Rotating `b`
     # by 90 deg lands on empty arena, so that one is a legitimate control and must survive.
-    assert "virtual_aggressive_90" not in labels, labels
-    assert "virtual_inert_90" in labels, labels
-    assert "virtual_aggressive_180" in labels, labels
+    assert not any(ref.parent_chaser_index == 0 and ref.rotation_deg == 90.0 for ref in virtuals)
+    assert any(ref.parent_chaser_index == 1 and ref.rotation_deg == 90.0 for ref in virtuals)
+    assert any(ref.parent_chaser_index == 0 and ref.rotation_deg == 180.0 for ref in virtuals)
     assert any(w.startswith("virtual_reference_dropped_on_real_object") for w in r.qc_warnings)
 
 
@@ -381,7 +422,6 @@ def test_virtual_reference_on_top_of_a_real_object_is_dropped(tmp_path: Path) ->
 # --------------------------------------------------------------------------------------
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_orbiting_the_object_turns_the_fish_toward_it(tmp_path: Path) -> None:
     """An arc around a point requires centripetal turning: the fish must keep turning toward
     the object. That is what a positive turn bias means -- circling, not approaching."""
@@ -402,7 +442,6 @@ def test_orbiting_the_object_turns_the_fish_toward_it(tmp_path: Path) -> None:
     # turn-bias tests below, which vary the bearing on purpose.
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_straight_swimming_past_the_object_has_no_turn_bias(tmp_path: Path) -> None:
     n = 600
     fish = np.stack([np.linspace(CX - 30.0, CX + 30.0, n), np.full(n, CY - 8.0)], axis=1)
@@ -439,7 +478,6 @@ def _steering_fixture(tmp_path: Path, *, headings: np.ndarray, name: str) -> Pat
                           bout_start=bs, bout_end=be, name=name)
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_bouts_steering_away_widen_the_predicted_miss(tmp_path: Path) -> None:
     n = 600
     z = _steering_fixture(tmp_path, headings=np.linspace(0.0, 80.0, n), name="steer_away.zarr")
@@ -450,7 +488,6 @@ def test_bouts_steering_away_widen_the_predicted_miss(tmp_path: Path) -> None:
     assert float(r.near_fraction_widening_miss[0, o]) > 0.9
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_bouts_steering_onto_the_object_narrow_the_predicted_miss(tmp_path: Path) -> None:
     """The mirror case. Note the metric uses |sin(bearing)|, so turning either way *off-axis*
     widens the miss -- what narrows it is swinging back toward dead-ahead."""
@@ -464,7 +501,6 @@ def test_bouts_steering_onto_the_object_narrow_the_predicted_miss(tmp_path: Path
     assert float(r.near_fraction_widening_miss[0, o]) < 0.1
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_bouts_that_hold_their_aim_show_no_steering(tmp_path: Path) -> None:
     n = 600
     z = _steering_fixture(tmp_path, headings=np.full(n, 30.0), name="steer_none.zarr")
@@ -473,7 +509,6 @@ def test_bouts_that_hold_their_aim_show_no_steering(tmp_path: Path) -> None:
     assert float(r.near_delta_predicted_miss_mm[0, o]) == pytest.approx(0.0, abs=1e-4)
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_predicted_miss_is_only_measured_with_the_object_ahead(tmp_path: Path) -> None:
     """With the object behind the fish there is no miss distance to steer, so those bouts must
     be excluded rather than contributing a meaningless number."""
@@ -499,7 +534,6 @@ def test_predicted_miss_is_only_measured_with_the_object_ahead(tmp_path: Path) -
 # --------------------------------------------------------------------------------------
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_visits_are_the_effective_sample_size(tmp_path: Path) -> None:
     """Many bouts inside a single close approach are one approach subsampled. The component
     must report the visit count and flag the pseudoreplication rather than let a bout-count
@@ -522,7 +556,6 @@ def test_visits_are_the_effective_sample_size(tmp_path: Path) -> None:
     assert set(np.unique(visits[visits >= 0]).tolist()) == {0}
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_separate_excursions_are_counted_as_separate_visits(tmp_path: Path) -> None:
     n = 900
     obj_pos = np.asarray([CX + 20.0, CY])
@@ -549,10 +582,12 @@ def test_separate_excursions_are_counted_as_separate_visits(tmp_path: Path) -> N
 
 def test_missing_egocentric_bearing_component_is_a_clear_error() -> None:
     with pytest.raises(ValueError, match="egocentric_bearing"):
-        _resolve_heading({}, total_frames=300)
+        _resolve_heading(
+            {}, snapshot=object(), run_group={}, total_frames=300,
+            dependency_handle=None,
+        )
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_write_component_round_trips(tmp_path: Path) -> None:
     n = 900
     obj_pos = np.asarray([CX + 20.0, CY])
@@ -562,12 +597,16 @@ def test_write_component_round_trips(tmp_path: Path) -> None:
     z = _build_archive(tmp_path, fish_mm=fish, chaser_mm=obj, heading_deg=heading,
                        bout_start=bs, bout_end=be, name="persist.zarr")
     r = build_chaser_bout_response_result(z, chaser_distance_run="chaser_distance_1", min_bin_bouts=5)
+    assert r.source_egocentric_manifest_sha256 == _egocentric_handle(z)["component_manifest_sha256"]
     path = write_chaser_bout_response_component(z, r, overwrite=True)
 
     assert path.endswith(f"{COMPONENT_PARENT_NAME}/{DEFAULT_COMPONENT_NAME}")
     root = zarr.open_group(str(z), mode="r", use_consolidated=False)
     component = root[path]
     assert component.attrs["schema_id"] == SCHEMA_ID
+    assert component.attrs["source_refs"]["source_egocentric_bearing_manifest_sha256"] == (
+        r.source_egocentric_manifest_sha256
+    )
 
     n_refs = len(r.references)
     n_bins = int(r.distance_bin_centers_mm.shape[0])
@@ -586,11 +625,10 @@ def test_write_component_round_trips(tmp_path: Path) -> None:
         assert png.attrs["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
         assert np.asarray(png[:], dtype=np.uint8).tobytes().startswith(b"\x89PNG")
 
-    with pytest.raises(ValueError, match="already exists"):
+    with pytest.raises(FileExistsError, match="Refusing to replace"):
         write_chaser_bout_response_component(z, r, overwrite=False, write_png=False)
 
 
-@_REQUIRES_SEALED_CHASER_BOUT_RESPONSE
 def test_steering_excess_by_band_is_the_dose_response(tmp_path: Path) -> None:
     """A single near-band scalar averages over bins where nothing happens. On the real cohort
     that halved the signal. The per-band profile must be persisted so a localized, decaying

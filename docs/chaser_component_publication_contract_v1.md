@@ -87,6 +87,13 @@ selector, scanning children, or following `latest`. This is intentionally a
 workflow-dependency authority only: it makes an immutable candidate usable by
 the next node without making it generally selectable.
 
+`open_explicit_chaser_component_group()` applies the same exact handle,
+base-seal, manifest-digest, semantic-schema, and method validation before
+returning a group opened through the caller's read-only archive root. It is the
+streaming alternative for scientific consumers that should not detach every
+declared array. CLI/workflow boundaries load handles through one strict JSON
+loader that rejects non-object and non-finite documents before archive access.
+
 Component-owned arrays and visualization artifacts are included in the sealed
 payload. Historical run-level dashboard refreshes executed by some private
 payload builders occur only in node-local staging and are not copied into the
@@ -94,21 +101,21 @@ authoritative archive. Rebuilding those compatibility dashboards is a separate
 post-activation maintenance concern, not part of scientific component
 authority.
 
-Downstream components that currently resolve an upstream dependency through
-`latest` intentionally remain fail closed after candidate publication. They
-must gain an explicit digest-bound selected-component request before an
-ineligible candidate can participate in a chained workflow. Candidate
-publication does not weaken that consumer rule merely to preserve historical
-one-process chaining.
+The first maintained chained consumers now use this boundary:
 
-The known compatibility boundary is visible in the historical escape-event
-fixture: it publishes an egocentric-bearing candidate and immediately asks the
-bout-response builder to rediscover that candidate through legacy `latest`
-selection. The new writer correctly leaves the candidate ineligible and the
-builder rejects the chain. This is not repaired by making candidates
-discoverable. A later reader-adoption change must pass an explicit validated
-component handle (or activate an independently reviewed digest-bound
-selector), then update the chained workflow tests to exercise that authority.
+- `chaser_bout_response` accepts an exact egocentric-bearing handle; and
+- `chaser_escape_events` accepts an exact bout-response handle.
+
+Both consumers remain fail closed when asked to rediscover a newly published,
+selector-ineligible candidate through `latest`. Their result and persisted
+run-lineage records bind the exact upstream component manifest digest. The
+historical swim-bout fixture path is available only through the explicit
+`legacy_swim_bout_compatibility` policy; the default remains the exact current
+swim-bout contract.
+
+Other component-to-component consumers and exports still require migration.
+Candidate publication does not weaken their selection rules merely to preserve
+historical one-process chaining.
 
 ## Manifest Envelope
 
@@ -175,9 +182,11 @@ attributes. Maintained readers must consume only this authority envelope.
       selector-ineligible recovery tombstone.
 - [x] Give every maintained component an exact semantic schema declaration.
 - [x] Migrate all maintained component writers off direct visible mutation.
-- [ ] Migrate readers/exports to validated component handles. The exact handle
-      builder, validator, detached loader, and writer-receipt binding are
-      implemented; scientific consumers still need argument adoption.
+- [ ] Migrate all readers/exports to validated component handles. The exact
+      builder, validator, detached/group loaders, strict JSON boundary, and
+      writer-receipt binding are implemented. Bout response now consumes
+      egocentric bearing explicitly, and escape events consumes bout response
+      explicitly; remaining component chains and exports are still open.
 - [x] Return a digest-bound writer publication receipt for every component.
 - [x] Expand the cluster orchestration target receipt to bind every requested
       component manifest, explicit dependency handle, successful validation,
@@ -186,8 +195,10 @@ attributes. Maintained readers must consume only this authority envelope.
       after all requested steps finish.
 - [x] Run focused real-Zarr success and post-selector failure/rollback tests
       outside the sandbox.
+- [x] Run the selector-ineligible egocentric -> bout-response -> escape-event
+      chain through explicit handles outside the sandbox.
 - [ ] Run end-to-end activated component-family workflow tests outside the
-      sandbox after explicit dependency selection is implemented.
+      sandbox after separately reviewed selector activation is authorized.
 
 Until the remaining reader/activation items pass, production component
 selectors remain unchanged. The old direct-writer quarantine remains available

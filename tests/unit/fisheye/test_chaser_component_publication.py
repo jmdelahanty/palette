@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,8 +16,10 @@ from fisheye.analysis.chaser_component_publication import (
     ChaserComponentPublicationError,
     build_chaser_component_handle,
     component_record_sha256,
+    load_chaser_component_handle_json,
     load_explicit_chaser_component,
     load_selected_chaser_component,
+    open_explicit_chaser_component_group,
     persist_chaser_component_manifest,
     persist_chaser_component_selector,
     validate_chaser_component_manifest,
@@ -479,6 +482,17 @@ def test_explicit_handle_loads_ineligible_component_without_selector() -> None:
     assert COMPONENT_SELECTOR_ATTR not in parent.attrs
     assert parent.attrs["latest"] == "unsealed_newer_child"
 
+    opened = open_explicit_chaser_component_group(
+        root,
+        snapshot=snapshot,
+        handle=handle,
+        expected_semantic_schema_id="palette.chaser_escape_events",
+        expected_semantic_schema_version=2,
+    )
+    assert opened.group is component
+    assert opened.manifest_sha256 == selected.manifest_sha256
+    assert opened.dependency_handle["record_sha256"] == handle["record_sha256"]
+
 
 def test_explicit_handle_rejects_rehashed_unknown_field_and_base_change() -> None:
     component = _component()
@@ -557,6 +571,23 @@ def test_explicit_handle_rejects_manifest_replacement() -> None:
             expected_semantic_schema_id="palette.chaser_escape_events",
             expected_semantic_schema_version=2,
         )
+
+
+def test_component_handle_json_loader_is_strict(tmp_path: Path) -> None:
+    source = tmp_path / "handle.json"
+    source.write_text('{"schema_id":"example","schema_version":1}', encoding="utf-8")
+    assert dict(load_chaser_component_handle_json(source)) == {
+        "schema_id": "example",
+        "schema_version": 1,
+    }
+
+    source.write_text("[]", encoding="utf-8")
+    with pytest.raises(ChaserComponentPublicationError, match="one object"):
+        load_chaser_component_handle_json(source)
+
+    source.write_text('{"value":NaN}', encoding="utf-8")
+    with pytest.raises(ChaserComponentPublicationError, match="non-finite"):
+        load_chaser_component_handle_json(source)
 
 
 def test_selected_reader_rejects_schema_mismatch() -> None:
