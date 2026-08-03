@@ -14,6 +14,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .contracts import (
+    BASELINE_BEHAVIOR_SUMMARY_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
     TABLE_CONTRACTS,
@@ -26,6 +27,7 @@ ARROW_TABLE_SCHEMA_VERSION = 1
 EXACT_ARROW_SCHEMA_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    BASELINE_BEHAVIOR_SUMMARY_TABLE,
 )
 
 _ENVELOPE_FIELDS = {
@@ -218,6 +220,115 @@ _RECORDING_SUMMARY_FIELDS = (
 )
 
 
+# Baseline behavior summary has a closed producer vocabulary assembled from
+# four fixed surfaces: the shared export identity, the fixed chaser/source
+# lineage literals, ``build_summary_metrics``, and the three optional
+# collection fields.  The source epoch row is deliberately not merged: the
+# metrics builder projects exactly eight named bout/IBI summary values.  The
+# physical schema therefore stays closed if that source structured dtype later
+# grows.  ``fps`` remains nullable in v1 because computation may fall back to
+# track FPS while the exported lineage column currently reads only the chaser
+# run attribute.  Freezing that discrepancy is representation, not authority
+# repair or source promotion.
+_BASELINE_BEHAVIOR_SUMMARY_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("chaser_distance_run", "string"),
+    _field("chaser_distance_path", "string"),
+    _field("chaser_distance_schema_id", "string", nullable=True),
+    _field("chaser_distance_schema_version", "int64", nullable=True),
+    _field("chaser_distance_method", "string", nullable=True),
+    _field("chaser_distance_method_version", "string", nullable=True),
+    _field("source_detection_path", "string", nullable=True),
+    _field("source_detection_kind", "string", nullable=True),
+    _field("source_stimulus_run", "string", nullable=True),
+    _field("source_stimulus_path", "string", nullable=True),
+    _field("source_stimulus_epoch_run", "string", nullable=True),
+    _field("source_stimulus_epoch_path", "string", nullable=True),
+    _field("source_refs_json", "string"),
+    _field("coordinate_frame", "string"),
+    _field("coordinate_origin", "string"),
+    _field("fps", "float64", nullable=True),
+    _field("total_frames", "int64", nullable=True),
+    _field("pixels_per_mm_projector", "float64"),
+    _field("source_chaser_distance_run", "string"),
+    _field("source_chaser_distance_path", "string"),
+    _field("source_epoch_behavior_component", "string"),
+    _field("source_epoch_behavior_path", "string"),
+    _field("source_track_kinematics_run", "string"),
+    _field("source_track_kinematics_scope", "string"),
+    _field("source_track_kinematics_path", "string"),
+    _field("source_track_kinematics_track_path", "string"),
+    _field("source_speed_level", "string"),
+    _field("source_swim_bout_run", "string", nullable=True),
+    _field("source_swim_bout_path", "string", nullable=True),
+    _field("track_id", "int64"),
+    _field("arena_center_x_px", "float64"),
+    _field("arena_center_y_px", "float64"),
+    _field("arena_radius_px", "float64"),
+    _field("baseline_method", "string"),
+    _field("baseline_method_version", "string"),
+    _field("baseline_window_id", "int64"),
+    _field("baseline_window_label", "string"),
+    _field("start_frame", "int64"),
+    _field("end_frame", "int64"),
+    _field("start_time_s", "float64"),
+    _field("end_time_s", "float64"),
+    _field("duration_s", "float64"),
+    _field("total_frame_count", "int64"),
+    _field("valid_frame_count", "int64"),
+    _field("missing_frame_count", "int64"),
+    _field("tracking_dropout_fraction", "float64", nullable=True),
+    _field("speed_sample_count", "int64"),
+    _field("mean_speed_mm_s", "float64", nullable=True),
+    _field("median_speed_mm_s", "float64", nullable=True),
+    _field("p95_speed_mm_s", "float64", nullable=True),
+    _field("max_speed_mm_s", "float64", nullable=True),
+    _field("total_path_mm", "float64", nullable=True),
+    _field("bout_count", "int64"),
+    _field("bout_rate_per_min", "float64", nullable=True),
+    _field("arena_radius_mm", "float64"),
+    _field("wall_band_mm", "float64"),
+    _field("expected_uniform_wall_fraction", "float64"),
+    _field("experimental_area_geometry_type", "string"),
+    _field("boundary_distance_method", "string"),
+    _field("wall_fraction_denominator", "string"),
+    _field("wall_frame_count", "int64"),
+    _field("wall_fraction", "float64", nullable=True),
+    _field("mean_distance_from_arena_center_mm", "float64", nullable=True),
+    _field("median_distance_from_arena_center_mm", "float64", nullable=True),
+    _field("p95_distance_from_arena_center_mm", "float64", nullable=True),
+    _field("mean_distance_to_arena_boundary_mm", "float64", nullable=True),
+    _field("median_distance_to_arena_boundary_mm", "float64", nullable=True),
+    _field("p95_distance_to_arena_boundary_mm", "float64", nullable=True),
+    _field("mean_center_distance_norm", "float64", nullable=True),
+    _field("median_center_distance_norm", "float64", nullable=True),
+    _field("x_axis_direction", "string"),
+    _field("y_axis_direction", "string"),
+    _field("spatial_grid_size", "int64"),
+    _field("spatial_valid_sample_count", "int64"),
+    _field("spatial_visited_cell_count", "int64"),
+    _field("spatial_entropy_normalized", "float64", nullable=True),
+    _field("spatial_max_cell_fraction", "float64", nullable=True),
+    _field("quadrant_entropy_normalized", "float64", nullable=True),
+    _field("quadrant_max_fraction", "float64", nullable=True),
+    _field("median_bout_duration_s", "float64", nullable=True),
+    _field("mean_bout_duration_s", "float64", nullable=True),
+    _field("median_bout_path_length_mm", "float64", nullable=True),
+    _field("mean_bout_path_length_mm", "float64", nullable=True),
+    _field("median_abs_bout_net_heading_change_deg", "float64", nullable=True),
+    _field("mean_abs_bout_net_heading_change_deg", "float64", nullable=True),
+    _field("median_inter_bout_interval_s", "float64", nullable=True),
+    _field("mean_inter_bout_interval_s", "float64", nullable=True),
+    _field("collection_id", "string", nullable=True),
+    _field("collection_manifest_sha256", "string", nullable=True),
+    _field("collection_manifest_path", "string", nullable=True),
+)
+
+
 ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     POSITION_OCCUPANCY_HISTOGRAM_TABLE: ArrowTableContract(
         table_name=POSITION_OCCUPANCY_HISTOGRAM_TABLE,
@@ -226,6 +337,10 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     RECORDING_SUMMARY_TABLE: ArrowTableContract(
         table_name=RECORDING_SUMMARY_TABLE,
         fields=_RECORDING_SUMMARY_FIELDS,
+    ),
+    BASELINE_BEHAVIOR_SUMMARY_TABLE: ArrowTableContract(
+        table_name=BASELINE_BEHAVIOR_SUMMARY_TABLE,
+        fields=_BASELINE_BEHAVIOR_SUMMARY_FIELDS,
     ),
 }
 

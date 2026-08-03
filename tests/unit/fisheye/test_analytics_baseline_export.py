@@ -91,6 +91,42 @@ def test_baseline_summary_has_activity_spatial_and_quality_metrics() -> None:
     assert np.isclose(row["expected_uniform_wall_fraction"], 0.36)
 
 
+def test_baseline_summary_projects_only_the_closed_source_quality_vocabulary() -> None:
+    source_fields = {
+        "median_bout_duration_s": 1.0,
+        "mean_bout_duration_s": 2.0,
+        "median_bout_path_length_mm": 3.0,
+        "mean_bout_path_length_mm": 4.0,
+        "median_abs_bout_net_heading_change_deg": 5.0,
+        "mean_abs_bout_net_heading_change_deg": 6.0,
+        "median_inter_bout_interval_s": 7.0,
+        "mean_inter_bout_interval_s": 8.0,
+        "future_source_metric": 9.0,
+        "window_label": "must_not_replace_the_baseline_window",
+    }
+
+    row = build_summary_metrics(
+        _inputs(),
+        _window(),
+        spatial_grid_size=4,
+        source_summary=source_fields,
+    )
+
+    projected = tuple(name for name in source_fields if name in row)
+    assert projected == (
+        "median_bout_duration_s",
+        "mean_bout_duration_s",
+        "median_bout_path_length_mm",
+        "mean_bout_path_length_mm",
+        "median_abs_bout_net_heading_change_deg",
+        "mean_abs_bout_net_heading_change_deg",
+        "median_inter_bout_interval_s",
+        "mean_inter_bout_interval_s",
+    )
+    assert row["baseline_window_label"] == "pre_event"
+    assert "future_source_metric" not in row
+
+
 def test_baseline_time_bins_preserve_temporal_change() -> None:
     rows = build_time_bin_metrics(_inputs(), _window(), time_bin_s=0.5)
 

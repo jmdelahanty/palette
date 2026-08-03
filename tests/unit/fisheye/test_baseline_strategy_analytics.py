@@ -10,7 +10,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from fisheye.analytics_exports.arrow_contracts import arrow_contract_envelope
+from fisheye.analytics_exports.arrow_contracts import (
+    ARROW_TABLE_CONTRACTS,
+    arrow_contract_envelope,
+    exact_arrow_schema,
+)
 from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     EXPORT_SCHEMA_ID,
@@ -19,6 +23,7 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
 )
 from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.validation import ExportValidationError
 from fisheye.baseline_strategy.cohort import (
     classify_strategy_features,
     discover_strategy_clusters,
@@ -266,7 +271,16 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
     )
     rows = []
     for index in range(6):
-        row = {column: None for column in TABLE_CONTRACTS[table_name].required_columns}
+        row = {}
+        for field in ARROW_TABLE_CONTRACTS[table_name].fields:
+            if field.nullable:
+                row[field.name] = None
+            elif field.arrow_type in {"int32", "int64"}:
+                row[field.name] = 1
+            elif field.arrow_type == "float64":
+                row[field.name] = 1.0
+            else:
+                row[field.name] = "value"
         row.update(
             _summary(
                 f"recording_{index}",
@@ -283,20 +297,27 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
         row.pop("export_run_id", None)
         row["export_schema_version"] = EXPORT_SCHEMA_VERSION
         row["table_name"] = table_name
+        row["source_lineage_hash"] = hashlib.sha256(
+            row["recording_id"].encode("utf-8")
+        ).hexdigest()
+        row["source_refs_json"] = "{}"
         rows.append(row)
     part = root / generation_path / "tables" / table_name / "part-00000.parquet"
     part.parent.mkdir(parents=True)
-    table = pa.Table.from_pylist(rows).replace_schema_metadata(
-        {
-            b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
-            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
-            b"palette.table_contract": json.dumps(
-                TABLE_CONTRACTS[table_name].to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode(),
-            b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
-        }
+    table = pa.Table.from_pylist(
+        rows,
+        schema=exact_arrow_schema(
+            table_name,
+            metadata={
+                b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
+                b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode(),
+                b"palette.table_contract": json.dumps(
+                    TABLE_CONTRACTS[table_name].to_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
+            },
+        ),
     )
     pq.write_table(table, part)
     manifest = root / "v1" / "manifests" / f"export_run_id={run_id}.json"
@@ -443,7 +464,7 @@ def test_strategy_workflow_rejects_symlinked_source_manifest_namespace(
     assert not any(outside.iterdir())
 
 
-def test_workflow_rejects_conflicting_source_export_identity(tmp_path: Path) -> None:
+def test_workflow_rejects_unexpected_source_identity_column(tmp_path: Path) -> None:
     source_root = tmp_path / "source_export"
     output_root = tmp_path / "derived_analytics"
     part = _write_summary_only_export(source_root, "source_001")
@@ -452,7 +473,10 @@ def test_workflow_rejects_conflicting_source_export_identity(tmp_path: Path) -> 
     )
     pq.write_table(table, part)
 
-    with np.testing.assert_raises_regex(ValueError, "does not match"):
+    with pytest.raises(
+        ExportValidationError,
+        match="digest mismatch|physical Arrow fields",
+    ):
         run_strategy_analytics(
             source_export_root=source_root,
             source_export_run_id="source_001",
