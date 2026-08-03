@@ -420,6 +420,13 @@ are frozen in `docs/chaser_component_publication_contract_v1.md`.
 
 ### Phase 6 — Adopt byte-aware physical planning
 
+- [x] Implement the strict declaration/facts adapter from exact
+      `AnalysisArrayDeclaration` records into the shared
+      `ArrayIntent -> StoragePlan` planner. It preserves complete trailing
+      record axes, derives rows from fixed-width dtype bytes, restricts shards
+      to the declared growth axis, and emits a digest-bound plan and object
+      estimate. This is infrastructure only; no production profile or writer
+      is promoted by its existence.
 - [ ] Define an `ArrayIntent` for every maintained analytics array.
 - [ ] Classify access as eager, windowed, per-row, indexed, bulk-scan, or
       artifact-byte-stream.
