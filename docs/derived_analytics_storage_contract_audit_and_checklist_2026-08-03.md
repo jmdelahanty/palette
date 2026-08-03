@@ -308,6 +308,7 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Seventh exact Arrow export schema | `/tmp/palette-stimulus-step-summary-arrow-contract-20260803` / `agent/palette/stimulus-step-summary-arrow-contract-20260803` | integrated as `93e81b12` | Exact ordered 38-field per-fish stimulus-step summary, corrected `(recording_id, fish_id, step_index)` key, real two-fish coverage, optional bout bundle, and strict writer/footer/selected-reader validation | Independently reviewed ACCEPT; value-level global key scanning and representative query evidence remain separate |
 | Eye-angle compact-v7 source/candidate read matrix | `/tmp/palette-eye-angle-v7-read-benchmark-20260803` / `agent/palette/eye-angle-v7-read-benchmark-20260803` | integrated and hardened through `35995e23`; cataloged by `9c771842` | Complete 41-array decoded equality, executable schema/storage replay, exact publication and nested materialization bindings, logical-input role identities, fresh processes, archive guards, and hard nonpromotion | Independently re-reviewed ACCEPT; full-duration execution, physical-I/O tracing, public candidate API decision, real consumers, and promotion remain pending |
 | Track-kinematics v1/v2 source/candidate read matrix | `/tmp/palette-track-kinematics-v2-read-benchmark-20260803` / `agent/palette/track-kinematics-v2-read-benchmark-20260803` | integrated as `c56b3103`; cataloged by `bf23020c` | Complete no-physical logical projection, public v1 source reader, diagnostic-only v2 adapter, exact backend/verification policy, live selector/receipt/workload replay, fresh processes, and hard nonpromotion | Independently re-reviewed ACCEPT; representative execution, physical-I/O tracing, maintained v2 consumer decision, and the optional 35-array physical bundle remain pending |
+| Shared candidate execution contract | coordination lane | integrated in this checkpoint | Closed 13-family typed adapter catalog; family-specific decoded-equality IDs; live family-suite validation; node-local and benchmark-namespace requests; externally anchored pre-state and request digests; exact coordinate evidence; complete-only 11-phase receipts; true filesystem/network transfer classification; and hard selector/registry/profile/canonical nonmutation | Independently reviewed ACCEPT; every family remains contract-only or explicitly blocked until a dedicated typed runner is separately implemented and reviewed |
 
 The next safe parallel wave assigns disjoint consumer/benchmark ownership as
 follows. The coordination lane remains the only owner of shared catalogs,
@@ -840,6 +841,19 @@ Recommended benchmark and promotion-review order:
       Catalog tests resolve every adapter while leaving writer, publication,
       physical-I/O, Palette/Crimson consumer, representative-scale, and
       promotion fields false and unbound.
+- [x] Freeze the shared writer/publication execution request and successful
+      receipt contract without authorizing a writer. All thirteen adapters
+      bind a family-specific equality projection and coordinate role; requests
+      require the live registered adapter, exact candidate profile, exact live
+      family-suite projection, a recognized node-local scratch root, immutable
+      production pre-state digests, and a benchmark-only nonmutation policy.
+      Receipt v1 represents completed publications only, requires all eleven
+      measured phases, externally anchors the request digest, distinguishes
+      application counters from genuine filesystem/network transfer, and
+      rejects zero-byte or coordinate-minting claims. The 48-test focused
+      catalog/execution set and independent adversarial review passed. Failed
+      attempts require a separate runner-owned attempt record rather than a
+      dishonest partial success receipt.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
