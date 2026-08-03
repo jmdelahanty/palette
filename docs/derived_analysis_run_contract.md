@@ -104,6 +104,14 @@ activation transaction. It cannot make an arbitrary legacy or external Zarr
 mutator safe. Such a mutator must be migrated to this lock before concurrent
 use, or run only against a quiescent archive.
 
+Physical experiments are cataloged separately in
+`analysis_workflows.storage_candidate_catalog`. An entry there means that one
+explicit selector-ineligible profile and its publication entrypoint exist. It
+does not set `byte_planner_adopted`, promote the profile, or change a selector.
+The catalog distinguishes shared atomic candidates—which consolidate and repair
+failed inline visibility—from guarded direct candidates whose remaining atomic
+publication/consolidation migration is still explicit.
+
 Lower-level writer functions may write directly to explicitly supplied
 in-memory or disposable Zarr groups for tests. Operator CLIs and DAG execution
 must use the atomic materializer for authoritative recording archives.
