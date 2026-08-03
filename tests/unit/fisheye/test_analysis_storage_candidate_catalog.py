@@ -42,6 +42,9 @@ def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:
     )
     for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES:
         assert candidate.resolves_entrypoint(), candidate.stage_id
+        assert candidate.run_parent == (
+            DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[candidate.stage_id].run_parent
+        )
         record = candidate.as_record()
         assert record["selector_eligible"] is False
         assert record["profile_promoted"] is False
@@ -75,6 +78,7 @@ def test_resolved_candidate_records_are_stable_and_json_compatible() -> None:
     (
         ({"stage_id": "unknown_stage"}, "central logical contract"),
         ({"profile_id": "bad profile"}, "canonical exact string"),
+        ({"run_parent": "analysis/bad path"}, "canonical relative path"),
         ({"owner_module": "not a module"}, "canonical exact string"),
         ({"entrypoint_attr": "write-run"}, "canonical exact string"),
         ({"publication_mode": "atomic"}, "publication_mode"),

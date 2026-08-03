@@ -38,7 +38,7 @@ from fisheye.registry.stage_catalog import DERIVED_ANALYSIS, STAGE_SPECS, StageS
 
 
 ANALYTICS_STORAGE_COVERAGE_SCHEMA_ID = "palette.analytics.storage_coverage"
-ANALYTICS_STORAGE_COVERAGE_SCHEMA_VERSION = 2
+ANALYTICS_STORAGE_COVERAGE_SCHEMA_VERSION = 3
 
 _REPORT_FIELDS = frozenset(
     {
@@ -54,6 +54,7 @@ _REPORT_FIELDS = frozenset(
 _STORAGE_CANDIDATE_FIELDS = frozenset(
     {
         "stage_id",
+        "run_parent",
         "profile_id",
         "owner_module",
         "entrypoint",
@@ -554,6 +555,7 @@ def _validate_storage_candidate_record(value: object, *, index: int) -> None:
     record = _exact_fields(value, _STORAGE_CANDIDATE_FIELDS, field=field)
     for name in (
         "stage_id",
+        "run_parent",
         "profile_id",
         "owner_module",
         "entrypoint",
@@ -574,6 +576,7 @@ def _validate_storage_candidate_record(value: object, *, index: int) -> None:
     try:
         DerivedAnalysisStorageCandidate(
             stage_id=record["stage_id"],
+            run_parent=record["run_parent"],
             profile_id=record["profile_id"],
             owner_module=record["owner_module"],
             entrypoint_attr=record["entrypoint"],

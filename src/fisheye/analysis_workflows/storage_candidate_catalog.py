@@ -21,6 +21,7 @@ _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 _PROFILE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 _MODULE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _CALLABLE_ATTR = re.compile(r"^_?[a-z][a-z0-9_]*$")
+_PATH_SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class StorageCandidatePublicationMode(str, Enum):
@@ -35,6 +36,7 @@ class DerivedAnalysisStorageCandidate:
     """One explicit, selector-ineligible physical-layout candidate."""
 
     stage_id: str
+    run_parent: str
     profile_id: str
     owner_module: str
     entrypoint_attr: str
@@ -53,6 +55,16 @@ class DerivedAnalysisStorageCandidate:
                 raise ValueError(f"{field} must be one canonical exact string")
         if self.stage_id not in DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE:
             raise ValueError("candidate stage must have one central logical contract")
+        if type(self.run_parent) is not str:
+            raise TypeError("run_parent must be one canonical relative path")
+        path_parts = self.run_parent.split("/")
+        if (
+            self.run_parent != self.run_parent.strip()
+            or self.run_parent.startswith("/")
+            or self.run_parent.endswith("/")
+            or any(not _PATH_SEGMENT.fullmatch(part) for part in path_parts)
+        ):
+            raise ValueError("run_parent must be one canonical relative path")
         if not isinstance(self.publication_mode, StorageCandidatePublicationMode):
             raise TypeError("publication_mode must use StorageCandidatePublicationMode")
         for field in ("consolidates_before_return", "repairs_failed_visibility"):
@@ -91,6 +103,7 @@ class DerivedAnalysisStorageCandidate:
     def as_record(self) -> dict[str, object]:
         return {
             "stage_id": self.stage_id,
+            "run_parent": self.run_parent,
             "profile_id": self.profile_id,
             "owner_module": self.owner_module,
             "entrypoint": self.entrypoint_attr,
@@ -108,9 +121,15 @@ def _atomic_candidate(
     profile_id: str,
     owner_module: str,
     entrypoint_attr: str,
+    run_parent: str | None = None,
 ) -> DerivedAnalysisStorageCandidate:
     return DerivedAnalysisStorageCandidate(
         stage_id=stage_id,
+        run_parent=(
+            DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[stage_id].run_parent
+            if run_parent is None
+            else run_parent
+        ),
         profile_id=profile_id,
         owner_module=owner_module,
         entrypoint_attr=entrypoint_attr,
@@ -126,9 +145,15 @@ def _direct_candidate(
     profile_id: str,
     owner_module: str,
     entrypoint_attr: str,
+    run_parent: str | None = None,
 ) -> DerivedAnalysisStorageCandidate:
     return DerivedAnalysisStorageCandidate(
         stage_id=stage_id,
+        run_parent=(
+            DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE[stage_id].run_parent
+            if run_parent is None
+            else run_parent
+        ),
         profile_id=profile_id,
         owner_module=owner_module,
         entrypoint_attr=entrypoint_attr,

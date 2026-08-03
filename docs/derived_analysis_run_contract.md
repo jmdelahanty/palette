@@ -110,9 +110,11 @@ explicit selector-ineligible profile and its publication entrypoint exist. It
 does not set `byte_planner_adopted`, promote the profile, or change a selector.
 The catalog distinguishes shared atomic candidates—which consolidate and repair
 failed inline visibility—from guarded direct candidates whose remaining atomic
-publication/consolidation migration is still explicit.
+publication/consolidation migration is still explicit. Every candidate record
+also names its exact run parent; most share the production run parent, while a
+versioned representation may use a dedicated candidate-only parent.
 
-`analysis_workflows.analytics_storage_coverage` schema version 2 joins that
+`analysis_workflows.analytics_storage_coverage` schema version 3 joins that
 candidate catalog to the maintained stage and logical-contract census. It
 rejects duplicate candidate ownership, candidates without a logical contract,
 and any serialized claim that a cataloged candidate is selector-eligible or

@@ -93,6 +93,10 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
         and record["profile_promoted"] is False
         for record in candidates.values()
     )
+    assert all(
+        record["run_parent"] == contracts[stage_id]["run_parent"]
+        for stage_id, record in candidates.items()
+    )
     assert surfaces["chaser_distance"]["central_storage_catalog_required"] is True
     assert (
         surfaces["track_kinematics_visualization"]["exact_storage_contract_status"]
