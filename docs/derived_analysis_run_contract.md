@@ -87,9 +87,14 @@ Production analysis workflows must not compute directly into a visible final
 run path. They compute into node-local Zarr storage, validate the completed
 logical and physical product, and publish it with
 `palette.atomic_run_group_publisher` version 1. The publisher serializes per
-recording, copies to a hidden same-parent sibling, verifies the copy, atomically
-renames it, marks completion, updates pointers, and restores both the target and
-parent attributes after any post-rename failure.
+recording through one archive-wide lock, copies to a hidden same-parent sibling,
+verifies the copy, atomically renames it, marks completion, and applies the
+family's pointer policy. Caller-specific lock suffixes are diagnostic labels;
+they do not create independent locks. A post-rename failure retains an
+owner-bound failed, selector-ineligible tombstone and restores only explicitly
+leased parent mutations. A family that may refresh consolidated metadata before
+a later fallible check must also provide the publisher's failure-visibility
+repair callback so direct and consolidated readers observe the same tombstone.
 
 Lower-level writer functions may write directly to explicitly supplied
 in-memory or disposable Zarr groups for tests. Operator CLIs and DAG execution

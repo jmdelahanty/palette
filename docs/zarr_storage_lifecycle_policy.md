@@ -339,8 +339,8 @@ Recommended flow:
    practical.
 2. Compute outputs into a local scratch Zarr run group.
 3. Validate the local run group before transfer.
-4. Copy the run group to a hidden same-parent sibling while holding the
-   per-recording publication lock.
+4. Copy the run group to a hidden same-parent sibling while holding the one
+   archive-wide publication and metadata-consolidation lock.
 5. Validate the hidden copy by physical inventory and the family validator.
 6. Atomically rename it into the final destination path.
 7. Mark the installed run complete and update reader-visible pointers.
@@ -384,7 +384,9 @@ different contract: the validated consolidated root view is the external reader
 and selector visibility surface.
 
 The writer policy is to refresh consolidated metadata at stable single-writer
-publication boundaries. The required order is:
+publication boundaries. The shared consolidation helper and atomic run
+publisher use the same process-reentrant, cross-process archive lock; stage
+names do not create independent lock domains. The required order is:
 
 1. write arrays, groups, direct attrs, indexes, and provenance;
 2. validate the complete direct run;
@@ -392,6 +394,10 @@ publication boundaries. The required order is:
 4. consolidate the root as the final published visibility step;
 5. validate that the consolidated generation contains the intended selector,
    schema bindings, and array metadata.
+
+If any check after step 4 fails, the publisher must first persist the direct
+failed/ineligible tombstone, restore only owned parent mutations, then
+reconsolidate and verify the failed view before releasing the archive lock.
 
 Published readers continue using the preceding consolidated generation until
 step 4 completes. This avoids exposing a new selector through the intended

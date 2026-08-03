@@ -348,6 +348,11 @@ now implemented on the coordination branch:
   direct/consolidated comparison, equality, object/byte/RSS/timing evidence,
   and explicit null physical-I/O telemetry when tracing is absent:
   `e348d53f`.
+- one archive-wide publication/consolidation lock shared by every common atomic
+  run publisher and every call through the shared consolidation helper, plus a
+  post-tombstone visibility-repair hook. Controlled two-publisher interleaving
+  and post-consolidation failure tests prove that the final consolidated view
+  contains both successful runs or the exact failed/ineligible tombstone.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received

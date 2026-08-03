@@ -11,7 +11,6 @@ post-rename failure.
 from __future__ import annotations
 
 import copy
-import fcntl
 import hashlib
 import os
 import shutil
@@ -29,6 +28,11 @@ import zarr
 
 from ...shared.json_safety import json_attr_safe
 from ...shared.zarr_io import open_zarr_root
+from ...shared.zarr_helpers import (
+    ARCHIVE_METADATA_PUBLICATION_LOCK_SUFFIX,
+    archive_metadata_publication_lock,
+    archive_metadata_publication_lock_path,
+)
 from .runtime_telemetry import PhaseTelemetry
 
 
@@ -45,6 +49,14 @@ ActivateRun = Callable[[zarr.Group, zarr.Group, zarr.Group], None]
 RollbackActivation = Callable[[], None]
 VerifyPointers = Callable[[zarr.Group], None]
 AfterRename = Callable[[zarr.Group, zarr.Group], Mapping[str, Any] | None]
+RepairFailedPublicationVisibility = Callable[[Path], None]
+
+
+# Consolidated metadata belongs to the complete archive, not to one run family.
+# Every publication through this shared primitive must therefore serialize on
+# one recording-wide lock even when callers retain stage-specific labels for
+# provenance and diagnostics.
+ARCHIVE_PUBLICATION_LOCK_SUFFIX = ARCHIVE_METADATA_PUBLICATION_LOCK_SUFFIX
 
 
 @dataclass(frozen=True)
@@ -90,9 +102,7 @@ class AtomicRunPublishSpec:
 
     @property
     def lock_path(self) -> Path:
-        return self.source_zarr.parent / (
-            f".{self.source_zarr.name}.{self.lock_suffix}.lock"
-        )
+        return archive_metadata_publication_lock_path(self.source_zarr)
 
     @property
     def temporary_path(self) -> Path:
@@ -606,6 +616,9 @@ def atomic_publish_run_group(
     after_rename: AfterRename | None = None,
     activate_run: ActivateRun | None = None,
     rollback_activation: RollbackActivation | None = None,
+    repair_failed_publication_visibility: (
+        RepairFailedPublicationVisibility | None
+    ) = None,
 ) -> dict[str, Any]:
     """Publish one completed local run as a fail-closed transaction."""
 
@@ -615,6 +628,8 @@ def atomic_publish_run_group(
             "publish_schema_id": spec.publish_schema_id,
             "copy_backend": copy_backend,
             "content_checksum": bool(spec.content_checksum),
+            "archive_publication_lock": str(spec.lock_path),
+            "caller_lock_suffix": spec.lock_suffix,
         },
     )
 
@@ -651,28 +666,30 @@ def atomic_publish_run_group(
             label="Local run",
         )
 
-    spec.lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with spec.lock_path.open("a+b") as lock_handle:
-        with telemetry.phase("publication_lock_wait"):
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        try:
-            result = _atomic_publish_locked(
-                spec,
-                copy_backend=copy_backend,
-                validate_run=validate_run,
-                prepare_parents=prepare_parents,
-                complete_run=complete_run,
-                verify_pointers=verify_pointers,
-                payload_metadata=payload_metadata,
-                after_rename=after_rename,
-                activate_run=activate_run,
-                rollback_activation=rollback_activation,
-                local_validation=local_validation,
-                telemetry=telemetry,
-            )
-        finally:
-            with telemetry.phase("publication_lock_release"):
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    lock_context = archive_metadata_publication_lock(spec.source_zarr)
+    with telemetry.phase("publication_lock_wait"):
+        lock_context.__enter__()
+    try:
+        result = _atomic_publish_locked(
+            spec,
+            copy_backend=copy_backend,
+            validate_run=validate_run,
+            prepare_parents=prepare_parents,
+            complete_run=complete_run,
+            verify_pointers=verify_pointers,
+            payload_metadata=payload_metadata,
+            after_rename=after_rename,
+            activate_run=activate_run,
+            rollback_activation=rollback_activation,
+            repair_failed_publication_visibility=(
+                repair_failed_publication_visibility
+            ),
+            local_validation=local_validation,
+            telemetry=telemetry,
+        )
+    finally:
+        with telemetry.phase("publication_lock_release"):
+            lock_context.__exit__(None, None, None)
     result["runtime_telemetry"] = telemetry.to_json()
     return result
 
@@ -689,6 +706,9 @@ def _atomic_publish_locked(
     after_rename: AfterRename | None,
     activate_run: ActivateRun | None,
     rollback_activation: RollbackActivation | None,
+    repair_failed_publication_visibility: (
+        RepairFailedPublicationVisibility | None
+    ),
     local_validation: Mapping[str, Any],
     telemetry: PhaseTelemetry,
 ) -> dict[str, Any]:
@@ -959,6 +979,7 @@ def _atomic_publish_locked(
         # public target that appeared, but never delete, rename, or reuse it.
         # Exact ownership authorizes only an in-place failed/ineligible
         # tombstone; a foreign replacement is left completely untouched.
+        owned_public_tombstoned = False
         if spec.target_run_path.exists():
             try:
                 target_owned = (
@@ -981,6 +1002,25 @@ def _atomic_publish_locked(
                     failure=exc,
                     rollback_errors=rollback_errors,
                 )
+                try:
+                    failed = _fresh_owned_public_target(
+                        spec,
+                        owner_attr=publication_owner_attr,
+                        publication_owner=expected_publication_owner,
+                        mode="r",
+                    )
+                    owned_public_tombstoned = bool(
+                        failed is not None
+                        and failed.attrs.get("stage_selector_eligible") is False
+                        and failed.attrs.get("palette_run_completion_status")
+                        == "failed"
+                        and ATOMIC_PUBLICATION_TOMBSTONE_ATTR in failed.attrs
+                    )
+                except BaseException as tombstone_check_exc:  # pragma: no cover
+                    rollback_errors.append(
+                        "verify failed public tombstone: "
+                        f"{tombstone_check_exc}"
+                    )
 
         if spec.selector_owner_attr is not None and spec.owned_parent_attr_names:
             # Only an exact persisted selector lease plus an explicit mutation
@@ -1016,6 +1056,21 @@ def _atomic_publish_locked(
         # Leave it untouched: the retained child is selector-ineligible, so a
         # stale pointer fails closed instead of risking successor clobber.
 
+        # A callback may have refreshed archive-wide consolidated metadata
+        # immediately before failing. Once direct metadata is tombstoned and
+        # any owned parent mutations are restored, give the stage one exact
+        # under-lock opportunity to make its consolidated view fail closed too.
+        if (
+            owned_public_tombstoned
+            and repair_failed_publication_visibility is not None
+        ):
+            try:
+                repair_failed_publication_visibility(spec.target_run_path)
+            except BaseException as repair_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(
+                    "repair failed publication visibility: " f"{repair_exc}"
+                )
+
         if temporary.exists():
             try:
                 shutil.rmtree(temporary)
@@ -1033,6 +1088,7 @@ def _atomic_publish_locked(
 
 
 __all__ = [
+    "ARCHIVE_PUBLICATION_LOCK_SUFFIX",
     "ATOMIC_PUBLICATION_OWNER_ATTR",
     "ATOMIC_PUBLICATION_TOMBSTONE_ATTR",
     "ATOMIC_RUN_PUBLISHER_SCHEMA_ID",

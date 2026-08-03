@@ -10,6 +10,7 @@ import pytest
 import zarr
 
 from fisheye.analysis_workflows.materializers import track_kinematics as mod
+from fisheye.analysis_workflows.materializers import atomic_run_publisher as atomic_mod
 
 
 @pytest.fixture(autouse=True)
@@ -669,7 +670,10 @@ def test_materializer_stages_unbound_then_binds_only_at_final_path(
         "analysis/track_kinematics_runs",
         "analysis/track_kinematics_runs/offline",
     }
-    assert (tmp_path / ".source.zarr.track-kinematics-publish.lock").is_file()
+    assert (
+        tmp_path
+        / f".source.zarr.{atomic_mod.ARCHIVE_PUBLICATION_LOCK_SUFFIX}.lock"
+    ).is_file()
 
 
 def test_unbound_stage_rejects_detached_coordinate_descriptor(

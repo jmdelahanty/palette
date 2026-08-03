@@ -451,7 +451,10 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
         run.attrs["cluster_output_staging"]["serialization_policy"]
         == "per_recording_advisory_file_lock"
     )
-    assert (tmp_path / ".source.zarr.tail-kinematics-publish.lock").is_file()
+    assert (
+        tmp_path
+        / f".source.zarr.{atomic_mod.ARCHIVE_PUBLICATION_LOCK_SUFFIX}.lock"
+    ).is_file()
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
     assert run.attrs["effective_block_rows"] == 4
     assert run.attrs["effective_output_shard_rows"] == 10
@@ -691,6 +694,7 @@ def test_tail_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
         run_name="tail_c",
         row_count=1,
         tail_angle_sample_count=1,
+        storage_profile_id=None,
     )
     receipt = object()
     intervening_seen: list[bool] = []

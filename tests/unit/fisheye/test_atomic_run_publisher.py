@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import os
 from pathlib import Path
+import threading
 import uuid
 
 import numpy as np
@@ -10,6 +12,9 @@ import pytest
 import zarr
 
 from fisheye.analysis_workflows.materializers import atomic_run_publisher as mod
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+)
 
 
 OWNER_ATTR = "publication_owner_uuid"
@@ -530,3 +535,120 @@ def test_atomic_failed_tombstone_removes_persisted_completion_timestamp(
     assert failed.attrs["stage_selector_eligible"] is False
     assert "palette_run_completed_at_utc" not in failed.attrs
     assert mod.ATOMIC_PUBLICATION_TOMBSTONE_ATTR in failed.attrs
+
+
+def test_atomic_publishers_share_one_archive_lock_and_consolidate_both_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, target, first_spec, _owner, validate, prepare = _publication_fixture(
+        tmp_path
+    )
+    second_spec = replace(
+        first_spec,
+        target_run_path=target.with_name("candidate_two"),
+        run_name="candidate_two",
+        lock_suffix="different-stage-label",
+    )
+    assert first_spec.lock_path == second_spec.lock_path
+    assert first_spec.lock_path.name.endswith(
+        f".{mod.ARCHIVE_PUBLICATION_LOCK_SUFFIX}.lock"
+    )
+
+    first_holds_lock = threading.Event()
+    release_first = threading.Event()
+    second_entered_locked_body = threading.Event()
+    real_locked = mod._atomic_publish_locked
+
+    def observe_locked_body(spec, **kwargs):  # type: ignore[no-untyped-def]
+        if spec.run_name == "candidate_two":
+            second_entered_locked_body.set()
+        return real_locked(spec, **kwargs)
+
+    monkeypatch.setattr(mod, "_atomic_publish_locked", observe_locked_body)
+
+    def complete(_root, _parent, run_group):  # type: ignore[no-untyped-def]
+        run_group.attrs["palette_run_completion_status"] = "complete"
+        run_group.attrs["stage_selector_eligible"] = False
+
+    def first_after_rename(_root, _run):  # type: ignore[no-untyped-def]
+        first_holds_lock.set()
+        assert release_first.wait(timeout=5)
+
+    def consolidate(_root, _parent, _run):  # type: ignore[no-untyped-def]
+        consolidate_metadata_capture_expected_warnings(source)
+
+    def publish(spec, *, after_rename=None):  # type: ignore[no-untyped-def]
+        return mod.atomic_publish_run_group(
+            spec,
+            copy_backend="python",
+            validate_run=validate,
+            prepare_parents=prepare,
+            complete_run=complete,
+            verify_pointers=lambda _root: None,
+            after_rename=after_rename,
+            activate_run=consolidate,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            publish,
+            first_spec,
+            after_rename=first_after_rename,
+        )
+        assert first_holds_lock.wait(timeout=5)
+        second = executor.submit(publish, second_spec)
+        assert not second_entered_locked_body.wait(timeout=0.25)
+        release_first.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+
+    assert second_entered_locked_body.is_set()
+    consolidated = zarr.open_group(
+        str(source), mode="r", use_consolidated=True
+    )
+    parent = consolidated["analysis/runs"]
+    assert parent["candidate"].attrs["palette_run_completion_status"] == "complete"
+    assert parent["candidate_two"].attrs[
+        "palette_run_completion_status"
+    ] == "complete"
+
+
+def test_atomic_failure_visibility_repair_reconsolidates_tombstone(
+    tmp_path: Path,
+) -> None:
+    source, target, spec, _owner, validate, prepare = _publication_fixture(tmp_path)
+    repairs: list[Path] = []
+
+    def complete(_root, _parent, run_group):  # type: ignore[no-untyped-def]
+        run_group.attrs["palette_run_completion_status"] = "complete"
+        run_group.attrs["stage_selector_eligible"] = False
+
+    def consolidate_then_fail(_root, _parent, _run):  # type: ignore[no-untyped-def]
+        consolidate_metadata_capture_expected_warnings(source)
+        raise RuntimeError("injected failure after consolidation")
+
+    def repair(path: Path) -> None:
+        repairs.append(path)
+        consolidate_metadata_capture_expected_warnings(source)
+
+    with pytest.raises(RuntimeError, match="failure after consolidation"):
+        mod.atomic_publish_run_group(
+            spec,
+            copy_backend="python",
+            validate_run=validate,
+            prepare_parents=prepare,
+            complete_run=complete,
+            verify_pointers=lambda _root: None,
+            activate_run=consolidate_then_fail,
+            repair_failed_publication_visibility=repair,
+        )
+
+    assert repairs == [target]
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    for root in (direct, consolidated):
+        failed = root["analysis/runs/candidate"]
+        assert failed.attrs["stage_selector_eligible"] is False
+        assert failed.attrs["palette_run_completion_status"] == "failed"
+        assert mod.ATOMIC_PUBLICATION_TOMBSTONE_ATTR in failed.attrs

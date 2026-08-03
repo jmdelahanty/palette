@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 from pathlib import Path
 import re
+import threading
 from typing import Any, Collection, Mapping, TypeAlias
 from urllib.parse import unquote, urlparse
 import warnings
@@ -24,6 +27,58 @@ EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = re.compile(
     r"Object at (logs|\.failed|\.imports|\.incoming) is not recognized as a component "
     r"of a Zarr hierarchy\."
 )
+ARCHIVE_METADATA_PUBLICATION_LOCK_SUFFIX = "archive-publication"
+_ARCHIVE_LOCK_STATE = threading.local()
+
+
+def archive_metadata_publication_lock_path(zarr_path: str | Path) -> Path:
+    """Return the one mutation/consolidation lock shared by an archive."""
+
+    archive = Path(zarr_path).expanduser().resolve()
+    return archive.parent / (
+        f".{archive.name}.{ARCHIVE_METADATA_PUBLICATION_LOCK_SUFFIX}.lock"
+    )
+
+
+@contextmanager
+def archive_metadata_publication_lock(
+    zarr_path: str | Path,
+) -> Iterator[Path]:
+    """Hold the process-reentrant, cross-process archive publication lock."""
+
+    lock_path = archive_metadata_publication_lock_path(zarr_path)
+    key = str(lock_path)
+    held = getattr(_ARCHIVE_LOCK_STATE, "held", None)
+    if held is None:
+        held = {}
+        _ARCHIVE_LOCK_STATE.held = held
+    existing = held.get(key)
+    if existing is not None:
+        handle, depth = existing
+        held[key] = (handle, depth + 1)
+        try:
+            yield lock_path
+        finally:
+            current_handle, current_depth = held[key]
+            if current_handle is not handle or current_depth <= 1:
+                raise RuntimeError("Archive publication lock recursion state changed.")
+            held[key] = (handle, current_depth - 1)
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        held[key] = (handle, 1)
+        try:
+            yield lock_path
+        finally:
+            current = held.pop(key, None)
+            if current != (handle, 1):
+                raise RuntimeError("Archive publication lock was released out of order.")
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _path_tokens(parent_path: ParentPath) -> tuple[str, ...]:
@@ -329,9 +384,10 @@ def consolidate_metadata_capture_expected_warnings(
 
     expected_messages: list[str] = []
     unexpected_warnings: list[warnings.WarningMessage] = []
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        zarr.consolidate_metadata(str(zarr_path), path=path)
+    with archive_metadata_publication_lock(zarr_path):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            zarr.consolidate_metadata(str(zarr_path), path=path)
 
     for warning in caught:
         message = str(warning.message)
