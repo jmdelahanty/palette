@@ -610,7 +610,6 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     } == original_pointers
     assert dict(direct_parent.attrs) == dict(consolidated_parent.attrs)
     direct = direct_parent["shape_byte_candidate"]
-    consolidated = consolidated_parent["shape_byte_candidate"]
     assert direct.attrs["palette_run_completion_status"] == "complete"
     assert direct.attrs["stage_selector_eligible"] is False
     assert direct.attrs["subject_shape_storage_profile_id"] == (
@@ -618,8 +617,8 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     )
     assert not validate_subject_shape_candidate_storage(direct, phase="bound")
     assert not validate_subject_shape_direct_consolidated_storage(
-        direct,
-        consolidated,
+        source_path,
+        run_path="analysis/subject_shape_runs/shape_byte_candidate",
     )
     compute = zarr.open_group(
         str(tmp_path / "candidate-scratch/compute.zarr"),
@@ -724,18 +723,18 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
     centerline.attrs["storage_profile_id"] = storage_profile_id
     writable["components/subject_body"].attrs["unconsolidated_tamper"] = True
     assert any(
-        "group declarations differ" in error
+        "Direct/consolidated declaration differs" in error
         for error in validate_subject_shape_direct_consolidated_storage(
-            writable,
-            consolidated,
+            source_path,
+            run_path="analysis/subject_shape_runs/shape_byte_candidate",
         )
     )
     writable.create_group("unexpected_unconsolidated_group")
     assert any(
-        "group paths differ" in error
+        "Direct/consolidated subtree paths differ" in error
         for error in validate_subject_shape_direct_consolidated_storage(
-            writable,
-            consolidated,
+            source_path,
+            run_path="analysis/subject_shape_runs/shape_byte_candidate",
         )
     )
     degree = compute["components/subject_body/bspline_degree_used"]

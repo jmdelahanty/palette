@@ -635,8 +635,8 @@ def publish_subject_shape_run(
                     "candidate pointer snapshot."
                 )
             issues = validate_subject_shape_direct_consolidated_storage(
-                direct_parent[plan.run_name],
-                consolidated_parent[plan.run_name],
+                plan.source_zarr,
+                run_path=f"analysis/subject_shape_runs/{plan.run_name}",
                 phase="bound",
             )
             if issues:

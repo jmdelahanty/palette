@@ -172,6 +172,12 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
         entrypoint_attr="materialize_eye_angles",
     ),
     _atomic_candidate(
+        "subject_shape",
+        profile_id="subject_shape_access_aware_candidate_v1",
+        owner_module="fisheye.analysis_workflows.materializers.subject_shape",
+        entrypoint_attr="materialize_subject_shape",
+    ),
+    _atomic_candidate(
         "tail_kinematics",
         profile_id="published_http_v1",
         owner_module="fisheye.analysis_workflows.materializers.tail_kinematics",

@@ -58,6 +58,9 @@ from fisheye.shared.zarr.manifest_digest import (
     canonical_json_bytes,
     metadata_without_empty_group_consolidation,
 )
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr.storage_intent import AccessPattern, WriteMode
 from fisheye.shared.zarr.storage_profiles import KIB, MIB, StorageProfile
 
@@ -747,83 +750,6 @@ def _normalized_metadata(value: Any) -> Any:
     return value
 
 
-def _metadata_without_runtime_group_consolidation(
-    value: Mapping[str, Any],
-    *,
-    path: str,
-) -> dict[str, Any]:
-    """Strip a proven well-formed runtime subtree envelope from one group.
-
-    Zarr reconstructs a non-empty inline envelope on a group reached through
-    the root consolidated view.  The flattened entries are validated
-    independently against the direct subtree below; this helper then removes
-    only the exact envelope shape so the group's own declaration can be
-    compared.
-    """
-
-    normalized = dict(value)
-    envelope = normalized.pop("consolidated_metadata", None)
-    if normalized.get("node_type") != "group":
-        raise ValueError(f"Expected a Zarr group declaration at {path!r}.")
-    if envelope is None:
-        return normalized
-    if (
-        not isinstance(envelope, Mapping)
-        or set(envelope) != {"kind", "must_understand", "metadata"}
-        or envelope.get("kind") != "inline"
-        or envelope.get("must_understand") is not False
-        or not isinstance(envelope.get("metadata"), Mapping)
-    ):
-        raise ValueError(
-            f"Runtime consolidated subtree at {path!r} is not an exact inline envelope."
-        )
-    return normalized
-
-
-def _direct_subtree_declaration_map(run_group: Any) -> dict[str, Any]:
-    declarations: dict[str, Any] = {}
-    for path, group in _iter_groups(run_group):
-        if not path:
-            continue
-        declarations[path] = metadata_without_empty_group_consolidation(
-            group.metadata.to_dict(),
-            path=path,
-        )
-    for path, array in _iter_arrays(run_group):
-        declarations[path] = metadata_without_empty_group_consolidation(
-            array.metadata.to_dict(),
-            path=path,
-        )
-    return declarations
-
-
-def _consolidated_subtree_declaration_map(run_group: Any) -> dict[str, Any]:
-    raw = run_group.metadata.to_dict()
-    envelope = raw.get("consolidated_metadata")
-    if (
-        not isinstance(envelope, Mapping)
-        or set(envelope) != {"kind", "must_understand", "metadata"}
-        or envelope.get("kind") != "inline"
-        or envelope.get("must_understand") is not False
-        or not isinstance(envelope.get("metadata"), Mapping)
-    ):
-        raise ValueError(
-            "Consolidated subject-shape run lacks one exact inline subtree envelope."
-        )
-    declarations: dict[str, Any] = {}
-    for raw_path, raw_declaration in envelope["metadata"].items():
-        path = str(raw_path)
-        if not path or not isinstance(raw_declaration, Mapping):
-            raise ValueError(
-                "Consolidated subject-shape subtree contains an invalid relative path."
-            )
-        declarations[path] = metadata_without_empty_group_consolidation(
-            raw_declaration,
-            path=path,
-        )
-    return declarations
-
-
 def validate_subject_shape_candidate_storage(
     run_group: Any,
     *,
@@ -921,69 +847,52 @@ def validate_subject_shape_candidate_storage(
 
 
 def validate_subject_shape_direct_consolidated_storage(
-    direct_run: Any,
-    consolidated_run: Any,
+    archive_path: str | Path,
     *,
+    run_path: str,
     phase: str = "bound",
 ) -> tuple[str, ...]:
-    errors = [
-        *validate_subject_shape_candidate_storage(direct_run, phase=phase),
-        *validate_subject_shape_candidate_storage(consolidated_run, phase=phase),
-    ]
-    if dict(direct_run.attrs) != dict(consolidated_run.attrs):
-        errors.append("subject-shape direct/consolidated run attrs differ")
-    direct_groups = dict(_iter_groups(direct_run))
-    consolidated_groups = dict(_iter_groups(consolidated_run))
-    if set(direct_groups) != set(consolidated_groups):
-        errors.append("subject-shape direct/consolidated group paths differ")
-    for path in sorted(set(direct_groups) & set(consolidated_groups)):
-        try:
-            direct_declaration = metadata_without_empty_group_consolidation(
-                direct_groups[path].metadata.to_dict(),
-                path=path or ".",
-            )
-            consolidated_declaration = _metadata_without_runtime_group_consolidation(
-                consolidated_groups[path].metadata.to_dict(),
-                path=path or ".",
-            )
-        except ValueError as exc:
-            errors.append(f"{path or '.'}: invalid group declaration: {exc}")
-            continue
-        if _normalized_metadata(direct_declaration) != _normalized_metadata(
-            consolidated_declaration
-        ):
-            errors.append(
-                f"{path or '.'}: direct/consolidated group declarations differ"
-            )
+    errors: list[str] = []
+    archive = Path(archive_path).expanduser().resolve()
     try:
-        direct_subtree = _direct_subtree_declaration_map(direct_run)
-        consolidated_subtree = _consolidated_subtree_declaration_map(
-            consolidated_run
+        direct_root = zarr.open_group(
+            str(archive), mode="r", zarr_format=3, use_consolidated=False
         )
-    except ValueError as exc:
-        errors.append(f"subject-shape consolidated subtree is invalid: {exc}")
+        consolidated_root = zarr.open_group(
+            str(archive), mode="r", zarr_format=3, use_consolidated=True
+        )
+        direct_run = _array_at_path(direct_root, run_path)
+        consolidated_run = _array_at_path(consolidated_root, run_path)
+    except Exception as exc:
+        return (f"subject-shape metadata views cannot be opened: {exc}",)
+    errors.extend(validate_subject_shape_candidate_storage(direct_run, phase=phase))
+    errors.extend(
+        validate_subject_shape_candidate_storage(consolidated_run, phase=phase)
+    )
+    try:
+        receipt = validate_direct_consolidated_subtree(
+            archive,
+            subtree_path=run_path,
+        )
+    except Exception as exc:
+        errors.append(str(exc))
     else:
-        if set(direct_subtree) != set(consolidated_subtree):
-            errors.append(
-                "subject-shape direct/consolidated flattened subtree paths differ"
-            )
-        for path in sorted(set(direct_subtree) & set(consolidated_subtree)):
-            if _normalized_metadata(direct_subtree[path]) != _normalized_metadata(
-                consolidated_subtree[path]
-            ):
-                errors.append(
-                    f"{path}: direct/consolidated flattened declarations differ"
-                )
-    direct_arrays = dict(_iter_arrays(direct_run))
-    consolidated_arrays = dict(_iter_arrays(consolidated_run))
-    if set(direct_arrays) != set(consolidated_arrays):
-        errors.append("subject-shape direct/consolidated array paths differ")
-        return tuple(errors)
-    for path in sorted(direct_arrays):
-        if _normalized_metadata(direct_arrays[path].metadata.to_dict()) != (
-            _normalized_metadata(consolidated_arrays[path].metadata.to_dict())
+        visibility = direct_run.attrs.get(
+            SUBJECT_SHAPE_STORAGE_METADATA_POLICY_ATTR
+        )
+        expected_array_count = (
+            visibility.get("expected_array_count")
+            if isinstance(visibility, Mapping)
+            else None
+        )
+        if (
+            type(expected_array_count) is not int
+            or expected_array_count < 0
+            or receipt.array_count != expected_array_count
         ):
-            errors.append(f"{path}: direct/consolidated declarations differ")
+            errors.append(
+                "subject-shape persisted metadata array count differs from policy"
+            )
     return tuple(errors)
 
 

@@ -46,13 +46,12 @@ boundary:
 Tail-posture views, bout classification, stimulus epochs, detection occupancy,
 and session occupancy are also cataloged, truthfully, as guarded direct writers
 rather than falsely claiming atomic-materializer ownership. None of the twelve
-uses the shared byte-budgeted planner as its production default yet.
-Tail-posture, bout-classification, tail-kinematics,
-eye-angle, swim-bout, and bout-kinematics now expose explicit
-selector-ineligible planner candidates. Stimulus epochs and both occupancy
-families now do as well. All twelve have serialized registry projection for
-eligible authorities. The chaser analysis suite still uses additional
-stage-local schemas and writers.
+uses the shared byte-budgeted planner as its production default yet. All twelve
+now expose explicit selector-ineligible planner candidates; ten publish through
+the shared atomic boundary, while tail-posture and bout-classification retain
+guarded direct candidate writers. All twelve have serialized registry
+projection for eligible authorities. The chaser analysis suite still uses
+additional stage-local schemas and writers.
 Several legacy or in-place writers remain explicitly classified compatibility
 or maintenance surfaces.
 
@@ -113,7 +112,7 @@ true.
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
 | Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract; the v2 candidate flattens the two structured lineage records into five exact primitive arrays while retaining float64 position authority | Benchmark the selector-ineligible v2 candidate through its real readers before any writer/profile promotion |
-| Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, content manifest, lineage, atomic sharded publication, strict reload, and serialized registry projection | Add an explicit selector-ineligible byte-planned physical candidate and benchmark it |
+| Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, producer-sealed source binding, lineage, atomic publication, strict reload, serialized registry projection, and an explicit selector-ineligible byte-planned candidate preserving every dtype, fill, and decoded payload | Benchmark node-local publication and mounted consumer access before any profile promotion |
 | Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an atomic selector-ineligible byte-planned candidate with exact failure-visibility repair | Benchmark through Palette and Crimson before profile promotion |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
@@ -601,7 +600,11 @@ Candidate-adoption checkpoints (these do not promote a profile):
       revision bundle through the shared planner/factory, persists a
       digest-bound receipt, validates direct/consolidated declarations, rejects
       process-shard ownership, and leaves all parent selectors unchanged.
-- [ ] Subject-shape candidate adoption.
+- [x] Subject-shape candidate adoption. The access-aware candidate validates
+      the producer-sealed source before planning, preserves the complete v4
+      inventory and path-specific fills, writes through the shared factory,
+      publishes atomically without pointer changes, and requires persisted
+      direct/consolidated subtree equivalence.
 - [x] Track-kinematics candidate adoption. The selector-ineligible v2 layout
       preserves float64 positions, writes all primitive arrays through the
       shared planner/factory, binds source and candidate logical hashes, proves

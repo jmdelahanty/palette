@@ -20,6 +20,7 @@ EXPECTED_ATOMIC = {
     "swim_bouts",
     "bout_kinematics",
     "eye_angles",
+    "subject_shape",
     "tail_kinematics",
     "stimulus_response",
     "stimulus_epochs",
@@ -36,7 +37,7 @@ def test_candidate_catalog_is_closed_executable_and_unpromoted() -> None:
     assert len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == len(
         DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE
     )
-    assert set(DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE) < set(
+    assert set(DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE) == set(
         DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE
     )
     for candidate in DERIVED_ANALYSIS_STORAGE_CANDIDATES:
