@@ -17,6 +17,7 @@ from fisheye.analytics_exports.arrow_contracts import (
 )
 from fisheye.analytics_exports.contracts import (
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
+    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
     TABLE_CONTRACTS,
@@ -261,7 +262,12 @@ def test_build_strategy_tables_returns_all_four_derived_tables() -> None:
     assert tables["baseline_exploration_episodes"] == []
 
 
-def _write_summary_only_export(root: Path, run_id: str) -> Path:
+def _write_summary_only_export(
+    root: Path,
+    run_id: str,
+    *,
+    include_time_bins: bool = False,
+) -> Path:
     table_name = BASELINE_BEHAVIOR_SUMMARY_TABLE
     generation_path = (
         Path("v1")
@@ -320,37 +326,125 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
         ),
     )
     pq.write_table(table, part)
+    parts_by_table = {table_name: [part]}
+    row_counts = {table_name: len(rows)}
+    capabilities = ["core.baseline.behavior_summary"]
+
+    if include_time_bins:
+        time_table = BASELINE_BEHAVIOR_TIME_BINS_TABLE
+        time_rows = []
+        for recording_index in range(6):
+            for bin_index, wall_fraction in enumerate((0.8, 0.2)):
+                row = {}
+                for field in ARROW_TABLE_CONTRACTS[time_table].fields:
+                    if field.nullable:
+                        row[field.name] = None
+                    elif field.arrow_type in {"int32", "int64"}:
+                        row[field.name] = 1
+                    elif field.arrow_type == "float64":
+                        row[field.name] = 1.0
+                    else:
+                        row[field.name] = "value"
+                recording_id = f"recording_{recording_index}"
+                row.update(
+                    {
+                        "export_schema_version": EXPORT_SCHEMA_VERSION,
+                        "table_name": time_table,
+                        "recording_id": recording_id,
+                        "zarr_path": f"/{recording_id}_analysis.zarr",
+                        "source_lineage_hash": hashlib.sha256(
+                            recording_id.encode("utf-8")
+                        ).hexdigest(),
+                        "source_refs_json": "{}",
+                        "track_id": 0,
+                        "baseline_window_id": 0,
+                        "baseline_window_label": "pre",
+                        "time_bin_index": bin_index,
+                        "relative_start_s": float(bin_index * 5),
+                        "relative_end_s": float((bin_index + 1) * 5),
+                        "time_bin_duration_s": 5.0,
+                        "source_start_frame": bin_index * 50,
+                        "source_end_frame": (bin_index + 1) * 50 - 1,
+                        "wall_fraction": wall_fraction,
+                        "mean_speed_mm_s": 2.0,
+                        "distance_travelled_mm": 10.0,
+                        "mean_center_distance_mm": wall_fraction * 10.0,
+                    }
+                )
+                time_rows.append(row)
+        time_part = (
+            root
+            / generation_path
+            / "tables"
+            / time_table
+            / "part-00000.parquet"
+        )
+        time_part.parent.mkdir(parents=True)
+        pq.write_table(
+            pa.Table.from_pylist(
+                time_rows,
+                schema=exact_arrow_schema(
+                    time_table,
+                    metadata={
+                        b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode(),
+                        b"palette.export_schema_version": str(
+                            EXPORT_SCHEMA_VERSION
+                        ).encode(),
+                        b"palette.table_contract": json.dumps(
+                            TABLE_CONTRACTS[time_table].to_dict(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode(),
+                    },
+                ),
+            ),
+            time_part,
+        )
+        parts_by_table[time_table] = [time_part]
+        row_counts[time_table] = len(time_rows)
+        capabilities.append("core.baseline.behavior_time_bins")
+
     manifest = root / "v1" / "manifests" / f"export_run_id={run_id}.json"
     manifest.parent.mkdir(parents=True)
-    relative_part = (generation_path / "tables" / table_name / part.name).as_posix()
+    relative_parts_by_table = {
+        name: [
+            (generation_path / "tables" / name / path.name).as_posix()
+            for path in paths
+        ]
+        for name, paths in parts_by_table.items()
+    }
+    publication_parts = {
+        name: [
+            {
+                "path": relative_path,
+                "sha256": sha256_file(path),
+                "size_bytes": path.stat().st_size,
+                "row_count": row_counts[name],
+            }
+            for path, relative_path in zip(paths, relative_parts_by_table[name])
+        ]
+        for name, paths in parts_by_table.items()
+    }
+    table_names = list(parts_by_table)
     manifest.write_text(
         json.dumps(
             {
                 "export_run_id": run_id,
                 "schema_id": EXPORT_SCHEMA_ID,
                 "schema_version": EXPORT_SCHEMA_VERSION,
-                "tables_requested": [table_name],
-                "table_contracts": contract_snapshot([table_name]),
-                "arrow_schema_contracts": arrow_contract_envelope([table_name]),
-                "row_counts_by_table": {table_name: len(rows)},
-                "part_files_by_table": {table_name: [relative_part]},
-                "capabilities": ["core.baseline.behavior_summary"],
+                "tables_requested": table_names,
+                "table_contracts": contract_snapshot(table_names),
+                "arrow_schema_contracts": arrow_contract_envelope(table_names),
+                "row_counts_by_table": row_counts,
+                "part_files_by_table": relative_parts_by_table,
+                "capabilities": capabilities,
                 "publication": {
                     "schema_id": "palette.analytics_export.publication",
                     "schema_version": 1,
                     "state": "complete",
                     "generation_id": "test",
                     "generation_path": generation_path.as_posix(),
-                    "parts_by_table": {
-                        table_name: [
-                            {
-                                "path": relative_part,
-                                "sha256": sha256_file(part),
-                                "size_bytes": part.stat().st_size,
-                                "row_count": len(rows),
-                            }
-                        ]
-                    },
+                    "parts_by_table": publication_parts,
                 },
             }
         ),
@@ -402,6 +496,63 @@ def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_pat
         columns=("recording_id", "feature_status"),
     )
     assert lazy.collect().shape == (6, 2)
+
+
+def test_workflow_consumes_manifest_selected_exact_time_bins(tmp_path: Path) -> None:
+    source_root = tmp_path / "source_export"
+    output_root = tmp_path / "derived_analytics"
+    _write_summary_only_export(
+        source_root,
+        "source_with_time_bins",
+        include_time_bins=True,
+    )
+
+    result = run_strategy_analytics(
+        source_export_root=source_root,
+        source_export_run_id="source_with_time_bins",
+        output_root=output_root,
+        analysis_run_id="strategy_with_time_bins",
+        config=StrategyFeatureConfig(cluster_stability_resamples=2),
+    )
+
+    feature_part = Path(result["part_files_by_table"]["baseline_strategy_features"][0])
+    rows = pq.ParquetFile(feature_part).read().to_pylist()
+    assert len(rows) == 6
+    assert all(row["time_bin_features_available"] is True for row in rows)
+    assert all(row["wall_fraction_delta_late_minus_early"] < 0 for row in rows)
+    assert all(row["wall_fraction_slope_per_baseline"] < 0 for row in rows)
+
+
+def test_workflow_rejects_rehashed_unexpected_time_bin_column(tmp_path: Path) -> None:
+    source_root = tmp_path / "source_export"
+    output_root = tmp_path / "derived_analytics"
+    run_id = "tampered_time_bins"
+    _write_summary_only_export(source_root, run_id, include_time_bins=True)
+    manifest_path = (
+        source_root / "v1" / "manifests" / f"export_run_id={run_id}.json"
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    relative_part = payload["part_files_by_table"][BASELINE_BEHAVIOR_TIME_BINS_TABLE][0]
+    part = source_root / relative_part
+    table = pq.ParquetFile(part).read().append_column(
+        "future_source_metric",
+        pa.array([999.0] * 12, type=pa.float64()),
+    )
+    pq.write_table(table, part)
+    entry = payload["publication"]["parts_by_table"][
+        BASELINE_BEHAVIOR_TIME_BINS_TABLE
+    ][0]
+    entry["sha256"] = sha256_file(part)
+    entry["size_bytes"] = part.stat().st_size
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ExportValidationError, match="physical Arrow fields"):
+        run_strategy_analytics(
+            source_export_root=source_root,
+            source_export_run_id=run_id,
+            output_root=output_root,
+            analysis_run_id="strategy_rejects_tampering",
+        )
 
 
 def test_workflow_binds_manifest_digest_to_loaded_generation(

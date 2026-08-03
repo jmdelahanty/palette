@@ -131,6 +131,46 @@ def test_baseline_time_bins_preserve_temporal_change() -> None:
     rows = build_time_bin_metrics(_inputs(), _window(), time_bin_s=0.5)
 
     assert len(rows) == 2
+    assert tuple(rows[0]) == (
+        "baseline_method",
+        "baseline_method_version",
+        "baseline_window_id",
+        "baseline_window_label",
+        "time_bin_index",
+        "relative_start_s",
+        "relative_end_s",
+        "time_bin_duration_s",
+        "source_start_frame",
+        "source_end_frame",
+        "expected_frame_count",
+        "valid_position_count",
+        "valid_position_fraction",
+        "speed_sample_count",
+        "mean_speed_mm_s",
+        "median_speed_mm_s",
+        "p95_speed_mm_s",
+        "distance_travelled_mm",
+        "mean_center_distance_mm",
+        "median_center_distance_mm",
+        "mean_distance_to_arena_boundary_mm",
+        "median_distance_to_arena_boundary_mm",
+        "experimental_area_geometry_type",
+        "boundary_distance_method",
+        "wall_fraction_denominator",
+        "wall_frame_count",
+        "wall_fraction",
+        "representative_position_method",
+        "representative_x_mm",
+        "representative_y_mm",
+        "mean_heading_deg",
+        "heading_resultant",
+        "bout_count",
+        "coordinate_frame",
+        "coordinate_origin",
+        "x_axis_direction",
+        "y_axis_direction",
+        "time_bin_policy",
+    )
     assert [row["source_start_frame"] for row in rows] == [0, 5]
     assert [row["source_end_frame"] for row in rows] == [4, 9]
     assert [row["mean_speed_mm_s"] for row in rows] == [2.0, 7.0]
