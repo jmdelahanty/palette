@@ -487,6 +487,11 @@ Recommended migration order:
 
 ### Phase 9 — Benchmark and promote one family at a time
 
+- [x] Add a deterministic suite planner that binds every array workload and
+      the whole-run publication workload to the exact logical declaration,
+      storage-plan receipt, logical dimensions, seed, and safety policy. It
+      covers 200,000- and 1,000,000-row contract scales and rejects rehashed
+      plan, selection, publication, or eligibility-policy tampering.
 - [ ] Define a deterministic writer/publisher/reader workload for every
       maintained family.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
