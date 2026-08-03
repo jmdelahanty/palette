@@ -210,19 +210,27 @@ def _target_receipt_requests(
                 raise RuntimeError(
                     f"Target receipt did not request {stage_id}: {receipt_path}"
                 )
-            if (
-                stage_id == "track_kinematics"
-                and str(stage_receipt.get("run_name") or "") != run_name
-            ):
+            receipt_run_name = str(
+                stage_receipt.get("run_name")
+                or stage_receipt.get("output_run_name")
+                or ""
+            ).strip()
+            if not receipt_run_name:
                 raise RuntimeError(
-                    "Track selector differs from the target receipt: "
-                    f"selector={run_name!r}, receipt={stage_receipt.get('run_name')!r}"
+                    f"Target receipt does not bind an exact {stage_id} output run: "
+                    f"{receipt_path}"
+                )
+            requested_run = receipt_run_name if run_name == "latest" else run_name
+            if requested_run != receipt_run_name:
+                raise RuntimeError(
+                    f"{stage_id} selector differs from the target receipt: "
+                    f"selector={run_name!r}, receipt={receipt_run_name!r}"
                 )
             requests.append(
                 RequestedPublication(
                     zarr_path=zarr_path,
                     stage_id=stage_id,
-                    requested_run=run_name,
+                    requested_run=requested_run,
                     receipt_path=receipt_path,
                     receipt_sha256=digest,
                 )

@@ -277,3 +277,78 @@ def test_target_receipts_must_exactly_cover_manifest(tmp_path: Path) -> None:
         assert str(second) in str(exc)
     else:  # pragma: no cover - assertion clarity
         raise AssertionError("incomplete target receipt set unexpectedly validated")
+
+
+def test_target_receipt_latest_binds_exact_eye_output_run(tmp_path: Path) -> None:
+    target = (tmp_path / "analysis.zarr").resolve()
+    target_list = tmp_path / "targets.txt"
+    target_list.write_text(f"{target}\n", encoding="utf-8")
+    status_dir = tmp_path / "status"
+    status_dir.mkdir()
+    receipt_path = status_dir / "target.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_id": mod.TARGET_RECEIPT_SCHEMA,
+                "schema_version": 1,
+                "status": "complete",
+                "registry_write_mode": "deferred_to_serial_finalizer",
+                "zarr_path": str(target),
+                "requested_publications": {
+                    "eye_angles": {
+                        "requested": True,
+                        "output_run_name": "eye_exact_1",
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    requests = mod._target_receipt_requests(
+        target_list,
+        status_dir,
+        ("eye_angles=latest",),
+    )
+
+    assert len(requests) == 1
+    assert requests[0].requested_run == "eye_exact_1"
+
+
+def test_target_receipt_rejects_generic_selector_run_mismatch(tmp_path: Path) -> None:
+    target = (tmp_path / "analysis.zarr").resolve()
+    target_list = tmp_path / "targets.txt"
+    target_list.write_text(f"{target}\n", encoding="utf-8")
+    status_dir = tmp_path / "status"
+    status_dir.mkdir()
+    (status_dir / "target.json").write_text(
+        json.dumps(
+            {
+                "schema_id": mod.TARGET_RECEIPT_SCHEMA,
+                "schema_version": 1,
+                "status": "complete",
+                "registry_write_mode": "deferred_to_serial_finalizer",
+                "zarr_path": str(target),
+                "requested_publications": {
+                    "swim_bouts": {
+                        "requested": True,
+                        "run_name": "bouts_receipt",
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        mod._target_receipt_requests(
+            target_list,
+            status_dir,
+            ("swim_bouts=bouts_other",),
+        )
+    except RuntimeError as exc:
+        assert "selector differs from the target receipt" in str(exc)
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("mismatched target run unexpectedly validated")
