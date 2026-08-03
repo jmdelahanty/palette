@@ -116,6 +116,9 @@ def test_skipped_producers_resolve_authoritative_inputs_per_recording(
     assert 'epoch_speed_args+=(--speed-level "$SPEED_LEVEL")' in job_script
     assert "export PALETTE_DISABLE_REGISTRY_WRITES=1" in job_script
     assert '"registry_write_mode": "deferred_to_serial_finalizer"' in job_script
+    assert '"schema_version": 2' in job_script
+    assert "fisheye.analysis_workflows.chaser_component_receipt" in job_script
+    assert '"chaser_component_publications"' in job_script
     run_dir = tmp_path / "logs" / "chaser_analytics_authoritative_inputs"
     finalizer = (run_dir / "run_registry_finalizer.sh").read_text(encoding="utf-8")
     assert "fisheye.analysis_workflows.registry_finalize" in finalizer
@@ -193,6 +196,12 @@ def test_profile_enable_adds_dependency_and_renders_generic_steps(
     )
     assert "fisheye.analysis.chaser_bout_response" in job_script
     assert "fisheye.analysis.chaser_escape_events" in job_script
+    assert (
+        'chaser_bout_response=$CHASER_BOUT_RESPONSE_COMPONENT' in job_script
+    )
+    assert (
+        'chaser_escape_events=$CHASER_ESCAPE_EVENTS_COMPONENT' in job_script
+    )
     assert "fisheye.utils.run_goodcopbadcop" not in job_script
 
 

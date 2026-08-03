@@ -477,11 +477,11 @@ implicit discovery.
       maintained writer paths.
 - [x] Define and test component selectors bound to exact manifest digests. Keep
       production activation quarantined until atomic workflow adoption.
-- [ ] Record every requested component's output identity, exact dependency
-      handle, and validation result in the chaser runner receipt. Individual
-      writer receipt v2 now returns a self-digested explicit dependency handle
-      that loads selector-ineligible candidates without fallback;
-      orchestration-result propagation remains.
+- [x] Record every requested component's output identity, exact dependency
+      handle, validation result, and selector-ineligible explicit-authority
+      state in the chaser runner receipt. Individual writer receipt v2 returns
+      the handle, and cluster target receipt v2 embeds a self-digested receipt
+      rebuilt from the read-only authoritative archive after all steps finish.
 - [ ] Keep export of unsealed component tables fail closed.
 - [ ] Add recovery tests for interrupted component publication and stale
       pointers. Post-selector failure rollback is covered; add interruption

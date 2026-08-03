@@ -845,6 +845,7 @@ fi
 safe_name="$(basename "$zarr_path" | tr -c 'A-Za-z0-9._-' '_')"
 json_dir="$RUN_DIR/json/${index}_${safe_name}"
 mkdir -p "$json_dir" "$RUN_DIR/status" "$RUN_DIR/matplotlib/${index}"
+component_receipt_path="$json_dir/chaser_component_publications.json"
 export MPLCONFIGDIR="$RUN_DIR/matplotlib/${index}"
 # Array elements publish Zarr artifacts only.  The dependent one-slot
 # finalizer owns every SQLite mutation for this campaign.
@@ -872,7 +873,8 @@ write_status() {
   local state="$1"
   "$py" - "$RUN_DIR/status/${index}_${safe_name}.json" "$state" "$index" "$zarr_path" \
     "$EXPECTED_COMMIT" "$RUN_MOVEMENT" "$TRACK_RUN" "$RUN_EYE_ANGLES" \
-    "$EYE_ANGLE_RUN" "$EYE_ANGLE_OUTPUT_RUN" <<'PY'
+    "$EYE_ANGLE_RUN" "$EYE_ANGLE_OUTPUT_RUN" "$component_receipt_path" <<'PY'
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -881,7 +883,7 @@ from pathlib import Path
 path = Path(sys.argv[1])
 payload = {
     "schema_id": "palette.chaser_analytics_target_receipt.v1",
-    "schema_version": 1,
+    "schema_version": 2,
     "status": sys.argv[2],
     "registry_write_mode": "deferred_to_serial_finalizer",
     "array_index": int(sys.argv[3]),
@@ -900,6 +902,25 @@ payload = {
     },
     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
 }
+component_receipt_path = Path(sys.argv[11])
+if payload["status"] == "complete":
+    component_receipt_bytes = component_receipt_path.read_bytes()
+    component_receipt = json.loads(component_receipt_bytes)
+    if (
+        not isinstance(component_receipt, dict)
+        or component_receipt.get("schema_id")
+        != "palette.chaser_component_runner_receipt"
+        or component_receipt.get("schema_version") != 1
+        or component_receipt.get("status") != "complete"
+    ):
+        raise RuntimeError("Chaser component runner receipt is not complete and exact")
+    payload["chaser_component_publications"] = component_receipt
+    payload["chaser_component_publications_sha256"] = hashlib.sha256(
+        component_receipt_bytes
+    ).hexdigest()
+else:
+    payload["chaser_component_publications"] = None
+    payload["chaser_component_publications_sha256"] = None
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 }
@@ -926,6 +947,7 @@ run_log_step() {
 
 trap 'write_status failed' ERR
 write_status started
+published_component_args=()
 
 if [[ "$RUN_MOVEMENT" == "1" ]]; then
   movement_args=()
@@ -999,6 +1021,7 @@ if [[ "$RUN_QUADRANT_OCCUPANCY" == "1" ]]; then
     "${png_args[@]}" \
     "${primary_interactive_args[@]}" \
     --json
+  published_component_args+=(--component "chaser_quadrant_occupancy=$QUADRANT_OCCUPANCY_COMPONENT")
 fi
 
 if [[ "$RUN_NEAR_FIELD_OCCUPANCY" == "1" ]]; then
@@ -1012,6 +1035,7 @@ if [[ "$RUN_NEAR_FIELD_OCCUPANCY" == "1" ]]; then
     "${png_args[@]}" \
     "${interactive_args[@]}" \
     --json
+  published_component_args+=(--component "chaser_near_field_occupancy=$NEAR_FIELD_OCCUPANCY_COMPONENT")
 fi
 
 if [[ "$RUN_EPOCH_BEHAVIOR" == "1" ]]; then
@@ -1029,6 +1053,7 @@ if [[ "$RUN_EPOCH_BEHAVIOR" == "1" ]]; then
     --track-id "$TRACK_ID" \
     "${epoch_speed_args[@]}" \
     "${overwrite_args[@]}"
+  published_component_args+=(--component "epoch_behavior_summary=$EPOCH_BEHAVIOR_COMPONENT")
 fi
 
 if [[ "$RUN_EGOCENTRIC" == "1" ]]; then
@@ -1052,6 +1077,7 @@ if [[ "$RUN_EGOCENTRIC" == "1" ]]; then
     "${interactive_args[@]}" \
     "${egocentric_args[@]}" \
     --json
+  published_component_args+=(--component "egocentric_bearing=$EGOCENTRIC_COMPONENT")
 fi
 
 if [[ "$RUN_CHASER_BOUT_RESPONSE" == "1" ]]; then
@@ -1065,6 +1091,7 @@ if [[ "$RUN_CHASER_BOUT_RESPONSE" == "1" ]]; then
     "${png_args[@]}" \
     "${interactive_args[@]}" \
     --json
+  published_component_args+=(--component "chaser_bout_response=$CHASER_BOUT_RESPONSE_COMPONENT")
 fi
 
 if [[ "$RUN_CHASER_ESCAPE_EVENTS" == "1" ]]; then
@@ -1076,6 +1103,7 @@ if [[ "$RUN_CHASER_ESCAPE_EVENTS" == "1" ]]; then
     --apply \
     "${overwrite_args[@]}" \
     "${png_args[@]}"
+  published_component_args+=(--component "chaser_escape_events=$CHASER_ESCAPE_EVENTS_COMPONENT")
 fi
 
 if [[ "$RUN_CHASER_RADIAL_OCCUPANCY" == "1" ]]; then
@@ -1088,6 +1116,7 @@ if [[ "$RUN_CHASER_RADIAL_OCCUPANCY" == "1" ]]; then
     "${png_args[@]}" \
     "${interactive_args[@]}" \
     --json
+  published_component_args+=(--component "chaser_radial_occupancy=$CHASER_RADIAL_OCCUPANCY_COMPONENT")
 fi
 
 if [[ "$RUN_CHASER_RESPONSE_REGIMES" == "1" ]]; then
@@ -1100,6 +1129,7 @@ if [[ "$RUN_CHASER_RESPONSE_REGIMES" == "1" ]]; then
     "${png_args[@]}" \
     "${interactive_args[@]}" \
     --json
+  published_component_args+=(--component "chaser_response_regimes=$CHASER_RESPONSE_REGIMES_COMPONENT")
 fi
 
 if [[ "$RUN_EYE_ANGLES" == "1" ]]; then
@@ -1165,6 +1195,7 @@ if [[ "$RUN_GAZE_TRACKING" == "1" ]]; then
     --apply \
     "${overwrite_args[@]}" \
     "${png_args[@]}"
+  published_component_args+=(--component "gaze_tracking=$GAZE_TRACKING_COMPONENT")
 fi
 
 if [[ "$RUN_ESCAPE_FREEZE" == "1" ]]; then
@@ -1227,9 +1258,15 @@ PY
       "${overwrite_args[@]}" \
       "${png_args[@]}" \
       "${escape_args[@]}"
+    published_component_args+=(--component "chaser_escape_freeze=$escape_component")
   done
 fi
 
+"$py" -m fisheye.analysis_workflows.chaser_component_receipt \
+  "$zarr_path" \
+  --chaser-distance-run "$CHASER_DISTANCE_RUN" \
+  --output-json "$component_receipt_path" \
+  "${published_component_args[@]}"
 write_status complete
 JOB
 chmod +x "$JOB_SCRIPT"

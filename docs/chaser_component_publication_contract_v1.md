@@ -179,8 +179,11 @@ attributes. Maintained readers must consume only this authority envelope.
       builder, validator, detached loader, and writer-receipt binding are
       implemented; scientific consumers still need argument adoption.
 - [x] Return a digest-bound writer publication receipt for every component.
-- [ ] Expand the orchestration runner receipt to bind every requested component
-      manifest, explicit dependency handle, and selector result.
+- [x] Expand the cluster orchestration target receipt to bind every requested
+      component manifest, explicit dependency handle, successful validation,
+      and the selector-ineligible explicit-authority result. Target receipt v2
+      embeds a self-digested runner receipt built by reopening the archive only
+      after all requested steps finish.
 - [x] Run focused real-Zarr success and post-selector failure/rollback tests
       outside the sandbox.
 - [ ] Run end-to-end activated component-family workflow tests outside the

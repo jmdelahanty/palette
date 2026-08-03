@@ -168,7 +168,7 @@ def _target_receipt_requests(
         payload, digest = _read_json_object(receipt_path)
         if payload.get("schema_id") != TARGET_RECEIPT_SCHEMA:
             continue
-        if payload.get("schema_version") != 1 or payload.get("status") != "complete":
+        if payload.get("schema_version") not in {1, 2} or payload.get("status") != "complete":
             raise RuntimeError(f"Target receipt is not complete: {receipt_path}")
         if payload.get("registry_write_mode") != "deferred_to_serial_finalizer":
             raise RuntimeError(
