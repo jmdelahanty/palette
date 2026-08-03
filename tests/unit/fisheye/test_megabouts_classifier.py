@@ -7,6 +7,7 @@ import pytest
 import zarr
 
 from fisheye.shared.zarr.columnar import read_columnar_dataset
+from fisheye.shared.zarr_run_completion import mark_run_complete
 from fisheye.analysis.megabouts_classifier import (
     MEGABOUTS_PREPROCESSED_INPUT_MODE,
     PALETTE_PREPARED_INPUT_MODE,
@@ -30,7 +31,15 @@ def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
 def _build_classifier_root() -> zarr.Group:
     root = _build_root()
     root["analysis/track_kinematics_runs/offline/tk_001"].attrs["fps"] = 60.0
-    root["analysis/swim_bout_runs/bouts_001/speed_filtered"].attrs["fps"] = 60.0
+    swim_parent = root["analysis/swim_bout_runs"]
+    swim_run = swim_parent["bouts_001"]
+    swim_run["speed_filtered"].attrs["fps"] = 60.0
+    swim_run.attrs["stage_selector_eligible"] = True
+    mark_run_complete(
+        swim_run,
+        parent_group=swim_parent,
+        run_name="bouts_001",
+    )
     return root
 
 
@@ -229,7 +238,7 @@ def test_write_megabouts_classification_run_preserves_preprocessed_input_mode() 
 
 
 def test_classify_megabouts_input_pack_with_no_valid_windows_does_not_require_runtime() -> None:
-    root = _build_root()
+    root = _build_classifier_root()
     pack = build_megabouts_classifier_input_pack(root, bout_duration_frames=4)
     assert pack.valid_bout.tolist() == [False, False]
     pack = replace(pack, tail_array=pack.tail_array.copy(), traj_array=pack.traj_array.copy())
