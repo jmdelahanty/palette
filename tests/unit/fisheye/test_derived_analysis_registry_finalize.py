@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
+import pytest
 import zarr
 
 from fisheye.analysis_workflows import registry_finalize as mod
@@ -25,6 +27,8 @@ GENERIC_STAGE_RUNS = {
 
 def _selected_derived_runs(path: Path) -> None:
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
+    root.attrs["recording_id"] = "recording-registry-finalizer-test"
+    root.attrs["zarr_use"] = "analysis"
     eye_parent = root.require_group("analysis/eye_angle_runs")
     eye_parent.attrs.update(
         {
@@ -71,6 +75,25 @@ def _selected_derived_runs(path: Path) -> None:
                 "stage_selector_eligible": True,
             }
         )
+    zarr.consolidate_metadata(str(path))
+
+
+def _receipt_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _mock_projection_state(monkeypatch) -> None:
+    observed: set[tuple[str, str]] = set()
+
+    def state(_registry, item, *, evidence):  # type: ignore[no-untyped-def]
+        assert evidence["stage_id"] == item.request.stage_id
+        key = (item.request.stage_id, item.registry_run_name)
+        if key in observed:
+            return "current"
+        observed.add(key)
+        return "missing"
+
+    monkeypatch.setattr(mod, "_registry_projection_state", state)
 
 
 def _execution_receipt(path: Path, zarr_path: Path) -> None:
@@ -136,6 +159,7 @@ def test_execution_receipt_finalizer_uses_exact_selected_runs(
 
     monkeypatch.setattr(mod, "emit_eye_angle_stage_completion", emit_eye)
     monkeypatch.setattr(mod, "emit_track_kinematics_stage_completion", emit_track)
+    _mock_projection_state(monkeypatch)
 
     report = mod.finalize_registry(
         requests,
@@ -144,6 +168,8 @@ def test_execution_receipt_finalizer_uses_exact_selected_runs(
     )
 
     assert report["status"] == "complete"
+    assert report["schema_id"] == "palette.derived_analysis_registry_finalizer.v2"
+    assert report["schema_version"] == 2
     assert report["registry_integrity"] == "ok"
     assert report["publication_count"] == 2
     assert events == [("eye_angles", "eye_1"), ("track_kinematics", "offline/track_1")]
@@ -189,7 +215,7 @@ def test_finalizer_dispatches_every_generic_derived_stage(
             stage_id=stage_id,
             requested_run=run_name,
             receipt_path=receipt_path,
-            receipt_sha256="a" * 64,
+            receipt_sha256=_receipt_sha256(receipt_path),
         )
         for stage_id, (_parent_path, run_name) in GENERIC_STAGE_RUNS.items()
     ]
@@ -206,6 +232,7 @@ def test_finalizer_dispatches_every_generic_derived_stage(
         "emit_derived_analysis_stage_completion",
         emit_generic,
     )
+    _mock_projection_state(monkeypatch)
 
     report = mod.finalize_registry(
         requests,
@@ -225,12 +252,14 @@ def test_generic_finalizer_rejects_selector_ineligible_run(tmp_path: Path) -> No
     _selected_derived_runs(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="r+")
     root["analysis/swim_bout_runs/bouts_1"].attrs["stage_selector_eligible"] = False
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("{}\n", encoding="utf-8")
     request = mod.RequestedPublication(
         zarr_path=zarr_path,
         stage_id="swim_bouts",
         requested_run="bouts_1",
-        receipt_path=tmp_path / "receipt.json",
-        receipt_sha256="b" * 64,
+        receipt_path=receipt_path,
+        receipt_sha256=_receipt_sha256(receipt_path),
     )
 
     try:
@@ -352,3 +381,185 @@ def test_target_receipt_rejects_generic_selector_run_mismatch(tmp_path: Path) ->
         assert "selector differs from the target receipt" in str(exc)
     else:  # pragma: no cover - assertion clarity
         raise AssertionError("mismatched target run unexpectedly validated")
+
+
+def test_finalizer_retry_is_exactly_idempotent_for_one_receipt(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _selected_derived_runs(zarr_path)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text('{"attempt":"one"}\n', encoding="utf-8")
+    request = mod.RequestedPublication(
+        zarr_path=zarr_path,
+        stage_id="swim_bouts",
+        requested_run="bouts_1",
+        receipt_path=receipt_path,
+        receipt_sha256=_receipt_sha256(receipt_path),
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+
+    first = mod.finalize_registry([request], registry_path=registry_path, apply=True)
+    second = mod.finalize_registry([request], registry_path=registry_path, apply=True)
+
+    assert first["publications"][0]["status"] == "published"
+    assert second["publications"][0]["status"] == "already_published"
+    assert first["publications"][0]["metadata_equivalence"]["node_count"] == 1
+    registry = Registry(registry_path)
+    try:
+        row = registry.conn.execute(
+            """
+            SELECT status, run_name, details_json
+            FROM recording_step_status
+            WHERE step_name = 'swim_bouts';
+            """
+        ).fetchone()
+        assert row["status"] == "ok"
+        assert row["run_name"] == "bouts_1"
+        details = json.loads(row["details_json"])
+        assert details["serialized_registry_finalization"] == (
+            first["publications"][0]["registry_finalization_evidence"]
+        )
+        history_count = registry.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM recording_step_status_history
+            WHERE step_name = 'swim_bouts';
+            """
+        ).fetchone()[0]
+        assert history_count == 1
+    finally:
+        registry.close()
+
+
+def test_partial_finalizer_retry_skips_already_committed_stage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _selected_derived_runs(zarr_path)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text('{"attempt":"partial"}\n', encoding="utf-8")
+    digest = _receipt_sha256(receipt_path)
+    requests = [
+        mod.RequestedPublication(
+            zarr_path=zarr_path,
+            stage_id=stage_id,
+            requested_run=run_name,
+            receipt_path=receipt_path,
+            receipt_sha256=digest,
+        )
+        for stage_id, run_name in (
+            ("bout_kinematics", "bout_kin_1"),
+            ("swim_bouts", "bouts_1"),
+        )
+    ]
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+    real_emit = mod.emit_derived_analysis_stage_completion
+
+    def fail_second(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if kwargs["stage_id"] == "bout_kinematics":
+            return False
+        return real_emit(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "emit_derived_analysis_stage_completion", fail_second)
+    with pytest.raises(RuntimeError, match="Registry publication returned false"):
+        mod.finalize_registry(requests, registry_path=registry_path, apply=True)
+
+    monkeypatch.setattr(mod, "emit_derived_analysis_stage_completion", real_emit)
+    retry = mod.finalize_registry(requests, registry_path=registry_path, apply=True)
+
+    assert [item["status"] for item in retry["publications"]] == [
+        "already_published",
+        "published",
+    ]
+    registry = Registry(registry_path)
+    try:
+        swim_history = registry.conn.execute(
+            """
+            SELECT COUNT(*) FROM recording_step_status_history
+            WHERE step_name = 'swim_bouts';
+            """
+        ).fetchone()[0]
+        assert swim_history == 1
+    finally:
+        registry.close()
+
+
+def test_request_receipt_digest_must_match_bytes(tmp_path: Path) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    request = mod.RequestedPublication(
+        zarr_path=tmp_path / "analysis.zarr",
+        stage_id="swim_bouts",
+        requested_run="bouts_1",
+        receipt_path=receipt_path,
+        receipt_sha256="0" * 64,
+    )
+
+    with pytest.raises(RuntimeError, match="receipt digest differs"):
+        mod.finalize_registry(
+            [request],
+            registry_path=tmp_path / "registry.sqlite",
+            apply=False,
+        )
+
+
+def test_retry_cannot_rebind_selected_run_to_different_receipt(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _selected_derived_runs(zarr_path)
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+
+    first_receipt = tmp_path / "first.json"
+    first_receipt.write_text('{"attempt":1}\n', encoding="utf-8")
+    first = mod.RequestedPublication(
+        zarr_path=zarr_path,
+        stage_id="swim_bouts",
+        requested_run="bouts_1",
+        receipt_path=first_receipt,
+        receipt_sha256=_receipt_sha256(first_receipt),
+    )
+    mod.finalize_registry([first], registry_path=registry_path, apply=True)
+
+    second_receipt = tmp_path / "second.json"
+    second_receipt.write_text('{"attempt":2}\n', encoding="utf-8")
+    second = mod.RequestedPublication(
+        zarr_path=zarr_path,
+        stage_id="swim_bouts",
+        requested_run="bouts_1",
+        receipt_path=second_receipt,
+        receipt_sha256=_receipt_sha256(second_receipt),
+    )
+    with pytest.raises(RuntimeError, match="different finalization evidence"):
+        mod.finalize_registry([second], registry_path=registry_path, apply=True)
+
+
+def test_finalizer_rejects_stale_consolidated_selected_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _selected_derived_runs(zarr_path)
+    direct = zarr.open_group(
+        str(zarr_path),
+        mode="r+",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    direct["analysis/swim_bout_runs/bouts_1"].attrs["tampered_after_consolidation"] = True
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    request = mod.RequestedPublication(
+        zarr_path=zarr_path,
+        stage_id="swim_bouts",
+        requested_run="bouts_1",
+        receipt_path=receipt_path,
+        receipt_sha256=_receipt_sha256(receipt_path),
+    )
+
+    with pytest.raises(RuntimeError, match="declaration differs"):
+        mod.finalize_registry(
+            [request],
+            registry_path=tmp_path / "registry.sqlite",
+            apply=False,
+        )

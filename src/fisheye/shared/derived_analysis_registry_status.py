@@ -31,6 +31,7 @@ def emit_eye_angle_stage_completion(
     registry: RegistryInput = None,
     console: Optional[Console] = None,
     invalidate_on_ok: bool = True,
+    registry_publication_details: Mapping[str, Any] | None = None,
 ) -> bool:
     """Project one activated canonical eye-angle run into the registry."""
 
@@ -57,6 +58,7 @@ def emit_eye_angle_stage_completion(
             "num_detections": attrs.get("num_detections"),
             "num_frames": attrs.get("num_frames"),
             "fps": attrs.get("fps"),
+            **dict(registry_publication_details or {}),
         }
     )
     return emit_stage_completion(
@@ -87,6 +89,7 @@ def emit_track_kinematics_stage_completion(
     registry: RegistryInput = None,
     console: Optional[Console] = None,
     invalidate_on_ok: bool = True,
+    registry_publication_details: Mapping[str, Any] | None = None,
 ) -> bool:
     """Project one activated canonical track-kinematics run into the registry."""
 
@@ -110,6 +113,7 @@ def emit_track_kinematics_stage_completion(
             ),
             "num_tracks": attrs.get("num_tracks"),
             "fps": attrs.get("fps"),
+            **dict(registry_publication_details or {}),
         }
     )
     return emit_stage_completion(

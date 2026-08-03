@@ -123,6 +123,18 @@ Lower-level writer functions may write directly to explicitly supplied
 in-memory or disposable Zarr groups for tests. Operator CLIs and DAG execution
 must use the atomic materializer for authoritative recording archives.
 
+Serialized registry projection uses
+`palette.derived_analysis_registry_finalizer.v2`. Before any registry write it
+revalidates the exact selected complete/eligible run from direct metadata and
+compares every group and array declaration in that run subtree against the
+persisted archive-root inline consolidated map. The finalizer binds the input
+receipt digest and declaration-tree digest into the registry row. Replaying the
+same evidence is a no-op; a different receipt cannot silently rebind the same
+selected run. Multi-stage requests are finalized in dependency order so an
+upstream invalidation cannot overwrite a downstream completion from the same
+batch. A partially committed batch is therefore safe to retry without adding
+duplicate completion history for stages already committed.
+
 ## Row-Aligned Analysis Runs
 
 For row-aligned analysis runs, include a `row_index/` group when practical:

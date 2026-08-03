@@ -13,9 +13,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
-from fisheye.registry.db import Registry
+from fisheye.registry.db import Registry, extract_dataset_metadata
+from fisheye.registry.stage_catalog import dependency_map
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.derived_analysis_registry_status import (
     emit_derived_analysis_stage_completion,
@@ -24,6 +26,10 @@ from fisheye.shared.derived_analysis_registry_status import (
 )
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr.metadata_equivalence import (
+    MetadataEquivalenceReceipt,
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 from .storage_contract_catalog import (
@@ -32,10 +38,16 @@ from .storage_contract_catalog import (
 )
 
 
-REPORT_SCHEMA = "palette.derived_analysis_registry_finalizer.v1"
+REPORT_SCHEMA = "palette.derived_analysis_registry_finalizer.v2"
 TARGET_RECEIPT_SCHEMA = "palette.chaser_analytics_target_receipt.v1"
+REGISTRY_FINALIZATION_EVIDENCE_SCHEMA = (
+    "palette.derived_analysis_registry_finalization_evidence.v1"
+)
 _DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 _SUPPORTED_STAGES = SERIALIZED_REGISTRY_STAGE_IDS
+_STAGE_DEPENDENCIES = dependency_map()
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_FINALIZATION_DETAILS_KEY = "serialized_registry_finalization"
 
 
 @dataclass(frozen=True)
@@ -55,6 +67,7 @@ class PreparedPublication:
     registry_run_name: str
     leaf_run_name: str
     run_type: str | None
+    metadata_equivalence: MetadataEquivalenceReceipt
 
 
 def _read_json_object(path: Path) -> tuple[dict[str, Any], str]:
@@ -63,6 +76,28 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(payload, Mapping):
         raise ValueError(f"Receipt must contain one JSON object: {path}")
     return dict(payload), hashlib.sha256(payload_bytes).hexdigest()
+
+
+def _validate_request_evidence(request: RequestedPublication) -> None:
+    if type(request.stage_id) is not str or request.stage_id not in _SUPPORTED_STAGES:
+        raise ValueError(f"Unsupported requested stage: {request.stage_id!r}")
+    if type(request.requested_run) is not str or not request.requested_run.strip():
+        raise ValueError("requested_run must be one nonempty exact string")
+    if type(request.receipt_sha256) is not str or not _SHA256.fullmatch(
+        request.receipt_sha256
+    ):
+        raise ValueError("receipt_sha256 must be one lowercase SHA-256 digest")
+    if not request.receipt_path.is_file():
+        raise FileNotFoundError(
+            f"Registry-finalization receipt does not exist: {request.receipt_path}"
+        )
+    observed = hashlib.sha256(request.receipt_path.read_bytes()).hexdigest()
+    if observed != request.receipt_sha256:
+        raise RuntimeError(
+            "Registry-finalization receipt digest differs from its request: "
+            f"path={request.receipt_path}, expected={request.receipt_sha256}, "
+            f"observed={observed}"
+        )
 
 
 def _require_text(value: object, *, field: str) -> str:
@@ -238,6 +273,33 @@ def _target_receipt_requests(
     return requests
 
 
+def _prepared_publication(
+    *,
+    request: RequestedPublication,
+    root: Any,
+    run_group: Any,
+    registry_run_name: str,
+    leaf_run_name: str,
+    run_type: str | None,
+) -> PreparedPublication:
+    run_path = str(getattr(run_group, "path", "")).strip("/")
+    if not run_path:
+        raise RuntimeError("Prepared publication run has no canonical Zarr path")
+    receipt = validate_direct_consolidated_subtree(
+        request.zarr_path,
+        subtree_path=run_path,
+    )
+    return PreparedPublication(
+        request=request,
+        root=root,
+        run_group=run_group,
+        registry_run_name=registry_run_name,
+        leaf_run_name=leaf_run_name,
+        run_type=run_type,
+        metadata_equivalence=receipt,
+    )
+
+
 def _prepare(request: RequestedPublication) -> PreparedPublication:
     root = open_zarr_group_direct(request.zarr_path, mode="r")
     if request.stage_id == "eye_angles":
@@ -256,7 +318,7 @@ def _prepare(request: RequestedPublication) -> PreparedPublication:
             )
         if requested not in parent:
             raise RuntimeError(f"Missing selected eye-angle run {requested!r}")
-        return PreparedPublication(
+        return _prepared_publication(
             request=request,
             root=root,
             run_group=parent[requested],
@@ -290,7 +352,7 @@ def _prepare(request: RequestedPublication) -> PreparedPublication:
             or leaf_name not in parent[run_type]
         ):
             raise RuntimeError(f"Missing selected track run {requested!r}")
-        return PreparedPublication(
+        return _prepared_publication(
             request=request,
             root=root,
             run_group=parent[run_type][leaf_name],
@@ -322,7 +384,7 @@ def _prepare(request: RequestedPublication) -> PreparedPublication:
         )
     if requested not in parent:
         raise RuntimeError(f"Missing selected {request.stage_id} run {requested!r}")
-    return PreparedPublication(
+    return _prepared_publication(
         request=request,
         root=root,
         run_group=parent[requested],
@@ -337,17 +399,116 @@ def _deduplicate(
 ) -> list[RequestedPublication]:
     by_key: dict[tuple[Path, str], RequestedPublication] = {}
     for request in requests:
+        _validate_request_evidence(request)
         key = (request.zarr_path.expanduser().resolve(), request.stage_id)
         prior = by_key.get(key)
-        if prior is not None and prior.requested_run != request.requested_run:
-            raise RuntimeError(
-                f"Conflicting receipts for {key}: "
-                f"{prior.requested_run!r} versus {request.requested_run!r}"
-            )
+        if prior is not None:
+            if prior.requested_run != request.requested_run:
+                raise RuntimeError(
+                    f"Conflicting receipts for {key}: "
+                    f"{prior.requested_run!r} versus {request.requested_run!r}"
+                )
+            if (
+                prior.receipt_sha256 != request.receipt_sha256
+                or prior.receipt_path.resolve() != request.receipt_path.resolve()
+            ):
+                raise RuntimeError(
+                    f"Conflicting receipt evidence for {key} and run "
+                    f"{request.requested_run!r}"
+                )
         by_key[key] = request
-    return [
-        by_key[key] for key in sorted(by_key, key=lambda item: (str(item[0]), item[1]))
-    ]
+    ordered: list[RequestedPublication] = []
+    paths = sorted({key[0] for key in by_key}, key=str)
+    for path in paths:
+        remaining = {
+            stage_id: by_key[(path, stage_id)]
+            for candidate_path, stage_id in by_key
+            if candidate_path == path
+        }
+        while remaining:
+            ready = sorted(
+                stage_id
+                for stage_id in remaining
+                if not (set(_STAGE_DEPENDENCIES.get(stage_id, ())) & set(remaining))
+            )
+            if not ready:
+                raise RuntimeError(
+                    "Derived-analysis registry finalization requests contain a "
+                    f"dependency cycle for {path}: {sorted(remaining)}"
+                )
+            for stage_id in ready:
+                ordered.append(remaining.pop(stage_id))
+    return ordered
+
+
+def _registry_finalization_evidence(
+    item: PreparedPublication,
+) -> dict[str, object]:
+    metadata = item.metadata_equivalence
+    return {
+        "schema_id": REGISTRY_FINALIZATION_EVIDENCE_SCHEMA,
+        "schema_version": 1,
+        "stage_id": item.request.stage_id,
+        "run_name": item.registry_run_name,
+        "receipt_sha256": item.request.receipt_sha256,
+        "metadata_declarations_sha256": metadata.declarations_sha256,
+    }
+
+
+def _effective_dataset_id(registry: Registry, item: PreparedPublication) -> str:
+    metadata = extract_dataset_metadata(
+        item.root,
+        item.request.zarr_path,
+    )
+    resolver = getattr(registry, "resolve_effective_dataset_id", None)
+    if callable(resolver):
+        return str(
+            resolver(
+                metadata.dataset_id,
+                session_uuid=metadata.session_uuid,
+                zarr_path=item.request.zarr_path,
+            )
+        )
+    return metadata.dataset_id
+
+
+def _registry_projection_state(
+    registry: Registry,
+    item: PreparedPublication,
+    *,
+    evidence: Mapping[str, object],
+) -> str:
+    dataset_id = _effective_dataset_id(registry, item)
+    row = registry.conn.execute(
+        """
+        SELECT status, run_name, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = ?
+        LIMIT 1;
+        """,
+        (dataset_id, item.request.stage_id),
+    ).fetchone()
+    if row is None:
+        return "missing"
+    if row["status"] != "ok" or row["run_name"] != item.registry_run_name:
+        return "stale"
+    details_raw = row["details_json"]
+    try:
+        details = json.loads(details_raw) if isinstance(details_raw, str) else {}
+    except json.JSONDecodeError:
+        details = {}
+    if not isinstance(details, Mapping):
+        details = {}
+    prior = details.get(_FINALIZATION_DETAILS_KEY)
+    if prior is None:
+        return "unbound"
+    if not isinstance(prior, Mapping) or dict(prior) != dict(evidence):
+        raise RuntimeError(
+            "Registry already binds the selected run to different finalization "
+            f"evidence: stage={item.request.stage_id!r}, "
+            f"run={item.registry_run_name!r}"
+        )
+    return "current"
 
 
 def finalize_registry(
@@ -367,9 +528,18 @@ def finalize_registry(
             registry = Registry(registry_path)
         for item in prepared:
             wrote = False
+            evidence = _registry_finalization_evidence(item)
+            projection_state = "not_checked"
             if apply:
                 assert registry is not None
-                if item.request.stage_id == "eye_angles":
+                projection_state = _registry_projection_state(
+                    registry,
+                    item,
+                    evidence=evidence,
+                )
+                if projection_state == "current":
+                    wrote = False
+                elif item.request.stage_id == "eye_angles":
                     wrote = emit_eye_angle_stage_completion(
                         item.root,
                         item.request.zarr_path,
@@ -378,6 +548,9 @@ def finalize_registry(
                         source="serial_derived_analysis_registry_finalizer",
                         registry=registry,
                         invalidate_on_ok=True,
+                        registry_publication_details={
+                            _FINALIZATION_DETAILS_KEY: evidence
+                        },
                     )
                 elif item.request.stage_id == "track_kinematics":
                     assert item.run_type is not None
@@ -390,6 +563,9 @@ def finalize_registry(
                         source="serial_derived_analysis_registry_finalizer",
                         registry=registry,
                         invalidate_on_ok=True,
+                        registry_publication_details={
+                            _FINALIZATION_DETAILS_KEY: evidence
+                        },
                     )
                 else:
                     wrote = emit_derived_analysis_stage_completion(
@@ -401,11 +577,22 @@ def finalize_registry(
                         source="serial_derived_analysis_registry_finalizer",
                         registry=registry,
                         invalidate_on_ok=True,
+                        details={_FINALIZATION_DETAILS_KEY: evidence},
                     )
-                if not wrote:
+                if projection_state != "current" and not wrote:
                     raise RuntimeError(
                         f"Registry publication returned false for "
                         f"{item.request.stage_id} {item.registry_run_name}"
+                    )
+                if _registry_projection_state(
+                    registry,
+                    item,
+                    evidence=evidence,
+                ) != "current":
+                    raise RuntimeError(
+                        "Registry publication did not persist its exact finalization "
+                        f"evidence for {item.request.stage_id} "
+                        f"{item.registry_run_name}"
                     )
             results.append(
                 {
@@ -414,7 +601,15 @@ def finalize_registry(
                     "run_name": item.registry_run_name,
                     "receipt_path": str(item.request.receipt_path),
                     "receipt_sha256": item.request.receipt_sha256,
-                    "status": "published" if wrote else "validated",
+                    "metadata_equivalence": item.metadata_equivalence.to_json(),
+                    "registry_finalization_evidence": evidence,
+                    "status": (
+                        "published"
+                        if wrote
+                        else "already_published"
+                        if apply and projection_state == "current"
+                        else "validated"
+                    ),
                 }
             )
         integrity = "not_checked"
@@ -432,7 +627,7 @@ def finalize_registry(
 
     return {
         "schema_id": REPORT_SCHEMA,
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "complete",
         "mode": "apply" if apply else "dry_run",
         "completed_at_utc": utc_now(),

@@ -626,10 +626,16 @@ Recommended migration order:
 - [ ] Decide production selection policy for body frame and keypoint quality;
       do not infer activation from their selector-ineligible canaries.
 - [ ] Standardize copy-integrity policy across maintained families.
-- [ ] Require direct and consolidated metadata equivalence before visibility.
-- [ ] Ensure completion, eligibility, selector activation, and registry state
-      cannot disagree after recovery.
-- [ ] Add idempotent finalizer and retry tests.
+- [x] Require direct and consolidated metadata equivalence before serialized
+      registry visibility. The generic subtree comparator reads persisted JSON
+      rather than accepting Zarr's direct-metadata fallback.
+- [x] Ensure the serialized finalizer binds completion, eligibility, selector,
+      receipt, declaration digest, and registry state after recovery. Requests
+      are ordered by the stage DAG so one batch cannot invalidate its own
+      downstream completions.
+- [x] Add idempotent finalizer and partial-commit retry tests. Exact replays are
+      reported as `already_published`; different evidence cannot rebind the
+      same selected run.
 
 ### Phase 8 — Implement declared workflow outputs
 
