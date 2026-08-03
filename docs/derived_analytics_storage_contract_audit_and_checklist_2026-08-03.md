@@ -392,16 +392,20 @@ production selector activation remain out of scope.
 
 ### Phase 5 — Seal chaser components independently
 
-- [ ] Define an immutable component manifest envelope with source-run identity,
+- [x] Define an immutable component manifest envelope with source-run identity,
       schema, parameters, array declarations, content digests, and completion.
 - [ ] Give each component its own hidden-copy/validate/rename publication step.
 - [ ] Remove delete-and-rewrite publication of visible components.
-- [ ] Bind component selectors to exact manifest digests.
+- [x] Define and test component selectors bound to exact manifest digests. Keep
+      production activation quarantined until atomic workflow adoption.
 - [ ] Record every requested component's output identity and validation result
       in the chaser runner receipt.
 - [ ] Keep export of unsealed component tables fail closed.
 - [ ] Add recovery tests for interrupted component publication and stale
       pointers.
+
+The v1 logical envelope, validation boundary, and remaining adoption checklist
+are frozen in `docs/chaser_component_publication_contract_v1.md`.
 
 ### Phase 6 — Adopt byte-aware physical planning
 
