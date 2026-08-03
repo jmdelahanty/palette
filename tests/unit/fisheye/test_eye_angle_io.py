@@ -16,7 +16,21 @@ from fisheye.analysis.eye_angle_io import (
     load_eye_angle_series_window,
     load_eye_gaze_frame_series,
     optional_1d_array,
+    resolve_eye_angle_run,
 )
+
+
+class _SelectionGroup(dict[str, object]):
+    def __init__(self, *, attrs: dict[str, object] | None = None) -> None:
+        super().__init__()
+        self.attrs = attrs if attrs is not None else {}
+
+    def group_keys(self) -> list[str]:
+        return [
+            key
+            for key, value in self.items()
+            if isinstance(value, _SelectionGroup)
+        ]
 
 
 def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
@@ -36,6 +50,7 @@ def _make_eye_angle_archive(tmp_path: Path) -> zarr.Group:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("eye_angle_runs")
     parent.attrs["latest"] = "eye_angle_1"
+    parent.attrs["latest_complete"] = "eye_angle_1"
     run = parent.create_group("eye_angle_1")
     run.attrs.update(
         {
@@ -45,6 +60,8 @@ def _make_eye_angle_archive(tmp_path: Path) -> zarr.Group:
             "preferred_eye_axis": "ellipse_major",
             "row_axis": "keypoint_detection_rows",
             "fps": 100.0,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
         }
     )
     angles = run.create_group("angles")
@@ -74,6 +91,7 @@ def _make_compact_eye_angle_archive(tmp_path: Path) -> zarr.Group:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("eye_angle_runs")
     parent.attrs["latest"] = "eye_angle_compact"
+    parent.attrs["latest_complete"] = "eye_angle_compact"
     run = parent.create_group("eye_angle_compact")
     run.attrs.update(
         {
@@ -84,6 +102,8 @@ def _make_compact_eye_angle_archive(tmp_path: Path) -> zarr.Group:
             "preferred_eye_axis": "ellipse_major",
             "row_axis": "keypoint_detection_rows",
             "fps": 100.0,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
         }
     )
 
@@ -179,6 +199,70 @@ def test_discover_eye_angle_run_options_uses_latest_and_shape_metadata(tmp_path:
     assert option.n_rows == 3
     assert option.is_latest is True
     assert "latest" in option.label
+
+
+def _make_eye_angle_selection_root() -> _SelectionGroup:
+    root = _SelectionGroup()
+    parent = _SelectionGroup(
+        attrs={"latest": "eye_angle_1", "latest_complete": "eye_angle_1"}
+    )
+    root["analysis/eye_angle_runs"] = parent
+    parent["eye_angle_1"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
+    )
+    return root
+
+
+def test_eye_angle_reader_rejects_explicit_ineligible_run() -> None:
+    root = _make_eye_angle_selection_root()
+    root["analysis/eye_angle_runs"]["eye_angle_1"].attrs[
+        "stage_selector_eligible"
+    ] = False
+
+    with pytest.raises(EyeAngleIOError, match="not selector-eligible"):
+        resolve_eye_angle_run(root, "eye_angle_1")
+
+    assert discover_eye_angle_run_options(root) == []
+
+
+def test_eye_angle_reader_fails_closed_during_selector_activation(
+) -> None:
+    root = _make_eye_angle_selection_root()
+    parent = root["analysis/eye_angle_runs"]
+    parent.attrs["latest"] = "candidate"
+    parent.attrs["latest_complete"] = "eye_angle_1"
+    parent["candidate"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+
+    with pytest.raises(EyeAngleIOError, match="selector activation may be in progress"):
+        resolve_eye_angle_run(root)
+
+
+def test_eye_angle_legacy_run_requires_explicit_compatibility(
+) -> None:
+    root = _make_eye_angle_selection_root()
+    parent = root["analysis/eye_angle_runs"]
+    run = parent["eye_angle_1"]
+    del parent.attrs["latest_complete"]
+    del run.attrs["palette_run_completion_status"]
+    del run.attrs["stage_selector_eligible"]
+
+    with pytest.raises(EyeAngleIOError, match="No stable complete"):
+        resolve_eye_angle_run(root)
+
+    resolved, resolved_name, _path = resolve_eye_angle_run(
+        root,
+        legacy_compatibility=True,
+    )
+    assert resolved is run
+    assert resolved_name == "eye_angle_1"
 
 
 def test_load_eye_angle_run_tables_reads_logical_groups(tmp_path: Path) -> None:

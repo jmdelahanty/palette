@@ -1386,8 +1386,11 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
     root = zarr.open_group(str(tmp_path / "eye_angle_compact_writer.zarr"), mode="w")
     parent = root.create_group("analysis").create_group("eye_angle_runs")
     parent.attrs["latest"] = "compact"
+    parent.attrs["latest_complete"] = "compact"
     run = parent.create_group("compact")
     run.attrs["schema_version"] = 5
+    run.attrs["palette_run_completion_status"] = "complete"
+    run.attrs["stage_selector_eligible"] = True
 
     roi = run.create_group("angles").create_group("roi")
     roi.create_array("left_eye_angle_deg", data=np.asarray([10.0, 11.0], dtype=np.float32), chunks=(2,))

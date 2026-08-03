@@ -208,6 +208,7 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("swim_bout_runs")
     parent.attrs["latest"] = "compact_run"
+    parent.attrs["latest_complete"] = "compact_run"
     run = parent.create_group("compact_run")
     run.attrs.update(
         {
@@ -217,6 +218,8 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
             "source_track_motion_manifest_sha256": "a" * 64,
             "track_id": 0,
             "default_level": "speed_exponential",
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
         }
     )
 

@@ -10,7 +10,7 @@ for read compatibility until the backfill tool verifies and stamps them.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional
 import warnings
 
 from fisheye.shared.run_provenance import CLI_RUN_PROVENANCE_ATTR
@@ -57,6 +57,13 @@ def effective_legacy_default(parent_group: Any) -> bool:
     """Return whether unmarked child runs remain legacy-complete for a parent."""
 
     epoch = _coerce_int(getattr(parent_group, "attrs", {}).get(COMPLETION_EPOCH_ATTR))
+    return not (epoch is not None and epoch >= COMPLETION_EPOCH_STRICT)
+
+
+def effective_legacy_default_from_attrs(parent_attrs: Mapping[str, Any]) -> bool:
+    """Return legacy completion policy for a metadata-only parent view."""
+
+    epoch = _coerce_int(parent_attrs.get(COMPLETION_EPOCH_ATTR))
     return not (epoch is not None and epoch >= COMPLETION_EPOCH_STRICT)
 
 
@@ -348,10 +355,37 @@ def is_run_selector_eligible(run_group: Any) -> bool:
     while auxiliary, shard, artifact, and compatibility outputs use ``false``.
     """
 
-    attrs = getattr(run_group, "attrs", {})
-    if "stage_selector_eligible" not in attrs:
+    return is_run_selector_eligible_attrs(getattr(run_group, "attrs", {}))
+
+
+def is_run_selector_eligible_attrs(run_attrs: Mapping[str, Any]) -> bool:
+    """Return selector eligibility from a metadata-only run attribute view."""
+
+    if "stage_selector_eligible" not in run_attrs:
         return True
-    return attrs.get("stage_selector_eligible") is True
+    return run_attrs.get("stage_selector_eligible") is True
+
+
+def is_run_complete_in_parent_attrs(
+    parent_attrs: Mapping[str, Any],
+    run_attrs: Mapping[str, Any],
+    *,
+    legacy_default: bool | None = None,
+) -> bool:
+    """Return completion from metadata-only parent and child attribute views."""
+
+    effective_default = (
+        effective_legacy_default_from_attrs(parent_attrs)
+        if legacy_default is None
+        else bool(legacy_default)
+    )
+    status = run_attrs.get(RUN_COMPLETION_STATUS_ATTR)
+    has_contract = (
+        run_attrs.get(RUN_COMPLETION_CONTRACT_ATTR) == RUN_COMPLETION_CONTRACT
+    )
+    if status is None and not has_contract:
+        return effective_default
+    return str(status).lower() == RUN_STATUS_COMPLETE
 
 
 def _group_names(parent_group: Any) -> list[str]:
@@ -416,54 +450,78 @@ def resolve_latest_complete_run_name(
         if legacy_default is None
         else bool(legacy_default)
     )
+
+    def child_attrs(name: str) -> Mapping[str, Any] | None:
+        child = _get_child(parent_group, name)
+        if child is None:
+            return None
+        attrs = getattr(child, "attrs", None)
+        return attrs if isinstance(attrs, Mapping) else dict(attrs or {})
+
+    result = resolve_latest_complete_run_name_from_attrs(
+        parent_attrs=getattr(parent_group, "attrs", {}),
+        child_names=_group_names(parent_group),
+        child_attrs=child_attrs,
+        latest_attr=latest_attr,
+        legacy_default=legacy_default,
+    )
+    if allow_legacy_group_scan and result is not None:
+        child = _get_child(parent_group, result)
+        if child is not None and _is_unmarked_legacy_run(child):
+            _warn_legacy_completion_acceptance(parent_group)
+    return result
+
+
+def resolve_latest_complete_run_name_from_attrs(
+    *,
+    parent_attrs: Mapping[str, Any],
+    child_names: Iterable[str],
+    child_attrs: Callable[[str], Mapping[str, Any] | None],
+    latest_attr: str = "latest",
+    legacy_default: bool | None = None,
+) -> Optional[str]:
+    """Resolve the canonical run from metadata-only parent/child state.
+
+    This is the pure decision boundary shared by open-Zarr readers and tools
+    that intentionally inspect direct ``zarr.json`` metadata.  Strict mode
+    requires the selector pair to agree before trusting either half of an
+    activation, and every selected child must be both complete and eligible.
+    """
+
+    allow_legacy_group_scan = (
+        effective_legacy_default_from_attrs(parent_attrs)
+        if legacy_default is None
+        else bool(legacy_default)
+    )
+
+    def selectable(name: str, *, legacy: bool) -> bool:
+        attrs = child_attrs(name)
+        return bool(
+            attrs is not None
+            and is_run_selector_eligible_attrs(attrs)
+            and is_run_complete_in_parent_attrs(
+                parent_attrs,
+                attrs,
+                legacy_default=legacy,
+            )
+        )
+
     if not allow_legacy_group_scan:
-        latest = _normalize_name(parent_group.attrs.get(latest_attr))
+        latest = _normalize_name(parent_attrs.get(latest_attr))
         latest_complete = _normalize_name(
-            parent_group.attrs.get(RUN_LATEST_COMPLETE_ATTR)
+            parent_attrs.get(RUN_LATEST_COMPLETE_ATTR)
         )
         if latest is None or latest_complete is None or latest != latest_complete:
             return None
-        child = _get_child(parent_group, latest)
-        if (
-            child is None
-            or not is_run_selector_eligible(child)
-            or not is_run_complete_in_parent(
-                parent_group,
-                child,
-                legacy_default=False,
-            )
-        ):
-            return None
-        return latest
+        return latest if selectable(latest, legacy=False) else None
 
     for attr in (latest_attr, RUN_LATEST_COMPLETE_ATTR):
-        candidate = parent_group.attrs.get(attr)
-        if not candidate:
-            continue
-        name = str(candidate)
-        child = _get_child(parent_group, name)
-        if (
-            child is not None
-            and is_run_selector_eligible(child)
-            and is_run_complete_in_parent(
-                parent_group,
-                child,
-                legacy_default=legacy_default,
-            )
-        ):
-            return name
+        candidate = _normalize_name(parent_attrs.get(attr))
+        if candidate is not None and selectable(candidate, legacy=True):
+            return candidate
 
-    for name in reversed(_group_names(parent_group)):
-        child = _get_child(parent_group, name)
-        if (
-            child is not None
-            and is_run_selector_eligible(child)
-            and is_run_complete_in_parent(
-                parent_group,
-                child,
-                legacy_default=legacy_default,
-            )
-        ):
+    for name in reversed(sorted(str(name) for name in child_names)):
+        if selectable(name, legacy=True):
             return name
     return None
 

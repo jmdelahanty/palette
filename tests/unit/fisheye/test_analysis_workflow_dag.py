@@ -270,7 +270,10 @@ def test_workflow_rejects_dependency_cycles() -> None:
 
 def test_availability_resolver_uses_latest_complete_metadata_pointer(tmp_path: Path) -> None:
     parent = tmp_path / "analysis" / "track_kinematics_runs" / "offline"
-    _write_zarr_metadata(parent, {"latest_complete": "track_a"})
+    _write_zarr_metadata(
+        parent,
+        {"latest": "track_a", "latest_complete": "track_a"},
+    )
     _write_zarr_metadata(
         parent / "track_a",
         {"palette_run_completion_status": "complete"},
@@ -286,7 +289,10 @@ def test_availability_resolver_uses_latest_complete_metadata_pointer(tmp_path: P
 
 def test_availability_resolver_discovers_tracking_authority(tmp_path: Path) -> None:
     parent = tmp_path / "tracking_runs"
-    _write_zarr_metadata(parent, {"latest_complete": "tracking_a"})
+    _write_zarr_metadata(
+        parent,
+        {"latest": "tracking_a", "latest_complete": "tracking_a"},
+    )
     _write_zarr_metadata(
         parent / "tracking_a",
         {"palette_run_completion_status": "complete"},
@@ -303,7 +309,10 @@ def test_visualization_availability_is_tied_to_selected_track_run(
     tmp_path: Path,
 ) -> None:
     parent = tmp_path / "analysis" / "track_kinematics_runs" / "offline"
-    _write_zarr_metadata(parent, {"latest_complete": "track_a"})
+    _write_zarr_metadata(
+        parent,
+        {"latest": "track_a", "latest_complete": "track_a"},
+    )
     _write_zarr_metadata(
         parent / "track_a",
         {"palette_run_completion_status": "complete"},
@@ -334,7 +343,7 @@ def test_visualization_availability_is_tied_to_selected_track_run(
     )
     _write_zarr_metadata(
         visualization_parent,
-        {"latest_complete": "render_a"},
+        {"latest": "render_a", "latest_complete": "render_a"},
     )
     motion_authority = {
         "run_ref": "/analysis/track_kinematics_runs/offline/track_a",
@@ -406,7 +415,10 @@ def test_visualization_availability_is_tied_to_selected_track_run(
 def test_availability_resolver_requires_pointer_or_explicit_run(tmp_path: Path) -> None:
     parent = tmp_path / "analysis" / "swim_bout_runs"
     _write_zarr_metadata(parent)
-    _write_zarr_metadata(parent / "bout_a", {"status": "complete"})
+    _write_zarr_metadata(
+        parent / "bout_a",
+        {"palette_run_completion_status": "complete"},
+    )
 
     unresolved = discover_stage_availability(tmp_path, "swim_bouts")
     explicit = discover_stage_availability(
@@ -416,21 +428,26 @@ def test_availability_resolver_requires_pointer_or_explicit_run(tmp_path: Path) 
     )
 
     assert unresolved.available is False
-    assert "select an explicit run" in unresolved.reason
+    assert "no stable complete selector-eligible run" in unresolved.reason
     assert explicit.available is True
     assert explicit.run_name == "bout_a"
 
 
 def test_availability_resolver_does_not_reuse_incomplete_run(tmp_path: Path) -> None:
     parent = tmp_path / "analysis" / "eye_angle_runs"
-    _write_zarr_metadata(parent, {"latest": "eye_a"})
-    _write_zarr_metadata(parent / "eye_a", {"run_status": "running"})
+    _write_zarr_metadata(
+        parent,
+        {"latest": "eye_a", "latest_complete": "eye_a"},
+    )
+    _write_zarr_metadata(
+        parent / "eye_a",
+        {"palette_run_completion_status": "running"},
+    )
 
     status = discover_stage_availability(tmp_path, "eye_angles")
 
     assert status.available is False
-    assert status.completion_status == "running"
-    assert "not complete" in status.reason
+    assert "no stable complete selector-eligible run" in status.reason
 
 
 def test_availability_resolver_fails_closed_for_unmarked_strict_parent(
@@ -439,12 +456,70 @@ def test_availability_resolver_fails_closed_for_unmarked_strict_parent(
     parent = tmp_path / "analysis" / "subject_shape_runs"
     _write_zarr_metadata(
         parent,
-        {"palette_completion_epoch": 2, "latest_complete": "shape_a"},
+        {
+            "palette_completion_epoch": 2,
+            "latest": "shape_a",
+            "latest_complete": "shape_a",
+        },
     )
     _write_zarr_metadata(parent / "shape_a")
 
     status = discover_stage_availability(tmp_path, "subject_shape")
 
     assert status.available is False
-    assert status.run_name == "shape_a"
-    assert "required complete marker" in status.reason
+    assert status.run_name is None
+    assert "no stable complete selector-eligible run" in status.reason
+
+
+def test_availability_resolver_fails_closed_during_selector_activation(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "analysis" / "eye_angle_runs"
+    _write_zarr_metadata(
+        parent,
+        {"latest": "candidate", "latest_complete": "previous"},
+    )
+    _write_zarr_metadata(
+        parent / "previous",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
+    )
+    _write_zarr_metadata(
+        parent / "candidate",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+
+    status = discover_stage_availability(tmp_path, "eye_angles")
+
+    assert status.available is False
+    assert status.run_name is None
+    assert "selector activation may be in progress" in status.reason
+
+
+def test_availability_resolver_rejects_explicit_ineligible_run(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "analysis" / "swim_bout_runs"
+    _write_zarr_metadata(parent)
+    _write_zarr_metadata(
+        parent / "candidate",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+
+    status = discover_stage_availability(
+        tmp_path,
+        "swim_bouts",
+        requested_run="candidate",
+    )
+
+    assert status.available is False
+    assert status.run_name == "candidate"
+    assert "not selector-eligible" in status.reason

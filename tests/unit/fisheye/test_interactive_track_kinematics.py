@@ -67,6 +67,7 @@ def _add_hierarchical_swim_bouts(
     root = zarr.open_group(str(zarr_path), mode="a")
     swim_parent = root["analysis"].create_group("swim_bout_runs")
     swim_parent.attrs["latest"] = "swim_bout_1"
+    swim_parent.attrs["latest_complete"] = "swim_bout_1"
 
     run = swim_parent.create_group("swim_bout_1")
     run.attrs["detection_method"] = detection_method
@@ -74,6 +75,8 @@ def _add_hierarchical_swim_bouts(
     run.attrs["fps"] = 200.0
     run.attrs["source_track_kinematics_run"] = source_track_kinematics_run
     run.attrs["track_id"] = track_id
+    run.attrs["palette_run_completion_status"] = "complete"
+    run.attrs["stage_selector_eligible"] = True
 
     bouts = np.asarray(
         [
@@ -132,6 +135,7 @@ def _add_compact_swim_bouts(zarr_path: Path) -> None:
     analysis = root["analysis"]
     swim_parent = analysis.create_group("swim_bout_runs")
     swim_parent.attrs["latest"] = "swim_bout_compact"
+    swim_parent.attrs["latest_complete"] = "swim_bout_compact"
 
     run = swim_parent.create_group("swim_bout_compact")
     run.attrs.update(
@@ -145,6 +149,8 @@ def _add_compact_swim_bouts(zarr_path: Path) -> None:
             "default_candidate_id": 0,
             "default_signal_id": 1,
             "exponential_tau_s": 0.025,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
         }
     )
     indexes = run.create_group("indexes")
@@ -313,6 +319,7 @@ def _add_eye_angle_run(zarr_path: Path) -> None:
     analysis = root["analysis"] if "analysis" in root else root.create_group("analysis")
     parent = analysis.create_group("eye_angle_runs")
     parent.attrs["latest"] = "eye_angle_1"
+    parent.attrs["latest_complete"] = "eye_angle_1"
     run = parent.create_group("eye_angle_1")
     run.attrs.update(
         {
@@ -322,6 +329,8 @@ def _add_eye_angle_run(zarr_path: Path) -> None:
             "preferred_eye_axis": "ellipse_minor",
             "row_axis": "keypoint_detection_rows",
             "fps": 200.0,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
             "eye_angle_variant_schema": {
                 "schema_id": "analysis.eye_angle_variant_schema",
                 "schema_version": 1,

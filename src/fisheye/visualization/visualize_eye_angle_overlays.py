@@ -30,7 +30,10 @@ import numpy as np
 import zarr
 from matplotlib.widgets import Button, Slider
 
-from fisheye.analysis.eye_angle_io import load_eye_angle_run_tables
+from fisheye.analysis.eye_angle_io import (
+    load_eye_angle_run_tables,
+    resolve_eye_angle_run,
+)
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
@@ -530,8 +533,18 @@ def _load_display_masks_and_geometry(
     return mask_source.masks_roi, geometry_source.ellipse_params
 
 
-def _load_angles(root: zarr.Group, run_name: str, prefer_smoothed: bool) -> tuple[List[AngleRecord], Dict[int, str]]:
-    tables = load_eye_angle_run_tables(root, run_name=run_name)
+def _load_angles(
+    root: zarr.Group,
+    run_name: str,
+    prefer_smoothed: bool,
+    *,
+    legacy_compatibility: bool = False,
+) -> tuple[List[AngleRecord], Dict[int, str]]:
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name=run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     angles_grp = tables.roi
     qa_grp = tables.qa_roi
     support = tables.support
@@ -701,6 +714,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-show", action="store_true", help="Generate figure without displaying (useful for tests).")
     parser.add_argument("--save", type=Path, help="Optional path to save the current ROI overlay as PNG.")
+    parser.add_argument(
+        "--legacy-eye-angle-compatibility",
+        action="store_true",
+        help=(
+            "Permit an explicitly selected historical eye-angle run without the "
+            "current completion contract. Never enables selector-ineligible runs."
+        ),
+    )
     return parser
 
 
@@ -709,11 +730,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     root = _open_zarr(args.zarr_path)
-    eye_angle_parent = root["analysis"]["eye_angle_runs"]
-    eye_angle_run = args.eye_angle_run or eye_angle_parent.attrs.get("latest")
-    if not eye_angle_run or eye_angle_run not in eye_angle_parent:
-        raise RuntimeError("Eye angle run not found; specify --eye-angle-run.")
-    run_group = eye_angle_parent[eye_angle_run]
+    run_group, eye_angle_run, _eye_angle_path = resolve_eye_angle_run(
+        root,
+        args.eye_angle_run,
+        legacy_compatibility=bool(args.legacy_eye_angle_compatibility),
+    )
 
     source_stage = str(run_group.attrs.get("source_eye_geometry_stage") or "")
     source_run = str(run_group.attrs.get("source_eye_geometry_run") or "")
@@ -749,7 +770,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     prefer_smoothed = args.angle_series == "smoothed"
 
-    angle_records, _ = _load_angles(root, str(eye_angle_run), prefer_smoothed)
+    angle_records, _ = _load_angles(
+        root,
+        str(eye_angle_run),
+        prefer_smoothed,
+        legacy_compatibility=bool(args.legacy_eye_angle_compatibility),
+    )
     if len(angle_records) != roi_images.shape[0]:
         raise ValueError(
             f"Angle record count ({len(angle_records)}) does not match ROI count ({roi_images.shape[0]})."

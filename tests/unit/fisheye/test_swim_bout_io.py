@@ -7,6 +7,7 @@ import zarr
 from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
+    _resolve_run_name,
     discover_swim_bout_candidates,
     load_default_swim_bout_tables,
     load_swim_bout_events,
@@ -14,6 +15,19 @@ from fisheye.analysis.swim_bout_io import (
     structured_records_to_dicts,
 )
 from fisheye.utils.export_cross_recording_analytics import _load_swim_bout_metrics
+
+
+class _SelectionGroup(dict[str, object]):
+    def __init__(self, *, attrs: dict[str, object] | None = None) -> None:
+        super().__init__()
+        self.attrs = attrs if attrs is not None else {}
+
+    def group_keys(self) -> list[str]:
+        return [
+            key
+            for key, value in self.items()
+            if isinstance(value, _SelectionGroup)
+        ]
 
 
 def _bout_records(offset: int = 0) -> np.ndarray:
@@ -72,6 +86,7 @@ def _build_v1_swim_bout_root() -> zarr.Group:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("swim_bout_runs")
     parent.attrs["latest"] = "bouts_canary"
+    parent.attrs["latest_complete"] = "bouts_canary"
 
     run = parent.create_group("bouts_canary")
     run.attrs.update(
@@ -83,6 +98,8 @@ def _build_v1_swim_bout_root() -> zarr.Group:
             "detection_method": "peak_event",
             "default_level": "speed_exponential",
             "exponential_tau_s": 0.025,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
         }
     )
 
@@ -121,6 +138,7 @@ def _build_compact_v2_swim_bout_root() -> zarr.Group:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("swim_bout_runs")
     parent.attrs["latest"] = "bouts_compact"
+    parent.attrs["latest_complete"] = "bouts_compact"
     run = parent.create_group("bouts_compact")
     run.attrs.update(
         {
@@ -131,6 +149,8 @@ def _build_compact_v2_swim_bout_root() -> zarr.Group:
             "track_id": 0,
             "default_candidate_id": 0,
             "default_signal_id": 1,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
         }
     )
     indexes = run.create_group("indexes")
@@ -296,6 +316,53 @@ def test_load_default_swim_bout_tables_uses_default_level() -> None:
     assert structured_records_to_dicts(payload.bouts)[0]["start_frame"] == 10
 
 
+def test_swim_bout_reader_rejects_explicit_ineligible_run() -> None:
+    parent = _SelectionGroup()
+    parent["bouts_canary"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        }
+    )
+
+    with pytest.raises(SwimBoutIOError, match="not selector-eligible"):
+        _resolve_run_name(parent, "bouts_canary")
+
+
+def test_swim_bout_reader_fails_closed_during_selector_activation() -> None:
+    parent = _SelectionGroup(
+        attrs={"latest": "candidate", "latest_complete": "bouts_canary"}
+    )
+    parent["bouts_canary"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+    parent["candidate"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        },
+    )
+
+    with pytest.raises(SwimBoutIOError, match="selector activation may be in progress"):
+        _resolve_run_name(parent, None)
+
+
+def test_swim_bout_legacy_run_requires_explicit_compatibility() -> None:
+    parent = _SelectionGroup(attrs={"latest": "bouts_canary"})
+    parent["bouts_canary"] = _SelectionGroup()
+
+    with pytest.raises(SwimBoutIOError, match="No stable complete"):
+        _resolve_run_name(parent, None)
+
+    assert (
+        _resolve_run_name(parent, None, legacy_compatibility=True)
+        == "bouts_canary"
+    )
+
+
 def test_load_swim_bout_tables_can_select_non_default_speed_level() -> None:
     root = _build_v1_swim_bout_root()
 
@@ -306,7 +373,7 @@ def test_load_swim_bout_tables_can_select_non_default_speed_level() -> None:
     assert payload.bouts["bout_id"].tolist() == [100, 101]
 
 
-def test_latest_fallback_is_consistent_between_discovery_and_loading() -> None:
+def test_legacy_latest_fallback_is_explicit_and_consistent() -> None:
     root = _build_v1_swim_bout_root()
     parent = root["analysis"]["swim_bout_runs"]
     del parent.attrs["latest"]
@@ -322,8 +389,14 @@ def test_latest_fallback_is_consistent_between_discovery_and_loading() -> None:
     filtered = earlier.create_group("speed_filtered")
     write_columnar_dataset(filtered, "bouts", _bout_records(offset=200))
 
-    candidates = discover_swim_bout_candidates(root)
-    payload = load_default_swim_bout_tables(root)
+    with pytest.raises(SwimBoutIOError, match="No stable complete"):
+        load_default_swim_bout_tables(root)
+
+    candidates = discover_swim_bout_candidates(root, legacy_compatibility=True)
+    payload = load_default_swim_bout_tables(
+        root,
+        legacy_compatibility=True,
+    )
 
     assert candidates[0].run_name == "bouts_canary"
     assert candidates[0].is_latest is True
@@ -335,8 +408,11 @@ def test_load_swim_bout_tables_requires_bouts_table() -> None:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("swim_bout_runs")
     parent.attrs["latest"] = "bouts_missing"
+    parent.attrs["latest_complete"] = "bouts_missing"
     run = parent.create_group("bouts_missing")
     run.attrs["default_level"] = "speed_filtered"
+    run.attrs["palette_run_completion_status"] = "complete"
+    run.attrs["stage_selector_eligible"] = True
     run.create_group("speed_filtered")
 
     with pytest.raises(SwimBoutIOError, match="Missing required swim-bout table"):
@@ -348,8 +424,11 @@ def test_discovery_counts_structured_array_bouts_without_n_bouts_attr() -> None:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("swim_bout_runs")
     parent.attrs["latest"] = "bouts_structured"
+    parent.attrs["latest_complete"] = "bouts_structured"
     run = parent.create_group("bouts_structured")
     run.attrs["default_level"] = "speed_filtered"
+    run.attrs["palette_run_completion_status"] = "complete"
+    run.attrs["stage_selector_eligible"] = True
     filtered = run.create_group("speed_filtered")
     filtered.create_array("bouts", data=_bout_records(), overwrite=True)
 

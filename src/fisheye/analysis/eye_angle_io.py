@@ -24,6 +24,11 @@ from ..shared.zarr_helpers import (
     zarr_child_group as _child_group,
     zarr_group_keys as _group_keys,
 )
+from ..shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+    resolve_latest_complete_run_name,
+)
 
 
 EYE_ANGLE_RUN_PARENT = "analysis/eye_angle_runs"
@@ -470,19 +475,26 @@ def _eye_angle_option_label(
 def resolve_eye_angle_run(
     root: zarr.Group,
     run_name: str | None = None,
+    *,
+    legacy_compatibility: bool = False,
 ) -> tuple[zarr.Group, str, str]:
-    """Resolve one ``analysis/eye_angle_runs`` child from a name, path, or latest."""
+    """Resolve one complete eligible eye-angle run by name, path, or selector."""
 
     parent = root.get(EYE_ANGLE_RUN_PARENT)
     if parent is None:
         raise EyeAngleIOError("No analysis/eye_angle_runs group found.")
 
     if run_name is None or str(run_name).strip().lower() in {"", "latest"}:
-        latest = parent.attrs.get("latest")
-        if isinstance(latest, str) and latest in parent:
-            resolved = latest
-        else:
-            raise EyeAngleIOError("No latest eye-angle run is recorded.")
+        selected = resolve_latest_complete_run_name(
+            parent,
+            legacy_default=legacy_compatibility,
+        )
+        if selected is None:
+            raise EyeAngleIOError(
+                "No stable complete selector-eligible eye-angle run is selected; "
+                "selector activation may be in progress."
+            )
+        resolved = selected
     else:
         normalized = _normalize_path(str(run_name))
         parts = normalized.split("/")
@@ -493,18 +505,34 @@ def resolve_eye_angle_run(
 
     if not resolved or resolved not in parent:
         raise EyeAngleIOError(f"Eye-angle run {run_name!r} not found in analysis/eye_angle_runs.")
+    run_group = parent[resolved]
+    if not is_run_complete_in_parent(
+        parent,
+        run_group,
+        legacy_default=legacy_compatibility,
+    ):
+        raise EyeAngleIOError(f"Eye-angle run {resolved!r} is not complete.")
+    if not is_run_selector_eligible(run_group):
+        raise EyeAngleIOError(
+            f"Eye-angle run {resolved!r} is not selector-eligible."
+        )
     run_path = f"{EYE_ANGLE_RUN_PARENT}/{resolved}"
-    return parent[resolved], str(resolved), run_path
+    return run_group, str(resolved), run_path
 
 
 def load_eye_angle_run_tables(
     root: zarr.Group,
     *,
     run_name: str | None = None,
+    legacy_compatibility: bool = False,
 ) -> EyeAngleRunTables:
     """Load logical angle, QA, and support arrays for one eye-angle run."""
 
-    run_group, resolved_run, run_path = resolve_eye_angle_run(root, run_name)
+    run_group, resolved_run, run_path = resolve_eye_angle_run(
+        root,
+        run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     attrs = _attrs_dict(run_group)
     if _layout(attrs) == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
         return _compact_dense_tables(
@@ -584,19 +612,32 @@ def _run_row_count(run_group: zarr.Group) -> int:
     return _first_array_length_in_group(_child_group(run_group, "angles/roi"), EYE_ANGLE_ROW_COUNT_COLUMNS)
 
 
-def discover_eye_angle_run_options(root: zarr.Group) -> list[EyeAngleRunOption]:
+def discover_eye_angle_run_options(
+    root: zarr.Group,
+    *,
+    legacy_compatibility: bool = False,
+) -> list[EyeAngleRunOption]:
     """Return available eye-angle analysis runs from an open Zarr root."""
 
     parent = root.get(EYE_ANGLE_RUN_PARENT)
     if parent is None:
         return []
 
-    latest = parent.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(
+        parent,
+        legacy_default=legacy_compatibility,
+    )
     options: list[EyeAngleRunOption] = []
     for run_name in _group_keys(parent):
         try:
             run_group = parent[run_name]
         except Exception:
+            continue
+        if not is_run_selector_eligible(run_group) or not is_run_complete_in_parent(
+            parent,
+            run_group,
+            legacy_default=legacy_compatibility,
+        ):
             continue
         n_rows = _run_row_count(run_group)
         if n_rows <= 0:
@@ -683,10 +724,15 @@ def catalog_eye_angle_series(
     *,
     run_name: str | None = None,
     prefer_frame: bool = True,
+    legacy_compatibility: bool = False,
 ) -> EyeAngleSeriesCatalog:
     """Inspect selectable eye-angle channels without reading dense value arrays."""
 
-    run_group, resolved_run, run_path = resolve_eye_angle_run(root, run_name)
+    run_group, resolved_run, run_path = resolve_eye_angle_run(
+        root,
+        run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     attrs = _attrs_dict(run_group)
     layout = _layout(attrs)
     support_group = _child_group(run_group, "support")
@@ -898,11 +944,21 @@ def load_eye_angle_series_window(
         "major_axis_marginal",
     ),
     max_rows: int = 300_000,
+    legacy_compatibility: bool = False,
 ) -> EyeAngleSeriesWindow:
     """Read only requested columns from a bounded eye-angle time interval."""
 
-    catalog = catalog_eye_angle_series(root, run_name=run_name, prefer_frame=prefer_frame)
-    run_group, _resolved_run, run_path = resolve_eye_angle_run(root, catalog.run_name)
+    catalog = catalog_eye_angle_series(
+        root,
+        run_name=run_name,
+        prefer_frame=prefer_frame,
+        legacy_compatibility=legacy_compatibility,
+    )
+    run_group, _resolved_run, run_path = resolve_eye_angle_run(
+        root,
+        catalog.run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     requested_angles = tuple(dict.fromkeys(str(name) for name in angle_channels))
     missing_angles = [name for name in requested_angles if name not in catalog.angle_channels]
     if missing_angles:
@@ -1009,6 +1065,7 @@ def load_eye_gaze_frame_series(
     eye_angle_family: str,
     frames: np.ndarray,
     allowed_families: tuple[str, ...],
+    legacy_compatibility: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """Load frame-aligned gaze series for bout-level eye summaries."""
 
@@ -1017,7 +1074,11 @@ def load_eye_gaze_frame_series(
         expected = ", ".join(allowed_families)
         raise EyeAngleIOError(f"Unsupported eye_angle_family {eye_angle_family!r}; expected one of: {expected}")
 
-    tables = load_eye_angle_run_tables(root, run_name=eye_angle_run)
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name=eye_angle_run,
+        legacy_compatibility=legacy_compatibility,
+    )
     if tables.schema_version < 2:
         raise EyeAngleIOError(
             f"Eye-angle run {tables.run_name!r} has schema_version={tables.schema_version}; "

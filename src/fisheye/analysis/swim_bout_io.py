@@ -9,7 +9,7 @@ do not need to depend on that physical storage choice.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional
 
 import numpy as np
 import zarr
@@ -20,6 +20,11 @@ from fisheye.analysis.swim_bout_frame_axis import (
     resolve_swim_bout_frame_axis,
 )
 from fisheye.shared.json_safety import decode_null_terminated_text
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    is_run_selector_eligible,
+    resolve_latest_complete_run_name,
+)
 from fisheye.shared.zarr_helpers import (
     normalize_zarr_path as _normalize_path,
     zarr_group_keys,
@@ -161,6 +166,7 @@ def discover_swim_bout_candidates(
     track_run_name: object | None = None,
     track_id: int | None = None,
     include_bout_counts: bool = True,
+    legacy_compatibility: bool = False,
 ) -> list[SwimBoutCandidate]:
     """Discover logical swim-bout candidates under ``analysis/swim_bout_runs``.
 
@@ -173,13 +179,20 @@ def discover_swim_bout_candidates(
     if parent is None:
         return []
 
-    latest = parent.attrs.get("latest")
+    latest_name = resolve_latest_complete_run_name(
+        parent,
+        legacy_default=legacy_compatibility,
+    )
     group_names = _group_names(parent)
-    fallback_latest = group_names[-1] if group_names else None
-    latest_name = str(latest) if isinstance(latest, str) and latest else fallback_latest
     candidates: list[SwimBoutCandidate] = []
     for run_name in group_names:
         run_group = parent[run_name]
+        if not is_run_selector_eligible(run_group) or not is_run_complete_in_parent(
+            parent,
+            run_group,
+            legacy_default=legacy_compatibility,
+        ):
+            continue
         attrs = _attrs_dict(run_group)
         if not _matches_track(attrs, track_run_name=track_run_name, track_id=track_id):
             continue
@@ -199,16 +212,22 @@ def load_default_swim_bout_tables(
     root: zarr.Group,
     *,
     run_name: str | None = "latest",
+    legacy_compatibility: bool = False,
 ) -> SwimBoutTables:
     """Load the default signal tables for a swim-bout run."""
 
-    candidate = resolve_swim_bout_candidate(root, run_name=run_name)
+    candidate = resolve_swim_bout_candidate(
+        root,
+        run_name=run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     default_signal = _default_signal(candidate)
     return load_swim_bout_tables(
         root,
         run_name=candidate.run_name,
         candidate_id=candidate.candidate_id,
         signal_id=default_signal.signal_id,
+        legacy_compatibility=legacy_compatibility,
     )
 
 
@@ -216,15 +235,26 @@ def resolve_swim_bout_candidate(
     root: zarr.Group,
     *,
     run_name: str | None = "latest",
+    legacy_compatibility: bool = False,
 ) -> SwimBoutCandidate:
     """Resolve one logical swim-bout candidate by run selector."""
 
     parent = _require_child(root, "analysis/swim_bout_runs")
-    resolved_name = _resolve_run_name(parent, run_name)
+    resolved_name = _resolve_run_name(
+        parent,
+        run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     candidate = _default_candidate_from_run_group(
         parent[resolved_name],
         run_name=resolved_name,
-        is_latest=str(parent.attrs.get("latest")) == str(resolved_name),
+        is_latest=(
+            resolve_latest_complete_run_name(
+                parent,
+                legacy_default=legacy_compatibility,
+            )
+            == resolved_name
+        ),
     )
     if not candidate.signals:
         raise SwimBoutIOError(f"Swim-bout run {resolved_name!r} has no readable speed levels.")
@@ -238,13 +268,24 @@ def load_swim_bout_tables(
     candidate_id: int | None = None,
     signal_id: int | None = None,
     speed_level: str | None = None,
+    legacy_compatibility: bool = False,
 ) -> SwimBoutTables:
     """Load normalized tables for one candidate/signal selection."""
 
     parent = _require_child(root, "analysis/swim_bout_runs")
-    resolved_name = _resolve_run_name(parent, run_name)
+    resolved_name = _resolve_run_name(
+        parent,
+        run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     run_group = parent[resolved_name]
-    is_latest = str(parent.attrs.get("latest")) == str(resolved_name)
+    is_latest = (
+        resolve_latest_complete_run_name(
+            parent,
+            legacy_default=legacy_compatibility,
+        )
+        == resolved_name
+    )
     if _is_compact_v2_group(run_group):
         return _load_compact_v2_tables(
             root,
@@ -297,6 +338,7 @@ def load_swim_bout_events(
     *,
     candidate: SwimBoutCandidate,
     signal: SwimBoutSignalVariant,
+    legacy_compatibility: bool = False,
 ) -> SwimBoutEvents:
     """Load only the selected persisted bout-event rows.
 
@@ -306,7 +348,12 @@ def load_swim_bout_events(
     """
 
     parent = _require_child(root, "analysis/swim_bout_runs")
-    run_group = _require_child(parent, candidate.run_name)
+    resolved_name = _resolve_run_name(
+        parent,
+        candidate.run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
+    run_group = _require_child(parent, resolved_name)
     if _is_compact_v2_group(run_group):
         tables = _require_child(run_group, "tables")
         bouts = _filter_records(
@@ -951,21 +998,39 @@ def _require_child(group: Any, path: str) -> Any:
     return child
 
 
-def _resolve_run_name(parent: zarr.Group, run_name: str | None) -> str:
+def _resolve_run_name(
+    parent: zarr.Group,
+    run_name: str | None,
+    *,
+    legacy_compatibility: bool = False,
+) -> str:
     requested = "latest" if run_name is None else str(run_name).strip().strip("/")
     if requested.startswith("analysis/swim_bout_runs/"):
         requested = requested.split("/", 2)[2].split("/", 1)[0]
     if requested in ("", "latest"):
-        latest = parent.attrs.get("latest")
-        if isinstance(latest, str) and latest:
-            requested = latest
-        else:
-            names = _group_names(parent)
-            if not names:
-                raise SwimBoutIOError("No swim-bout runs available.")
-            requested = names[-1]
+        selected = resolve_latest_complete_run_name(
+            parent,
+            legacy_default=legacy_compatibility,
+        )
+        if selected is None:
+            raise SwimBoutIOError(
+                "No stable complete selector-eligible swim-bout run is selected; "
+                "selector activation may be in progress."
+            )
+        requested = selected
     if requested not in parent:
         raise SwimBoutIOError(f"Swim-bout run {requested!r} not found.")
+    run_group = parent[requested]
+    if not is_run_complete_in_parent(
+        parent,
+        run_group,
+        legacy_default=legacy_compatibility,
+    ):
+        raise SwimBoutIOError(f"Swim-bout run {requested!r} is not complete.")
+    if not is_run_selector_eligible(run_group):
+        raise SwimBoutIOError(
+            f"Swim-bout run {requested!r} is not selector-eligible."
+        )
     return requested
 
 

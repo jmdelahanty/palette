@@ -44,6 +44,7 @@ from fisheye.shared.zarr_run_completion import (
     requires_completion_provenance,
     resolve_authoritative_run_name,
     resolve_latest_complete_run_name,
+    resolve_latest_complete_run_name_from_attrs,
     set_authoritative_run,
 )
 
@@ -438,6 +439,74 @@ def test_canonical_latest_resolver_rejects_each_intermediate_selector_handoff(
     assert resolve_latest_complete_run_name(parent) is None
     assert (
         resolve_latest_complete_run_name(parent, legacy_default=True) == "old"
+    )
+
+
+@pytest.mark.parametrize(
+    ("parent_attrs", "expected"),
+    (
+        (
+            {
+                COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
+                "latest": "selected",
+                "latest_complete": "selected",
+            },
+            "selected",
+        ),
+        (
+            {
+                COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
+                "latest": "candidate",
+                "latest_complete": "selected",
+            },
+            None,
+        ),
+    ),
+)
+def test_attrs_only_latest_resolver_matches_open_group_strict_selection(
+    parent_attrs: dict[str, object],
+    expected: str | None,
+) -> None:
+    child_attrs = {
+        "selected": {
+            RUN_COMPLETION_STATUS_ATTR: "complete",
+            "stage_selector_eligible": True,
+        },
+        "candidate": {
+            RUN_COMPLETION_STATUS_ATTR: "complete",
+            "stage_selector_eligible": False,
+        },
+    }
+    parent = FakeGroup(attrs=dict(parent_attrs))
+    for name, attrs in child_attrs.items():
+        parent[name] = FakeGroup(attrs=dict(attrs))
+
+    attrs_result = resolve_latest_complete_run_name_from_attrs(
+        parent_attrs=parent_attrs,
+        child_names=child_attrs,
+        child_attrs=child_attrs.get,
+        legacy_default=False,
+    )
+
+    assert attrs_result == expected
+    assert resolve_latest_complete_run_name(parent, legacy_default=False) == expected
+
+
+def test_attrs_only_latest_resolver_legacy_fallback_skips_ineligible_child() -> None:
+    parent_attrs = {"latest": "candidate"}
+    child_attrs = {
+        "legacy": {},
+        "candidate": {"stage_selector_eligible": False},
+    }
+
+    assert (
+        resolve_latest_complete_run_name_from_attrs(
+            parent_attrs=parent_attrs,
+            child_names=child_attrs,
+            child_attrs=child_attrs.get,
+            legacy_default=True,
+        )
+        == "legacy"
     )
 
 

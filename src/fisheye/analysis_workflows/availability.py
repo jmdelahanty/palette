@@ -11,6 +11,11 @@ from fisheye.analysis_workflows.storage_contract_catalog import (
     DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
 )
 from fisheye.registry.stage_catalog import canonical_stage_id
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent_attrs,
+    is_run_selector_eligible_attrs,
+    resolve_latest_complete_run_name_from_attrs,
+)
 
 
 STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
@@ -21,11 +26,6 @@ STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
     "bout_classification": ("analysis/bout_classification_runs",),
     **DERIVED_ANALYSIS_AVAILABILITY_RUN_PARENTS,
 }
-POINTER_KEYS = ("latest_complete", "latest_materialized", "latest")
-COMPLETE_STATUSES = frozenset({"complete", "completed", "ok", "success"})
-COMPLETION_EPOCH_ATTR = "palette_completion_epoch"
-RUN_COMPLETION_CONTRACT_ATTR = "palette_run_completion_contract"
-RUN_COMPLETION_CONTRACT = "palette.zarr_run_completion.v1"
 TRACK_KINEMATICS_VISUALIZATION_STAGE = "track_kinematics_visualization"
 TRACK_KINEMATICS_PARENT = "analysis/track_kinematics_runs/offline"
 TRACK_KINEMATICS_VISUALIZATION_PARENT = (
@@ -104,14 +104,55 @@ def stage_run_relative_path(stage_id: str, run_name: str) -> str:
     return f"{parents[0]}/{_safe_run_name(run_name)}"
 
 
-def _strict_completion_parent(attrs: Mapping[str, object]) -> bool:
-    value = attrs.get(COMPLETION_EPOCH_ATTR)
-    if value is None or isinstance(value, bool):
-        return False
+def _metadata_child_names(parent: Path) -> tuple[str, ...]:
     try:
-        return int(value) >= 1
-    except (TypeError, ValueError):
-        return False
+        return tuple(
+            child.name
+            for child in parent.iterdir()
+            if child.is_dir() and (child / "zarr.json").is_file()
+        )
+    except OSError:
+        return ()
+
+
+def _resolve_metadata_run_name(
+    parent: Path,
+    parent_attrs: Mapping[str, object],
+    requested_run: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve one strict maintained run through the shared lifecycle contract."""
+
+    if requested_run and requested_run != "latest":
+        run_name = _safe_run_name(requested_run)
+        run_attrs = _attrs(parent / run_name)
+        if not (parent / run_name / "zarr.json").is_file():
+            return run_name, "selected run metadata is missing"
+        if not is_run_complete_in_parent_attrs(
+            parent_attrs,
+            run_attrs,
+            legacy_default=False,
+        ):
+            return run_name, "selected run is not complete"
+        if not is_run_selector_eligible_attrs(run_attrs):
+            return run_name, "selected run is not selector-eligible"
+        return run_name, None
+
+    run_name = resolve_latest_complete_run_name_from_attrs(
+        parent_attrs=parent_attrs,
+        child_names=_metadata_child_names(parent),
+        child_attrs=lambda name: (
+            _attrs(parent / name)
+            if (parent / name / "zarr.json").is_file()
+            else None
+        ),
+        legacy_default=False,
+    )
+    if run_name is None:
+        return None, (
+            "no stable complete selector-eligible run is selected; "
+            "selector activation may be in progress"
+        )
+    return run_name, None
 
 
 def _track_kinematics_visualization_availability(
@@ -130,22 +171,23 @@ def _track_kinematics_visualization_availability(
             reason="persisted track-kinematics run parent is missing",
         )
     parent_attrs = _attrs(parent)
-    if requested_run and requested_run != "latest":
-        run_name = _safe_run_name(requested_run)
-    else:
-        run_name = ""
-        for key in POINTER_KEYS:
-            value = parent_attrs.get(key)
-            if isinstance(value, str) and value.strip():
-                run_name = _safe_run_name(value)
-                break
-        if not run_name:
-            return StageAvailability(
-                stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
-                available=False,
-                artifact_path=TRACK_KINEMATICS_PARENT,
-                reason="track-kinematics parent has no latest pointer",
-            )
+    run_name, selection_error = _resolve_metadata_run_name(
+        parent,
+        parent_attrs,
+        requested_run,
+    )
+    if run_name is None or selection_error is not None:
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=(
+                f"{TRACK_KINEMATICS_PARENT}/{run_name}"
+                if run_name
+                else TRACK_KINEMATICS_PARENT
+            ),
+            run_name=run_name,
+            reason=selection_error or "track-kinematics run selection failed",
+        )
 
     run_path = parent / run_name
     run_relative_path = f"{TRACK_KINEMATICS_PARENT}/{run_name}"
@@ -159,28 +201,6 @@ def _track_kinematics_visualization_availability(
         )
     run_attrs = _attrs(run_path)
     status = _completion_status(run_attrs)
-    has_palette_contract = (
-        run_attrs.get(RUN_COMPLETION_CONTRACT_ATTR) == RUN_COMPLETION_CONTRACT
-    )
-    if status is not None and status not in COMPLETE_STATUSES:
-        return StageAvailability(
-            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
-            available=False,
-            artifact_path=run_relative_path,
-            run_name=run_name,
-            reason=f"selected track-kinematics run is not complete ({status})",
-            completion_status=status,
-        )
-    if status is None and (
-        has_palette_contract or _strict_completion_parent(parent_attrs)
-    ):
-        return StageAvailability(
-            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
-            available=False,
-            artifact_path=run_relative_path,
-            run_name=run_name,
-            reason="selected track-kinematics run lacks a required complete marker",
-        )
 
     visualization_parent_relative = stage_run_relative_path(
         TRACK_KINEMATICS_VISUALIZATION_STAGE, run_name
@@ -196,37 +216,24 @@ def _track_kinematics_visualization_availability(
             completion_status=status,
         )
     visualization_parent_attrs = _attrs(visualization_parent)
-    render_name = ""
-    for key in POINTER_KEYS:
-        value = visualization_parent_attrs.get(key)
-        if isinstance(value, str) and value.strip():
-            render_name = _safe_run_name(value)
-            break
-    if not render_name:
+    render_name, render_selection_error = _resolve_metadata_run_name(
+        visualization_parent,
+        visualization_parent_attrs,
+        None,
+    )
+    if render_name is None or render_selection_error is not None:
         return StageAvailability(
             stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
             available=False,
             artifact_path=visualization_parent_relative,
             run_name=run_name,
-            reason="visualization parent has no selected render run",
+            reason=render_selection_error or "visualization render selection failed",
             completion_status=status,
         )
     render_relative_path = f"{visualization_parent_relative}/{render_name}"
     render_path = root / render_relative_path
     render_attrs = _attrs(render_path)
     render_status = _completion_status(render_attrs)
-    if (
-        render_status not in COMPLETE_STATUSES
-        or render_attrs.get("stage_selector_eligible") is not True
-    ):
-        return StageAvailability(
-            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
-            available=False,
-            artifact_path=render_relative_path,
-            run_name=run_name,
-            reason="selected visualization render is not complete and eligible",
-            completion_status=render_status,
-        )
     artifact_relative_path = (
         f"{render_relative_path}/{TRACK_KINEMATICS_INTERACTIVE_ARTIFACT}"
     )
@@ -358,22 +365,23 @@ def discover_stage_availability(
         if not (parent / "zarr.json").is_file():
             continue
         parent_attrs = _attrs(parent)
-        if requested_run and requested_run != "latest":
-            run_name = _safe_run_name(requested_run)
-        else:
-            run_name = ""
-            for key in POINTER_KEYS:
-                value = parent_attrs.get(key)
-                if isinstance(value, str) and value.strip():
-                    run_name = _safe_run_name(value)
-                    break
-            if not run_name:
-                return StageAvailability(
-                    stage_id=canonical,
-                    available=False,
-                    artifact_path=relative_parent,
-                    reason="run parent has no latest pointer; select an explicit run",
-                )
+        run_name, selection_error = _resolve_metadata_run_name(
+            parent,
+            parent_attrs,
+            requested_run,
+        )
+        if run_name is None or selection_error is not None:
+            return StageAvailability(
+                stage_id=canonical,
+                available=False,
+                artifact_path=(
+                    f"{relative_parent}/{run_name}"
+                    if run_name
+                    else relative_parent
+                ),
+                run_name=run_name,
+                reason=selection_error or "run selection failed",
+            )
         run_path = parent / run_name
         relative_run_path = f"{relative_parent}/{run_name}"
         if not (run_path / "zarr.json").is_file():
@@ -386,41 +394,12 @@ def discover_stage_availability(
             )
         run_attrs = _attrs(run_path)
         status = _completion_status(run_attrs)
-        has_palette_contract = (
-            run_attrs.get(RUN_COMPLETION_CONTRACT_ATTR) == RUN_COMPLETION_CONTRACT
-        )
-        if status is not None and status not in COMPLETE_STATUSES:
-            return StageAvailability(
-                stage_id=canonical,
-                available=False,
-                artifact_path=relative_run_path,
-                run_name=run_name,
-                reason=f"selected run is not complete ({status})",
-                completion_status=status,
-            )
-        if status is None and (
-            has_palette_contract or _strict_completion_parent(parent_attrs)
-        ):
-            return StageAvailability(
-                stage_id=canonical,
-                available=False,
-                artifact_path=relative_run_path,
-                run_name=run_name,
-                reason="selected run lacks a required complete marker",
-                completion_status=status,
-            )
-        if status in COMPLETE_STATUSES:
-            reason = "persisted complete run is available"
-        elif status is None:
-            reason = "persisted legacy run is available (parent is not completion-strict)"
-        else:
-            reason = f"persisted run is available ({status})"
         return StageAvailability(
             stage_id=canonical,
             available=True,
             artifact_path=relative_run_path,
             run_name=run_name,
-            reason=reason,
+            reason="persisted complete selector-eligible run is available",
             completion_status=status,
         )
     return StageAvailability(
