@@ -109,6 +109,21 @@ from fisheye.analysis.eye_angle_schema import (
     validate_eye_angle_value_aliases,
     canonical_exact_json_bytes,
 )
+from fisheye.analysis.eye_angle_storage import (
+    EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
+    EYE_ANGLE_STORAGE_CANDIDATE_ATTR,
+    EYE_ANGLE_STORAGE_PLAN_ATTR,
+    EYE_ANGLE_STORAGE_PROFILE_CHOICES,
+    build_eye_angle_candidate_storage_plan,
+    create_eye_angle_array_from_entry,
+    eye_angle_storage_entries_by_path,
+    is_eye_angle_storage_candidate,
+)
+from fisheye.shared.zarr.analysis_storage_planning import (
+    AnalysisArrayStoragePlanReceipt,
+    AnalysisStoragePlanReceipt,
+)
 
 # Preserve the long-standing module import surface while the implementation
 # and exact declarations live in ``eye_angle_schema``.
@@ -1801,14 +1816,32 @@ def _prepare_output_arrays(
     group: zarr.Group,
     dataset_specs: List[Tuple[str, Tuple[int, ...], Tuple[int, ...], str]],
     fill_value: Optional[float] = None,
+    *,
+    storage_entries: Mapping[str, AnalysisArrayStoragePlanReceipt] | None = None,
+    path_prefix: str = "",
 ) -> None:
     """Create (or overwrite) output arrays according to specs."""
     for name, shape, chunks, dtype in dataset_specs:
+        path = f"{path_prefix}/{name}" if path_prefix else name
+        entry = (storage_entries or {}).get(path)
         if name in group:
             existing = group[name]
             if tuple(existing.shape) == tuple(shape) and np.dtype(existing.dtype) == np.dtype(dtype):
                 continue
             del group[name]
+        if entry is not None:
+            if entry.plan.logical_shape != tuple(shape) or np.dtype(
+                entry.plan.logical_dtype
+            ) != np.dtype(dtype):
+                raise ValueError(
+                    f"{path}: resolved storage plan differs from writer array spec."
+                )
+            create_eye_angle_array_from_entry(
+                group,
+                name=name,
+                entry=entry,
+            )
+            continue
         kwargs = {"dtype": dtype, "chunks": chunks, "overwrite": True}
         if fill_value is not None:
             kwargs["fill_value"] = fill_value
@@ -1825,17 +1858,52 @@ def _fixed_width_text_array(values: Sequence[object], *, width: int = 256) -> np
     return out
 
 
-def _write_text_index_array(group: zarr.Group, name: str, values: Sequence[object], *, width: int = 256) -> None:
+def _write_text_index_array(
+    group: zarr.Group,
+    name: str,
+    values: Sequence[object],
+    *,
+    width: int = 256,
+    storage_entries: Mapping[str, AnalysisArrayStoragePlanReceipt] | None = None,
+    path_prefix: str = "",
+) -> None:
     data = _fixed_width_text_array(values, width=width)
     if name in group:
         del group[name]
+    path = f"{path_prefix}/{name}" if path_prefix else name
+    entry = (storage_entries or {}).get(path)
+    if entry is not None:
+        create_eye_angle_array_from_entry(
+            group,
+            name=name,
+            entry=entry,
+            data=data,
+        )
+        return
     group.create_array(name, data=data, chunks=(max(1, int(data.shape[0])), int(data.shape[1])), overwrite=True)
 
 
-def _write_bool_index_array(group: zarr.Group, name: str, values: Sequence[bool]) -> None:
+def _write_bool_index_array(
+    group: zarr.Group,
+    name: str,
+    values: Sequence[bool],
+    *,
+    storage_entries: Mapping[str, AnalysisArrayStoragePlanReceipt] | None = None,
+    path_prefix: str = "",
+) -> None:
     data = np.asarray(values, dtype=bool)
     if name in group:
         del group[name]
+    path = f"{path_prefix}/{name}" if path_prefix else name
+    entry = (storage_entries or {}).get(path)
+    if entry is not None:
+        create_eye_angle_array_from_entry(
+            group,
+            name=name,
+            entry=entry,
+            data=data,
+        )
+        return
     group.create_array(name, data=data, chunks=(max(1, int(data.shape[0])),), overwrite=True)
 
 
@@ -2020,9 +2088,26 @@ def _stack_vector_channels(
     return data
 
 
-def _replace_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tuple[int, ...]) -> None:
+def _replace_array(
+    group: zarr.Group,
+    name: str,
+    data: np.ndarray,
+    *,
+    chunks: tuple[int, ...],
+    storage_entries: Mapping[str, AnalysisArrayStoragePlanReceipt] | None = None,
+    path: str | None = None,
+) -> None:
     if name in group:
         del group[name]
+    entry = (storage_entries or {}).get(path or name)
+    if entry is not None:
+        create_eye_angle_array_from_entry(
+            group,
+            name=name,
+            entry=entry,
+            data=data,
+        )
+        return
     group.create_array(name, data=data, chunks=chunks, overwrite=True)
 
 
@@ -2032,24 +2117,28 @@ def _write_angle_channel_index(
     *,
     roi_available: Sequence[bool],
     frame_available: Sequence[bool],
+    storage_entries: Mapping[str, AnalysisArrayStoragePlanReceipt] | None = None,
 ) -> None:
     group = run_group.require_group("angle_channel_index")
+    prefix = "angle_channel_index"
     for name in _array_keys(group):
         del group[name]
     metadata = eye_angle_channel_metadata(channel_names)
-    _write_text_index_array(group, "name", metadata["name"])
-    _write_bool_index_array(group, "roi_available", roi_available)
-    _write_bool_index_array(group, "frame_available", frame_available)
-    _write_text_index_array(group, "representation", metadata["representation"])
-    _write_text_index_array(group, "eye", metadata["eye"], width=64)
-    _write_text_index_array(group, "value_kind", metadata["value_kind"], width=64)
-    _write_text_index_array(group, "units", metadata["units"], width=64)
-    _write_text_index_array(group, "source_channel", metadata["source_channel"])
-    _write_text_index_array(group, "formula", metadata["formula"], width=512)
+    _write_text_index_array(group, "name", metadata["name"], storage_entries=storage_entries, path_prefix=prefix)
+    _write_bool_index_array(group, "roi_available", roi_available, storage_entries=storage_entries, path_prefix=prefix)
+    _write_bool_index_array(group, "frame_available", frame_available, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "representation", metadata["representation"], storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "eye", metadata["eye"], width=64, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "value_kind", metadata["value_kind"], width=64, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "units", metadata["units"], width=64, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "source_channel", metadata["source_channel"], storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "formula", metadata["formula"], width=512, storage_entries=storage_entries, path_prefix=prefix)
     _write_text_index_array(
         group,
         "compatibility_alias_of",
         metadata["compatibility_alias_of"],
+        storage_entries=storage_entries,
+        path_prefix=prefix,
     )
     group.attrs.update(
         eye_angle_channel_index_attrs(
@@ -2065,18 +2154,20 @@ def _write_vector_channel_index(
     *,
     roi_available: Sequence[bool],
     frame_available: Sequence[bool],
+    storage_entries: Mapping[str, AnalysisArrayStoragePlanReceipt] | None = None,
 ) -> None:
     group = run_group.require_group("vector_channel_index")
+    prefix = "vector_channel_index"
     for name in _array_keys(group):
         del group[name]
     metadata = eye_vector_channel_metadata(channel_names)
-    _write_text_index_array(group, "name", metadata["name"])
-    _write_bool_index_array(group, "roi_available", roi_available)
-    _write_bool_index_array(group, "frame_available", frame_available)
-    _write_text_index_array(group, "representation", metadata["representation"])
-    _write_text_index_array(group, "eye", metadata["eye"], width=64)
-    _write_text_index_array(group, "value_kind", metadata["value_kind"], width=64)
-    _write_text_index_array(group, "units", metadata["units"], width=64)
+    _write_text_index_array(group, "name", metadata["name"], storage_entries=storage_entries, path_prefix=prefix)
+    _write_bool_index_array(group, "roi_available", roi_available, storage_entries=storage_entries, path_prefix=prefix)
+    _write_bool_index_array(group, "frame_available", frame_available, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "representation", metadata["representation"], storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "eye", metadata["eye"], width=64, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "value_kind", metadata["value_kind"], width=64, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "units", metadata["units"], width=64, storage_entries=storage_entries, path_prefix=prefix)
     group.attrs.update(
         eye_angle_channel_index_attrs(
             "vector_channel_index",
@@ -2092,19 +2183,21 @@ def _write_qa_channel_index(
     *,
     roi_available: Sequence[bool],
     frame_available: Sequence[bool],
+    storage_entries: Mapping[str, AnalysisArrayStoragePlanReceipt] | None = None,
 ) -> None:
     group = run_group.require_group("qa_channel_index")
+    prefix = "qa_channel_index"
     for name in _array_keys(group):
         del group[name]
     metadata = eye_qa_channel_metadata(
         channel_names,
         dtype_by_name=dtype_by_name,
     )
-    _write_text_index_array(group, "name", metadata["name"])
-    _write_bool_index_array(group, "roi_available", roi_available)
-    _write_bool_index_array(group, "frame_available", frame_available)
-    _write_text_index_array(group, "value_kind", metadata["value_kind"])
-    _write_text_index_array(group, "dtype", metadata["dtype"], width=64)
+    _write_text_index_array(group, "name", metadata["name"], storage_entries=storage_entries, path_prefix=prefix)
+    _write_bool_index_array(group, "roi_available", roi_available, storage_entries=storage_entries, path_prefix=prefix)
+    _write_bool_index_array(group, "frame_available", frame_available, storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "value_kind", metadata["value_kind"], storage_entries=storage_entries, path_prefix=prefix)
+    _write_text_index_array(group, "dtype", metadata["dtype"], width=64, storage_entries=storage_entries, path_prefix=prefix)
     group.attrs.update(
         eye_angle_channel_index_attrs(
             "qa_channel_index",
@@ -2123,6 +2216,7 @@ def _write_compact_dense_layout(
     dense_chunk_rows: int = EYE_ANGLE_DENSE_CHUNK_ROWS,
     dense_chunk_columns: int = EYE_ANGLE_DENSE_CHUNK_COLUMNS,
     enforce_current_schema: bool = False,
+    storage_plan: AnalysisStoragePlanReceipt | None = None,
 ) -> None:
     """Pack completed hierarchical eye-angle outputs into compact dense arrays."""
 
@@ -2140,6 +2234,7 @@ def _write_compact_dense_layout(
     qa_group = run_group["qa"]
     qa_roi = qa_group["roi"]
     qa_frame = qa_group["frame"]
+    storage_entries = eye_angle_storage_entries_by_path(storage_plan)
 
     roi_angle_names = _scalar_channel_names(roi_group, dtype_kinds="f")
     frame_angle_names = _scalar_channel_names(frame_group, dtype_kinds="f")
@@ -2163,6 +2258,7 @@ def _write_compact_dense_layout(
         angle_names,
         roi_available=[name in roi_angle_name_set for name in angle_names],
         frame_available=[name in frame_angle_name_set for name in angle_names],
+        storage_entries=storage_entries,
     )
     _replace_array(
         run_group,
@@ -2178,6 +2274,8 @@ def _write_compact_dense_layout(
             max(1, min(int(dense_chunk_rows), max(1, int(total_detections)))),
             max(1, min(int(dense_chunk_columns), max(1, len(angle_names)))),
         ),
+        storage_entries=storage_entries,
+        path="roi_angles",
     )
     _replace_array(
         run_group,
@@ -2193,6 +2291,8 @@ def _write_compact_dense_layout(
             max(1, min(int(dense_chunk_rows), max(1, int(num_frames)))),
             max(1, min(int(dense_chunk_columns), max(1, len(angle_names)))),
         ),
+        storage_entries=storage_entries,
+        path="frame_angles",
     )
 
     roi_vector_names = _vector_channel_names(roi_group)
@@ -2210,12 +2310,15 @@ def _write_compact_dense_layout(
             vector_names,
             roi_available=[name in roi_vector_name_set for name in vector_names],
             frame_available=[name in frame_vector_name_set for name in vector_names],
+            storage_entries=storage_entries,
         )
         _replace_array(
             run_group,
             "roi_vectors",
             _stack_vector_channels(roi_group, vector_names, row_count=total_detections),
             chunks=(max(1, min(int(chunk_len), max(1, int(total_detections)))), max(1, len(vector_names)), 2),
+            storage_entries=storage_entries,
+            path="roi_vectors",
         )
         if frame_vector_names:
             _replace_array(
@@ -2223,6 +2326,8 @@ def _write_compact_dense_layout(
                 "frame_vectors",
                 _stack_vector_channels(frame_group, vector_names, row_count=num_frames),
                 chunks=(max(1, min(int(frame_chunk), max(1, int(num_frames)))), max(1, len(vector_names)), 2),
+                storage_entries=storage_entries,
+                path="frame_vectors",
             )
 
     roi_qa_names = _scalar_channel_names(qa_roi, dtype_kinds="bui")
@@ -2247,6 +2352,7 @@ def _write_compact_dense_layout(
         dtype_by_name,
         roi_available=[name in roi_qa_name_set for name in qa_names],
         frame_available=[name in frame_qa_name_set for name in qa_names],
+        storage_entries=storage_entries,
     )
     _replace_array(
         run_group,
@@ -2259,6 +2365,8 @@ def _write_compact_dense_layout(
             fill_value=0,
         ),
         chunks=(max(1, min(int(chunk_len), max(1, int(total_detections)))), max(1, len(qa_names))),
+        storage_entries=storage_entries,
+        path="roi_qa",
     )
     _replace_array(
         run_group,
@@ -2271,6 +2379,8 @@ def _write_compact_dense_layout(
             fill_value=0,
         ),
         chunks=(max(1, min(int(frame_chunk), max(1, int(num_frames)))), max(1, len(qa_names))),
+        storage_entries=storage_entries,
+        path="frame_qa",
     )
 
     _delete_child(run_group, "angles")
@@ -2316,8 +2426,14 @@ def _write_compact_dense_layout(
             n_frames=int(num_frames),
             angle_block_width=int(dense_chunk_columns),
         )
-        manifest = eye_angle_array_schema_manifest(dimensions)
+        byte_planner_adopted = storage_plan is not None
+        manifest = eye_angle_array_schema_manifest(
+            dimensions,
+            byte_planner_adopted=byte_planner_adopted,
+        )
         run_group.attrs[EYE_ANGLE_ARRAY_SCHEMA_ATTR] = manifest
+        if storage_plan is not None:
+            run_group.attrs[EYE_ANGLE_STORAGE_PLAN_ATTR] = storage_plan.as_manifest()
         issues = validate_eye_angle_compact_arrays(
             collect_eye_angle_arrays(run_group),
             dimensions=dimensions,
@@ -2425,6 +2541,17 @@ def build_parser() -> argparse.ArgumentParser:
             f"Output storage layout (default: {EYE_ANGLE_LAYOUT_DEFAULT}). "
             "compact_dense_v2 packs completed angle/QA outputs into dense channel tables; "
             "hierarchical_v1 writes one array per logical field for compatibility/debug runs."
+        ),
+    )
+    parser.add_argument(
+        "--storage-profile",
+        choices=EYE_ANGLE_STORAGE_PROFILE_CHOICES,
+        default=EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
+        help=(
+            "Physical storage policy. The default preserves established explicit "
+            "chunks and normal activation. "
+            f"{EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID} is an opt-in, "
+            "selector-ineligible byte-planned benchmark candidate."
         ),
     )
     parser.add_argument(
@@ -4217,6 +4344,7 @@ def _prepare_base_output_arrays(
     *,
     total_detections: int,
     chunk_len: int,
+    storage_plan: AnalysisStoragePlanReceipt | None = None,
 ) -> None:
     angles_group = run_group.require_group("angles")
     roi_group = angles_group.require_group("roi")
@@ -4224,6 +4352,7 @@ def _prepare_base_output_arrays(
     qa_roi = qa_group.require_group("roi")
     support_group = run_group.require_group("support")
     body_frame_group = support_group.require_group("body_frame")
+    storage_entries = eye_angle_storage_entries_by_path(storage_plan)
 
     _prepare_output_arrays(
         roi_group,
@@ -4264,6 +4393,8 @@ def _prepare_base_output_arrays(
             ("ellipse_minor", (total_detections,), (chunk_len,), "f4"),
             ("ellipse_ratio", (total_detections,), (chunk_len,), "f4"),
         ],
+        storage_entries=storage_entries,
+        path_prefix="support",
     )
     _prepare_output_arrays(
         body_frame_group,
@@ -4275,6 +4406,8 @@ def _prepare_base_output_arrays(
             ("valid", (total_detections,), (chunk_len,), "bool"),
             ("failure_reason_bytes", (total_detections, 64), (chunk_len, 64), "u1"),
         ],
+        storage_entries=storage_entries,
+        path_prefix="support/body_frame",
     )
     body_frame_group.attrs.update(
         build_keypoint_body_frame_contract_attrs(
@@ -4592,6 +4725,7 @@ def _is_selector_eligible_eye_angle_output(
     diagnostic_output: bool,
     staged_input_integrity_receipt: Optional[Mapping[str, Any]],
     output_layout: str,
+    storage_candidate: bool = False,
 ) -> bool:
     """Allow canonical activation only for the maintained compact-v7 layout."""
 
@@ -4599,6 +4733,7 @@ def _is_selector_eligible_eye_angle_output(
         not diagnostic_output
         and staged_input_integrity_receipt is None
         and output_layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+        and not storage_candidate
     )
 
 
@@ -4718,6 +4853,30 @@ def run(
     else:
         resolved_run_name = datetime.now(timezone.utc).strftime("eye_angle_%Y%m%d_%H%M%S")
 
+    output_layout = str(args.layout)
+    storage_profile_id = str(
+        getattr(args, "storage_profile", EYE_ANGLE_LEGACY_EXPLICIT_STORAGE)
+    )
+    storage_candidate = is_eye_angle_storage_candidate(storage_profile_id)
+    storage_plan: AnalysisStoragePlanReceipt | None = None
+    if storage_candidate:
+        if output_layout != EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+            raise ValueError(
+                "The eye-angle byte-planned candidate requires compact_dense_v2."
+            )
+        if backend != SERIAL_EXECUTION_BACKEND:
+            raise ValueError(
+                "The eye-angle byte-planned candidate requires serial_driver so "
+                "one writer owns every complete physical shard."
+            )
+        storage_plan = build_eye_angle_candidate_storage_plan(
+            EyeAngleDimensions(
+                n_roi_rows=int(total_detections),
+                n_frames=int(num_frames),
+                angle_block_width=int(args.dense_chunk_columns),
+            )
+        )
+
     analysis_group = root.require_group("analysis")
     parent_group = require_runs_parent(analysis_group, "eye_angle_runs")
     if resolved_run_name in parent_group:
@@ -4734,6 +4893,18 @@ def run(
         "stage_selector_eligible": False,
         "keypoint_source_mode": context.keypoint_source_mode,
     }
+    if storage_candidate:
+        initial_publication_attrs.update(
+            {
+                EYE_ANGLE_STORAGE_CANDIDATE_ATTR: {
+                    "profile_id": EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+                    "status": "selector_ineligible_candidate",
+                    "activation_allowed": False,
+                    "whole_shard_write_ownership": "single_serial_writer",
+                },
+                "publication_scope": "storage_benchmark_candidate_only",
+            }
+        )
     if diagnostic_output:
         initial_publication_attrs.update(
             {
@@ -4749,7 +4920,6 @@ def run(
         attributes=initial_publication_attrs,
     )
     mark_run_started(run_group, run_name=resolved_run_name, stage="eye_angle")
-    output_layout = str(args.layout)
     run_group.attrs["status"] = "running"
     run_group.attrs["layout"] = output_layout
     if output_layout != EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
@@ -4774,7 +4944,12 @@ def run(
     if not args.quiet:
         console.print(f"Created run group: [cyan]analysis/eye_angle_runs/{resolved_run_name}[/cyan]")
 
-    _prepare_base_output_arrays(run_group, total_detections=total_detections, chunk_len=chunk_len)
+    _prepare_base_output_arrays(
+        run_group,
+        total_detections=total_detections,
+        chunk_len=chunk_len,
+        storage_plan=storage_plan,
+    )
     run_group["support"]["body_frame"].attrs.update(
         build_keypoint_body_frame_contract_attrs(
             source_keypoints_run=(
@@ -5823,6 +5998,7 @@ def run(
         qa_frame["major_axis_marginal"][:] = frame_major_axis_marginal
 
     support_group = run_group.require_group("support")
+    storage_entries = eye_angle_storage_entries_by_path(storage_plan)
     _prepare_output_arrays(
         support_group,
         [
@@ -5839,18 +6015,29 @@ def run(
             ("ellipse_minor", (total_detections,), (chunk_len,), "f4"),
             ("ellipse_ratio", (total_detections,), (chunk_len,), "f4"),
         ],
+        storage_entries=storage_entries,
+        path_prefix="support",
     )
 
     if num_frames > 0 and fps:
         frame_time = np.arange(num_frames, dtype=np.float32) / float(fps)
         if "frame_time_seconds" in support_group:
             del support_group["frame_time_seconds"]
-        support_group.create_array(
-            "frame_time_seconds",
-            data=frame_time,
-            chunks=(frame_chunk,),
-            overwrite=True,
-        )
+        frame_time_entry = storage_entries.get("support/frame_time_seconds")
+        if frame_time_entry is not None:
+            create_eye_angle_array_from_entry(
+                support_group,
+                name="frame_time_seconds",
+                entry=frame_time_entry,
+                data=frame_time,
+            )
+        else:
+            support_group.create_array(
+                "frame_time_seconds",
+                data=frame_time,
+                chunks=(frame_chunk,),
+                overwrite=True,
+            )
 
     phase_seconds["derived_trace_and_frame_materialization"] = float(
         time.perf_counter() - derived_materialization_started
@@ -5870,6 +6057,7 @@ def run(
             dense_chunk_rows=int(args.dense_chunk_rows),
             dense_chunk_columns=int(args.dense_chunk_columns),
             enforce_current_schema=True,
+            storage_plan=storage_plan,
         )
         phase_seconds["compact_dense_packing"] = float(
             time.perf_counter() - compact_packing_started
@@ -6003,6 +6191,11 @@ def run(
                 else EYE_ANGLE_LEGACY_RUN_SCHEMA_VERSION
             ),
             "layout": output_layout,
+            **(
+                {"storage_profile_request": storage_profile_id}
+                if storage_candidate
+                else {}
+            ),
             "method": EYE_ANGLE_METHOD,
             "method_version": EYE_ANGLE_METHOD_VERSION,
             "row_axis": EYE_ANGLE_ROW_AXIS,
@@ -6152,6 +6345,11 @@ def run(
             "fps_override": args.fps,
             "smoothing_window": smoothing_window_param,
             "layout": output_layout,
+            **(
+                {"storage_profile": storage_profile_id}
+                if storage_candidate
+                else {}
+            ),
         },
         "outputs": {
             "left_signed_deg": True,
@@ -6450,6 +6648,7 @@ def run(
         diagnostic_output=diagnostic_output,
         staged_input_integrity_receipt=staged_input_integrity_receipt,
         output_layout=output_layout,
+        storage_candidate=storage_candidate,
     ):
         # Publish selectors while the completed candidate still fails closed,
         # then make eligibility the final canonical activation write. Strict

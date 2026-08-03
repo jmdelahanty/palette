@@ -701,6 +701,7 @@ def _declaration(
     units: str | None = None,
     coordinate_space: str | None = None,
     physical_owner: str = EYE_ANGLE_PHYSICAL_POLICY_OWNER,
+    byte_planner_adopted: bool = False,
 ) -> AnalysisArrayDeclaration:
     if authority == "compatibility_alias":
         authority_role = AnalysisAuthorityRole.COMPATIBILITY_ALIAS
@@ -733,13 +734,32 @@ def _declaration(
         fill_semantics=fill,
         null_semantics=null,
         physical_policy_owner=physical_owner,
-        byte_planner_adopted=False,
+        byte_planner_adopted=byte_planner_adopted,
     )
 
 
-def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]:
+def build_eye_angle_array_declarations(
+    *, byte_planner_adopted: bool = False
+) -> tuple[AnalysisArrayDeclaration, ...]:
+    """Return the exact 41-array inventory for one physical-policy mode.
+
+    The default retains the established production declaration unchanged.
+    Candidate byte-planned runs opt in explicitly and differ only in the
+    physical-policy ownership fields; logical paths, shapes, dtypes, authority,
+    fill, and null semantics remain identical.
+    """
+
+    if type(byte_planner_adopted) is not bool:
+        raise TypeError("byte_planner_adopted must be an exact bool.")
+
+    def declared(*args: Any, **kwargs: Any) -> AnalysisArrayDeclaration:
+        kwargs["byte_planner_adopted"] = byte_planner_adopted
+        if byte_planner_adopted:
+            kwargs["physical_owner"] = "eye_angle_byte_planner_candidate_v1"
+        return _declaration(*args, **kwargs)
+
     declarations = [
-        _declaration(
+        declared(
             "roi_angles",
             FLOAT32,
             ("n_roi_rows", "n_angle_channels"),
@@ -752,7 +772,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
             coordinate_space="mixed_angle_domain_declared_by_angle_channel_index",
             physical_owner="eye_angle_materializer_explicit_semantic_shards",
         ),
-        _declaration(
+        declared(
             "frame_angles",
             FLOAT32,
             ("n_frames", "n_angle_channels"),
@@ -765,7 +785,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
             coordinate_space="mixed_angle_domain_declared_by_angle_channel_index",
             physical_owner="eye_angle_materializer_explicit_semantic_shards",
         ),
-        _declaration(
+        declared(
             "roi_vectors",
             FLOAT32,
             ("n_roi_rows", "n_vector_channels", 2),
@@ -777,7 +797,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
             units="unitless",
             coordinate_space="roi_image_xy_unit_vector",
         ),
-        _declaration(
+        declared(
             "roi_qa",
             UINT16,
             ("n_roi_rows", "n_qa_channels"),
@@ -787,7 +807,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
             fill="zero means false for boolean channels and no reason bits for reason_codes; no missing sentinel",
             null="all rows are present",
         ),
-        _declaration(
+        declared(
             "frame_qa",
             UINT16,
             ("n_frames", "n_qa_channels"),
@@ -826,7 +846,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
     for group, specs in text_specs.items():
         for name, width in specs:
             declarations.append(
-                _declaration(
+                declared(
                     f"{group}/{name}",
                     UINT8,
                     (dimension[group], width),
@@ -839,7 +859,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
             )
         for name in ("roi_available", "frame_available"):
             declarations.append(
-                _declaration(
+                declared(
                     f"{group}/{name}",
                     BOOL,
                     (dimension[group],),
@@ -909,7 +929,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
     )
     for name, dtype, units, authority, fill, null in support_specs:
         declarations.append(
-            _declaration(
+            declared(
                 f"support/{name}",
                 dtype,
                 ("n_roi_rows",),
@@ -922,7 +942,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
             )
         )
     declarations.append(
-        _declaration(
+        declared(
             "support/frame_time_seconds",
             FLOAT32,
             ("n_frames",),
@@ -936,7 +956,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
     )
     for name in ("origin_xy", "forward_axis_xy", "left_axis_xy"):
         declarations.append(
-            _declaration(
+            declared(
                 f"support/body_frame/{name}",
                 FLOAT32,
                 ("n_roi_rows", 2),
@@ -952,7 +972,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
         )
     declarations.extend(
         (
-            _declaration(
+            declared(
                 "support/body_frame/heading_deg",
                 FLOAT32,
                 ("n_roi_rows",),
@@ -964,7 +984,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
                 units="deg",
                 coordinate_space="roi_image_xy_heading_math_ccw_after_y_flip",
             ),
-            _declaration(
+            declared(
                 "support/body_frame/valid",
                 BOOL,
                 ("n_roi_rows",),
@@ -974,7 +994,7 @@ def build_eye_angle_array_declarations() -> tuple[AnalysisArrayDeclaration, ...]
                 fill="false means body-frame origin axes and heading are invalid; true means all are finite",
                 null="all rows are present",
             ),
-            _declaration(
+            declared(
                 "support/body_frame/failure_reason_bytes",
                 UINT8,
                 ("n_roi_rows", 64),
@@ -999,8 +1019,12 @@ EYE_ANGLE_ARRAY_DECLARATIONS = build_eye_angle_array_declarations()
 
 def eye_angle_array_schema_manifest(
     dimensions: EyeAngleDimensions,
+    *,
+    byte_planner_adopted: bool = False,
 ) -> dict[str, object]:
-    declarations = build_eye_angle_array_declarations()
+    declarations = build_eye_angle_array_declarations(
+        byte_planner_adopted=byte_planner_adopted
+    )
     return {
         "schema_id": EYE_ANGLE_ARRAY_SCHEMA_ID,
         "schema_version": EYE_ANGLE_ARRAY_SCHEMA_VERSION,
@@ -1010,7 +1034,7 @@ def eye_angle_array_schema_manifest(
         "dimensions": dimensions.contract_dimensions,
         "arrays": [item.as_manifest() for item in declarations],
         "forbidden_arrays": ["frame_vectors"],
-        "byte_planner_adopted": False,
+        "byte_planner_adopted": byte_planner_adopted,
     }
 
 
@@ -1118,7 +1142,14 @@ def validate_eye_angle_compact_arrays(
             array, dimensions=dimensions.contract_dimensions
         ):
             issues.append(EyeAngleSchemaIssue("array_contract_violation", path, error))
-    expected_manifest = eye_angle_array_schema_manifest(dimensions)
+    adopted = (
+        isinstance(persisted_manifest, Mapping)
+        and persisted_manifest.get("byte_planner_adopted") is True
+    )
+    expected_manifest = eye_angle_array_schema_manifest(
+        dimensions,
+        byte_planner_adopted=adopted,
+    )
     try:
         manifest_matches = canonical_exact_json_bytes(
             persisted_manifest,
@@ -1423,4 +1454,22 @@ def validate_eye_angle_compact_run(run_group: Any) -> tuple[EyeAngleSchemaIssue,
             channel_index_attrs=collect_eye_angle_channel_index_attrs(run_group),
         )
     )
+    persisted_array_schema = attrs.get(EYE_ANGLE_ARRAY_SCHEMA_ATTR)
+    if (
+        isinstance(persisted_array_schema, Mapping)
+        and persisted_array_schema.get("byte_planner_adopted") is True
+    ):
+        # Local import avoids making the logical declaration module depend on
+        # the candidate physical adapter during module initialization.
+        from fisheye.analysis.eye_angle_storage import (  # noqa: PLC0415
+            validate_eye_angle_candidate_storage,
+        )
+
+        issues.extend(
+            EyeAngleSchemaIssue(item.code, item.path, item.message)
+            for item in validate_eye_angle_candidate_storage(
+                run_group,
+                dimensions=dimensions,
+            )
+        )
     return tuple(issues)

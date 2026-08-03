@@ -221,7 +221,7 @@ def test_exact_manifest_tampering_and_frame_time_rules_fail_closed() -> None:
     dimensions = EyeAngleDimensions(2, 3)
     arrays = _valid_arrays(dimensions)
     manifest = deepcopy(eye_angle_array_schema_manifest(dimensions))
-    manifest["byte_planner_adopted"] = True
+    manifest["arrays"][0]["byte_planner_adopted"] = True
     issues = validate_eye_angle_compact_arrays(
         arrays,
         dimensions=dimensions,
@@ -229,6 +229,22 @@ def test_exact_manifest_tampering_and_frame_time_rules_fail_closed() -> None:
         channel_index_attrs=_valid_index_attrs(dimensions),
     )
     assert "array_schema_manifest_mismatch" in {issue.code for issue in issues}
+
+    adopted_manifest = eye_angle_array_schema_manifest(
+        dimensions,
+        byte_planner_adopted=True,
+    )
+    assert adopted_manifest["byte_planner_adopted"] is True
+    assert all(
+        declaration["byte_planner_adopted"] is True
+        for declaration in adopted_manifest["arrays"]
+    )
+    assert not validate_eye_angle_compact_arrays(
+        arrays,
+        dimensions=dimensions,
+        persisted_manifest=adopted_manifest,
+        channel_index_attrs=_valid_index_attrs(dimensions),
+    )
 
     optional = EyeAngleDimensions(0, 3)
     optional_arrays = _valid_arrays(optional)

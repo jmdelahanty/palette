@@ -9,6 +9,11 @@ import fisheye.analysis.eye_angle_analysis as eye_angle_analysis
 import fisheye.shared.eye_geometry_source as eye_geometry_source_mod
 import fisheye.visualization.visualize_eye_angles as visualize_eye_angles
 from fisheye.analysis.eye_angle_analysis import _eye_angle_definition_attrs, _process_chunk
+from fisheye.analysis.eye_angle_storage import (
+    EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+    EYE_ANGLE_STORAGE_PLAN_ATTR,
+    validate_eye_angle_candidate_storage,
+)
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
@@ -61,6 +66,7 @@ def test_eye_angle_layout_default_is_compact_dense_v2() -> None:
 
     assert eye_angle_analysis.EYE_ANGLE_LAYOUT_DEFAULT == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
     assert args.layout == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+    assert args.storage_profile == "legacy_explicit_chunks"
 
 
 def test_only_current_compact_eye_angle_output_can_activate_selectors() -> None:
@@ -86,6 +92,12 @@ def test_only_current_compact_eye_angle_output_can_activate_selectors() -> None:
         diagnostic_output=False,
         staged_input_integrity_receipt={"record_sha256": "staged"},
         output_layout=current,
+    )
+    assert not eye_angle_analysis._is_selector_eligible_eye_angle_output(
+        diagnostic_output=False,
+        staged_input_integrity_receipt=None,
+        output_layout=current,
+        storage_candidate=True,
     )
 
 
@@ -832,6 +844,135 @@ def test_explicit_refined_keypoint_diagnostic_completes_without_selector_promoti
     )
     assert persisted_parent.attrs["latest"] == "canonical_existing"
     assert persisted_parent.attrs["latest_complete"] == "canonical_existing"
+
+
+def test_byte_planned_candidate_writes_exact_plan_without_selector_promotion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import zarr
+
+    zarr_path = tmp_path / "eye-storage-candidate.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    shape = _add_subject_shape_eye_geometry(root)
+    _refined, base = _add_eye_keypoint_sources(root)
+    _install_synthetic_canonical_keypoint_publication(
+        monkeypatch,
+        shape=shape,
+        base=base,
+    )
+    parent = root["analysis"].create_group("eye_angle_runs")
+    parent.attrs.update(
+        {
+            "latest": "canonical_existing",
+            "latest_complete": "canonical_existing",
+        }
+    )
+    parent.create_group("canonical_existing")
+
+    unsafe_args = eye_angle_analysis.build_parser().parse_args(
+        [
+            str(zarr_path),
+            "--subject-shape-run",
+            "shape_001",
+            "--keypoint-run",
+            "kp_from_shape",
+            "--run-name",
+            "unsafe_parallel_candidate",
+            "--fps",
+            "200",
+            "--chunk-size",
+            "2",
+            "--execution-backend",
+            "dask_worker_chunks",
+            "--storage-profile",
+            EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+            "--quiet",
+        ]
+    )
+    with pytest.raises(ValueError, match="one writer owns every complete physical shard"):
+        eye_angle_analysis.run(unsafe_args)
+    assert "unsafe_parallel_candidate" not in parent
+
+    regular_args = eye_angle_analysis.build_parser().parse_args(
+        [
+            str(zarr_path),
+            "--subject-shape-run",
+            "shape_001",
+            "--keypoint-run",
+            "kp_from_shape",
+            "--run-name",
+            "eye_storage_regular_001",
+            "--fps",
+            "200",
+            "--chunk-size",
+            "2",
+            "--smoothing-window",
+            "3",
+            "--quiet",
+        ]
+    )
+    eye_angle_analysis.run(regular_args)
+
+    args = eye_angle_analysis.build_parser().parse_args(
+        [
+            str(zarr_path),
+            "--subject-shape-run",
+            "shape_001",
+            "--keypoint-run",
+            "kp_from_shape",
+            "--run-name",
+            "eye_storage_candidate_001",
+            "--fps",
+            "200",
+            "--chunk-size",
+            "2",
+            "--smoothing-window",
+            "3",
+            "--storage-profile",
+            EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+            "--quiet",
+        ]
+    )
+    eye_angle_analysis.run(args)
+
+    persisted_root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=False,
+    )
+    persisted_parent = persisted_root["analysis/eye_angle_runs"]
+    regular = persisted_parent["eye_storage_regular_001"]
+    candidate = persisted_parent["eye_storage_candidate_001"]
+    assert candidate.attrs["stage_selector_eligible"] is False
+    assert candidate.attrs["publication_scope"] == (
+        "storage_benchmark_candidate_only"
+    )
+    assert candidate.attrs["eye_angle_storage_candidate"] == {
+        "profile_id": EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        "status": "selector_ineligible_candidate",
+        "activation_allowed": False,
+        "whole_shard_write_ownership": "single_serial_writer",
+    }
+    assert candidate.attrs["eye_angle_array_schema"]["byte_planner_adopted"] is True
+    assert candidate.attrs[EYE_ANGLE_STORAGE_PLAN_ATTR]["payload"][
+        "storage_profile"
+    ]["profile_id"] == EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID
+    assert persisted_parent.attrs["latest"] == "eye_storage_regular_001"
+    assert persisted_parent.attrs["latest_complete"] == "eye_storage_regular_001"
+    regular_arrays = eye_angle_analysis.collect_eye_angle_arrays(regular)
+    candidate_arrays = eye_angle_analysis.collect_eye_angle_arrays(candidate)
+    assert set(regular_arrays) == set(candidate_arrays)
+    for path in sorted(regular_arrays):
+        np.testing.assert_equal(
+            regular_arrays[path][:],
+            candidate_arrays[path][:],
+            err_msg=path,
+        )
+    assert not validate_eye_angle_candidate_storage(
+        candidate,
+        dimensions=eye_angle_analysis.EyeAngleDimensions(2, 6),
+    )
 
 
 def test_eye_geometry_resolution_prefers_latest_subject_shape_when_enabled(monkeypatch) -> None:
