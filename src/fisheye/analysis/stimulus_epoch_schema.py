@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Mapping
 
 import numpy as np
 
 from fisheye.shared.zarr.analysis_array_contracts import AnalysisAuthorityRole
+from fisheye.shared.run_lineage_fingerprint import (
+    LINEAGE_ATTR_SCHEMA_ID,
+    LINEAGE_ATTR_SCHEMA_VERSION,
+    LINEAGE_CANONICALIZATION,
+    build_run_lineage_payload,
+    canonical_lineage_json,
+    compute_run_lineage_hash,
+)
+from fisheye.shared.zarr.manifest_digest import (
+    CANONICAL_JSON_DIGEST_ALGORITHM,
+    canonical_json_bytes,
+    canonical_json_sha256,
+)
 from fisheye.shared.zarr.storage_intent import AccessPattern
+from fisheye.shared.zarr_run_completion import RUN_NAME_ATTR
 
 from ._exact_tabular_run_schema import (
     ColumnSpec,
@@ -31,6 +47,16 @@ WINDOWS_PATH = "windows"
 WINDOW_LABEL_WIDTH = 96
 EVENT_NAME_WIDTH = 96
 SOURCE_POLICY_WIDTH = 160
+STIMULUS_EPOCH_RUN_MANIFEST_ATTR = "stimulus_epoch_run_manifest"
+STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_ID = "palette.stimulus_epoch_run_manifest"
+STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_VERSION = 1
+STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_ID = (
+    "palette.stimulus_epoch_logical_content"
+)
+STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_VERSION = 1
+STIMULUS_SOURCE_FINGERPRINT_ALGORITHM = (
+    "sha256_canonical_stimulus_group_logical_tree_v1"
+)
 
 
 def _specs() -> dict[str, ColumnSpec]:
@@ -377,6 +403,501 @@ def validate_legacy_stimulus_epoch_source(run_group: Any) -> tuple[str, ...]:
     return tuple(errors)
 
 
+def stimulus_epoch_logical_content_document(run_group: Any) -> dict[str, object]:
+    """Return an exact decoded-content document for all twelve arrays."""
+
+    errors = validate_stimulus_epoch_semantics(run_group)
+    if errors:
+        raise ValueError(
+            "Cannot describe invalid stimulus-epoch content: " + "; ".join(errors)
+        )
+    arrays: dict[str, object] = {}
+    for path in sorted(_specs()):
+        array = _array(run_group, path)
+        values = np.ascontiguousarray(array[...])
+        arrays[path] = {
+            "dtype": str(np.dtype(array.dtype)),
+            "shape": [int(value) for value in array.shape],
+            "digest_algorithm": "sha256_c_order_decoded_bytes_v1",
+            "sha256": hashlib.sha256(values.tobytes(order="C")).hexdigest(),
+        }
+    document: dict[str, object] = {
+        "schema_id": STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_ID,
+        "schema_version": STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_VERSION,
+        "array_count": len(arrays),
+        "arrays": arrays,
+    }
+    canonical_json_bytes(document)
+    return document
+
+
+def stimulus_epoch_logical_content_sha256(run_group: Any) -> str:
+    return canonical_json_sha256(stimulus_epoch_logical_content_document(run_group))
+
+
+def _required_text_attr(run_group: Any, name: str) -> str:
+    value = run_group.attrs.get(name)
+    if type(value) is not str or not value.strip() or value != value.strip():
+        raise ValueError(f"{name} must be one canonical nonempty exact string.")
+    return value
+
+
+def _required_exact_int_attr(run_group: Any, name: str, *, positive: bool) -> int:
+    value = run_group.attrs.get(name)
+    if type(value) is not int or (positive and value <= 0):
+        qualifier = "positive " if positive else ""
+        raise ValueError(f"{name} must be one {qualifier}exact integer.")
+    return value
+
+
+def _required_mapping_attr(
+    run_group: Any,
+    name: str,
+    *,
+    exact_fields: set[str],
+) -> dict[str, Any]:
+    value = run_group.attrs.get(name)
+    if type(value) is not dict or set(value) != exact_fields:
+        raise ValueError(f"{name} must have the exact canonical field set.")
+    canonical_json_bytes(value)
+    return dict(value)
+
+
+def _require_protocol_profile_identity(value: Mapping[str, Any]) -> None:
+    for name in (
+        "profile_id",
+        "profile_sha256",
+        "profile_source",
+        "source_adapter_id",
+        "role_resolver_id",
+    ):
+        item = value.get(name)
+        if type(item) is not str or not item.strip() or item != item.strip():
+            raise ValueError(f"protocol_profile.{name} must be canonical text.")
+    for name in (
+        "profile_version",
+        "source_adapter_version",
+        "role_resolver_version",
+    ):
+        item = value.get(name)
+        if type(item) is not int or item <= 0:
+            raise ValueError(f"protocol_profile.{name} must be a positive exact integer.")
+    digest = value["profile_sha256"]
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError("protocol_profile.profile_sha256 must be lowercase SHA-256.")
+
+
+def build_stimulus_epoch_candidate_lineage_payload(run_group: Any) -> dict[str, Any]:
+    """Reconstruct the candidate-owned lineage payload from bound run attrs."""
+
+    protocol_profile = _required_mapping_attr(
+        run_group,
+        "protocol_profile",
+        exact_fields={
+            "profile_id",
+            "profile_version",
+            "profile_sha256",
+            "profile_source",
+            "source_adapter_id",
+            "source_adapter_version",
+            "role_resolver_id",
+            "role_resolver_version",
+        },
+    )
+    _require_protocol_profile_identity(protocol_profile)
+    source_stimulus_run = _required_text_attr(run_group, "source_stimulus_run")
+    source_stimulus_path = _required_text_attr(run_group, "source_stimulus_path")
+    if source_stimulus_path != f"analysis/stimulus_runs/{source_stimulus_run}":
+        raise ValueError("source_stimulus_path does not bind source_stimulus_run.")
+    source_epoch_run = _required_text_attr(
+        run_group, "source_stimulus_epoch_run"
+    )
+    source_epoch_path = _required_text_attr(
+        run_group, "source_stimulus_epoch_path"
+    )
+    if source_epoch_path != f"analysis/stimulus_epoch_runs/{source_epoch_run}":
+        raise ValueError(
+            "source_stimulus_epoch_path does not bind source_stimulus_epoch_run."
+        )
+    fingerprint_algorithm = _required_text_attr(
+        run_group, "source_stimulus_fingerprint_algorithm"
+    )
+    if fingerprint_algorithm != STIMULUS_SOURCE_FINGERPRINT_ALGORITHM:
+        raise ValueError("source stimulus fingerprint algorithm mismatch.")
+    source_stimulus_fingerprint = _required_text_attr(
+        run_group, "source_stimulus_fingerprint"
+    )
+    source_epoch_lineage_hash = _required_text_attr(
+        run_group, "source_stimulus_epoch_lineage_hash"
+    )
+    source_epoch_lineage_payload_sha256 = _required_text_attr(
+        run_group, "source_stimulus_epoch_lineage_payload_sha256"
+    )
+    source_epoch_content_sha256 = _required_text_attr(
+        run_group, "source_stimulus_epoch_logical_content_sha256"
+    )
+    for name, value in (
+        ("source_stimulus_fingerprint", source_stimulus_fingerprint),
+        ("source_stimulus_epoch_lineage_hash", source_epoch_lineage_hash),
+        (
+            "source_stimulus_epoch_lineage_payload_sha256",
+            source_epoch_lineage_payload_sha256,
+        ),
+        (
+            "source_stimulus_epoch_logical_content_sha256",
+            source_epoch_content_sha256,
+        ),
+    ):
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError(f"{name} must be one lowercase SHA-256 digest.")
+    epoch_policy = _required_text_attr(run_group, "epoch_policy")
+    epoch_policy_version = _required_exact_int_attr(
+        run_group, "epoch_policy_version", positive=True
+    )
+    method = _required_text_attr(run_group, "method")
+    method_version = _required_text_attr(run_group, "method_version")
+    total_frames = _required_exact_int_attr(run_group, "total_frames", positive=True)
+    fps = run_group.attrs.get("fps")
+    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not np.isfinite(float(fps)) or float(fps) <= 0:
+        raise ValueError("fps must be one positive finite number.")
+    materializer_commit = _required_text_attr(
+        run_group, "candidate_materializer_git_commit"
+    )
+    materializer_dirty = run_group.attrs.get("candidate_materializer_git_dirty")
+    if type(materializer_dirty) is not bool:
+        raise ValueError("candidate_materializer_git_dirty must be an exact bool.")
+    return build_run_lineage_payload(
+        run_family="analysis/stimulus_epoch_runs",
+        analysis_schema={
+            "schema_id": STIMULUS_EPOCH_RUN_SCHEMA_ID,
+            "schema_version": STIMULUS_EPOCH_RUN_SCHEMA_VERSION,
+            "layout": STIMULUS_EPOCH_LAYOUT,
+            "row_axis": "epoch_windows",
+        },
+        method=method,
+        method_version=method_version,
+        source_refs={
+            "source_stimulus_run": source_stimulus_run,
+            "source_stimulus_path": source_stimulus_path,
+            "source_stimulus_epoch_run": source_epoch_run,
+            "source_stimulus_epoch_path": source_epoch_path,
+        },
+        source_fingerprints={
+            "source_stimulus_fingerprint_algorithm": fingerprint_algorithm,
+            "source_stimulus_fingerprint": source_stimulus_fingerprint,
+            "source_stimulus_epoch_lineage_hash": source_epoch_lineage_hash,
+            "source_stimulus_epoch_lineage_payload_sha256": (
+                source_epoch_lineage_payload_sha256
+            ),
+            "source_stimulus_epoch_logical_content_sha256": (
+                source_epoch_content_sha256
+            ),
+        },
+        parameters={
+            "recording_id": _required_text_attr(run_group, "recording_id"),
+            "fps": float(fps),
+            "total_frames": total_frames,
+            "epoch_policy": epoch_policy,
+            "epoch_policy_version": epoch_policy_version,
+            "protocol_profile": protocol_profile,
+        },
+        code={
+            "git_commit": materializer_commit,
+            "git_dirty": materializer_dirty,
+        },
+    )
+
+
+def validate_stimulus_epoch_candidate_lineage(run_group: Any) -> tuple[str, ...]:
+    errors: list[str] = []
+    try:
+        lineage_json = run_group.attrs.get("lineage_payload_json")
+        if type(lineage_json) is not str:
+            raise ValueError("lineage_payload_json must be a canonical JSON string.")
+        payload = json.loads(lineage_json)
+        if type(payload) is not dict:
+            raise ValueError("lineage_payload_json must decode to an exact object.")
+        if lineage_json != canonical_lineage_json(payload):
+            errors.append("candidate lineage payload JSON is not canonical")
+        expected = build_stimulus_epoch_candidate_lineage_payload(run_group)
+        if canonical_lineage_json(payload) != canonical_lineage_json(expected):
+            errors.append("candidate lineage payload differs from executable binding")
+        lineage_hash = compute_run_lineage_hash(payload)
+        for attr_name in ("source_fingerprint", "source_lineage_hash", "lineage_hash"):
+            if run_group.attrs.get(attr_name) != lineage_hash:
+                errors.append(f"{attr_name} differs from candidate lineage payload")
+        if run_group.attrs.get("fingerprint_status") != "complete":
+            errors.append("candidate fingerprint_status must be complete")
+        if run_group.attrs.get("lineage_fingerprint_schema_id") != LINEAGE_ATTR_SCHEMA_ID:
+            errors.append("candidate lineage attribute schema_id mismatch")
+        if run_group.attrs.get("lineage_fingerprint_schema_version") != LINEAGE_ATTR_SCHEMA_VERSION:
+            errors.append("candidate lineage attribute schema_version mismatch")
+        if run_group.attrs.get("lineage_fingerprint_canonicalization") != LINEAGE_CANONICALIZATION:
+            errors.append("candidate lineage canonicalization mismatch")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        errors.append(str(exc))
+    return tuple(errors)
+
+
+def _authoritative_child_group_document(run_group: Any) -> dict[str, object]:
+    if set(run_group.group_keys()) != {WINDOWS_PATH}:
+        raise ValueError("stimulus-epoch run must contain only the windows group.")
+    windows = run_group[WINDOWS_PATH]
+    if list(windows.group_keys()):
+        raise ValueError("windows cannot contain nested groups.")
+    attrs = dict(windows.attrs)
+    if set(attrs) != {"storage_layout", "field_names"}:
+        raise ValueError("windows attributes must have the exact v2 field set.")
+    if attrs.get("storage_layout") != "columnar":
+        raise ValueError("windows storage_layout must be columnar.")
+    if attrs.get("field_names") != list(STIMULUS_EPOCH_FIELD_NAMES):
+        raise ValueError("windows field_names differ from the exact v2 order.")
+    return {"windows": attrs}
+
+
+def build_stimulus_epoch_run_manifest(run_group: Any) -> dict[str, object]:
+    """Build the canonical complete scientific/lineage envelope for v2."""
+
+    if run_group.attrs.get("storage_candidate_profile_promoted") is not False:
+        raise ValueError("storage_candidate_profile_promoted must be exact false.")
+    if run_group.attrs.get("stage_selector_eligible") is not False:
+        raise ValueError("stage_selector_eligible must be exact false.")
+    if run_group.attrs.get("schema_id") != STIMULUS_EPOCH_RUN_SCHEMA_ID:
+        raise ValueError("stimulus-epoch run schema_id mismatch.")
+    if run_group.attrs.get("schema_version") != STIMULUS_EPOCH_RUN_SCHEMA_VERSION:
+        raise ValueError("stimulus-epoch run schema_version mismatch.")
+    lineage_errors = validate_stimulus_epoch_candidate_lineage(run_group)
+    if lineage_errors:
+        raise ValueError("Invalid candidate lineage: " + "; ".join(lineage_errors))
+    array_errors = validate_stimulus_epoch_array_manifest(
+        run_group,
+        byte_planner_adopted=True,
+    )
+    if array_errors:
+        raise ValueError("Invalid exact array manifest: " + "; ".join(array_errors))
+    from fisheye.analysis.exact_tabular_storage import (
+        validate_exact_tabular_storage_receipt,
+    )
+
+    storage_errors = validate_exact_tabular_storage_receipt(
+        run_group,
+        declarations=build_stimulus_epoch_array_declarations(
+            run_group,
+            byte_planner_adopted=True,
+        ),
+    )
+    if storage_errors:
+        raise ValueError(
+            "Invalid executable storage receipt: " + "; ".join(storage_errors)
+        )
+    array_manifest = run_group.attrs.get(MANIFEST_ATTRIBUTE)
+    storage_receipt = run_group.attrs.get("analysis_storage_plan_receipt")
+    if type(array_manifest) is not dict or type(storage_receipt) is not dict:
+        raise ValueError("Exact array manifest and storage receipt are required.")
+    source_event_schema = _required_mapping_attr(
+        run_group,
+        "source_event_schema",
+        exact_fields={"events_path", "event_name_fields", "frame_fields"},
+    )
+    source_refs = _required_mapping_attr(
+        run_group,
+        "source_refs",
+        exact_fields={"source_stimulus_run", "source_stimulus_path"},
+    )
+    protocol_profile = _required_mapping_attr(
+        run_group,
+        "protocol_profile",
+        exact_fields={
+            "profile_id",
+            "profile_version",
+            "profile_sha256",
+            "profile_source",
+            "source_adapter_id",
+            "source_adapter_version",
+            "role_resolver_id",
+            "role_resolver_version",
+        },
+    )
+    _require_protocol_profile_identity(protocol_profile)
+    lineage_json = _required_text_attr(run_group, "lineage_payload_json")
+    logical_content = stimulus_epoch_logical_content_document(run_group)
+    source_content_sha256 = _required_text_attr(
+        run_group, "source_stimulus_epoch_logical_content_sha256"
+    )
+    candidate_content_sha256 = canonical_json_sha256(logical_content)
+    if source_content_sha256 != candidate_content_sha256:
+        raise ValueError("Candidate logical content differs from source epoch content.")
+    source_stimulus_run = _required_text_attr(run_group, "source_stimulus_run")
+    source_stimulus_path = _required_text_attr(run_group, "source_stimulus_path")
+    source_epoch_run = _required_text_attr(run_group, "source_stimulus_epoch_run")
+    source_epoch_path = _required_text_attr(run_group, "source_stimulus_epoch_path")
+    if source_stimulus_path != f"analysis/stimulus_runs/{source_stimulus_run}":
+        raise ValueError("run manifest source stimulus run/path binding mismatch.")
+    if source_epoch_path != f"analysis/stimulus_epoch_runs/{source_epoch_run}":
+        raise ValueError("run manifest source epoch run/path binding mismatch.")
+    if source_refs != {
+        "source_stimulus_run": source_stimulus_run,
+        "source_stimulus_path": source_stimulus_path,
+    }:
+        raise ValueError("source_refs differs from exact source stimulus identity.")
+    if source_event_schema.get("events_path") != f"{source_stimulus_path}/events":
+        raise ValueError("source_event_schema events_path binding mismatch.")
+    if source_event_schema.get("event_name_fields") != [
+        "event_name",
+        "event_type_name",
+        "name",
+        "event_type_id",
+    ]:
+        raise ValueError("source_event_schema event-name fields mismatch.")
+    if source_event_schema.get("frame_fields") != [
+        "camera_frame_id",
+        "camera_frame_num",
+        "triggering_camera_frame_id",
+    ]:
+        raise ValueError("source_event_schema frame fields mismatch.")
+    if _required_text_attr(
+        run_group, "storage_candidate_source_run"
+    ) != source_epoch_run or _required_text_attr(
+        run_group, "storage_candidate_source_run_path"
+    ) != source_epoch_path:
+        raise ValueError("storage candidate source identity differs from source epoch.")
+    payload: dict[str, object] = {
+        "run_identity": {
+            "recording_id": _required_text_attr(run_group, "recording_id"),
+            "run_name": _required_text_attr(run_group, RUN_NAME_ATTR),
+            "run_schema_id": STIMULUS_EPOCH_RUN_SCHEMA_ID,
+            "run_schema_version": STIMULUS_EPOCH_RUN_SCHEMA_VERSION,
+            "layout": STIMULUS_EPOCH_LAYOUT,
+            "row_axis": "epoch_windows",
+        },
+        "dimensions": {
+            "window_count": _required_exact_int_attr(
+                run_group, "window_count", positive=True
+            ),
+            "total_frames": _required_exact_int_attr(
+                run_group, "total_frames", positive=True
+            ),
+            "fps": float(run_group.attrs["fps"]),
+        },
+        "source_stimulus": {
+            "run": source_stimulus_run,
+            "path": source_stimulus_path,
+            "fingerprint_algorithm": _required_text_attr(
+                run_group, "source_stimulus_fingerprint_algorithm"
+            ),
+            "fingerprint": _required_text_attr(
+                run_group, "source_stimulus_fingerprint"
+            ),
+            "event_schema": source_event_schema,
+        },
+        "source_epoch": {
+            "run": source_epoch_run,
+            "path": source_epoch_path,
+            "schema_id": LEGACY_STIMULUS_EPOCH_SCHEMA_ID,
+            "schema_version": LEGACY_STIMULUS_EPOCH_SCHEMA_VERSION,
+            "lineage_hash": _required_text_attr(
+                run_group, "source_stimulus_epoch_lineage_hash"
+            ),
+            "lineage_payload_sha256": _required_text_attr(
+                run_group, "source_stimulus_epoch_lineage_payload_sha256"
+            ),
+            "logical_content_sha256": source_content_sha256,
+        },
+        "protocol": {
+            "method": _required_text_attr(run_group, "method"),
+            "method_version": _required_text_attr(run_group, "method_version"),
+            "epoch_policy": _required_text_attr(run_group, "epoch_policy"),
+            "epoch_policy_version": _required_exact_int_attr(
+                run_group, "epoch_policy_version", positive=True
+            ),
+            "profile": protocol_profile,
+            "source_refs": source_refs,
+        },
+        "candidate_lineage": {
+            "lineage_hash": _required_text_attr(run_group, "lineage_hash"),
+            "lineage_payload_sha256": hashlib.sha256(
+                lineage_json.encode("utf-8")
+            ).hexdigest(),
+            "fingerprint_status": "complete",
+        },
+        "logical_content": logical_content,
+        "schema_bindings": {
+            "array_manifest_schema_id": array_manifest.get("schema_id"),
+            "array_manifest_payload_digest": array_manifest.get("payload_digest"),
+            "storage_receipt_schema_id": storage_receipt.get("schema_id"),
+            "storage_receipt_payload_digest": storage_receipt.get("payload_digest"),
+        },
+        "authoritative_child_groups": _authoritative_child_group_document(run_group),
+        "publication_state": {
+            "stage_selector_eligible": False,
+            "storage_candidate_profile_promoted": False,
+            "storage_profile_id": _required_text_attr(
+                run_group, "analysis_storage_profile_id"
+            ),
+            "source_candidate_run": _required_text_attr(
+                run_group, "storage_candidate_source_run"
+            ),
+            "source_candidate_path": _required_text_attr(
+                run_group, "storage_candidate_source_run_path"
+            ),
+        },
+    }
+    canonical_json_bytes(payload)
+    return {
+        "schema_id": STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_ID,
+        "schema_version": STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_VERSION,
+        "persisted_attribute": STIMULUS_EPOCH_RUN_MANIFEST_ATTR,
+        "digest_algorithm": CANONICAL_JSON_DIGEST_ALGORITHM,
+        "payload": payload,
+        "payload_digest": canonical_json_sha256(payload),
+    }
+
+
+def validate_stimulus_epoch_run_manifest(run_group: Any) -> tuple[str, ...]:
+    value = run_group.attrs.get(STIMULUS_EPOCH_RUN_MANIFEST_ATTR)
+    if type(value) is not dict or set(value) != {
+        "schema_id",
+        "schema_version",
+        "persisted_attribute",
+        "digest_algorithm",
+        "payload",
+        "payload_digest",
+    }:
+        return ("stimulus-epoch run manifest is absent or not exact",)
+    errors: list[str] = []
+    if value.get("schema_id") != STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_ID:
+        errors.append("stimulus-epoch run manifest schema_id mismatch")
+    if value.get("schema_version") != STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_VERSION:
+        errors.append("stimulus-epoch run manifest schema_version mismatch")
+    if value.get("persisted_attribute") != STIMULUS_EPOCH_RUN_MANIFEST_ATTR:
+        errors.append("stimulus-epoch run manifest attribute binding mismatch")
+    if value.get("digest_algorithm") != CANONICAL_JSON_DIGEST_ALGORITHM:
+        errors.append("stimulus-epoch run manifest digest algorithm mismatch")
+    payload = value.get("payload")
+    if type(payload) is not dict:
+        return (*errors, "stimulus-epoch run manifest payload is not exact")
+    try:
+        if value.get("payload_digest") != canonical_json_sha256(payload):
+            errors.append("stimulus-epoch run manifest payload digest mismatch")
+        expected = build_stimulus_epoch_run_manifest(run_group)
+        if canonical_json_bytes(value) != canonical_json_bytes(expected):
+            errors.append("stimulus-epoch run manifest differs from executable binding")
+    except (KeyError, TypeError, ValueError) as exc:
+        errors.append(str(exc))
+    return tuple(errors)
+
+
+def write_stimulus_epoch_run_manifest(run_group: Any) -> Mapping[str, Any]:
+    manifest = build_stimulus_epoch_run_manifest(run_group)
+    run_group.attrs[STIMULUS_EPOCH_RUN_MANIFEST_ATTR] = manifest
+    errors = validate_stimulus_epoch_run_manifest(run_group)
+    if errors:
+        raise ValueError("Invalid stimulus-epoch run manifest: " + "; ".join(errors))
+    return manifest
+
+
 def build_stimulus_epoch_array_declarations(
     run_group: Any,
     *,
@@ -473,13 +994,26 @@ __all__ = [
     "STIMULUS_EPOCH_ARRAY_MANIFEST_SCHEMA_ID",
     "STIMULUS_EPOCH_FIELD_NAMES",
     "STIMULUS_EPOCH_LAYOUT",
+    "STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_ID",
+    "STIMULUS_EPOCH_LOGICAL_CONTENT_SCHEMA_VERSION",
+    "STIMULUS_EPOCH_RUN_MANIFEST_ATTR",
+    "STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_ID",
+    "STIMULUS_EPOCH_RUN_MANIFEST_SCHEMA_VERSION",
     "STIMULUS_EPOCH_RUN_SCHEMA_ID",
     "STIMULUS_EPOCH_RUN_SCHEMA_VERSION",
+    "STIMULUS_SOURCE_FINGERPRINT_ALGORITHM",
     "WINDOW_LABEL_WIDTH",
     "build_stimulus_epoch_array_declarations",
     "build_stimulus_epoch_array_manifest",
+    "build_stimulus_epoch_candidate_lineage_payload",
+    "build_stimulus_epoch_run_manifest",
+    "stimulus_epoch_logical_content_document",
+    "stimulus_epoch_logical_content_sha256",
     "validate_legacy_stimulus_epoch_source",
     "validate_stimulus_epoch_array_manifest",
+    "validate_stimulus_epoch_candidate_lineage",
+    "validate_stimulus_epoch_run_manifest",
     "validate_stimulus_epoch_semantics",
     "write_stimulus_epoch_array_manifest",
+    "write_stimulus_epoch_run_manifest",
 ]

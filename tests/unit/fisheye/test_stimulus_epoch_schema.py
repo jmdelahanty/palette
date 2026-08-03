@@ -24,6 +24,21 @@ from fisheye.analysis.stimulus_epoch_schema import (
 def create_legacy_stimulus_epoch_archive(path: Path) -> zarr.Group:
     root = zarr.open_group(str(path), mode="w", zarr_format=3)
     root.attrs.update({"recording_id": "recording_1", "fps": 10.0, "total_frames": 30})
+    stimulus = root.require_group("analysis").require_group("stimulus_runs").create_group(
+        "stimulus_1"
+    )
+    stimulus.attrs.update(
+        {
+            "schema_id": "palette.stimulus.import.v1",
+            "schema_version": 1,
+            "run_name": "stimulus_1",
+        }
+    )
+    events = stimulus.create_group("events")
+    events.create_array(
+        "camera_frame_id",
+        data=np.asarray([0, 10, 20, 30], dtype=np.int64),
+    )
     windows = tuple(
         StimulusEpochWindow(
             window_id=index,

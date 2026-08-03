@@ -34,13 +34,30 @@ from fisheye.analysis.stimulus_epoch_schema import (
     STIMULUS_EPOCH_LAYOUT,
     STIMULUS_EPOCH_RUN_SCHEMA_ID,
     STIMULUS_EPOCH_RUN_SCHEMA_VERSION,
+    STIMULUS_SOURCE_FINGERPRINT_ALGORITHM,
+    build_stimulus_epoch_candidate_lineage_payload,
     build_stimulus_epoch_array_declarations,
+    stimulus_epoch_logical_content_sha256,
     validate_legacy_stimulus_epoch_source,
     validate_stimulus_epoch_array_manifest,
+    validate_stimulus_epoch_candidate_lineage,
+    validate_stimulus_epoch_run_manifest,
     write_stimulus_epoch_array_manifest,
+    write_stimulus_epoch_run_manifest,
 )
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.run_lineage_fingerprint import (
+    canonical_lineage_json,
+    compute_run_lineage_hash,
+    normalize_lineage_value,
+    write_run_lineage_attrs,
+)
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
+from fisheye.shared.system_metadata import get_git_info
+from fisheye.shared.zarr.manifest_digest import (
+    canonical_json_bytes,
+    canonical_json_sha256,
+)
 from fisheye.shared.zarr.storage_profiles import get_storage_profile
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
@@ -89,6 +106,12 @@ class StimulusEpochCandidatePlan:
     scratch_root: Path
     local_zarr: Path
     profile_id: str
+    source_stimulus_run: str
+    source_stimulus_path: str
+    source_stimulus_fingerprint: str
+    source_epoch_lineage_hash: str
+    source_epoch_lineage_payload_sha256: str
+    source_epoch_logical_content_sha256: str
     latest_before: Any
     latest_complete_before: Any
 
@@ -123,6 +146,19 @@ class StimulusEpochCandidatePlan:
             "scratch_root": str(self.scratch_root),
             "local_zarr": str(self.local_zarr),
             "profile_id": self.profile_id,
+            "source_stimulus_run": self.source_stimulus_run,
+            "source_stimulus_path": self.source_stimulus_path,
+            "source_stimulus_fingerprint_algorithm": (
+                STIMULUS_SOURCE_FINGERPRINT_ALGORITHM
+            ),
+            "source_stimulus_fingerprint": self.source_stimulus_fingerprint,
+            "source_epoch_lineage_hash": self.source_epoch_lineage_hash,
+            "source_epoch_lineage_payload_sha256": (
+                self.source_epoch_lineage_payload_sha256
+            ),
+            "source_epoch_logical_content_sha256": (
+                self.source_epoch_logical_content_sha256
+            ),
             "latest_before": self.latest_before,
             "latest_complete_before": self.latest_complete_before,
             "source_schema": {
@@ -139,6 +175,64 @@ class StimulusEpochCandidatePlan:
                 "atomic_named_candidate_selector_ineligible_no_pointer_update"
             ),
         }
+
+
+def _validated_lineage_identity(group: Any, *, label: str) -> tuple[str, str]:
+    lineage_json = group.attrs.get("lineage_payload_json")
+    if type(lineage_json) is not str:
+        raise ValueError(f"{label} lacks canonical lineage_payload_json.")
+    try:
+        payload = json.loads(lineage_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} lineage_payload_json is invalid JSON.") from exc
+    if type(payload) is not dict or lineage_json != canonical_lineage_json(payload):
+        raise ValueError(f"{label} lineage payload is not one canonical object.")
+    lineage_hash = compute_run_lineage_hash(payload)
+    for attr_name in ("source_fingerprint", "source_lineage_hash", "lineage_hash"):
+        if group.attrs.get(attr_name) != lineage_hash:
+            raise ValueError(f"{label} {attr_name} differs from its lineage payload.")
+    if group.attrs.get("fingerprint_status") not in {"best_effort", "complete"}:
+        raise ValueError(f"{label} fingerprint_status is not usable.")
+    if group.attrs.get("lineage_fingerprint_schema_id") != (
+        "palette.run_lineage_fingerprint_attrs"
+    ) or group.attrs.get("lineage_fingerprint_schema_version") != 1:
+        raise ValueError(f"{label} lineage attribute schema identity mismatch.")
+    if group.attrs.get("lineage_fingerprint_canonicalization") != (
+        "json_sorted_keys_run_lineage_v1"
+    ):
+        raise ValueError(f"{label} lineage canonicalization mismatch.")
+    return lineage_hash, hashlib.sha256(lineage_json.encode("utf-8")).hexdigest()
+
+
+def _iter_group_tree(group: Any, prefix: str = ""):
+    yield prefix, group
+    for name, child in sorted(group.groups(), key=lambda item: item[0]):
+        child_path = f"{prefix}/{name}" if prefix else str(name)
+        yield from _iter_group_tree(child, child_path)
+
+
+def _stimulus_group_fingerprint(group: Any) -> str:
+    groups: dict[str, object] = {}
+    arrays: dict[str, object] = {}
+    for group_path, node in _iter_group_tree(group):
+        groups[group_path] = normalize_lineage_value(dict(node.attrs))
+        for name, array in sorted(node.arrays(), key=lambda item: item[0]):
+            path = f"{group_path}/{name}" if group_path else str(name)
+            values = np.ascontiguousarray(array[...])
+            arrays[path] = {
+                "dtype": str(np.dtype(array.dtype)),
+                "shape": [int(value) for value in array.shape],
+                "attributes": normalize_lineage_value(dict(array.attrs)),
+                "sha256": hashlib.sha256(values.tobytes(order="C")).hexdigest(),
+            }
+    document = {
+        "schema_id": "palette.stimulus_group_logical_tree",
+        "schema_version": 1,
+        "groups": groups,
+        "arrays": arrays,
+    }
+    canonical_json_bytes(document)
+    return canonical_json_sha256(document)
 
 
 def build_stimulus_epoch_candidate_plan(
@@ -189,6 +283,36 @@ def build_stimulus_epoch_candidate_plan(
     errors = validate_legacy_stimulus_epoch_source(source_group)
     if errors:
         raise ValueError("Legacy stimulus-epoch source is invalid: " + "; ".join(errors))
+    source_epoch_lineage_hash, source_epoch_lineage_payload_sha256 = (
+        _validated_lineage_identity(source_group, label="Source stimulus-epoch run")
+    )
+    source_epoch_logical_content_sha256 = stimulus_epoch_logical_content_sha256(
+        source_group
+    )
+    source_stimulus_run = source_group.attrs.get("source_stimulus_run")
+    source_stimulus_path = source_group.attrs.get("source_stimulus_path")
+    if type(source_stimulus_run) is not str or not source_stimulus_run.strip():
+        raise ValueError("Source epoch lacks an exact source_stimulus_run.")
+    if (
+        type(source_stimulus_path) is not str
+        or source_stimulus_path
+        != f"analysis/stimulus_runs/{source_stimulus_run}"
+    ):
+        raise ValueError("Source epoch source stimulus run/path binding is invalid.")
+    stimulus_group = root.get(source_stimulus_path)
+    if not isinstance(stimulus_group, zarr.Group):
+        raise ValueError("Source epoch's exact source stimulus group is missing.")
+    stimulus_physical_path = source.joinpath(*source_stimulus_path.split("/"))
+    if stimulus_physical_path.is_symlink() or any(
+        path.is_symlink() for path in stimulus_physical_path.rglob("*")
+    ):
+        raise ValueError("Source stimulus group cannot contain symbolic links.")
+    _require_contained(
+        stimulus_physical_path,
+        source,
+        label="source stimulus path",
+    )
+    source_stimulus_fingerprint = _stimulus_group_fingerprint(stimulus_group)
     if candidate_name in parent or target_run_path.exists() or target_run_path.is_symlink():
         raise FileExistsError(f"Candidate run {candidate_name!r} already exists.")
 
@@ -199,6 +323,14 @@ def build_stimulus_epoch_candidate_plan(
         scratch_root=scratch,
         local_zarr=scratch / "stimulus-epoch-candidate.zarr",
         profile_id=profile_id,
+        source_stimulus_run=source_stimulus_run,
+        source_stimulus_path=source_stimulus_path,
+        source_stimulus_fingerprint=source_stimulus_fingerprint,
+        source_epoch_lineage_hash=source_epoch_lineage_hash,
+        source_epoch_lineage_payload_sha256=source_epoch_lineage_payload_sha256,
+        source_epoch_logical_content_sha256=(
+            source_epoch_logical_content_sha256
+        ),
         latest_before=parent.attrs.get("latest"),
         latest_complete_before=parent.attrs.get("latest_complete"),
     )
@@ -247,10 +379,63 @@ def _normalize_metadata(value: Any) -> Any:
     return value
 
 
-def _metadata_declarations(group: Any, declarations: Sequence[Any]) -> dict[str, Any]:
-    return {
-        declaration.path: _array_at_path(group, declaration.path).metadata.to_dict()
+def _normalize_node_declaration(value: Mapping[str, Any], *, path: str) -> Any:
+    declaration = dict(value)
+    if declaration.get("zarr_format") != 3:
+        raise ValueError(f"Zarr declaration {path!r} is not format 3.")
+    node_type = declaration.get("node_type")
+    if node_type == "group":
+        required = {"zarr_format", "node_type", "attributes"}
+        optional = {"consolidated_metadata"}
+        if not required.issubset(declaration) or not set(declaration).issubset(
+            required | optional
+        ):
+            raise ValueError(f"Group declaration {path!r} has unexpected fields.")
+        envelope = declaration.pop("consolidated_metadata", None)
+        if envelope is not None and not isinstance(envelope, Mapping):
+            raise ValueError(
+                f"Group declaration {path!r} has malformed consolidated metadata."
+            )
+    elif node_type == "array":
+        if "consolidated_metadata" in declaration:
+            raise ValueError(
+                f"Array declaration {path!r} cannot contain consolidated metadata."
+            )
+    else:
+        raise ValueError(f"Zarr declaration {path!r} has invalid node_type.")
+    canonical_json_bytes(declaration)
+    return _normalize_metadata(declaration)
+
+
+def _metadata_declaration_tree(
+    group: Any,
+    declarations: Sequence[Any],
+) -> dict[str, Any]:
+    observed_groups = {path for path, _node in _iter_group_tree(group)}
+    if observed_groups != {"", "windows"}:
+        raise ValueError(
+            "Stimulus-epoch declaration tree has unexpected groups: "
+            f"{sorted(observed_groups)!r}."
+        )
+    groups = {
+        "": _normalize_node_declaration(group.metadata.to_dict(), path=""),
+        "windows": _normalize_node_declaration(
+            group["windows"].metadata.to_dict(), path="windows"
+        ),
+    }
+    arrays = {
+        declaration.path: _normalize_node_declaration(
+            _array_at_path(group, declaration.path).metadata.to_dict(),
+            path=declaration.path,
+        )
         for declaration in declarations
+    }
+    return {
+        "schema_id": "palette.stimulus_epoch.normalized_zarr_declaration_tree",
+        "schema_version": 1,
+        "path_basis": "relative_to_stimulus_epoch_run_empty_string_is_root",
+        "groups": groups,
+        "arrays": arrays,
     }
 
 
@@ -269,15 +454,13 @@ def _direct_consolidated_check(
     )
     direct = direct_root[run_path]
     consolidated = consolidated_root[run_path]
-    if _normalize_metadata(dict(direct.attrs)) != _normalize_metadata(
-        dict(consolidated.attrs)
-    ):
-        raise ValueError("Direct and consolidated stimulus-epoch attributes differ.")
-    direct_arrays = _metadata_declarations(direct, declarations)
-    consolidated_arrays = _metadata_declarations(consolidated, declarations)
-    if _normalize_metadata(direct_arrays) != _normalize_metadata(consolidated_arrays):
-        raise ValueError("Direct and consolidated stimulus-epoch arrays differ.")
-    return len(direct_arrays)
+    direct_tree = _metadata_declaration_tree(direct, declarations)
+    consolidated_tree = _metadata_declaration_tree(consolidated, declarations)
+    if canonical_json_bytes(direct_tree) != canonical_json_bytes(consolidated_tree):
+        raise ValueError(
+            "Direct and consolidated stimulus-epoch declaration trees differ."
+        )
+    return len(direct_tree["arrays"])
 
 
 def _validate_candidate_group(
@@ -291,6 +474,8 @@ def _validate_candidate_group(
             byte_planner_adopted=True,
         )
     )
+    errors.extend(validate_stimulus_epoch_candidate_lineage(group))
+    errors.extend(validate_stimulus_epoch_run_manifest(group))
     try:
         declarations = build_stimulus_epoch_array_declarations(
             group,
@@ -311,6 +496,8 @@ def _validate_candidate_group(
         hashes = {}
     if group.attrs.get("stage_selector_eligible") is not False:
         errors.append("candidate is not selector-ineligible")
+    if group.attrs.get("storage_candidate_profile_promoted") is not False:
+        errors.append("storage_candidate_profile_promoted is not exact false")
     if group.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
         errors.append("candidate is not complete")
     return {
@@ -354,6 +541,30 @@ def materialize_stimulus_epoch_candidate(
     try:
         source_root = open_zarr_root(plan.source_zarr, mode="r")
         source_group = source_root[plan.source_run_path]
+        observed_source_lineage_hash, observed_source_lineage_payload_sha256 = (
+            _validated_lineage_identity(
+                source_group,
+                label="Source stimulus-epoch run",
+            )
+        )
+        observed_source_content_sha256 = stimulus_epoch_logical_content_sha256(
+            source_group
+        )
+        observed_stimulus_fingerprint = _stimulus_group_fingerprint(
+            source_root[plan.source_stimulus_path]
+        )
+        if (
+            observed_source_lineage_hash != plan.source_epoch_lineage_hash
+            or observed_source_lineage_payload_sha256
+            != plan.source_epoch_lineage_payload_sha256
+            or observed_source_content_sha256
+            != plan.source_epoch_logical_content_sha256
+            or observed_stimulus_fingerprint
+            != plan.source_stimulus_fingerprint
+        ):
+            raise RuntimeError(
+                "Stimulus-epoch or source-stimulus identity changed after planning."
+            )
         source_declarations = build_stimulus_epoch_array_declarations(
             source_group,
             byte_planner_adopted=False,
@@ -380,6 +591,7 @@ def materialize_stimulus_epoch_candidate(
             local_group,
             receipt=receipt,
         )
+        git = get_git_info(Path(__file__).resolve().parents[4])
         local_group.attrs.update(
             {
                 "schema_id": STIMULUS_EPOCH_RUN_SCHEMA_ID,
@@ -391,6 +603,25 @@ def materialize_stimulus_epoch_candidate(
                 "storage_candidate_source_run": plan.source_run_name,
                 "storage_candidate_source_run_path": plan.source_run_path,
                 "storage_candidate_profile_promoted": False,
+                "source_stimulus_epoch_run": plan.source_run_name,
+                "source_stimulus_epoch_path": plan.source_run_path,
+                "source_stimulus_fingerprint_algorithm": (
+                    STIMULUS_SOURCE_FINGERPRINT_ALGORITHM
+                ),
+                "source_stimulus_fingerprint": (
+                    plan.source_stimulus_fingerprint
+                ),
+                "source_stimulus_epoch_lineage_hash": (
+                    plan.source_epoch_lineage_hash
+                ),
+                "source_stimulus_epoch_lineage_payload_sha256": (
+                    plan.source_epoch_lineage_payload_sha256
+                ),
+                "source_stimulus_epoch_logical_content_sha256": (
+                    plan.source_epoch_logical_content_sha256
+                ),
+                "candidate_materializer_git_commit": git.get("commit_hash"),
+                "candidate_materializer_git_dirty": bool(git.get("is_dirty")),
                 "stage_selector_eligible": False,
                 RUN_NAME_ATTR: plan.run_name,
                 RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
@@ -402,6 +633,12 @@ def materialize_stimulus_epoch_candidate(
             byte_planner_adopted=True,
         )
         persist_exact_tabular_storage_receipt(local_group, receipt)
+        write_run_lineage_attrs(
+            local_group,
+            build_stimulus_epoch_candidate_lineage_payload(local_group),
+            fingerprint_status="complete",
+            overwrite=True,
+        )
         mark_run_complete(
             local_group,
             parent_group=None,
@@ -411,6 +648,7 @@ def materialize_stimulus_epoch_candidate(
                 fallback_command="stimulus_epoch_candidate_materializer",
             ),
         )
+        write_stimulus_epoch_run_manifest(local_group)
         local_validation = _validate_candidate_group(
             local_group,
             expected_hashes=source_hashes,
@@ -425,6 +663,29 @@ def materialize_stimulus_epoch_candidate(
             declarations=candidate_declarations,
         )
         materialization_seconds = float(time.perf_counter() - started)
+        stable_root = open_zarr_root(plan.source_zarr, mode="r")
+        stable_source = stable_root[plan.source_run_path]
+        stable_lineage_hash, stable_lineage_payload_sha256 = (
+            _validated_lineage_identity(
+                stable_source,
+                label="Source stimulus-epoch run",
+            )
+        )
+        if (
+            stable_lineage_hash != plan.source_epoch_lineage_hash
+            or stable_lineage_payload_sha256
+            != plan.source_epoch_lineage_payload_sha256
+            or stimulus_epoch_logical_content_sha256(stable_source)
+            != plan.source_epoch_logical_content_sha256
+            or _stimulus_group_fingerprint(
+                stable_root[plan.source_stimulus_path]
+            )
+            != plan.source_stimulus_fingerprint
+        ):
+            raise RuntimeError(
+                "Stimulus-epoch or source-stimulus identity changed during "
+                "candidate materialization."
+            )
 
         def validate(path: Path) -> dict[str, Any]:
             return _validate_candidate_group(

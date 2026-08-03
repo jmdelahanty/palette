@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
 import shutil
 
@@ -10,14 +12,18 @@ from fisheye.analysis.exact_tabular_storage import (
     ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
 )
 from fisheye.analysis.stimulus_epoch_schema import (
+    STIMULUS_EPOCH_RUN_MANIFEST_ATTR,
     STIMULUS_EPOCH_RUN_SCHEMA_ID,
     validate_stimulus_epoch_array_manifest,
+    validate_stimulus_epoch_candidate_lineage,
+    validate_stimulus_epoch_run_manifest,
 )
 from fisheye.analysis_workflows.materializers import stimulus_epochs as materializer
 from fisheye.analysis_workflows.materializers.stimulus_epochs import (
     build_stimulus_epoch_candidate_plan,
     materialize_stimulus_epoch_candidate,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 from .test_stimulus_epoch_schema import create_legacy_stimulus_epoch_archive
 
@@ -77,6 +83,23 @@ def test_candidate_is_exact_byte_planned_and_selector_ineligible(
     assert validate_stimulus_epoch_array_manifest(
         candidate, byte_planner_adopted=True
     ) == ()
+    assert validate_stimulus_epoch_candidate_lineage(candidate) == ()
+    assert validate_stimulus_epoch_run_manifest(candidate) == ()
+    source = parent["source"]
+    source_lineage = json.loads(source.attrs["lineage_payload_json"])
+    candidate_lineage = json.loads(candidate.attrs["lineage_payload_json"])
+    assert candidate.attrs["lineage_hash"] != source.attrs["lineage_hash"]
+    assert source_lineage["analysis_schema"]["schema_id"].endswith(".v1")
+    assert candidate_lineage["analysis_schema"] == {
+        "layout": "exact_columnar_v1",
+        "row_axis": "epoch_windows",
+        "schema_id": "palette.stimulus_epoch_windows.v2",
+        "schema_version": 2,
+    }
+    assert candidate_lineage["source_refs"]["source_stimulus_epoch_run"] == "source"
+    assert candidate_lineage["source_fingerprints"][
+        "source_stimulus_epoch_lineage_hash"
+    ] == source.attrs["lineage_hash"]
     receipt = candidate.attrs[ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR]
     assert receipt["payload"]["storage_profile"]["profile_id"] == "published_http_v1"
     assert receipt["payload"]["storage_profile"]["codec_profile_id"] == "zstd_fast_v1"
@@ -85,6 +108,133 @@ def test_candidate_is_exact_byte_planned_and_selector_ineligible(
     assert all(array.metadata.zarr_format == 3 for _path, array in _walk_arrays(candidate))
     consolidated_candidate = consolidated["analysis/stimulus_epoch_runs/candidate"]
     assert dict(consolidated_candidate.attrs) == dict(candidate.attrs)
+
+
+def _publish_candidate(tmp_path: Path, *, suffix: str) -> tuple[Path, zarr.Group]:
+    archive = tmp_path / f"{suffix}_analysis.zarr"
+    create_legacy_stimulus_epoch_archive(archive)
+    result = materialize_stimulus_epoch_candidate(
+        archive,
+        source_run="source",
+        run_name="candidate",
+        scratch_root=tmp_path / f"scratch-{suffix}",
+        copy_backend="python",
+        apply=True,
+    )
+    assert result["status"] == "complete"
+    root = zarr.open_group(str(archive), mode="a", use_consolidated=False)
+    return archive, root["analysis/stimulus_epoch_runs/candidate"]
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("dimensions", "fps"), 99.0),
+        (("source_stimulus", "fingerprint"), "f" * 64),
+        (("source_epoch", "lineage_hash"), "e" * 64),
+        (("protocol", "profile", "profile_id"), "tampered_profile"),
+        (("candidate_lineage", "lineage_hash"), "d" * 64),
+    ],
+)
+def test_rehashed_deep_run_manifest_tampering_fails_executable_binding(
+    tmp_path: Path,
+    path: tuple[str, ...],
+    value: object,
+) -> None:
+    _archive, candidate = _publish_candidate(tmp_path, suffix=path[-1])
+    manifest = copy.deepcopy(candidate.attrs[STIMULUS_EPOCH_RUN_MANIFEST_ATTR])
+    target = manifest["payload"]
+    for component in path[:-1]:
+        target = target[component]
+    target[path[-1]] = value
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+    candidate.attrs[STIMULUS_EPOCH_RUN_MANIFEST_ATTR] = manifest
+
+    errors = validate_stimulus_epoch_run_manifest(candidate)
+    assert errors
+    assert any("executable binding" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("attr_name", "value", "manifest_path"),
+    [
+        (
+            "recording_id",
+            "other_recording",
+            ("run_identity", "recording_id"),
+        ),
+        (
+            "source_stimulus_fingerprint",
+            "f" * 64,
+            ("source_stimulus", "fingerprint"),
+        ),
+    ],
+)
+def test_rehashed_attr_and_manifest_tampering_is_still_rejected_by_lineage(
+    tmp_path: Path,
+    attr_name: str,
+    value: object,
+    manifest_path: tuple[str, ...],
+) -> None:
+    _archive, candidate = _publish_candidate(tmp_path, suffix=attr_name)
+    candidate.attrs[attr_name] = value
+    manifest = copy.deepcopy(candidate.attrs[STIMULUS_EPOCH_RUN_MANIFEST_ATTR])
+    target = manifest["payload"]
+    for component in manifest_path[:-1]:
+        target = target[component]
+    target[manifest_path[-1]] = value
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+    candidate.attrs[STIMULUS_EPOCH_RUN_MANIFEST_ATTR] = manifest
+
+    assert validate_stimulus_epoch_candidate_lineage(candidate)
+    assert validate_stimulus_epoch_run_manifest(candidate)
+
+
+def test_rehashed_profile_promotion_true_fails_exact_false_gate(tmp_path: Path) -> None:
+    _archive, candidate = _publish_candidate(tmp_path, suffix="promoted")
+    candidate.attrs["storage_candidate_profile_promoted"] = True
+    manifest = copy.deepcopy(candidate.attrs[STIMULUS_EPOCH_RUN_MANIFEST_ATTR])
+    manifest["payload"]["publication_state"][
+        "storage_candidate_profile_promoted"
+    ] = True
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+    candidate.attrs[STIMULUS_EPOCH_RUN_MANIFEST_ATTR] = manifest
+
+    errors = materializer._validate_candidate_group(
+        candidate,
+        expected_hashes=materializer._logical_hashes(
+            candidate,
+            materializer.build_stimulus_epoch_array_declarations(
+                candidate,
+                byte_planner_adopted=True,
+            ),
+        ),
+    )["errors"]
+    assert any("exact false" in error for error in errors)
+
+
+def test_direct_consolidated_check_includes_windows_group_declaration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, candidate = _publish_candidate(tmp_path, suffix="group-tree")
+    candidate["windows"].attrs["field_names"] = ["window_id"]
+    monkeypatch.setattr(
+        materializer,
+        "consolidate_metadata_capture_expected_warnings",
+        lambda _path: None,
+    )
+    declarations = materializer.build_stimulus_epoch_array_declarations(
+        candidate,
+        byte_planner_adopted=True,
+    )
+
+    with pytest.raises(ValueError, match="declaration trees differ"):
+        materializer._direct_consolidated_check(
+            archive,
+            run_path="analysis/stimulus_epoch_runs/candidate",
+            declarations=declarations,
+        )
 
 
 def _walk_arrays(group: zarr.Group, prefix: str = ""):

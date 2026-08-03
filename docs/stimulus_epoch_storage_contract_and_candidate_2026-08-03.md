@@ -80,6 +80,30 @@ The executable validator in `analysis/stimulus_epoch_schema.py` requires:
 - finite time columns exactly derived from frame bounds and FPS within a small
   float64 arithmetic tolerance.
 
+Each v2 candidate also owns a canonical
+`stimulus_epoch_run_manifest`. Its digest-bound payload is reconstructed from
+the current run and binds:
+
+- recording identity, window count, total frames, and FPS;
+- the exact source stimulus run/path and a decoded logical-tree fingerprint of
+  that stimulus group;
+- the exact v1 source epoch run/path, lineage hash, lineage-payload digest, and
+  full logical-content digest;
+- the protocol profile, adapter, role resolver, method, and window-policy
+  identities;
+- the newly computed v2 candidate lineage hash and payload digest;
+- every decoded candidate array, the exact array-manifest and storage-plan
+  digests, and the authoritative `windows` group declaration;
+- exact `stage_selector_eligible=false` and
+  `storage_candidate_profile_promoted=false` publication state.
+
+The candidate never inherits the v1 `lineage_payload_json`. It constructs and
+persists a new complete v2 lineage payload that binds the candidate schema,
+both source identities, source fingerprints, protocol parameters, dimensions,
+and materializer revision. Validators recompute both the lineage and run
+manifest. Rehashing only a modified outer manifest therefore cannot make
+recording, dimensions, source, policy, profile, or lineage tampering valid.
+
 Empty labels, invalid UTF-8, aliases such as `frame_counts`, missing arrays,
 wrong dtypes, overlapping intervals, duplicate IDs, and inconsistent time
 columns fail closed.
@@ -98,14 +122,17 @@ The candidate materializer:
 6. writes complete non-overlapping physical units;
 7. writes the exact logical manifest and executable storage receipt;
 8. proves source/candidate logical hashes are identical;
-9. consolidates local metadata and proves direct/consolidated attribute and
-   array-declaration equivalence;
-10. uses the common atomic run-group publisher to copy into a hidden sibling,
+9. writes and validates candidate-owned v2 lineage plus the canonical run-level
+   scientific/lineage manifest;
+10. consolidates local metadata and proves the complete direct/consolidated
+   declaration tree is equal, including the run group, `windows` group attrs,
+   and every array declaration;
+11. uses the common atomic run-group publisher to copy into a hidden sibling,
     validate it, rename it atomically, and retain selector-ineligible state;
-11. leaves `latest` and `latest_complete` unchanged;
-12. consolidates the authoritative archive as the final visibility step and
+12. leaves `latest` and `latest_complete` unchanged;
+13. consolidates the authoritative archive as the final visibility step and
     proves direct/consolidated equivalence;
-13. on a post-consolidation failure, writes an owner-bound failed tombstone,
+14. on a post-consolidation failure, writes an owner-bound failed tombstone,
     reconsolidates, and requires exact failed metadata in both views.
 
 The candidate records `storage_candidate_profile_promoted=false` and
@@ -119,13 +146,20 @@ selection evidence, or permission to change the v1 writer.
 - [x] Freeze row-order, interval, and time-consistency semantics.
 - [x] Declare v1 input-only compatibility and v2 strict-authority boundaries.
 - [x] Add a digest-bound exact array manifest.
+- [x] Add a deeply validated canonical run-level scientific/lineage manifest.
+- [x] Replace inherited v1 lineage with candidate-owned complete v2 lineage.
+- [x] Bind the actual source stimulus logical-tree fingerprint and exact source
+  epoch lineage/content identities.
 - [x] Replan actual bytes with the shared storage planner and factory.
 - [x] Materialize on node-local scratch as Zarr v3.
 - [x] Prove exact decoded equality and direct/consolidated equivalence.
 - [x] Publish atomically without selector or registry changes.
 - [x] Repair consolidated failed-tombstone visibility after injected failure.
+- [x] Compare the complete direct/consolidated declaration tree, including
+  authoritative child-group declarations.
+- [x] Enforce `storage_candidate_profile_promoted` as exact JSON `false`.
 - [x] Add adversarial inventory, dtype, ordering, containment, symlink, and
-  failure-visibility tests.
+  failure-visibility tests, plus recomputed-digest manifest/lineage probes.
 - [ ] Add a strict v2 consumer adapter; keep current v1 readers explicitly
   legacy-compatible.
 - [ ] Run a real archive canary and record read/open/object-count telemetry.
