@@ -7,6 +7,7 @@ import pytest
 
 import fisheye.analysis.eye_angle_analysis as eye_angle_analysis
 import fisheye.shared.eye_geometry_source as eye_geometry_source_mod
+import fisheye.visualization.visualize_eye_angles as visualize_eye_angles
 from fisheye.analysis.eye_angle_analysis import _eye_angle_definition_attrs, _process_chunk
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
@@ -60,6 +61,38 @@ def test_eye_angle_layout_default_is_compact_dense_v2() -> None:
 
     assert eye_angle_analysis.EYE_ANGLE_LAYOUT_DEFAULT == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
     assert args.layout == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_legacy"),
+    (([], False), (["--legacy-eye-angle-compatibility"], True)),
+)
+def test_eye_angle_dashboard_cli_propagates_legacy_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    extra_args: list[str],
+    expected_legacy: bool,
+) -> None:
+    calls: list[tuple[object, object, bool]] = []
+
+    def stop_after_load(
+        zarr_path: object,
+        run_name: object,
+        *,
+        legacy_compatibility: bool = False,
+    ) -> None:
+        calls.append((zarr_path, run_name, legacy_compatibility))
+        raise RuntimeError("stop after policy handoff")
+
+    monkeypatch.setattr(
+        visualize_eye_angles,
+        "_load_eye_angle_run",
+        stop_after_load,
+    )
+
+    with pytest.raises(RuntimeError, match="policy handoff"):
+        visualize_eye_angles.main(["archive.zarr", *extra_args])
+
+    assert calls == [(visualize_eye_angles.Path("archive.zarr"), None, expected_legacy)]
 
 
 def test_eye_angle_definition_attrs_match_undirected_axis_vergence_math() -> None:

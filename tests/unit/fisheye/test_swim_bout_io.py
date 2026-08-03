@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pytest
 import zarr
+from rich.console import Console
 
+from fisheye.analysis.track_kinematics import _mirror_swim_bouts_to_tracks
 from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
@@ -362,6 +366,68 @@ def test_swim_bout_legacy_run_requires_explicit_compatibility() -> None:
         _resolve_run_name(parent, None, legacy_compatibility=True)
         == "bouts_canary"
     )
+
+
+def _build_legacy_mirror_target(root: zarr.Group) -> zarr.Group:
+    target = root["analysis"].create_group("track_kinematics_target")
+    target.create_group("tracks").create_group("id_0")
+    return target
+
+
+def test_track_kinematics_legacy_mirror_requires_explicit_compatibility() -> None:
+    root = _build_v1_swim_bout_root()
+    parent = root["analysis/swim_bout_runs"]
+    run = parent["bouts_canary"]
+    del parent.attrs["latest_complete"]
+    del run.attrs["palette_run_completion_status"]
+    del run.attrs["stage_selector_eligible"]
+    target = _build_legacy_mirror_target(root)
+    console = Console(file=io.StringIO())
+
+    assert (
+        _mirror_swim_bouts_to_tracks(
+            root,
+            target,
+            [0],
+            None,
+            console,
+        )
+        is None
+    )
+    assert "swim_bouts" not in target["tracks/id_0"]
+
+    assert (
+        _mirror_swim_bouts_to_tracks(
+            root,
+            target,
+            [0],
+            None,
+            console,
+            legacy_compatibility=True,
+        )
+        == "bouts_canary"
+    )
+    assert "swim_bouts" in target["tracks/id_0"]
+
+
+def test_track_kinematics_legacy_mirror_never_accepts_ineligible_run() -> None:
+    root = _build_v1_swim_bout_root()
+    run = root["analysis/swim_bout_runs/bouts_canary"]
+    run.attrs["stage_selector_eligible"] = False
+    target = _build_legacy_mirror_target(root)
+
+    assert (
+        _mirror_swim_bouts_to_tracks(
+            root,
+            target,
+            [0],
+            None,
+            Console(file=io.StringIO()),
+            legacy_compatibility=True,
+        )
+        is None
+    )
+    assert "swim_bouts" not in target["tracks/id_0"]
 
 
 @pytest.mark.parametrize(

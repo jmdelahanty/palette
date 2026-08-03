@@ -100,9 +100,18 @@ def _save_png_bytes(path: Path, png_bytes: bytes) -> None:
     path.write_bytes(png_bytes)
 
 
-def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[str, object], Dict[str, np.ndarray]]:
+def _load_eye_angle_run(
+    zarr_path: Path,
+    run_name: Optional[str],
+    *,
+    legacy_compatibility: bool = False,
+) -> Tuple[Dict[str, object], Dict[str, np.ndarray]]:
     root = open_zarr_root(zarr_path, mode="r")
-    tables = load_eye_angle_run_tables(root, run_name=run_name or "latest")
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name=run_name or "latest",
+        legacy_compatibility=legacy_compatibility,
+    )
     run_name = tables.run_name
     roi_group = tables.roi
     frame_group = tables.frame
@@ -1456,6 +1465,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Specific eye_angle_runs/<name> to load (default: latest).",
     )
     parser.add_argument(
+        "--legacy-eye-angle-compatibility",
+        action="store_true",
+        help=(
+            "Permit statusless historical eye-angle runs. Current runs use "
+            "strict completion and selector eligibility by default."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="Optional PNG output path (default: auto-generated in visualization/plots).",
@@ -1531,7 +1548,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else " ".join(["fisheye.visualization.visualize_eye_angles", *map(str, argv_list)])
     )
 
-    attrs, data = _load_eye_angle_run(args.zarr_path, args.run)
+    attrs, data = _load_eye_angle_run(
+        args.zarr_path,
+        args.run,
+        legacy_compatibility=args.legacy_eye_angle_compatibility,
+    )
     if not args.quiet:
         print(f"Loaded eye angle run '{attrs['run_name']}' from {args.zarr_path}")
 

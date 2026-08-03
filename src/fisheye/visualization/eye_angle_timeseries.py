@@ -45,11 +45,18 @@ def _safe_float(value: object) -> float | None:
     return result if np.isfinite(result) else None
 
 
-def discover_eye_angle_run_options(zarr_path: Path | str) -> list[EyeAngleRunOption]:
+def discover_eye_angle_run_options(
+    zarr_path: Path | str,
+    *,
+    legacy_compatibility: bool = False,
+) -> list[EyeAngleRunOption]:
     """Return available eye-angle analysis runs without importing pandas."""
 
     root = open_zarr_root(Path(zarr_path), mode="r")
-    return discover_eye_angle_run_options_from_root(root)
+    return discover_eye_angle_run_options_from_root(
+        root,
+        legacy_compatibility=legacy_compatibility,
+    )
 
 
 def catalog_eye_angle_timeseries_data(
@@ -57,11 +64,17 @@ def catalog_eye_angle_timeseries_data(
     *,
     run_name: str | None = None,
     prefer_frame: bool = True,
+    legacy_compatibility: bool = False,
 ) -> EyeAngleSeriesCatalog:
     """Return a metadata-only channel and time inventory for one run."""
 
     root = open_zarr_root(Path(zarr_path), mode="r")
-    return catalog_eye_angle_series(root, run_name=run_name, prefer_frame=prefer_frame)
+    return catalog_eye_angle_series(
+        root,
+        run_name=run_name,
+        prefer_frame=prefer_frame,
+        legacy_compatibility=legacy_compatibility,
+    )
 
 
 def load_eye_angle_timeseries_window(
@@ -73,6 +86,7 @@ def load_eye_angle_timeseries_window(
     stop_s: float | None = None,
     series_names: tuple[str, ...] = (),
     max_rows: int = 300_000,
+    legacy_compatibility: bool = False,
 ) -> EyeAngleTimeseriesData:
     """Load selected eye-angle columns for one bounded time interval."""
 
@@ -86,6 +100,7 @@ def load_eye_angle_timeseries_window(
         stop_s=stop_s,
         angle_channels=series_names,
         max_rows=max_rows,
+        legacy_compatibility=legacy_compatibility,
     )
     columns: dict[str, np.ndarray] = {
         "time_s": window.time_seconds,
@@ -109,12 +124,17 @@ def load_eye_angle_timeseries_data(
     *,
     run_name: str | None = None,
     prefer_frame: bool = True,
+    legacy_compatibility: bool = False,
 ) -> EyeAngleTimeseriesData:
     """Load one eye-angle run into a Polars frame for interactive plotting."""
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
-    tables = load_eye_angle_run_tables(root, run_name=run_name)
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name=run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     resolved_run = tables.run_name
 
     frame_rows = first_array_length(tables.frame) if tables.frame else 0

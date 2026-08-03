@@ -12893,6 +12893,7 @@ def _mirror_swim_bouts_to_tracks(
     console: Console,
     *,
     expected_track_kinematics_run: Optional[str] = None,
+    legacy_compatibility: bool = False,
 ) -> Optional[str]:
     analysis = root.get("analysis")
     if analysis is None or "swim_bout_runs" not in analysis:
@@ -12904,7 +12905,7 @@ def _mirror_swim_bouts_to_tracks(
         default_payload = load_default_swim_bout_tables(
             root,
             run_name=requested_run,
-            legacy_compatibility=True,
+            legacy_compatibility=legacy_compatibility,
         )
     except SwimBoutIOError as exc:
         console.print(
@@ -13018,7 +13019,7 @@ def _mirror_swim_bouts_to_tracks(
                     run_name=run_name,
                     candidate_id=default_payload.candidate.candidate_id,
                     signal_id=signal.signal_id,
-                    legacy_compatibility=True,
+                    legacy_compatibility=legacy_compatibility,
                 )
             )
             columns = _columnar_bout_data(payload.bouts)
@@ -13207,6 +13208,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "Legacy compatibility only: analysis/swim_bout_runs/<run> to mirror into "
             "the offline track kinematics run (default: latest). New consumers "
             "should read authoritative bouts from analysis/swim_bout_runs via swim_bout_io."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-swim-bout-compatibility",
+        action="store_true",
+        help=(
+            "Permit statusless historical swim-bout runs only for the legacy "
+            "track mirror. Current runs remain strict by default, and explicitly "
+            "selector-ineligible runs are always rejected."
         ),
     )
     parser.add_argument(
@@ -14076,6 +14086,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                     args.swim_bout_run,
                                     console,
                                     expected_track_kinematics_run=offline_run_name,
+                                    legacy_compatibility=(
+                                        args.legacy_swim_bout_compatibility
+                                    ),
                                 )
                             except Exception as exc:
                                 console.print(
