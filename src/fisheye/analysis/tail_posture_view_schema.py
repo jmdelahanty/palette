@@ -263,8 +263,16 @@ TAIL_POSTURE_VIEW_ACCESS_UNIT_SEMANTICS = {
     for declaration in TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS
 }
 TAIL_POSTURE_VIEW_FILL_VALUES = {
-    declaration.path: (False if declaration.contract.dtype.numpy_dtype == "bool" else 0)
-    for declaration in TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS
+    "instance_key": 0,
+    "source_crop_row_ids": 0,
+    "source_acquisition_frame_index": 0,
+    "valid": False,
+    "failure_reason_bytes": 0,
+    "head_xy": float("nan"),
+    "head_yaw_rad": float("nan"),
+    "tail_keypoints_xy": float("nan"),
+    "tail_angle_rad": float("nan"),
+    "tail_angle_deg": float("nan"),
 }
 
 

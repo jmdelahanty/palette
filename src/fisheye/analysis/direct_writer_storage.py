@@ -7,7 +7,7 @@ storage planner without selecting a profile or changing publication policy.
 
 from __future__ import annotations
 
-import json
+import math
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -19,8 +19,8 @@ from fisheye.shared.zarr.analysis_storage_planning import (
     plan_analysis_storage,
 )
 from fisheye.shared.zarr.array_factory import (
+    array_metadata_declaration_from_plan,
     create_array_from_plan,
-    validate_array_metadata_declaration_from_plan,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.storage_profiles import (
@@ -33,6 +33,31 @@ ANALYSIS_STORAGE_PLAN_DIGEST_ATTR = "analysis_storage_plan_payload_sha256"
 ANALYSIS_STORAGE_PROFILE_ID_ATTR = "analysis_storage_profile_id"
 ANALYSIS_STORAGE_PROFILE_ROLE_ATTR = "analysis_storage_profile_role"
 ANALYSIS_STORAGE_PROFILE_ROLE = "explicit_unpromoted_candidate"
+_RESERVED_ARRAY_ATTRIBUTES = frozenset(
+    {
+        "logical_schema_id",
+        "logical_schema_version",
+        "storage_policy_version",
+        "storage_profile_id",
+        "codec_profile_id",
+        "access_pattern",
+        "write_mode",
+    }
+)
+
+
+def _normalized_metadata(value: Any) -> Any:
+    """Normalize tuple/list and NaN representation for exact metadata comparison."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _normalized_metadata(child) for key, child in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_normalized_metadata(child) for child in value]
+    if value == "NaN":
+        return {"palette_exact_float": "nan"}
+    if isinstance(value, (float, np.floating)) and math.isnan(float(value)):
+        return {"palette_exact_float": "nan"}
+    return value
 
 
 def _array_at_path(run_group: Any, path: str) -> Any:
@@ -219,12 +244,31 @@ def validate_direct_writer_storage_receipt(
     for path in sorted(declaration_by_path):
         try:
             array = _array_at_path(run_group, path)
-            metadata = json.loads(json.dumps(array.metadata.to_dict(), allow_nan=False))
-            metadata_errors = validate_array_metadata_declaration_from_plan(
-                metadata,
+            raw_metadata = array.metadata.to_dict()
+            attributes = raw_metadata.get("attributes")
+            if not isinstance(attributes, Mapping):
+                raise ValueError("array metadata attributes are not an object")
+            nonreserved_attributes = {
+                str(key): value
+                for key, value in attributes.items()
+                if key not in _RESERVED_ARRAY_ATTRIBUTES
+            }
+            expected_metadata = array_metadata_declaration_from_plan(
                 contract=declaration_by_path[path].contract,
                 plan=entries[path].plan,
                 fill_value=fill_values[path],
+                attributes=nonreserved_attributes,
+            )
+            observed_metadata = {
+                key: value
+                for key, value in raw_metadata.items()
+                if key not in {"zarr_format", "node_type", "consolidated_metadata"}
+            }
+            metadata_errors = (
+                ()
+                if _normalized_metadata(observed_metadata)
+                == _normalized_metadata(expected_metadata)
+                else ("array metadata differs from the resolved storage plan",)
             )
         except Exception as exc:
             errors.append(f"{path}: physical metadata validation failed: {exc}")

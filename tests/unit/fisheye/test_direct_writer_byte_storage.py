@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import zarr
 
+from fisheye.analysis import megabouts_classifier as megabouts_module
+from fisheye.analysis import tail_posture_view_runs as tail_posture_module
 from fisheye.analysis.bout_classification_runs import (
     validate_staged_bout_classification_run,
 )
@@ -81,6 +83,18 @@ def _copy_group(source, destination) -> None:
         destination_array.attrs.update(dict(source_array.attrs))
     for name in source.group_keys():
         _copy_group(source[name], destination.create_group(name))
+
+
+def _normalized_metadata(value):
+    if isinstance(value, dict):
+        return {key: _normalized_metadata(child) for key, child in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_normalized_metadata(child) for child in value]
+    if value == "NaN":
+        return {"palette_exact_float": "nan"}
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return {"palette_exact_float": "nan"}
+    return value
 
 
 def test_tail_and_bout_candidate_plans_are_byte_derived_at_empty_short_and_full_scale() -> (
@@ -175,6 +189,17 @@ def test_tail_candidate_is_complete_ineligible_and_rejects_rehashed_plan_tamperi
     assert (
         run.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR]["byte_planner_adopted"] is True
     )
+    assert run["instance_key"].metadata.fill_value == 0
+    assert bool(run["valid"].metadata.fill_value) is False
+    assert run["failure_reason_bytes"].metadata.fill_value == 0
+    for path in (
+        "head_xy",
+        "head_yaw_rad",
+        "tail_keypoints_xy",
+        "tail_angle_rad",
+        "tail_angle_deg",
+    ):
+        assert np.isnan(float(run[path].metadata.fill_value))
     assert not validate_tail_posture_view_arrays(
         run,
         dimensions=TailPostureViewDimensions(
@@ -229,6 +254,17 @@ def test_bout_candidate_roundtrips_and_direct_matches_consolidated_metadata(
         )["ok"]
         is True
     )
+    assert np.isnan(float(run["per_bout/probability"].metadata.fill_value))
+    for path in (
+        "per_bout/HB1_frame",
+        "per_bout/HB1_offset_frames",
+        "per_bout/category_id",
+        "per_bout/subcategory_id",
+    ):
+        assert run[path].metadata.fill_value == -1
+    assert run["per_bout/sign"].metadata.fill_value == 0
+    assert bool(run["per_bout/source_window_valid"].metadata.fill_value) is False
+    assert run["per_bout/category_label_bytes"].metadata.fill_value == 0
 
     zarr.consolidate_metadata(store_path)
     direct = zarr.open_group(store_path, mode="r", use_consolidated=False)
@@ -239,7 +275,9 @@ def test_bout_candidate_roundtrips_and_direct_matches_consolidated_metadata(
     for declaration in BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS:
         direct_array = direct_run[declaration.path]
         consolidated_array = consolidated_run[declaration.path]
-        assert direct_array.metadata.to_dict() == consolidated_array.metadata.to_dict()
+        assert _normalized_metadata(direct_array.metadata.to_dict()) == (
+            _normalized_metadata(consolidated_array.metadata.to_dict())
+        )
         np.testing.assert_array_equal(direct_array[:], consolidated_array[:])
 
 
@@ -268,5 +306,16 @@ def test_tail_candidate_direct_matches_consolidated_metadata(
     for declaration in TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS:
         direct_array = direct_run[declaration.path]
         consolidated_array = consolidated_run[declaration.path]
-        assert direct_array.metadata.to_dict() == consolidated_array.metadata.to_dict()
+        assert _normalized_metadata(direct_array.metadata.to_dict()) == (
+            _normalized_metadata(consolidated_array.metadata.to_dict())
+        )
         np.testing.assert_array_equal(direct_array[:], consolidated_array[:])
+
+
+def test_analytics_clis_do_not_offer_detection_specific_rollback_profile() -> None:
+    for parser in (
+        tail_posture_module._build_parser(),
+        megabouts_module._build_parser(),
+    ):
+        action = parser._option_string_actions["--storage-profile"]
+        assert tuple(action.choices) == ("published_http_v1",)

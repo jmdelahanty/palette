@@ -345,8 +345,26 @@ BOUT_CLASSIFICATION_ACCESS_UNIT_SEMANTICS = {
     for declaration in BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS
 }
 BOUT_CLASSIFICATION_FILL_VALUES = {
-    declaration.path: (False if declaration.contract.dtype.numpy_dtype == "bool" else 0)
-    for declaration in BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS
+    "per_bout/source_bout_id": 0,
+    "per_bout/start_frame": 0,
+    "per_bout/end_frame": 0,
+    "per_bout/window_start_frame": 0,
+    "per_bout/window_end_frame": 0,
+    "per_bout/HB1_frame": -1,
+    "per_bout/HB1_offset_frames": -1,
+    "per_bout/category_id": -1,
+    "per_bout/category_label_bytes": 0,
+    "per_bout/subcategory_id": -1,
+    "per_bout/sign": 0,
+    "per_bout/probability": float("nan"),
+    "per_bout/tail_valid_fraction": 0.0,
+    "per_bout/traj_valid_fraction": 0.0,
+    "per_bout/max_consecutive_tail_invalid": 0,
+    "per_bout/max_consecutive_traj_invalid": 0,
+    "per_bout/source_window_valid": False,
+    "per_bout/classified": False,
+    "per_bout/valid": False,
+    "per_bout/failure_reason_bytes": 0,
 }
 BOUT_CLASSIFICATION_FIELD_NAMES = tuple(
     item.path.removeprefix("per_bout/")

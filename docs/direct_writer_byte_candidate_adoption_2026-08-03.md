@@ -25,6 +25,10 @@ Passing a `StorageProfile` through the Python API, or one of the explicit CLI
 - the completed run remains `stage_selector_eligible=false` and does not update
   `latest` or `latest_complete`.
 
+The CLIs expose only the generic `published_http_v1` candidate. Detection-only
+rollback profile IDs are intentionally not analytics CLI options. Programmatic
+benchmark code may still pass a purpose-built `StorageProfile` explicitly.
+
 The persisted role is `explicit_unpromoted_candidate`. Omitting the profile
 continues to use the established tail-posture mask-row chunks or shared
 columnar chunks and then follows the existing guarded activation policy.
@@ -41,6 +45,12 @@ actual uncompressed bytes. Examples include 131,072 `uint64` identity rows,
 16,384 64-byte rows, 8,192 128-byte rows, and 8,192 `float32[11,2]`
 tail-keypoint rows. There is no family-wide row-count literal in the candidate
 path.
+
+Array metadata also freezes semantic fill values. Tail floating posture
+payloads use NaN; bout probability uses NaN; unclassified HB1, category, and
+subcategory identifiers use `-1`; booleans and fixed-width text use false/zero;
+and counters, lineage fields, fractions, and classifier sign retain true zero
+fills where zero is meaningful.
 
 ## Validation evidence
 

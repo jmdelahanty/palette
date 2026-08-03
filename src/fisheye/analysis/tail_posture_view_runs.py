@@ -1178,15 +1178,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--storage-profile",
-        choices=tuple(
-            sorted(
-                profile_id
-                for profile_id in (
-                    "published_http_v1",
-                    "detection_regular_rollback_v1",
-                )
-            )
-        ),
+        choices=("published_http_v1",),
         help=(
             "Explicit unpromoted byte-planned candidate profile. Supplying it "
             "writes a complete selector-ineligible candidate; omission preserves "
