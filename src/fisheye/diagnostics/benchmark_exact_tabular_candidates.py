@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import platform
@@ -598,33 +597,6 @@ def _preflight(
         "candidate_validation": candidate_validation,
         "logical_inventory": source_inventory,
         "candidate_storage_receipt_payload_digest": receipt_manifest["payload_digest"],
-    }
-
-
-def _normalize_metadata(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        result = {str(key): _normalize_metadata(child) for key, child in value.items()}
-        if result.get("node_type") == "group" and result.get(
-            "consolidated_metadata"
-        ) in (
-            None,
-            {"kind": "inline", "must_understand": False, "metadata": {}},
-        ):
-            result.pop("consolidated_metadata", None)
-        return result
-    if isinstance(value, (tuple, list)):
-        return [_normalize_metadata(child) for child in value]
-    if value == "NaN" or (
-        isinstance(value, (float, np.floating)) and math.isnan(float(value))
-    ):
-        return {"palette_exact_float": "nan"}
-    return value
-
-
-def _metadata_declarations(group: Any, paths: Sequence[str]) -> dict[str, Any]:
-    return {
-        path: _normalize_metadata(_array_at(group, path).metadata.to_dict())
-        for path in paths
     }
 
 
