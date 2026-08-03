@@ -317,10 +317,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
         method_version_attr="TAIL_POSTURE_VIEW_METHOD_VERSION",
         layout_attr=None,
         materializer_module=None,
-        physical_policy_owner=(
-            "fisheye.shared.subject_mask_chunks."
-            "refined_subject_mask_metric_row_chunk"
-        ),
+        physical_policy_owner="refined_subject_mask_metric_row_chunk_compatibility",
         registry_publication="not_implemented",
         byte_planner_adopted=False,
         method_attr="TAIL_POSTURE_VIEW_METHOD",
@@ -338,7 +335,7 @@ DERIVED_ANALYSIS_STORAGE_CONTRACTS: tuple[DerivedAnalysisStorageContract, ...] =
         method_version_attr="ADAPTER_METHOD_VERSION",
         layout_attr=None,
         materializer_module=None,
-        physical_policy_owner="shared_columnar_v1",
+        physical_policy_owner="columnar_store_array_v1",
         registry_publication="not_implemented",
         byte_planner_adopted=False,
         method_attr="ADAPTER_METHOD",

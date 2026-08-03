@@ -376,12 +376,18 @@ production selector activation remain out of scope.
       publication.
 - [x] Complete exact dtype validation for every eye-angle semantic array.
 - [ ] Add closed whole-run manifests for swim bouts and bout kinematics.
-- [ ] Freeze exact per-field bout-classification storage declarations.
-- [ ] Bind tail-posture arrays to explicit analytics contracts rather than a
-      subject-mask chunk helper.
+- [x] Freeze exact per-field bout-classification storage declarations.
+      Maintained schema v2 contains 20 exact arrays, fixed 64/128-byte text
+      matrices, an executable manifest, and explicit v1 compatibility.
+- [x] Bind all ten tail-posture arrays to explicit analytics contracts.
+      Schema v3 records the still-current subject-mask row-chunk helper as a
+      compatibility physical owner with `byte_planner_adopted=false`; migrating
+      that physical owner remains Phase 6 work.
 - [ ] Define exact Arrow dtypes for export columns where cross-language stability
       requires them.
-- [ ] Add recomputed-digest tampering and unexpected-field tests for every new
+- [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
+      bout-classification, and tail-posture manifests completed so far.
+- [ ] Add equivalent adversarial coverage for every remaining new
       manifest.
 
 ### Phase 5 — Seal chaser components independently
@@ -502,8 +508,7 @@ gates pass:
 
 Continue correctness work before rechunking:
 
-1. branch the stimulus-response and swim/bout exact-schema lanes from integrated
-   commit `c1976300` and the reviewed shared declaration;
-2. keep shared catalog/planner edits in the serial coordination lane; and
-3. integrate each family lane serially and run the combined catalog, lifecycle, and
-   exact-schema matrix before beginning physical-profile migrations.
+1. finish the isolated stimulus-response and swim/bout exact-schema lanes;
+2. keep shared catalog/planner edits in this serial coordination lane; and
+3. integrate each family lane serially and run the combined catalog, lifecycle,
+   and exact-schema matrix before beginning physical-profile migrations.

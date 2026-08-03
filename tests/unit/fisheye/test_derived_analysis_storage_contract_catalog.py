@@ -23,8 +23,8 @@ EXPECTED_SCHEMA_IDENTITIES = {
     "eye_angles": ("analysis.eye_angle_runs", 7),
     "subject_shape": ("analysis.subject_shape_runs", 4),
     "tail_kinematics": ("analysis.tail_kinematics_runs", 2),
-    "tail_posture_view": ("analysis.tail_posture_view_runs", 2),
-    "bout_classification": ("analysis.bout_classification_runs", 1),
+    "tail_posture_view": ("analysis.tail_posture_view_runs", 3),
+    "bout_classification": ("analysis.bout_classification_runs", 2),
     "stimulus_response": ("palette.stimulus_response", 2),
 }
 
@@ -33,16 +33,13 @@ EXPECTED_DIRECT_WRITERS = {
         "fisheye.analysis.tail_posture_view_runs",
         "write_tail_posture_view_run",
         "tail_posture_view_from_subject_shape",
-        (
-            "fisheye.shared.subject_mask_chunks."
-            "refined_subject_mask_metric_row_chunk"
-        ),
+        "refined_subject_mask_metric_row_chunk_compatibility",
     ),
     "bout_classification": (
         "fisheye.analysis.megabouts_classifier",
         "write_megabouts_classification_run",
         "palette_megabouts_direct_classifier",
-        "shared_columnar_v1",
+        "columnar_store_array_v1",
     ),
 }
 
