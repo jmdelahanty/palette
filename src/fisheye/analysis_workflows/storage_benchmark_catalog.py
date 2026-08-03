@@ -221,12 +221,13 @@ _CRIMSON_REQUIRED_STAGES = frozenset(
 
 
 def _read_matrix(stage_id: str) -> DerivedAnalysisStorageBenchmark:
+    adapter_module, adapter_entrypoint = _READ_MATRIX_ADAPTERS[stage_id]
     return DerivedAnalysisStorageBenchmark(
         stage_id=stage_id,
         adapter_status=StorageBenchmarkAdapterStatus.READ_MATRIX_IMPLEMENTED,
         crimson_consumer_required=stage_id in _CRIMSON_REQUIRED_STAGES,
-        adapter_module="fisheye.diagnostics.benchmark_exact_tabular_candidates",
-        adapter_entrypoint="run_benchmark_matrix",
+        adapter_module=adapter_module,
+        adapter_entrypoint=adapter_entrypoint,
         reader_workload_implemented=True,
         decoded_equality_implemented=True,
         metadata_equivalence_implemented=True,
@@ -241,21 +242,27 @@ def _plan_only(stage_id: str) -> DerivedAnalysisStorageBenchmark:
     )
 
 
-_READ_MATRIX_STAGES = frozenset(
-    {
-        "swim_bouts",
-        "bout_kinematics",
-        "detection_occupancy",
-        "session_occupancy",
-    }
+_EXACT_TABULAR_ADAPTER = (
+    "fisheye.diagnostics.benchmark_exact_tabular_candidates",
+    "run_benchmark_matrix",
 )
+_READ_MATRIX_ADAPTERS = {
+    "swim_bouts": _EXACT_TABULAR_ADAPTER,
+    "bout_kinematics": _EXACT_TABULAR_ADAPTER,
+    "detection_occupancy": _EXACT_TABULAR_ADAPTER,
+    "session_occupancy": _EXACT_TABULAR_ADAPTER,
+    "chaser_distance": (
+        "fisheye.diagnostics.benchmark_chaser_distance_base_candidate",
+        "run_benchmark_matrix",
+    ),
+}
 
 DERIVED_ANALYSIS_STORAGE_BENCHMARKS: tuple[
     DerivedAnalysisStorageBenchmark, ...
 ] = tuple(
     (
         _read_matrix(stage_id)
-        if stage_id in _READ_MATRIX_STAGES
+        if stage_id in _READ_MATRIX_ADAPTERS
         else _plan_only(stage_id)
     )
     for stage_id in DERIVED_ANALYSIS_STORAGE_CANDIDATE_BY_STAGE

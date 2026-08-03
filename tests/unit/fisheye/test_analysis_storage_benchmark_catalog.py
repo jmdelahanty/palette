@@ -21,6 +21,7 @@ READ_MATRIX_STAGES = {
     "bout_kinematics",
     "detection_occupancy",
     "session_occupancy",
+    "chaser_distance",
 }
 
 
@@ -62,6 +63,12 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         assert record.crimson_consumer_implemented is False
         assert record.representative_short_executed is False
         assert record.representative_full_executed is False
+
+    chaser = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["chaser_distance"]
+    assert chaser.adapter_module == (
+        "fisheye.diagnostics.benchmark_chaser_distance_base_candidate"
+    )
+    assert chaser.adapter_entrypoint == "run_benchmark_matrix"
 
 
 def test_plan_only_families_have_no_fabricated_adapter_or_execution_evidence() -> None:

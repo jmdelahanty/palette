@@ -11,8 +11,8 @@ scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
 Benchmark coverage is now separately executable rather than inferred from
-candidate presence. Four of thirteen families have a generic source/candidate
-read matrix; none yet has the complete writer, publication, physical-I/O,
+candidate presence. Five of thirteen families have an executable
+source/candidate read matrix; none yet has the complete writer, publication, physical-I/O,
 representative-scale, and real-consumer evidence required for promotion. The
 catalog binds any future measured/executed claims to an immutable evidence
 receipt and versioned passing gate; complete catalog coverage still does not
@@ -292,6 +292,7 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Subject-shape byte candidate | `/tmp/palette-subject-shape-byte-candidate-20260803` / `agent/palette/subject-shape-byte-candidate-20260803` | integrated as `ce6fdfc9`, `b9da5d36`, and `039eccc7` | Producer-sealed full-v4 inventory, exact semantic fills, byte-planned rematerialization, atomic publication, and persisted metadata equivalence | Independently reviewed ACCEPT; benchmarks remain pending |
 | Stimulus epoch and occupancy candidates | isolated family lanes plus coordination catalog work | integrated before `f273be11` | Exact 12/30/29-array contracts, byte-planned candidates, atomic rematerialization, and benchmark-harness coverage | Integrated; strict stimulus-v2 consumer and representative benchmarks remain pending |
 | Chaser-distance sealed-base candidate | `/tmp/palette-chaser-distance-storage-candidate-20260803` / `agent/palette/chaser-distance-storage-candidate-20260803` | integrated as `563d7720` | Exact source-sealed 30-array projection, byte-aware plan, source/candidate hashes, persisted metadata equality, and atomic non-promoting publication | Independently reviewed ACCEPT; full-duration benchmark remains pending |
+| Chaser-distance sealed-base read matrix | `/tmp/palette-chaser-distance-base-benchmark-20260803` / `agent/palette/chaser-distance-base-benchmark-20260803` | integrated as `14013b09` | Explicit source/candidate parents, authority/manifest/receipt bindings, rotated fresh processes, exact decoded equality, metadata and archive guards, CPU/wall/RSS/object/byte evidence, and hard-coded nonpromotion | Independently reviewed ACCEPT; representative execution, physical-I/O tracing, real consumers, and promotion remain pending |
 | Stimulus-epoch v2 consumer | `/tmp/palette-stimulus-epoch-v2-consumer-20260803` / `agent/palette/stimulus-epoch-v2-consumer-20260803` | integrated as `72d59c84` | Explicit named selector-ineligible v2 read, complete direct/consolidated metadata gate, exact lifecycle/schema/lineage/manifest/receipt validation, eager backend-neutral rows, and typed explicit-only v1 compatibility | Independently reviewed ACCEPT; source/candidate benchmark and any selection change remain pending |
 | First exact Arrow export schema | `/tmp/palette-analytics-arrow-dtype-contracts-20260803` / `agent/palette/analytics-arrow-dtype-contracts-20260803` | integrated as `379b9262` | Closed digest-bound Arrow envelope, exact 62-field position-occupancy schema, writer/staging/read validation, and an explicit census of 36 inferred compatibility schemas | Independently reviewed ACCEPT; remaining exact schemas, zero-row hardening, and production evidence remain pending |
 
@@ -747,6 +748,12 @@ Recommended benchmark and promotion-review order:
       access selections and full scans in rotated fresh processes; publication
       phase timings come from the existing candidate receipt. Physical request
       and transfer counts remain explicitly unavailable until tracing is added.
+- [x] Implement the family-local sealed chaser-distance source/candidate matrix.
+      It binds the exact source authority, candidate manifest, storage receipt,
+      atomic publication owner, full decoded values, access-class selections,
+      and direct/consolidated metadata across rotated fresh processes. It is
+      explicitly nonpromoting and leaves physical request/transfer telemetry
+      unavailable until genuine tracing is added.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
