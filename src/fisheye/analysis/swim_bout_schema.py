@@ -12,6 +12,7 @@ from fisheye.shared.zarr.storage_intent import AccessPattern
 from ._exact_tabular_run_schema import (
     ColumnSpec,
     MANIFEST_ATTRIBUTE,
+    build_exact_array_declarations,
     build_exact_manifest,
     collect_run_arrays,
     prefixed_specs,
@@ -201,7 +202,27 @@ def _optional_bundles() -> dict[str, dict[str, ColumnSpec]]:
     }
 
 
-def build_swim_bout_array_manifest(run_group: Any) -> dict[str, Any]:
+def build_swim_bout_array_declarations(
+    run_group: Any,
+    *,
+    byte_planner_adopted: bool = False,
+) -> tuple[Any, ...]:
+    """Return the exact declarations for the arrays present in one run."""
+
+    return build_exact_array_declarations(
+        collect_run_arrays(run_group),
+        schema_prefix="palette.array.swim_bout",
+        required=_required_specs(),
+        optional_bundles=_optional_bundles(),
+        byte_planner_adopted=byte_planner_adopted,
+    )
+
+
+def build_swim_bout_array_manifest(
+    run_group: Any,
+    *,
+    byte_planner_adopted: bool = False,
+) -> dict[str, Any]:
     return build_exact_manifest(
         run_group,
         collect_run_arrays(run_group),
@@ -213,10 +234,15 @@ def build_swim_bout_array_manifest(run_group: Any) -> dict[str, Any]:
         required=_required_specs(),
         optional_bundles=_optional_bundles(),
         columnar_table_paths=_COLUMNAR_TABLE_PATHS,
+        byte_planner_adopted=byte_planner_adopted,
     )
 
 
-def validate_swim_bout_array_manifest(run_group: Any) -> tuple[str, ...]:
+def validate_swim_bout_array_manifest(
+    run_group: Any,
+    *,
+    byte_planner_adopted: bool = False,
+) -> tuple[str, ...]:
     attrs = dict(run_group.attrs)
     errors: list[str] = []
     if attrs.get("schema_id") != SWIM_BOUT_RUN_SCHEMA_ID:
@@ -238,15 +264,26 @@ def validate_swim_bout_array_manifest(run_group: Any) -> tuple[str, ...]:
             required=_required_specs(),
             optional_bundles=_optional_bundles(),
             columnar_table_paths=_COLUMNAR_TABLE_PATHS,
+            byte_planner_adopted=byte_planner_adopted,
         )
     )
     return tuple(errors)
 
 
-def write_swim_bout_array_manifest(run_group: Any) -> dict[str, Any]:
-    manifest = build_swim_bout_array_manifest(run_group)
+def write_swim_bout_array_manifest(
+    run_group: Any,
+    *,
+    byte_planner_adopted: bool = False,
+) -> dict[str, Any]:
+    manifest = build_swim_bout_array_manifest(
+        run_group,
+        byte_planner_adopted=byte_planner_adopted,
+    )
     run_group.attrs[MANIFEST_ATTRIBUTE] = manifest
-    errors = validate_swim_bout_array_manifest(run_group)
+    errors = validate_swim_bout_array_manifest(
+        run_group,
+        byte_planner_adopted=byte_planner_adopted,
+    )
     if errors:
         raise ValueError("Invalid swim-bout exact array manifest: " + "; ".join(errors))
     return manifest
@@ -257,6 +294,7 @@ __all__ = [
     "SWIM_BOUT_LAYOUT",
     "SWIM_BOUT_RUN_SCHEMA_ID",
     "SWIM_BOUT_RUN_SCHEMA_VERSION",
+    "build_swim_bout_array_declarations",
     "build_swim_bout_array_manifest",
     "validate_swim_bout_array_manifest",
     "write_swim_bout_array_manifest",

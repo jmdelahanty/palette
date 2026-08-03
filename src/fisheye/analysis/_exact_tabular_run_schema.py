@@ -27,6 +27,8 @@ from fisheye.shared.zarr.storage_intent import AccessPattern, WriteMode
 
 MANIFEST_ATTRIBUTE = "array_schema_manifest"
 EXCLUDED_REPORT_PREFIXES = ("visualizations", "report_tables")
+LEGACY_COLUMNAR_PHYSICAL_POLICY_OWNER = "shared_columnar_storage_policy"
+BYTE_PLANNER_PHYSICAL_POLICY_OWNER = "analysis_storage_planning_v1"
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,7 @@ def _declaration(
     *,
     schema_prefix: str,
     required: bool,
+    byte_planner_adopted: bool = False,
 ) -> AnalysisArrayDeclaration:
     dtype = np.dtype(array.dtype)
     if spec.dtype is not None and dtype != np.dtype(spec.dtype):
@@ -211,8 +214,46 @@ def _declaration(
         authority_role=spec.authority,
         fill_semantics=spec.fill,
         null_semantics=spec.null,
-        physical_policy_owner="shared_columnar_storage_policy",
-        byte_planner_adopted=False,
+        physical_policy_owner=(
+            BYTE_PLANNER_PHYSICAL_POLICY_OWNER
+            if byte_planner_adopted
+            else LEGACY_COLUMNAR_PHYSICAL_POLICY_OWNER
+        ),
+        byte_planner_adopted=byte_planner_adopted,
+    )
+
+
+def build_exact_array_declarations(
+    arrays: Mapping[str, Any],
+    *,
+    schema_prefix: str,
+    required: Mapping[str, ColumnSpec],
+    optional_bundles: Mapping[str, Mapping[str, ColumnSpec]],
+    byte_planner_adopted: bool = False,
+) -> tuple[AnalysisArrayDeclaration, ...]:
+    """Return the closed declaration set for one observed compact run.
+
+    The logical schema remains identical between the established columnar
+    layout and an opt-in byte-planned candidate.  Only the physical-policy
+    owner and adoption flag differ.  Callers must still derive concrete
+    chunks/shards from the returned declarations and the observed fixed-width
+    array facts; this helper never chooses a storage profile.
+    """
+
+    specs, _enabled = _require_array_specs(
+        arrays,
+        required=required,
+        optional_bundles=optional_bundles,
+    )
+    return tuple(
+        _declaration(
+            specs[path],
+            arrays[path],
+            schema_prefix=schema_prefix,
+            required=path in required,
+            byte_planner_adopted=byte_planner_adopted,
+        )
+        for path in sorted(specs)
     )
 
 
@@ -228,21 +269,25 @@ def build_exact_manifest(
     required: Mapping[str, ColumnSpec],
     optional_bundles: Mapping[str, Mapping[str, ColumnSpec]],
     columnar_table_paths: Sequence[str],
+    byte_planner_adopted: bool = False,
 ) -> dict[str, Any]:
     specs, enabled = _require_array_specs(
         arrays, required=required, optional_bundles=optional_bundles
     )
-    declarations: list[dict[str, object]] = []
+    declarations = build_exact_array_declarations(
+        arrays,
+        schema_prefix=schema_prefix,
+        required=required,
+        optional_bundles=optional_bundles,
+        byte_planner_adopted=byte_planner_adopted,
+    )
+    declaration_by_path = {
+        declaration.path: declaration for declaration in declarations
+    }
+    declaration_manifests: list[dict[str, object]] = []
     dimensions: dict[str, int] = {}
     for path in sorted(specs):
-        declaration = _declaration(
-            specs[path],
-            arrays[path],
-            schema_prefix=schema_prefix,
-            required=path in required,
-        )
-        item = declaration.as_manifest()
-        declarations.append(item)
+        declaration_manifests.append(declaration_by_path[path].as_manifest())
         shape = tuple(int(value) for value in arrays[path].shape)
         _shape_template, item_dimensions = _shape_contract(specs[path], shape)
         for name, value in item_dimensions.items():
@@ -259,7 +304,7 @@ def build_exact_manifest(
         "layout": layout,
         "enabled_optional_bundles": list(enabled),
         "dimensions": dimensions,
-        "arrays": declarations,
+        "arrays": declaration_manifests,
         "columnar_tables": _columnar_table_declarations(
             run_group,
             specs=specs,
@@ -267,8 +312,12 @@ def build_exact_manifest(
         ),
         "forbidden_layouts": ["hierarchical_v1"],
         "excluded_non_scientific_report_namespaces": list(EXCLUDED_REPORT_PREFIXES),
-        "physical_policy_owner": "shared_columnar_storage_policy",
-        "byte_planner_adopted": False,
+        "physical_policy_owner": (
+            BYTE_PLANNER_PHYSICAL_POLICY_OWNER
+            if byte_planner_adopted
+            else LEGACY_COLUMNAR_PHYSICAL_POLICY_OWNER
+        ),
+        "byte_planner_adopted": byte_planner_adopted,
     }
     return {
         "schema_id": manifest_schema_id,
@@ -293,6 +342,7 @@ def validate_exact_manifest(
     required: Mapping[str, ColumnSpec],
     optional_bundles: Mapping[str, Mapping[str, ColumnSpec]],
     columnar_table_paths: Sequence[str],
+    byte_planner_adopted: bool = False,
 ) -> tuple[str, ...]:
     errors: list[str] = []
     if type(manifest) is not dict:
@@ -331,6 +381,7 @@ def validate_exact_manifest(
             required=required,
             optional_bundles=optional_bundles,
             columnar_table_paths=columnar_table_paths,
+            byte_planner_adopted=byte_planner_adopted,
         )
         if canonical_json_bytes(manifest) != canonical_json_bytes(expected):
             errors.append("array_schema_manifest does not equal the executable schema")
@@ -401,8 +452,11 @@ def _infer_units(name: str) -> str | None:
 
 
 __all__ = [
+    "BYTE_PLANNER_PHYSICAL_POLICY_OWNER",
     "ColumnSpec",
+    "LEGACY_COLUMNAR_PHYSICAL_POLICY_OWNER",
     "MANIFEST_ATTRIBUTE",
+    "build_exact_array_declarations",
     "build_exact_manifest",
     "collect_run_arrays",
     "prefixed_specs",

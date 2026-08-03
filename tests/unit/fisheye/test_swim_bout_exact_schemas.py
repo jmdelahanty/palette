@@ -172,6 +172,44 @@ def test_bout_kinematics_manifest_is_exact_with_optional_eye_bundle() -> None:
     ]
 
 
+def test_exact_compact_manifests_bind_byte_planner_adoption_explicitly() -> None:
+    swim = _swim_group()
+    swim_manifest = swim_schema.build_swim_bout_array_manifest(
+        swim,
+        byte_planner_adopted=True,
+    )
+    swim.attrs[MANIFEST_ATTRIBUTE] = swim_manifest
+    assert swim_manifest["payload"]["physical_policy_owner"] == (
+        "analysis_storage_planning_v1"
+    )
+    assert swim_manifest["payload"]["byte_planner_adopted"] is True
+    assert all(
+        declaration["byte_planner_adopted"] is True
+        for declaration in swim_manifest["payload"]["arrays"]
+    )
+    assert swim_schema.validate_swim_bout_array_manifest(
+        swim,
+        byte_planner_adopted=True,
+    ) == ()
+    assert swim_schema.validate_swim_bout_array_manifest(swim)
+
+    bout = _bout_group()
+    bout_manifest = bout_schema.build_bout_kinematics_array_manifest(
+        bout,
+        byte_planner_adopted=True,
+    )
+    bout.attrs[MANIFEST_ATTRIBUTE] = bout_manifest
+    assert bout_manifest["payload"]["physical_policy_owner"] == (
+        "analysis_storage_planning_v1"
+    )
+    assert bout_manifest["payload"]["byte_planner_adopted"] is True
+    assert bout_schema.validate_bout_kinematics_array_manifest(
+        bout,
+        byte_planner_adopted=True,
+    ) == ()
+    assert bout_schema.validate_bout_kinematics_array_manifest(bout)
+
+
 def test_bout_kinematics_manifest_rejects_missing_unexpected_wrong_dtype_and_tampering() -> None:
     missing = _bout_group()
     _delete_array(missing, "movement_metrics/bout_id")
