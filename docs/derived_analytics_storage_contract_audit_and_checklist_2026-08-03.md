@@ -3,7 +3,8 @@
 Date: 2026-08-03
 
 Status: active implementation checklist; read-only census and correctness
-phases 1-3 complete; initial phase-4 exact-schema work in review; no production
+phases 1-3 complete; reusable exact-array declarations and the first complete
+phase-4 schema are integrated; no production
 profile or scientific selector authority changed by these checkpoints
 
 ## Purpose
@@ -105,7 +106,7 @@ true.
 | Track kinematics | Strong logical, lineage, materializer, and registry contract | Replace stage-specific fixed row grids with byte planning and benchmark the real consumer |
 | Subject shape | Strong typed semantic surface, content manifest, lineage, and atomic sharded publication | Byte-plan heterogeneous semantic arrays; add registry projection |
 | Tail kinematics | Strong typed surface, coordinate manifest, and whole-shard worker ownership | Replace fixed 262,144-row policy; add registry projection |
-| Eye angles | Strong semantic dense layout and registry publication | Close dtype validation for every array and migrate fixed grids to byte planning |
+| Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, atomic publication, and registry publication | Migrate the still-fixed semantic chunk/shard grid to byte planning and benchmark the real consumers |
 | Swim bouts | Strong event/frame-axis semantics and compact tables | Add a closed whole-run array manifest, authoritative reader selection, byte planning, and registry projection |
 | Bout kinematics | Exact structured table builders and compact columnar storage | Add a closed manifest, byte planning, registry projection, and consumer benchmark |
 | Stimulus response | Cataloged and atomically published | Freeze exact compact table fields and dtypes; current output is data-dependent |
@@ -160,6 +161,10 @@ benchmarks open
 (`docs/derived_analytics_storage_reconciliation_2026-08-01.md:102-124`).
 
 ## Correctness Blockers Before Physical Optimization
+
+The findings in this section are the audit baseline. Phases 1 and 2 above have
+closed the discovery, reader-fallback, and Parquet-generation blockers. The
+chaser component blocker remains open for Phase 5.
 
 ### Authoritative run discovery
 
@@ -228,9 +233,9 @@ production archives, selectors, or registries:
 
 | Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
 | --- | --- | --- | --- | --- |
-| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | `4923757f` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
+| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | `c1976300` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
 | Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | Integrated as `a2668075` and `f178e315`; it classifies rather than promotes |
-| Eye-angle exact schema | `/tmp/palette-eye-angle-exact-schema-20260803` / `agent/palette/eye-angle-exact-schema-20260803` | `eeacc13f` | Reusable analytics array declaration, exact eye-angle schema, writer/validator hook, focused tests | Land only after adversarial review; its shared declaration becomes the base for later exact-schema lanes |
+| Eye-angle exact schema | `/tmp/palette-eye-v7-clean-20260803` / `agent/palette/eye-v7-clean-20260803` | `dd4c0f74` | Reusable analytics array declaration, exact 41-array eye-angle schema, deep writer/reader/readiness validation, and explicit v2-v6 compatibility boundaries | Reviewed as ready, committed as `3025d66e`, and integrated as `c1976300` |
 
 After the reusable declaration lands, the next safe parallel wave is:
 
@@ -361,7 +366,7 @@ production selector activation remain out of scope.
 
 ### Phase 4 — Freeze exact logical schemas
 
-- [ ] Introduce or reuse one exact analytics stage-schema representation that
+- [x] Introduce or reuse one exact analytics stage-schema representation that
       binds concrete paths to versioned `ArrayContract` identities.
 - [ ] Require exact dtype, axes, shape, units, coordinates, null/fill semantics,
       access class, mutability, and authority role for every array.
@@ -369,7 +374,7 @@ production selector activation remain out of scope.
       dtypes, required/optional fields, and string encodings.
 - [ ] Reject data-dependent schema expansion in current stimulus-response
       publication.
-- [ ] Complete exact dtype validation for every eye-angle semantic array.
+- [x] Complete exact dtype validation for every eye-angle semantic array.
 - [ ] Add closed whole-run manifests for swim bouts and bout kinematics.
 - [ ] Freeze exact per-field bout-classification storage declarations.
 - [ ] Bind tail-posture arrays to explicit analytics contracts rather than a
@@ -497,9 +502,8 @@ gates pass:
 
 Continue correctness work before rechunking:
 
-1. land the reusable exact-array declaration and the first complete eye-angle
-   schema only after its adversarial validator/publication review is green;
-2. branch the stimulus-response and swim/bout exact-schema lanes from that
-   reviewed shared declaration; and
-3. integrate each lane serially and run the combined catalog, lifecycle, and
+1. branch the stimulus-response and swim/bout exact-schema lanes from integrated
+   commit `c1976300` and the reviewed shared declaration;
+2. keep shared catalog/planner edits in the serial coordination lane; and
+3. integrate each family lane serially and run the combined catalog, lifecycle, and
    exact-schema matrix before beginning physical-profile migrations.
