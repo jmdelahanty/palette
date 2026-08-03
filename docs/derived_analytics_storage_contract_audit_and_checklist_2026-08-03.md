@@ -215,6 +215,51 @@ Evidence:
 
 ## Implementation Checklist
 
+### Parallel Worktree Execution Plan
+
+Parallel implementation is allowed only when each lane owns a disjoint set of
+production modules and tests.  Shared catalogs, shared storage-policy types,
+publication infrastructure, registry projection, and this coordination
+checklist remain integration-lane surfaces.  A lane must stop and return for
+review instead of editing another lane's files.
+
+Current lanes are pinned from the coordination history and do not modify
+production archives, selectors, or registries:
+
+| Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
+| --- | --- | --- | --- | --- |
+| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | `4923757f` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
+| Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | May land before exact schemas because it classifies rather than promotes |
+| Eye-angle exact schema | `/tmp/palette-eye-angle-exact-schema-20260803` / `agent/palette/eye-angle-exact-schema-20260803` | `eeacc13f` | Reusable analytics array declaration, exact eye-angle schema, writer/validator hook, focused tests | Land only after adversarial review; its shared declaration becomes the base for later exact-schema lanes |
+
+After the reusable declaration lands, the next safe parallel wave is:
+
+1. stimulus-response exact compact schema and writer validation;
+2. swim-bout and bout-kinematics closed manifests;
+3. tail-kinematics and subject-shape byte-planner adoption; and
+4. chaser component sealing.
+
+Those lanes may run concurrently only when their file ownership remains
+disjoint.  Changes to `storage_contract_catalog.py`, the shared byte planner,
+atomic publication helpers, registry projection, or cross-family documentation
+are reconciled serially after the family branch passes review.
+
+Every implementation lane must satisfy this handoff checklist:
+
+- [ ] Record the exact base commit and branch/worktree path.
+- [ ] Keep the worktree clean except for the declared ownership surface.
+- [ ] Add exact positive, missing-field, unexpected-field, wrong-dtype,
+      wrong-shape, and recomputed-digest tampering tests as applicable.
+- [ ] Run focused tests outside the sandbox when real Zarr is involved; also
+      run static compilation, Ruff, and `git diff --check`.
+- [ ] Report the complete diff and validation evidence before committing.
+- [ ] Commit one reviewable checkpoint without pushing, merging, rebasing, or
+      changing the shared `/groups` checkout.
+- [ ] Re-run the combined integration matrix after the reviewed commit is
+      applied to the coordination branch.
+- [ ] Leave production selectors and canonical archives unchanged until the
+      corresponding correctness and performance promotion gates pass.
+
 ### Implemented checkpoints
 
 The first two correctness phases and the initial catalog-closure checkpoint are
@@ -438,13 +483,13 @@ gates pass:
 
 ## Immediate Next Checkpoint
 
-Begin with correctness rather than rechunking:
+Continue correctness work before rechunking:
 
-1. make workflow availability require completion **and** selector eligibility;
-2. migrate swim-bout and eye-angle implicit readers to the canonical resolver;
-3. make Parquet export generations atomic and manifest-exclusive; and
-4. add the associated recovery and stale-part regression tests.
-
-After that checkpoint, freeze the exact compact stimulus-response schema and
-expand the executable analytics catalog before beginning physical-profile
-migrations.
+1. land the closed classification catalog for maintained, embedded, artifact,
+   maintenance, active-legacy-shaped, and legacy analytics surfaces;
+2. land the reusable exact-array declaration and the first complete eye-angle
+   schema only after its adversarial validator/publication review is green;
+3. branch the stimulus-response and swim/bout exact-schema lanes from that
+   reviewed shared declaration; and
+4. integrate each lane serially and run the combined catalog, lifecycle, and
+   exact-schema matrix before beginning physical-profile migrations.
