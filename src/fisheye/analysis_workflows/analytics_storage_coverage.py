@@ -18,6 +18,11 @@ from fisheye.analysis_workflows.storage_contract_catalog import (
     DERIVED_ANALYSIS_STORAGE_CONTRACTS,
     DerivedAnalysisStorageContract,
 )
+from fisheye.analysis_workflows.storage_candidate_catalog import (
+    DERIVED_ANALYSIS_STORAGE_CANDIDATES,
+    DerivedAnalysisStorageCandidate,
+    StorageCandidatePublicationMode,
+)
 from fisheye.analysis_workflows.surface_classification_catalog import (
     ANALYTICS_SURFACE_CLASSIFICATIONS,
     AnalyticsConsumerScope,
@@ -33,7 +38,7 @@ from fisheye.registry.stage_catalog import DERIVED_ANALYSIS, STAGE_SPECS, StageS
 
 
 ANALYTICS_STORAGE_COVERAGE_SCHEMA_ID = "palette.analytics.storage_coverage"
-ANALYTICS_STORAGE_COVERAGE_SCHEMA_VERSION = 1
+ANALYTICS_STORAGE_COVERAGE_SCHEMA_VERSION = 2
 
 _REPORT_FIELDS = frozenset(
     {
@@ -41,8 +46,22 @@ _REPORT_FIELDS = frozenset(
         "schema_version",
         "derived_stage_coverage",
         "storage_contracts",
+        "storage_candidates",
         "classified_surfaces",
         "summary",
+    }
+)
+_STORAGE_CANDIDATE_FIELDS = frozenset(
+    {
+        "stage_id",
+        "profile_id",
+        "owner_module",
+        "entrypoint",
+        "publication_mode",
+        "consolidates_before_return",
+        "repairs_failed_visibility",
+        "selector_eligible",
+        "profile_promoted",
     }
 )
 _STAGE_COVERAGE_FIELDS = frozenset(
@@ -91,6 +110,9 @@ _SUMMARY_FIELDS = frozenset(
     {
         "derived_stage_count",
         "central_storage_contract_count",
+        "storage_candidate_count",
+        "atomic_storage_candidate_count",
+        "guarded_direct_storage_candidate_count",
         "classified_non_catalog_stage_count",
         "classified_surface_count",
         "additional_classified_surface_count",
@@ -282,6 +304,7 @@ def build_analytics_storage_coverage_report(
     *,
     stage_specs: Sequence[StageSpec] | None = None,
     storage_contracts: Sequence[DerivedAnalysisStorageContract] | None = None,
+    storage_candidates: Sequence[DerivedAnalysisStorageCandidate] | None = None,
     surface_classifications: Sequence[AnalyticsSurfaceClassification] | None = None,
 ) -> dict[str, object]:
     """Build and validate the deterministic live analytics coverage report."""
@@ -300,6 +323,29 @@ def build_analytics_storage_coverage_report(
         ),
     )
     contract_by_stage = {contract.stage_id: contract for contract in contracts}
+    candidates = tuple(
+        DERIVED_ANALYSIS_STORAGE_CANDIDATES
+        if storage_candidates is None
+        else storage_candidates
+    )
+    for index, candidate in enumerate(candidates):
+        if type(candidate) is not DerivedAnalysisStorageCandidate:
+            _fail(
+                f"storage_candidates[{index}] must be an exact "
+                "DerivedAnalysisStorageCandidate"
+            )
+        if candidate.stage_id not in contract_by_stage:
+            _fail(
+                f"storage candidate {candidate.stage_id!r} has no report logical contract"
+            )
+    candidate_ids = [candidate.stage_id for candidate in candidates]
+    duplicate_candidates = sorted(
+        stage_id
+        for stage_id in set(candidate_ids)
+        if candidate_ids.count(stage_id) > 1
+    )
+    if duplicate_candidates:
+        _fail(f"duplicate storage candidate ownership: {duplicate_candidates}")
     surface_by_stage = {
         surface.stage_binding: surface
         for surface in surfaces
@@ -308,6 +354,10 @@ def build_analytics_storage_coverage_report(
 
     storage_records = sorted(
         (contract.resolved_schema() for contract in contracts),
+        key=lambda record: str(record["stage_id"]),
+    )
+    candidate_records = sorted(
+        (candidate.as_record() for candidate in candidates),
         key=lambda record: str(record["stage_id"]),
     )
     surface_records = sorted(
@@ -343,10 +393,22 @@ def build_analytics_storage_coverage_report(
         "schema_version": ANALYTICS_STORAGE_COVERAGE_SCHEMA_VERSION,
         "derived_stage_coverage": derived_records,
         "storage_contracts": storage_records,
+        "storage_candidates": candidate_records,
         "classified_surfaces": surface_records,
         "summary": {
             "derived_stage_count": len(derived_records),
             "central_storage_contract_count": len(storage_records),
+            "storage_candidate_count": len(candidate_records),
+            "atomic_storage_candidate_count": sum(
+                record["publication_mode"]
+                == StorageCandidatePublicationMode.SHARED_ATOMIC.value
+                for record in candidate_records
+            ),
+            "guarded_direct_storage_candidate_count": sum(
+                record["publication_mode"]
+                == StorageCandidatePublicationMode.GUARDED_DIRECT.value
+                for record in candidate_records
+            ),
             "classified_non_catalog_stage_count": sum(
                 record["owner_kind"] == "classified_non_catalog_surface"
                 for record in derived_records
@@ -487,6 +549,44 @@ def _validate_classified_surface_record(value: object, *, index: int) -> None:
         _fail(f"{field} violates classified-surface semantics: {exc}")
 
 
+def _validate_storage_candidate_record(value: object, *, index: int) -> None:
+    field = f"storage_candidates[{index}]"
+    record = _exact_fields(value, _STORAGE_CANDIDATE_FIELDS, field=field)
+    for name in (
+        "stage_id",
+        "profile_id",
+        "owner_module",
+        "entrypoint",
+        "publication_mode",
+    ):
+        _exact_str(record[name], field=f"{field}.{name}")
+    for name in (
+        "consolidates_before_return",
+        "repairs_failed_visibility",
+        "selector_eligible",
+        "profile_promoted",
+    ):
+        _exact_bool(record[name], field=f"{field}.{name}")
+    if record["selector_eligible"] is not False:
+        _fail(f"{field}.selector_eligible must remain false")
+    if record["profile_promoted"] is not False:
+        _fail(f"{field}.profile_promoted must remain false")
+    try:
+        DerivedAnalysisStorageCandidate(
+            stage_id=record["stage_id"],
+            profile_id=record["profile_id"],
+            owner_module=record["owner_module"],
+            entrypoint_attr=record["entrypoint"],
+            publication_mode=StorageCandidatePublicationMode(
+                record["publication_mode"]
+            ),
+            consolidates_before_return=record["consolidates_before_return"],
+            repairs_failed_visibility=record["repairs_failed_visibility"],
+        )
+    except (TypeError, ValueError) as exc:
+        _fail(f"{field} violates storage-candidate semantics: {exc}")
+
+
 def validate_analytics_storage_coverage_report(report: object) -> None:
     """Fail closed on malformed, duplicated, or internally inconsistent reports."""
 
@@ -500,13 +600,30 @@ def validate_analytics_storage_coverage_report(report: object) -> None:
 
     stages = _exact_list(root["derived_stage_coverage"], field="derived_stage_coverage")
     contracts = _exact_list(root["storage_contracts"], field="storage_contracts")
+    candidates = _exact_list(root["storage_candidates"], field="storage_candidates")
     surfaces = _exact_list(root["classified_surfaces"], field="classified_surfaces")
     summary = _exact_fields(root["summary"], _SUMMARY_FIELDS, field="summary")
 
     for index, value in enumerate(contracts):
         _validate_storage_contract_record(value, index=index)
+    for index, value in enumerate(candidates):
+        _validate_storage_candidate_record(value, index=index)
     for index, value in enumerate(surfaces):
         _validate_classified_surface_record(value, index=index)
+
+    def reject_duplicates(values: list[str], *, field: str) -> None:
+        duplicates = sorted(value for value in set(values) if values.count(value) > 1)
+        if duplicates:
+            _fail(f"duplicate {field}: {duplicates}")
+
+    contract_ids = [item["stage_id"] for item in contracts]
+    candidate_ids = [item["stage_id"] for item in candidates]
+    surface_ids = [item["surface_id"] for item in surfaces]
+    reject_duplicates(contract_ids, field="storage contract stage ids")
+    reject_duplicates(candidate_ids, field="storage candidate stage ids")
+    reject_duplicates(surface_ids, field="classified surface ids")
+    if set(candidate_ids) - set(contract_ids):
+        _fail("storage candidates contain stages absent from logical contracts")
 
     stage_ids: list[str] = []
     for index, value in enumerate(stages):
@@ -553,16 +670,7 @@ def validate_analytics_storage_coverage_report(report: object) -> None:
                 f"{field}.artifact_families do not match its declared owner"
             )
 
-    def reject_duplicates(values: list[str], *, field: str) -> None:
-        duplicates = sorted(value for value in set(values) if values.count(value) > 1)
-        if duplicates:
-            _fail(f"duplicate {field}: {duplicates}")
-
     reject_duplicates(stage_ids, field="derived stage ids")
-    contract_ids = [item["stage_id"] for item in contracts]
-    surface_ids = [item["surface_id"] for item in surfaces]
-    reject_duplicates(contract_ids, field="storage contract stage ids")
-    reject_duplicates(surface_ids, field="classified surface ids")
     if set(contract_ids) - set(stage_ids):
         _fail("storage contracts contain stages absent from derived coverage")
 
@@ -570,12 +678,25 @@ def validate_analytics_storage_coverage_report(report: object) -> None:
         _fail("derived_stage_coverage must be sorted by stage_id")
     if contract_ids != sorted(contract_ids):
         _fail("storage_contracts must be sorted by stage_id")
+    if candidate_ids != sorted(candidate_ids):
+        _fail("storage_candidates must be sorted by stage_id")
     if surface_ids != sorted(surface_ids):
         _fail("classified_surfaces must be sorted by surface_id")
 
     expected_summary = {
         "derived_stage_count": len(stages),
         "central_storage_contract_count": len(contracts),
+        "storage_candidate_count": len(candidates),
+        "atomic_storage_candidate_count": sum(
+            item["publication_mode"]
+            == StorageCandidatePublicationMode.SHARED_ATOMIC.value
+            for item in candidates
+        ),
+        "guarded_direct_storage_candidate_count": sum(
+            item["publication_mode"]
+            == StorageCandidatePublicationMode.GUARDED_DIRECT.value
+            for item in candidates
+        ),
         "classified_non_catalog_stage_count": sum(
             item["owner_kind"] == "classified_non_catalog_surface" for item in stages
         ),

@@ -263,7 +263,7 @@ a safe base for new work.
 | Chaser remaining exact consumers | `/tmp/palette-chaser-remaining-handles-20260803` / `agent/palette/chaser-remaining-handles-20260803` | integrated as `e179075d` | Exact egocentric/quadrant handles in gaze, near-field, batch orchestration, and explicit historical-wrapper compatibility | Reviewed and integrated; selector activation remains separate |
 | Archive metadata hardening | coordination lane | integrated as `0a4985fe` | Fork-safe archive lock, serialized direct consolidators/activations, exact failed-tombstone repair, bout rollback consolidation, and subject-mask unknown-ack recovery | Independently reviewed ACCEPT; arbitrary legacy/external mutators still require quiescence until migrated |
 | Eye-angle atomic candidate | `/tmp/palette-eye-angle-atomic-candidate-v2-20260803` / `agent/palette/eye-angle-atomic-candidate-v2-20260803` | integrated as `c658dfcc` and `10bf957e` | Direct byte-planned 41-array candidate, atomic non-promoting publication, exact consolidated metadata, containment guards, and failure repair | Reviewed and integrated; benchmark and promotion remain pending |
-| Physical candidate catalog | coordination lane | current checkpoint | Executable separation of seven unpromoted candidate profiles from their production logical contracts, including exact owner, atomic/direct mode, consolidation, and repair state | Extend only when a family candidate is implemented and validated; never infer promotion from membership |
+| Physical candidate catalog | coordination lane | integrated as `e26450b4` | Executable separation of seven unpromoted candidate profiles from their production logical contracts, including exact owner, atomic/direct mode, consolidation, and repair state | Extend only when a family candidate is implemented and validated; never infer promotion from membership |
 | Stimulus-response v3 byte candidate | `/tmp/palette-stimulus-response-v3-candidate-20260803` / `agent/palette/stimulus-response-v3-candidate-20260803` | integrated as `40434306` | Exact opt-in candidate writer, storage receipt, metadata equivalence, immutable publisher, strict reader, and adversarial tests | Integrated; benchmark evidence and promotion remain pending |
 | Exact-tabular read benchmark | `/tmp/palette-bout-storage-benchmark-20260803` / `agent/palette/bout-storage-benchmark-20260803` | integrated as `e348d53f` | Fresh-process deterministic source/candidate runner for swim bouts and bout kinematics, exact equality, access-class reads, full scans, storage/RSS/timing evidence, and strict output contracts | Integrated; authorized short/full-duration execution and physical-I/O tracing remain pending |
 
@@ -328,6 +328,10 @@ now implemented on the coordination branch:
   stage registry, exact storage catalog, and all 22 classified auxiliary
   surfaces, including relational ownership and tamper validation:
   `fdc3f076`.
+- coverage schema v2 also joins the separate physical-candidate catalog while
+  preserving the candidate/adoption boundary: duplicate ownership, missing
+  logical contracts, forged selector eligibility, forged promotion, and
+  publication-mode drift fail closed.
 - exact byte-planned tail-kinematics candidate publication with semantic fills,
   executable receipt replanning, direct/consolidated metadata equivalence,
   serial whole-shard ownership, and selector non-mutation: `600fab64`.
@@ -413,6 +417,8 @@ a v3 storage-candidate regression.
 - [x] Separate logical, physical, lifecycle, consumer, and benchmark concerns.
 - [x] Add a machine-readable analytics coverage report generated from the live
       writer, stage, and storage catalogs.
+- [x] Include selector-ineligible physical candidates in coverage schema v2
+      without treating candidate presence as production adoption or promotion.
 - [x] Make CI fail when a newly maintained array-bearing analytics stage has no
       explicit coverage classification.
 

@@ -112,6 +112,13 @@ The catalog distinguishes shared atomic candidates—which consolidate and repai
 failed inline visibility—from guarded direct candidates whose remaining atomic
 publication/consolidation migration is still explicit.
 
+`analysis_workflows.analytics_storage_coverage` schema version 2 joins that
+candidate catalog to the maintained stage and logical-contract census. It
+rejects duplicate candidate ownership, candidates without a logical contract,
+and any serialized claim that a cataloged candidate is selector-eligible or
+promoted. Candidate coverage is therefore observable in one canonical report
+without turning implementation evidence into production authority.
+
 Lower-level writer functions may write directly to explicitly supplied
 in-memory or disposable Zarr groups for tests. Operator CLIs and DAG execution
 must use the atomic materializer for authoritative recording archives.

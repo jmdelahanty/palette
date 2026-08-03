@@ -14,6 +14,9 @@ from fisheye.analysis_workflows.analytics_storage_coverage import (
     build_analytics_storage_coverage_report,
     validate_analytics_storage_coverage_report,
 )
+from fisheye.analysis_workflows.storage_candidate_catalog import (
+    DERIVED_ANALYSIS_STORAGE_CANDIDATES,
+)
 from fisheye.analysis_workflows.storage_contract_catalog import (
     DERIVED_ANALYSIS_STORAGE_CONTRACTS,
 )
@@ -54,15 +57,22 @@ def test_live_report_covers_every_maintained_derived_stage_exactly_once() -> Non
 def test_report_preserves_live_storage_and_classification_statuses() -> None:
     report = build_analytics_storage_coverage_report()
     contracts = {record["stage_id"]: record for record in report["storage_contracts"]}
+    candidates = {
+        record["stage_id"]: record for record in report["storage_candidates"]
+    }
     surfaces = {
         record["surface_id"]: record for record in report["classified_surfaces"]
     }
 
     assert len(contracts) == len(DERIVED_ANALYSIS_STORAGE_CONTRACTS) == 9
+    assert len(candidates) == len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == 7
     assert len(surfaces) == len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 22
     assert report["summary"] == {
         "derived_stage_count": 10,
         "central_storage_contract_count": 9,
+        "storage_candidate_count": 7,
+        "atomic_storage_candidate_count": 5,
+        "guarded_direct_storage_candidate_count": 2,
         "classified_non_catalog_stage_count": 1,
         "classified_surface_count": 22,
         "additional_classified_surface_count": 21,
@@ -74,6 +84,14 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
     assert contracts["eye_angles"]["byte_planner_adopted"] is False
     assert contracts["eye_angles"]["registry_publication"] == (
         "serialized_finalizer_v1"
+    )
+    assert candidates["eye_angles"]["profile_id"] == (
+        "eye_angle_access_aware_candidate_v1"
+    )
+    assert all(
+        record["selector_eligible"] is False
+        and record["profile_promoted"] is False
+        for record in candidates.values()
     )
     assert surfaces["chaser_distance"]["central_storage_catalog_required"] is True
     assert (
@@ -123,6 +141,17 @@ def test_duplicate_classified_surface_id_fails_closed() -> None:
     ):
         build_analytics_storage_coverage_report(
             surface_classifications=(*ANALYTICS_SURFACE_CLASSIFICATIONS, duplicate)
+        )
+
+
+def test_duplicate_storage_candidate_ownership_fails_closed() -> None:
+    duplicate = DERIVED_ANALYSIS_STORAGE_CANDIDATES[0]
+
+    with pytest.raises(
+        AnalyticsStorageCoverageError, match="duplicate storage candidate ownership"
+    ):
+        build_analytics_storage_coverage_report(
+            storage_candidates=(*DERIVED_ANALYSIS_STORAGE_CANDIDATES, duplicate)
         )
 
 
@@ -214,6 +243,12 @@ def test_classified_fallback_cannot_hide_required_central_adoption() -> None:
             ),
             "schema_version must be an exact positive int",
         ),
+        (
+            lambda report: report["storage_candidates"][0].__setitem__(
+                "selector_eligible", 0
+            ),
+            "selector_eligible must be an exact bool",
+        ),
     ),
 )
 def test_report_validator_rejects_malformed_exact_fields_and_types(
@@ -245,6 +280,51 @@ def test_report_validator_rejects_serialized_owner_path_drift() -> None:
     with pytest.raises(
         AnalyticsStorageCoverageError,
         match="artifact_families do not match its declared owner",
+    ):
+        validate_analytics_storage_coverage_report(report)
+
+
+@pytest.mark.parametrize("field", ("selector_eligible", "profile_promoted"))
+def test_report_validator_rejects_candidate_promotion_claim(field: str) -> None:
+    report = deepcopy(build_analytics_storage_coverage_report())
+    report["storage_candidates"][0][field] = True
+
+    with pytest.raises(
+        AnalyticsStorageCoverageError,
+        match=rf"{field} must remain false",
+    ):
+        validate_analytics_storage_coverage_report(report)
+
+
+def test_report_validator_rejects_candidate_publication_semantic_drift() -> None:
+    report = deepcopy(build_analytics_storage_coverage_report())
+    atomic = next(
+        record
+        for record in report["storage_candidates"]
+        if record["publication_mode"] == "shared_atomic_nonpromoting_v1"
+    )
+    atomic["repairs_failed_visibility"] = False
+
+    with pytest.raises(
+        AnalyticsStorageCoverageError,
+        match="violates storage-candidate semantics",
+    ):
+        validate_analytics_storage_coverage_report(report)
+
+
+def test_report_validator_rejects_candidate_without_logical_contract() -> None:
+    report = deepcopy(build_analytics_storage_coverage_report())
+    candidate = report["storage_candidates"][-1]
+    report["storage_contracts"] = [
+        contract
+        for contract in report["storage_contracts"]
+        if contract["stage_id"] != candidate["stage_id"]
+    ]
+    report["summary"]["central_storage_contract_count"] -= 1
+
+    with pytest.raises(
+        AnalyticsStorageCoverageError,
+        match="storage candidates contain stages absent from logical contracts",
     ):
         validate_analytics_storage_coverage_report(report)
 
