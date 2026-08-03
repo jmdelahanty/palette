@@ -110,9 +110,9 @@ true.
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
 | Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract | Version or flatten the two structured lineage dtypes in the shared factory before candidate adoption; retain float64 position authority |
-| Subject shape | Strong typed semantic surface, content manifest, lineage, atomic sharded publication, and serialized registry projection | Close the currently dynamic component/relation/body-frame array inventory before byte-planned adoption |
+| Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, content manifest, lineage, atomic sharded publication, strict reload, and serialized registry projection | Add an explicit selector-ineligible byte-planned physical candidate and benchmark it |
 | Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
-| Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an explicit selector-ineligible byte-planned direct-writer candidate | Add a consolidated atomic publication boundary, then benchmark through Palette and Crimson before profile promotion |
+| Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an atomic selector-ineligible byte-planned candidate with exact failure-visibility repair | Benchmark through Palette and Crimson before profile promotion |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
 | Bout kinematics | Exact compact-v7 manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
 | Stimulus response | Exact opt-in compact-v3 schema and selector-ineligible shared-planner/factory candidate with closed bundles, semantic fills, pinned codecs, immutable atomic publication, and direct/consolidated validation; legacy v2 remains the default compatibility path | Benchmark the v3 candidate through real producers/consumers before any default change |
@@ -125,7 +125,7 @@ true.
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
-| Chaser components | Protocol-neutral schemas, payload-bound manifests, selector and explicit dependency-handle readers, all ten maintained writers routed through node-local sealed immutable publication, exact cluster runner receipts, and explicit egocentric-to-bout-to-escape consumption | Propagate handles through the remaining scientific consumers/exports; add consolidated activation and chained recovery coverage |
+| Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Add central catalog/byte planning plus consolidated activation and chained recovery coverage |
 | Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
@@ -260,6 +260,9 @@ a safe base for new work.
 | Shared compact candidate publication | coordination lane | integrated from `d82dcf41` | Immutable selector-ineligible swim-bout and bout-kinematics candidates, logical hashes, local and authoritative-root metadata equivalence, and selector non-mutation | Candidate evidence only; benchmark and promotion remain pending |
 | Chaser scientific writer adoption | historical isolated lane | integrated as `fc6a48c5` | All ten component writers, sealed staging capability, atomic component publisher, focused tests, and lifecycle doc | Integrated as candidate publication; explicit dependency handles and activation remain separate |
 | Chaser dependency/runner receipts | coordination lane | integrated as `34c067e5` and `21e115b3` | Self-digested explicit handles, detached exact reads, writer receipt v2, and cluster target receipt v2 | Integrated; scientific chained consumers and selector activation remain separate |
+| Chaser remaining exact consumers | `/tmp/palette-chaser-remaining-handles-20260803` / `agent/palette/chaser-remaining-handles-20260803` | integrated as `e179075d` | Exact egocentric/quadrant handles in gaze, near-field, batch orchestration, and explicit historical-wrapper compatibility | Reviewed and integrated; selector activation remains separate |
+| Archive metadata hardening | coordination lane | integrated as `0a4985fe` | Fork-safe archive lock, serialized direct consolidators/activations, exact failed-tombstone repair, bout rollback consolidation, and subject-mask unknown-ack recovery | Independently reviewed ACCEPT; arbitrary legacy/external mutators still require quiescence until migrated |
+| Eye-angle atomic candidate | `/tmp/palette-eye-angle-atomic-candidate-v2-20260803` / `agent/palette/eye-angle-atomic-candidate-v2-20260803` | integrated as `c658dfcc` and `10bf957e` | Direct byte-planned 41-array candidate, atomic non-promoting publication, exact consolidated metadata, containment guards, and failure repair | Reviewed and integrated; benchmark and promotion remain pending |
 | Stimulus-response v3 byte candidate | `/tmp/palette-stimulus-response-v3-candidate-20260803` / `agent/palette/stimulus-response-v3-candidate-20260803` | integrated as `40434306` | Exact opt-in candidate writer, storage receipt, metadata equivalence, immutable publisher, strict reader, and adversarial tests | Integrated; benchmark evidence and promotion remain pending |
 | Exact-tabular read benchmark | `/tmp/palette-bout-storage-benchmark-20260803` / `agent/palette/bout-storage-benchmark-20260803` | integrated as `e348d53f` | Fresh-process deterministic source/candidate runner for swim bouts and bout kinematics, exact equality, access-class reads, full scans, storage/RSS/timing evidence, and strict output contracts | Integrated; authorized short/full-duration execution and physical-I/O tracing remain pending |
 
@@ -388,10 +391,11 @@ made explicit about completion, eligibility, and compatibility. These are
 correctness results, not full-duration performance evidence.
 
 The integrated chaser manifest/materializer/writer matrix passed 82 tests.
-Twenty broader historical chained-workflow cases remain intentionally failing
-closed because they try to select an ineligible component through `latest`;
-they are the explicit-handle migration surface, not authorization to restore
-implicit discovery.
+The remaining gaze/near-field and batch callers then passed 38 exact-handle and
+fail-closed preflight tests in isolation. After integration with eye-angle and
+the hardened atomic publisher, the combined focused matrix passed 86 tests.
+Historical name/`latest` discovery remains available only through explicit
+compatibility flags; it is not authorization to restore implicit discovery.
 
 The integrated stimulus-response family matrix passed 142 tests. One unchanged
 historical swim-bout fixture remains intentionally excluded because it creates
@@ -699,13 +703,15 @@ gates pass:
 
 Continue exact-contract and opt-in candidate work without promoting defaults:
 
-1. integrate subject-shape exact closure, finish the eye-angle atomic candidate
-   boundary, and continue migrating remaining chaser scientific consumers to
-   the explicit dependency handles now used by bout response and escape events;
+1. add selector-ineligible byte-planned candidates for the remaining exact
+   families, beginning with subject shape and the structured-lineage decision
+   for track kinematics;
 2. keep shared catalog/planner/registry/selector edits in this serial
    coordination lane;
-3. integrate each family lane serially and run the combined catalog, lifecycle,
+3. close catalog/planner/lifecycle ownership for stimulus epochs,
+   detection/session occupancy, and Chaser components in disjoint family lanes;
+4. integrate each family lane serially and run the combined catalog, lifecycle,
    exact-schema, and storage-receipt matrix; and
-4. execute the integrated writer/rematerialization/publication/reader benchmark
+5. execute the integrated writer/rematerialization/publication/reader benchmark
    for selector-ineligible swim-bout and bout-kinematics candidates on
    representative short and full-duration datasets.
