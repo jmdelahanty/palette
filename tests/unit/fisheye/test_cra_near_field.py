@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import zarr
 
-from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
+import fisheye.analysis.chaser_near_field_occupancy as near_field_module
+import fisheye.analysis.cra_near_field as cra_compatibility_module
+from fisheye.analysis.chaser_component_publication import (
+    ChaserComponentContract,
+    build_chaser_component_handle,
+    component_record_sha256,
+    persist_chaser_component_manifest,
+)
+from fisheye.analysis.chaser_component_writer import _STAGING_CAPABILITY
+from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_near_field_occupancy import (
     COMPONENT_PARENT_NAME,
-    DEFAULT_COMPONENT_NAME,
     DISTANCE_CDF_PNG_ARTIFACT_NAME,
     INTERACTIVE_ARTIFACT_NAME,
     INTERACTIVE_RENDERER,
@@ -20,6 +30,7 @@ from fisheye.analysis.chaser_near_field_occupancy import (
     SUMMARY_PNG_ARTIFACT_NAME,
     ArenaGeometry,
     _available_annulus_area_mm2,
+    _resolve_quadrant_occupancy_component,
     build_chaser_near_field_occupancy_result as build_cra_near_field_result,
     compute_hysteresis_visits,
     write_chaser_near_field_occupancy_component as write_cra_near_field_component,
@@ -27,6 +38,10 @@ from fisheye.analysis.chaser_near_field_occupancy import (
 from fisheye.analysis.chaser_profiles import default_goodcopbadcop_source_profile_path
 from fisheye.analysis.chaser_quadrant_occupancy import (
     DEFAULT_COMPONENT_NAME as DEFAULT_QUADRANT_COMPONENT_NAME,
+    METHOD as QUADRANT_METHOD,
+    METHOD_VERSION as QUADRANT_METHOD_VERSION,
+    SCHEMA_ID as QUADRANT_SCHEMA_ID,
+    SCHEMA_VERSION as QUADRANT_SCHEMA_VERSION,
     build_chaser_quadrant_occupancy_result as build_cra_primary_endpoint_result,
     write_chaser_quadrant_occupancy_component as write_cra_primary_endpoint_component,
 )
@@ -35,14 +50,7 @@ from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFA
 from tests.unit.fisheye.test_cra_primary_endpoint import _make_archive, _make_chaser_result
 
 
-_CRA_NEAR_FIELD_AUTHORITY_DEFERRED = pytest.mark.xfail(
-    raises=ChaserDistanceReadError,
-    strict=True,
-    reason=(
-        "deferred: CRA near-field integration requires independently sealed "
-        "behavior, arena-geometry, quadrant, and near-field authorities"
-    ),
-)
+pytestmark = pytest.mark.usefixtures("logical_chaser_distance_reader")
 
 
 def _decode_first(array: zarr.Array) -> str:
@@ -80,9 +88,201 @@ def _write_sources(zarr_path: Path) -> str:
         chaser_distance_run="chaser_distance_1",
         protocol_profile=default_goodcopbadcop_source_profile_path(),
     )
-    return write_cra_primary_endpoint_component(
-        zarr_path, endpoint, overwrite=True, write_png=False
+    component_path = write_cra_primary_endpoint_component.__wrapped__(
+        zarr_path,
+        endpoint,
+        overwrite=True,
+        write_png=False,
+        write_interactive_spec=False,
+        _chaser_component_staging_capability=_STAGING_CAPABILITY,
     )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
+    relative_path = str(component_path).removeprefix(f"{snapshot.run_path}/")
+    persist_chaser_component_manifest(
+        root[str(component_path)],
+        snapshot=snapshot,
+        relative_path=relative_path,
+        contract=ChaserComponentContract(
+            component_family="chaser_quadrant_occupancy",
+            component_name=DEFAULT_QUADRANT_COMPONENT_NAME,
+            semantic_schema_id=QUADRANT_SCHEMA_ID,
+            semantic_schema_version=QUADRANT_SCHEMA_VERSION,
+            method_id=QUADRANT_METHOD,
+            method_version=QUADRANT_METHOD_VERSION,
+            parameters={"fixture": "exact_quadrant_dependency"},
+            source_authorities={"fixture": "sealed"},
+        ),
+    )
+    return str(component_path)
+
+
+def _quadrant_handle(zarr_path: Path, component_path: str) -> dict[str, object]:
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
+    relative_path = component_path.removeprefix(f"{snapshot.run_path}/")
+    return build_chaser_component_handle(
+        root[component_path],
+        snapshot=snapshot,
+        relative_path=relative_path,
+    )
+
+
+def _resolve_quadrant_fixture(
+    zarr_path: Path,
+    *,
+    handle: dict[str, object] | None,
+    legacy_compatibility: bool,
+):
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    snapshot = load_chaser_distance_run(root, run_name="chaser_distance_1")
+    return _resolve_quadrant_occupancy_component(
+        root,
+        snapshot=snapshot,
+        run_group=root[snapshot.run_path],
+        chaser_distance_run_path=snapshot.run_path,
+        component_name="latest",
+        dependency_handle=handle,
+        legacy_compatibility=legacy_compatibility,
+    )
+
+
+def test_quadrant_latest_discovery_requires_explicit_compatibility(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+    component_path = _write_sources(zarr_path)
+
+    with pytest.raises(ValueError, match="explicit self-digested"):
+        _resolve_quadrant_fixture(
+            zarr_path,
+            handle=None,
+            legacy_compatibility=False,
+        )
+
+    _component, name, path, manifest_sha256 = _resolve_quadrant_fixture(
+        zarr_path,
+        handle=None,
+        legacy_compatibility=True,
+    )
+    assert name == DEFAULT_QUADRANT_COMPONENT_NAME
+    assert path == component_path
+    assert manifest_sha256 is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["component_path", "component_manifest_sha256", "record_sha256"],
+)
+def test_invalid_explicit_quadrant_handle_never_falls_back_to_latest(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+    component_path = _write_sources(zarr_path)
+    invalid = copy.deepcopy(_quadrant_handle(zarr_path, component_path))
+    if field != "record_sha256":
+        invalid[field] = (
+            f"{invalid[field]}-wrong"
+            if field == "component_path"
+            else "0" * 64
+        )
+        body = {key: value for key, value in invalid.items() if key != "record_sha256"}
+        invalid["record_sha256"] = component_record_sha256(body)
+    else:
+        invalid[field] = "0" * 64
+
+    with pytest.raises(ValueError):
+        _resolve_quadrant_fixture(
+            zarr_path,
+            handle=invalid,
+            legacy_compatibility=True,
+        )
+
+
+def test_quadrant_handle_rejects_different_base_snapshot(tmp_path: Path) -> None:
+    zarr_path = _make_archive(tmp_path)
+    component_path = _write_sources(zarr_path)
+    source_handle = copy.deepcopy(_quadrant_handle(zarr_path, component_path))
+    source_handle["base_publication_seal_sha256"] = "f" * 64
+    body = {
+        key: value
+        for key, value in source_handle.items()
+        if key != "record_sha256"
+    }
+    source_handle["record_sha256"] = component_record_sha256(body)
+
+    with pytest.raises(ValueError, match="different base authority"):
+        _resolve_quadrant_fixture(
+            zarr_path,
+            handle=source_handle,
+            legacy_compatibility=True,
+        )
+
+
+def test_quadrant_handle_rejects_wrong_component_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        near_field_module,
+        "open_explicit_chaser_component_group",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            component_family="wrong_family",
+            component_name="sealed_quadrant",
+            component_path=(
+                "analysis/chaser_distance_runs/run/wrong_family/sealed_quadrant"
+            ),
+            manifest_sha256="a" * 64,
+            group={},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="different component family"):
+        _resolve_quadrant_occupancy_component(
+            {},
+            snapshot=SimpleNamespace(run_path="analysis/chaser_distance_runs/run"),
+            run_group={},
+            chaser_distance_run_path="analysis/chaser_distance_runs/run",
+            component_name="latest",
+            dependency_handle={"explicit": True},
+            legacy_compatibility=True,
+        )
+
+
+def test_historical_cra_alias_enables_only_explicit_legacy_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        cra_compatibility_module,
+        "build_chaser_near_field_occupancy_result",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "result",
+    )
+
+    result = cra_compatibility_module.build_cra_near_field_result(
+        "archive.zarr",
+        cra_primary_endpoint_component="object_relative_pre_post_v1",
+    )
+
+    assert result == "result"
+    assert calls == [
+        (
+            ("archive.zarr",),
+            {
+                "quadrant_occupancy_component": "latest",
+                "legacy_quadrant_occupancy_component_compatibility": True,
+            },
+        )
+    ]
+
+
+def test_historical_cra_alias_cannot_weaken_exact_handle_path() -> None:
+    with pytest.raises(ValueError, match="cannot be combined"):
+        cra_compatibility_module.build_cra_near_field_result(
+            "archive.zarr",
+            cra_primary_endpoint_component="legacy",
+            quadrant_occupancy_dependency_handle={"record_sha256": "a" * 64},
+        )
 
 
 def test_hysteresis_visits_counts_entries_and_closes_on_invalid() -> None:
@@ -145,17 +345,18 @@ def test_available_annulus_area_uses_circular_arena_mask() -> None:
     assert 0.0 < float(circular_area[0]) < float(rectangle_area[0])
 
 
-@_CRA_NEAR_FIELD_AUTHORITY_DEFERRED
 def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
     tmp_path: Path,
 ) -> None:
     zarr_path = _make_archive(tmp_path)
     cra_component_path = _write_sources(zarr_path)
+    quadrant_handle = _quadrant_handle(zarr_path, cra_component_path)
 
     result = build_cra_near_field_result(
         zarr_path,
         chaser_distance_run="chaser_distance_1",
         quadrant_occupancy_component=DEFAULT_QUADRANT_COMPONENT_NAME,
+        quadrant_occupancy_dependency_handle=quadrant_handle,
         r_zone_mm=2.0,
         r_in_mm=2.0,
         r_out_mm=3.0,
@@ -166,6 +367,10 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
     )
 
     assert result.source_quadrant_occupancy_path == cra_component_path
+    assert (
+        result.source_quadrant_occupancy_manifest_sha256
+        == quadrant_handle["component_manifest_sha256"]
+    )
     assert result.geometry_status == "circle"
     assert result.arena_geometry_source == "analysis/stimulus_runs/stimulus_1/calibration/arena_geometry"
     # This fixture carries no analysis_metadata.dish_mask, so the resolver correctly falls back
@@ -199,7 +404,8 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
 
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["analysis/chaser_distance_runs/chaser_distance_1"]
-    assert run[COMPONENT_PARENT_NAME].attrs["latest_complete"] == DEFAULT_COMPONENT_NAME
+    assert "latest" not in run[COMPONENT_PARENT_NAME].attrs
+    assert "latest_complete" not in run[COMPONENT_PARENT_NAME].attrs
     component = root[component_path]
     assert component.attrs["schema_id"] == SCHEMA_ID
     assert component.attrs["status"] == "computed"
@@ -208,6 +414,12 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(
     assert (
         component.attrs["source_refs"]["source_quadrant_occupancy_path"]
         == cra_component_path
+    )
+    assert (
+        component.attrs["source_refs"][
+            "source_quadrant_occupancy_manifest_sha256"
+        ]
+        == quadrant_handle["component_manifest_sha256"]
     )
     assert (
         _decode_first(component["chasers"]["behavior_class_label_bytes"])

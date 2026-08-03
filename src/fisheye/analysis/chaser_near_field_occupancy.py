@@ -27,12 +27,18 @@ from fisheye.analysis.chaser_component_writer import (
     require_chaser_component_staging_capability,
     sealed_chaser_component_writer,
 )
+from fisheye.analysis.chaser_component_publication import (
+    load_chaser_component_handle_json,
+    open_explicit_chaser_component_group,
+)
 from fisheye.analysis.chaser_behavior import (
     BEHAVIOR_CLASS_LABELS,
     canonical_behavior_label,
 )
 from fisheye.analysis.chaser_quadrant_occupancy import (
     COMPONENT_PARENT_NAME as QUADRANT_OCCUPANCY_PARENT,
+    SCHEMA_ID as QUADRANT_OCCUPANCY_SCHEMA_ID,
+    SCHEMA_VERSION as QUADRANT_OCCUPANCY_SCHEMA_VERSION,
 )
 from fisheye.shared.arena_geometry import (
     ArenaGeometry,
@@ -95,6 +101,7 @@ class ChaserNearFieldOccupancyResult:
     chaser_distance_run_path: str
     source_quadrant_occupancy_component: str
     source_quadrant_occupancy_path: str
+    source_quadrant_occupancy_manifest_sha256: str | None
     source_stimulus_run: str | None
     source_stimulus_path: str | None
     source_stimulus_epoch_run: str | None
@@ -226,11 +233,41 @@ def _resolve_chaser_distance_run(
 
 
 def _resolve_quadrant_occupancy_component(
-    run_group: zarr.Group,
+    root: zarr.Group,
     *,
+    snapshot: ChaserDistanceReadSnapshot,
+    run_group: zarr.Group,
     chaser_distance_run_path: str,
     component_name: str,
-) -> tuple[zarr.Group, str, str]:
+    dependency_handle: Mapping[str, Any] | None,
+    legacy_compatibility: bool,
+) -> tuple[zarr.Group, str, str, str | None]:
+    if dependency_handle is not None:
+        verified = open_explicit_chaser_component_group(
+            root,
+            snapshot=snapshot,
+            handle=dependency_handle,
+            expected_semantic_schema_id=QUADRANT_OCCUPANCY_SCHEMA_ID,
+            expected_semantic_schema_version=QUADRANT_OCCUPANCY_SCHEMA_VERSION,
+        )
+        if verified.component_family != QUADRANT_OCCUPANCY_PARENT:
+            raise ValueError(
+                "Quadrant-occupancy dependency handle belongs to a different "
+                "component family."
+            )
+        component = verified.group
+        return (
+            component,
+            verified.component_name,
+            verified.component_path,
+            verified.manifest_sha256,
+        )
+    if not legacy_compatibility:
+        raise ValueError(
+            "chaser_near_field_occupancy requires an explicit self-digested "
+            "chaser_quadrant_occupancy dependency handle; historical name/latest "
+            "discovery requires legacy_quadrant_occupancy_component_compatibility=True."
+        )
     parent = run_group.get(QUADRANT_OCCUPANCY_PARENT)
     if parent is None:
         raise ValueError(
@@ -255,6 +292,7 @@ def _resolve_quadrant_occupancy_component(
         component,
         resolved,
         f"{chaser_distance_run_path}/{QUADRANT_OCCUPANCY_PARENT}/{resolved}",
+        None,
     )
 
 
@@ -1218,6 +1256,8 @@ def build_chaser_near_field_occupancy_result(
     *,
     chaser_distance_run: str = "latest",
     quadrant_occupancy_component: str = "latest",
+    quadrant_occupancy_dependency_handle: Mapping[str, Any] | None = None,
+    legacy_quadrant_occupancy_component_compatibility: bool = False,
     component_name: str = DEFAULT_COMPONENT_NAME,
     r_zone_mm: float = DEFAULT_R_ZONE_MM,
     r_in_mm: float = DEFAULT_R_IN_MM,
@@ -1238,7 +1278,10 @@ def build_chaser_near_field_occupancy_result(
         root,
         chaser_distance_run,
     )
-    distance.require_derived_surface_authority(QUADRANT_OCCUPANCY_PARENT)
+    if quadrant_occupancy_dependency_handle is None and not (
+        legacy_quadrant_occupancy_component_compatibility
+    ):
+        distance.require_derived_surface_authority(QUADRANT_OCCUPANCY_PARENT)
     coordinate_frame = distance.coordinate_space_id
     coordinate_origin = distance.coordinate_origin
     if coordinate_frame != "arena_relative_canvas_px":
@@ -1257,11 +1300,20 @@ def build_chaser_near_field_occupancy_result(
     # arrays or coordinate attrs.
     run_group = root[distance_run_path]
 
-    quadrant_component, quadrant_component_name, quadrant_component_path = (
+    (
+        quadrant_component,
+        quadrant_component_name,
+        quadrant_component_path,
+        quadrant_component_manifest_sha256,
+    ) = (
         _resolve_quadrant_occupancy_component(
-            run_group,
+            root,
+            snapshot=distance,
+            run_group=run_group,
             chaser_distance_run_path=distance_run_path,
             component_name=quadrant_occupancy_component,
+            dependency_handle=quadrant_occupancy_dependency_handle,
+            legacy_compatibility=legacy_quadrant_occupancy_component_compatibility,
         )
     )
     fish_xy = np.asarray(distance.fish_centroid_arena_xy, dtype=np.float32)
@@ -1387,6 +1439,9 @@ def build_chaser_near_field_occupancy_result(
             "source_quadrant_occupancy_schema_id": quadrant_component.attrs.get(
                 "schema_id"
             ),
+            "source_quadrant_occupancy_manifest_sha256": (
+                quadrant_component_manifest_sha256
+            ),
             "qc_warning_count": len(compute_warnings),
         }
     )
@@ -1398,6 +1453,9 @@ def build_chaser_near_field_occupancy_result(
         chaser_distance_run_path=distance_run_path,
         source_quadrant_occupancy_component=quadrant_component_name,
         source_quadrant_occupancy_path=quadrant_component_path,
+        source_quadrant_occupancy_manifest_sha256=(
+            quadrant_component_manifest_sha256
+        ),
         source_stimulus_run=source_refs.get("source_stimulus_run")
         or distance.source_stimulus_run,
         source_stimulus_path=source_refs.get("source_stimulus_path")
@@ -1662,6 +1720,9 @@ def _source_refs(result: ChaserNearFieldOccupancyResult) -> dict[str, Any]:
         "source_chaser_distance_path": result.chaser_distance_run_path,
         "source_quadrant_occupancy_component": result.source_quadrant_occupancy_component,
         "source_quadrant_occupancy_path": result.source_quadrant_occupancy_path,
+        "source_quadrant_occupancy_manifest_sha256": (
+            result.source_quadrant_occupancy_manifest_sha256
+        ),
         "source_stimulus_run": result.source_stimulus_run,
         "source_stimulus_path": result.source_stimulus_path,
         "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
@@ -2121,6 +2182,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path, help="Analysis zarr archive.")
     parser.add_argument("--chaser-distance-run", default="latest")
     parser.add_argument("--quadrant-occupancy-component", default="latest")
+    parser.add_argument(
+        "--quadrant-occupancy-dependency-handle-json",
+        type=Path,
+        help=(
+            "Strict JSON dependency handle for one immutable selector-ineligible "
+            "chaser-quadrant-occupancy candidate."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-quadrant-occupancy-component-compatibility",
+        action="store_true",
+        help=(
+            "Explicitly permit historical quadrant component name/latest discovery; "
+            "exact handles remain the maintained default."
+        ),
+    )
     parser.add_argument("--component-name", default=DEFAULT_COMPONENT_NAME)
     parser.add_argument("--r-zone-mm", type=float, default=DEFAULT_R_ZONE_MM)
     parser.add_argument("--r-in-mm", type=float, default=DEFAULT_R_IN_MM)
@@ -2144,10 +2221,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    quadrant_dependency_handle = (
+        load_chaser_component_handle_json(
+            args.quadrant_occupancy_dependency_handle_json
+        )
+        if args.quadrant_occupancy_dependency_handle_json is not None
+        else None
+    )
     result = build_chaser_near_field_occupancy_result(
         Path(args.zarr_path),
         chaser_distance_run=str(args.chaser_distance_run),
         quadrant_occupancy_component=str(args.quadrant_occupancy_component),
+        quadrant_occupancy_dependency_handle=quadrant_dependency_handle,
+        legacy_quadrant_occupancy_component_compatibility=bool(
+            args.legacy_quadrant_occupancy_component_compatibility
+        ),
         component_name=str(args.component_name),
         r_zone_mm=float(args.r_zone_mm),
         r_in_mm=float(args.r_in_mm),

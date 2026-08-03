@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from fisheye.utils import run_goodcopbadcop_cra_near_field as mod
 from fisheye.utils import run_chaser_near_field_occupancy as generic_mod
 
@@ -11,6 +13,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
     calls: dict[str, object] = {}
     zarr_path = tmp_path / "recording_GoodCopBadCop_analysis.zarr"
     zarr_path.mkdir()
+    dependency_handle = {"record_sha256": "a" * 64}
 
     def fake_build(path: Path, **kwargs):
         calls["build_path"] = path
@@ -18,6 +21,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
         return SimpleNamespace(
             chaser_distance_run_name="chaser_distance_1",
             source_quadrant_occupancy_component="object_relative_pre_post_v1",
+            source_quadrant_occupancy_manifest_sha256="b" * 64,
             geometry_status="circle",
             summary={
                 "approach_p05_delta_agg": -1.25,
@@ -48,6 +52,8 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
         ],
         chaser_distance_run="latest",
         quadrant_occupancy_component="latest",
+        quadrant_occupancy_dependency_handle=dependency_handle,
+        legacy_quadrant_occupancy_component_compatibility=False,
         component_name="object_relative_near_field_v1",
         r_zone_mm=4.0,
         r_in_mm=4.0,
@@ -67,6 +73,8 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
     assert calls["build_kwargs"] == {
         "chaser_distance_run": "latest",
         "quadrant_occupancy_component": "latest",
+        "quadrant_occupancy_dependency_handle": dependency_handle,
+        "legacy_quadrant_occupancy_component_compatibility": False,
         "component_name": "object_relative_near_field_v1",
         "r_zone_mm": 4.0,
         "r_in_mm": 4.0,
@@ -92,6 +100,7 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
             "refined_run": "refined_1",
             "chaser_distance_run": "chaser_distance_1",
             "quadrant_occupancy_component": "object_relative_pre_post_v1",
+            "quadrant_occupancy_manifest_sha256": "b" * 64,
             "component_name": "object_relative_near_field_v1",
             "chaser_near_field_occupancy_path": "analysis/chaser_distance_runs/chaser_distance_1/cra_near_field/object_relative_near_field_v1",
             "geometry_status": "circle",
@@ -104,6 +113,81 @@ def test_run_for_targets_forwards_near_field_parameters_and_writes(monkeypatch, 
             },
         }
     ]
+
+
+def test_exact_named_component_is_converted_to_dependency_handle(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    component = object()
+    root = {"analysis/chaser_distance_runs/base/chaser_quadrant_occupancy/exact": component}
+    snapshot = SimpleNamespace(run_path="analysis/chaser_distance_runs/base")
+    expected_handle = {"record_sha256": "c" * 64}
+    calls: list[tuple[object, object, str]] = []
+    monkeypatch.setattr(generic_mod, "open_zarr_root", lambda *_a, **_k: root)
+    monkeypatch.setattr(
+        generic_mod,
+        "load_chaser_distance_run",
+        lambda candidate_root, *, run_name: (
+            snapshot
+            if candidate_root is root and run_name == "base"
+            else pytest.fail("wrong base resolution")
+        ),
+    )
+
+    def fake_build_handle(candidate, *, snapshot, relative_path):
+        calls.append((candidate, snapshot, relative_path))
+        return expected_handle
+
+    monkeypatch.setattr(
+        generic_mod,
+        "build_chaser_component_handle",
+        fake_build_handle,
+    )
+
+    actual = generic_mod._build_explicit_quadrant_dependency_handle(
+        tmp_path / "analysis.zarr",
+        chaser_distance_run="base",
+        quadrant_occupancy_component="exact",
+    )
+
+    assert actual is expected_handle
+    assert calls == [(component, snapshot, "chaser_quadrant_occupancy/exact")]
+
+
+def test_batch_runner_refuses_implicit_latest_before_builder(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    zarr_path.mkdir()
+    monkeypatch.setattr(
+        generic_mod,
+        "build_chaser_near_field_occupancy_result",
+        lambda *_a, **_k: pytest.fail("implicit latest reached scientific builder"),
+    )
+
+    rows = generic_mod.run_for_targets(
+        [{"recording_id": "recording", "zarr_path": str(zarr_path)}],
+        chaser_distance_run="base",
+        quadrant_occupancy_component="latest",
+        component_name="near",
+        r_zone_mm=4.0,
+        r_in_mm=4.0,
+        r_out_mm=5.0,
+        percentile_values=(5.0,),
+        radial_bin_edges_mm=None,
+        cdf_thresholds_mm=(2.0,),
+        perimeter_band_mm=3.0,
+        immobility_speed_threshold_mm_s=1.5,
+        apply=False,
+        overwrite=False,
+        no_png=True,
+        no_interactive_spec=True,
+    )
+
+    assert rows[0]["status"] == "failed"
+    assert "requires an exact" in rows[0]["error"]
 
 
 def test_parse_float_list_accepts_none_string_and_sequence() -> None:

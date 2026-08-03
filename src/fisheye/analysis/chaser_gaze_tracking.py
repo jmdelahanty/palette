@@ -40,8 +40,15 @@ from fisheye.analysis.chaser_component_writer import (
     require_chaser_component_staging_capability,
     sealed_chaser_component_writer,
 )
+from fisheye.analysis.chaser_component_publication import (
+    load_chaser_component_handle_json,
+    open_explicit_chaser_component_group,
+)
 from fisheye.analysis.chaser_egocentric_bearing import (
     ANGLE_CONVENTION,
+    COMPONENT_PARENT_NAME as EGOCENTRIC_COMPONENT_PARENT,
+    SCHEMA_ID as EGOCENTRIC_SCHEMA_ID,
+    SCHEMA_VERSION as EGOCENTRIC_SCHEMA_VERSION,
     _load_configured_chaser_behavior_labels,
     compute_egocentric_chaser_bearing,
     wrap_degrees_signed,
@@ -134,6 +141,7 @@ class ChaserGazeTrackingResult:
     chaser_distance_run_path: str
     egocentric_component_name: str
     egocentric_component_path: str
+    egocentric_component_manifest_sha256: str | None
     eye_angle_run_name: str
     eye_angle_run_path: str
     component_name: str
@@ -361,23 +369,60 @@ def _metadata_eye_convention(run_group: zarr.Group) -> None:
         raise ValueError("Eye-angle gaze fields are not declared fish-body-frame/anatomical-left-positive.")
 
 
-def _resolve_egocentric_component(run_group: zarr.Group, requested: str) -> tuple[zarr.Group, str]:
-    parent = run_group.get("egocentric_bearing")
-    if parent is None:
-        raise ValueError("Chaser-distance run has no egocentric_bearing component.")
-    name = requested
-    if requested == "latest":
-        name = str(parent.attrs.get("latest_complete") or parent.attrs.get("latest") or "")
-    if not name or name not in parent:
-        raise ValueError(f"Egocentric-bearing component {requested!r} is not available.")
-    component = parent[name]
+def _resolve_egocentric_component(
+    root: zarr.Group,
+    *,
+    snapshot: Any,
+    run_group: zarr.Group,
+    requested: str,
+    dependency_handle: Mapping[str, Any] | None,
+    legacy_compatibility: bool,
+) -> tuple[zarr.Group, str, str, str | None]:
+    if dependency_handle is not None:
+        verified = open_explicit_chaser_component_group(
+            root,
+            snapshot=snapshot,
+            handle=dependency_handle,
+            expected_semantic_schema_id=EGOCENTRIC_SCHEMA_ID,
+            expected_semantic_schema_version=EGOCENTRIC_SCHEMA_VERSION,
+        )
+        if verified.component_family != EGOCENTRIC_COMPONENT_PARENT:
+            raise ValueError(
+                "Egocentric dependency handle belongs to a different component family."
+            )
+        component = verified.group
+        name = verified.component_name
+        path = verified.component_path
+        manifest_sha256: str | None = verified.manifest_sha256
+    else:
+        if not legacy_compatibility:
+            raise ValueError(
+                "chaser_gaze_tracking requires an explicit self-digested "
+                "egocentric dependency handle; historical name/latest discovery "
+                "requires legacy_egocentric_component_compatibility=True."
+            )
+        parent = run_group.get(EGOCENTRIC_COMPONENT_PARENT)
+        if parent is None:
+            raise ValueError("Chaser-distance run has no egocentric_bearing component.")
+        name = requested
+        if requested == "latest":
+            name = str(
+                parent.attrs.get("latest_complete")
+                or parent.attrs.get("latest")
+                or ""
+            )
+        if not name or name not in parent:
+            raise ValueError(f"Egocentric-bearing component {requested!r} is not available.")
+        component = parent[name]
+        path = f"{snapshot.run_path}/{EGOCENTRIC_COMPONENT_PARENT}/{name}"
+        manifest_sha256 = None
     per_chaser = component.get("per_chaser")
     if per_chaser is None or "bearing_deg" not in per_chaser:
         raise ValueError(f"Egocentric component {name!r} lacks per_chaser/bearing_deg.")
     angle_convention = str(per_chaser.attrs.get("angle_convention") or "")
     if "positive=anatomical_left" not in angle_convention:
         raise ValueError("Egocentric bearing does not declare anatomical-left-positive angles.")
-    return component, str(name)
+    return component, str(name), path, manifest_sha256
 
 
 def _epoch_table(run_group: zarr.Group) -> tuple[np.ndarray, tuple[str, ...], np.ndarray, np.ndarray]:
@@ -715,6 +760,8 @@ def build_chaser_gaze_tracking_result(
     *,
     chaser_distance_run: str = "latest",
     egocentric_component: str = "latest",
+    egocentric_dependency_handle: Mapping[str, Any] | None = None,
+    legacy_egocentric_component_compatibility: bool = False,
     eye_angle_run: str = "latest",
     component_name: str = DEFAULT_COMPONENT_NAME,
     eye_range_quantiles: tuple[float, float] = DEFAULT_EYE_RANGE_QUANTILES,
@@ -737,7 +784,16 @@ def build_chaser_gaze_tracking_result(
     # the typed boundary instead of falling back to protocol_json or raw attrs.
     distance_snapshot.require_behavior_authority()
     distance_run_group = root[distance_run_path]
-    ego_group, ego_name = _resolve_egocentric_component(distance_run_group, egocentric_component)
+    ego_group, ego_name, ego_path, ego_manifest_sha256 = (
+        _resolve_egocentric_component(
+            root,
+            snapshot=distance_snapshot,
+            run_group=distance_run_group,
+            requested=egocentric_component,
+            dependency_handle=egocentric_dependency_handle,
+            legacy_compatibility=legacy_egocentric_component_compatibility,
+        )
+    )
     eye_group, eye_name, eye_path = _resolve_eye_run(root, eye_angle_run)
     _metadata_eye_convention(eye_group)
 
@@ -984,7 +1040,8 @@ def build_chaser_gaze_tracking_result(
     recording_id = str(distance_run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or zarr_path.stem)
     diagnostics = {
         "eye_angle_source_field": "left/right_gaze_signed_deg_smoothed",
-        "object_bearing_source_field": f"{distance_run_path}/egocentric_bearing/{ego_name}/per_chaser/bearing_deg",
+        "object_bearing_source_field": f"{ego_path}/per_chaser/bearing_deg",
+        "source_egocentric_bearing_manifest_sha256": ego_manifest_sha256,
         "chaser_behavior_label_source": behavior_label_source,
         "coordinate_frame": "fish_body_frame",
         "zero_definition": "fish_forward",
@@ -1022,7 +1079,8 @@ def build_chaser_gaze_tracking_result(
         chaser_distance_run_name=distance_run_name,
         chaser_distance_run_path=distance_run_path,
         egocentric_component_name=ego_name,
-        egocentric_component_path=f"{distance_run_path}/egocentric_bearing/{ego_name}",
+        egocentric_component_path=ego_path,
+        egocentric_component_manifest_sha256=ego_manifest_sha256,
         eye_angle_run_name=eye_name,
         eye_angle_run_path=eye_path,
         component_name=component_name,
@@ -1068,6 +1126,20 @@ def _event_arrays(events: Sequence[LockEvent]) -> dict[str, np.ndarray]:
         "median_bearing_deg": np.asarray([event.median_bearing_deg for event in events], dtype=np.float32),
         "median_gaze_error_deg": np.asarray([event.median_gaze_error_deg for event in events], dtype=np.float32),
         "mean_vergence_eye_angle_deg": np.asarray([event.mean_vergence_eye_angle_deg for event in events], dtype=np.float32),
+    }
+
+
+def _source_refs(result: ChaserGazeTrackingResult) -> dict[str, Any]:
+    return {
+        "chaser_distance_run": result.chaser_distance_run_name,
+        "chaser_distance_path": result.chaser_distance_run_path,
+        "egocentric_component": result.egocentric_component_name,
+        "egocentric_component_path": result.egocentric_component_path,
+        "egocentric_component_manifest_sha256": (
+            result.egocentric_component_manifest_sha256
+        ),
+        "eye_angle_run": result.eye_angle_run_name,
+        "eye_angle_path": result.eye_angle_run_path,
     }
 
 
@@ -1321,14 +1393,7 @@ def write_chaser_gaze_tracking_component(
     )
 
     git = get_git_info(Path(__file__).resolve().parents[3])
-    source_refs = {
-        "chaser_distance_run": result.chaser_distance_run_name,
-        "chaser_distance_path": result.chaser_distance_run_path,
-        "egocentric_component": result.egocentric_component_name,
-        "egocentric_component_path": result.egocentric_component_path,
-        "eye_angle_run": result.eye_angle_run_name,
-        "eye_angle_path": result.eye_angle_run_path,
-    }
+    source_refs = _source_refs(result)
     attrs = {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
@@ -1423,6 +1488,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--chaser-distance-run", default="latest")
     parser.add_argument("--egocentric-component", default="latest")
+    parser.add_argument(
+        "--egocentric-dependency-handle-json",
+        type=Path,
+        help=(
+            "Strict JSON dependency handle for one immutable selector-ineligible "
+            "egocentric-bearing candidate."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-egocentric-component-compatibility",
+        action="store_true",
+        help=(
+            "Explicitly permit historical egocentric component name/latest discovery; "
+            "exact handles remain the maintained default."
+        ),
+    )
     parser.add_argument("--eye-angle-run", default="latest")
     parser.add_argument("--component-name", default=DEFAULT_COMPONENT_NAME)
     parser.add_argument("--eye-range-quantiles", default="0.01,0.99")
@@ -1447,10 +1528,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    egocentric_dependency_handle = (
+        load_chaser_component_handle_json(args.egocentric_dependency_handle_json)
+        if args.egocentric_dependency_handle_json is not None
+        else None
+    )
     result = build_chaser_gaze_tracking_result(
         args.zarr_path,
         chaser_distance_run=args.chaser_distance_run,
         egocentric_component=args.egocentric_component,
+        egocentric_dependency_handle=egocentric_dependency_handle,
+        legacy_egocentric_component_compatibility=bool(
+            args.legacy_egocentric_component_compatibility
+        ),
         eye_angle_run=args.eye_angle_run,
         component_name=args.component_name,
         eye_range_quantiles=_parse_pair(args.eye_range_quantiles, name="eye-range-quantiles"),

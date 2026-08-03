@@ -7,8 +7,13 @@ import fnmatch
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
+from fisheye.analysis.chaser_component_publication import (
+    build_chaser_component_handle,
+    load_chaser_component_handle_json,
+)
+from fisheye.analysis.chaser_distance_io import load_chaser_distance_run
 from fisheye.analysis.chaser_near_field_occupancy import (
     DEFAULT_CDF_THRESHOLDS_MM,
     DEFAULT_COMPONENT_NAME,
@@ -21,8 +26,12 @@ from fisheye.analysis.chaser_near_field_occupancy import (
     build_chaser_near_field_occupancy_result,
     write_chaser_near_field_occupancy_component,
 )
+from fisheye.analysis.chaser_quadrant_occupancy import (
+    COMPONENT_PARENT_NAME as QUADRANT_OCCUPANCY_PARENT,
+)
 from fisheye.registry.db import RegistryPaths
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 def _query_targets(
@@ -128,11 +137,46 @@ def _parse_float_list(value: str | Sequence[float] | None) -> list[float] | None
     return [float(item) for item in value]
 
 
+def _build_explicit_quadrant_dependency_handle(
+    zarr_path: Path,
+    *,
+    chaser_distance_run: str,
+    quadrant_occupancy_component: str,
+) -> Mapping[str, Any]:
+    component_name = str(quadrant_occupancy_component).strip()
+    if not component_name or component_name == "latest":
+        raise ValueError(
+            "Maintained near-field batch execution requires an exact "
+            "--quadrant-occupancy-component name or a dependency-handle JSON; "
+            "latest discovery requires the explicit legacy compatibility flag."
+        )
+    root = open_zarr_root(zarr_path, mode="r")
+    snapshot = load_chaser_distance_run(
+        root,
+        run_name=str(chaser_distance_run).strip() or "latest",
+    )
+    relative_path = f"{QUADRANT_OCCUPANCY_PARENT}/{component_name}"
+    component_path = f"{snapshot.run_path}/{relative_path}"
+    try:
+        component = root[component_path]
+    except Exception as exc:
+        raise ValueError(
+            f"Exact quadrant-occupancy component {component_path!r} is unavailable."
+        ) from exc
+    return build_chaser_component_handle(
+        component,
+        snapshot=snapshot,
+        relative_path=relative_path,
+    )
+
+
 def run_for_targets(
     targets: Sequence[dict[str, Any]],
     *,
     chaser_distance_run: str,
     quadrant_occupancy_component: str,
+    quadrant_occupancy_dependency_handle: Mapping[str, Any] | None = None,
+    legacy_quadrant_occupancy_component_compatibility: bool = False,
     component_name: str,
     r_zone_mm: float,
     r_in_mm: float,
@@ -156,12 +200,26 @@ def run_for_targets(
         summary: dict[str, Any] | None = None
         chaser_run_name = None
         source_quadrant_component = None
+        source_quadrant_manifest_sha256 = None
         geometry_status = None
         try:
+            dependency_handle = quadrant_occupancy_dependency_handle
+            if dependency_handle is None and not (
+                legacy_quadrant_occupancy_component_compatibility
+            ):
+                dependency_handle = _build_explicit_quadrant_dependency_handle(
+                    zarr_path,
+                    chaser_distance_run=chaser_distance_run,
+                    quadrant_occupancy_component=quadrant_occupancy_component,
+                )
             result = build_chaser_near_field_occupancy_result(
                 zarr_path,
                 chaser_distance_run=chaser_distance_run,
                 quadrant_occupancy_component=quadrant_occupancy_component,
+                quadrant_occupancy_dependency_handle=dependency_handle,
+                legacy_quadrant_occupancy_component_compatibility=(
+                    legacy_quadrant_occupancy_component_compatibility
+                ),
                 component_name=component_name,
                 r_zone_mm=float(r_zone_mm),
                 r_in_mm=float(r_in_mm),
@@ -174,6 +232,9 @@ def run_for_targets(
             )
             chaser_run_name = result.chaser_distance_run_name
             source_quadrant_component = result.source_quadrant_occupancy_component
+            source_quadrant_manifest_sha256 = (
+                result.source_quadrant_occupancy_manifest_sha256
+            )
             geometry_status = result.geometry_status
             summary = result.summary
             status = result.endpoint_status
@@ -198,6 +259,9 @@ def run_for_targets(
                 "chaser_distance_run": chaser_run_name or chaser_distance_run,
                 "quadrant_occupancy_component": source_quadrant_component
                 or quadrant_occupancy_component,
+                "quadrant_occupancy_manifest_sha256": (
+                    source_quadrant_manifest_sha256
+                ),
                 "component_name": component_name,
                 "chaser_near_field_occupancy_path": applied_path,
                 "geometry_status": geometry_status,
@@ -233,6 +297,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=12, help="Limit registry-selected targets.")
     parser.add_argument("--chaser-distance-run", default="latest")
     parser.add_argument("--quadrant-occupancy-component", default="latest")
+    parser.add_argument(
+        "--quadrant-occupancy-dependency-handle-json",
+        type=Path,
+        help=(
+            "Strict JSON handle for one exact quadrant-occupancy candidate. "
+            "Without this option, provide an exact component name."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-quadrant-occupancy-component-compatibility",
+        action="store_true",
+        help=(
+            "Explicitly permit historical component name/latest discovery; "
+            "exact manifest-digested dependencies remain the default."
+        ),
+    )
     parser.add_argument("--component-name", default=DEFAULT_COMPONENT_NAME)
     parser.add_argument("--r-zone-mm", type=float, default=DEFAULT_R_ZONE_MM)
     parser.add_argument("--r-in-mm", type=float, default=DEFAULT_R_IN_MM)
@@ -277,10 +357,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     percentiles = _parse_float_list(str(args.percentiles)) or list(DEFAULT_PERCENTILES)
     radial_edges = _parse_float_list(args.radial_bin_edges_mm)
     cdf_thresholds = _parse_float_list(str(args.cdf_thresholds_mm)) or list(DEFAULT_CDF_THRESHOLDS_MM)
+    quadrant_dependency_handle = (
+        load_chaser_component_handle_json(
+            args.quadrant_occupancy_dependency_handle_json
+        )
+        if args.quadrant_occupancy_dependency_handle_json is not None
+        else None
+    )
     results = run_for_targets(
         targets,
         chaser_distance_run=str(args.chaser_distance_run),
         quadrant_occupancy_component=str(args.quadrant_occupancy_component),
+        quadrant_occupancy_dependency_handle=quadrant_dependency_handle,
+        legacy_quadrant_occupancy_component_compatibility=bool(
+            args.legacy_quadrant_occupancy_component_compatibility
+        ),
         component_name=str(args.component_name),
         r_zone_mm=float(args.r_zone_mm),
         r_in_mm=float(args.r_in_mm),
@@ -305,6 +396,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "limit": None if args.zarr else args.limit,
         "target_count": len(targets),
         "parameters": {
+            "quadrant_dependency_mode": (
+                "explicit_handle_json"
+                if quadrant_dependency_handle is not None
+                else (
+                    "legacy_component_discovery"
+                    if args.legacy_quadrant_occupancy_component_compatibility
+                    else "exact_named_component_handle"
+                )
+            ),
             "r_zone_mm": float(args.r_zone_mm),
             "r_in_mm": float(args.r_in_mm),
             "r_out_mm": float(args.r_out_mm),
