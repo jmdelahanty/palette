@@ -109,17 +109,17 @@ true.
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, atomic publication, and registry publication | Migrate the still-fixed semantic chunk/shard grid to byte planning and benchmark the real consumers |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, and serialized registry projection | Adopt byte planning and benchmark the real consumer |
 | Bout kinematics | Exact compact-v7 manifest, authoritative selection, and serialized registry projection | Adopt byte planning and add a consumer benchmark |
-| Stimulus response | Cataloged and atomically published | Freeze exact compact table fields and dtypes; current output is data-dependent |
+| Stimulus response | Exact opt-in compact-v3 schema with closed table bundles, fixed dtypes, strict coercion, and atomic publication; legacy v2 remains the default compatibility path | Adopt byte planning in the v3 writer and benchmark before any default change |
 | Body frame | Exact ten-array schema, byte planner, strict manifest, and consolidated publication | Move from selector-ineligible companion evidence to an explicitly governed production lifecycle when authorized |
 | Keypoint quality | Exact diagnostic schema, byte planner, strict manifest, and consolidated publication | Add explicit production lifecycle/registry policy when authorized |
-| Tail-posture view | Exact typed arrays, guarded candidate lifecycle, and truthful direct-writer catalog ownership | Replace mask-derived row chunk helpers, adopt the planner, and decide whether to migrate to the atomic materializer |
-| Bout classification | Exact compact-v2 manifest, guarded activation, truthful direct-writer catalog ownership, and serialized registry projection | Adopt the byte planner and benchmark the real consumer |
+| Tail-posture view | Exact typed arrays, guarded lifecycle, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate and decide whether to migrate to the atomic materializer |
+| Bout classification | Exact compact-v2 manifest, guarded activation, serialized registry projection, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate through its real consumer |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
-| Chaser components | Protocol-neutral schemas increasingly exist | Add independently payload-bound component seals and atomic component publication |
-| Cross-recording Parquet exports | Versioned table/manifest contracts | Make generations atomic and exclusive; freeze exact Arrow dtypes where required |
+| Chaser components | Protocol-neutral schemas plus payload-bound component manifests, verified detached reads, and an atomic component publisher | Adopt the shared publisher in each scientific writer and finish interruption recovery coverage |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
@@ -438,8 +438,25 @@ are frozen in `docs/chaser_component_publication_contract_v1.md`.
       the storage profile and manifest.
 - [ ] Preserve independently readable inner chunks inside shards.
 - [ ] Record requested/effective chunks and shards plus object estimates.
-- [ ] Add planner parity tests for short recordings, million-frame recordings,
+- [x] Add planner parity tests for short recordings, million-frame recordings,
       empty tables, wide matrices, and fixed-width text arrays.
+
+Candidate-adoption checkpoints (these do not promote a profile):
+
+- [ ] Eye-angle compact-v7 candidate writes all 41 arrays through a recomputed
+      plan receipt and remains selector-ineligible. Implementation is under
+      final semantic-fill review.
+- [x] Tail-posture v3 candidate writes all ten arrays through the shared
+      planner/factory while preserving the default writer and selectors.
+- [x] Bout-classification v2 candidate writes all 20 arrays through the shared
+      planner/factory while preserving the default writer and selectors.
+- [x] Tail-posture and bout-classification candidate metadata freeze semantic
+      NaN, `-1`, false, and zero fills rather than using one numeric default.
+- [ ] Subject-shape candidate adoption.
+- [ ] Tail-kinematics candidate adoption.
+- [ ] Track-kinematics candidate adoption.
+- [ ] Shared columnar adoption for swim bouts and bout kinematics.
+- [ ] Compact stimulus-response v3 candidate adoption.
 
 Recommended migration order:
 
