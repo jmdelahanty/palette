@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import zarr
 
+import fisheye.analysis.chaser_bout_response as chaser_bout_response_module
 from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
 from fisheye.analysis.chaser_egocentric_bearing import compute_egocentric_chaser_bearing
@@ -20,6 +21,7 @@ from fisheye.analysis.chaser_bout_response import (
     SCHEMA_ID,
     TURN_BIAS_PNG_ARTIFACT_NAME,
     _resolve_heading,
+    _resolve_swim_bout_run,
     _select_bout_row_mask,
     bearing_deg,
     build_chaser_bout_response_result,
@@ -28,8 +30,6 @@ from fisheye.analysis.chaser_bout_response import (
 from fisheye.shared.plot_artifacts import PNG_ARTIFACT_SCHEMA_ID
 from tests.unit.fisheye.test_chaser_radial_occupancy import (
     ARENA_CENTER_MM,
-    ARENA_RADIUS_MM,
-    PPM,
     _make_archive,
 )
 
@@ -46,6 +46,12 @@ _REQUIRES_SEALED_CHASER_BOUT_RESPONSE = pytest.mark.xfail(
     reason=_DEFERRED_CHASER_BOUT_RESPONSE_REASON,
     strict=True,
 )
+
+
+class _SelectionGroup(dict[str, object]):
+    def __init__(self, *, attrs: dict[str, object] | None = None) -> None:
+        super().__init__()
+        self.attrs = attrs if attrs is not None else {}
 
 
 # --------------------------------------------------------------------------------------
@@ -122,6 +128,9 @@ def _build_archive(
     frames.create_array("fish_heading_deg", data=np.asarray(heading_deg, dtype=np.float32), overwrite=True)
     frames.create_array("fish_heading_valid", data=np.ones(n, dtype=bool), overwrite=True)
     run["egocentric_bearing"].attrs["latest"] = "track_test"
+    run["egocentric_bearing"].attrs["latest_complete"] = "track_test"
+    ego.attrs["palette_run_completion_status"] = "complete"
+    ego.attrs["stage_selector_eligible"] = True
 
     bouts = root.require_group("analysis/swim_bout_runs/bouts_1/tables/bouts")
     k = len(bout_start)
@@ -134,6 +143,13 @@ def _build_archive(
     bouts.create_array("path_length_mm", data=np.full(k, 3.0, dtype=np.float64), overwrite=True)
     bouts.create_array("net_displacement_mm", data=np.full(k, 2.0, dtype=np.float64), overwrite=True)
     root["analysis/swim_bout_runs"].attrs["latest"] = "bouts_1"
+    root["analysis/swim_bout_runs"].attrs["latest_complete"] = "bouts_1"
+    root["analysis/swim_bout_runs/bouts_1"].attrs[
+        "palette_run_completion_status"
+    ] = "complete"
+    root["analysis/swim_bout_runs/bouts_1"].attrs[
+        "stage_selector_eligible"
+    ] = True
     return z
 
 
@@ -201,6 +217,60 @@ def test_single_level_bout_table_is_kept_whole() -> None:
     assert np.all(keep)
     assert source_signal_id == -1
     assert "single_level" in selection
+
+
+def test_swim_bout_selection_routes_through_canonical_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_group = object()
+    parent = _SelectionGroup()
+    parent["bouts_current"] = run_group
+    root = _SelectionGroup()
+    root["analysis/swim_bout_runs"] = parent
+    calls: list[tuple[object, str]] = []
+
+    def _fake_resolve(candidate_root, *, run_name):
+        calls.append((candidate_root, run_name))
+        return "bouts_current"
+
+    monkeypatch.setattr(
+        chaser_bout_response_module,
+        "resolve_swim_bout_run_name",
+        _fake_resolve,
+    )
+
+    resolved_group, resolved_name, resolved_path = _resolve_swim_bout_run(
+        root,
+        "latest",
+    )
+
+    assert resolved_group is run_group
+    assert resolved_name == "bouts_current"
+    assert resolved_path == "analysis/swim_bout_runs/bouts_current"
+    assert calls == [(root, "latest")]
+
+
+def test_heading_selection_rejects_intermediate_selector_handoff() -> None:
+    run_group = _SelectionGroup()
+    parent = _SelectionGroup(
+        attrs={"latest": "candidate", "latest_complete": "previous"}
+    )
+    parent["previous"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+    parent["candidate"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": False,
+        }
+    )
+    run_group["egocentric_bearing"] = parent
+
+    with pytest.raises(ValueError, match="No stable complete selector-eligible"):
+        _resolve_heading(run_group, total_frames=10)
 
 
 # --------------------------------------------------------------------------------------

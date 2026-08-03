@@ -122,6 +122,7 @@ def _make_archive(path: Path) -> zarr.Group:
     analysis = root.create_group("analysis")
     parent = analysis.create_group("swim_bout_runs")
     parent.attrs["latest"] = "bouts_canary"
+    parent.attrs["latest_complete"] = "bouts_canary"
     run = parent.create_group("bouts_canary")
     run.attrs.update(
         {
@@ -129,6 +130,8 @@ def _make_archive(path: Path) -> zarr.Group:
             "detection_method": "peak_event",
             "source_track_kinematics_run": "tk_hyst4_low2_s005",
             "track_id": 0,
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
         }
     )
     filtered = run.create_group("speed_filtered")
@@ -189,7 +192,12 @@ def test_visualization_loader_reads_flat_legacy_run(tmp_path: Path) -> None:
     write_columnar_dataset(run, "trials", _trials())
     write_columnar_dataset(run, "inter_bout_interval_histogram", _interval_histogram())
 
-    attrs, datasets = _load_swim_bout_run(zarr_path, None, speed_level="filtered")
+    attrs, datasets = _load_swim_bout_run(
+        zarr_path,
+        None,
+        speed_level="filtered",
+        legacy_compatibility=True,
+    )
 
     assert attrs["run_name"] == "flat_run"
     assert attrs["speed_level"] == ""

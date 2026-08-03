@@ -88,16 +88,27 @@ def _load_swim_bout_run(
     zarr_path: Path,
     run_name: Optional[str],
     speed_level: str = "smoothed",
+    *,
+    legacy_compatibility: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Optional[np.ndarray]]]:
     """Load swim-bout datasets through the shared logical resolver."""
     root = zarr.open(str(zarr_path), mode="r")
     selector = run_name or "latest"
     try:
-        payload = load_swim_bout_tables(root, run_name=selector, speed_level=speed_level)
+        payload = load_swim_bout_tables(
+            root,
+            run_name=selector,
+            speed_level=speed_level,
+            legacy_compatibility=legacy_compatibility,
+        )
     except SwimBoutIOError as exc:
         if "Speed level" not in str(exc):
             raise ValueError(str(exc)) from exc
-        payload = load_default_swim_bout_tables(root, run_name=selector)
+        payload = load_default_swim_bout_tables(
+            root,
+            run_name=selector,
+            legacy_compatibility=legacy_compatibility,
+        )
         requested = SPEED_LEVEL_ALIASES.get(speed_level, f"speed_{speed_level}")
         print(
             f"Warning: Speed level '{requested}' not found, "
@@ -673,6 +684,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Specific swim_bout_runs/<name> to load (default: latest).",
     )
     parser.add_argument(
+        "--legacy-compatibility",
+        action="store_true",
+        help="Permit a statusless historical swim-bout run; never permits selector-ineligible runs.",
+    )
+    parser.add_argument(
         "--speed-level",
         type=str,
         choices=["raw", "filtered", "smoothed", "averaged", "exponential"],
@@ -721,7 +737,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parser.parse_args(None if argv is None else list(argv))
 
     # First load to check if hierarchical
-    attrs_initial, _ = _load_swim_bout_run(args.zarr_path, args.run, speed_level=args.speed_level)
+    attrs_initial, _ = _load_swim_bout_run(
+        args.zarr_path,
+        args.run,
+        speed_level=args.speed_level,
+        legacy_compatibility=bool(args.legacy_compatibility),
+    )
     is_hierarchical = attrs_initial.get("is_hierarchical", False)
     canonical_artifact_level = _display_speed_level(
         str(attrs_initial.get("speed_level") or args.speed_level)
@@ -735,7 +756,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
         for level in speed_levels:
-            attrs, datasets = _load_swim_bout_run(args.zarr_path, args.run, speed_level=level)
+            attrs, datasets = _load_swim_bout_run(
+                args.zarr_path,
+                args.run,
+                speed_level=level,
+                legacy_compatibility=bool(args.legacy_compatibility),
+            )
             if not args.quiet:
                 print(f"Generating plot for speed level: {level}")
 
@@ -786,7 +812,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             plt.show()
     else:
         # Legacy: single plot
-        attrs, datasets = _load_swim_bout_run(args.zarr_path, args.run, speed_level=args.speed_level)
+        attrs, datasets = _load_swim_bout_run(
+            args.zarr_path,
+            args.run,
+            speed_level=args.speed_level,
+            legacy_compatibility=bool(args.legacy_compatibility),
+        )
         if not args.quiet:
             print(f"Loaded swim bout run '{attrs['run_name']}' from {args.zarr_path}")
 

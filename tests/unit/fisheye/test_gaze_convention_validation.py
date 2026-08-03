@@ -7,6 +7,7 @@ import pytest
 
 import fisheye.analysis.gaze_convention_validation as validation_module
 from fisheye.analysis.gaze_convention_validation import (
+    _resolve_eye_run,
     _resolve_review_masks,
     body_frame_angles_from_vectors,
     validate_gaze_geometry_arrays,
@@ -123,3 +124,28 @@ def test_review_masks_reject_row_mismatch() -> None:
 
     with pytest.raises(ValueError, match="not row-aligned"):
         _resolve_review_masks(object(), geometry)
+
+
+def test_eye_run_resolution_uses_canonical_eye_angle_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_group = object()
+    calls: list[tuple[object, object, bool]] = []
+
+    def _fake_resolve(root, run_name, *, legacy_compatibility):
+        calls.append((root, run_name, legacy_compatibility))
+        return run_group, "eye_current", "analysis/eye_angle_runs/eye_current"
+
+    monkeypatch.setattr(validation_module, "resolve_eye_angle_run", _fake_resolve)
+    root = object()
+
+    resolved, group = _resolve_eye_run(
+        root,
+        "analysis/eye_angle_runs/eye_current",
+    )
+
+    assert resolved == "eye_current"
+    assert group is run_group
+    assert calls == [
+        (root, "analysis/eye_angle_runs/eye_current", False)
+    ]

@@ -496,7 +496,7 @@ def resolve_eye_angle_run(
             )
         resolved = selected
     else:
-        normalized = _normalize_path(str(run_name))
+        normalized = _normalize_path(str(run_name).strip())
         parts = normalized.split("/")
         if normalized.startswith(EYE_ANGLE_RUN_PARENT + "/") and len(parts) >= 3:
             resolved = parts[2]

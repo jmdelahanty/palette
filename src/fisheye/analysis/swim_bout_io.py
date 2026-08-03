@@ -231,6 +231,22 @@ def load_default_swim_bout_tables(
     )
 
 
+def resolve_swim_bout_run_name(
+    root: zarr.Group,
+    *,
+    run_name: str | None = "latest",
+    legacy_compatibility: bool = False,
+) -> str:
+    """Resolve one exact complete selector-eligible swim-bout child name."""
+
+    parent = _require_child(root, "analysis/swim_bout_runs")
+    return _resolve_run_name(
+        parent,
+        run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
+
+
 def resolve_swim_bout_candidate(
     root: zarr.Group,
     *,

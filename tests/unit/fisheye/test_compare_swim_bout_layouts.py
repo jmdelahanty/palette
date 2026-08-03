@@ -222,6 +222,7 @@ def test_compare_swim_bout_layouts_passes_for_equivalent_v1_and_compact_v2(tmp_p
         zarr_path,
         reference_run="bouts_v1",
         candidate_run="bouts_compact",
+        legacy_compatibility=True,
     )
     payload = comparison_to_dict(comparison)
 

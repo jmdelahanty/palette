@@ -45,6 +45,7 @@ from fisheye.analysis.chaser_bout_response import (
     DEFAULT_VISIT_EXIT_MM,
     _segment_visits,
 )
+from fisheye.analysis.swim_bout_io import resolve_swim_bout_run_name
 from fisheye.analysis.chaser_radial_occupancy import (
     _apply_settle_trim,
     _open_root,
@@ -53,6 +54,7 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _resolve_arena_geometry,
     _resolve_chaser_distance_run,
 )
+from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 
 DEFAULT_EPOCHS = ("pre_event", "post_event")
@@ -163,26 +165,42 @@ def _collect_visits_unsealed_inspection(
     )
 
     # heading, for the arrow in the animation
-    heading = np.full(total_frames, np.nan)
     ego = root[run_path].get("egocentric_bearing")
-    if ego is not None:
-        keys = list(ego.keys())
-        if keys:
-            frames = ego[keys[-1]].get("frames")
-            if frames is not None and "fish_heading_deg" in frames:
-                heading = np.asarray(frames["fish_heading_deg"][:], dtype=np.float64).reshape(-1)
+    if ego is None:
+        raise ValueError("Visit trajectories require egocentric_bearing.")
+    resolved_ego = resolve_authoritative_run_name(
+        ego,
+        legacy_default=False,
+    )
+    if not resolved_ego:
+        raise ValueError(
+            "Visit trajectories require a stable complete selector-eligible "
+            "egocentric_bearing component."
+        )
+    frames = ego[resolved_ego].get("frames")
+    if frames is None or "fish_heading_deg" not in frames:
+        raise ValueError("Selected egocentric_bearing component lacks fish_heading_deg.")
+    heading = np.asarray(frames["fish_heading_deg"][:], dtype=np.float64).reshape(-1)
 
     # bout onsets, to mark where the fish re-aims
     bout_start = np.zeros(0, dtype=np.int64)
-    bouts_parent = root.get("analysis/swim_bout_runs")
-    if bouts_parent is not None:
-        name = str(swim_bout_run).strip()
-        if not name or name == "latest":
-            keys = list(bouts_parent.keys())
-            name = keys[-1] if keys else ""
-        if name and name in bouts_parent and "tables" in bouts_parent[name]:
-            table = bouts_parent[name]["tables"]["bouts"]
-            bout_start = np.asarray(table["start_frame"][:], dtype=np.int64).reshape(-1)
+    swim_bout_name = resolve_swim_bout_run_name(
+        root,
+        run_name=swim_bout_run,
+    )
+    swim_bout_group = root[f"analysis/swim_bout_runs/{swim_bout_name}"]
+    tables = swim_bout_group.get("tables")
+    if tables is None or "bouts" not in tables:
+        raise ValueError(
+            "Visit trajectories require a canonical compact swim-bout table."
+        )
+    bout_table = tables["bouts"]
+    if "start_frame" not in bout_table:
+        raise ValueError("Selected swim-bout table lacks start_frame.")
+    bout_start = np.asarray(
+        bout_table["start_frame"][:],
+        dtype=np.int64,
+    ).reshape(-1)
 
     pad = int(max(0.0, float(pad_s)) * fps)
     scenes: list[VisitScene] = []

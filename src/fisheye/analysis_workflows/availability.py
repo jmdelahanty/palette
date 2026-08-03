@@ -119,11 +119,17 @@ def _resolve_metadata_run_name(
     parent: Path,
     parent_attrs: Mapping[str, object],
     requested_run: str | None,
+    *,
+    parent_relative_path: str,
 ) -> tuple[str | None, str | None]:
     """Resolve one strict maintained run through the shared lifecycle contract."""
 
-    if requested_run and requested_run != "latest":
-        run_name = _safe_run_name(requested_run)
+    requested = "" if requested_run is None else str(requested_run).strip().strip("/")
+    parent_prefix = str(parent_relative_path).strip().strip("/") + "/"
+    if requested.startswith(parent_prefix):
+        requested = requested[len(parent_prefix) :]
+    if requested and requested.lower() != "latest":
+        run_name = _safe_run_name(requested)
         run_attrs = _attrs(parent / run_name)
         if not (parent / run_name / "zarr.json").is_file():
             return run_name, "selected run metadata is missing"
@@ -175,6 +181,7 @@ def _track_kinematics_visualization_availability(
         parent,
         parent_attrs,
         requested_run,
+        parent_relative_path=TRACK_KINEMATICS_PARENT,
     )
     if run_name is None or selection_error is not None:
         return StageAvailability(
@@ -220,6 +227,7 @@ def _track_kinematics_visualization_availability(
         visualization_parent,
         visualization_parent_attrs,
         None,
+        parent_relative_path=visualization_parent_relative,
     )
     if render_name is None or render_selection_error is not None:
         return StageAvailability(
@@ -369,6 +377,7 @@ def discover_stage_availability(
             parent,
             parent_attrs,
             requested_run,
+            parent_relative_path=relative_parent,
         )
         if run_name is None or selection_error is not None:
             return StageAvailability(

@@ -12,6 +12,7 @@ from fisheye.analysis.swim_bout_io import (
     load_default_swim_bout_tables,
     load_swim_bout_events,
     load_swim_bout_tables,
+    resolve_swim_bout_run_name,
     structured_records_to_dicts,
 )
 from fisheye.utils.export_cross_recording_analytics import _load_swim_bout_metrics
@@ -359,6 +360,31 @@ def test_swim_bout_legacy_run_requires_explicit_compatibility() -> None:
 
     assert (
         _resolve_run_name(parent, None, legacy_compatibility=True)
+        == "bouts_canary"
+    )
+
+
+@pytest.mark.parametrize(
+    "requested_run",
+    ("  bouts_canary  ", "/analysis/swim_bout_runs/bouts_canary/"),
+)
+def test_open_zarr_swim_bout_resolution_normalizes_explicit_run(
+    requested_run: str,
+) -> None:
+    root = _SelectionGroup()
+    analysis = _SelectionGroup()
+    parent = _SelectionGroup()
+    root["analysis"] = analysis
+    analysis["swim_bout_runs"] = parent
+    parent["bouts_canary"] = _SelectionGroup(
+        attrs={
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        }
+    )
+
+    assert (
+        resolve_swim_bout_run_name(root, run_name=requested_run)
         == "bouts_canary"
     )
 

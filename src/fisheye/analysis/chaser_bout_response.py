@@ -53,6 +53,10 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.swim_bout_io import (
+    SwimBoutIOError,
+    resolve_swim_bout_run_name,
+)
 from fisheye.analysis.chaser_distance_io import (
     reject_unsealed_chaser_derived_publication,
 )
@@ -242,14 +246,13 @@ def _resolve_swim_bout_run(root: zarr.Group, run_name: str) -> tuple[zarr.Group,
     parent = root.get("analysis/swim_bout_runs")
     if parent is None:
         raise ValueError("Archive has no analysis/swim_bout_runs group; run bout detection first.")
-    resolved = str(run_name).strip()
-    if not resolved or resolved == "latest":
-        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
-        if not resolved:
-            keys = list(parent.keys())
-            resolved = keys[-1] if keys else ""
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable swim-bout run found; pass --swim-bout-run.")
+    try:
+        resolved = resolve_swim_bout_run_name(root, run_name=run_name)
+    except SwimBoutIOError as exc:
+        raise ValueError(
+            "No stable complete selector-eligible swim-bout run was resolved; "
+            "pass --swim-bout-run only for an exact current run."
+        ) from exc
     return parent[resolved], resolved, f"analysis/swim_bout_runs/{resolved}"
 
 
@@ -299,12 +302,11 @@ def _resolve_heading(run_group: zarr.Group, *, total_frames: int) -> tuple[np.nd
             "run (it supplies fish heading on the camera-frame axis). Run "
             "fisheye.analysis.chaser_egocentric_bearing first."
         )
-    resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
+    resolved = resolve_authoritative_run_name(parent, legacy_default=False)
     if not resolved or resolved not in parent:
-        keys = list(parent.keys())
-        resolved = keys[-1] if keys else ""
-    if not resolved or resolved not in parent:
-        raise ValueError("No usable egocentric_bearing component found.")
+        raise ValueError(
+            "No stable complete selector-eligible egocentric_bearing component found."
+        )
     component = parent[resolved]
     frames = component.get("frames")
     if frames is None or "fish_heading_deg" not in frames or "fish_heading_valid" not in frames:

@@ -265,6 +265,20 @@ def test_eye_angle_legacy_run_requires_explicit_compatibility(
     assert resolved_name == "eye_angle_1"
 
 
+@pytest.mark.parametrize(
+    "requested_run",
+    ("  eye_angle_1  ", "/analysis/eye_angle_runs/eye_angle_1/"),
+)
+def test_eye_angle_resolution_normalizes_explicit_run(
+    requested_run: str,
+) -> None:
+    root = _make_eye_angle_selection_root()
+
+    _run, resolved_name, _path = resolve_eye_angle_run(root, requested_run)
+
+    assert resolved_name == "eye_angle_1"
+
+
 def test_load_eye_angle_run_tables_reads_logical_groups(tmp_path: Path) -> None:
     root = _make_eye_angle_archive(tmp_path)
 

@@ -12899,31 +12899,21 @@ def _mirror_swim_bouts_to_tracks(
         return None
 
     bouts_parent = analysis["swim_bout_runs"]
-    run_name = swim_bout_run
-    if not run_name or run_name.lower() == "latest":
-        candidate = bouts_parent.attrs.get("latest")
-        if isinstance(candidate, str) and candidate:
-            run_name = candidate
-    if not run_name:
-        console.print(
-            "[yellow]Warning:[/yellow] Unable to mirror swim bouts (no swim_bout_runs/latest attribute)."
-        )
-        return None
-    if run_name not in bouts_parent:
-        console.print(
-            f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' not found; skipping mirror."
-        )
-        return None
-
+    requested_run = swim_bout_run or "latest"
     try:
-        default_payload = load_default_swim_bout_tables(root, run_name=run_name)
+        default_payload = load_default_swim_bout_tables(
+            root,
+            run_name=requested_run,
+            legacy_compatibility=True,
+        )
     except SwimBoutIOError as exc:
         console.print(
-            f"[yellow]Warning:[/yellow] Unable to resolve swim bout run '{run_name}' "
+            f"[yellow]Warning:[/yellow] Unable to resolve swim bout run '{requested_run}' "
             f"for legacy mirror: {exc}"
         )
         return None
 
+    run_name = default_payload.run_name
     bout_group = bouts_parent[run_name]
     ordered_track_ids = [int(track_id) for track_id in track_ids]
     source_track_kinematics_run = (
@@ -13028,6 +13018,7 @@ def _mirror_swim_bouts_to_tracks(
                     run_name=run_name,
                     candidate_id=default_payload.candidate.candidate_id,
                     signal_id=signal.signal_id,
+                    legacy_compatibility=True,
                 )
             )
             columns = _columnar_bout_data(payload.bouts)

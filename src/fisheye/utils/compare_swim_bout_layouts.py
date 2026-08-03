@@ -68,17 +68,36 @@ def compare_swim_bout_layouts(
     speed_level: str | None = None,
     atol: float = DEFAULT_ATOL,
     series_atol: float = DEFAULT_SERIES_ATOL,
+    legacy_compatibility: bool = False,
 ) -> SwimBoutLayoutComparison:
     """Compare two swim-bout runs loaded through the logical resolver."""
 
     zarr_path = zarr_path.expanduser().resolve()
     root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     if speed_level:
-        reference = load_swim_bout_tables(root, run_name=reference_run, speed_level=speed_level)
-        candidate = load_swim_bout_tables(root, run_name=candidate_run, speed_level=speed_level)
+        reference = load_swim_bout_tables(
+            root,
+            run_name=reference_run,
+            speed_level=speed_level,
+            legacy_compatibility=legacy_compatibility,
+        )
+        candidate = load_swim_bout_tables(
+            root,
+            run_name=candidate_run,
+            speed_level=speed_level,
+            legacy_compatibility=legacy_compatibility,
+        )
     else:
-        reference = load_default_swim_bout_tables(root, run_name=reference_run)
-        candidate = load_default_swim_bout_tables(root, run_name=candidate_run)
+        reference = load_default_swim_bout_tables(
+            root,
+            run_name=reference_run,
+            legacy_compatibility=legacy_compatibility,
+        )
+        candidate = load_default_swim_bout_tables(
+            root,
+            run_name=candidate_run,
+            legacy_compatibility=legacy_compatibility,
+        )
 
     checks: list[CheckResult] = []
     _add_scalar_check(
@@ -354,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--speed-level", default=None, help="Optional speed level to compare instead of each run's default.")
     parser.add_argument("--atol", type=float, default=DEFAULT_ATOL, help="Absolute tolerance for table numeric fields.")
     parser.add_argument("--series-atol", type=float, default=DEFAULT_SERIES_ATOL, help="Absolute tolerance for dense signal series.")
+    parser.add_argument(
+        "--legacy-compatibility",
+        action="store_true",
+        help="Permit statusless historical comparison runs; never permits selector-ineligible runs.",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     parser.add_argument("--write-json", type=Path, help="Optional path to write comparison JSON.")
     return parser
@@ -368,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         speed_level=args.speed_level,
         atol=args.atol,
         series_atol=args.series_atol,
+        legacy_compatibility=bool(args.legacy_compatibility),
     )
     payload = comparison_to_dict(comparison)
     if args.write_json:

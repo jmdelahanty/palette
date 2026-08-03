@@ -523,3 +523,34 @@ def test_availability_resolver_rejects_explicit_ineligible_run(
     assert status.available is False
     assert status.run_name == "candidate"
     assert "not selector-eligible" in status.reason
+
+
+@pytest.mark.parametrize(
+    "requested_run",
+    (
+        "  bout_a  ",
+        "/analysis/swim_bout_runs/bout_a/",
+    ),
+)
+def test_metadata_availability_normalizes_explicit_run_like_open_zarr(
+    tmp_path: Path,
+    requested_run: str,
+) -> None:
+    parent = tmp_path / "analysis" / "swim_bout_runs"
+    _write_zarr_metadata(parent)
+    _write_zarr_metadata(
+        parent / "bout_a",
+        {
+            "palette_run_completion_status": "complete",
+            "stage_selector_eligible": True,
+        },
+    )
+
+    status = discover_stage_availability(
+        tmp_path,
+        "swim_bouts",
+        requested_run=requested_run,
+    )
+
+    assert status.available is True
+    assert status.run_name == "bout_a"

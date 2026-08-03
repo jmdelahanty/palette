@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
+from fisheye.analysis.eye_angle_io import resolve_eye_angle_run  # noqa: E402
 from fisheye.shared.eye_geometry_source import (  # noqa: E402
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
@@ -333,15 +334,6 @@ def _decode_channel_names(index_group: zarr.Group, expected_count: int) -> list[
     return names
 
 
-def _resolve_run(parent: zarr.Group, requested: Optional[str]) -> tuple[str, zarr.Group]:
-    name = requested
-    if not name or name == "latest":
-        name = str(parent.attrs.get("latest_complete") or parent.attrs.get("latest") or "")
-    if not name or name not in parent:
-        raise ValueError(f"Could not resolve run {requested!r} under {parent.path!r}.")
-    return str(name), parent[str(name)]
-
-
 def _sample_slices(row_count: int, *, windows: int, rows_per_window: int) -> tuple[slice, ...]:
     if row_count <= 0:
         return ()
@@ -390,11 +382,18 @@ def _sample_row_indices(slices: Sequence[slice]) -> np.ndarray:
     return np.concatenate(pieces) if pieces else np.asarray([], dtype=np.int64)
 
 
-def _resolve_eye_run(root: zarr.Group, run_name: Optional[str]) -> tuple[str, zarr.Group]:
-    parent = root.get("analysis/eye_angle_runs")
-    if parent is None:
-        raise ValueError("Recording has no analysis/eye_angle_runs group.")
-    return _resolve_run(parent, run_name)
+def _resolve_eye_run(
+    root: zarr.Group,
+    run_name: Optional[str],
+    *,
+    legacy_compatibility: bool = False,
+) -> tuple[str, zarr.Group]:
+    run_group, resolved, _run_path = resolve_eye_angle_run(
+        root,
+        run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
+    return resolved, run_group
 
 
 def _load_compact_sample(
@@ -717,11 +716,16 @@ def validate_eye_angle_run(
     rows_per_window: int = DEFAULT_ROWS_PER_WINDOW,
     review_png: Optional[Path] = None,
     review_panels: int = 12,
+    legacy_compatibility: bool = False,
 ) -> dict[str, object]:
     """Validate one persisted eye-angle run without modifying its Zarr."""
 
     root = open_zarr_root(zarr_path, mode="r")
-    resolved_run, run_group = _resolve_eye_run(root, eye_angle_run)
+    resolved_run, run_group = _resolve_eye_run(
+        root,
+        eye_angle_run,
+        legacy_compatibility=legacy_compatibility,
+    )
     attrs = _group_attrs(run_group)
     sample = _load_compact_sample(run_group, windows=windows, rows_per_window=rows_per_window)
     valid = np.asarray(sample["valid_frame"], dtype=bool) & np.asarray(sample["valid"], dtype=bool)
@@ -810,7 +814,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Read-only validation of eye identity, gaze signs, and body-frame geometry."
     )
     parser.add_argument("zarr_path", type=Path, help="Palette analysis Zarr.")
-    parser.add_argument("--eye-angle-run", help="Eye-angle run name; defaults to latest complete/latest.")
+    parser.add_argument("--eye-angle-run", help="Eye-angle run name; defaults to the stable complete selector.")
+    parser.add_argument(
+        "--legacy-eye-angle-compatibility",
+        action="store_true",
+        help="Permit statusless historical eye-angle runs; never permits selector-ineligible runs.",
+    )
     parser.add_argument("--windows", type=int, default=DEFAULT_WINDOWS, help="Bounded sample windows across the run.")
     parser.add_argument(
         "--rows-per-window",
@@ -834,6 +843,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rows_per_window=args.rows_per_window,
         review_png=args.review_png,
         review_panels=args.review_panels,
+        legacy_compatibility=bool(args.legacy_eye_angle_compatibility),
     )
     rendered = json.dumps(report, indent=2, sort_keys=True)
     if args.json_output is not None:
