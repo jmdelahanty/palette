@@ -118,6 +118,7 @@ true.
 | Stimulus response | Exact opt-in compact-v3 schema with closed table bundles, fixed dtypes, strict coercion, and atomic publication; legacy v2 remains the default compatibility path | Adopt byte planning in the v3 writer and benchmark before any default change |
 | Body frame | Exact ten-array schema, byte planner, strict manifest, and consolidated publication | Move from selector-ineligible companion evidence to an explicitly governed production lifecycle when authorized |
 | Keypoint quality | Exact diagnostic schema, byte planner, strict manifest, and consolidated publication | Add explicit production lifecycle/registry policy when authorized |
+| Derived keypoint metrics | Current v2 keeps profile-specific diagnostics in immutable source-bound `keypoint_quality_runs`; refined v2 retains compact acceptance gates and forbids legacy triangle arrays | Add any future skeleton-specific triangle metrics as a versioned quality profile, not universal refined-keypoint arrays |
 | Tail-posture view | Exact typed arrays, guarded lifecycle, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate and decide whether to migrate to the atomic materializer |
 | Bout classification | Exact compact-v2 manifest, guarded activation, serialized registry projection, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate through its real consumer |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
@@ -434,6 +435,10 @@ These are correctness results, not full-duration performance evidence.
 - [x] Freeze track kinematics as an exact 69-array per-track core, closed
       35-array physical bundle, required/optional run identities, and explicit
       legacy exclusions without weakening float64 coordinate authority.
+- [x] Resolve the derived-keypoint-metric ownership contradiction: the embedded
+      `derived_metrics_schema` triangle surface is legacy v1 compatibility;
+      maintained v2 diagnostics belong to versioned `keypoint_quality_runs`
+      profiles and do not weaken the exact refined-keypoint-v2 inventory.
 - [x] Record the fail-closed track adoption blocker: two structured lineage
       dtypes cannot yet round-trip through `DTypeContract`, `StoragePlan`, the
       array factory, and physical metadata comparison.

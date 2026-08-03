@@ -1,3 +1,10 @@
+"""Legacy refined-keypoint-v1 derived-metric metadata builders.
+
+Maintained keypoint/refined-keypoint v2 keeps diagnostic metric values in
+separate ``keypoint_quality_runs`` profiles.  This module remains for explicit
+v1 compatibility writers and metadata backfills.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Sequence
@@ -25,6 +32,7 @@ def build_refined_keypoint_derived_metrics_schema(
     *,
     keypoint_labels: Sequence[str],
 ) -> dict[str, Any]:
+    """Build the legacy v1 embedded triangle-metric declaration."""
     triangle_indices, triangle_labels = _head_triangle_selector(keypoint_labels)
     triangle_metric_name = "eye_triangle_geometry"
 

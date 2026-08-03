@@ -1,9 +1,18 @@
 # Derived Metrics Schema Contract
 <!-- contract-meta
 version: 1
-status: draft
-last_verified: 2026-04-11
+status: legacy-compatibility
+last_verified: 2026-08-03
 -->
+
+> **Current boundary (2026-08-03):** this document describes the legacy
+> refined-keypoint v1 metadata layer. Maintained raw/refined keypoint v2 does
+> not persist `triangle_area`, `triangle_angles`, or `min_angle` inside the
+> keypoint snapshot. Refined v2 explicitly forbids those profile-specific
+> arrays. New observation-local numeric diagnostics belong in a separately
+> versioned `keypoint_quality_runs/<run>` metric profile; accepted refinement
+> decisions retain compact gates such as `geometry_valid`. See
+> `docs/keypoint_storage_contract_v2.md`.
 
 Purpose: define a run-level metadata contract for derived numeric/vector
 measurements and optional boolean/status gates without collapsing every stage
@@ -32,13 +41,13 @@ The contract is run-level and is intended to work for:
 - detect bbox runs / refined detect groups
 - mask ROI runs
 
-Immediate implementation target:
+Legacy implementation target:
 
-- `refined_keypoints_runs/<run>.attrs["derived_metrics_schema"]`
+- legacy `refined_keypoints_runs/<run>.attrs["derived_metrics_schema"]`
 
 ## Canonical Placement
 
-When present, writers should store:
+Legacy v1 writers and compatibility backfills may store:
 
 - `<run>.attrs["derived_metrics_schema"]`
 
@@ -55,17 +64,20 @@ Version 1 payload shape:
 
 ## Reader Rules
 
-- When `derived_metrics_schema` is present, it is the authoritative semantic
-  description of the run's derived arrays and quality-gate arrays.
+- In a declared legacy v1 run, `derived_metrics_schema` is the authoritative
+  semantic description of that run's derived arrays and quality-gate arrays.
 - When it is absent, readers must continue supporting legacy stage-specific
   behavior and fallbacks.
 - This contract describes semantics only. It does not require a storage-layout
   rewrite.
 - Existing arrays stay where they already live.
+- Readers must not use this attribute to reinterpret a current keypoint-v2 or
+  refined-keypoint-v2 run. Current v2 arrays and metric-profile references are
+  governed by their exact manifests.
 
 ## Metadata Backfill
 
-Older refined-keypoint runs may already contain the derived arrays but lack the
+Older refined-keypoint v1 runs may already contain the derived arrays but lack the
 run-level `derived_metrics_schema` attr. These runs can be upgraded without
 rerunning keypoint prediction or refinement:
 
@@ -75,8 +87,9 @@ scripts/py -m fisheye.utils.backfill_keypoint_derived_metrics_schema \
   --apply
 ```
 
-The backfill is metadata-only. It writes `derived_metrics_schema` only when the
-run already has the refined-keypoint arrays described by the schema:
+The compatibility backfill is metadata-only. It writes
+`derived_metrics_schema` only when the legacy run already has the arrays
+described by the schema:
 `keypoints_roi`, `triangle_area`, `triangle_angles`, `min_angle`, and
 `geometry_valid`. It resolves keypoint labels from run-level `keypoint_labels`
 first, then `pose_schema`, and skips runs whose labels cannot identify the
@@ -172,9 +185,9 @@ Conditions may reference:
 - a threshold attr path such as `summary_statistics.min_triangle_area` or a
   more stage-specific path like `summary_statistics.refine.min_area`
 
-## Refined Keypoint V1 Example
+## Legacy Refined Keypoint V1 Example
 
-Current Palette refined-keypoint implementation writes:
+The legacy Palette refined-keypoint diagnostic writer writes:
 
 - `entity_kind = "keypoint_roi"`
 - one metric:
@@ -195,8 +208,28 @@ Current Palette refined-keypoint implementation writes:
     - `summary_statistics.min_triangle_area`
     - optional `summary_statistics.max_triangle_area`
 
-This makes the current eye-triangle geometry explicit without forcing downstream
-consumers to guess it from label names or array names alone.
+This makes eye-triangle geometry explicit for that legacy profile without
+forcing compatibility consumers to guess it from label names or array names.
+It is not the maintained refined-keypoint-v2 storage contract.
+
+## Maintained Keypoint V2 Mapping
+
+For current keypoint-v2 workflows:
+
+- raw and refined coordinate snapshots keep exact observation, lineage,
+  confidence, review, and compact acceptance-gate arrays;
+- `keypoint_quality_runs/<run>` owns separately versioned diagnostic metric
+  matrices, validity matrices, flag registries, policy proposals, and the
+  source-keypoint manifest binding;
+- ordered metric IDs and units come from the digest-bound quality profile, so
+  skeleton-specific geometry can be added without changing the universal
+  refined-keypoint array inventory; and
+- adding or changing metrics creates a new immutable quality run rather than
+  mutating the keypoint snapshot.
+
+The initial quality-v1 producer includes confidence margin and valid-landmark
+fraction only. Triangle geometry is a possible future skeleton-specific metric
+profile, not an already-promised current-v2 array.
 
 ## Detect BBox Compatibility
 
@@ -249,6 +282,7 @@ content.
 
 - `docs/keypoint_heading_computation_contract.md`
 - `docs/body_frame_contract.md`
+- `docs/keypoint_storage_contract_v2.md`
 - `docs/keypoint_derived_metric_schema_contract.md`
 - `docs/crimson_detect_bbox_read_contract.md`
 - `docs/subject_mask_runs_contract.md`
