@@ -150,6 +150,32 @@ def test_small_eager_semantic_table_remains_one_regular_object() -> None:
     assert receipt.plan.estimated_payload_objects == 1
 
 
+def test_indexed_array_below_eager_cap_still_uses_access_budgeted_inner_chunks() -> None:
+    receipt = plan_analysis_array_storage(
+        _declaration(
+            "probability",
+            access=AccessPattern.INDEXED,
+        ),
+        _facts(
+            "probability",
+            (1_000_000,),
+            np.float32,
+            semantics="one independently indexed probability row",
+        ),
+        profile=PUBLISHED_HTTP_V1,
+    )
+
+    # The logical payload is only 4 MiB, below the profile's 8 MiB eager cap.
+    # That cap is deliberately irrelevant to INDEXED access: decode granularity
+    # remains governed by the access-specific uncompressed byte budget.
+    assert receipt.plan.logical_nbytes == 4_000_000
+    assert receipt.plan.chunk_shape == (262_144,)
+    assert receipt.plan.chunk_nbytes == MIB
+    assert receipt.plan.estimated_chunk_count == 4
+    assert receipt.plan.shard_shape == (1_048_576,)
+    assert receipt.plan.estimated_payload_objects == 1
+
+
 def test_indexed_flat_rows_use_complete_xy_records_and_json_receipt() -> None:
     declaration = _declaration(
         "contour_points_xy",
