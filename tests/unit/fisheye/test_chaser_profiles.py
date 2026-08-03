@@ -5,13 +5,17 @@ import importlib
 from fisheye.analysis.chaser_profiles import (
     ANALYSIS_PROFILE_SCHEMA_ID,
     PROTOCOL_PROFILE_SCHEMA_ID,
+    ChaserAnalysisProfile,
     default_chaser_analysis_profile_path,
     default_chaser_protocol_profile_path,
     default_goodcopbadcop_source_profile_path,
+    full_chaser_analysis_profile_path,
     load_chaser_analysis_profile,
     load_chaser_protocol_profile,
+    resolve_chaser_analysis_modules,
     resolve_protocol_payload_path,
     resolve_profile_windows,
+    validate_chaser_runner_modules,
 )
 
 
@@ -46,6 +50,134 @@ def test_profile_schema_contracts_match_their_implementations() -> None:
         implementation = importlib.import_module(module.implementation)
         assert implementation.SCHEMA_ID == module.schema_id
         assert implementation.SCHEMA_VERSION == module.schema_version
+
+
+def test_default_module_resolution_preserves_profile_order() -> None:
+    profile = load_chaser_analysis_profile(default_chaser_analysis_profile_path())
+
+    selected = resolve_chaser_analysis_modules(profile)
+
+    assert [module.module_id for module in selected] == [
+        module.module_id for module in profile.modules if module.default_enabled
+    ]
+
+
+def test_module_resolution_adds_dependency_closure() -> None:
+    profile = load_chaser_analysis_profile(default_chaser_analysis_profile_path())
+
+    selected = resolve_chaser_analysis_modules(
+        profile,
+        enable=["chaser_escape_events"],
+    )
+    selected_ids = [module.module_id for module in selected]
+
+    assert "chaser_bout_response" in selected_ids
+    assert selected_ids.index("chaser_bout_response") < selected_ids.index(
+        "chaser_escape_events"
+    )
+
+
+def test_module_resolution_rejects_disabled_dependency() -> None:
+    profile = load_chaser_analysis_profile(default_chaser_analysis_profile_path())
+
+    try:
+        resolve_chaser_analysis_modules(
+            profile,
+            enable=["chaser_escape_events"],
+            disable=["chaser_bout_response"],
+        )
+    except ValueError as error:
+        assert "requires explicitly disabled" in str(error)
+    else:
+        raise AssertionError("disabled dependency should fail closed")
+
+
+def test_module_resolution_rejects_unknown_module() -> None:
+    profile = load_chaser_analysis_profile(default_chaser_analysis_profile_path())
+
+    try:
+        resolve_chaser_analysis_modules(profile, enable=["not_a_module"])
+    except ValueError as error:
+        assert "unknown chaser analysis module" in str(error)
+    else:
+        raise AssertionError("unknown module should fail closed")
+
+
+def test_module_resolution_rejects_dependency_cycle() -> None:
+    profile = ChaserAnalysisProfile.from_mapping(
+        {
+            "schema_id": ANALYSIS_PROFILE_SCHEMA_ID,
+            "schema_version": 1,
+            "profile_id": "cycle_test",
+            "profile_version": 1,
+            "modules": [
+                {
+                    "id": "first",
+                    "implementation": "fisheye.analysis.first",
+                    "schema_id": "palette.first.v1",
+                    "schema_version": 1,
+                    "depends_on": ["second"],
+                    "execution_cardinality": "recording",
+                    "default_enabled": True,
+                },
+                {
+                    "id": "second",
+                    "implementation": "fisheye.analysis.second",
+                    "schema_id": "palette.second.v1",
+                    "schema_version": 1,
+                    "depends_on": ["first"],
+                    "execution_cardinality": "recording",
+                    "default_enabled": False,
+                },
+            ],
+        }
+    )
+
+    try:
+        resolve_chaser_analysis_modules(profile)
+    except ValueError as error:
+        assert "dependency cycle" in str(error)
+    else:
+        raise AssertionError("dependency cycle should fail closed")
+
+
+def test_full_profile_enables_the_complete_generic_module_catalog() -> None:
+    profile = load_chaser_analysis_profile(full_chaser_analysis_profile_path())
+
+    selected = resolve_chaser_analysis_modules(profile)
+
+    assert profile.profile_id == "chaser_behavior_full_v2"
+    assert len(selected) == len(profile.modules)
+    validate_chaser_runner_modules(selected)
+
+
+def test_runner_adapter_validation_rejects_unimplemented_profile_module() -> None:
+    profile = ChaserAnalysisProfile.from_mapping(
+        {
+            "schema_id": ANALYSIS_PROFILE_SCHEMA_ID,
+            "schema_version": 1,
+            "profile_id": "unsupported_test",
+            "profile_version": 1,
+            "modules": [
+                {
+                    "id": "unsupported",
+                    "implementation": "fisheye.analysis.unsupported",
+                    "schema_id": "palette.unsupported.v1",
+                    "schema_version": 1,
+                    "depends_on": [],
+                    "execution_cardinality": "recording",
+                    "default_enabled": True,
+                }
+            ],
+        }
+    )
+
+    try:
+        validate_chaser_runner_modules(resolve_chaser_analysis_modules(profile))
+    except ValueError as error:
+        assert "no maintained runner adapter" in str(error)
+    else:
+        raise AssertionError("unsupported selected module should fail closed")
 
 
 def test_profile_window_resolution_matches_configured_event_boundaries() -> None:

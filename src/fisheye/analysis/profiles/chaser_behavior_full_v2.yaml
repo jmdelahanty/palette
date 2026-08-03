@@ -1,0 +1,112 @@
+schema_id: palette.chaser_analysis_profile
+schema_version: 1
+profile_id: chaser_behavior_full_v2
+profile_version: 2
+
+# Full generic chaser-analysis surface. Protocol-branded presets may select
+# this profile and provide run/component names, but the module graph remains
+# protocol-neutral and reusable.
+modules:
+  - id: stimulus_epochs
+    implementation: fisheye.analysis.stimulus_epoch_runs
+    schema_id: palette.stimulus_epoch_windows.v1
+    schema_version: 1
+    depends_on: []
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: detection_occupancy
+    implementation: fisheye.analysis.detection_occupancy_runs
+    schema_id: palette.detection_occupancy.v1
+    schema_version: 1
+    depends_on: [stimulus_epochs]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_distance
+    implementation: fisheye.analysis.chaser_distance_runs
+    schema_id: palette.chaser_distance.v1
+    schema_version: 1
+    depends_on: [stimulus_epochs]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_quadrant_occupancy
+    implementation: fisheye.analysis.chaser_quadrant_occupancy
+    schema_id: palette.chaser.quadrant_occupancy.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_near_field_occupancy
+    implementation: fisheye.analysis.chaser_near_field_occupancy
+    schema_id: palette.chaser.near_field_occupancy.v1
+    schema_version: 1
+    depends_on: [chaser_quadrant_occupancy]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_epoch_behavior_summary
+    implementation: fisheye.analysis.chaser_epoch_behavior_summary
+    schema_id: palette.chaser.epoch_behavior_summary.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_egocentric_bearing
+    implementation: fisheye.analysis.chaser_egocentric_bearing
+    schema_id: palette.chaser_egocentric_bearing.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_gaze_tracking
+    implementation: fisheye.analysis.chaser_gaze_tracking
+    schema_id: palette.chaser_gaze_tracking.v1
+    schema_version: 1
+    depends_on: [chaser_egocentric_bearing]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_bout_response
+    implementation: fisheye.analysis.chaser_bout_response
+    schema_id: palette.chaser_bout_response.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_escape_events
+    implementation: fisheye.analysis.chaser_escape_events
+    schema_id: palette.chaser_escape_events.v3
+    schema_version: 3
+    depends_on: [chaser_bout_response]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_radial_occupancy
+    implementation: fisheye.analysis.chaser_radial_occupancy
+    schema_id: palette.chaser_radial_occupancy.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_response_regimes
+    implementation: fisheye.analysis.chaser_response_regimes
+    schema_id: palette.chaser_response_regimes.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: recording
+    default_enabled: true
+
+  - id: chaser_escape_freeze_summary
+    implementation: fisheye.analysis.chaser_escape_freeze_summary
+    schema_id: palette.chaser.escape_freeze_summary.v1
+    schema_version: 1
+    depends_on: [chaser_distance]
+    execution_cardinality: per_chaser
+    default_enabled: true

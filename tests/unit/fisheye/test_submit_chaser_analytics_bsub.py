@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -161,3 +162,106 @@ def test_explicit_reused_inputs_override_authoritative_resolution(
         "CHASER_DISTANCE_RUN_SELECTION",
     ):
         assert config[key] == "explicit_reuse"
+
+
+def test_profile_enable_adds_dependency_and_renders_generic_steps(
+    tmp_path: Path,
+) -> None:
+    palette_repo = tmp_path / "palette-checkout"
+    _build_clean_palette_checkout(palette_repo)
+    zarr_path = tmp_path / "recording" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    config, job_script = _render(
+        palette_repo=palette_repo,
+        zarr_path=zarr_path,
+        log_dir=tmp_path / "logs",
+        run_id="enabled_escape_events",
+        selectors=("--enable-chaser-module", "chaser_escape_events"),
+    )
+    run_dir = tmp_path / "logs" / "chaser_analytics_enabled_escape_events"
+    profiles = json.loads((run_dir / "profiles.json").read_text(encoding="utf-8"))
+
+    assert config["RUN_CHASER_BOUT_RESPONSE"] == "1"
+    assert config["RUN_CHASER_ESCAPE_EVENTS"] == "1"
+    assert config["RUN_CHASER_RADIAL_OCCUPANCY"] == "0"
+    assert profiles["analysis_selection"]["explicit_enable"] == [
+        "chaser_escape_events"
+    ]
+    selected = profiles["analysis_selection"]["selected_module_ids"]
+    assert selected.index("chaser_bout_response") < selected.index(
+        "chaser_escape_events"
+    )
+    assert "fisheye.analysis.chaser_bout_response" in job_script
+    assert "fisheye.analysis.chaser_escape_events" in job_script
+    assert "fisheye.utils.run_goodcopbadcop" not in job_script
+
+
+def test_goodcopbadcop_v2_preset_selects_full_generic_profile(
+    tmp_path: Path,
+) -> None:
+    palette_repo = tmp_path / "palette-checkout"
+    _build_clean_palette_checkout(palette_repo)
+    zarr_path = tmp_path / "recording" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    config, _job_script = _render(
+        palette_repo=palette_repo,
+        zarr_path=zarr_path,
+        log_dir=tmp_path / "logs",
+        run_id="goodcopbadcop_v2",
+        selectors=("--preset", "goodcopbadcop_v2"),
+    )
+    run_dir = tmp_path / "logs" / "chaser_analytics_goodcopbadcop_v2"
+    profiles = json.loads((run_dir / "profiles.json").read_text(encoding="utf-8"))
+
+    assert config["CHASER_ANALYSIS_PROFILE"].endswith(
+        "chaser_behavior_full_v2.yaml"
+    )
+    assert profiles["analysis_profile"]["profile_id"] == "chaser_behavior_full_v2"
+    assert all(
+        config[key] == "1"
+        for key in (
+            "RUN_CHASER_BOUT_RESPONSE",
+            "RUN_CHASER_ESCAPE_EVENTS",
+            "RUN_CHASER_RADIAL_OCCUPANCY",
+            "RUN_CHASER_RESPONSE_REGIMES",
+        )
+    )
+    assert config["CHASER_BOUT_RESPONSE_COMPONENT"] == (
+        "chaser_bout_response_v2_20260717"
+    )
+
+
+def test_profile_selection_rejects_explicitly_disabled_dependency(
+    tmp_path: Path,
+) -> None:
+    palette_repo = tmp_path / "palette-checkout"
+    _build_clean_palette_checkout(palette_repo)
+    zarr_path = tmp_path / "recording" / "analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--zarr",
+            str(zarr_path),
+            "--palette-repo",
+            str(palette_repo),
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--run-id",
+            "disabled_dependency",
+            "--enable-chaser-module",
+            "chaser_escape_events",
+            "--disable-chaser-module",
+            "chaser_bout_response",
+            "--dry-run",
+        ],
+        cwd=palette_repo,
+        check=False,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "PALETTE_PYTHON": sys.executable},
+    )
+
+    assert result.returncode != 0
+    assert "requires explicitly disabled" in result.stderr

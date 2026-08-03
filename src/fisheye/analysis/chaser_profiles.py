@@ -19,6 +19,25 @@ PROFILE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 BOUNDARY_POLICY = "inclusive_start_exclusive_end_event_boundary"
 ALLOWED_FALLBACKS = frozenset({"recording_start", "recording_end"})
 ALLOWED_CARDINALITIES = frozenset({"recording", "per_chaser"})
+CHASER_RUNNER_IMPLEMENTATIONS: Mapping[str, str] = {
+    "stimulus_epochs": "fisheye.analysis.stimulus_epoch_runs",
+    "detection_occupancy": "fisheye.analysis.detection_occupancy_runs",
+    "chaser_distance": "fisheye.analysis.chaser_distance_runs",
+    "chaser_quadrant_occupancy": "fisheye.analysis.chaser_quadrant_occupancy",
+    "chaser_near_field_occupancy": "fisheye.analysis.chaser_near_field_occupancy",
+    "chaser_epoch_behavior_summary": (
+        "fisheye.analysis.chaser_epoch_behavior_summary"
+    ),
+    "chaser_egocentric_bearing": "fisheye.analysis.chaser_egocentric_bearing",
+    "chaser_gaze_tracking": "fisheye.analysis.chaser_gaze_tracking",
+    "chaser_bout_response": "fisheye.analysis.chaser_bout_response",
+    "chaser_escape_events": "fisheye.analysis.chaser_escape_events",
+    "chaser_radial_occupancy": "fisheye.analysis.chaser_radial_occupancy",
+    "chaser_response_regimes": "fisheye.analysis.chaser_response_regimes",
+    "chaser_escape_freeze_summary": (
+        "fisheye.analysis.chaser_escape_freeze_summary"
+    ),
+}
 
 
 def _identifier(value: Any, *, label: str) -> str:
@@ -329,6 +348,95 @@ class ChaserAnalysisProfile:
         return _canonical_sha256(self.to_dict())
 
 
+def resolve_chaser_analysis_modules(
+    profile: ChaserAnalysisProfile,
+    *,
+    enable: Sequence[str] = (),
+    disable: Sequence[str] = (),
+) -> tuple[ChaserAnalysisModule, ...]:
+    """Resolve enabled modules and their dependencies in execution order.
+
+    Profile defaults establish the normal module set. Explicit enables add a
+    module and its complete dependency closure. Explicit disables are a
+    fail-closed constraint: resolution fails when another selected module
+    requires a disabled dependency.
+    """
+
+    modules_by_id = {module.module_id: module for module in profile.modules}
+    enabled_ids = {
+        _identifier(value, label="enabled analysis module") for value in enable
+    }
+    disabled_ids = {
+        _identifier(value, label="disabled analysis module") for value in disable
+    }
+    unknown = sorted((enabled_ids | disabled_ids) - set(modules_by_id))
+    if unknown:
+        raise ValueError(f"unknown chaser analysis module(s): {', '.join(unknown)}")
+    contradictory = sorted(enabled_ids & disabled_ids)
+    if contradictory:
+        raise ValueError(
+            "analysis modules cannot be both enabled and disabled: "
+            + ", ".join(contradictory)
+        )
+
+    selected_ids = {
+        module.module_id for module in profile.modules if module.default_enabled
+    }
+    selected_ids.update(enabled_ids)
+    selected_ids.difference_update(disabled_ids)
+
+    visiting: list[str] = []
+    visited: set[str] = set()
+    ordered: list[ChaserAnalysisModule] = []
+
+    def visit(module_id: str) -> None:
+        if module_id in visited:
+            return
+        if module_id in visiting:
+            cycle_start = visiting.index(module_id)
+            cycle = visiting[cycle_start:] + [module_id]
+            raise ValueError(
+                "chaser analysis module dependency cycle: " + " -> ".join(cycle)
+            )
+        if module_id in disabled_ids:
+            requiring = visiting[-1] if visiting else module_id
+            raise ValueError(
+                f"selected module {requiring!r} requires explicitly disabled "
+                f"module {module_id!r}"
+            )
+        visiting.append(module_id)
+        module = modules_by_id[module_id]
+        for dependency_id in module.depends_on:
+            selected_ids.add(dependency_id)
+            visit(dependency_id)
+        visiting.pop()
+        visited.add(module_id)
+        ordered.append(module)
+
+    for module in profile.modules:
+        if module.module_id in selected_ids:
+            visit(module.module_id)
+    return tuple(ordered)
+
+
+def validate_chaser_runner_modules(
+    modules: Sequence[ChaserAnalysisModule],
+) -> None:
+    """Fail closed when the maintained runner lacks an exact typed adapter."""
+
+    for module in modules:
+        expected = CHASER_RUNNER_IMPLEMENTATIONS.get(module.module_id)
+        if expected is None:
+            raise ValueError(
+                f"selected module {module.module_id!r} has no maintained runner adapter"
+            )
+        if module.implementation != expected:
+            raise ValueError(
+                f"selected module {module.module_id!r} declares implementation "
+                f"{module.implementation!r}; runner adapter requires {expected!r}"
+            )
+
+
 def _resolve_event(
     profile: ChaserProtocolProfile,
     event_frames: Mapping[str, int],
@@ -460,10 +568,15 @@ def default_chaser_analysis_profile_path() -> Path:
     return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_v1.yaml"
 
 
+def full_chaser_analysis_profile_path() -> Path:
+    return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_full_v2.yaml"
+
+
 __all__ = [
     "ANALYSIS_PROFILE_SCHEMA_ID",
     "ANALYSIS_PROFILE_SCHEMA_VERSION",
     "BOUNDARY_POLICY",
+    "CHASER_RUNNER_IMPLEMENTATIONS",
     "PROTOCOL_PROFILE_SCHEMA_ID",
     "PROTOCOL_PROFILE_SCHEMA_VERSION",
     "ChaserAnalysisModule",
@@ -474,8 +587,11 @@ __all__ = [
     "default_chaser_analysis_profile_path",
     "default_chaser_protocol_profile_path",
     "default_goodcopbadcop_source_profile_path",
+    "full_chaser_analysis_profile_path",
     "load_chaser_analysis_profile",
     "load_chaser_protocol_profile",
+    "resolve_chaser_analysis_modules",
     "resolve_protocol_payload_path",
     "resolve_profile_windows",
+    "validate_chaser_runner_modules",
 ]

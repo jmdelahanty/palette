@@ -14,8 +14,9 @@ The reusable stack has five layers:
    canonical chaser roles, stimulus events, and window-policy inputs.
 3. A configurable stimulus-window policy derives reusable epoch windows.
 4. A versioned chaser-analysis profile catalogs independent generic analysis
-   modules, dependencies, cardinality, and defaults. Runner stage flags select
-   from that catalog and are recorded beside the profile snapshot.
+   modules, dependencies, cardinality, and defaults. The maintained runner
+   resolves that graph and records the exact selection beside the normalized
+   profile snapshot.
 5. Cohort-specific exports and figures consume the generic persisted schemas.
 
 GoodCopBadCop remains an appropriate name for its source adapter and cohort
@@ -59,6 +60,25 @@ It records:
 `chaser_behavior_v1.yaml` is protocol-neutral. It identifies generic modules,
 their schema contracts, dependencies, execution cardinality, and defaults.
 The runner snapshots both normalized profiles into provenance.
+
+`chaser_behavior_full_v2.yaml` selects the complete maintained generic catalog,
+including bout response, escape events, radial occupancy, and response regimes.
+The `goodcopbadcop_v2` runner preset selects this full profile and supplies
+versioned output names; it does not invoke protocol-branded analysis modules.
+
+`--enable-chaser-module` adds a module and its dependency closure.
+`--disable-chaser-module` is fail-closed: selection is rejected if any selected
+module needs the disabled module. Unknown modules and dependency cycles are
+also rejected. Every selected module must match an exact maintained runner
+adapter; a profile cannot silently select an implementation the runner does
+not execute. The run directory records the normalized profiles, their digests,
+explicit overrides, and resolved execution order in `profiles.json`;
+`declared_chaser_modules.txt` and `enabled_chaser_modules.txt` are the
+corresponding line-oriented catalog and selection receipts.
+
+Legacy `--skip-*` flags remain execution/reuse overrides. They do not rewrite
+the profile or silently discard dependency declarations. This preserves old
+submission behavior while making new workflow composition declarative.
 
 `goodcopbadcop_source_v1.yaml` remains loadable as an immutable compatibility
 profile for runs that already named that adapter. New generic chaser releases

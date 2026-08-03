@@ -31,6 +31,8 @@ RUN_ID_OVERRIDE=""
 DRY_RUN=0
 PROTOCOL_PROFILE="src/fisheye/analysis/profiles/chaser_event_windows_v1.yaml"
 CHASER_ANALYSIS_PROFILE="src/fisheye/analysis/profiles/chaser_behavior_v1.yaml"
+ENABLE_CHASER_MODULES=()
+DISABLE_CHASER_MODULES=()
 
 RUN_MOVEMENT=1
 RUN_STIMULUS_EPOCH=1
@@ -43,6 +45,10 @@ RUN_EGOCENTRIC=1
 RUN_ESCAPE_FREEZE=1
 RUN_EYE_ANGLES=1
 RUN_GAZE_TRACKING=1
+RUN_CHASER_BOUT_RESPONSE=0
+RUN_CHASER_ESCAPE_EVENTS=0
+RUN_CHASER_RADIAL_OCCUPANCY=0
+RUN_CHASER_RESPONSE_REGIMES=0
 
 OVERWRITE=0
 NO_PNG=0
@@ -70,6 +76,10 @@ EYE_ANGLE_OUTPUT_RUN="eye_angles_chaser_gaze_v1_20260714"
 EYE_ANGLE_RUN="latest"
 GAZE_EGOCENTRIC_COMPONENT="latest"
 GAZE_TRACKING_COMPONENT="chaser_gaze_tracking_v1_20260714"
+CHASER_BOUT_RESPONSE_COMPONENT="chaser_bout_response_v1"
+CHASER_ESCAPE_EVENTS_COMPONENT="chaser_escape_events_v1"
+CHASER_RADIAL_OCCUPANCY_COMPONENT="chaser_radial_occupancy_v1"
+CHASER_RESPONSE_REGIMES_COMPONENT="chaser_response_regimes_v1"
 
 OCCUPANCY_BIN_SIZE=128
 OCCUPANCY_SMOOTH_SIGMA=1.0
@@ -114,6 +124,24 @@ apply_preset() {
       EGOCENTRIC_COMPONENT="egocentric_bearing_v1"
       ESCAPE_FREEZE_COMPONENT="escape_freeze_chaser_{chaser_index}_v1_20260717"
       ;;
+    goodcopbadcop_v2)
+      CHASER_ANALYSIS_PROFILE="src/fisheye/analysis/profiles/chaser_behavior_full_v2.yaml"
+      TRACK_RUN="track_kinematics_chaser_v2_20260717"
+      SWIM_BOUT_RUN="swim_bouts_chaser_v2_20260717"
+      BOUT_KINEMATICS_RUN="bout_kinematics_chaser_v2_20260717"
+      EPOCH_RUN="stimulus_epochs_chaser_v2_20260717"
+      OCCUPANCY_RUN="detection_occupancy_chaser_v2_20260717"
+      CHASER_DISTANCE_RUN="chaser_distance_chaser_v2_20260717"
+      QUADRANT_OCCUPANCY_COMPONENT="quadrant_occupancy_v2_20260717"
+      NEAR_FIELD_OCCUPANCY_COMPONENT="near_field_occupancy_v2_20260717"
+      EPOCH_BEHAVIOR_COMPONENT="epoch_behavior_v2_20260717"
+      EGOCENTRIC_COMPONENT="egocentric_bearing_v2_20260717"
+      ESCAPE_FREEZE_COMPONENT="escape_freeze_chaser_{chaser_index}_v2_20260717"
+      CHASER_BOUT_RESPONSE_COMPONENT="chaser_bout_response_v2_20260717"
+      CHASER_ESCAPE_EVENTS_COMPONENT="chaser_escape_events_v2_20260717"
+      CHASER_RADIAL_OCCUPANCY_COMPONENT="chaser_radial_occupancy_v2_20260717"
+      CHASER_RESPONSE_REGIMES_COMPONENT="chaser_response_regimes_v2_20260717"
+      ;;
     redscare)
       TRACK_RUN="tk_hyst4_low2_latch_s005_redscare_v1_20260708"
       SWIM_BOUT_RUN="bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_redscare_v1_20260708"
@@ -129,7 +157,7 @@ apply_preset() {
       ;;
     *)
       echo "Unknown --preset: $1" >&2
-      echo "Known presets: chaser_v1, goodcopbadcop, redscare" >&2
+      echo "Known presets: chaser_v1, goodcopbadcop, goodcopbadcop_v2, redscare" >&2
       exit 2
       ;;
   esac
@@ -166,6 +194,10 @@ Target selection, choose at least one, or use --source registry:
   --submit-host HOST          Citrus SSH poller when bsub is unavailable locally.
   --protocol-profile PATH     Versioned protocol adapter/window profile.
   --analysis-profile PATH     Versioned generic chaser-analysis profile.
+  --enable-chaser-module ID   Add a profile module and its dependency closure.
+                              May be repeated.
+  --disable-chaser-module ID  Remove a profile module. Fails if another selected
+                              module requires it. May be repeated.
 
 LSF options:
   --queue NAME                LSF queue. If omitted, bsub default queue is used.
@@ -204,8 +236,10 @@ Stage toggles:
   --gaze-only                 Disable other modules; validate/use an existing eye run.
 
 Run names and components:
-  --preset NAME               Apply chaser_v1, goodcopbadcop, or redscare.
+  --preset NAME               Apply chaser_v1, goodcopbadcop, goodcopbadcop_v2,
+                              or redscare.
                               chaser_v1 is the generic default.
+                              goodcopbadcop_v2 selects the full generic profile.
                               Options are parsed in order; later explicit names win.
   --track-run NAME
   --swim-bout-run NAME
@@ -222,6 +256,10 @@ Run names and components:
   --eye-angle-run NAME        Eye run validated/used for gaze (default: latest).
   --gaze-egocentric-component NAME
   --gaze-tracking-component NAME
+  --chaser-bout-response-component NAME
+  --chaser-escape-events-component NAME
+  --chaser-radial-occupancy-component NAME
+  --chaser-response-regimes-component NAME
 
 Parameters:
   --overwrite                 Overwrite existing runs/components where supported.
@@ -267,6 +305,8 @@ while [[ $# -gt 0 ]]; do
     --submit-host) SUBMIT_HOST="$2"; shift 2;;
     --protocol-profile) PROTOCOL_PROFILE="$2"; shift 2;;
     --analysis-profile) CHASER_ANALYSIS_PROFILE="$2"; shift 2;;
+    --enable-chaser-module) ENABLE_CHASER_MODULES+=("$2"); shift 2;;
+    --disable-chaser-module) DISABLE_CHASER_MODULES+=("$2"); shift 2;;
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
@@ -316,6 +356,10 @@ while [[ $# -gt 0 ]]; do
     --eye-angle-run) EYE_ANGLE_RUN="$2"; shift 2;;
     --gaze-egocentric-component) GAZE_EGOCENTRIC_COMPONENT="$2"; shift 2;;
     --gaze-tracking-component) GAZE_TRACKING_COMPONENT="$2"; shift 2;;
+    --chaser-bout-response-component) CHASER_BOUT_RESPONSE_COMPONENT="$2"; shift 2;;
+    --chaser-escape-events-component) CHASER_ESCAPE_EVENTS_COMPONENT="$2"; shift 2;;
+    --chaser-radial-occupancy-component) CHASER_RADIAL_OCCUPANCY_COMPONENT="$2"; shift 2;;
+    --chaser-response-regimes-component) CHASER_RESPONSE_REGIMES_COMPONENT="$2"; shift 2;;
     --overwrite) OVERWRITE=1; shift;;
     --no-png) NO_PNG=1; shift;;
     --no-interactive-spec) NO_INTERACTIVE_SPEC=1; shift;;
@@ -455,32 +499,113 @@ fi
 
 mkdir -p "$RUN_DIR/json" "$RUN_DIR/status"
 
+PROFILE_SELECTION_ARGS=()
+for module_id in "${ENABLE_CHASER_MODULES[@]}"; do
+  PROFILE_SELECTION_ARGS+=(--enable "$module_id")
+done
+for module_id in "${DISABLE_CHASER_MODULES[@]}"; do
+  PROFILE_SELECTION_ARGS+=(--disable "$module_id")
+done
 env PYTHONPATH="$PALETTE_REPO/src" "$PALETTE_REPO/scripts/py" - \
   "$PROTOCOL_PROFILE_RESOLVED" \
   "$CHASER_ANALYSIS_PROFILE_RESOLVED" \
-  "$RUN_DIR/profiles.json" <<'PY'
+  "$RUN_DIR/profiles.json" \
+  "$RUN_DIR/declared_chaser_modules.txt" \
+  "$RUN_DIR/enabled_chaser_modules.txt" \
+  "${PROFILE_SELECTION_ARGS[@]}" <<'PY'
+import argparse
 import json
-import sys
 from pathlib import Path
 
 from fisheye.analysis.chaser_profiles import (
     load_chaser_analysis_profile,
     load_chaser_protocol_profile,
+    resolve_chaser_analysis_modules,
+    validate_chaser_runner_modules,
 )
 
-protocol = load_chaser_protocol_profile(Path(sys.argv[1]))
-analysis = load_chaser_analysis_profile(Path(sys.argv[2]))
+parser = argparse.ArgumentParser()
+parser.add_argument("protocol_profile", type=Path)
+parser.add_argument("analysis_profile", type=Path)
+parser.add_argument("output_json", type=Path)
+parser.add_argument("declared_modules", type=Path)
+parser.add_argument("enabled_modules", type=Path)
+parser.add_argument("--enable", action="append", default=[])
+parser.add_argument("--disable", action="append", default=[])
+args = parser.parse_args()
+
+protocol = load_chaser_protocol_profile(args.protocol_profile)
+analysis = load_chaser_analysis_profile(args.analysis_profile)
+selected = resolve_chaser_analysis_modules(
+    analysis,
+    enable=args.enable,
+    disable=args.disable,
+)
+validate_chaser_runner_modules(selected)
+selected_ids = [module.module_id for module in selected]
 payload = {
     "protocol_profile": protocol.to_dict(),
     "protocol_profile_sha256": protocol.sha256,
     "analysis_profile": analysis.to_dict(),
     "analysis_profile_sha256": analysis.sha256,
+    "analysis_selection": {
+        "explicit_enable": args.enable,
+        "explicit_disable": args.disable,
+        "selected_module_ids": selected_ids,
+    },
 }
-Path(sys.argv[3]).write_text(
+args.output_json.write_text(
     json.dumps(payload, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
+args.declared_modules.write_text(
+    "\n".join(module.module_id for module in analysis.modules) + "\n",
+    encoding="utf-8",
+)
+args.enabled_modules.write_text("\n".join(selected_ids) + "\n", encoding="utf-8")
 PY
+
+mapfile -t DECLARED_CHASER_MODULES < "$RUN_DIR/declared_chaser_modules.txt"
+mapfile -t SELECTED_CHASER_MODULES < "$RUN_DIR/enabled_chaser_modules.txt"
+declare -A DECLARED_CHASER_MODULE_SET=()
+declare -A SELECTED_CHASER_MODULE_SET=()
+for module_id in "${DECLARED_CHASER_MODULES[@]}"; do
+  DECLARED_CHASER_MODULE_SET["$module_id"]=1
+done
+for module_id in "${SELECTED_CHASER_MODULES[@]}"; do
+  SELECTED_CHASER_MODULE_SET["$module_id"]=1
+done
+profile_selects_module() {
+  [[ -n "${SELECTED_CHASER_MODULE_SET[$1]+selected}" ]]
+}
+profile_declares_module() {
+  [[ -n "${DECLARED_CHASER_MODULE_SET[$1]+declared}" ]]
+}
+apply_profile_selection() {
+  local module_id="$1"
+  local run_variable="$2"
+  if profile_declares_module "$module_id" && ! profile_selects_module "$module_id"; then
+    printf -v "$run_variable" '%s' 0
+  fi
+}
+
+apply_profile_selection stimulus_epochs RUN_STIMULUS_EPOCH
+apply_profile_selection detection_occupancy RUN_DETECTION_OCCUPANCY
+apply_profile_selection chaser_distance RUN_CHASER_DISTANCE
+apply_profile_selection chaser_quadrant_occupancy RUN_QUADRANT_OCCUPANCY
+apply_profile_selection chaser_near_field_occupancy RUN_NEAR_FIELD_OCCUPANCY
+apply_profile_selection chaser_epoch_behavior_summary RUN_EPOCH_BEHAVIOR
+apply_profile_selection chaser_egocentric_bearing RUN_EGOCENTRIC
+apply_profile_selection chaser_gaze_tracking RUN_GAZE_TRACKING
+apply_profile_selection chaser_escape_freeze_summary RUN_ESCAPE_FREEZE
+if profile_selects_module chaser_bout_response; then RUN_CHASER_BOUT_RESPONSE=1; fi
+if profile_selects_module chaser_escape_events; then RUN_CHASER_ESCAPE_EVENTS=1; fi
+if profile_selects_module chaser_radial_occupancy; then RUN_CHASER_RADIAL_OCCUPANCY=1; fi
+if profile_selects_module chaser_response_regimes; then RUN_CHASER_RESPONSE_REGIMES=1; fi
+
+SELECTED_CHASER_MODULES_CSV="$(IFS=,; echo "${SELECTED_CHASER_MODULES[*]}")"
+EXPLICIT_ENABLE_CHASER_MODULES_CSV="$(IFS=,; echo "${ENABLE_CHASER_MODULES[*]}")"
+EXPLICIT_DISABLE_CHASER_MODULES_CSV="$(IFS=,; echo "${DISABLE_CHASER_MODULES[*]}")"
 
 TARGET_ARGS=()
 TARGET_ARGS+=(--source "$SOURCE")
@@ -644,6 +769,9 @@ write_var REPO_ROOT "$PALETTE_REPO"
 write_var EXPECTED_COMMIT "$EXPECTED_COMMIT"
 write_var PROTOCOL_PROFILE "$PROTOCOL_PROFILE_RESOLVED"
 write_var CHASER_ANALYSIS_PROFILE "$CHASER_ANALYSIS_PROFILE_RESOLVED"
+write_var SELECTED_CHASER_MODULES_CSV "$SELECTED_CHASER_MODULES_CSV"
+write_var EXPLICIT_ENABLE_CHASER_MODULES_CSV "$EXPLICIT_ENABLE_CHASER_MODULES_CSV"
+write_var EXPLICIT_DISABLE_CHASER_MODULES_CSV "$EXPLICIT_DISABLE_CHASER_MODULES_CSV"
 write_var RUN_MOVEMENT "$RUN_MOVEMENT"
 write_var RUN_STIMULUS_EPOCH "$RUN_STIMULUS_EPOCH"
 write_var RUN_DETECTION_OCCUPANCY "$RUN_DETECTION_OCCUPANCY"
@@ -655,6 +783,10 @@ write_var RUN_EGOCENTRIC "$RUN_EGOCENTRIC"
 write_var RUN_ESCAPE_FREEZE "$RUN_ESCAPE_FREEZE"
 write_var RUN_EYE_ANGLES "$RUN_EYE_ANGLES"
 write_var RUN_GAZE_TRACKING "$RUN_GAZE_TRACKING"
+write_var RUN_CHASER_BOUT_RESPONSE "$RUN_CHASER_BOUT_RESPONSE"
+write_var RUN_CHASER_ESCAPE_EVENTS "$RUN_CHASER_ESCAPE_EVENTS"
+write_var RUN_CHASER_RADIAL_OCCUPANCY "$RUN_CHASER_RADIAL_OCCUPANCY"
+write_var RUN_CHASER_RESPONSE_REGIMES "$RUN_CHASER_RESPONSE_REGIMES"
 write_var OVERWRITE "$OVERWRITE"
 write_var NO_PNG "$NO_PNG"
 write_var NO_INTERACTIVE_SPEC "$NO_INTERACTIVE_SPEC"
@@ -679,6 +811,10 @@ write_var EYE_ANGLE_OUTPUT_RUN "$EYE_ANGLE_OUTPUT_RUN"
 write_var EYE_ANGLE_RUN "$EYE_ANGLE_RUN"
 write_var GAZE_EGOCENTRIC_COMPONENT "$GAZE_EGOCENTRIC_COMPONENT"
 write_var GAZE_TRACKING_COMPONENT "$GAZE_TRACKING_COMPONENT"
+write_var CHASER_BOUT_RESPONSE_COMPONENT "$CHASER_BOUT_RESPONSE_COMPONENT"
+write_var CHASER_ESCAPE_EVENTS_COMPONENT "$CHASER_ESCAPE_EVENTS_COMPONENT"
+write_var CHASER_RADIAL_OCCUPANCY_COMPONENT "$CHASER_RADIAL_OCCUPANCY_COMPONENT"
+write_var CHASER_RESPONSE_REGIMES_COMPONENT "$CHASER_RESPONSE_REGIMES_COMPONENT"
 write_var OCCUPANCY_BIN_SIZE "$OCCUPANCY_BIN_SIZE"
 write_var OCCUPANCY_SMOOTH_SIGMA "$OCCUPANCY_SMOOTH_SIGMA"
 write_var CHASER_THRESHOLD_MM "$CHASER_THRESHOLD_MM"
@@ -915,6 +1051,54 @@ if [[ "$RUN_EGOCENTRIC" == "1" ]]; then
     "${png_args[@]}" \
     "${interactive_args[@]}" \
     "${egocentric_args[@]}" \
+    --json
+fi
+
+if [[ "$RUN_CHASER_BOUT_RESPONSE" == "1" ]]; then
+  run_json_step chaser_bout_response "$py" -m fisheye.analysis.chaser_bout_response \
+    "$zarr_path" \
+    --chaser-distance-run "$CHASER_DISTANCE_RUN" \
+    --swim-bout-run "$SWIM_BOUT_RUN" \
+    --component-name "$CHASER_BOUT_RESPONSE_COMPONENT" \
+    --apply \
+    "${overwrite_args[@]}" \
+    "${png_args[@]}" \
+    "${interactive_args[@]}" \
+    --json
+fi
+
+if [[ "$RUN_CHASER_ESCAPE_EVENTS" == "1" ]]; then
+  run_log_step chaser_escape_events "$py" -m fisheye.analysis.chaser_escape_events \
+    "$zarr_path" \
+    --chaser-distance-run "$CHASER_DISTANCE_RUN" \
+    --bout-response-component "$CHASER_BOUT_RESPONSE_COMPONENT" \
+    --component-name "$CHASER_ESCAPE_EVENTS_COMPONENT" \
+    --apply \
+    "${overwrite_args[@]}" \
+    "${png_args[@]}"
+fi
+
+if [[ "$RUN_CHASER_RADIAL_OCCUPANCY" == "1" ]]; then
+  run_json_step chaser_radial_occupancy "$py" -m fisheye.analysis.chaser_radial_occupancy \
+    "$zarr_path" \
+    --chaser-distance-run "$CHASER_DISTANCE_RUN" \
+    --component-name "$CHASER_RADIAL_OCCUPANCY_COMPONENT" \
+    --apply \
+    "${overwrite_args[@]}" \
+    "${png_args[@]}" \
+    "${interactive_args[@]}" \
+    --json
+fi
+
+if [[ "$RUN_CHASER_RESPONSE_REGIMES" == "1" ]]; then
+  run_json_step chaser_response_regimes "$py" -m fisheye.analysis.chaser_response_regimes \
+    "$zarr_path" \
+    --chaser-distance-run "$CHASER_DISTANCE_RUN" \
+    --component-name "$CHASER_RESPONSE_REGIMES_COMPONENT" \
+    --apply \
+    "${overwrite_args[@]}" \
+    "${png_args[@]}" \
+    "${interactive_args[@]}" \
     --json
 fi
 
