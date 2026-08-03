@@ -11,6 +11,10 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis.eye_angle_storage import (
+    EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+)
+from fisheye.analysis_workflows.materializers import atomic_run_publisher as atomic_mod
 from fisheye.analysis_workflows.materializers import eye_angles as mod
 from fisheye.shared import eye_geometry_source as eye_geometry_source_mod
 from fisheye.shared.coordinate_descriptor import (
@@ -1802,6 +1806,231 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     assert publication["physical_copy"]["verification"] == (
         "sha256_all_physical_files"
     )
+
+
+def _seed_eye_angle_selectors(source: Path) -> None:
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    parent = root["analysis"].require_group("eye_angle_runs")
+    parent.attrs["latest"] = "established_eye"
+    parent.attrs["latest_complete"] = "established_eye"
+
+
+def _materialize_storage_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    source: Path,
+    scratch: Path,
+    *,
+    run_name: str = "eye_candidate",
+) -> dict[str, object]:
+    _accept_synthetic_subject_shape_publication(monkeypatch, source)
+    return mod.materialize_eye_angles(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+        run_name=run_name,
+        storage_profile=EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        chunk_rows=2,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_workers=1,
+        fps=100.0,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+        check_capacity=False,
+        stage_command="unit-test-eye-candidate",
+    )
+
+
+def test_storage_candidate_is_atomic_ineligible_pointer_preserving_and_consolidated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_eye_angle_selectors(source)
+    # Deliberately create a generation that cannot yet contain the candidate.
+    # Publication must refresh it only after all publisher metadata is final.
+    zarr.consolidate_metadata(str(source))
+
+    result = _materialize_storage_candidate(monkeypatch, source, scratch)
+
+    assert result["status"] == "complete"
+    publication = result["publish"]
+    assert publication["registry_updated"] is False
+    assert publication["archive_direct_consolidated_array_count"] == 41
+    assert publication["node_local_sharded_run"] is None
+    assert publication["node_local_publication_run"].endswith(
+        "eye-inputs-and-output.zarr/analysis/eye_angle_runs/eye_candidate"
+    )
+    assert publication["promotion_policy"] == (
+        "immutable_named_candidate_no_pointer_or_registry_activation"
+    )
+    assert publication["metadata_visibility_policy"] == {
+        "authoritative_root_consolidation": "after_final_publisher_metadata_write",
+        "direct_consolidated_group_attrs_required": True,
+        "direct_consolidated_array_declarations_required": 41,
+        "consolidated_parent_selectors_must_match_publication_snapshot": True,
+    }
+    assert result["local_materialization"][
+        "local_direct_consolidated_array_count"
+    ] == 41
+    assert result["local_materialization"]["final_physical_validation"][
+        "candidate_storage_valid"
+    ] is True
+    assert "sharded_validation" not in result["local_materialization"]
+    assert "sharding" not in result["local_materialization"]
+    assert not (scratch / "eye-angle-sharded-run").exists()
+
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    for root in (direct, consolidated):
+        parent = root["analysis/eye_angle_runs"]
+        assert parent.attrs["latest"] == "established_eye"
+        assert parent.attrs["latest_complete"] == "established_eye"
+        candidate = parent["eye_candidate"]
+        assert candidate.attrs["palette_run_completion_status"] == "complete"
+        assert candidate.attrs["stage_selector_eligible"] is False
+        assert candidate.attrs["eye_angle_storage_candidate"][
+            "activation_allowed"
+        ] is False
+        assert candidate.attrs["cluster_output_staging"]["promotion_policy"] == (
+            "immutable_named_candidate_no_pointer_or_registry_activation"
+        )
+    assert direct["analysis/eye_angle_runs/eye_candidate"].attrs[
+        "cluster_output_staging"
+    ] == consolidated["analysis/eye_angle_runs/eye_candidate"].attrs[
+        "cluster_output_staging"
+    ]
+
+    with pytest.raises(FileExistsError, match="Refusing to replace"):
+        mod.materialize_eye_angles(
+            source,
+            scratch_root=tmp_path / "other-scratch",
+            subject_shape_run="shape_1",
+            keypoint_run="kp_raw_1",
+            run_name="eye_candidate",
+            storage_profile=EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+            execution_backend="serial_driver",
+            fps=100.0,
+            apply=False,
+        )
+
+
+def test_storage_candidate_recovers_same_name_after_pre_rename_copy_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_eye_angle_selectors(source)
+    real_copy = atomic_mod._copy_tree
+    copy_attempts = 0
+
+    def interrupt_first_copy(source_path, target_path, *, backend):  # type: ignore[no-untyped-def]
+        nonlocal copy_attempts
+        copy_attempts += 1
+        if copy_attempts == 1:
+            raise RuntimeError("injected pre-rename copy interruption")
+        return real_copy(source_path, target_path, backend=backend)
+
+    monkeypatch.setattr(atomic_mod, "_copy_tree", interrupt_first_copy)
+    with pytest.raises(RuntimeError, match="pre-rename copy interruption"):
+        _materialize_storage_candidate(monkeypatch, source, scratch)
+
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = direct["analysis/eye_angle_runs"]
+    assert parent.attrs["latest"] == "established_eye"
+    assert parent.attrs["latest_complete"] == "established_eye"
+    assert parent.get("eye_candidate") is None
+    assert not tuple(
+        (source / "analysis" / "eye_angle_runs").glob(
+            ".eye_candidate.publish_tmp.*"
+        )
+    )
+
+    plan = mod.build_eye_angle_materialization_plan(
+        source,
+        scratch_root=scratch,
+        subject_shape_run="shape_1",
+        keypoint_run="kp_raw_1",
+        run_name="eye_candidate",
+        storage_profile=EYE_ANGLE_ACCESS_AWARE_CANDIDATE_PROFILE_ID,
+        chunk_rows=2,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_workers=1,
+        fps=100.0,
+    )
+    local = zarr.open_group(
+        str(plan.local_run_path), mode="r", use_consolidated=False
+    )
+    recovered = mod.publish_eye_angle_run(
+        plan,
+        materialization_payload=dict(local.attrs["node_local_materialization"]),
+        copy_backend="python",
+    )
+    assert recovered["archive_direct_consolidated_array_count"] == 41
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    assert direct["analysis/eye_angle_runs/eye_candidate"].attrs[
+        "palette_run_completion_status"
+    ] == "complete"
+
+    with pytest.raises(FileExistsError, match="Refusing to replace"):
+        mod.publish_eye_angle_run(
+            plan,
+            materialization_payload=dict(local.attrs["node_local_materialization"]),
+            copy_backend="python",
+        )
+
+
+def test_storage_candidate_consolidation_failure_is_terminal_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source(source)
+    _seed_eye_angle_selectors(source)
+    zarr.consolidate_metadata(str(source))
+    real_consolidate = mod.consolidate_metadata_capture_expected_warnings
+
+    def fail_authoritative_consolidation(path):  # type: ignore[no-untyped-def]
+        if Path(path).resolve() == source.resolve():
+            raise RuntimeError("injected authoritative consolidation failure")
+        return real_consolidate(path)
+
+    monkeypatch.setattr(
+        mod,
+        "consolidate_metadata_capture_expected_warnings",
+        fail_authoritative_consolidation,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="authoritative consolidation failure",
+    ):
+        _materialize_storage_candidate(monkeypatch, source, scratch)
+
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = direct["analysis/eye_angle_runs"]
+    failed = parent["eye_candidate"]
+    assert parent.attrs["latest"] == "established_eye"
+    assert parent.attrs["latest_complete"] == "established_eye"
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs["stage_selector_eligible"] is False
+    tombstone = failed.attrs["atomic_publication_tombstone"]
+    assert tombstone["public_path_retained"] is True
+    assert tombstone["selector_eligible"] is False
+    assert tombstone["retry_policy"] == "new_immutable_run_name_required"
+    assert "authoritative consolidation failure" in tombstone["failure"]
+
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    assert consolidated["analysis/eye_angle_runs"].get("eye_candidate") is None
 
 
 @pytest.mark.parametrize(

@@ -4,9 +4,11 @@ The production eye-angle path consumes completed subject-shape eye geometry and
 the exact canonical base keypoints sealed by that publication. Only the physical
 files backing those resolved
 arrays are copied to node-local storage.  The existing scientific writer then
-runs entirely against that staged Zarr, its completed output is converted to
-indexed Zarr v3 shards with decoded validation, and the shared atomic publisher
-installs the result in the authoritative recording.
+runs entirely against that staged Zarr. The established path converts its
+completed output to indexed Zarr v3 shards; the explicit access-aware candidate
+is already written through the shared byte planner and is not reshared. Both
+paths receive decoded validation before the shared atomic publisher installs
+the result in the authoritative recording.
 """
 
 from __future__ import annotations
@@ -31,8 +33,16 @@ import zarr
 
 from ...analysis import eye_angle_analysis as eye_writer
 from ...analysis.eye_angle_schema import (
+    EyeAngleDimensions,
     validate_eye_angle_compact_run,
     validate_eye_angle_value_aliases,
+)
+from ...analysis.eye_angle_storage import (
+    EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
+    EYE_ANGLE_STORAGE_PROFILE_CHOICES,
+    is_eye_angle_storage_candidate,
+    validate_eye_angle_candidate_storage,
+    validate_eye_angle_direct_consolidated_storage,
 )
 from ...shared.derived_analysis_registry_status import (
     emit_eye_angle_stage_completion,
@@ -45,6 +55,7 @@ from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from ...shared.zarr_sharded_copy import ShardedArrayLayout, copy_completed_run_to_sharded
+from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 
@@ -92,6 +103,9 @@ class EyeAngleMaterializationPlan:
     keypoint_run: str
     source_keypoint_run: str | None
     run_name: str
+    storage_profile_id: str
+    latest_before: str | None
+    latest_complete_before: str | None
     row_count: int
     frame_count: int
     chunk_rows: int
@@ -134,6 +148,14 @@ class EyeAngleMaterializationPlan:
     def target_run_path(self) -> Path:
         return self.source_zarr / "analysis" / "eye_angle_runs" / self.run_name
 
+    @property
+    def publication_run_path(self) -> Path:
+        """Return the already-final physical run selected for publication."""
+
+        if is_eye_angle_storage_candidate(self.storage_profile_id):
+            return self.local_run_path
+        return self.sharded_run
+
     def to_json(self) -> dict[str, Any]:
         return json_attr_safe(
             {
@@ -149,6 +171,10 @@ class EyeAngleMaterializationPlan:
                 "keypoint_run": self.keypoint_run,
                 "source_keypoint_run": self.source_keypoint_run,
                 "run_name": self.run_name,
+                "storage_profile_id": self.storage_profile_id,
+                "publication_run_path": str(self.publication_run_path),
+                "latest_before": self.latest_before,
+                "latest_complete_before": self.latest_complete_before,
                 "row_count": self.row_count,
                 "frame_count": self.frame_count,
                 "chunk_rows": self.chunk_rows,
@@ -455,6 +481,7 @@ def build_eye_angle_materialization_plan(
     subject_shape_run: str | None,
     keypoint_run: str | None,
     run_name: str,
+    storage_profile: str = EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
     angle_chunk_rows: int = DEFAULT_ANGLE_CHUNK_ROWS,
     angle_chunk_columns: int = DEFAULT_ANGLE_CHUNK_COLUMNS,
@@ -498,6 +525,19 @@ def build_eye_angle_materialization_plan(
         )
     backend = eye_writer._normalize_execution_backend(execution_backend)
     scheduler_key = eye_writer._normalize_scheduler(scheduler)
+    storage_profile_id = str(storage_profile)
+    if storage_profile_id not in EYE_ANGLE_STORAGE_PROFILE_CHOICES:
+        raise ValueError(
+            f"Unsupported eye-angle storage profile {storage_profile_id!r}; "
+            f"expected one of {EYE_ANGLE_STORAGE_PROFILE_CHOICES!r}."
+        )
+    if is_eye_angle_storage_candidate(storage_profile_id) and (
+        backend != eye_writer.SERIAL_EXECUTION_BACKEND
+    ):
+        raise ValueError(
+            "The byte-planned eye-angle candidate requires serial_driver so "
+            "one writer owns every complete physical shard."
+        )
     if fps is not None and float(fps) <= 0:
         raise ValueError("fps must be positive when supplied.")
     if smoothing_window is not None and int(smoothing_window) <= 0:
@@ -516,6 +556,18 @@ def build_eye_angle_materialization_plan(
         keypoint_run=keypoint_run,
     )
     resolved_name = _validate_run_name(run_name)
+    source_root = open_zarr_root(source, mode="r")
+    existing_parent = source_root.get("analysis/eye_angle_runs")
+    latest_before = (
+        existing_parent.attrs.get("latest")
+        if isinstance(existing_parent, zarr.Group)
+        else None
+    )
+    latest_complete_before = (
+        existing_parent.attrs.get("latest_complete")
+        if isinstance(existing_parent, zarr.Group)
+        else None
+    )
     target = source / "analysis" / "eye_angle_runs" / resolved_name
     if target.exists():
         raise FileExistsError(f"Refusing to replace existing authoritative run: {target}")
@@ -589,6 +641,15 @@ def build_eye_angle_materialization_plan(
         keypoint_run=context.keypoint_run_name,
         source_keypoint_run=context.keypoint_run_name,
         run_name=resolved_name,
+        storage_profile_id=storage_profile_id,
+        latest_before=(
+            str(latest_before) if latest_before is not None else None
+        ),
+        latest_complete_before=(
+            str(latest_complete_before)
+            if latest_complete_before is not None
+            else None
+        ),
         row_count=row_count,
         frame_count=frame_count,
         chunk_rows=int(chunk_rows),
@@ -896,10 +957,11 @@ def _validate_eye_angle_run(
     expected_instance_key_sha256: str,
     expected_acquisition_frame_index_sha256: str,
     require_sharded: bool,
-    expected_angle_chunk_rows: int,
-    expected_angle_chunk_columns: int,
-    expected_angle_shard_rows: int,
-    expected_angle_shard_columns: int,
+    expected_angle_chunk_rows: int | None,
+    expected_angle_chunk_columns: int | None,
+    expected_angle_shard_rows: int | None,
+    expected_angle_shard_columns: int | None,
+    storage_profile_id: str = EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
 ) -> dict[str, Any]:
     group = open_zarr_root(path, mode="r")
     attrs = group.attrs
@@ -982,7 +1044,11 @@ def _validate_eye_angle_run(
             if tuple(int(value) for value in array.shape) != (expected_rows, len(names)):
                 errors.append(f"shape mismatch for {array_path}")
                 continue
-            if index_path == "angle_channel_index":
+            if (
+                index_path == "angle_channel_index"
+                and expected_angle_chunk_rows is not None
+                and expected_angle_chunk_columns is not None
+            ):
                 expected_chunks = (
                     min(max(1, int(expected_angle_chunk_rows)), max(1, expected_rows)),
                     min(max(1, int(expected_angle_chunk_columns)), max(1, len(names))),
@@ -993,7 +1059,11 @@ def _validate_eye_angle_run(
                         f"{array_path}: expected angle chunks {expected_chunks}, "
                         f"observed {observed_chunks}"
                     )
-                if require_sharded:
+                if (
+                    require_sharded
+                    and expected_angle_shard_rows is not None
+                    and expected_angle_shard_columns is not None
+                ):
                     requested_outer = (
                         max(1, int(expected_angle_shard_rows)),
                         max(1, int(expected_angle_shard_columns)),
@@ -1169,6 +1239,31 @@ def _validate_eye_angle_run(
     materialization = attrs.get("node_local_materialization")
     if not isinstance(materialization, dict):
         errors.append("node_local_materialization provenance is missing")
+    candidate_storage_issues = ()
+    if is_eye_angle_storage_candidate(storage_profile_id):
+        column_order_contract = attrs.get("angle_column_order_contract")
+        observed_bundle_width = (
+            column_order_contract.get("semantic_bundle_width")
+            if isinstance(column_order_contract, Mapping)
+            else eye_writer.EYE_ANGLE_DENSE_CHUNK_COLUMNS
+        )
+        semantic_bundle_width = (
+            observed_bundle_width
+            if type(observed_bundle_width) is int and observed_bundle_width >= 3
+            else eye_writer.EYE_ANGLE_DENSE_CHUNK_COLUMNS
+        )
+        candidate_storage_issues = validate_eye_angle_candidate_storage(
+            group,
+            dimensions=EyeAngleDimensions(
+                n_roi_rows=int(row_count),
+                n_frames=int(frame_count),
+                angle_block_width=int(semantic_bundle_width),
+            ),
+        )
+        errors.extend(
+            f"candidate storage: {issue.code}:{issue.path}:{issue.message}"
+            for issue in candidate_storage_issues
+        )
     return json_attr_safe(
         {
             "valid": not errors,
@@ -1193,8 +1288,38 @@ def _validate_eye_angle_run(
                 _json_digest(output_schema) if isinstance(output_schema, dict) else None
             ),
             "physical_storage_layout": physical_layout,
+            "storage_profile_id": storage_profile_id,
+            "candidate_storage_valid": not candidate_storage_issues,
         }
     )
+
+
+def _require_candidate_direct_consolidated_equivalence(
+    direct_run: zarr.Group,
+    consolidated_run: zarr.Group,
+    *,
+    dimensions: EyeAngleDimensions,
+    label: str,
+) -> int:
+    """Require final attrs and all 41 array declarations in both views."""
+
+    if dict(direct_run.attrs) != dict(consolidated_run.attrs):
+        raise RuntimeError(
+            f"{label} eye-angle candidate direct/consolidated attributes differ."
+        )
+    issues = validate_eye_angle_direct_consolidated_storage(
+        direct_run,
+        consolidated_run,
+        dimensions=dimensions,
+    )
+    if issues:
+        raise RuntimeError(
+            f"{label} eye-angle candidate direct/consolidated metadata differs: "
+            + "; ".join(
+                f"{issue.code}:{issue.path}:{issue.message}" for issue in issues
+            )
+        )
+    return 41
 
 
 def publish_eye_angle_run(
@@ -1203,11 +1328,20 @@ def publish_eye_angle_run(
     materialization_payload: dict[str, Any],
     copy_backend: str,
 ) -> dict[str, Any]:
-    """Validate and publish one completed sharded eye-angle run."""
+    """Validate and atomically publish one final physical eye-angle run."""
 
     sealed_identity = _sealed_output_identity_digests(
         plan.staged_input_integrity_receipt
     )
+    storage_candidate = is_eye_angle_storage_candidate(plan.storage_profile_id)
+    publication_pointer_snapshot: dict[str, tuple[bool, Any]] = {}
+
+    def candidate_dimensions() -> EyeAngleDimensions:
+        return EyeAngleDimensions(
+            n_roi_rows=int(plan.row_count),
+            n_frames=int(plan.frame_count),
+            angle_block_width=int(plan.angle_chunk_columns),
+        )
 
     def validate(path: Path) -> dict[str, Any]:
         return _validate_eye_angle_run(
@@ -1219,16 +1353,39 @@ def publish_eye_angle_run(
             expected_acquisition_frame_index_sha256=sealed_identity[
                 "source_acquisition_frame_index"
             ],
-            require_sharded=True,
-            expected_angle_chunk_rows=plan.angle_chunk_rows,
-            expected_angle_chunk_columns=plan.angle_chunk_columns,
-            expected_angle_shard_rows=plan.output_shard_rows,
-            expected_angle_shard_columns=plan.angle_shard_columns,
+            require_sharded=not storage_candidate,
+            expected_angle_chunk_rows=(
+                None if storage_candidate else plan.angle_chunk_rows
+            ),
+            expected_angle_chunk_columns=(
+                None if storage_candidate else plan.angle_chunk_columns
+            ),
+            expected_angle_shard_rows=(
+                None if storage_candidate else plan.output_shard_rows
+            ),
+            expected_angle_shard_columns=(
+                None if storage_candidate else plan.angle_shard_columns
+            ),
+            storage_profile_id=plan.storage_profile_id,
         )
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
-        return (
-            require_runs_parent(root.require_group("analysis"), "eye_angle_runs"),
+        parent = require_runs_parent(
+            root.require_group("analysis"), "eye_angle_runs"
+        )
+        if storage_candidate and not publication_pointer_snapshot:
+            publication_pointer_snapshot.update(
+                {
+                    name: (name in parent.attrs, parent.attrs.get(name))
+                    for name in ("latest", "latest_complete")
+                }
+            )
+        return (parent,)
+
+    def candidate_pointers_unchanged(parent: zarr.Group) -> bool:
+        return bool(publication_pointer_snapshot) and all(
+            (name in parent.attrs, parent.attrs.get(name)) == expected
+            for name, expected in publication_pointer_snapshot.items()
         )
 
     def after_rename(_root: zarr.Group, run_group: zarr.Group) -> dict[str, Any]:
@@ -1248,35 +1405,82 @@ def publish_eye_angle_run(
     ) -> None:
         mark_run_complete(
             run_group,
-            parent_group=parent,
+            parent_group=None if storage_candidate else parent,
             run_name=plan.run_name,
             run_provenance=build_run_provenance_from_stage_record(
                 run_group.attrs.get("provenance", {}),
                 fallback_command="eye_angle_materializer",
             ),
         )
-        parent.attrs["latest_complete"] = plan.run_name
-        parent.attrs["latest"] = plan.run_name
+        run_group.attrs["stage_selector_eligible"] = False
+        if not storage_candidate:
+            parent.attrs["latest_complete"] = plan.run_name
+            parent.attrs["latest"] = plan.run_name
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/eye_angle_runs"]
         run_group = parent[plan.run_name]
-        if str(parent.attrs.get("latest")) != plan.run_name or str(
-            parent.attrs.get("latest_complete")
-        ) != plan.run_name or (
-            run_group.attrs.get("palette_run_completion_status") != "complete"
+        pointers_valid = (
+            candidate_pointers_unchanged(parent)
+            if storage_candidate
+            else (
+                parent.attrs.get("latest") == plan.run_name
+                and parent.attrs.get("latest_complete") == plan.run_name
+            )
+        )
+        if (
+            not pointers_valid
+            or run_group.attrs.get("palette_run_completion_status") != "complete"
             or run_group.attrs.get("stage_selector_eligible") is not False
         ):
             raise RuntimeError(
                 "Eye-angle run was not persisted complete and ineligible behind "
-                "its parent pointers."
+                "the expected parent pointer state."
             )
 
-    def activate(
+    archive_consolidated_counts: list[int] = []
+
+    def finalize_visibility_boundary(
         _root: zarr.Group,
         parent: zarr.Group,
         run_group: zarr.Group,
     ) -> None:
+        if storage_candidate:
+            if (
+                not candidate_pointers_unchanged(parent)
+                or run_group.attrs.get("palette_run_completion_status")
+                != "complete"
+                or run_group.attrs.get("stage_selector_eligible") is not False
+            ):
+                raise RuntimeError(
+                    "Eye-angle candidate lost its complete, selector-ineligible, "
+                    "pointer-preserving state before metadata consolidation."
+                )
+            consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+            direct_root = zarr.open_group(
+                str(plan.source_zarr), mode="r", use_consolidated=False
+            )
+            consolidated_root = zarr.open_group(
+                str(plan.source_zarr), mode="r", use_consolidated=True
+            )
+            direct_parent = direct_root["analysis/eye_angle_runs"]
+            consolidated_parent = consolidated_root["analysis/eye_angle_runs"]
+            if not candidate_pointers_unchanged(
+                direct_parent
+            ) or not candidate_pointers_unchanged(consolidated_parent):
+                raise RuntimeError(
+                    "Eye-angle candidate consolidated metadata does not preserve "
+                    "the publication-lock selector snapshot."
+                )
+            archive_consolidated_counts.append(
+                _require_candidate_direct_consolidated_equivalence(
+                    direct_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                    consolidated_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                    dimensions=candidate_dimensions(),
+                    label="Authoritative",
+                )
+            )
+            return
         if (
             str(parent.attrs.get("latest")) != plan.run_name
             or str(parent.attrs.get("latest_complete")) != plan.run_name
@@ -1296,7 +1500,7 @@ def publish_eye_angle_run(
     result = atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
-            local_run_path=plan.sharded_run,
+            local_run_path=plan.publication_run_path,
             target_run_path=plan.target_run_path,
             run_name=plan.run_name,
             lock_suffix="eye-angle-publish",
@@ -1315,19 +1519,47 @@ def publish_eye_angle_run(
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
-        activate_run=activate,
+        activate_run=finalize_visibility_boundary,
         after_rename=after_rename,
         payload_metadata={
             "authoritative_source_zarr": str(plan.source_zarr),
             "node_local_staged_zarr": str(plan.staged_zarr),
             "node_local_regular_run": str(plan.local_run_path),
-            "node_local_sharded_run": str(plan.sharded_run),
+            "node_local_sharded_run": (
+                None if storage_candidate else str(plan.sharded_run)
+            ),
+            "node_local_publication_run": str(plan.publication_run_path),
+            "storage_profile_id": plan.storage_profile_id,
+            "metadata_visibility_policy": (
+                {
+                    "authoritative_root_consolidation": (
+                        "after_final_publisher_metadata_write"
+                    ),
+                    "direct_consolidated_group_attrs_required": True,
+                    "direct_consolidated_array_declarations_required": 41,
+                    "consolidated_parent_selectors_must_match_publication_snapshot": True,
+                }
+                if storage_candidate
+                else None
+            ),
             "promotion_policy": (
-                "complete_ineligible_then_pointers_then_eligibility_final"
+                "immutable_named_candidate_no_pointer_or_registry_activation"
+                if storage_candidate
+                else "complete_ineligible_then_pointers_then_eligibility_final"
             ),
             "materialization": json_attr_safe(materialization_payload),
         },
     )
+    if storage_candidate and archive_consolidated_counts != [41]:
+        raise RuntimeError(
+            "Eye-angle candidate archive metadata was not consolidated exactly once."
+        )
+    result["archive_direct_consolidated_array_count"] = (
+        archive_consolidated_counts[0] if archive_consolidated_counts else None
+    )
+    if storage_candidate:
+        result["registry_updated"] = False
+        return result
     authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
     result["registry_updated"] = emit_eye_angle_stage_completion(
         authoritative_root,
@@ -1348,6 +1580,7 @@ def materialize_eye_angles(
     subject_shape_run: str | None,
     keypoint_run: str | None,
     run_name: str,
+    storage_profile: str = EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
     angle_chunk_rows: int = DEFAULT_ANGLE_CHUNK_ROWS,
     angle_chunk_columns: int = DEFAULT_ANGLE_CHUNK_COLUMNS,
@@ -1374,6 +1607,7 @@ def materialize_eye_angles(
         subject_shape_run=subject_shape_run,
         keypoint_run=keypoint_run,
         run_name=run_name,
+        storage_profile=storage_profile,
         chunk_rows=chunk_rows,
         angle_chunk_rows=angle_chunk_rows,
         angle_chunk_columns=angle_chunk_columns,
@@ -1429,6 +1663,8 @@ def materialize_eye_angles(
             str(plan.num_workers),
             "--layout",
             eye_writer.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+            "--storage-profile",
+            plan.storage_profile_id,
             "--quiet",
         ]
         if plan.fps is not None:
@@ -1454,10 +1690,27 @@ def materialize_eye_angles(
                 "source_acquisition_frame_index"
             ],
             require_sharded=False,
-            expected_angle_chunk_rows=plan.angle_chunk_rows,
-            expected_angle_chunk_columns=plan.angle_chunk_columns,
-            expected_angle_shard_rows=plan.output_shard_rows,
-            expected_angle_shard_columns=plan.angle_shard_columns,
+            expected_angle_chunk_rows=(
+                None
+                if is_eye_angle_storage_candidate(plan.storage_profile_id)
+                else plan.angle_chunk_rows
+            ),
+            expected_angle_chunk_columns=(
+                None
+                if is_eye_angle_storage_candidate(plan.storage_profile_id)
+                else plan.angle_chunk_columns
+            ),
+            expected_angle_shard_rows=(
+                None
+                if is_eye_angle_storage_candidate(plan.storage_profile_id)
+                else plan.output_shard_rows
+            ),
+            expected_angle_shard_columns=(
+                None
+                if is_eye_angle_storage_candidate(plan.storage_profile_id)
+                else plan.angle_shard_columns
+            ),
+            storage_profile_id=plan.storage_profile_id,
         )
         # The validation contract requires materialization provenance, which is
         # appended immediately after validating the scientific writer surface.
@@ -1499,6 +1752,7 @@ def materialize_eye_angles(
                     "fps_source": plan.fps_source,
                     "smoothing_window": plan.smoothing_window,
                     "layout": eye_writer.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+                    "storage_profile_id": plan.storage_profile_id,
                     "angle_column_order_profile": eye_writer.EYE_ANGLE_COLUMN_ORDER_PROFILE,
                 },
                 "regular_validation": {
@@ -1544,6 +1798,68 @@ def materialize_eye_angles(
             "compute_arguments": writer_argv,
         }
         regular_run.attrs["provenance"] = json_attr_safe(provenance)
+
+        if is_eye_angle_storage_candidate(plan.storage_profile_id):
+            candidate_validation = _validate_eye_angle_run(
+                plan.local_run_path,
+                row_count=plan.row_count,
+                frame_count=plan.frame_count,
+                expected_source_contract_sha256=plan.source_contract_sha256,
+                expected_instance_key_sha256=sealed_identity["instance_key"],
+                expected_acquisition_frame_index_sha256=sealed_identity[
+                    "source_acquisition_frame_index"
+                ],
+                require_sharded=False,
+                expected_angle_chunk_rows=None,
+                expected_angle_chunk_columns=None,
+                expected_angle_shard_rows=None,
+                expected_angle_shard_columns=None,
+                storage_profile_id=plan.storage_profile_id,
+            )
+            if not candidate_validation["valid"]:
+                raise RuntimeError(
+                    "Node-local final eye-angle candidate is invalid: "
+                    f"{candidate_validation}"
+                )
+            materialization_payload.update(
+                {
+                    "local_direct_consolidated_array_count": 41,
+                    "final_physical_validation": candidate_validation,
+                }
+            )
+            regular_run.attrs["node_local_materialization"] = materialization_payload
+            consolidate_metadata_capture_expected_warnings(plan.staged_zarr)
+            direct_root = zarr.open_group(
+                str(plan.staged_zarr), mode="r", use_consolidated=False
+            )
+            consolidated_root = zarr.open_group(
+                str(plan.staged_zarr), mode="r", use_consolidated=True
+            )
+            _require_candidate_direct_consolidated_equivalence(
+                direct_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                consolidated_root[f"analysis/eye_angle_runs/{plan.run_name}"],
+                dimensions=EyeAngleDimensions(
+                    n_roi_rows=plan.row_count,
+                    n_frames=plan.frame_count,
+                    angle_block_width=plan.angle_chunk_columns,
+                ),
+                label="Node-local",
+            )
+            publish = publish_eye_angle_run(
+                plan,
+                materialization_payload=materialization_payload,
+                copy_backend=copy_backend,
+            )
+            result.update(
+                {
+                    "status": "complete",
+                    "staging": staging,
+                    "local_materialization": materialization_payload,
+                    "publish": publish,
+                }
+            )
+            succeeded = True
+            return result
 
         sharding = copy_completed_run_to_sharded(
             plan.local_run_path,
@@ -1643,6 +1959,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--run-name", required=True)
+    parser.add_argument(
+        "--storage-profile",
+        choices=EYE_ANGLE_STORAGE_PROFILE_CHOICES,
+        default=EYE_ANGLE_LEGACY_EXPLICIT_STORAGE,
+        help=(
+            "Explicit physical storage profile. The access-aware profile is an "
+            "immutable selector-ineligible candidate and requires serial_driver."
+        ),
+    )
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_ROWS)
     parser.add_argument(
@@ -1697,6 +2022,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         subject_shape_run=args.subject_shape_run,
         keypoint_run=args.keypoint_run,
         run_name=args.run_name,
+        storage_profile=args.storage_profile,
         chunk_rows=args.chunk_size,
         angle_chunk_rows=args.angle_chunk_rows,
         angle_chunk_columns=args.angle_chunk_columns,

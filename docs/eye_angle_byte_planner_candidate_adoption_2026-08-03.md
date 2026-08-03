@@ -26,6 +26,22 @@ explicit `eye_angle_storage_candidate` envelope stating that activation is not
 allowed. Hierarchical output and Dask worker writes are rejected for this
 profile.
 
+The production materializer accepts the same explicit profile and preserves
+that boundary end to end:
+
+```text
+scripts/py -m fisheye.analysis_workflows.materializers.eye_angles \
+  <recording>_analysis.zarr \
+  --run-name <immutable-candidate-name> \
+  --storage-profile eye_angle_access_aware_candidate_v1 \
+  --execution-backend serial_driver \
+  --apply
+```
+
+It stages the exact sealed source subset to node-local scratch, asks the
+maintained direct writer to create the final byte-planned arrays there, and
+does not run the legacy post-hoc resharing copy over those arrays.
+
 ## Candidate policy
 
 - Inner target: approximately 1 MiB uncompressed, bounded to 512 KiB–2 MiB.
@@ -75,12 +91,26 @@ JSON string `"NaN"` and its decoded in-memory float NaN are normalized only for
 that top-level metadata field; other metadata remains exact. Ordinary
 compact-v7 logical and value-alias validation still runs unchanged.
 
-The active writer does not consolidate the recording root because it is
-mutating an existing archive and the candidate is not selector-visible. A
-separate validation helper proves direct/consolidated declaration equivalence
-after a benchmark or atomic publisher explicitly consolidates its immutable
-artifact. A future promotion gate must perform that consolidation check before
-visibility.
+The direct writer does not consolidate while it is mutating the node-local
+archive. The materializer writes all local provenance, consolidates the
+node-local root, and proves direct/consolidated declaration equivalence before
+publication. It then uses the common atomic run-group publisher: copy to a
+same-parent hidden sibling, validate the copy, and `os.replace` it into the
+immutable named path. After the publisher's final metadata write, the
+materializer refreshes the authoritative recording-root consolidated metadata
+and proves the direct and consolidated run attributes and 41 array
+declarations agree.
+
+This final callback is a metadata-visibility boundary only. It does not make
+the candidate selector eligible, change `latest` or `latest_complete`, or emit
+a registry completion event. Existing parent pointer values are recorded in
+the read-only plan for evidence, then snapshotted again under the publication
+lock and checked unchanged in both metadata views.
+
+A pre-rename interruption leaves no public child and the retained node-local
+run may be retried with the same name. Any post-rename failure retains an
+immutable public failed/ineligible tombstone whose recovery policy requires a
+new run name. Existing public names are never replaced.
 
 ## Implementation checklist
 
@@ -94,6 +124,12 @@ visibility.
 - [x] Validate direct/consolidated equivalence in a real-Zarr fixture.
 - [x] Reject unsafe Dask worker ownership and legacy hierarchical layout.
 - [x] Prove candidate and established writers produce identical logical arrays.
+- [x] Build the candidate on node-local scratch through the direct byte planner.
+- [x] Publish through hidden-copy validation and immutable rename.
+- [x] Refresh authoritative consolidated metadata after final publisher writes.
+- [x] Preserve selectors and suppress registry completion/activation.
+- [x] Prove pre-rename retry, terminal failed-tombstone evidence, stale metadata
+  refresh, and no same-name replacement.
 - [ ] Run an immutable full-duration candidate publication benchmark.
 - [ ] Obtain mounted Crimson read/object/RSS evidence.
 - [ ] Promote a versioned shared profile only through a separate reviewed
