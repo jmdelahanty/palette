@@ -13,6 +13,7 @@ from fisheye.analysis.track_kinematics_schema import (
     TRACK_KINEMATICS_CORE_TRACK_DECLARATIONS,
     TRACK_KINEMATICS_FLAT_LINEAGE_PATHS,
     TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION,
+    TRACK_KINEMATICS_PHYSICAL_TRACK_DECLARATIONS,
     build_track_kinematics_flat_lineage_declarations,
 )
 from fisheye.analysis.track_kinematics_storage import (
@@ -83,7 +84,13 @@ def _sample_payload(path: str, dtype: np.dtype, shape: tuple[int, ...], track_id
     return values + dtype.type(track_id / 10.0)
 
 
-def _populate_v1_run(run: zarr.Group, *, track_rows: tuple[int, ...] = (11, 7)) -> None:
+def _populate_v1_run(
+    run: zarr.Group,
+    *,
+    track_rows: tuple[int, ...] = (11, 7),
+    include_physical: bool = False,
+    include_arena_inventory: bool = True,
+) -> None:
     track_ids = tuple(index * 2 for index in range(len(track_rows)))
     run.attrs.update(
         {
@@ -104,15 +111,19 @@ def _populate_v1_run(run: zarr.Group, *, track_rows: tuple[int, ...] = (11, 7)) 
         data=np.asarray(track_ids, dtype=np.int32),
         chunks=(len(track_ids),),
     )
-    run.create_array(
-        "track_arena_ids",
-        data=np.asarray([5 + track_id for track_id in track_ids], dtype=np.int32),
-        chunks=(len(track_ids),),
-    )
+    if include_arena_inventory:
+        run.create_array(
+            "track_arena_ids",
+            data=np.asarray([5 + track_id for track_id in track_ids], dtype=np.int32),
+            chunks=(len(track_ids),),
+        )
     tracks = run.create_group("tracks")
     for track_id, row_count in zip(track_ids, track_rows):
         track = tracks.create_group(f"id_{track_id}")
-        for declaration in TRACK_KINEMATICS_CORE_TRACK_DECLARATIONS:
+        declarations = TRACK_KINEMATICS_CORE_TRACK_DECLARATIONS + (
+            TRACK_KINEMATICS_PHYSICAL_TRACK_DECLARATIONS if include_physical else ()
+        )
+        for declaration in declarations:
             shape = tuple(
                 row_count
                 if dimension == "n_track_samples"
@@ -133,6 +144,35 @@ def _populate_v1_run(run: zarr.Group, *, track_rows: tuple[int, ...] = (11, 7)) 
                 data=data,
                 chunks=tuple(max(1, extent) for extent in shape),
             )
+
+
+def _materialize_self_consistent_candidate(
+    source: zarr.Group,
+    candidate: zarr.Group,
+) -> None:
+    declarations = build_flat_candidate_declarations(source)
+    hashes = source_flat_projection_hashes(source, declarations)
+    receipt = build_flat_candidate_storage_receipt(
+        source,
+        profile=get_storage_profile("published_http_v1"),
+    )
+    rematerialize_flat_candidate(source, candidate, receipt=receipt)
+    candidate.attrs.update(
+        {
+            "schema_id": TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID,
+            "schema_version": TRACK_KINEMATICS_FLAT_LINEAGE_SCHEMA_VERSION,
+            RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
+            "stage_selector_eligible": False,
+            "storage_candidate_profile_promoted": False,
+        }
+    )
+    persist_flat_candidate_contract(
+        candidate,
+        receipt=receipt,
+        declarations=declarations,
+        source_run_path="analysis/track_kinematics_runs/offline/source_v1",
+        source_projection_hashes=hashes,
+    )
 
 
 def _build_source_archive(path: Path) -> None:
@@ -342,6 +382,93 @@ def test_flat_candidate_rejects_unexpected_group_topology(tmp_path: Path) -> Non
     tampered = validate_flat_candidate(candidate, source_group=source)
     assert not tampered["valid"]
     assert "decoded values differ" in " ".join(tampered["errors"])
+
+
+@pytest.mark.parametrize(
+    ("include_physical", "include_arena_inventory", "missing_bundle"),
+    [
+        (False, True, "physical-position"),
+        (True, False, "arena-inventory"),
+    ],
+)
+def test_flat_candidate_rejects_source_optional_bundle_omission_even_when_resealed(
+    tmp_path: Path,
+    include_physical: bool,
+    include_arena_inventory: bool,
+    missing_bundle: str,
+) -> None:
+    full_source = zarr.open_group(
+        str(tmp_path / "full-source"),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    _populate_v1_run(
+        full_source,
+        include_physical=True,
+        include_arena_inventory=True,
+    )
+    reduced_source = zarr.open_group(
+        str(tmp_path / f"reduced-source-{missing_bundle}"),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    _populate_v1_run(
+        reduced_source,
+        include_physical=include_physical,
+        include_arena_inventory=include_arena_inventory,
+    )
+    candidate = zarr.open_group(
+        str(tmp_path / f"candidate-{missing_bundle}"),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    _materialize_self_consistent_candidate(reduced_source, candidate)
+
+    self_validation = validate_flat_candidate(candidate, source_group=reduced_source)
+    assert self_validation["valid"], self_validation
+
+    bound_validation = validate_flat_candidate(candidate, source_group=full_source)
+    assert not bound_validation["valid"]
+    assert (
+        "declaration inventory differs from bound v1 source"
+        in " ".join(bound_validation["errors"])
+    )
+
+
+def test_flat_candidate_rejects_dot_source_run_name_after_rehash(tmp_path: Path) -> None:
+    source = zarr.open_group(
+        str(tmp_path / "source-run"), mode="w", zarr_format=3, use_consolidated=False
+    )
+    _populate_v1_run(source)
+    candidate = zarr.open_group(
+        str(tmp_path / "candidate-run"),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    _materialize_self_consistent_candidate(source, candidate)
+
+    manifest = dict(candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR])
+    manifest["payload"] = dict(manifest["payload"])
+    manifest["payload"]["source_run_path"] = (
+        "analysis/track_kinematics_runs/offline/.."
+    )
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+    candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR] = manifest
+    candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_DIGEST_ATTR] = manifest[
+        "payload_digest"
+    ]
+    candidate.attrs["storage_candidate_source_run_path"] = manifest["payload"][
+        "source_run_path"
+    ]
+    candidate.attrs["storage_candidate_source_run"] = ".."
+
+    validation = validate_flat_candidate(candidate)
+    assert not validation["valid"]
+    assert "semantic manifest envelope differs" in " ".join(validation["errors"])
 
 
 def test_plan_rejects_archive_scratch_containment_and_symlink_alias(

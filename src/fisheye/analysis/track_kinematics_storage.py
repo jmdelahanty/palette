@@ -57,7 +57,7 @@ TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR = (
     "track_kinematics_flat_candidate_logical_hashes"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_SOURCE_RUN_PREFIX = "analysis/track_kinematics_runs/offline/"
+_SOURCE_RUN_PARENT_COMPONENTS = ("analysis", "track_kinematics_runs", "offline")
 _STRUCTURED_SOURCE_FIELDS = {
     "source_frame_interpolation/left_source_frame_index": (
         "source_frame_interpolation",
@@ -234,6 +234,17 @@ def _candidate_declarations(
         track_ids=track_ids,
         include_physical=include_physical,
         include_arena_inventory=include_arena,
+    )
+
+
+def _is_canonical_source_run_path(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    components = value.split("/")
+    return (
+        tuple(components[:3]) == _SOURCE_RUN_PARENT_COMPONENTS
+        and len(components) == 4
+        and components[-1] not in {"", ".", ".."}
     )
 
 
@@ -541,6 +552,21 @@ def validate_flat_candidate(
         declarations = _candidate_declarations(run_group)
     except Exception as exc:
         return {"valid": False, "errors": [str(exc)], "array_count": 0}
+    source_declarations: tuple[AnalysisArrayDeclaration, ...] | None = None
+    source_inventory_matches = False
+    if source_group is not None:
+        try:
+            source_declarations = build_flat_candidate_declarations(source_group)
+        except Exception as exc:
+            errors.append(f"source declaration validation failed: {exc}")
+        else:
+            source_inventory_matches = [
+                declaration.as_manifest() for declaration in source_declarations
+            ] == [declaration.as_manifest() for declaration in declarations]
+            if not source_inventory_matches:
+                errors.append(
+                    "flat candidate declaration inventory differs from bound v1 source"
+                )
     declaration_paths = {declaration.path for declaration in declarations}
     observed_paths = set(_iter_array_paths(run_group))
     if observed_paths != declaration_paths:
@@ -631,9 +657,7 @@ def validate_flat_candidate(
                 "positions_mm_dtype": "float64_or_absent_all_tracks",
                 "narrowing_permitted": False,
             }
-            or not isinstance(payload.get("source_run_path"), str)
-            or not str(payload.get("source_run_path")).startswith(_SOURCE_RUN_PREFIX)
-            or str(payload.get("source_run_path")).count("/") != 3
+            or not _is_canonical_source_run_path(payload.get("source_run_path"))
         ):
             errors.append("flat candidate semantic manifest envelope differs")
     access = {
@@ -706,22 +730,26 @@ def validate_flat_candidate(
         ):
             errors.append("flat candidate source and candidate hash bindings differ")
     if source_group is not None:
-        try:
-            expected = source_flat_projection_hashes(source_group, declarations)
-        except Exception as exc:
-            errors.append(f"source equality validation failed: {exc}")
-        else:
-            if hashes != expected:
-                errors.append("flat candidate decoded values differ from v1 source")
-            if (
-                isinstance(manifest, Mapping)
-                and isinstance(manifest.get("payload"), Mapping)
-                and manifest["payload"].get("source_projection_hashes") != expected
-            ):
-                errors.append("flat candidate manifest source hashes differ")
-            source_group_path = str(getattr(source_group, "name", "")).strip("/")
-            if source_group_path and source_group_path != source_path:
-                errors.append("flat candidate source group path binding differs")
+        if source_declarations is not None and source_inventory_matches:
+            try:
+                expected = source_flat_projection_hashes(
+                    source_group, source_declarations
+                )
+            except Exception as exc:
+                errors.append(f"source equality validation failed: {exc}")
+            else:
+                if hashes != expected:
+                    errors.append("flat candidate decoded values differ from v1 source")
+                if (
+                    isinstance(manifest, Mapping)
+                    and isinstance(manifest.get("payload"), Mapping)
+                    and manifest["payload"].get("source_projection_hashes")
+                    != expected
+                ):
+                    errors.append("flat candidate manifest source hashes differ")
+        source_group_path = str(getattr(source_group, "name", "")).strip("/")
+        if source_group_path and source_group_path != source_path:
+            errors.append("flat candidate source group path binding differs")
     return {
         "valid": not errors,
         "errors": errors,
