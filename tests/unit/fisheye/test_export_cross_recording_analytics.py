@@ -108,8 +108,25 @@ def _make_source_zarr(path: Path) -> Path:
         }
     )
     moving = step0.create_group("moving_grating")
-    moving.attrs["direction_degrees"] = 0.0
-    moving.attrs["direction_mapping_status"] = "validated"
+    moving.attrs.update(
+        {
+            "metadata_schema_version": 1,
+            "source": "protocol_snapshot",
+            "orientation_degrees_authored": 0.0,
+            "grating_direction_camera_deg": 0.0,
+            "camera_to_projector_offset_deg": 0.0,
+            "direction_mapping_source": "protocol_orientation_degrees_no_offset",
+            "direction_mapping_status": "unvalidated_default_zero_offset",
+            "direction_mapping_validated": False,
+            "speed_mm_s": 5.0,
+            "speed_pps": 12.0,
+            "spatial_freq_cycles_per_mm": 0.2,
+            "spatial_freq_rpp": 0.1,
+            "temporal_frequency_hz": 1.0,
+            "actual_rendered_temporal_frequency_hz": 1.2,
+            "duty_cycle": 0.5,
+        }
+    )
 
     step1 = steps.create_group("step_1")
     step1.attrs.update(
@@ -125,7 +142,31 @@ def _make_source_zarr(path: Path) -> Path:
         }
     )
     concentric = step1.create_group("concentric_grating")
-    concentric.attrs["stimulus_radial_polarity_authored"] = "contracting"
+    concentric.attrs.update(
+        {
+            "metadata_schema_version": 1,
+            "source": "protocol_snapshot",
+            "stimulus_role": "inert",
+            "radial_polarity_authored": "contracting",
+            "radial_sign_authored": -1,
+            "radial_polarity_source": "protocol_parameters.is_expanding",
+            "radial_polarity_validated": False,
+            "speed_mm_s": 4.0,
+            "speed_pps": 10.0,
+            "spatial_freq_cycles_per_mm": 0.25,
+            "spatial_freq_rpp": 0.1,
+            "temporal_frequency_hz": 1.0,
+            "actual_rendered_temporal_frequency_hz": 1.0,
+            "duty_cycle": 0.5,
+            "target_radius_min_mm": 1.0,
+            "target_radius_max_mm": 10.0,
+            "target_radius_source": "protocol_snapshot",
+            "centering_success_fraction_threshold": 0.9,
+            "coordinate_geometry_status": (
+                "not_materialized_missing_exact_protocol_coordinate_contract"
+            ),
+        }
+    )
 
     resp_parent = analysis.create_group("stimulus_response_runs")
     resp_parent.attrs["latest"] = "stimulus_response_test"

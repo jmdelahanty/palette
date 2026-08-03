@@ -19,6 +19,7 @@ from .contracts import (
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    STIMULUS_STEPS_TABLE,
     TABLE_CONTRACTS,
 )
 
@@ -29,6 +30,7 @@ ARROW_TABLE_SCHEMA_VERSION = 1
 EXACT_ARROW_SCHEMA_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    STIMULUS_STEPS_TABLE,
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -218,6 +220,91 @@ _RECORDING_SUMMARY_FIELDS = (
     _field("swim_bout_default_n_bouts", "int64", nullable=True),
     _field("swim_bout_default_mean_duration_s", "float64", nullable=True),
     _field("swim_bout_default_total_path_length_mm", "float64", nullable=True),
+    _field("collection_id", "string", nullable=True),
+    _field("collection_manifest_sha256", "string", nullable=True),
+    _field("collection_manifest_path", "string", nullable=True),
+)
+
+
+# Stimulus steps are one row per source step.  The fixed row prefix is followed
+# by the exact maintained metadata vocabularies written for moving and
+# concentric gratings, then by the protocol-signature and optional collection
+# fields.  Child metadata is mode-specific, so every prefixed child field is
+# nullable even when its owning source writer always emits a value.  The
+# exporter's historical free-form child-attribute flattening is deliberately
+# not an open extension point in physical v1: undeclared legacy, future, and
+# looming-dot attributes fail before publication instead of changing Parquet
+# schemas by observation.
+_STIMULUS_STEPS_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("stimulus_run", "string"),
+    _field("step_index", "int64"),
+    _field("step_group", "string"),
+    _field("step_name", "string", nullable=True),
+    _field("stimulus_mode", "string", nullable=True),
+    _field("stimulus_mode_id", "int64", nullable=True),
+    _field("start_frame", "int64", nullable=True),
+    _field("end_frame", "int64", nullable=True),
+    _field("start_camera_frame", "int64", nullable=True),
+    _field("end_camera_frame", "int64", nullable=True),
+    _field("duration_s", "float64", nullable=True),
+    _field("stimulus_params_json", "string", nullable=True),
+    _field("moving_grating_metadata_schema_version", "int64", nullable=True),
+    _field("moving_grating_source", "string", nullable=True),
+    _field("moving_grating_orientation_degrees_authored", "float64", nullable=True),
+    _field("moving_grating_grating_direction_camera_deg", "float64", nullable=True),
+    _field("moving_grating_camera_to_projector_offset_deg", "float64", nullable=True),
+    _field("moving_grating_direction_mapping_source", "string", nullable=True),
+    _field("moving_grating_direction_mapping_status", "string", nullable=True),
+    _field("moving_grating_direction_mapping_validated", "bool", nullable=True),
+    _field("moving_grating_speed_mm_s", "float64", nullable=True),
+    _field("moving_grating_speed_pps", "float64", nullable=True),
+    _field("moving_grating_spatial_freq_cycles_per_mm", "float64", nullable=True),
+    _field("moving_grating_spatial_freq_rpp", "float64", nullable=True),
+    _field("moving_grating_temporal_frequency_hz", "float64", nullable=True),
+    _field(
+        "moving_grating_actual_rendered_temporal_frequency_hz",
+        "float64",
+        nullable=True,
+    ),
+    _field("moving_grating_duty_cycle", "float64", nullable=True),
+    _field("concentric_grating_metadata_schema_version", "int64", nullable=True),
+    _field("concentric_grating_source", "string", nullable=True),
+    _field("concentric_grating_stimulus_role", "string", nullable=True),
+    _field("concentric_grating_radial_polarity_authored", "string", nullable=True),
+    _field("concentric_grating_radial_sign_authored", "int64", nullable=True),
+    _field("concentric_grating_radial_polarity_source", "string", nullable=True),
+    _field("concentric_grating_radial_polarity_validated", "bool", nullable=True),
+    _field("concentric_grating_speed_mm_s", "float64", nullable=True),
+    _field("concentric_grating_speed_pps", "float64", nullable=True),
+    _field("concentric_grating_spatial_freq_cycles_per_mm", "float64", nullable=True),
+    _field("concentric_grating_spatial_freq_rpp", "float64", nullable=True),
+    _field("concentric_grating_temporal_frequency_hz", "float64", nullable=True),
+    _field(
+        "concentric_grating_actual_rendered_temporal_frequency_hz",
+        "float64",
+        nullable=True,
+    ),
+    _field("concentric_grating_duty_cycle", "float64", nullable=True),
+    _field("concentric_grating_target_radius_min_mm", "float64", nullable=True),
+    _field("concentric_grating_target_radius_max_mm", "float64", nullable=True),
+    _field("concentric_grating_target_radius_source", "string", nullable=True),
+    _field(
+        "concentric_grating_centering_success_fraction_threshold",
+        "float64",
+        nullable=True,
+    ),
+    _field("concentric_grating_coordinate_geometry_status", "string", nullable=True),
+    _field("protocol_signature_schema", "string"),
+    _field("protocol_signature_hash", "string"),
+    _field("derived_protocol_hash", "string"),
+    _field("protocol_mode_sequence", "string", nullable=True),
+    _field("protocol_duration_sequence_s", "string", nullable=True),
+    _field("protocol_step_count", "int64"),
     _field("collection_id", "string", nullable=True),
     _field("collection_manifest_sha256", "string", nullable=True),
     _field("collection_manifest_path", "string", nullable=True),
@@ -511,6 +598,10 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     RECORDING_SUMMARY_TABLE: ArrowTableContract(
         table_name=RECORDING_SUMMARY_TABLE,
         fields=_RECORDING_SUMMARY_FIELDS,
+    ),
+    STIMULUS_STEPS_TABLE: ArrowTableContract(
+        table_name=STIMULUS_STEPS_TABLE,
+        fields=_STIMULUS_STEPS_FIELDS,
     ),
     BASELINE_BEHAVIOR_SUMMARY_TABLE: ArrowTableContract(
         table_name=BASELINE_BEHAVIOR_SUMMARY_TABLE,

@@ -27,8 +27,12 @@ from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    STIMULUS_STEPS_TABLE,
 )
-from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.publication import (
+    manifest_selected_part_files,
+    sha256_file,
+)
 from fisheye.analytics_exports.validation import ExportValidationError, validate_export_run
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.utils.export_cross_recording_analytics import (
@@ -117,6 +121,35 @@ def _valid_recording_summary_row() -> dict[str, object]:
     return row
 
 
+def _valid_stimulus_step_row() -> dict[str, object]:
+    contract = ARROW_TABLE_CONTRACTS[STIMULUS_STEPS_TABLE]
+    row: dict[str, object] = {}
+    for field in contract.fields:
+        if field.nullable:
+            row[field.name] = None
+        elif field.arrow_type in {"int32", "int64"}:
+            row[field.name] = 1
+        else:
+            row[field.name] = "value"
+    row.update(
+        {
+            "export_schema_version": EXPORT_SCHEMA_VERSION,
+            "table_name": STIMULUS_STEPS_TABLE,
+            "recording_id": "recording-1",
+            "zarr_path": "/recordings/recording-1_analysis.zarr",
+            "source_lineage_hash": "e" * 64,
+            "stimulus_run": "stimulus-1",
+            "step_index": 0,
+            "step_group": "step_0",
+            "protocol_signature_schema": "palette_protocol_signature_v1",
+            "protocol_signature_hash": "f" * 64,
+            "derived_protocol_hash": "f" * 64,
+            "protocol_step_count": 1,
+        }
+    )
+    return row
+
+
 def _valid_baseline_summary_row() -> dict[str, object]:
     contract = ARROW_TABLE_CONTRACTS[BASELINE_BEHAVIOR_SUMMARY_TABLE]
     row: dict[str, object] = {}
@@ -199,6 +232,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
         (
             POSITION_OCCUPANCY_HISTOGRAM_TABLE,
             RECORDING_SUMMARY_TABLE,
+            STIMULUS_STEPS_TABLE,
             BASELINE_BEHAVIOR_SUMMARY_TABLE,
             BASELINE_BEHAVIOR_TIME_BINS_TABLE,
             BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -208,6 +242,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
     assert tuple(envelope["exact_tables"]) == (
         POSITION_OCCUPANCY_HISTOGRAM_TABLE,
         RECORDING_SUMMARY_TABLE,
+        STIMULUS_STEPS_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -219,6 +254,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
             (
                 POSITION_OCCUPANCY_HISTOGRAM_TABLE,
                 RECORDING_SUMMARY_TABLE,
+                STIMULUS_STEPS_TABLE,
                 BASELINE_BEHAVIOR_SUMMARY_TABLE,
                 BASELINE_BEHAVIOR_TIME_BINS_TABLE,
                 BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -232,6 +268,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
     assert EXACT_ARROW_SCHEMA_TABLES == (
         POSITION_OCCUPANCY_HISTOGRAM_TABLE,
         RECORDING_SUMMARY_TABLE,
+        STIMULUS_STEPS_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -281,6 +318,86 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         "stimulus_step_count",
     }
     assert next(field for field in fields if field.name == "derived_protocol_hash").nullable
+
+
+def test_stimulus_steps_contract_freezes_all_60_maintained_fields_in_order() -> None:
+    fields = ARROW_TABLE_CONTRACTS[STIMULUS_STEPS_TABLE].fields
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("recording_id", "string", False),
+        ("zarr_path", "string", False),
+        ("source_lineage_hash", "string", False),
+        ("stimulus_run", "string", False),
+        ("step_index", "int64", False),
+        ("step_group", "string", False),
+        ("step_name", "string", True),
+        ("stimulus_mode", "string", True),
+        ("stimulus_mode_id", "int64", True),
+        ("start_frame", "int64", True),
+        ("end_frame", "int64", True),
+        ("start_camera_frame", "int64", True),
+        ("end_camera_frame", "int64", True),
+        ("duration_s", "float64", True),
+        ("stimulus_params_json", "string", True),
+        ("moving_grating_metadata_schema_version", "int64", True),
+        ("moving_grating_source", "string", True),
+        ("moving_grating_orientation_degrees_authored", "float64", True),
+        ("moving_grating_grating_direction_camera_deg", "float64", True),
+        ("moving_grating_camera_to_projector_offset_deg", "float64", True),
+        ("moving_grating_direction_mapping_source", "string", True),
+        ("moving_grating_direction_mapping_status", "string", True),
+        ("moving_grating_direction_mapping_validated", "bool", True),
+        ("moving_grating_speed_mm_s", "float64", True),
+        ("moving_grating_speed_pps", "float64", True),
+        ("moving_grating_spatial_freq_cycles_per_mm", "float64", True),
+        ("moving_grating_spatial_freq_rpp", "float64", True),
+        ("moving_grating_temporal_frequency_hz", "float64", True),
+        (
+            "moving_grating_actual_rendered_temporal_frequency_hz",
+            "float64",
+            True,
+        ),
+        ("moving_grating_duty_cycle", "float64", True),
+        ("concentric_grating_metadata_schema_version", "int64", True),
+        ("concentric_grating_source", "string", True),
+        ("concentric_grating_stimulus_role", "string", True),
+        ("concentric_grating_radial_polarity_authored", "string", True),
+        ("concentric_grating_radial_sign_authored", "int64", True),
+        ("concentric_grating_radial_polarity_source", "string", True),
+        ("concentric_grating_radial_polarity_validated", "bool", True),
+        ("concentric_grating_speed_mm_s", "float64", True),
+        ("concentric_grating_speed_pps", "float64", True),
+        ("concentric_grating_spatial_freq_cycles_per_mm", "float64", True),
+        ("concentric_grating_spatial_freq_rpp", "float64", True),
+        ("concentric_grating_temporal_frequency_hz", "float64", True),
+        (
+            "concentric_grating_actual_rendered_temporal_frequency_hz",
+            "float64",
+            True,
+        ),
+        ("concentric_grating_duty_cycle", "float64", True),
+        ("concentric_grating_target_radius_min_mm", "float64", True),
+        ("concentric_grating_target_radius_max_mm", "float64", True),
+        ("concentric_grating_target_radius_source", "string", True),
+        (
+            "concentric_grating_centering_success_fraction_threshold",
+            "float64",
+            True,
+        ),
+        ("concentric_grating_coordinate_geometry_status", "string", True),
+        ("protocol_signature_schema", "string", False),
+        ("protocol_signature_hash", "string", False),
+        ("derived_protocol_hash", "string", False),
+        ("protocol_mode_sequence", "string", True),
+        ("protocol_duration_sequence_s", "string", True),
+        ("protocol_step_count", "int64", False),
+        ("collection_id", "string", True),
+        ("collection_manifest_sha256", "string", True),
+        ("collection_manifest_path", "string", True),
+    )
 
 
 def test_baseline_summary_contract_freezes_all_95_fields_in_order() -> None:
@@ -555,6 +672,7 @@ def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
     (
         POSITION_OCCUPANCY_HISTOGRAM_TABLE,
         RECORDING_SUMMARY_TABLE,
+        STIMULUS_STEPS_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -613,6 +731,26 @@ def test_recording_summary_exact_writer_uses_declared_schema(tmp_path: Path) -> 
         generation_root=tmp_path / "generation",
         table=table_name,
         rows_by_source=(("source-1", [_valid_recording_summary_row()]),),
+    )
+
+    assert count == 1
+    schema = pq.ParquetFile(parts[0]).schema_arrow
+    validate_arrow_schema(table_name, schema)
+    assert schema.remove_metadata() == exact_arrow_schema(
+        table_name,
+        metadata={},
+    ).remove_metadata()
+    assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
+        ARROW_TABLE_CONTRACTS[table_name].payload_sha256
+    )
+
+
+def test_stimulus_steps_exact_writer_uses_declared_schema(tmp_path: Path) -> None:
+    table_name = STIMULUS_STEPS_TABLE
+    count, parts = _write_table_parts(
+        generation_root=tmp_path / "generation",
+        table=table_name,
+        rows_by_source=(("source-1", [_valid_stimulus_step_row()]),),
     )
 
     assert count == 1
@@ -742,6 +880,34 @@ def test_recording_summary_exact_writer_rejects_unexpected_and_missing_required_
             )
 
 
+def test_stimulus_steps_writer_rejects_unexpected_and_every_missing_required_field(
+    tmp_path: Path,
+) -> None:
+    row = _valid_stimulus_step_row()
+    row["surprise"] = 1
+    with pytest.raises(ValueError, match="unexpected fields"):
+        _write_table_parts(
+            generation_root=tmp_path / "unexpected",
+            table=STIMULUS_STEPS_TABLE,
+            rows_by_source=(("source", [row]),),
+        )
+
+    required = {
+        field.name
+        for field in ARROW_TABLE_CONTRACTS[STIMULUS_STEPS_TABLE].fields
+        if not field.nullable
+    }
+    for field_name in sorted(required):
+        row = _valid_stimulus_step_row()
+        del row[field_name]
+        with pytest.raises(ValueError, match="null/missing non-nullable"):
+            _write_table_parts(
+                generation_root=tmp_path / f"missing-{field_name}",
+                table=STIMULUS_STEPS_TABLE,
+                rows_by_source=(("source", [row]),),
+            )
+
+
 def test_baseline_summary_exact_writer_rejects_unexpected_and_missing_required_fields(
     tmp_path: Path,
 ) -> None:
@@ -864,6 +1030,44 @@ def test_recording_summary_zero_rows_publish_no_parts_but_retain_exact_contract(
     )
     assert manifest["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
     assert validate_export_run(root, "empty-recording-summary")["status"] == "valid"
+
+
+def test_stimulus_steps_zero_rows_retain_exact_contract_without_parts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        return SourceExportResult(
+            zarr_path=str(path),
+            recording_id="recording-1",
+            rows_by_table={STIMULUS_STEPS_TABLE: []},
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.export_one_zarr",
+        source,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.get_git_info",
+        lambda _path: {"commit_hash": "test", "is_dirty": False},
+    )
+    root = tmp_path / "exports"
+    manifest = export_sources(
+        [tmp_path / "source.zarr"],
+        output_root=root,
+        export_run_id="empty-stimulus-steps",
+        tables=(STIMULUS_STEPS_TABLE,),
+        jobs=1,
+    )
+
+    assert manifest["row_counts_by_table"] == {STIMULUS_STEPS_TABLE: 0}
+    assert manifest["part_files_by_table"] == {STIMULUS_STEPS_TABLE: []}
+    assert manifest["publication"]["parts_by_table"] == {STIMULUS_STEPS_TABLE: []}
+    assert tuple(manifest["arrow_schema_contracts"]["exact_tables"]) == (
+        STIMULUS_STEPS_TABLE,
+    )
+    assert manifest["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
+    assert validate_export_run(root, "empty-stimulus-steps")["status"] == "valid"
 
 
 def test_baseline_summary_zero_rows_publish_no_parts_but_retain_exact_contract(
@@ -1035,6 +1239,141 @@ def test_real_recording_summary_export_uses_exact_schema_and_collection_fields(
     assert row["collection_id"] == collection["collection_id"]
     assert row["collection_manifest_sha256"] == collection["manifest_sha256"]
     assert validate_export_run(root, "recording-summary-arrow")["status"] == "valid"
+
+
+def test_real_stimulus_steps_export_uses_maintained_exact_selected_representation(
+    tmp_path: Path,
+) -> None:
+    source = _make_source_zarr(tmp_path / "recording_a_analysis.zarr")
+    collection_path = tmp_path / "collection.manifest.json"
+    collection = _write_collection_manifest(collection_path, source)
+    root = tmp_path / "exports"
+
+    manifest = export_sources(
+        [source],
+        output_root=root,
+        export_run_id="stimulus-steps-arrow",
+        tables=(STIMULUS_STEPS_TABLE,),
+        jobs=1,
+        collection_manifest_path=collection_path,
+    )
+
+    assert manifest["row_counts_by_table"] == {STIMULUS_STEPS_TABLE: 2}
+    assert tuple(manifest["arrow_schema_contracts"]["exact_tables"]) == (
+        STIMULUS_STEPS_TABLE,
+    )
+    selected = manifest_selected_part_files(
+        root,
+        "stimulus-steps-arrow",
+        STIMULUS_STEPS_TABLE,
+    )
+    assert len(selected) == 1
+    parquet_file = pq.ParquetFile(selected[0])
+    validate_arrow_schema(STIMULUS_STEPS_TABLE, parquet_file.schema_arrow)
+    assert parquet_file.schema_arrow.names == [
+        field.name for field in ARROW_TABLE_CONTRACTS[STIMULUS_STEPS_TABLE].fields
+    ]
+    rows = parquet_file.read().to_pylist()
+    moving, concentric = rows
+    assert moving["step_index"] == 0
+    assert moving["moving_grating_orientation_degrees_authored"] == 0.0
+    assert moving["moving_grating_direction_mapping_validated"] is False
+    assert moving["concentric_grating_radial_sign_authored"] is None
+    assert concentric["step_index"] == 1
+    assert concentric["moving_grating_metadata_schema_version"] is None
+    assert concentric["concentric_grating_radial_sign_authored"] == -1
+    assert concentric["concentric_grating_radial_polarity_validated"] is False
+    assert {row["collection_id"] for row in rows} == {collection["collection_id"]}
+    assert all(
+        row["protocol_signature_hash"] == row["derived_protocol_hash"]
+        for row in rows
+    )
+    assert not any(
+        "direction_degrees" == name or "stimulus_radial_polarity_authored" in name
+        for name in parquet_file.schema_arrow.names
+    )
+    assert not any(name.startswith("looming_dot_") for name in parquet_file.schema_arrow.names)
+    assert validate_export_run(root, "stimulus-steps-arrow")["status"] == "valid"
+
+
+@pytest.mark.parametrize(
+    ("case", "unexpected_field"),
+    (
+        ("legacy-moving", "moving_grating_direction_degrees"),
+        (
+            "legacy-concentric",
+            "concentric_grating_stimulus_radial_polarity_authored",
+        ),
+        ("looming", "looming_dot_radius_px"),
+    ),
+)
+def test_stimulus_steps_rejects_legacy_and_undeclared_child_metadata_before_publication(
+    tmp_path: Path,
+    case: str,
+    unexpected_field: str,
+) -> None:
+    source = _make_source_zarr(tmp_path / f"{case}_analysis.zarr")
+    archive = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    steps = archive["analysis/stimulus_runs/stimulus_test/steps"]
+    if case == "legacy-moving":
+        steps["step_0/moving_grating"].attrs["direction_degrees"] = 0.0
+    elif case == "legacy-concentric":
+        steps["step_1/concentric_grating"].attrs[
+            "stimulus_radial_polarity_authored"
+        ] = "contracting"
+    elif case == "looming":
+        looming = steps["step_0"].create_group("looming_dot")
+        looming.attrs["radius_px"] = 12.0
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(case)
+
+    root = tmp_path / "exports"
+    run_id = f"stimulus-steps-{case}"
+    with pytest.raises(ValueError, match=unexpected_field):
+        export_sources(
+            [source],
+            output_root=root,
+            export_run_id=run_id,
+            tables=(STIMULUS_STEPS_TABLE,),
+            jobs=1,
+        )
+
+    assert not (root / "v1" / "manifests" / f"export_run_id={run_id}.json").exists()
+    assert not list((root / "v1" / ".generations").glob(f"export_run_id={run_id}/**/*"))
+
+
+def test_stimulus_steps_empty_looming_group_has_no_current_row_representation(
+    tmp_path: Path,
+) -> None:
+    source = _make_source_zarr(tmp_path / "empty_looming_analysis.zarr")
+    archive = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    archive[
+        "analysis/stimulus_runs/stimulus_test/steps/step_0"
+    ].create_group("looming_dot")
+    root = tmp_path / "exports"
+
+    export_sources(
+        [source],
+        output_root=root,
+        export_run_id="stimulus-steps-empty-looming",
+        tables=(STIMULUS_STEPS_TABLE,),
+        jobs=1,
+    )
+
+    selected = manifest_selected_part_files(
+        root,
+        "stimulus-steps-empty-looming",
+        STIMULUS_STEPS_TABLE,
+    )
+    assert selected
+    assert not any(
+        name.startswith("looming_dot_")
+        for name in pq.ParquetFile(selected[0]).schema_arrow.names
+    )
+    assert (
+        validate_export_run(root, "stimulus-steps-empty-looming")["status"]
+        == "valid"
+    )
 
 
 def _make_baseline_representation_source(
@@ -1412,6 +1751,94 @@ def test_recording_summary_manifest_reader_rejects_rehashed_physical_tampering(
         match="physical Arrow fields|footer contract metadata",
     ):
         validate_export_run(root, f"recording-summary-{mutation}")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "reordered",
+        "wrong_type",
+        "wrong_nullability",
+        "unexpected",
+        "missing",
+        "metadata",
+    ),
+)
+def test_stimulus_steps_manifest_reader_rejects_rehashed_physical_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    table_name = STIMULUS_STEPS_TABLE
+
+    def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        return SourceExportResult(
+            zarr_path=str(path),
+            recording_id="recording-1",
+            rows_by_table={table_name: [_valid_stimulus_step_row()]},
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.export_one_zarr",
+        source,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.get_git_info",
+        lambda _path: {"commit_hash": "test", "is_dirty": False},
+    )
+    root = tmp_path / "exports"
+    run_id = f"stimulus-steps-{mutation}"
+    manifest = export_sources(
+        [tmp_path / "source.zarr"],
+        output_root=root,
+        export_run_id=run_id,
+        tables=(table_name,),
+        jobs=1,
+    )
+    part = root / manifest["part_files_by_table"][table_name][0]
+    original = pq.ParquetFile(part).read()
+    arrays = list(original.columns)
+    fields = list(original.schema)
+    metadata = dict(original.schema.metadata or {})
+
+    if mutation == "reordered":
+        arrays[0], arrays[1] = arrays[1], arrays[0]
+        fields[0], fields[1] = fields[1], fields[0]
+    elif mutation == "wrong_type":
+        index = original.schema.get_field_index("step_index")
+        arrays[index] = pa.array([0.0], type=pa.float64())
+        fields[index] = pa.field("step_index", pa.float64(), nullable=False)
+    elif mutation == "wrong_nullability":
+        index = original.schema.get_field_index("recording_id")
+        fields[index] = pa.field("recording_id", pa.string(), nullable=True)
+    elif mutation == "unexpected":
+        arrays.append(pa.array(["surprise"], type=pa.string()))
+        fields.append(pa.field("unexpected", pa.string(), nullable=False))
+    elif mutation == "missing":
+        index = original.schema.get_field_index("source_lineage_hash")
+        del arrays[index]
+        del fields[index]
+    elif mutation == "metadata":
+        metadata[b"palette.arrow_schema_sha256"] = b"0" * 64
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(mutation)
+
+    pq.write_table(
+        pa.Table.from_arrays(arrays, schema=pa.schema(fields, metadata=metadata)),
+        part,
+    )
+    manifest_path = Path(manifest["manifest_path"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = payload["publication"]["parts_by_table"][table_name][0]
+    entry["sha256"] = sha256_file(part)
+    entry["size_bytes"] = part.stat().st_size
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ExportValidationError,
+        match="physical Arrow fields|footer contract metadata",
+    ):
+        validate_export_run(root, run_id)
 
 
 @pytest.mark.parametrize(
