@@ -1674,6 +1674,19 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     assert result["status"] == "complete"
     assert result["publish"]["pre_pointer_validation"]["valid"] is True
     assert result["publish"]["final_validation"]["valid"] is True
+    assert result["local_materialization"]["regular_validation"][
+        "exact_compact_v7_valid"
+    ] is True
+    assert result["local_materialization"]["sharded_validation"][
+        "exact_compact_v7_valid"
+    ] is True
+    for validation_name in (
+        "local_validation",
+        "temporary_validation",
+        "pre_pointer_validation",
+        "final_validation",
+    ):
+        assert result["publish"][validation_name]["exact_compact_v7_valid"] is True
     assert result["publish"]["source_revision_audit"]["status"] == "current"
     assert result["publish"]["registry_updated"] is True
     assert len(registry_events) == 1
@@ -1683,12 +1696,16 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     parent = root["analysis/eye_angle_runs"]
     run = parent["eye_1"]
+    from fisheye.analysis.eye_angle_io import load_eye_angle_run_tables
+
+    strict_tables = load_eye_angle_run_tables(root, run_name="eye_1")
+    assert strict_tables.schema_version == 7
     assert parent.attrs["latest"] == "eye_1"
     assert parent.attrs["latest_complete"] == "eye_1"
     assert run.attrs["stage_selector_eligible"] is True
     assert run.attrs["atomic_publication_owner_uuid"]
     assert "atomic_publication_tombstone" not in run.attrs
-    assert run.attrs["schema_version"] == 6
+    assert run.attrs["schema_version"] == 7
     assert run.attrs["eye_angle_output_schema"]["schema_version"] == 9
     assert run.attrs["eye_angle_algorithm_contract"]["schema_version"] == 1
     assert run.attrs["keypoint_source_mode"] == (
@@ -1803,6 +1820,39 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
             ),
             id="coordinated-acquisition-frame-values",
         ),
+        pytest.param(
+            "angle_index_metadata",
+            "channel_index_content_mismatch:angle_channel_index/representation",
+            id="exact-angle-index-metadata",
+        ),
+        pytest.param(
+            "column_order_envelope",
+            "column_order_contract_mismatch:angle_column_order_contract",
+            id="exact-column-order-envelope",
+        ),
+        pytest.param(
+            "output_schema_nested",
+            "eye_angle_output_schema must exactly equal its executable contract",
+            id="exact-output-schema-nested",
+        ),
+        pytest.param(
+            "algorithm_contract_nested",
+            (
+                "eye_angle_algorithm_contract must exactly equal the reconstructed "
+                "executable contract"
+            ),
+            id="exact-algorithm-contract-nested",
+        ),
+        pytest.param(
+            "heading_alias",
+            "heading_alias_mismatch:roi_angles/heading_deg",
+            id="heading-alias-values",
+        ),
+        pytest.param(
+            "frame_alias",
+            "frame_alias_mismatch:support/frame_indices",
+            id="frame-alias-values",
+        ),
     ],
 )
 def test_publication_rejects_output_identity_that_differs_from_sealed_source(
@@ -1829,7 +1879,7 @@ def test_publication_rejects_output_identity_that_differs_from_sealed_source(
             instance_key = np.asarray(sharded["support/instance_key"][:])
             instance_key[0] += np.uint64(100)
             sharded["support/instance_key"][:] = instance_key
-        else:
+        elif tamper_kind == "coordinated_acquisition_frames":
             acquisition = np.asarray(
                 sharded["support/source_acquisition_frame_index"][:],
                 dtype=np.int64,
@@ -1847,6 +1897,40 @@ def test_publication_rejects_output_identity_that_differs_from_sealed_source(
                     dtype=np.int64,
                 ),
             )
+        elif tamper_kind == "angle_index_metadata":
+            representation = np.asarray(
+                sharded["angle_channel_index/representation"][:],
+                dtype=np.uint8,
+            )
+            representation[0, :] = 0
+            sharded["angle_channel_index/representation"][:] = representation
+        elif tamper_kind == "column_order_envelope":
+            column_order = dict(sharded.attrs["angle_column_order_contract"])
+            column_order["unexpected"] = True
+            sharded.attrs["angle_column_order_contract"] = column_order
+        elif tamper_kind == "output_schema_nested":
+            output_schema = dict(sharded.attrs["eye_angle_output_schema"])
+            output_schema["row_axes"] = {
+                **output_schema["row_axes"],
+                "roi": "tampered_rows",
+            }
+            sharded.attrs["eye_angle_output_schema"] = output_schema
+        elif tamper_kind == "algorithm_contract_nested":
+            algorithm = dict(sharded.attrs["eye_angle_algorithm_contract"])
+            algorithm["delta"] = {
+                **algorithm["delta"],
+                "time_normalized": True,
+            }
+            sharded.attrs["eye_angle_algorithm_contract"] = algorithm
+        elif tamper_kind == "heading_alias":
+            roi_angles = np.asarray(sharded["roi_angles"][:])
+            names = mod._decode_text_index(sharded["angle_channel_index/name"])
+            roi_angles[0, names.index("heading_deg")] += np.float32(1.0)
+            sharded["roi_angles"][:] = roi_angles
+        else:
+            frame_alias = np.asarray(sharded["support/frame_indices"][:])
+            frame_alias[0] += np.int64(1)
+            sharded["support/frame_indices"][:] = frame_alias
         tampered = True
         return real_publish(
             plan,
@@ -1858,7 +1942,7 @@ def test_publication_rejects_output_identity_that_differs_from_sealed_source(
 
     with pytest.raises(
         RuntimeError,
-        match=rf"^Local run validation failed: .*'{expected_error}'",
+        match=rf"^Local run validation failed: .*{expected_error}",
     ):
         mod.materialize_eye_angles(
             source,

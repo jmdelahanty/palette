@@ -87,7 +87,7 @@ authoritative representation.
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape and shared body-frame surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
 | Tail kinematics | ordered tail geometry from `analysis/subject_shape_runs` or future keypoint-derived tail posture | none; derived deterministic analysis layer | `analysis/tail_kinematics_runs/<run>` for body-frame tail angles, lateral deflections, and curvature summaries; Megabouts/ZebraZoom/Stytra views are adapters | tail traces must reference exact geometry source and record angle/sign/unit conventions |
-| Eye angles | canonical subject-shape eye geometry plus the exact base keypoints sealed by its assignment proof | none; specialized deterministic analysis layer | historical refined-keypoint input is explicit diagnostic-only and produces a permanently nonselector run | `analysis/eye_angle_runs/<run>` run schema v6/output schema v9; canonical rows persist ordered `support/instance_key` and `support/source_acquisition_frame_index`, with `support/frame_indices` as an equality-required compatibility alias; body frame and heading are recomputed from the sealed keypoints rather than read from upstream |
+| Eye angles | canonical subject-shape eye geometry plus the exact base keypoints sealed by its assignment proof | none; specialized deterministic analysis layer | historical refined-keypoint input is explicit diagnostic-only and produces a permanently nonselector run | `analysis/eye_angle_runs/<run>` exact compact run schema v7/output schema v9 (the closed v2-v6 layout allowlist is explicit legacy); canonical rows persist ordered `support/instance_key` and `support/source_acquisition_frame_index`, with `support/frame_indices` as an equality-required compatibility alias; body frame and heading are recomputed from the sealed keypoints rather than read from upstream |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -165,7 +165,7 @@ Current rules:
   geometry and a used assignment proof for one exact base-keypoint child. It
   records
   `source_geometry_kind`, and writes `schema_id = "analysis.eye_angle_runs"`
-  with run schema v6 plus output schema v9. The v5 scientific method makes
+  with exact compact run schema v7 plus output schema v9. The v5 scientific method makes
   `preferred_angle_family="gaze"`,
   `preferred_eye_axis="ellipse_major"`, and `support/body_frame/` explicit.
   The major axis is canonical, while gaze/minor direction is derived from the

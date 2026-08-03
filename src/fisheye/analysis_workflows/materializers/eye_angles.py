@@ -30,6 +30,10 @@ import numpy as np
 import zarr
 
 from ...analysis import eye_angle_analysis as eye_writer
+from ...analysis.eye_angle_schema import (
+    validate_eye_angle_compact_run,
+    validate_eye_angle_value_aliases,
+)
 from ...shared.derived_analysis_registry_status import (
     emit_eye_angle_stage_completion,
 )
@@ -900,6 +904,12 @@ def _validate_eye_angle_run(
     group = open_zarr_root(path, mode="r")
     attrs = group.attrs
     errors: list[str] = []
+    exact_schema_issues = validate_eye_angle_compact_run(group)
+    errors.extend(
+        "exact compact-v7 contract: "
+        f"{issue.code}:{issue.path}:{issue.message}"
+        for issue in exact_schema_issues
+    )
     if str(attrs.get("schema_id")) != eye_writer.EYE_ANGLE_RUN_SCHEMA_ID:
         errors.append("schema_id mismatch")
     if int(attrs.get("schema_version", -1)) != eye_writer.EYE_ANGLE_RUN_SCHEMA_VERSION:
@@ -924,25 +934,8 @@ def _validate_eye_angle_run(
         errors.append("num_frames mismatch")
 
     output_schema = attrs.get("eye_angle_output_schema")
-    if not isinstance(output_schema, dict) or (
-        str(output_schema.get("schema_id")) != eye_writer.EYE_ANGLE_OUTPUT_SCHEMA_ID
-        or int(output_schema.get("schema_version", -1))
-        != eye_writer.EYE_ANGLE_OUTPUT_SCHEMA_VERSION
-    ):
-        errors.append("eye_angle_output_schema contract mismatch")
     algorithm = attrs.get("eye_angle_algorithm_contract")
-    if not isinstance(algorithm, dict) or (
-        str(algorithm.get("schema_id"))
-        != eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID
-        or int(algorithm.get("schema_version", -1))
-        != eye_writer.EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION
-    ):
-        errors.append("eye_angle_algorithm_contract mismatch")
-    elif (
-        str(algorithm.get("method")) != eye_writer.EYE_ANGLE_METHOD
-        or str(algorithm.get("method_version")) != eye_writer.EYE_ANGLE_METHOD_VERSION
-    ):
-        errors.append("eye-angle method contract mismatch")
+    errors.extend(eye_writer.validate_eye_angle_persisted_contract_manifests(attrs))
     source_contracts = attrs.get("eye_angle_source_contracts")
     observed_contract_sha256 = (
         _json_digest(source_contracts) if isinstance(source_contracts, dict) else None
@@ -1071,6 +1064,10 @@ def _validate_eye_angle_run(
             errors.append(f"missing array {array_path}")
         elif tuple(int(value) for value in array.shape) != expected_shape:
             errors.append(f"shape mismatch for {array_path}")
+    errors.extend(
+        f"{issue.code}:{issue.path}:{issue.message}"
+        for issue in validate_eye_angle_value_aliases(group)
+    )
     instance_key = group.get("support/instance_key")
     acquisition_index = group.get("support/source_acquisition_frame_index")
     frame_alias = group.get("support/frame_indices")
@@ -1176,6 +1173,7 @@ def _validate_eye_angle_run(
         {
             "valid": not errors,
             "errors": errors,
+            "exact_compact_v7_valid": not exact_schema_issues,
             "row_count": row_count,
             "frame_count": observed_frame_count,
             "angle_channel_count": len(channel_names.get("angle_channel_index", ())),

@@ -1,15 +1,15 @@
 # Eye Angle Variants
 <!-- eye-angle-variants-meta
 status: draft
-last_verified: 2026-04-30
-schema_context: analysis.eye_angle_runs v5, analysis.eye_angle_output_schema v7
+last_verified: 2026-08-03
+schema_context: analysis.eye_angle_runs v7, analysis.eye_angle_output_schema v9
 -->
 
 This document explains the eye-angle arrays currently written by
 `analysis/eye_angle_runs/<run>`. It is a naming and interpretation guide for
 users and downstream consumers. The storage contract remains
 `src/fisheye/docs/eye_angle_conventions.md` and the run metadata stored in
-`eye_angle_output_schema`. Output schema v7 also embeds
+`eye_angle_output_schema`. Output schema v9 also embeds
 `eye_angle_variant_schema`, a machine-readable representation registry that UIs
 can use to offer these variants without hardcoding Palette field names.
 
@@ -70,7 +70,7 @@ Use mean_eye_vergence_gaze_deg for Johnson/BEAST-style mean convergence.
 
 ## Machine-Readable Representation Schema
 
-Every v7 eye-angle output schema includes:
+Every output-schema-v9 eye-angle contract includes:
 
 ```text
 eye_angle_output_schema.variant_schema

@@ -714,7 +714,11 @@ def test_discover_and_load_eye_angle_timeseries(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_interactive_artifact(tmp_path)
     _add_eye_angle_run(zarr_path)
 
-    options = discover_eye_angle_run_options(zarr_path)
+    assert discover_eye_angle_run_options(zarr_path) == []
+    options = discover_eye_angle_run_options(
+        zarr_path,
+        legacy_compatibility=True,
+    )
 
     assert len(options) == 1
     assert options[0].run_name == "eye_angle_1"
@@ -723,7 +727,11 @@ def test_discover_and_load_eye_angle_timeseries(tmp_path: Path) -> None:
     assert options[0].preferred_angle_family == "gaze"
     assert options[0].is_latest is True
 
-    frame_data = load_eye_angle_timeseries_data(zarr_path, run_name="latest")
+    frame_data = load_eye_angle_timeseries_data(
+        zarr_path,
+        run_name="latest",
+        legacy_compatibility=True,
+    )
 
     assert frame_data.run_name == "eye_angle_1"
     assert frame_data.row_axis == "frame"
@@ -740,6 +748,7 @@ def test_discover_and_load_eye_angle_timeseries(tmp_path: Path) -> None:
         zarr_path,
         run_name="analysis/eye_angle_runs/eye_angle_1",
         prefer_frame=False,
+        legacy_compatibility=True,
     )
 
     assert roi_data.row_axis == "roi"

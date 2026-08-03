@@ -595,7 +595,14 @@ def _validate_refined_subject_mask_storage(
         errors[:] = [message for message in errors if message != dense_missing_error]
 
 
-def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
+def validate_run(
+    group: zarr.Group,
+    spec: StageSpec,
+    *,
+    legacy_compatibility: bool = False,
+) -> ValidationResult:
+    if type(legacy_compatibility) is not bool:
+        raise TypeError("legacy_compatibility must be an exact bool.")
     errors: List[str] = []
     warnings: List[str] = []
 
@@ -682,6 +689,41 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
                 )
         elif probabilities is None:
             errors.append("subject_masks: missing required array 'mask_probs_roi'")
+
+    if spec.stage_name == "eye_angle":
+        from fisheye.analysis.eye_angle_schema import (
+            is_current_eye_angle_run_contract,
+            is_supported_legacy_eye_angle_run,
+            validate_eye_angle_compact_run,
+        )
+
+        is_current = is_current_eye_angle_run_contract(attrs)
+        if is_current:
+            from fisheye.analysis.eye_angle_analysis import (
+                validate_eye_angle_persisted_contract_manifests,
+            )
+
+            errors.extend(
+                f"eye_angle/{issue.path}: {issue.code}: {issue.message}"
+                for issue in validate_eye_angle_compact_run(group)
+            )
+            errors.extend(
+                f"eye_angle/attrs: {message}"
+                for message in validate_eye_angle_persisted_contract_manifests(
+                    attrs
+                )
+            )
+        elif legacy_compatibility and is_supported_legacy_eye_angle_run(attrs):
+            warnings.append(
+                "eye_angle: explicit legacy compatibility accepted one exact "
+                "schema-v2-v6 supported layout"
+            )
+        else:
+            errors.append(
+                "eye_angle: maintained validation requires analysis.eye_angle_runs "
+                "schema v7 with layout='compact_dense_v2'; compatibility mode "
+                "accepts only the closed schema-v2-v6 legacy layout allowlist"
+            )
 
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
 

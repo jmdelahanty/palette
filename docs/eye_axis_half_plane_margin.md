@@ -129,7 +129,9 @@ right-eye rows of real data.
   near the comment `axis_major_aligned = axis_major * sign_major[:, None]`
 - Per-eye QA arrays: `qa/roi/{left,right}_major_axis_marginal`,
   per-frame: `qa/frame/major_axis_marginal`
-- Schema: `analysis.eye_angle_runs` run schema v6 (`schema_version = 6`),
+- Schema: `analysis.eye_angle_runs` exact compact run schema v7
+  (`schema_version = 7`; the closed v2-v6 layout allowlist remains explicit
+  legacy compatibility),
   retaining scientific `method_version = "eye_angle_analysis.v5"`; output
   schema v9 carries explicit row identity and acquisition-frame support.
 

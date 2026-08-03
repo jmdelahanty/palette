@@ -2,6 +2,10 @@
 
 Date: 2026-08-01
 
+> Historical snapshot: the eye-angle row below records the v6 state observed
+> on 2026-08-01. The maintained contract was superseded by exact compact run
+> schema v7 on 2026-08-03; this dated evidence is intentionally not rewritten.
+
 Status: executable contract catalog and serialized track/eye registry
 publication reconciled; remaining families are intentionally not activated
 

@@ -9,6 +9,16 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.analysis import eye_angle_analysis
+from fisheye.analysis.eye_angle_schema import (
+    EYE_ANGLE_ARRAY_SCHEMA_ATTR,
+    EyeAngleDimensions,
+    build_eye_angle_array_declarations,
+    canonical_angle_channels,
+    expected_eye_angle_channel_index_attrs,
+    expected_eye_angle_channel_index_content,
+    eye_angle_array_schema_manifest,
+)
 from fisheye.registry.db import Registry
 from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
@@ -20,6 +30,109 @@ def _write_minimal_h5(path: Path, *, session_uuid: str, camera_id: str = "cam_1"
     with h5py.File(path, "w") as h5:
         h5.attrs["session_uuid"] = session_uuid
         h5.attrs["camera_id"] = camera_id
+
+
+def _populate_exact_eye_angle_v7_run(run: zarr.Group) -> None:
+    dimensions = EyeAngleDimensions(n_roi_rows=2, n_frames=3)
+    declarations = {
+        declaration.path: declaration
+        for declaration in build_eye_angle_array_declarations()
+    }
+    index_content = expected_eye_angle_channel_index_content(
+        angle_block_width=dimensions.angle_block_width
+    )
+    for path, declaration in declarations.items():
+        parent = run
+        parts = path.split("/")
+        for component in parts[:-1]:
+            parent = parent.require_group(component)
+        shape = tuple(
+            dimensions.contract_dimensions[value]
+            if type(value) is str
+            else value
+            for value in declaration.contract.shape_template
+        )
+        values = index_content.get(path)
+        if values is not None and values and type(values[0]) is bool:
+            payload = np.asarray(values, dtype=bool)
+        elif values is not None:
+            width = declaration.contract.shape_template[1]
+            assert type(width) is int
+            payload = np.zeros((len(values), width), dtype=np.uint8)
+            for row_index, value in enumerate(values):
+                encoded = value.encode("utf-8")
+                payload[row_index, : len(encoded)] = np.frombuffer(
+                    encoded,
+                    dtype=np.uint8,
+                )
+        else:
+            payload = np.zeros(
+                shape,
+                dtype=np.dtype(declaration.contract.dtype.numpy_dtype),
+            )
+        parent.create_array(parts[-1], data=payload, chunks=payload.shape)
+
+    for group_name, group_attrs in expected_eye_angle_channel_index_attrs(
+        angle_block_width=dimensions.angle_block_width
+    ).items():
+        run[group_name].attrs.update(group_attrs)
+    run.attrs.update(
+        {
+            "status": "complete",
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 7,
+            "layout": "compact_dense_v2",
+            "method": "ellipse_and_centroid_eye_angles",
+            "method_version": "eye_angle_analysis.v5",
+            "row_axis": "keypoint_detection_rows",
+            "report_version": "2.0",
+            "fps": 100.0,
+            "fps_source": "test_fixture",
+            "num_detections": dimensions.n_roi_rows,
+            "num_frames": dimensions.n_frames,
+            "source_geometry_kind": "subject_shape_eye_geometry",
+            "source_eye_geometry_stage": "analysis/subject_shape_runs",
+            "source_eye_geometry_run": "shape_001",
+            "source_keypoint_run": "keypoints_001",
+            "source_keypoints_run": "keypoints_001",
+            "valid_detection_fraction": 0.75,
+            "resolved_head_keypoint_indices": {
+                "swim_bladder": 0,
+                "eye_left": 1,
+                "eye_right": 2,
+            },
+            "eye_angle_source_contracts": {
+                "eye_geometry": {"components": []}
+            },
+            "angle_smoothing_window_requested": 7,
+            "angle_smoothing_window_source": "module_default",
+            "angle_smoothing_window_detections": None,
+            "angle_smoothing_window_frames": 3,
+            "angle_column_order_contract": {
+                "schema_id": "palette.eye_angle_semantic_column_order.v1",
+                "profile": "semantic_bundles_v1",
+                "logical_lookup": "angle_channel_index/name",
+                "physical_index_semantics": False,
+                "semantic_bundle_width": dimensions.angle_block_width,
+                "requested_dense_inner_chunks": [4096, 16],
+                "effective_roi_chunks": list(run["roi_angles"].chunks),
+                "effective_frame_chunks": list(run["frame_angles"].chunks),
+                "first_angle_chunk_channels": list(
+                    canonical_angle_channels(dimensions.angle_block_width)[
+                        : dimensions.angle_block_width
+                    ]
+                ),
+            },
+            EYE_ANGLE_ARRAY_SCHEMA_ATTR: eye_angle_array_schema_manifest(dimensions),
+            "eye_angle_output_schema": eye_angle_analysis._eye_angle_output_schema(),
+            "eye_angle_variant_schema": eye_angle_analysis._eye_angle_variant_schema(),
+        }
+    )
+    run.attrs["eye_angle_algorithm_contract"] = (
+        eye_angle_analysis.expected_eye_angle_algorithm_contract_from_run_attrs(
+            run.attrs
+        )
+    )
 
 
 def test_check_zarr_reports_detect_coverage_full_basis(tmp_path: Path) -> None:
@@ -531,20 +644,7 @@ def test_check_zarr_reads_ready_eye_angle_analysis_run(tmp_path: Path) -> None:
     parent = analysis.create_group("eye_angle_runs")
     parent.attrs["latest"] = "eye_angle_001"
     run = parent.create_group("eye_angle_001")
-    run.attrs.update(
-        {
-            "status": "complete",
-            "schema_id": "analysis.eye_angle_runs",
-            "schema_version": 5,
-            "method": "ellipse_and_centroid_eye_angles",
-            "row_axis": "keypoint_detection_rows",
-            "source_geometry_kind": "subject_shape_eye_geometry",
-            "source_eye_geometry_stage": "analysis/subject_shape_runs",
-            "source_eye_geometry_run": "shape_001",
-            "source_keypoints_run": "refined_keypoints_001",
-            "valid_detection_fraction": 0.75,
-        }
-    )
+    _populate_exact_eye_angle_v7_run(run)
 
     info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
 
@@ -554,6 +654,43 @@ def test_check_zarr_reads_ready_eye_angle_analysis_run(tmp_path: Path) -> None:
     assert info["eye_angle_valid_detection_fraction"] == pytest.approx(0.75)
     assert info["eye_angle_source_geometry_kind"] == "subject_shape_eye_geometry"
     assert info["eye_angle_readiness_reasons"] == []
+
+
+def test_check_zarr_rejects_metadata_only_eye_angle_v7_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_angle_metadata_only_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("analysis").create_group("eye_angle_runs")
+    parent.attrs["latest"] = "eye_angle_001"
+    run = parent.create_group("eye_angle_001")
+    run.attrs.update(
+        {
+            "status": "complete",
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 7,
+            "layout": "compact_dense_v2",
+            "method": "ellipse_and_centroid_eye_angles",
+            "method_version": "eye_angle_analysis.v5",
+            "row_axis": "keypoint_detection_rows",
+            "source_geometry_kind": "subject_shape_eye_geometry",
+            "source_eye_geometry_stage": "analysis/subject_shape_runs",
+            "source_eye_geometry_run": "shape_001",
+            "source_keypoints_run": "keypoints_001",
+            "valid_detection_fraction": 0.75,
+        }
+    )
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["eye_angles_present"] is True
+    assert info["eye_angles_ready"] is False
+    assert any(
+        reason.startswith("exact_payload=")
+        for reason in info["eye_angle_readiness_reasons"]
+    )
+    assert any(
+        reason.startswith("exact_manifest=")
+        for reason in info["eye_angle_readiness_reasons"]
+    )
 
 
 def test_check_zarr_reports_eye_angle_analysis_contract_warnings(tmp_path: Path) -> None:
@@ -579,9 +716,35 @@ def test_check_zarr_reports_eye_angle_analysis_contract_warnings(tmp_path: Path)
     reasons = info["eye_angle_readiness_reasons"]
     assert "schema_id=legacy.eye_angle_runs" in reasons
     assert "schema_version=0" in reasons
+    assert "layout=missing" in reasons
     assert "source_geometry_kind=missing" in reasons
     assert "source_keypoints_run=missing" in reasons
     assert "valid_detection_fraction=0" in reasons
+
+
+@pytest.mark.parametrize("schema_version", (6, 8, 7.0, "7", True))
+def test_eye_angle_readiness_rejects_legacy_and_future_schema_versions(
+    schema_version: object,
+) -> None:
+    result = mod._extract_eye_angle_readiness(  # noqa: SLF001
+        run_name="eye_angle_001",
+        run_group=None,
+        details={
+            "status": "complete",
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": schema_version,
+            "layout": "compact_dense_v2",
+            "method": "ellipse_and_centroid_eye_angles",
+            "row_axis": "keypoint_detection_rows",
+            "source_geometry_kind": "subject_shape_eye_geometry",
+            "source_eye_geometry_stage": "analysis/subject_shape_runs",
+            "source_eye_geometry_run": "shape_001",
+            "source_keypoints_run": "keypoints_001",
+            "valid_detection_fraction": 0.75,
+        },
+    )
+    assert result["ready"] is False
+    assert result["readiness_reasons"] == [f"schema_version={schema_version}"]
 
 
 def test_check_zarr_reads_subject_mask_status_and_components(tmp_path: Path) -> None:

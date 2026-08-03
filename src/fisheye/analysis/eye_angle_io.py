@@ -13,6 +13,14 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from .eye_angle_schema import (
+    EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+    EYE_ANGLE_LAYOUT_HIERARCHICAL_V1,
+    EYE_ANGLE_RUN_PARENT,
+    is_current_eye_angle_run_contract,
+    is_supported_legacy_eye_angle_run,
+    validate_eye_angle_compact_run,
+)
 from ..shared.json_safety import decode_null_terminated_text
 from ..shared.zarr_helpers import (
     first_array_length as _shared_first_array_length,
@@ -30,10 +38,6 @@ from ..shared.zarr_run_completion import (
     resolve_latest_complete_run_name,
 )
 
-
-EYE_ANGLE_RUN_PARENT = "analysis/eye_angle_runs"
-EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
-EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2 = "compact_dense_v2"
 
 EYE_ANGLE_TIMESERIES_COLUMNS: tuple[str, ...] = (
     "left_eye_angle_deg",
@@ -199,6 +203,55 @@ def optional_1d_array(arrays: Mapping[str, np.ndarray], name: str, *, length: Op
 
 def _layout(attrs: Mapping[str, Any]) -> str:
     return str(attrs.get("layout") or attrs.get("storage_layout") or EYE_ANGLE_LAYOUT_HIERARCHICAL_V1)
+
+
+def _require_eye_angle_contract_identity(
+    attrs: Mapping[str, Any],
+    *,
+    legacy_compatibility: bool,
+) -> bool:
+    """Require current v7, or one explicitly enabled closed legacy identity."""
+
+    if is_current_eye_angle_run_contract(attrs):
+        return True
+    if legacy_compatibility and is_supported_legacy_eye_angle_run(attrs):
+        return False
+    identity = (
+        attrs.get("schema_id"),
+        attrs.get("schema_version"),
+        attrs.get("layout"),
+    )
+    raise EyeAngleIOError(
+        "Eye-angle run contract is not maintained compact v7; known v2-v6 "
+        f"layouts require legacy_compatibility=True, got {identity!r}."
+    )
+
+
+def _require_eye_angle_payload_contract(
+    run_group: Any,
+    *,
+    legacy_compatibility: bool,
+) -> None:
+    """Validate the exact current payload while keeping legacy parsing isolated."""
+
+    attrs = _attrs_dict(run_group)
+    if not _require_eye_angle_contract_identity(
+        attrs,
+        legacy_compatibility=legacy_compatibility,
+    ):
+        return
+    issues = validate_eye_angle_compact_run(run_group)
+    from .eye_angle_analysis import validate_eye_angle_persisted_contract_manifests
+
+    manifest_errors = validate_eye_angle_persisted_contract_manifests(attrs)
+    if issues or manifest_errors:
+        details = "; ".join(
+            [
+                *(f"{issue.code}:{issue.path}:{issue.message}" for issue in issues),
+                *(f"persisted_manifest:{error}" for error in manifest_errors),
+            ]
+        )
+        raise EyeAngleIOError(f"Exact compact eye-angle v7 validation failed: {details}")
 
 
 def _logical_source_path(tables: "EyeAngleRunTables", logical_path: str) -> str:
@@ -516,6 +569,10 @@ def resolve_eye_angle_run(
         raise EyeAngleIOError(
             f"Eye-angle run {resolved!r} is not selector-eligible."
         )
+    _require_eye_angle_contract_identity(
+        _attrs_dict(run_group),
+        legacy_compatibility=legacy_compatibility,
+    )
     run_path = f"{EYE_ANGLE_RUN_PARENT}/{resolved}"
     return run_group, str(resolved), run_path
 
@@ -531,6 +588,10 @@ def load_eye_angle_run_tables(
     run_group, resolved_run, run_path = resolve_eye_angle_run(
         root,
         run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
+    _require_eye_angle_payload_contract(
+        run_group,
         legacy_compatibility=legacy_compatibility,
     )
     attrs = _attrs_dict(run_group)
@@ -639,10 +700,17 @@ def discover_eye_angle_run_options(
             legacy_default=legacy_compatibility,
         ):
             continue
+        attrs = _attrs_dict(run_group)
+        try:
+            _require_eye_angle_contract_identity(
+                attrs,
+                legacy_compatibility=legacy_compatibility,
+            )
+        except EyeAngleIOError:
+            continue
         n_rows = _run_row_count(run_group)
         if n_rows <= 0:
             continue
-        attrs = _attrs_dict(run_group)
         schema_version = _safe_int(attrs.get("schema_version"))
         preferred_angle_family = attrs.get("preferred_angle_family")
         preferred_eye_axis = attrs.get("preferred_eye_axis")
@@ -731,6 +799,10 @@ def catalog_eye_angle_series(
     run_group, resolved_run, run_path = resolve_eye_angle_run(
         root,
         run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
+    _require_eye_angle_payload_contract(
+        run_group,
         legacy_compatibility=legacy_compatibility,
     )
     attrs = _attrs_dict(run_group)

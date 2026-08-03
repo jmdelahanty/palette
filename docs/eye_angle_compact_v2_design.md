@@ -31,7 +31,8 @@ analysis/eye_angle_runs/<run>/
   attrs:
     layout = "compact_dense_v2"
     schema_id = "analysis.eye_angle_runs"
-    schema_version = 6
+    schema_version = 7
+    eye_angle_array_schema = palette.analysis.eye_angle.compact_dense_arrays v1
     eye_angle_output_schema.schema_version = 9
     eye_angle_algorithm_contract.schema_version = 1
 

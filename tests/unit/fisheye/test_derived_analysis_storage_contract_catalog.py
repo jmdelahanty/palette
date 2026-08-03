@@ -20,7 +20,7 @@ EXPECTED_SCHEMA_IDENTITIES = {
     "track_kinematics": ("analysis.track_kinematics_runs", 1),
     "swim_bouts": ("palette.swim_bout_runs", 8),
     "bout_kinematics": ("analysis.bout_kinematics_runs", 7),
-    "eye_angles": ("analysis.eye_angle_runs", 6),
+    "eye_angles": ("analysis.eye_angle_runs", 7),
     "subject_shape": ("analysis.subject_shape_runs", 4),
     "tail_kinematics": ("analysis.tail_kinematics_runs", 2),
     "tail_posture_view": ("analysis.tail_posture_view_runs", 2),

@@ -24,6 +24,13 @@ from fisheye.shared.refined_detect_review import (
     resolve_refined_detect_group,
 )
 from fisheye.shared.mask_store import MaskStoreError, open_mask_store
+from fisheye.analysis.eye_angle_schema import (
+    EYE_ANGLE_LAYOUT,
+    EYE_ANGLE_RUN_SCHEMA_ID,
+    EYE_ANGLE_RUN_SCHEMA_VERSION,
+    is_current_eye_angle_run_contract,
+    validate_eye_angle_compact_run,
+)
 from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.type_conversions import status_text as _status_text
@@ -898,8 +905,6 @@ def _extract_tracking_qc_details(details: Optional[Dict[str, object]]) -> Dict[s
     }
 
 
-_EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
-_EYE_ANGLE_RUN_SCHEMA_VERSION = 5
 _EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
 _EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
 
@@ -929,7 +934,9 @@ def _extract_eye_angle_readiness(
 
     status = _normalize_attr(attrs.get("status"))
     schema_id = _normalize_attr(attrs.get("schema_id"))
-    schema_version = _coerce_int(attrs.get("schema_version"))
+    raw_schema_version = attrs.get("schema_version")
+    schema_version = _coerce_int(raw_schema_version)
+    layout = _normalize_attr(attrs.get("layout"))
     method = _normalize_attr(attrs.get("method"))
     row_axis = _normalize_attr(attrs.get("row_axis"))
     source_geometry_kind = _normalize_attr(attrs.get("source_geometry_kind"))
@@ -950,10 +957,37 @@ def _extract_eye_angle_readiness(
     reasons: List[str] = []
     if status != "complete":
         reasons.append(f"status={status or 'missing'}")
-    if schema_id != _EYE_ANGLE_RUN_SCHEMA_ID:
-        reasons.append(f"schema_id={schema_id or 'missing'}")
-    if schema_version != _EYE_ANGLE_RUN_SCHEMA_VERSION:
-        reasons.append(f"schema_version={schema_version if schema_version is not None else 'missing'}")
+    if not is_current_eye_angle_run_contract(attrs):
+        contract_reason_count = len(reasons)
+        if schema_id != EYE_ANGLE_RUN_SCHEMA_ID:
+            reasons.append(f"schema_id={schema_id or 'missing'}")
+        if (
+            type(raw_schema_version) is not int
+            or raw_schema_version != EYE_ANGLE_RUN_SCHEMA_VERSION
+        ):
+            reasons.append(
+                "schema_version="
+                f"{raw_schema_version if raw_schema_version is not None else 'missing'}"
+            )
+        if layout != EYE_ANGLE_LAYOUT:
+            reasons.append(f"layout={layout or 'missing'}")
+        if len(reasons) == contract_reason_count:
+            reasons.append("run_contract_mismatch")
+    elif run_group is None:
+        reasons.append("exact_payload_validation=unavailable")
+    else:
+        from fisheye.analysis.eye_angle_analysis import (
+            validate_eye_angle_persisted_contract_manifests,
+        )
+
+        exact_issues = validate_eye_angle_compact_run(run_group)
+        reasons.extend(
+            f"exact_payload={issue.code}:{issue.path}" for issue in exact_issues
+        )
+        reasons.extend(
+            f"exact_manifest={message}"
+            for message in validate_eye_angle_persisted_contract_manifests(attrs)
+        )
     if method != _EYE_ANGLE_METHOD:
         reasons.append(f"method={method or 'missing'}")
     if row_axis != _EYE_ANGLE_ROW_AXIS:

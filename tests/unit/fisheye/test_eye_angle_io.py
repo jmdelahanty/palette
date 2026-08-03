@@ -187,7 +187,8 @@ def _make_compact_eye_angle_archive(tmp_path: Path) -> zarr.Group:
 def test_discover_eye_angle_run_options_uses_latest_and_shape_metadata(tmp_path: Path) -> None:
     root = _make_eye_angle_archive(tmp_path)
 
-    options = discover_eye_angle_run_options(root)
+    assert discover_eye_angle_run_options(root) == []
+    options = discover_eye_angle_run_options(root, legacy_compatibility=True)
 
     assert len(options) == 1
     option = options[0]
@@ -209,6 +210,9 @@ def _make_eye_angle_selection_root() -> _SelectionGroup:
     root["analysis/eye_angle_runs"] = parent
     parent["eye_angle_1"] = _SelectionGroup(
         attrs={
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 7,
+            "layout": "compact_dense_v2",
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
         },
@@ -282,7 +286,16 @@ def test_eye_angle_resolution_normalizes_explicit_run(
 def test_load_eye_angle_run_tables_reads_logical_groups(tmp_path: Path) -> None:
     root = _make_eye_angle_archive(tmp_path)
 
-    tables = load_eye_angle_run_tables(root, run_name="analysis/eye_angle_runs/eye_angle_1")
+    with pytest.raises(EyeAngleIOError, match="legacy_compatibility=True"):
+        load_eye_angle_run_tables(
+            root,
+            run_name="analysis/eye_angle_runs/eye_angle_1",
+        )
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name="analysis/eye_angle_runs/eye_angle_1",
+        legacy_compatibility=True,
+    )
 
     assert tables.run_name == "eye_angle_1"
     assert tables.run_path == "analysis/eye_angle_runs/eye_angle_1"
@@ -297,12 +310,17 @@ def test_load_eye_angle_run_tables_reads_logical_groups(tmp_path: Path) -> None:
 def test_load_eye_angle_run_tables_reads_compact_dense_channels(tmp_path: Path) -> None:
     root = _make_compact_eye_angle_archive(tmp_path)
 
-    options = discover_eye_angle_run_options(root)
+    assert discover_eye_angle_run_options(root) == []
+    options = discover_eye_angle_run_options(root, legacy_compatibility=True)
     assert len(options) == 1
     assert options[0].run_name == "eye_angle_compact"
     assert options[0].n_rows == 3
 
-    tables = load_eye_angle_run_tables(root, run_name="latest")
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name="latest",
+        legacy_compatibility=True,
+    )
 
     assert tables.attrs["layout"] == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
     assert first_array_length(tables.roi) == 3
@@ -318,7 +336,12 @@ def test_load_eye_angle_run_tables_reads_compact_dense_channels(tmp_path: Path) 
 def test_compact_eye_angle_window_reads_selected_columns_and_rows(tmp_path: Path) -> None:
     root = _make_compact_eye_angle_archive(tmp_path)
 
-    catalog = catalog_eye_angle_series(root, run_name="latest", prefer_frame=True)
+    catalog = catalog_eye_angle_series(
+        root,
+        run_name="latest",
+        prefer_frame=True,
+        legacy_compatibility=True,
+    )
 
     assert catalog.row_axis == "frame"
     assert catalog.row_count == 4
@@ -333,6 +356,7 @@ def test_compact_eye_angle_window_reads_selected_columns_and_rows(tmp_path: Path
         start_s=0.01,
         stop_s=0.02,
         angle_channels=("left_gaze_deg", "vergence_gaze_signed_deg"),
+        legacy_compatibility=True,
     )
 
     np.testing.assert_allclose(window.time_seconds, [0.01, 0.02])
@@ -352,6 +376,7 @@ def test_eye_angle_window_refuses_unbounded_large_projection(tmp_path: Path) -> 
             run_name="latest",
             angle_channels=("left_gaze_deg",),
             max_rows=2,
+            legacy_compatibility=True,
         )
 
 
@@ -365,6 +390,7 @@ def test_load_eye_gaze_frame_series_aligns_frames_and_validity(tmp_path: Path) -
         eye_angle_family="gaze",
         frames=frames,
         allowed_families=("gaze",),
+        legacy_compatibility=True,
     )
 
     np.testing.assert_allclose(series["left_gaze_deg"], [1.0, 3.0, 4.0])
@@ -388,6 +414,7 @@ def test_load_eye_gaze_frame_series_uses_compact_source_paths(tmp_path: Path) ->
         eye_angle_family="gaze",
         frames=frames,
         allowed_families=("gaze",),
+        legacy_compatibility=True,
     )
 
     np.testing.assert_allclose(series["left_gaze_deg"], [1.0, 3.0, 4.0])
@@ -409,6 +436,7 @@ def test_load_eye_gaze_frame_series_rejects_unsupported_family(tmp_path: Path) -
             eye_angle_family="eye_frame",
             frames=np.asarray([0], dtype=np.int64),
             allowed_families=("gaze",),
+            legacy_compatibility=True,
         )
 
 
@@ -422,4 +450,5 @@ def test_load_eye_gaze_frame_series_checks_frame_bounds(tmp_path: Path) -> None:
             eye_angle_family="gaze",
             frames=np.asarray([4], dtype=np.int64),
             allowed_families=("gaze",),
+            legacy_compatibility=True,
         )

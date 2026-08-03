@@ -308,7 +308,13 @@ def test_core_source_exposes_eye_angles_only_when_persisted(
     assert "eye_angles" not in source_without_eyes.available_analysis_ids()
 
     _add_eye_angle_run(zarr_path)
-    source = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
+    strict_source = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
+    assert "eye_angles" not in strict_source.available_analysis_ids()
+    source = CoreBehaviorSource(
+        zarr_path,
+        _core_option(zarr_path),
+        legacy_eye_angle_compatibility=True,
+    )
 
     def _forbid_from_pandas(*args, **kwargs):
         raise AssertionError("eye projection must not require Polars.from_pandas")

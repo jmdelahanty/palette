@@ -1,6 +1,6 @@
 # Eye-Angle Metrics: Data Layout and Computation
 
-This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and subject-mask eye geometry. It reflects the v6 eye-angle run schema and v9 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, a machine-readable variant schema classifies those surfaces for UI selection, and versioned algorithm/source contracts make the exact computation reproducible. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
+This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and subject-mask eye geometry. It reflects the exact compact v7 eye-angle run schema and v9 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, a machine-readable variant schema classifies those surfaces for UI selection, and versioned algorithm/source contracts make the exact computation reproducible. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
 
 ## Where the data lives
 
@@ -55,7 +55,9 @@ the exact base-keypoint child already sealed by the selected subject-shape run.
 
 The referenced sources are captured in run attributes:
 
-- `schema_id = "analysis.eye_angle_runs"` and `schema_version = 6`: stable
+- `schema_id = "analysis.eye_angle_runs"` and `schema_version = 7`: exact
+  compact-dense-v2 array contract. The closed schema-v2-v6 legacy-layout
+  allowlist remains behind explicit compatibility. This is the stable
   run-level contract for this analysis product.
 - `method = "ellipse_and_centroid_eye_angles"`: the writer computes both
   ellipse-axis and centroid-position eye-angle families.
@@ -73,6 +75,10 @@ The referenced sources are captured in run attributes:
   schema v8 adds the versioned algorithm-contract link and exact temporal
   operator identities. Output schema v9 adds canonical row identity and
   acquisition-frame support surfaces.
+- `support/frame_time_seconds` is required for every maintained v7 run. The
+  dense `roi_angles` channel named `heading_deg` is a compatibility alias only;
+  its values must exactly equal authoritative
+  `support/body_frame/heading_deg`.
 - `eye_angle_variant_schema`: mirror of
   `eye_angle_output_schema.variant_schema`. Consumers can use it to present
   selectable `eye_frame`, `gaze`, `nasal_gaze`, `major`, `centroid`, and
@@ -85,6 +91,14 @@ The referenced sources are captured in run attributes:
   `analysis.eye_angle_algorithm_contract`, version 1. This is separate from
   `method_version` because adding more precise provenance does not change the
   v5 scientific calculation.
+
+Maintained discovery and ordinary reads accept only compact run schema v7.
+Historical run schemas v2-v6 are available solely through an explicit
+`legacy_compatibility=True` policy. Open/read validation checks exact arrays,
+semantic indexes, group attributes, and the reconstructed output/algorithm
+manifests without scanning all scientific values. Publication validation adds
+chunked identity/alias checks, including exact heading-alias equality; exhaustive
+scientific fill/null audits remain canary or maintenance work.
 - `eye_angle_source_contracts`: resolved paths and available schema, method,
   completion, git, and lineage-fingerprint attrs for the eye geometry and exact
   keypoint source. Its canonical keypoint authority binds the subject-shape

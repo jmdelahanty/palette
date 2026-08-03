@@ -216,8 +216,13 @@ def _track_run_groups(parent: Any, parent_path: str, *, depth: int = 0) -> list[
 def discover_core_behavior_options(
     zarr_path: Path | str,
     interactive_options: Sequence[InteractiveSpecOption] = (),
+    *,
+    legacy_eye_angle_compatibility: bool = False,
 ) -> list[CoreBehaviorOption]:
     """Discover canonical core runs even when no visualization spec was persisted."""
+
+    if type(legacy_eye_angle_compatibility) is not bool:
+        raise TypeError("legacy_eye_angle_compatibility must be an exact bool")
 
     archive = Path(zarr_path)
     options = [
@@ -271,7 +276,10 @@ def discover_core_behavior_options(
                 )
                 seen.add((run_path, track_id))
     if not options:
-        eye_options = discover_eye_angle_run_options(archive)
+        eye_options = discover_eye_angle_run_options(
+            archive,
+            legacy_compatibility=legacy_eye_angle_compatibility,
+        )
         if eye_options:
             eye = eye_options[0]
             options.append(
@@ -561,6 +569,8 @@ class CoreBehaviorSource:
         self,
         zarr_path: Path | str,
         option: InteractiveSpecOption | CoreBehaviorOption,
+        *,
+        legacy_eye_angle_compatibility: bool = False,
     ):
         if not is_core_behavior_option(option):
             raise ValueError("Not a core-behavior source")
@@ -570,6 +580,9 @@ class CoreBehaviorSource:
         )
         self.source_paths = dict(self.option.source_paths)
         self.track_id = int(self.option.track_id)
+        if type(legacy_eye_angle_compatibility) is not bool:
+            raise TypeError("legacy_eye_angle_compatibility must be an exact bool")
+        self.legacy_eye_angle_compatibility = legacy_eye_angle_compatibility
         self._time_seconds_cache: np.ndarray | None = None
         self._swim_bout_selection_cache: tuple[Any, Any] | None = None
         self._swim_bout_events_cache: Any = None
@@ -649,7 +662,10 @@ class CoreBehaviorSource:
         except Exception:
             pass
         try:
-            if discover_eye_angle_run_options(self.zarr_path):
+            if discover_eye_angle_run_options(
+                self.zarr_path,
+                legacy_compatibility=self.legacy_eye_angle_compatibility,
+            ):
                 available.append("eye_angles")
         except Exception:
             pass
@@ -669,7 +685,12 @@ class CoreBehaviorSource:
         return self._available_analysis_ids_cache
 
     def eye_angle_options(self) -> tuple[Any, ...]:
-        return tuple(discover_eye_angle_run_options(self.zarr_path))
+        return tuple(
+            discover_eye_angle_run_options(
+                self.zarr_path,
+                legacy_compatibility=self.legacy_eye_angle_compatibility,
+            )
+        )
 
     def eye_angle_catalog(self, run_name: str | None = None) -> Any:
         key = str(run_name or "latest")
@@ -678,6 +699,7 @@ class CoreBehaviorSource:
                 self.zarr_path,
                 run_name=run_name,
                 prefer_frame=True,
+                legacy_compatibility=self.legacy_eye_angle_compatibility,
             )
         return self._eye_catalog_cache[key]
 
@@ -1078,6 +1100,7 @@ class CoreBehaviorSource:
             start_s=start_s,
             stop_s=stop_s,
             series_names=selected_series,
+            legacy_compatibility=self.legacy_eye_angle_compatibility,
         )
         frame = payload.dataframe
         bounds = _finite_bounds(frame["time_s"].to_numpy()) if "time_s" in frame.columns else (0.0, 0.0)

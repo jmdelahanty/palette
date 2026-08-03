@@ -2237,7 +2237,7 @@ Eye angle analysis results:
   inner chunks and `(131072, 32)` outer shards; consumers resolve named
   channels through `fisheye.analysis.eye_angle_io` rather than persisting
   numeric column positions.
-- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 6`,
+- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 7`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
@@ -2245,7 +2245,7 @@ Eye angle analysis results:
   reason-code linkage. Output schema v9 includes
   `variant_schema`, mirrored as `eye_angle_variant_schema` in run attrs, for
   UI-selectable angle representations, and links the versioned algorithm
-  contract. Run-schema v6/output-schema v9 additionally make ordered row
+  contract. Run-schema v7/output-schema v9 additionally make ordered row
   identity and acquisition time explicit.
 - `eye_angle_algorithm_contract`: versioned computation metadata covering the
   ellipse source/parameter convention, body-frame formulas and resolved
@@ -2304,7 +2304,7 @@ Eye angle analysis results:
   surface; UI selectors should use
   `eye_angle_variant_schema.default_representation` for angle-representation
   defaults.
-- Run-schema v6 materializes keypoint-derived body-frame support arrays under
+- Run-schema v7 materializes keypoint-derived body-frame support arrays under
   `support/body_frame/` so signed eye angles are anatomical-left-positive and
   convergence polarity is not conflated with ellipse-axis orientation
   disambiguation. These arrays are recomputed from the exact sealed keypoint

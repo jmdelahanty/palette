@@ -63,6 +63,32 @@ def test_eye_angle_layout_default_is_compact_dense_v2() -> None:
     assert args.layout == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
 
 
+def test_only_current_compact_eye_angle_output_can_activate_selectors() -> None:
+    current = eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+    legacy = eye_angle_analysis.EYE_ANGLE_LAYOUT_HIERARCHICAL_V1
+
+    assert eye_angle_analysis._is_selector_eligible_eye_angle_output(
+        diagnostic_output=False,
+        staged_input_integrity_receipt=None,
+        output_layout=current,
+    )
+    assert not eye_angle_analysis._is_selector_eligible_eye_angle_output(
+        diagnostic_output=False,
+        staged_input_integrity_receipt=None,
+        output_layout=legacy,
+    )
+    assert not eye_angle_analysis._is_selector_eligible_eye_angle_output(
+        diagnostic_output=True,
+        staged_input_integrity_receipt=None,
+        output_layout=current,
+    )
+    assert not eye_angle_analysis._is_selector_eligible_eye_angle_output(
+        diagnostic_output=False,
+        staged_input_integrity_receipt={"record_sha256": "staged"},
+        output_layout=current,
+    )
+
+
 @pytest.mark.parametrize(
     ("extra_args", "expected_legacy"),
     (([], False), (["--legacy-eye-angle-compatibility"], True)),
@@ -191,7 +217,12 @@ def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
     assert "left_gaze_speed_deg_s" in schema["groups"]["angles/roi"]["derivative_outputs"]
     assert schema["groups"]["support"]["row_axis"] == "mixed"
     support_outputs = schema["groups"]["support"]["outputs"]
-    assert {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": True} in support_outputs
+    assert {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": False} in support_outputs
+    assert schema["compatibility_aliases"]["angles/roi/heading_deg"] == {
+        "canonical_path": "support/body_frame/heading_deg",
+        "values_must_equal_canonical": True,
+        "authority": "compatibility_alias_only",
+    }
     assert schema["groups"]["qa/roi"]["outputs"] == [
         "valid_left",
         "valid_right",
@@ -1421,6 +1452,7 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
     parent.attrs["latest"] = "compact"
     parent.attrs["latest_complete"] = "compact"
     run = parent.create_group("compact")
+    run.attrs["schema_id"] = "analysis.eye_angle_runs"
     run.attrs["schema_version"] = 5
     run.attrs["palette_run_completion_status"] = "complete"
     run.attrs["stage_selector_eligible"] = True
@@ -1478,7 +1510,11 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
         ],
     }
 
-    tables = load_eye_angle_run_tables(root, run_name="latest")
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name="latest",
+        legacy_compatibility=True,
+    )
     np.testing.assert_allclose(tables.roi["left_eye_angle_deg"], [10.0, 11.0])
     np.testing.assert_allclose(tables.roi["heading_deg"], [1.0, 2.0])
     assert "heading_deg" not in tables.frame

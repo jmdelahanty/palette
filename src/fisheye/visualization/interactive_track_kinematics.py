@@ -905,11 +905,18 @@ def _classification_matches_swim_bout(
     return source_run is not None or source_speed is not None
 
 
-def discover_eye_angle_run_options(zarr_path: Path | str) -> list[EyeAngleRunOption]:
+def discover_eye_angle_run_options(
+    zarr_path: Path | str,
+    *,
+    legacy_compatibility: bool = False,
+) -> list[EyeAngleRunOption]:
     """Return available eye-angle analysis runs."""
 
     root = open_zarr_root(Path(zarr_path), mode="r")
-    return discover_eye_angle_run_options_from_root(root)
+    return discover_eye_angle_run_options_from_root(
+        root,
+        legacy_compatibility=legacy_compatibility,
+    )
 
 
 def load_eye_angle_timeseries_data(
@@ -917,12 +924,17 @@ def load_eye_angle_timeseries_data(
     *,
     run_name: Optional[str] = None,
     prefer_frame: bool = True,
+    legacy_compatibility: bool = False,
 ) -> EyeAngleTimeseriesData:
     """Load eye-angle arrays into a time-indexed dataframe for interactive plotting."""
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
-    tables = load_eye_angle_run_tables(root, run_name=run_name)
+    tables = load_eye_angle_run_tables(
+        root,
+        run_name=run_name,
+        legacy_compatibility=legacy_compatibility,
+    )
     resolved_run = tables.run_name
 
     frame_rows = (

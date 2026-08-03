@@ -1029,6 +1029,7 @@ def _load_eye_gaze_frame_series(
     eye_angle_run: str,
     eye_angle_family: str,
     frames: np.ndarray,
+    legacy_compatibility: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     try:
         return load_eye_gaze_frame_series(
@@ -1037,6 +1038,7 @@ def _load_eye_gaze_frame_series(
             eye_angle_family=eye_angle_family,
             frames=frames,
             allowed_families=EYE_ANGLE_FAMILIES,
+            legacy_compatibility=legacy_compatibility,
         )
     except EyeAngleIOError as exc:
         raise ValueError(
@@ -2847,6 +2849,7 @@ def compute_and_save_bout_kinematics(
     include_eye_gaze: bool = True,
     eye_angle_run: str = "latest",
     eye_angle_family: str = "gaze",
+    legacy_eye_angle_compatibility: bool = False,
     eye_validity_min_fraction: float = 1.0,
     vergence_threshold_deg: Optional[float] = None,
     write_visualizations: bool = False,
@@ -2870,6 +2873,8 @@ def compute_and_save_bout_kinematics(
     if str(eye_angle_family).strip() not in EYE_ANGLE_FAMILIES:
         expected = ", ".join(EYE_ANGLE_FAMILIES)
         raise ValueError(f"Unsupported eye_angle_family {eye_angle_family!r}; expected one of: {expected}")
+    if type(legacy_eye_angle_compatibility) is not bool:
+        raise TypeError("legacy_eye_angle_compatibility must be an exact bool")
     if physical_active_boundary_constraint not in PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS:
         expected = ", ".join(PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS)
         raise ValueError(
@@ -3115,6 +3120,7 @@ def compute_and_save_bout_kinematics(
             eye_angle_run=eye_angle_run,
             eye_angle_family=eye_angle_family,
             frames=frames,
+            legacy_compatibility=legacy_eye_angle_compatibility,
         )
 
     if "analysis" not in output_root:
@@ -3212,6 +3218,7 @@ def compute_and_save_bout_kinematics(
             "enabled": bool(include_eye_gaze),
             "eye_angle_run": str(eye_angle_run),
             "eye_angle_family": str(eye_angle_family),
+            "legacy_eye_angle_compatibility": legacy_eye_angle_compatibility,
             "eye_validity_min_fraction": float(eye_validity_min_fraction),
             "vergence_threshold_deg": (
                 None if vergence_threshold_deg is None else float(vergence_threshold_deg)
@@ -3588,6 +3595,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--eye-angle-run", type=str, default="latest")
     parser.add_argument("--eye-angle-family", choices=EYE_ANGLE_FAMILIES, default="gaze")
+    parser.add_argument(
+        "--legacy-eye-angle-compatibility",
+        action="store_true",
+        help=(
+            "Explicitly allow one closed eye-angle run-schema v2-v6 layout. "
+            "Maintained production inputs remain strict compact v7 by default."
+        ),
+    )
     parser.add_argument("--eye-validity-min-fraction", type=float, default=1.0)
     parser.add_argument(
         "--vergence-threshold-deg",
@@ -3653,6 +3668,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         include_eye_gaze=args.include_eye_gaze,
         eye_angle_run=args.eye_angle_run,
         eye_angle_family=args.eye_angle_family,
+        legacy_eye_angle_compatibility=args.legacy_eye_angle_compatibility,
         eye_validity_min_fraction=args.eye_validity_min_fraction,
         vergence_threshold_deg=args.vergence_threshold_deg,
         write_visualizations=args.write_zarr_artifacts,

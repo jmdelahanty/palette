@@ -78,6 +78,42 @@ from fisheye.pose.schema import (
 from fisheye.shared.metadata import get_fps
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.analysis.eye_angle_schema import (
+    CANONICAL_FRAME_ANGLE_CHANNELS,
+    CANONICAL_ROI_ANGLE_CHANNELS,
+    FRAME_QA_CHANNELS,
+    ROI_QA_CHANNELS,
+    ROI_VECTOR_CHANNELS,
+    EYE_ANGLE_ARRAY_SCHEMA_ATTR,
+    EYE_ANGLE_COLUMN_ORDER_PROFILE,
+    EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID,
+    EYE_ANGLE_LAYOUT_CHOICES,
+    EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+    EYE_ANGLE_LAYOUT_DEFAULT,
+    EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 as _EYE_ANGLE_LAYOUT_HIERARCHICAL_V1,
+    EYE_ANGLE_LEGACY_RUN_SCHEMA_VERSION,
+    EYE_ANGLE_RUN_SCHEMA_ID,
+    EYE_ANGLE_RUN_SCHEMA_VERSION,
+    EyeAngleDimensions,
+    collect_eye_angle_arrays,
+    collect_eye_angle_channel_index_attrs,
+    eye_angle_array_schema_manifest,
+    eye_angle_channel_index_attrs,
+    eye_angle_channel_metadata,
+    eye_qa_channel_metadata,
+    eye_vector_channel_metadata,
+    _formula_for_angle_channel as _schema_formula_for_angle_channel,
+    semantic_angle_channel_order as _schema_semantic_angle_channel_order,
+    validate_eye_angle_compact_arrays,
+    validate_eye_angle_compact_run,
+    validate_eye_angle_value_aliases,
+    canonical_exact_json_bytes,
+)
+
+# Preserve the long-standing module import surface while the implementation
+# and exact declarations live in ``eye_angle_schema``.
+EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 = _EYE_ANGLE_LAYOUT_HIERARCHICAL_V1
+_formula_for_angle_channel = _schema_formula_for_angle_channel
 
 # Reason-code bitmask values (shared across detection- and frame-level QA)
 REASON_NONE = np.uint16(0)
@@ -105,8 +141,6 @@ SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed"
 EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
 DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
-EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
-EYE_ANGLE_RUN_SCHEMA_VERSION = 6
 EYE_ANGLE_OUTPUT_SCHEMA_ID = "analysis.eye_angle_output_schema"
 EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 9
 EYE_ANGLE_VARIANT_SCHEMA_ID = "analysis.eye_angle_variant_schema"
@@ -116,12 +150,6 @@ EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION = 1
 EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
 EYE_ANGLE_METHOD_VERSION = "eye_angle_analysis.v5"
 EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
-EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
-EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2 = "compact_dense_v2"
-EYE_ANGLE_LAYOUT_CHOICES = (EYE_ANGLE_LAYOUT_HIERARCHICAL_V1, EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2)
-EYE_ANGLE_LAYOUT_DEFAULT = EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
-EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID = "palette.eye_angle_semantic_column_order.v1"
-EYE_ANGLE_COLUMN_ORDER_PROFILE = "semantic_bundles_v1"
 EYE_ANGLE_DENSE_CHUNK_ROWS = 4_096
 EYE_ANGLE_DENSE_CHUNK_COLUMNS = 16
 MAJOR_AXIS_MARGINAL_DOT_THRESHOLD = 0.1
@@ -541,7 +569,7 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         {"name": "body_frame/heading_deg", "row_axis": "roi", "units": "deg"},
         {"name": "body_frame/valid", "row_axis": "roi", "value_kind": "bool"},
         {"name": "body_frame/failure_reason_bytes", "row_axis": "roi", "value_kind": "reason_tag"},
-        {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": True},
+        {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": False},
     ]
     qa_outputs = [
         "valid_left",
@@ -683,6 +711,13 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         "body_frame_schema_version": BODY_FRAME_SCHEMA_VERSION,
         "body_frame_estimator": "keypoint_head_axis",
         "body_frame_group": "support/body_frame",
+        "compatibility_aliases": {
+            "angles/roi/heading_deg": {
+                "canonical_path": "support/body_frame/heading_deg",
+                "values_must_equal_canonical": True,
+                "authority": "compatibility_alias_only",
+            }
+        },
         "qa_reason_codes_attr": "reason_code_map",
     }
 
@@ -924,9 +959,10 @@ def _eye_angle_source_contracts(context: EyeAngleInputContext) -> Dict[str, obje
     }
 
 
-def _eye_angle_algorithm_contract(
-    context: EyeAngleInputContext,
+def _build_eye_angle_algorithm_contract(
     *,
+    component_sources: Sequence[Mapping[str, object]],
+    keypoint_indices: Mapping[str, int],
     fps: Optional[float],
     fps_source: str,
     smoothing_window_requested: int,
@@ -961,7 +997,7 @@ def _eye_angle_algorithm_contract(
                 f"ellipse_ratio > {ELLIPSE_CIRCULARITY_THRESHOLD}"
             ),
             "circularity_threshold": float(ELLIPSE_CIRCULARITY_THRESHOLD),
-            "component_sources": _eye_geometry_component_contracts(context),
+            "component_sources": _canonical_json_copy(list(component_sources)),
         },
         "body_frame": {
             "schema_id": BODY_FRAME_SCHEMA_ID,
@@ -970,7 +1006,7 @@ def _eye_angle_algorithm_contract(
             "coordinate_space": BODY_FRAME_COORDINATE_SPACE_ROI,
             "required_keypoint_labels": list(_HEAD_KEYPOINT_LABELS),
             "resolved_keypoint_indices": {
-                key: int(value) for key, value in context.keypoint_indices.items()
+                key: int(value) for key, value in keypoint_indices.items()
             },
             "origin_formula": "0.5 * (eye_left_xy + eye_right_xy)",
             "forward_axis_formula": (
@@ -1081,6 +1117,144 @@ def _eye_angle_algorithm_contract(
             ),
         },
     }
+
+
+def _eye_angle_algorithm_contract(
+    context: EyeAngleInputContext,
+    *,
+    fps: Optional[float],
+    fps_source: str,
+    smoothing_window_requested: int,
+    smoothing_window_source: str,
+    detection_smoothing_window: int,
+    frame_smoothing_window: int,
+) -> Dict[str, object]:
+    """Describe the exact scientific transformations used for eye-angle outputs."""
+
+    return _build_eye_angle_algorithm_contract(
+        component_sources=_eye_geometry_component_contracts(context),
+        keypoint_indices=context.keypoint_indices,
+        fps=fps,
+        fps_source=fps_source,
+        smoothing_window_requested=smoothing_window_requested,
+        smoothing_window_source=smoothing_window_source,
+        detection_smoothing_window=detection_smoothing_window,
+        frame_smoothing_window=frame_smoothing_window,
+    )
+
+
+def expected_eye_angle_algorithm_contract_from_run_attrs(
+    attrs: Mapping[str, Any],
+) -> Dict[str, object]:
+    """Reconstruct the only valid algorithm contract for one compact-v7 run."""
+
+    source_contracts = attrs.get("eye_angle_source_contracts")
+    if type(source_contracts) is not dict:
+        raise ValueError("eye_angle_source_contracts must be one exact JSON object.")
+    eye_geometry = source_contracts.get("eye_geometry")
+    if type(eye_geometry) is not dict:
+        raise ValueError("eye_angle_source_contracts.eye_geometry must be an object.")
+    component_sources = eye_geometry.get("components")
+    if type(component_sources) is not list or any(
+        type(component) is not dict for component in component_sources
+    ):
+        raise ValueError(
+            "eye_angle_source_contracts.eye_geometry.components must be a JSON object list."
+        )
+    keypoint_indices = attrs.get("resolved_head_keypoint_indices")
+    if (
+        type(keypoint_indices) is not dict
+        or set(keypoint_indices) != set(_HEAD_KEYPOINT_LABELS)
+        or any(type(value) is not int or value < 0 for value in keypoint_indices.values())
+    ):
+        raise ValueError(
+            "resolved_head_keypoint_indices must exactly map the three semantic labels "
+            "to nonnegative integers."
+        )
+    fps = attrs.get("fps")
+    if type(fps) is not float or not np.isfinite(fps) or fps <= 0.0:
+        raise ValueError("fps must be one exact positive finite JSON float.")
+    fps_source = attrs.get("fps_source")
+    smoothing_source = attrs.get("angle_smoothing_window_source")
+    if type(fps_source) is not str or not fps_source:
+        raise ValueError("fps_source must be one exact nonempty string.")
+    if type(smoothing_source) is not str or not smoothing_source:
+        raise ValueError(
+            "angle_smoothing_window_source must be one exact nonempty string."
+        )
+
+    def exact_window(name: str, *, required: bool) -> int:
+        value = attrs.get(name)
+        if not required and value is None:
+            return 0
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{name} must be one exact integer in its valid range.")
+        return value
+
+    return _build_eye_angle_algorithm_contract(
+        component_sources=component_sources,
+        keypoint_indices=keypoint_indices,
+        fps=fps,
+        fps_source=fps_source,
+        smoothing_window_requested=exact_window(
+            "angle_smoothing_window_requested",
+            required=True,
+        ),
+        smoothing_window_source=smoothing_source,
+        detection_smoothing_window=exact_window(
+            "angle_smoothing_window_detections",
+            required=False,
+        ),
+        frame_smoothing_window=exact_window(
+            "angle_smoothing_window_frames",
+            required=False,
+        ),
+    )
+
+
+def validate_eye_angle_persisted_contract_manifests(
+    attrs: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Deeply validate static and reconstructed compact-v7 contract manifests."""
+
+    errors: list[str] = []
+    expected_static = {
+        "eye_angle_output_schema": _eye_angle_output_schema(),
+        "eye_angle_variant_schema": _eye_angle_variant_schema(),
+    }
+    for attr_name, expected in expected_static.items():
+        try:
+            matches = canonical_exact_json_bytes(
+                attrs.get(attr_name),
+                path=f"$.{attr_name}",
+            ) == canonical_exact_json_bytes(expected)
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            errors.append(f"{attr_name} must exactly equal its executable contract")
+    try:
+        expected_algorithm = expected_eye_angle_algorithm_contract_from_run_attrs(attrs)
+        algorithm_matches = canonical_exact_json_bytes(
+            attrs.get("eye_angle_algorithm_contract"),
+            path="$.eye_angle_algorithm_contract",
+        ) == canonical_exact_json_bytes(expected_algorithm)
+    except (TypeError, ValueError) as exc:
+        errors.append(f"cannot reconstruct eye_angle_algorithm_contract: {exc}")
+    else:
+        if not algorithm_matches:
+            errors.append(
+                "eye_angle_algorithm_contract must exactly equal the reconstructed executable contract"
+            )
+    exact_scalars = {
+        "method": EYE_ANGLE_METHOD,
+        "method_version": EYE_ANGLE_METHOD_VERSION,
+        "row_axis": EYE_ANGLE_ROW_AXIS,
+    }
+    for attr_name, expected in exact_scalars.items():
+        observed = attrs.get(attr_name)
+        if type(observed) is not str or observed != expected:
+            errors.append(f"{attr_name} must be exact string {expected!r}")
+    return tuple(errors)
 
 
 def _normalize_scheduler(value: str) -> str:
@@ -1793,55 +1967,12 @@ def semantic_angle_channel_order(
     column chunk when enough non-bundle channels are available as padding.
     """
 
-    width = int(block_width)
-    if width <= 0:
-        raise ValueError("Eye-angle semantic block width must be positive.")
-    available = set(str(name) for name in channel_names)
-    primary = tuple(
-        name for name in EYE_ANGLE_PRIMARY_INTERACTIVE_CHANNELS if name in available
+    return list(
+        _schema_semantic_angle_channel_order(
+            channel_names,
+            block_width=block_width,
+        )
     )
-    bundles: list[tuple[str, ...]] = (
-        [primary] if 2 <= len(primary) <= width else []
-    )
-    for base_bundle in _SEMANTIC_ANGLE_BASE_BUNDLES:
-        for variant in ("raw", "smoothed", "delta", "delta_smoothed"):
-            bundle = tuple(
-                name
-                for name in (
-                    _angle_variant_name(base_name, variant)
-                    for base_name in base_bundle
-                )
-                if name in available
-            )
-            if len(bundle) >= 2:
-                bundles.append(bundle)
-    for candidate in _SEMANTIC_ANGLE_KINEMATIC_BUNDLES:
-        bundle = tuple(name for name in candidate if name in available)
-        if len(bundle) >= 2:
-            bundles.append(bundle)
-
-    priority = {name for bundle in bundles for name in bundle}
-    filler = [name for name in sorted(available) if name not in priority]
-    ordered: list[str] = []
-    used: set[str] = set()
-    for bundle in bundles:
-        fresh = [name for name in bundle if name not in used]
-        if not fresh:
-            continue
-        remaining = width - (len(ordered) % width) if ordered else width
-        if remaining != width and len(fresh) > remaining:
-            while filler and len(ordered) % width:
-                name = filler.pop(0)
-                ordered.append(name)
-                used.add(name)
-        for name in fresh:
-            ordered.append(name)
-            used.add(name)
-    ordered.extend(name for name in filler if name not in used)
-    ordered.extend(name for name in sorted(available) if name not in used and name not in filler)
-    if len(ordered) != len(available) or set(ordered) != available:
-        raise RuntimeError("Semantic eye-angle ordering lost or duplicated channel names.")
-    return ordered
 
 
 def _stack_scalar_channels(
@@ -1895,111 +2026,6 @@ def _replace_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tu
     group.create_array(name, data=data, chunks=chunks, overwrite=True)
 
 
-def _eye_for_channel(name: str) -> str:
-    if name.startswith("left_"):
-        return "left"
-    if name.startswith("right_"):
-        return "right"
-    if name.startswith(("vergence_", "version_", "mean_eye_vergence_")):
-        return "binocular"
-    return "none"
-
-
-def _value_kind_for_angle_channel(name: str) -> str:
-    if name.endswith("_accel_deg_s2"):
-        return "acceleration"
-    if name.endswith("_speed_deg_s"):
-        return "speed"
-    if "delta_deg" in name:
-        return "delta"
-    if name.startswith("vergence_") or name.startswith("mean_eye_vergence_"):
-        return "vergence"
-    if name.startswith("version_"):
-        return "version"
-    if name == "heading_deg":
-        return "heading"
-    return "angle"
-
-
-def _units_for_angle_channel(name: str) -> str:
-    if name.endswith("_accel_deg_s2"):
-        return "deg/s2"
-    if name.endswith("_speed_deg_s"):
-        return "deg/s"
-    return "deg"
-
-
-def _representation_for_angle_channel(name: str) -> str:
-    if "centroid" in name:
-        return "centroid"
-    if "nasal_gaze" in name or name.startswith("mean_eye_vergence_gaze"):
-        return "nasal_gaze"
-    if "eye_angle" in name:
-        return "eye_frame"
-    if "gaze" in name:
-        return "gaze"
-    if "major" in name:
-        return "major"
-    if "minor" in name:
-        return "legacy_minor"
-    if name in {"left_deg", "right_deg", "left_signed_deg", "right_signed_deg", "vergence_deg", "vergence_signed_deg"}:
-        return "legacy"
-    return "major" if name in {"version_deg", "heading_deg"} else "legacy"
-
-
-def _alias_target_for_angle_channel(name: str) -> str:
-    aliases = {
-        "left_signed_deg": "left_major_signed_deg",
-        "right_signed_deg": "right_major_signed_deg",
-        "left_minor_signed_deg": "left_gaze_signed_deg",
-        "right_minor_signed_deg": "right_gaze_signed_deg",
-        "vergence_minor_signed_deg": "vergence_gaze_deg",
-        "version_minor_deg": "version_gaze_deg",
-        "vergence_deg": "vergence_major_signed_deg",
-        "vergence_signed_deg": "vergence_major_signed_deg",
-        "version_deg": "version_major_deg",
-    }
-    return aliases.get(name, "")
-
-
-def _angle_channel_from_stem(stem: str) -> str:
-    return stem if stem.endswith("_deg") else f"{stem}_deg"
-
-
-def _source_channel_for_angle_channel(name: str) -> str:
-    if name.endswith("_delta_deg_smoothed"):
-        return _angle_channel_from_stem(name[: -len("_delta_deg_smoothed")])
-    if name.endswith("_delta_deg"):
-        return _angle_channel_from_stem(name[: -len("_delta_deg")])
-    if name.endswith("_smoothed"):
-        return name[: -len("_smoothed")]
-    if name.endswith("_speed_deg_s"):
-        return _angle_channel_from_stem(name[: -len("_speed_deg_s")])
-    if name.endswith("_accel_deg_s2"):
-        return f"{name[: -len('_accel_deg_s2')]}_speed_deg_s"
-    return _alias_target_for_angle_channel(name)
-
-
-def _formula_for_angle_channel(name: str) -> str:
-    if name.endswith("_delta_deg_smoothed"):
-        return "abs(smoothed_source_channel[row] - smoothed_source_channel[row - 1])"
-    if name.endswith("_delta_deg"):
-        return "abs(source_channel[row] - source_channel[row - 1])"
-    if name.endswith("_smoothed"):
-        return "nan_aware_centered_boxcar(source_channel)"
-    if name.endswith("_speed_deg_s"):
-        return "backward_difference_to_previous_valid(source_channel, time_seconds)"
-    if name.endswith("_accel_deg_s2"):
-        return "backward_difference_to_previous_valid(speed_channel, time_seconds)"
-    formulas = {
-        "left_eye_angle_deg": "-left_major_signed_deg",
-        "right_eye_angle_deg": "right_major_signed_deg",
-        "vergence_eye_angle_deg": "left_eye_angle_deg + right_eye_angle_deg",
-        "mean_eye_vergence_gaze_deg": "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)",
-    }
-    return formulas.get(name, "")
-
-
 def _write_angle_channel_index(
     run_group: zarr.Group,
     channel_names: Sequence[str],
@@ -2010,29 +2036,26 @@ def _write_angle_channel_index(
     group = run_group.require_group("angle_channel_index")
     for name in _array_keys(group):
         del group[name]
-    _write_text_index_array(group, "name", channel_names)
+    metadata = eye_angle_channel_metadata(channel_names)
+    _write_text_index_array(group, "name", metadata["name"])
     _write_bool_index_array(group, "roi_available", roi_available)
     _write_bool_index_array(group, "frame_available", frame_available)
-    _write_text_index_array(group, "representation", [_representation_for_angle_channel(name) for name in channel_names])
-    _write_text_index_array(group, "eye", [_eye_for_channel(name) for name in channel_names], width=64)
-    _write_text_index_array(group, "value_kind", [_value_kind_for_angle_channel(name) for name in channel_names], width=64)
-    _write_text_index_array(group, "units", [_units_for_angle_channel(name) for name in channel_names], width=64)
-    _write_text_index_array(group, "source_channel", [_source_channel_for_angle_channel(name) for name in channel_names])
-    _write_text_index_array(group, "formula", [_formula_for_angle_channel(name) for name in channel_names], width=512)
+    _write_text_index_array(group, "representation", metadata["representation"])
+    _write_text_index_array(group, "eye", metadata["eye"], width=64)
+    _write_text_index_array(group, "value_kind", metadata["value_kind"], width=64)
+    _write_text_index_array(group, "units", metadata["units"], width=64)
+    _write_text_index_array(group, "source_channel", metadata["source_channel"])
+    _write_text_index_array(group, "formula", metadata["formula"], width=512)
     _write_text_index_array(
         group,
         "compatibility_alias_of",
-        [_alias_target_for_angle_channel(name) for name in channel_names],
+        metadata["compatibility_alias_of"],
     )
     group.attrs.update(
-        {
-            "channel_count": int(len(channel_names)),
-            "encoding": "uint8_fixed_width_null_terminated_utf8",
-            "axis": 1,
-            "logical_lookup": "name",
-            "physical_order_schema_id": EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID,
-            "physical_order_profile": EYE_ANGLE_COLUMN_ORDER_PROFILE,
-        }
+        eye_angle_channel_index_attrs(
+            "angle_channel_index",
+            channel_count=len(channel_names),
+        )
     )
 
 
@@ -2046,20 +2069,19 @@ def _write_vector_channel_index(
     group = run_group.require_group("vector_channel_index")
     for name in _array_keys(group):
         del group[name]
-    _write_text_index_array(group, "name", channel_names)
+    metadata = eye_vector_channel_metadata(channel_names)
+    _write_text_index_array(group, "name", metadata["name"])
     _write_bool_index_array(group, "roi_available", roi_available)
     _write_bool_index_array(group, "frame_available", frame_available)
-    _write_text_index_array(group, "representation", ["gaze" if "gaze" in name else "support" for name in channel_names])
-    _write_text_index_array(group, "eye", [_eye_for_channel(name) for name in channel_names], width=64)
-    _write_text_index_array(group, "value_kind", ["unit_vector_xy" for _name in channel_names], width=64)
-    _write_text_index_array(group, "units", ["unitless" for _name in channel_names], width=64)
+    _write_text_index_array(group, "representation", metadata["representation"])
+    _write_text_index_array(group, "eye", metadata["eye"], width=64)
+    _write_text_index_array(group, "value_kind", metadata["value_kind"], width=64)
+    _write_text_index_array(group, "units", metadata["units"], width=64)
     group.attrs.update(
-        {
-            "channel_count": int(len(channel_names)),
-            "encoding": "uint8_fixed_width_null_terminated_utf8",
-            "axis": 1,
-            "component_axis": 2,
-        }
+        eye_angle_channel_index_attrs(
+            "vector_channel_index",
+            channel_count=len(channel_names),
+        )
     )
 
 
@@ -2074,21 +2096,20 @@ def _write_qa_channel_index(
     group = run_group.require_group("qa_channel_index")
     for name in _array_keys(group):
         del group[name]
-    _write_text_index_array(group, "name", channel_names)
+    metadata = eye_qa_channel_metadata(
+        channel_names,
+        dtype_by_name=dtype_by_name,
+    )
+    _write_text_index_array(group, "name", metadata["name"])
     _write_bool_index_array(group, "roi_available", roi_available)
     _write_bool_index_array(group, "frame_available", frame_available)
-    _write_text_index_array(
-        group,
-        "value_kind",
-        ["reason_code" if name == "reason_codes" else "warning_flag" if "marginal" in name else "validity_flag" for name in channel_names],
-    )
-    _write_text_index_array(group, "dtype", [dtype_by_name.get(name, "uint16") for name in channel_names], width=64)
+    _write_text_index_array(group, "value_kind", metadata["value_kind"])
+    _write_text_index_array(group, "dtype", metadata["dtype"], width=64)
     group.attrs.update(
-        {
-            "channel_count": int(len(channel_names)),
-            "encoding": "uint8_fixed_width_null_terminated_utf8",
-            "axis": 1,
-        }
+        eye_angle_channel_index_attrs(
+            "qa_channel_index",
+            channel_count=len(channel_names),
+        )
     )
 
 
@@ -2101,6 +2122,7 @@ def _write_compact_dense_layout(
     frame_chunk: int,
     dense_chunk_rows: int = EYE_ANGLE_DENSE_CHUNK_ROWS,
     dense_chunk_columns: int = EYE_ANGLE_DENSE_CHUNK_COLUMNS,
+    enforce_current_schema: bool = False,
 ) -> None:
     """Pack completed hierarchical eye-angle outputs into compact dense arrays."""
 
@@ -2121,6 +2143,15 @@ def _write_compact_dense_layout(
 
     roi_angle_names = _scalar_channel_names(roi_group, dtype_kinds="f")
     frame_angle_names = _scalar_channel_names(frame_group, dtype_kinds="f")
+    if enforce_current_schema:
+        if tuple(roi_angle_names) != tuple(sorted(CANONICAL_ROI_ANGLE_CHANNELS)):
+            raise ValueError(
+                "ROI angle channels differ from compact eye-angle v7: "
+                f"missing={sorted(set(CANONICAL_ROI_ANGLE_CHANNELS) - set(roi_angle_names))!r}, "
+                f"unexpected={sorted(set(roi_angle_names) - set(CANONICAL_ROI_ANGLE_CHANNELS))!r}."
+            )
+        if tuple(frame_angle_names) != tuple(sorted(CANONICAL_FRAME_ANGLE_CHANNELS)):
+            raise ValueError("Frame angle channels differ from compact eye-angle v7.")
     angle_names = semantic_angle_channel_order(
         _ordered_union(roi_angle_names, frame_angle_names),
         block_width=dense_chunk_columns,
@@ -2166,6 +2197,10 @@ def _write_compact_dense_layout(
 
     roi_vector_names = _vector_channel_names(roi_group)
     frame_vector_names = _vector_channel_names(frame_group)
+    if enforce_current_schema and (
+        tuple(roi_vector_names) != ROI_VECTOR_CHANNELS or frame_vector_names
+    ):
+        raise ValueError("Vector channels differ from compact eye-angle v7.")
     vector_names = _ordered_union(roi_vector_names, frame_vector_names)
     if vector_names:
         roi_vector_name_set = set(roi_vector_names)
@@ -2192,6 +2227,11 @@ def _write_compact_dense_layout(
 
     roi_qa_names = _scalar_channel_names(qa_roi, dtype_kinds="bui")
     frame_qa_names = _scalar_channel_names(qa_frame, dtype_kinds="bui")
+    if enforce_current_schema and (
+        tuple(roi_qa_names) != ROI_QA_CHANNELS
+        or tuple(frame_qa_names) != FRAME_QA_CHANNELS
+    ):
+        raise ValueError("QA channels differ from compact eye-angle v7.")
     qa_names = _ordered_union(roi_qa_names, frame_qa_names)
     dtype_by_name: dict[str, str] = {}
     for source_group in (qa_roi, qa_frame):
@@ -2270,6 +2310,25 @@ def _write_compact_dense_layout(
             ),
         }
     )
+    if enforce_current_schema:
+        dimensions = EyeAngleDimensions(
+            n_roi_rows=int(total_detections),
+            n_frames=int(num_frames),
+            angle_block_width=int(dense_chunk_columns),
+        )
+        manifest = eye_angle_array_schema_manifest(dimensions)
+        run_group.attrs[EYE_ANGLE_ARRAY_SCHEMA_ATTR] = manifest
+        issues = validate_eye_angle_compact_arrays(
+            collect_eye_angle_arrays(run_group),
+            dimensions=dimensions,
+            persisted_manifest=manifest,
+            channel_index_attrs=collect_eye_angle_channel_index_attrs(run_group),
+        )
+        if issues:
+            raise ValueError(
+                "Compact eye-angle v7 array validation failed: "
+                + "; ".join(f"{item.code}:{item.path}" for item in issues)
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4528,6 +4587,21 @@ def _project_detection_bool_to_frames(
     return frame_values
 
 
+def _is_selector_eligible_eye_angle_output(
+    *,
+    diagnostic_output: bool,
+    staged_input_integrity_receipt: Optional[Mapping[str, Any]],
+    output_layout: str,
+) -> bool:
+    """Allow canonical activation only for the maintained compact-v7 layout."""
+
+    return (
+        not diagnostic_output
+        and staged_input_integrity_receipt is None
+        and output_layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+    )
+
+
 def run(
     args: argparse.Namespace,
     *,
@@ -4678,6 +4752,13 @@ def run(
     output_layout = str(args.layout)
     run_group.attrs["status"] = "running"
     run_group.attrs["layout"] = output_layout
+    if output_layout != EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        run_group.attrs.update(
+            {
+                "publication_scope": "legacy_compatibility_only",
+                "legacy_storage_layout": True,
+            }
+        )
     run_group.attrs["execution_backend"] = backend
     run_group.attrs["keypoint_source_mode"] = context.keypoint_source_mode
     run_group.attrs["source_eye_geometry_authority_mode"] = source_authority_mode
@@ -5775,6 +5856,10 @@ def run(
         time.perf_counter() - derived_materialization_started
     )
     if output_layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        if fps is None or not np.isfinite(float(fps)) or float(fps) <= 0.0:
+            raise ValueError(
+                "Maintained compact eye-angle v7 requires a positive finite fps."
+            )
         compact_packing_started = time.perf_counter()
         _write_compact_dense_layout(
             run_group,
@@ -5784,6 +5869,7 @@ def run(
             frame_chunk=frame_chunk,
             dense_chunk_rows=int(args.dense_chunk_rows),
             dense_chunk_columns=int(args.dense_chunk_columns),
+            enforce_current_schema=True,
         )
         phase_seconds["compact_dense_packing"] = float(
             time.perf_counter() - compact_packing_started
@@ -5911,7 +5997,11 @@ def run(
         {
             "status": "complete",
             "schema_id": EYE_ANGLE_RUN_SCHEMA_ID,
-            "schema_version": EYE_ANGLE_RUN_SCHEMA_VERSION,
+            "schema_version": (
+                EYE_ANGLE_RUN_SCHEMA_VERSION
+                if output_layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+                else EYE_ANGLE_LEGACY_RUN_SCHEMA_VERSION
+            ),
             "layout": output_layout,
             "method": EYE_ANGLE_METHOD,
             "method_version": EYE_ANGLE_METHOD_VERSION,
@@ -5979,6 +6069,7 @@ def run(
                 coordinate_space=BODY_FRAME_COORDINATE_SPACE_ROI,
             ),
             "fps": float(fps) if fps else None,
+            "fps_source": fps_source,
             "num_detections": int(total_detections),
             "num_frames": int(num_frames),
             "duration_seconds": duration_seconds,
@@ -6302,6 +6393,29 @@ def run(
         "frame_reason_counts": _count_reason_bits(frame_reason) if num_frames else {},
     }
     run_group.attrs["provenance"] = json.loads(json.dumps(provenance, default=_to_serializable))
+    if output_layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        array_issues = validate_eye_angle_compact_run(run_group)
+        alias_issues = validate_eye_angle_value_aliases(run_group)
+        manifest_issues = validate_eye_angle_persisted_contract_manifests(
+            run_group.attrs
+        )
+        if array_issues or alias_issues or manifest_issues:
+            raise RuntimeError(
+                "Refusing to complete an invalid compact eye-angle v7 run: "
+                + "; ".join(
+                    [
+                        *(
+                            f"{item.code}:{item.path}:{item.message}"
+                            for item in array_issues
+                        ),
+                        *(
+                            f"{item.code}:{item.path}:{item.message}"
+                            for item in alias_issues
+                        ),
+                        *(f"persisted_manifest:{item}" for item in manifest_issues),
+                    ]
+                )
+            )
     write_best_effort_run_lineage_attrs(run_group, run_family="eye_angle_run")
     mark_run_complete(
         run_group,
@@ -6332,7 +6446,11 @@ def run(
             },
         ),
     )
-    if not diagnostic_output and staged_input_integrity_receipt is None:
+    if _is_selector_eligible_eye_angle_output(
+        diagnostic_output=diagnostic_output,
+        staged_input_integrity_receipt=staged_input_integrity_receipt,
+        output_layout=output_layout,
+    ):
         # Publish selectors while the completed candidate still fails closed,
         # then make eligibility the final canonical activation write. Strict
         # readers therefore cannot observe a partially written eye run.

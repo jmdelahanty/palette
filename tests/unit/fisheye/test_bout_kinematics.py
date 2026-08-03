@@ -254,6 +254,12 @@ def test_bout_kinematics_layout_default_is_compact_v2(monkeypatch: pytest.Monkey
         .default
         is True
     )
+    assert (
+        inspect.signature(compute_and_save_bout_kinematics)
+        .parameters["legacy_eye_angle_compatibility"]
+        .default
+        is False
+    )
 
     captured: dict[str, object] = {}
 
@@ -270,6 +276,7 @@ def test_bout_kinematics_layout_default_is_compact_v2(monkeypatch: pytest.Monkey
     assert bout_kinematics_module.main(["/tmp/example.zarr"]) == 0
     assert captured["layout"] == BOUT_KINEMATICS_LAYOUT_DEFAULT
     assert captured["include_eye_gaze"] is True
+    assert captured["legacy_eye_angle_compatibility"] is False
 
     captured.clear()
     assert (
@@ -279,6 +286,39 @@ def test_bout_kinematics_layout_default_is_compact_v2(monkeypatch: pytest.Monkey
         == 0
     )
     assert captured["include_eye_gaze"] is False
+
+    captured.clear()
+    assert (
+        bout_kinematics_module.main(
+            ["/tmp/example.zarr", "--legacy-eye-angle-compatibility"]
+        )
+        == 0
+    )
+    assert captured["legacy_eye_angle_compatibility"] is True
+
+
+def test_bout_eye_loader_propagates_explicit_legacy_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_loader(*args: object, **kwargs: object):
+        captured.update(kwargs)
+        return {}, {}
+
+    monkeypatch.setattr(
+        bout_kinematics_module,
+        "load_eye_gaze_frame_series",
+        fake_loader,
+    )
+    bout_kinematics_module._load_eye_gaze_frame_series(
+        object(),
+        eye_angle_run="legacy",
+        eye_angle_family="gaze",
+        frames=np.asarray([0], dtype=np.int64),
+        legacy_compatibility=True,
+    )
+    assert captured["legacy_compatibility"] is True
 
 
 def test_default_eye_gaze_fails_before_creating_output_without_eye_angles(
@@ -644,6 +684,7 @@ def test_compute_and_save_bout_kinematics_writes_default_compact_v2_layout(tmp_p
         physical_active_threshold_mm_s=0.1,
         physical_active_boundary_margin_s=0.1,
         eye_angle_run="eye_1",
+        legacy_eye_angle_compatibility=True,
         vergence_threshold_deg=10.0,
     )
 
@@ -720,6 +761,7 @@ def test_compute_and_save_bout_kinematics_compact_v2_writes_zarr_artifacts(tmp_p
         physical_active_boundary_margin_s=0.1,
         include_eye_gaze=True,
         eye_angle_run="eye_1",
+        legacy_eye_angle_compatibility=True,
         vergence_threshold_deg=10.0,
         layout=LAYOUT_COMPACT_TABULAR_V2,
         write_visualizations=True,
@@ -802,6 +844,7 @@ def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
         post_window_s=0.2,
         include_eye_gaze=True,
         eye_angle_run="eye_1",
+        legacy_eye_angle_compatibility=True,
         eye_validity_min_fraction=1.0,
         vergence_threshold_deg=10.0,
         write_visualizations=True,
@@ -816,6 +859,7 @@ def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
         "enabled": True,
         "eye_angle_run": "eye_1",
         "eye_angle_family": "gaze",
+        "legacy_eye_angle_compatibility": True,
         "eye_validity_min_fraction": 1.0,
         "vergence_threshold_deg": 10.0,
     }

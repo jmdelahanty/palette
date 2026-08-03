@@ -199,8 +199,9 @@ Existing analysis outputs already follow this direction:
   `eye_gaze/per_bout_metrics` subgroup with pre/post/within-bout eye-gaze and
   vergence summaries linked to an exact `analysis/eye_angle_runs/<run>` source.
 - `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
-  interpreted in a keypoint-derived body frame. Current run-schema v6 outputs
-  declare `schema_id = "analysis.eye_angle_runs"`, `schema_version = 6`,
+  interpreted in a keypoint-derived body frame. Current exact compact outputs
+  declare `schema_id = "analysis.eye_angle_runs"`, `schema_version = 7`
+  (the closed v2-v6 layout allowlist remains explicit legacy compatibility),
   `method = "ellipse_and_centroid_eye_angles"`,
   `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and

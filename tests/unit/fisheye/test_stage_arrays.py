@@ -311,11 +311,69 @@ def test_validate_run_accepts_minimal_track_kinematics_surface() -> None:
 def test_validate_run_accepts_minimal_eye_angle_surface() -> None:
     group = zarr.group()
     _write_required_arrays(group, EYE_ANGLE_SPEC)
+    group.attrs.update(
+        {
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 6,
+            "layout": "hierarchical_v1",
+        }
+    )
 
-    result = validate_run(group, EYE_ANGLE_SPEC)
+    result = validate_run(group, EYE_ANGLE_SPEC, legacy_compatibility=True)
 
     assert result.valid, result.errors
     assert not result.errors
+    assert result.warnings == [
+        "eye_angle: explicit legacy compatibility accepted one exact "
+        "schema-v2-v6 supported layout"
+    ]
+
+
+def test_eye_angle_v6_is_legacy_only_and_v7_fails_closed_without_exact_arrays() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, EYE_ANGLE_SPEC)
+    group.attrs.update(
+        {
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 6,
+            "layout": "compact_dense_v2",
+        }
+    )
+
+    strict_v6 = validate_run(group, EYE_ANGLE_SPEC)
+    assert not strict_v6.valid
+    assert "schema v7" in strict_v6.errors[-1]
+    assert validate_run(
+        group,
+        EYE_ANGLE_SPEC,
+        legacy_compatibility=True,
+    ).valid
+
+    group.attrs["schema_version"] = 8
+    assert not validate_run(
+        group,
+        EYE_ANGLE_SPEC,
+        legacy_compatibility=True,
+    ).valid
+    group.attrs["schema_version"] = 6
+    group.attrs["layout"] = "future_layout"
+    assert not validate_run(
+        group,
+        EYE_ANGLE_SPEC,
+        legacy_compatibility=True,
+    ).valid
+
+    group.attrs["schema_version"] = 7
+    group.attrs["layout"] = "compact_dense_v2"
+    group.attrs["num_detections"] = 2
+    group.attrs["num_frames"] = 3
+    group.attrs["fps"] = 30.0
+    group.attrs["angle_column_order_contract"] = {
+        "semantic_bundle_width": 16,
+    }
+    strict_v7 = validate_run(group, EYE_ANGLE_SPEC)
+    assert not strict_v7.valid
+    assert any("missing_required_array" in error for error in strict_v7.errors)
 
 
 def test_validate_run_accepts_minimal_bout_kinematics_surface() -> None:

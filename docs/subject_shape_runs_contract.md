@@ -954,11 +954,11 @@ a keypoint-derived body frame. It remains a valid specialized analysis run, but
 it is not the first authority for mask-derived eye shape geometry in unified
 body/eyes/swim workflows.
 
-Current eye-angle run-schema v6 outputs require `analysis/subject_shape_runs`
+Current exact compact eye-angle run-schema v7 outputs require `analysis/subject_shape_runs`
 as the canonical geometry source. The selected publication must be complete,
 selector-eligible, contain left/right eye ellipse geometry, and carry the used
 assignment proof for the exact base keypoint source. Eye-angle runs record
-`schema_id = "analysis.eye_angle_runs"`, `schema_version = 6`,
+`schema_id = "analysis.eye_angle_runs"`, `schema_version = 7`,
 `method = "ellipse_and_centroid_eye_angles"`,
 `row_axis = "keypoint_detection_rows"`, `source_geometry_kind`, and
 `eye_angle_output_schema`. The v5 scientific method also
