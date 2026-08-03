@@ -2,10 +2,11 @@
 
 Date: 2026-08-03
 
-Status: active implementation checklist; read-only census and correctness
-phases 1-3 complete; reusable exact-array declarations and the first complete
-phase-4 schema are integrated; no production
-profile or scientific selector authority changed by these checkpoints
+Status: active implementation checklist; correctness, executable-catalog,
+shared-planner, serialized-registry, and benchmark-planning foundations are
+integrated; opt-in writer candidates are being adopted family by family; no
+production profile or scientific selector authority changed by these
+checkpoints
 
 ## Purpose
 
@@ -41,11 +42,13 @@ entries. Seven use the shared atomic materializer boundary:
 
 Tail-posture views and bout classification are also cataloged, truthfully, as
 guarded direct writers rather than falsely claiming atomic-materializer
-ownership. None of the nine derives every array's physical layout through the
-shared byte-budgeted storage planner. Only track kinematics and eye angles have
-serialized registry publication. Stimulus epochs, occupancy outputs, and the
-chaser analysis suite use additional stage-local schemas and writers. Several
-legacy or in-place writers remain unclassified.
+ownership. None of the nine uses the shared byte-budgeted planner as its
+production default yet. Tail-posture and bout-classification now expose guarded,
+selector-ineligible planner candidates, and eye-angle candidate adoption is
+under final review. All nine have serialized registry projection for eligible
+authorities. Stimulus epochs, occupancy outputs, and the chaser analysis suite
+use additional stage-local schemas and writers. Several legacy or in-place
+writers remain explicitly classified compatibility or maintenance surfaces.
 
 The target is not one scientific schema for every datatype. The target is one
 contract system in which every persisted output is classified and every
@@ -106,7 +109,7 @@ true.
 | Track kinematics | Strong logical, lineage, materializer, and registry contract | Replace stage-specific fixed row grids with byte planning and benchmark the real consumer |
 | Subject shape | Strong typed semantic surface, content manifest, lineage, atomic sharded publication, and serialized registry projection | Byte-plan heterogeneous semantic arrays |
 | Tail kinematics | Strong typed surface, coordinate manifest, whole-shard worker ownership, and serialized registry projection | Replace fixed 262,144-row policy |
-| Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, atomic publication, and registry publication | Migrate the still-fixed semantic chunk/shard grid to byte planning and benchmark the real consumers |
+| Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Benchmark the candidate through Palette and Crimson before profile promotion |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, and serialized registry projection | Adopt byte planning and benchmark the real consumer |
 | Bout kinematics | Exact compact-v7 manifest, authoritative selection, and serialized registry projection | Adopt byte planning and add a consumer benchmark |
 | Stimulus response | Exact opt-in compact-v3 schema with closed table bundles, fixed dtypes, strict coercion, and atomic publication; legacy v2 remains the default compatibility path | Adopt byte planning in the v3 writer and benchmark before any default change |
@@ -146,11 +149,12 @@ The shared columnar helper is an earlier-generation physical policy: it uses
 array creation but does not freeze an explicit codec chain there
 (`src/fisheye/shared/zarr/columnar.py:141-155`).
 
-Compact stimulus-response fields and dtypes are inferred from the current row
-payload (`src/fisheye/analysis/stimulus_response.py:1730-1817`). The older
-`analysis_stage_arrays` declarations cover inputs and hierarchical output
-variants, not the exact compact persisted surface
-(`src/fisheye/shared/zarr/analysis_stage_arrays.py:1-7`).
+Production compact-v2 stimulus-response fields and dtypes are still inferred
+from the current row payload (`src/fisheye/analysis/stimulus_response.py`), but
+the opt-in compact-v3 path now has an exact closed schema, strict coercion, and
+all-or-none optional bundles. The older `analysis_stage_arrays` declarations
+remain compatibility/input declarations rather than the compact-v3 persisted
+authority.
 
 The older canonical analytics matrix documents seven maintained families
 (`docs/analytics_storage_schema_matrix.md:31-49`). It now trails the executable
@@ -443,9 +447,11 @@ are frozen in `docs/chaser_component_publication_contract_v1.md`.
 
 Candidate-adoption checkpoints (these do not promote a profile):
 
-- [ ] Eye-angle compact-v7 candidate writes all 41 arrays through a recomputed
-      plan receipt and remains selector-ineligible. Implementation is under
-      final semantic-fill review.
+- [x] Eye-angle compact-v7 candidate writes all 41 arrays through a recomputed
+      plan receipt and remains selector-ineligible.
+- [x] Eye-angle candidate metadata uses a closed path-aware fill contract:
+      NaN for invalid/unavailable float payloads, false for boolean
+      availability/validity, and zero for QA, text, and mandatory coordinates.
 - [x] Tail-posture v3 candidate writes all ten arrays through the shared
       planner/factory while preserving the default writer and selectors.
 - [x] Bout-classification v2 candidate writes all 20 arrays through the shared
