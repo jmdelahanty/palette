@@ -31,6 +31,7 @@ from fisheye.analysis import chaser_response_regimes as response_regimes_module
 from fisheye.analysis import plot_goodcopbadcop_bout_rate as bout_rate_module
 from fisheye.analysis import plot_goodcopbadcop_occupancy_heatmaps as occupancy_module
 from fisheye.analysis import plot_goodcopbadcop_trajectory_prepost as trajectory_module
+from fisheye.analysis.chaser_component_writer import ChaserComponentWriterError
 from fisheye.analysis.chaser_distance_io import ChaserDistanceReadError
 from fisheye.montage import render as montage_render_module
 from fisheye.utils import export_goodcopbadcop_static_montage as montage_module
@@ -246,44 +247,30 @@ def test_component_builders_stop_at_unsealed_authority_before_raw_navigation(
         (response_regimes_module, "write_chaser_response_regimes_component", "_open_root"),
     ],
 )
-def test_unsealed_component_writers_reject_before_group_or_selector_mutation(
+def test_private_component_payload_writers_reject_before_group_or_selector_mutation(
     monkeypatch: pytest.MonkeyPatch,
     module,
     writer_name: str,
     opener_name: str,
 ) -> None:
-    root = _RawNavigationTrap()
-    calls: list[tuple[object, dict[str, str]]] = []
-    monkeypatch.setattr(module, opener_name, lambda *_a, **_k: root)
-
-    def reject(root_node, **kwargs):
-        calls.append((root_node, kwargs))
-        raise ChaserDistanceReadError("derived publication is intentionally disabled")
-
     monkeypatch.setattr(
         module,
-        "reject_unsealed_chaser_derived_publication",
-        reject,
+        opener_name,
+        lambda *_a, **_k: pytest.fail(
+            "private component payload writer opened Zarr before capability rejection"
+        ),
     )
     result = SimpleNamespace(
         chaser_distance_run_name="canonical",
         chaser_distance_run_path="analysis/chaser_distance_runs/canonical",
         component_name="component",
     )
+    public_writer = getattr(module, writer_name)
+    assert public_writer.__chaser_component_sealed_writer__ is True
+    private_payload_writer = public_writer.__wrapped__
 
-    with pytest.raises(ChaserDistanceReadError, match="intentionally disabled"):
-        getattr(module, writer_name)("/unused/archive.zarr", result)
-
-    assert calls == [
-        (
-            root,
-            {
-                "run_name": "canonical",
-                "run_path": "analysis/chaser_distance_runs/canonical",
-                "relative_path": f"{module.COMPONENT_PARENT_NAME}/component",
-            },
-        )
-    ]
+    with pytest.raises(ChaserComponentWriterError, match="Unsealed chaser component"):
+        private_payload_writer("/unused/archive.zarr", result)
 
 
 @pytest.mark.parametrize(
