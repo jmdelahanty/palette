@@ -17,7 +17,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-import time
+import subprocess
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
@@ -47,6 +47,8 @@ from fisheye.analysis.swim_bout_schema import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.zarr.storage_profiles import get_storage_profile
+from fisheye.shared.zarr.benchmark_runtime import storage_stats
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr.metadata_equivalence import (
     validate_direct_consolidated_subtree,
 )
@@ -65,11 +67,36 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from .runtime_telemetry import PhaseTelemetry
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.exact_tabular_candidate_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.exact_tabular_candidate_publish.v1"
 SUPPORTED_PROFILE_ID = "published_http_v1"
+_NODE_LOCAL_SCRATCH_ROOTS = tuple(
+    Path(value)
+    for value in (
+        "/tmp",
+        "/var/tmp",
+        "/scratch",
+        "/dev/shm",
+        "/local",
+        "/lscratch",
+    )
+)
+_EXECUTION_PHASE_ORDER = (
+    "plan",
+    "source_staging",
+    "logical_rematerialization",
+    "local_validation",
+    "local_consolidation",
+    "local_direct_consolidated_comparison",
+    "atomic_publication",
+    "published_validation",
+    "published_direct_consolidated_comparison",
+    "decoded_equality",
+    "physical_inventory",
+)
 
 
 @dataclass(frozen=True)
@@ -141,6 +168,46 @@ def _family(value: str) -> _Family:
         raise ValueError(
             f"Unsupported exact compact family {value!r}; expected {sorted(_FAMILIES)!r}."
         ) from exc
+
+
+def _require_node_local_scratch(path: Path) -> None:
+    if not any(
+        path == root or path.is_relative_to(root)
+        for root in _NODE_LOCAL_SCRATCH_ROOTS
+    ):
+        raise ValueError(
+            "Scratch root must be below a recognized node-local filesystem."
+        )
+
+
+def _require_symlink_free_tree(path: Path, *, label: str) -> None:
+    links: list[str] = []
+    if path.is_symlink():
+        links.append(str(path))
+    for root, directories, filenames in os.walk(path, followlinks=False):
+        for name in (*directories, *filenames):
+            candidate = Path(root) / name
+            if candidate.is_symlink():
+                links.append(str(candidate))
+                if len(links) >= 8:
+                    break
+        if len(links) >= 8:
+            break
+    if links:
+        raise ValueError(
+            f"{label} must be self-contained and symlink-free; found {links!r}."
+        )
+
+
+def _ordered_runtime_telemetry(telemetry: PhaseTelemetry) -> dict[str, Any]:
+    result = telemetry.to_json()
+    order = {name: index for index, name in enumerate(_EXECUTION_PHASE_ORDER)}
+    phases = list(result["phases"])
+    if any(phase["name"] not in order for phase in phases):
+        raise RuntimeError("Exact-tabular telemetry contains an unknown phase.")
+    phases.sort(key=lambda phase: order[phase["name"]])
+    result["phases"] = phases
+    return result
 
 
 @dataclass(frozen=True)
@@ -215,6 +282,7 @@ def build_exact_tabular_candidate_plan(
     scratch = Path(scratch_root).expanduser().resolve()
     if not source.is_dir():
         raise FileNotFoundError(f"Source analysis Zarr not found: {source}.")
+    _require_node_local_scratch(scratch)
     if scratch == source or scratch.is_relative_to(source):
         raise ValueError("Scratch root must be outside the authoritative archive.")
     source_name = _safe_name(source_run, label="source run")
@@ -287,13 +355,16 @@ def _logical_hashes(group: Any, declarations: Sequence[Any]) -> dict[str, str]:
     return hashes
 
 
-def _local_direct_consolidated_check(
+def _consolidate_archive_metadata(path: Path) -> None:
+    consolidate_metadata_capture_expected_warnings(path)
+
+
+def _direct_consolidated_check(
     local_zarr: Path,
     *,
     run_path: str,
     declarations: Sequence[Any],
 ) -> int:
-    consolidate_metadata_capture_expected_warnings(local_zarr)
     receipt = validate_direct_consolidated_subtree(
         local_zarr,
         subtree_path=run_path,
@@ -304,6 +375,46 @@ def _local_direct_consolidated_check(
             f"expected at least {len(declarations)}, got {receipt.array_count}."
         )
     return receipt.array_count
+
+
+def _local_direct_consolidated_check(
+    local_zarr: Path,
+    *,
+    run_path: str,
+    declarations: Sequence[Any],
+) -> int:
+    """Compatibility wrapper for callers that require both operations."""
+
+    _consolidate_archive_metadata(local_zarr)
+    return _direct_consolidated_check(
+        local_zarr,
+        run_path=run_path,
+        declarations=declarations,
+    )
+
+
+def _copy_source_run_to_scratch(
+    source: Path,
+    target: Path,
+    *,
+    backend: str,
+) -> None:
+    if target.exists():
+        raise FileExistsError(f"Refusing existing staged source: {target}.")
+    _require_symlink_free_tree(source, label="Authoritative source run")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if backend == "python":
+        shutil.copytree(source, target, symlinks=False)
+        _require_symlink_free_tree(target, label="Staged source run")
+        return
+    if backend != "rsync":
+        raise ValueError(f"Unsupported source-staging backend: {backend!r}.")
+    target.mkdir()
+    subprocess.run(
+        ["rsync", "-aL", "--", f"{source}/", f"{target}/"],
+        check=True,
+    )
+    _require_symlink_free_tree(target, label="Staged source run")
 
 
 def _validate_candidate_group(
@@ -351,17 +462,28 @@ def materialize_exact_tabular_candidate(
     copy_backend: str = "rsync",
     apply: bool = False,
     keep_scratch: bool = False,
+    stage_source_to_scratch: bool = False,
 ) -> dict[str, Any]:
     """Create and optionally atomically publish one named physical candidate."""
 
-    plan = build_exact_tabular_candidate_plan(
-        source_zarr,
-        family_id=family_id,
-        source_run=source_run,
-        run_name=run_name,
-        scratch_root=scratch_root,
-        profile_id=profile_id,
+    telemetry = PhaseTelemetry(
+        materializer="exact_tabular_candidate",
+        context={
+            "family_id": family_id,
+            "source_run": source_run,
+            "run_name": run_name,
+            "stage_source_to_scratch": bool(stage_source_to_scratch),
+        },
     )
+    with telemetry.phase("plan"):
+        plan = build_exact_tabular_candidate_plan(
+            source_zarr,
+            family_id=family_id,
+            source_run=source_run,
+            run_name=run_name,
+            scratch_root=scratch_root,
+            profile_id=profile_id,
+        )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
         "status": "planned" if not apply else "running",
@@ -369,6 +491,7 @@ def materialize_exact_tabular_candidate(
         "plan": plan.as_dict(),
     }
     if not apply:
+        result["runtime_telemetry"] = _ordered_runtime_telemetry(telemetry)
         return result
     if plan.scratch_root.exists():
         raise FileExistsError(f"Refusing existing scratch root: {plan.scratch_root}.")
@@ -376,67 +499,115 @@ def materialize_exact_tabular_candidate(
     succeeded = False
     family = _family(plan.family_id)
     try:
-        source_root = open_zarr_root(plan.source_zarr, mode="r")
-        source_group = source_root[plan.source_run_path]
-        source_declarations = family.build_declarations(
-            source_group,
-            byte_planner_adopted=False,
-        )
-        candidate_declarations = family.build_declarations(
-            source_group,
-            byte_planner_adopted=True,
-        )
-        source_hashes = _logical_hashes(source_group, source_declarations)
-        receipt = build_exact_tabular_storage_receipt(
-            source_group,
-            declarations=candidate_declarations,
-            profile=get_storage_profile(plan.profile_id),
-        )
+        with telemetry.phase("source_staging"):
+            source_root = open_zarr_root(plan.source_zarr, mode="r")
+            authoritative_source_group = source_root[plan.source_run_path]
+            source_declarations = family.build_declarations(
+                authoritative_source_group,
+                byte_planner_adopted=False,
+            )
+            source_hashes = _logical_hashes(
+                authoritative_source_group,
+                source_declarations,
+            )
+            if stage_source_to_scratch:
+                staged_source_path = plan.scratch_root / "staged-source-run"
+                authoritative_source_path = plan.source_zarr.joinpath(
+                    *plan.source_run_path.split("/")
+                )
+                _copy_source_run_to_scratch(
+                    authoritative_source_path,
+                    staged_source_path,
+                    backend=copy_backend,
+                )
+                source_group = open_zarr_root(staged_source_path, mode="r")
+                staged_errors = family.validate_manifest(source_group)
+                if staged_errors:
+                    raise ValueError(
+                        "Staged exact compact source is invalid: "
+                        + "; ".join(staged_errors)
+                    )
+                staged_declarations = family.build_declarations(
+                    source_group,
+                    byte_planner_adopted=False,
+                )
+                if _logical_hashes(source_group, staged_declarations) != source_hashes:
+                    raise ValueError(
+                        "Staged exact compact source differs from authoritative source."
+                    )
+            else:
+                source_group = authoritative_source_group
+            candidate_declarations = family.build_declarations(
+                source_group,
+                byte_planner_adopted=True,
+            )
+            receipt = build_exact_tabular_storage_receipt(
+                source_group,
+                declarations=candidate_declarations,
+                profile=get_storage_profile(plan.profile_id),
+            )
 
-        started = time.perf_counter()
-        local_root = zarr.open_group(
-            str(plan.local_zarr), mode="w-", zarr_format=3
+        with telemetry.phase("logical_rematerialization"):
+            local_root = zarr.open_group(
+                str(plan.local_zarr), mode="w-", zarr_format=3
+            )
+            local_parent = local_root
+            for component in plan.parent_path.split("/"):
+                local_parent = local_parent.require_group(component)
+            local_group = local_parent.create_group(plan.run_name)
+            rematerialize_exact_tabular_candidate(
+                source_group,
+                local_group,
+                receipt=receipt,
+            )
+            local_group.attrs[RUN_NAME_ATTR] = plan.run_name
+            local_group.attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_RUNNING
+            local_group.attrs.pop(RUN_COMPLETED_AT_ATTR, None)
+            local_group.attrs["stage_selector_eligible"] = False
+            local_group.attrs["storage_candidate_source_run"] = plan.source_run_name
+            local_group.attrs["storage_candidate_source_run_path"] = plan.source_run_path
+            local_group.attrs["storage_candidate_profile_promoted"] = False
+            family.write_manifest(local_group, byte_planner_adopted=True)
+            persist_exact_tabular_storage_receipt(local_group, receipt)
+            mark_run_complete(
+                local_group,
+                parent_group=None,
+                run_name=plan.run_name,
+                run_provenance=build_run_provenance_from_stage_record(
+                    source_group.attrs.get("provenance", {}),
+                    fallback_command="exact_tabular_candidate_materializer",
+                ),
+            )
+        with telemetry.phase("local_validation"):
+            local_validation = _validate_candidate_group(
+                local_group,
+                family=family,
+                expected_hashes=source_hashes,
+            )
+            if not local_validation["valid"]:
+                raise RuntimeError(
+                    "Local exact compact candidate is invalid: "
+                    f"{local_validation}."
+                )
+        with telemetry.phase("local_consolidation"):
+            _consolidate_archive_metadata(plan.local_zarr)
+        with telemetry.phase("local_direct_consolidated_comparison"):
+            compared = _direct_consolidated_check(
+                plan.local_zarr,
+                run_path=plan.run_path,
+                declarations=candidate_declarations,
+            )
+        materialization_seconds = float(
+            sum(
+                telemetry.duration_seconds(name) or 0.0
+                for name in (
+                    "logical_rematerialization",
+                    "local_validation",
+                    "local_consolidation",
+                    "local_direct_consolidated_comparison",
+                )
+            )
         )
-        local_parent = local_root
-        for component in plan.parent_path.split("/"):
-            local_parent = local_parent.require_group(component)
-        local_group = local_parent.create_group(plan.run_name)
-        rematerialize_exact_tabular_candidate(
-            source_group,
-            local_group,
-            receipt=receipt,
-        )
-        local_group.attrs[RUN_NAME_ATTR] = plan.run_name
-        local_group.attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_RUNNING
-        local_group.attrs.pop(RUN_COMPLETED_AT_ATTR, None)
-        local_group.attrs["stage_selector_eligible"] = False
-        local_group.attrs["storage_candidate_source_run"] = plan.source_run_name
-        local_group.attrs["storage_candidate_source_run_path"] = plan.source_run_path
-        local_group.attrs["storage_candidate_profile_promoted"] = False
-        family.write_manifest(local_group, byte_planner_adopted=True)
-        persist_exact_tabular_storage_receipt(local_group, receipt)
-        mark_run_complete(
-            local_group,
-            parent_group=None,
-            run_name=plan.run_name,
-            run_provenance=build_run_provenance_from_stage_record(
-                source_group.attrs.get("provenance", {}),
-                fallback_command="exact_tabular_candidate_materializer",
-            ),
-        )
-        local_validation = _validate_candidate_group(
-            local_group,
-            family=family,
-            expected_hashes=source_hashes,
-        )
-        if not local_validation["valid"]:
-            raise RuntimeError(f"Local exact compact candidate is invalid: {local_validation}.")
-        compared = _local_direct_consolidated_check(
-            plan.local_zarr,
-            run_path=plan.run_path,
-            declarations=candidate_declarations,
-        )
-        materialization_seconds = float(time.perf_counter() - started)
 
         def validate(path: Path) -> dict[str, Any]:
             return _validate_candidate_group(
@@ -487,7 +658,7 @@ def materialize_exact_tabular_candidate(
                     "Published exact compact candidate is not complete and ineligible."
                 )
 
-        archive_consolidated_counts: list[int] = []
+        publication_acceptance: dict[str, Any] = {}
 
         def consolidate_archive(
             _root: zarr.Group,
@@ -503,61 +674,116 @@ def materialize_exact_tabular_candidate(
                     "Exact compact candidate lost its complete ineligible state "
                     "before metadata consolidation."
                 )
-            archive_consolidated_counts.append(
-                _local_direct_consolidated_check(
+            with telemetry.phase("published_validation"):
+                published_validation = _validate_candidate_group(
+                    run_group,
+                    family=family,
+                    expected_hashes=source_hashes,
+                )
+                if not published_validation["valid"]:
+                    raise RuntimeError(
+                        "Published exact compact candidate is invalid: "
+                        f"{published_validation}."
+                    )
+            _consolidate_archive_metadata(plan.source_zarr)
+            with telemetry.phase("published_direct_consolidated_comparison"):
+                published_compared = _direct_consolidated_check(
                     plan.source_zarr,
                     run_path=plan.run_path,
                     declarations=candidate_declarations,
                 )
+            with telemetry.phase("decoded_equality"):
+                published_hashes = _logical_hashes(
+                    run_group,
+                    candidate_declarations,
+                )
+                if published_hashes != source_hashes:
+                    raise RuntimeError(
+                        "Published exact compact decoded values differ from source."
+                    )
+            with telemetry.phase("physical_inventory"):
+                published_storage = storage_stats(plan.target_run_path)
+                if (
+                    published_storage["file_count"] < 1
+                    or published_storage["apparent_bytes"] < 1
+                    or published_storage["allocated_bytes"] < 1
+                ):
+                    raise RuntimeError(
+                        "Published exact compact candidate has no physical payload."
+                    )
+            publication_acceptance.update(
+                archive_direct_consolidated_array_count=published_compared,
+                published_validation=published_validation,
+                published_direct_consolidated_array_count=published_compared,
+                published_hashes=published_hashes,
+                output_storage=published_storage,
             )
 
         def repair_failed_visibility(_target_path: Path) -> None:
             consolidate_metadata_capture_expected_warnings(plan.source_zarr)
 
-        publication = atomic_publish_run_group(
-            AtomicRunPublishSpec(
-                source_zarr=plan.source_zarr,
-                local_run_path=plan.local_run_path,
-                target_run_path=plan.target_run_path,
-                run_name=plan.run_name,
-                lock_suffix=f"{plan.family_id}-storage-candidate",
-                publish_schema_id=PUBLISH_SCHEMA_ID,
-                policy="exact_tabular_byte_planned_atomic_nonpromoting_publish",
-                rollback_policy=(
-                    "retain_failed_public_tombstone_leave_parent_selectors_untouched"
+        with telemetry.phase("atomic_publication"):
+            publication = atomic_publish_run_group(
+                AtomicRunPublishSpec(
+                    source_zarr=plan.source_zarr,
+                    local_run_path=plan.local_run_path,
+                    target_run_path=plan.target_run_path,
+                    run_name=plan.run_name,
+                    lock_suffix=f"{plan.family_id}-storage-candidate",
+                    publish_schema_id=PUBLISH_SCHEMA_ID,
+                    policy="exact_tabular_byte_planned_atomic_nonpromoting_publish",
+                    rollback_policy=(
+                        "retain_failed_public_tombstone_leave_parent_selectors_untouched"
+                    ),
                 ),
-            ),
-            copy_backend=copy_backend,
-            validate_run=validate,
-            prepare_parents=prepare,
-            complete_run=complete,
-            verify_pointers=verify,
-            activate_run=consolidate_archive,
-            repair_failed_publication_visibility=repair_failed_visibility,
-            payload_metadata={
-                "profile_id": plan.profile_id,
-                "source_run": plan.source_run_name,
-                "source_logical_hashes": source_hashes,
-                "local_direct_consolidated_array_count": compared,
-                "materialization_seconds": materialization_seconds,
-            },
-        )
-        if archive_consolidated_counts != [len(candidate_declarations)]:
-            raise RuntimeError(
-                "Exact compact archive metadata was not consolidated exactly once."
+                copy_backend=copy_backend,
+                validate_run=validate,
+                prepare_parents=prepare,
+                complete_run=complete,
+                verify_pointers=verify,
+                activate_run=consolidate_archive,
+                repair_failed_publication_visibility=repair_failed_visibility,
+                payload_metadata={
+                    "profile_id": plan.profile_id,
+                    "source_run": plan.source_run_name,
+                    "source_logical_hashes": source_hashes,
+                    "local_direct_consolidated_array_count": compared,
+                    "materialization_seconds": materialization_seconds,
+                },
             )
+        published_hashes = publication_acceptance["published_hashes"]
         result.update(
             status="complete",
             local_validation=local_validation,
             local_direct_consolidated_array_count=compared,
-            archive_direct_consolidated_array_count=(
-                archive_consolidated_counts[0]
+            archive_direct_consolidated_array_count=publication_acceptance[
+                "archive_direct_consolidated_array_count"
+            ],
+            published_validation=publication_acceptance["published_validation"],
+            published_direct_consolidated_array_count=publication_acceptance[
+                "published_direct_consolidated_array_count"
+            ],
+            source_logical_manifest_sha256=canonical_json_sha256(source_hashes),
+            published_logical_manifest_sha256=canonical_json_sha256(
+                published_hashes
             ),
+            output_storage=publication_acceptance["output_storage"],
             materialization_seconds=materialization_seconds,
             publication=publication,
+            runtime_telemetry=_ordered_runtime_telemetry(telemetry),
         )
         succeeded = True
         return json_attr_safe(result)
+    except BaseException as exc:
+        try:
+            setattr(
+                exc,
+                "palette_runtime_telemetry",
+                _ordered_runtime_telemetry(telemetry),
+            )
+        except BaseException:
+            pass
+        raise
     finally:
         if succeeded and not keep_scratch and plan.scratch_root.exists():
             shutil.rmtree(plan.scratch_root)
@@ -585,6 +811,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--copy-backend", choices=("rsync", "python"), default="rsync")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--keep-scratch", action="store_true")
+    parser.add_argument(
+        "--stage-source-to-scratch",
+        action="store_true",
+        help=(
+            "Copy and verify the exact source run on node-local scratch before "
+            "rematerialization."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -601,6 +835,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         copy_backend=args.copy_backend,
         apply=args.apply,
         keep_scratch=args.keep_scratch,
+        stage_source_to_scratch=args.stage_source_to_scratch,
     )
     print(json.dumps(result, indent=None if args.json else 2, sort_keys=True))
     return 0
