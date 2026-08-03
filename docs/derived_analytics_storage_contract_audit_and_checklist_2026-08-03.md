@@ -115,7 +115,7 @@ true.
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an explicit selector-ineligible byte-planned direct-writer candidate | Add a consolidated atomic publication boundary, then benchmark through Palette and Crimson before profile promotion |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
 | Bout kinematics | Exact compact-v7 manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
-| Stimulus response | Exact opt-in compact-v3 schema with closed table bundles, fixed dtypes, strict coercion, and atomic publication; legacy v2 remains the default compatibility path | Adopt byte planning in the v3 writer and benchmark before any default change |
+| Stimulus response | Exact opt-in compact-v3 schema and selector-ineligible shared-planner/factory candidate with closed bundles, semantic fills, pinned codecs, immutable atomic publication, and direct/consolidated validation; legacy v2 remains the default compatibility path | Benchmark the v3 candidate through real producers/consumers before any default change |
 | Body frame | Exact ten-array schema, byte planner, strict manifest, and consolidated publication | Move from selector-ineligible companion evidence to an explicitly governed production lifecycle when authorized |
 | Keypoint quality | Exact diagnostic schema, byte planner, strict manifest, and consolidated publication | Add explicit production lifecycle/registry policy when authorized |
 | Derived keypoint metrics | Current v2 keeps profile-specific diagnostics in immutable source-bound `keypoint_quality_runs`; refined v2 retains compact acceptance gates and forbids legacy triangle arrays | Add any future skeleton-specific triangle metrics as a versioned quality profile, not universal refined-keypoint arrays |
@@ -125,7 +125,7 @@ true.
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
 | Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
-| Chaser components | Protocol-neutral schemas, payload-bound manifests, selector and explicit dependency-handle readers, and all ten maintained writers routed through node-local sealed immutable publication | Propagate handles through runner receipts and scientific consumers; add consolidated activation, export adoption, and chained recovery coverage |
+| Chaser components | Protocol-neutral schemas, payload-bound manifests, selector and explicit dependency-handle readers, all ten maintained writers routed through node-local sealed immutable publication, and exact cluster runner receipts | Propagate handles into scientific consumers; add consolidated activation, export adoption, and chained recovery coverage |
 | Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
@@ -241,14 +241,14 @@ review instead of editing another lane's files.
 
 Historical lanes are pinned from the coordination history and do not modify
 production archives, selectors, or registries. New implementation lanes must
-start from the current clean coordination history (`d82dcf41` at this
+start from the current clean coordination history (`40434306` at this
 reverification), not from one of the older worktree heads listed by
 `git worktree list`. A historical dirty worktree is evidence to reconcile, not
 a safe base for new work.
 
 | Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
 | --- | --- | --- | --- | --- |
-| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `d82dcf41` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
+| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `40434306` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
 | Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | Integrated as `a2668075` and `f178e315`; it classifies rather than promotes |
 | Eye-angle exact schema | `/tmp/palette-eye-v7-clean-20260803` / `agent/palette/eye-v7-clean-20260803` | `dd4c0f74` | Reusable analytics array declaration, exact 41-array eye-angle schema, deep writer/reader/readiness validation, and explicit v2-v6 compatibility boundaries | Reviewed as ready, committed as `3025d66e`, and integrated as `c1976300` |
 | Eye-angle byte candidate | historical isolated lane | `28f0132c` through `ac6b8bc3` | Exact 41-array planner/factory candidate and semantic fills | Integrated; remains explicit and selector-ineligible |
@@ -257,6 +257,8 @@ a safe base for new work.
 | Shared compact rematerialization | coordination lane | integrated as `5d7fb30c` | Exact declaration-bound replanning, frame-axis growth, whole-physical-unit writes, receipt and metadata validation | Infrastructure only; family adoption remains explicit and opt-in |
 | Shared compact candidate publication | coordination lane | integrated from `d82dcf41` | Immutable selector-ineligible swim-bout and bout-kinematics candidates, logical hashes, local and authoritative-root metadata equivalence, and selector non-mutation | Candidate evidence only; benchmark and promotion remain pending |
 | Chaser scientific writer adoption | historical isolated lane | integrated as `fc6a48c5` | All ten component writers, sealed staging capability, atomic component publisher, focused tests, and lifecycle doc | Integrated as candidate publication; explicit dependency handles and activation remain separate |
+| Chaser dependency/runner receipts | coordination lane | integrated as `34c067e5` and `21e115b3` | Self-digested explicit handles, detached exact reads, writer receipt v2, and cluster target receipt v2 | Integrated; scientific chained consumers and selector activation remain separate |
+| Stimulus-response v3 byte candidate | `/tmp/palette-stimulus-response-v3-candidate-20260803` / `agent/palette/stimulus-response-v3-candidate-20260803` | integrated as `40434306` | Exact opt-in candidate writer, storage receipt, metadata equivalence, immutable publisher, strict reader, and adversarial tests | Integrated; benchmark evidence and promotion remain pending |
 
 The next safe parallel wave assigns disjoint ownership as follows. The
 coordination lane remains the only owner of shared catalogs, planner/factory
@@ -331,6 +333,13 @@ now implemented on the coordination branch:
 - node-local sealed immutable publication for all ten maintained chaser
   component writers, with digest-bound writer receipts and no legacy pointer
   writes or same-name replacement: `fc6a48c5`.
+- explicit self-digested chaser dependency handles and target-runner receipts
+  that authorize only exact selector-ineligible components without `latest`
+  discovery: `34c067e5` and `21e115b3`.
+- selector-ineligible stimulus-response compact-v3 candidate creation through
+  the shared byte planner/factory, with semantic fills, immutable publication,
+  receipt replanning, direct/consolidated metadata validation, and unchanged
+  parent pointers: `40434306`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
@@ -356,6 +365,12 @@ Twenty broader historical chained-workflow cases remain intentionally failing
 closed because they try to select an ineligible component through `latest`;
 they are the explicit-handle migration surface, not authorization to restore
 implicit discovery.
+
+The integrated stimulus-response family matrix passed 142 tests. One unchanged
+historical swim-bout fixture remains intentionally excluded because it creates
+an unmarked v6 source that the current fail-closed swim-bout reader correctly
+rejects; that same case fails on the stimulus lane's untouched base and is not
+a v3 storage-candidate regression.
 
 ### Phase 0 — Preserve the audit baseline
 
@@ -539,7 +554,11 @@ Candidate-adoption checkpoints (these do not promote a profile):
       adoption: it derives the growth axis from semantic axes, creates arrays
       through the common factory, writes complete physical units, preserves
       explicit report artifacts, and validates an executable receipt.
-- [ ] Compact stimulus-response v3 candidate adoption.
+- [x] Compact stimulus-response v3 candidate adoption. The opt-in writer and
+      materializer use the shared planner/factory, pin the existing published
+      HTTP candidate profile, enforce serial whole-shard ownership, validate a
+      digest-bound plan and current metadata-equivalence receipt, publish
+      immutably, and leave selectors unchanged.
 
 Recommended migration order:
 
@@ -549,8 +568,8 @@ Recommended migration order:
 4. tail-posture view and bout classification;
 5. track kinematics;
 6. shared columnar storage, thereby covering swim bouts and bout kinematics;
-7. stimulus response after its exact schema is frozen;
-8. stimulus/occupancy/chaser families after their authority classification and
+7. stimulus-response producer/consumer benchmarks;
+8. stimulus-epoch/occupancy/chaser families after their authority classification and
    lifecycle are complete.
 
 ### Phase 7 — Complete publication and registry projection
