@@ -15,6 +15,13 @@ from fisheye.analysis.detection_occupancy_runs import (
     write_detection_occupancy_run,
     write_session_occupancy_run,
 )
+from fisheye.analysis.detection_occupancy_schema import (
+    build_occupancy_array_declarations,
+    validate_occupancy_array_manifest,
+)
+from fisheye.analysis_workflows.materializers.exact_tabular_candidate import (
+    materialize_exact_tabular_candidate,
+)
 
 
 def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
@@ -131,6 +138,10 @@ def test_detection_occupancy_writes_image_quadrant_spatial_summary(tmp_path: Pat
     np.testing.assert_array_equal(stored_summary["frame_count"][:], quadrants.frame_count)
     np.testing.assert_array_equal(stored_summary["missing_frame_count"][:], quadrants.missing_frame_count)
     assert zone_group["zone_spec"]["bounds_xyxy"].shape == (4, 4)
+    assert validate_occupancy_array_manifest(run, session=False) == ()
+    declarations = build_occupancy_array_declarations(run, session=False)
+    assert len(declarations) == 30
+    assert all(declaration.byte_planner_adopted is False for declaration in declarations)
 
 
 def test_session_occupancy_does_not_require_stimulus_epochs(tmp_path: Path) -> None:
@@ -166,3 +177,81 @@ def test_session_occupancy_does_not_require_stimulus_epochs(tmp_path: Path) -> N
     artifact = run["visualizations/session_occupancy_overview_png"]
     assert artifact.attrs["visualization_contract_id"] == SESSION_VISUALIZATION_CONTRACT_ID
     assert artifact.attrs["renderer"] == "fisheye.analysis.detection_occupancy_runs"
+    assert validate_occupancy_array_manifest(run, session=True) == ()
+    assert len(build_occupancy_array_declarations(run, session=True)) == 29
+
+
+def test_occupancy_contract_rejects_cross_family_lineage_inventory(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_detection_archive(tmp_path)
+    result = build_session_occupancy_result(
+        zarr_path,
+        run_name="session_1",
+        detection_path="refined_detect_runs/refined_1/instances",
+        bin_size=50,
+        smooth_sigma=0.0,
+    )
+    run_path = write_session_occupancy_run(
+        zarr_path,
+        result,
+        overwrite=True,
+        write_png=False,
+    )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    run = root[run_path]
+    run["windows"].create_array(
+        "source_stimulus_epoch_window_id",
+        data=np.asarray([0], dtype=np.int32),
+        chunks=(1,),
+    )
+
+    errors = validate_occupancy_array_manifest(run, session=True)
+
+    assert any("Unexpected compact arrays" in error for error in errors)
+
+
+def test_detection_occupancy_can_be_rematerialized_as_ineligible_byte_candidate(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_detection_archive(tmp_path)
+    result = build_detection_occupancy_result(
+        zarr_path,
+        run_name="occupancy_source",
+        stimulus_epoch_run="epochs_1",
+        epoch_windows=(
+            OccupancyWindow(0, "full", 0, 7, 0.0, 0.8, 0.8),
+        ),
+        detection_path="refined_detect_runs/refined_1/instances",
+        bin_size=50,
+        smooth_sigma=0.0,
+    )
+    write_detection_occupancy_run(
+        zarr_path,
+        result,
+        overwrite=True,
+        write_png=False,
+    )
+
+    published = materialize_exact_tabular_candidate(
+        zarr_path,
+        family_id="detection_occupancy",
+        source_run="occupancy_source",
+        run_name="occupancy_candidate",
+        scratch_root=tmp_path / "scratch",
+        copy_backend="python",
+        apply=True,
+    )
+
+    assert published["status"] == "complete"
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    parent = root["analysis/detection_occupancy_runs"]
+    assert parent.attrs["latest_complete"] == "occupancy_source"
+    candidate = parent["occupancy_candidate"]
+    assert candidate.attrs["stage_selector_eligible"] is False
+    assert candidate.attrs["storage_candidate_profile_promoted"] is False
+    assert validate_occupancy_array_manifest(
+        candidate,
+        session=False,
+        byte_planner_adopted=True,
+    ) == ()

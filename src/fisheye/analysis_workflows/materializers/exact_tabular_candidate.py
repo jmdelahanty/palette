@@ -28,6 +28,11 @@ from fisheye.analysis.bout_kinematics_schema import (
     validate_bout_kinematics_array_manifest,
     write_bout_kinematics_array_manifest,
 )
+from fisheye.analysis.detection_occupancy_schema import (
+    build_occupancy_array_declarations,
+    validate_occupancy_array_manifest,
+    write_occupancy_array_manifest,
+)
 from fisheye.analysis.exact_tabular_storage import (
     build_exact_tabular_storage_receipt,
     persist_exact_tabular_storage_receipt,
@@ -42,6 +47,9 @@ from fisheye.analysis.swim_bout_schema import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.zarr.storage_profiles import get_storage_profile
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -87,6 +95,32 @@ _FAMILIES = {
         validate_manifest=validate_bout_kinematics_array_manifest,
         build_declarations=build_bout_kinematics_array_declarations,
         write_manifest=write_bout_kinematics_array_manifest,
+    ),
+    "detection_occupancy": _Family(
+        family_id="detection_occupancy",
+        parent_path="analysis/detection_occupancy_runs",
+        validate_manifest=lambda group, **kwargs: validate_occupancy_array_manifest(
+            group, session=False, **kwargs
+        ),
+        build_declarations=lambda group, **kwargs: build_occupancy_array_declarations(
+            group, session=False, **kwargs
+        ),
+        write_manifest=lambda group, **kwargs: write_occupancy_array_manifest(
+            group, session=False, **kwargs
+        ),
+    ),
+    "session_occupancy": _Family(
+        family_id="session_occupancy",
+        parent_path="analysis/session_occupancy_runs",
+        validate_manifest=lambda group, **kwargs: validate_occupancy_array_manifest(
+            group, session=True, **kwargs
+        ),
+        build_declarations=lambda group, **kwargs: build_occupancy_array_declarations(
+            group, session=True, **kwargs
+        ),
+        write_manifest=lambda group, **kwargs: write_occupancy_array_manifest(
+            group, session=True, **kwargs
+        ),
     ),
 }
 
@@ -253,36 +287,6 @@ def _logical_hashes(group: Any, declarations: Sequence[Any]) -> dict[str, str]:
     return hashes
 
 
-def _metadata_declarations(group: Any, declarations: Sequence[Any]) -> dict[str, Any]:
-    return {
-        declaration.path: _array_at_path(group, declaration.path).metadata.to_dict()
-        for declaration in declarations
-    }
-
-
-def _normalize_metadata(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        result = {
-            str(key): _normalize_metadata(child) for key, child in value.items()
-        }
-        if result.get("node_type") == "group":
-            envelope = result.get("consolidated_metadata")
-            if envelope is None or envelope == {
-                "kind": "inline",
-                "must_understand": False,
-                "metadata": {},
-            }:
-                result.pop("consolidated_metadata", None)
-        return result
-    if isinstance(value, (tuple, list)):
-        return [_normalize_metadata(child) for child in value]
-    if value == "NaN" or (
-        isinstance(value, (float, np.floating)) and np.isnan(float(value))
-    ):
-        return {"palette_exact_float": "nan"}
-    return value
-
-
 def _local_direct_consolidated_check(
     local_zarr: Path,
     *,
@@ -290,27 +294,16 @@ def _local_direct_consolidated_check(
     declarations: Sequence[Any],
 ) -> int:
     consolidate_metadata_capture_expected_warnings(local_zarr)
-    direct_root = zarr.open_group(
-        str(local_zarr), mode="r", use_consolidated=False
+    receipt = validate_direct_consolidated_subtree(
+        local_zarr,
+        subtree_path=run_path,
     )
-    consolidated_root = zarr.open_group(
-        str(local_zarr), mode="r", use_consolidated=True
-    )
-    direct_run = direct_root[run_path]
-    consolidated_run = consolidated_root[run_path]
-    # A consolidated group node embeds descendant declarations in its
-    # ``consolidated_metadata`` envelope, while the direct group node does not.
-    # Compare the run's semantic attributes here and every exact array below;
-    # do not confuse that representation-only envelope with contract drift.
-    if _normalize_metadata(dict(direct_run.attrs)) != _normalize_metadata(
-        dict(consolidated_run.attrs)
-    ):
-        raise ValueError("Direct and consolidated candidate group attributes differ.")
-    direct = _metadata_declarations(direct_run, declarations)
-    consolidated = _metadata_declarations(consolidated_run, declarations)
-    if _normalize_metadata(direct) != _normalize_metadata(consolidated):
-        raise ValueError("Direct and consolidated candidate declarations differ.")
-    return len(direct)
+    if receipt.array_count < len(declarations):
+        raise ValueError(
+            "Direct/consolidated candidate subtree omits declared arrays: "
+            f"expected at least {len(declarations)}, got {receipt.array_count}."
+        )
+    return receipt.array_count
 
 
 def _validate_candidate_group(

@@ -123,7 +123,7 @@ true.
 | Bout classification | Exact compact-v2 manifest, guarded activation, serialized registry projection, and an explicit selector-ineligible byte-planned candidate with semantic fills | Benchmark the candidate through its real consumer |
 | Track visualization | Shared PNG/spec byte artifact contract | Keep classified as an artifact rather than a numeric scientific run |
 | Stimulus epochs | Explicit typed window columns | Add catalog ownership, byte planning, manifest validation, and atomic publication |
-| Detection/session occupancy | Scientific schema IDs and direct writers | Freeze exact arrays and lifecycle; adopt planner and atomic publisher |
+| Detection/session occupancy | Separate epoch-aligned and full-session authorities now have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, and a selector-ineligible shared-planner rematerialization path | Add central stage/catalog/registry ownership after the stimulus-epoch dependency lands; benchmark both families before promotion |
 | Chaser-distance base | Hardened immutable base and guarded activation | Add to the central analytics catalog and byte planner |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Add central catalog/byte planning plus consolidated activation and chained recovery coverage |
 | Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations | Freeze exact Arrow dtypes where cross-language stability requires them |
@@ -508,6 +508,10 @@ a v3 storage-candidate regression.
       `derived_metrics_schema` triangle surface is legacy v1 compatibility;
       maintained v2 diagnostics belong to versioned `keypoint_quality_runs`
       profiles and do not weaken the exact refined-keypoint-v2 inventory.
+- [x] Freeze detection occupancy as a 30-array epoch authority and session
+      occupancy as a distinct 29-array full-recording authority. The exact
+      inventories differ only by the required stimulus-window lineage column;
+      cross-family inventories fail closed.
 - [x] Record the fail-closed track adoption blocker: two structured lineage
       dtypes cannot yet round-trip through `DTypeContract`, `StoragePlan`, the
       array factory, and physical metadata comparison.
@@ -603,6 +607,11 @@ Candidate-adoption checkpoints (these do not promote a profile):
       HTTP candidate profile, enforce serial whole-shard ownership, validate a
       digest-bound plan and current metadata-equivalence receipt, publish
       immutably, and leave selectors unchanged.
+- [x] Detection/session occupancy opt-in candidate adoption. The existing
+      direct writer now stamps a digest-bound exact manifest, while the shared
+      compact rematerializer derives chunks and shards from bytes, validates
+      decoded equality and the complete direct/consolidated subtree, publishes
+      atomically, and leaves the source selector unchanged.
 
 Recommended migration order:
 

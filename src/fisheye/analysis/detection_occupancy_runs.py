@@ -41,6 +41,9 @@ from fisheye.visualization.plot_detection_epoch_heatmaps import (
     _resolve_dimensions,
     compute_heatmap,
 )
+from fisheye.analysis.detection_occupancy_schema import (
+    write_occupancy_array_manifest,
+)
 
 
 SCHEMA_ID = "palette.detection_occupancy.v1"
@@ -886,6 +889,7 @@ def write_detection_occupancy_run(
                 }
             )
         run.attrs.update(json_attr_safe(attrs))
+        run.attrs["stage_selector_eligible"] = True
         lineage_payload = build_run_lineage_payload(
             run_family=f"analysis/{parent_name}",
             analysis_schema={
@@ -928,6 +932,10 @@ def write_detection_occupancy_run(
                 extra_attrs={"occupancy_schema_id": schema_id, "summary": json_attr_safe(summary)},
                 overwrite=True,
             )
+        write_occupancy_array_manifest(
+            run,
+            session=segment_source_kind == "full_session",
+        )
         mark_run_complete(
             run,
             parent_group=parent,
