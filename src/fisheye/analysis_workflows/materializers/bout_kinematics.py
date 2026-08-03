@@ -9,7 +9,6 @@ profile and publishes a non-promoted candidate for review.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import getpass
 import hashlib
 import json
@@ -38,6 +37,10 @@ from ...analysis.bout_kinematics_schema import (
 from ...shared.json_safety import json_attr_safe
 from ...shared.run_provenance import build_run_provenance
 from ...shared.zarr_io import open_zarr_root
+from ...shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    consolidate_metadata_capture_expected_warnings,
+)
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from ...shared.zarr_sharded_copy import (
     SHARD_POLICY_MULTI_CHUNK_CAPPED,
@@ -794,73 +797,98 @@ def promote_bout_kinematics_candidate(
     if not apply:
         return result
 
-    lock_path = source.parent / f".{source.name}.{COMMON_LOCK_SUFFIX}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        try:
-            write_root = open_zarr_root(source, mode="a")
-            write_parent = write_root["analysis/bout_kinematics_runs"]
-            write_candidate = write_parent[name]
-            parent_before = dict(write_parent.attrs)
-            candidate_before = dict(write_candidate.attrs)
-            try:
-                logical, validation = inspect_candidate()
-                promoted_at = datetime.now(timezone.utc).isoformat()
-                receipt = {
-                    "schema_id": PROMOTION_SCHEMA_ID,
-                    "promoted_at_utc": promoted_at,
-                    "approved_by": str(
-                        approved_by
-                        or os.environ.get("USER")
-                        or getpass.getuser()
-                    ),
-                    "host": socket.gethostname(),
-                    "note": str(note or ""),
-                    "run_name": name,
-                    "previous_latest": parent_before.get("latest"),
-                    "previous_latest_complete": parent_before.get(
-                        "latest_complete"
-                    ),
-                    "logical_sha256": str(logical["logical_sha256"]),
-                }
-                write_candidate.attrs["storage_promotion"] = json_attr_safe(receipt)
-                write_parent.attrs["latest_complete"] = name
-                write_parent.attrs["latest"] = name
+    with archive_metadata_publication_lock(source):
+        write_root = open_zarr_root(source, mode="a")
+        write_parent = write_root["analysis/bout_kinematics_runs"]
+        write_candidate = write_parent[name]
+        parent_before = dict(write_parent.attrs)
+        candidate_before = dict(write_candidate.attrs)
 
-                verify_root = open_zarr_root(source, mode="r")
-                verify_parent = verify_root["analysis/bout_kinematics_runs"]
-                if str(verify_parent.attrs.get("latest")) != name or str(
-                    verify_parent.attrs.get("latest_complete")
-                ) != name:
+        def consolidate_and_require_exact_metadata(
+            *,
+            expected_parent: Mapping[str, Any],
+            expected_candidate: Mapping[str, Any],
+        ) -> None:
+            consolidate_metadata_capture_expected_warnings(source)
+            direct_root = open_zarr_root(source, mode="r")
+            consolidated_root = zarr.open_group(
+                str(source),
+                mode="r",
+                zarr_format=3,
+                use_consolidated=True,
+            )
+            for label, checked_root in (
+                ("direct", direct_root),
+                ("consolidated", consolidated_root),
+            ):
+                checked_parent = checked_root["analysis/bout_kinematics_runs"]
+                if dict(checked_parent.attrs) != dict(expected_parent):
                     raise RuntimeError(
-                        "Bout-kinematics candidate pointer verification failed."
+                        f"Bout-kinematics {label} parent metadata differs."
                     )
-                if (
-                    write_candidate.attrs.get("palette_run_completion_status")
-                    != "complete"
-                ):
+                if dict(checked_parent[name].attrs) != dict(expected_candidate):
                     raise RuntimeError(
-                        "Bout-kinematics promotion requires a complete candidate."
+                        f"Bout-kinematics {label} candidate metadata differs."
                     )
-                # Literal publication commit. No archive read or metadata write
-                # follows this eligibility transition.
-                try:
-                    write_candidate.attrs["stage_selector_eligible"] = True
-                except BaseException:
-                    if (
-                        write_candidate.attrs.get("stage_selector_eligible")
-                        is not True
-                    ):
-                        raise
+        try:
+            logical, validation = inspect_candidate()
+            promoted_at = datetime.now(timezone.utc).isoformat()
+            receipt = {
+                "schema_id": PROMOTION_SCHEMA_ID,
+                "promoted_at_utc": promoted_at,
+                "approved_by": str(
+                    approved_by or os.environ.get("USER") or getpass.getuser()
+                ),
+                "host": socket.gethostname(),
+                "note": str(note or ""),
+                "run_name": name,
+                "previous_latest": parent_before.get("latest"),
+                "previous_latest_complete": parent_before.get("latest_complete"),
+                "logical_sha256": str(logical["logical_sha256"]),
+            }
+            write_candidate.attrs["storage_promotion"] = json_attr_safe(receipt)
+            write_parent.attrs["latest_complete"] = name
+            write_parent.attrs["latest"] = name
+
+            verify_root = open_zarr_root(source, mode="r")
+            verify_parent = verify_root["analysis/bout_kinematics_runs"]
+            if str(verify_parent.attrs.get("latest")) != name or str(
+                verify_parent.attrs.get("latest_complete")
+            ) != name:
+                raise RuntimeError(
+                    "Bout-kinematics candidate pointer verification failed."
+                )
+            if write_candidate.attrs.get("palette_run_completion_status") != "complete":
+                raise RuntimeError(
+                    "Bout-kinematics promotion requires a complete candidate."
+                )
+            # Literal selection commit. Archive-wide consolidation and exact
+            # direct/inline verification immediately follow under the lock.
+            try:
+                write_candidate.attrs["stage_selector_eligible"] = True
             except BaseException:
-                write_parent.attrs.clear()
-                write_parent.attrs.update(parent_before)
-                write_candidate.attrs.clear()
-                write_candidate.attrs.update(candidate_before)
-                raise
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                if write_candidate.attrs.get("stage_selector_eligible") is not True:
+                    raise
+            consolidate_and_require_exact_metadata(
+                expected_parent=dict(write_parent.attrs),
+                expected_candidate=dict(write_candidate.attrs),
+            )
+        except BaseException as exc:
+            write_parent.attrs.clear()
+            write_parent.attrs.update(parent_before)
+            write_candidate.attrs.clear()
+            write_candidate.attrs.update(candidate_before)
+            try:
+                consolidate_and_require_exact_metadata(
+                    expected_parent=parent_before,
+                    expected_candidate=candidate_before,
+                )
+            except BaseException as rollback_exc:
+                raise RuntimeError(
+                    "Bout-kinematics promotion failed and metadata rollback "
+                    f"was incomplete: {rollback_exc}."
+                ) from exc
+            raise
 
     result.update(
         {

@@ -7,6 +7,7 @@ import pytest
 import zarr
 
 from fisheye.analysis import bout_kinematics as bout_writer_module
+from fisheye.analysis_workflows.materializers import bout_kinematics as materializer_mod
 from fisheye.analysis.bout_kinematics import LAYOUT_COMPACT_TABULAR_V2
 from fisheye.analysis.bout_kinematics_schema import (
     write_bout_kinematics_array_manifest,
@@ -225,6 +226,62 @@ def test_promote_bout_candidate_validates_then_updates_both_pointers(
     receipt = promoted_candidate.attrs["storage_promotion"]
     assert receipt["approved_by"] == "test"
     assert receipt["previous_latest"] == "bout_source"
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    consolidated_parent = consolidated["analysis/bout_kinematics_runs"]
+    assert dict(consolidated_parent.attrs) == dict(parent.attrs)
+    assert dict(consolidated_parent["bout_candidate"].attrs) == dict(
+        promoted_candidate.attrs
+    )
+
+
+def test_promote_bout_candidate_reconsolidates_exact_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _make_archive(tmp_path)
+    materialize_bout_kinematics_storage(
+        source,
+        source_run="bout_source",
+        scratch_root=tmp_path / "storage-scratch",
+        run_name="bout_candidate",
+        output_shard_rows=8_192,
+        workers=1,
+        copy_backend="python",
+        apply=True,
+    )
+    original = materializer_mod.consolidate_metadata_capture_expected_warnings
+    calls = 0
+
+    def consolidate_then_fail_once(path: str | Path):
+        nonlocal calls
+        calls += 1
+        result = original(path)
+        if calls == 1:
+            raise RuntimeError("injected failure after promotion consolidation")
+        return result
+
+    monkeypatch.setattr(
+        materializer_mod,
+        "consolidate_metadata_capture_expected_warnings",
+        consolidate_then_fail_once,
+    )
+    with pytest.raises(RuntimeError, match="injected failure"):
+        promote_bout_kinematics_candidate(
+            source,
+            run_name="bout_candidate",
+            apply=True,
+            approved_by="test",
+        )
+
+    direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    for root in (direct, consolidated):
+        parent = root["analysis/bout_kinematics_runs"]
+        assert parent.attrs["latest"] == "bout_source"
+        assert parent.attrs["latest_complete"] == "bout_source"
+        candidate = parent["bout_candidate"]
+        assert candidate.attrs["stage_selector_eligible"] is False
+        assert "storage_promotion" not in candidate.attrs
 
 
 def test_compute_plan_is_read_only_and_rejects_managed_writer_arguments(

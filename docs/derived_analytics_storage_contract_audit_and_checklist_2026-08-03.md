@@ -352,12 +352,26 @@ now implemented on the coordination branch:
   run publisher and every call through the shared consolidation helper, plus a
   post-tombstone visibility-repair hook. Controlled two-publisher interleaving
   and post-consolidation failure tests prove that the final consolidated view
-  contains both successful runs or the exact failed/ineligible tombstone.
+  contains both successful runs or the exact failed/ineligible tombstone. A
+  follow-up adversarial review found fork-state, direct-consolidator,
+  family-specific activation-lock, and unverified repair gaps. The hardening
+  checkpoint closes all inherited lock descriptors after fork, moves
+  consolidation attrs inside the lock, migrates maintained
+  stimulus/tail/bout/subject-mask metadata transactions, and binds repaired
+  metadata to the exact pre-callback tombstone. Bout promotion and subject-mask
+  authority activation now prove exact direct/inline metadata, including
+  rollback and unknown-ack paths. Arbitrary legacy or external mutators remain
+  safe only on a quiescent archive until migrated.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
-expected legacy compatibility xfails. The atomic-publication lane also received
-an independent adversarial review with no remaining correctness or
-publication-safety blockers. The exact catalog/stage-array matrix passed 88
+expected legacy compatibility xfails. A later independent adversarial review
+identified the archive-lock gaps recorded above; the final focused adversarial
+matrix passed 44 lock/atomic/bout/subject-mask tests, including the deterministic
+open/register fork race, malicious tombstone rewrite, rollback consolidation, and post-commit
+acknowledgement recovery. The exact-tabular/stimulus matrix passed 15 tests,
+while a broader affected-stage run reached 52 passes without a failure before
+unrelated long tail-compute cases were stopped. The exact
+catalog/stage-array matrix passed 88
 tests after integration. The combined exact-catalog, surface-classification,
 and coverage-report matrix passed 103 tests. Physical-profile promotion and
 production selector activation remain out of scope.

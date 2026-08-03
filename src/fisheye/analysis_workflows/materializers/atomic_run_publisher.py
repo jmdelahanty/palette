@@ -597,6 +597,49 @@ def _fresh_owned_public_target(
     return run
 
 
+def _verify_failed_publication_visibility(
+    spec: AtomicRunPublishSpec,
+    *,
+    owner_attr: str,
+    publication_owner: str,
+    expected_attrs: Mapping[str, Any],
+) -> None:
+    """Require the failed tombstone to agree in direct and inline metadata."""
+
+    direct_root = zarr.open_group(
+        str(spec.source_zarr),
+        mode="r",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    consolidated_root = zarr.open_group(
+        str(spec.source_zarr),
+        mode="r",
+        zarr_format=3,
+        use_consolidated=True,
+    )
+    target_path = _target_group_path(spec)
+    direct = _resolve_group(direct_root, target_path)
+    consolidated = _resolve_group(consolidated_root, target_path)
+    direct_attrs = dict(direct.attrs)
+    consolidated_attrs = dict(consolidated.attrs)
+    expected = copy.deepcopy(dict(expected_attrs))
+    for label, attrs in (
+        ("direct", direct_attrs),
+        ("consolidated", consolidated_attrs),
+    ):
+        if attrs != expected:
+            raise RuntimeError(f"{label} failed tombstone metadata changed")
+        if attrs.get(owner_attr) != publication_owner:
+            raise RuntimeError(f"{label} failed tombstone owner differs")
+        if attrs.get("stage_selector_eligible") is not False:
+            raise RuntimeError(f"{label} failed tombstone is selector eligible")
+        if attrs.get("palette_run_completion_status") != "failed":
+            raise RuntimeError(f"{label} failed tombstone is not failed")
+        if ATOMIC_PUBLICATION_TOMBSTONE_ATTR not in attrs:
+            raise RuntimeError(f"{label} failed tombstone receipt is missing")
+
+
 def _require_valid(validation: Mapping[str, Any], *, label: str) -> dict[str, Any]:
     payload = dict(validation)
     if not bool(payload.get("valid")):
@@ -980,6 +1023,7 @@ def _atomic_publish_locked(
         # Exact ownership authorizes only an in-place failed/ineligible
         # tombstone; a foreign replacement is left completely untouched.
         owned_public_tombstoned = False
+        expected_failed_publication_attrs: dict[str, Any] | None = None
         if spec.target_run_path.exists():
             try:
                 target_owned = (
@@ -1016,6 +1060,10 @@ def _atomic_publish_locked(
                         == "failed"
                         and ATOMIC_PUBLICATION_TOMBSTONE_ATTR in failed.attrs
                     )
+                    if owned_public_tombstoned and failed is not None:
+                        expected_failed_publication_attrs = copy.deepcopy(
+                            dict(failed.attrs)
+                        )
                 except BaseException as tombstone_check_exc:  # pragma: no cover
                     rollback_errors.append(
                         "verify failed public tombstone: "
@@ -1062,10 +1110,17 @@ def _atomic_publish_locked(
         # under-lock opportunity to make its consolidated view fail closed too.
         if (
             owned_public_tombstoned
+            and expected_failed_publication_attrs is not None
             and repair_failed_publication_visibility is not None
         ):
             try:
                 repair_failed_publication_visibility(spec.target_run_path)
+                _verify_failed_publication_visibility(
+                    spec,
+                    owner_attr=publication_owner_attr,
+                    publication_owner=expected_publication_owner,
+                    expected_attrs=expected_failed_publication_attrs,
+                )
             except BaseException as repair_exc:  # pragma: no cover - hostile store
                 rollback_errors.append(
                     "repair failed publication visibility: " f"{repair_exc}"

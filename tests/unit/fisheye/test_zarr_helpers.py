@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import multiprocessing
 from pathlib import Path
+import threading
 from typing import Any
 import warnings
 
@@ -8,7 +10,10 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared import zarr_helpers as zarr_helpers_module
 from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    archive_metadata_publication_lock_path,
     consolidate_metadata_capture_expected_warnings,
     first_array_length,
     first_array_length_in_group,
@@ -33,6 +38,20 @@ class _FakeArray:
 
     def __getitem__(self, key: object) -> np.ndarray:
         return self._values[key]
+
+
+def _acquire_archive_lock_in_fork(
+    archive: str,
+    sender: Any,
+) -> None:
+    with archive_metadata_publication_lock(archive):
+        sender.send("acquired")
+    sender.close()
+
+
+def _signal_fork_completed(sender: Any) -> None:
+    sender.send("forked")
+    sender.close()
 
 
 class _FakeGroup:
@@ -497,6 +516,159 @@ def test_consolidate_metadata_capture_expected_warnings_reemits_unexpected(
 
     assert report["suppressed_expected_warning_count"] == 0
     assert report["unexpected_warning_count"] == 1
+
+
+def test_archive_lock_resets_inherited_reentrancy_state_after_fork(
+    tmp_path: Path,
+) -> None:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("fork start method is unavailable")
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    archive = tmp_path / "archive.zarr"
+    process = context.Process(
+        target=_acquire_archive_lock_in_fork,
+        args=(str(archive), sender),
+    )
+    try:
+        with archive_metadata_publication_lock(archive):
+            process.start()
+            sender.close()
+            assert not receiver.poll(0.25)
+        assert receiver.poll(5)
+        assert receiver.recv() == "acquired"
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+
+def test_archive_lock_resolves_symlink_aliases_to_one_lock(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.zarr"
+    archive.mkdir()
+    alias = tmp_path / "archive-alias.zarr"
+    alias.symlink_to(archive, target_is_directory=True)
+
+    assert archive_metadata_publication_lock_path(alias) == (
+        archive_metadata_publication_lock_path(archive)
+    )
+    with archive_metadata_publication_lock(archive) as direct_lock:
+        with archive_metadata_publication_lock(alias) as alias_lock:
+            assert alias_lock == direct_lock
+
+
+def test_archive_lock_drops_handle_inherited_from_other_thread(
+    tmp_path: Path,
+) -> None:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("fork start method is unavailable")
+    archive = tmp_path / "archive.zarr"
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_parent_lock() -> None:
+        with archive_metadata_publication_lock(archive):
+            held.set()
+            assert release.wait(5)
+
+    thread = threading.Thread(target=hold_parent_lock)
+    thread.start()
+    assert held.wait(5)
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_acquire_archive_lock_in_fork,
+        args=(str(archive), sender),
+    )
+    try:
+        process.start()
+        sender.close()
+        assert not receiver.poll(0.25)
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert receiver.poll(5)
+        assert receiver.recv() == "acquired"
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    finally:
+        release.set()
+        thread.join(timeout=5)
+        receiver.close()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+
+def test_archive_lock_open_and_registration_are_atomic_with_fork(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("fork start method is unavailable")
+    archive = tmp_path / "archive.zarr"
+    lock_path = archive_metadata_publication_lock_path(archive)
+    opened = threading.Event()
+    allow_registration = threading.Event()
+    parent_held = threading.Event()
+    release_parent = threading.Event()
+    original_open = Path.open
+
+    def delay_lock_open(path: Path, *args: Any, **kwargs: Any):
+        handle = original_open(path, *args, **kwargs)
+        if path == lock_path:
+            opened.set()
+            assert allow_registration.wait(5)
+        return handle
+
+    monkeypatch.setattr(Path, "open", delay_lock_open)
+
+    def hold_parent_lock() -> None:
+        with archive_metadata_publication_lock(archive):
+            parent_held.set()
+            assert release_parent.wait(5)
+
+    lock_thread = threading.Thread(target=hold_parent_lock)
+    lock_thread.start()
+    assert opened.wait(5)
+
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_signal_fork_completed, args=(sender,))
+    fork_returned = threading.Event()
+
+    def start_child() -> None:
+        process.start()
+        sender.close()
+        fork_returned.set()
+
+    fork_thread = threading.Thread(target=start_child)
+    fork_thread.start()
+    try:
+        assert not fork_returned.wait(0.25)
+        allow_registration.set()
+        assert parent_held.wait(5)
+        assert fork_returned.wait(5)
+        assert receiver.poll(5)
+        assert receiver.recv() == "forked"
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    finally:
+        allow_registration.set()
+        release_parent.set()
+        lock_thread.join(timeout=5)
+        fork_thread.join(timeout=5)
+        receiver.close()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+    assert not lock_thread.is_alive()
+    assert not fork_thread.is_alive()
+    assert not zarr_helpers_module._ARCHIVE_LIVE_HANDLES
 
 
 def test_reconsolidate_zarr_metadata_returns_error_without_raising(

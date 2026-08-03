@@ -36,6 +36,7 @@ from ...shared.zarr.stimulus_response_schema import (
     validate_stimulus_response_v3_run,
 )
 from ...shared.zarr.storage_profiles import get_storage_profile
+from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 MATERIALIZATION_SCHEMA_ID = "palette.stimulus_response_materialization.v1"
@@ -356,6 +357,9 @@ def publish_stimulus_response_run(
                 + "; ".join(final_errors)
             )
 
+    def repair_failed_candidate_visibility(_target_path: Path) -> None:
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
@@ -380,6 +384,9 @@ def publish_stimulus_response_run(
             else None
             if selector_ineligible
             else activate
+        ),
+        repair_failed_publication_visibility=(
+            repair_failed_candidate_visibility if byte_planner_candidate else None
         ),
         payload_metadata={
             "copy_backend": copy_backend,

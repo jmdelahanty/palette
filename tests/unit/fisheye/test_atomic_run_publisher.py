@@ -652,3 +652,62 @@ def test_atomic_failure_visibility_repair_reconsolidates_tombstone(
         assert failed.attrs["stage_selector_eligible"] is False
         assert failed.attrs["palette_run_completion_status"] == "failed"
         assert mod.ATOMIC_PUBLICATION_TOMBSTONE_ATTR in failed.attrs
+
+
+def test_atomic_failure_visibility_rejects_noop_repair(
+    tmp_path: Path,
+) -> None:
+    source, _target, spec, _owner, validate, prepare = _publication_fixture(tmp_path)
+
+    def complete(_root, _parent, run_group):  # type: ignore[no-untyped-def]
+        run_group.attrs["palette_run_completion_status"] = "complete"
+        run_group.attrs["stage_selector_eligible"] = False
+
+    def consolidate_then_fail(_root, _parent, _run):  # type: ignore[no-untyped-def]
+        consolidate_metadata_capture_expected_warnings(source)
+        raise RuntimeError("injected failure after consolidation")
+
+    with pytest.raises(RuntimeError, match="rollback was incomplete"):
+        mod.atomic_publish_run_group(
+            spec,
+            copy_backend="python",
+            validate_run=validate,
+            prepare_parents=prepare,
+            complete_run=complete,
+            verify_pointers=lambda _root: None,
+            activate_run=consolidate_then_fail,
+            repair_failed_publication_visibility=lambda _path: None,
+        )
+
+
+def test_atomic_failure_visibility_rejects_rewritten_tombstone(
+    tmp_path: Path,
+) -> None:
+    source, _target, spec, _owner, validate, prepare = _publication_fixture(tmp_path)
+
+    def complete(_root, _parent, run_group):  # type: ignore[no-untyped-def]
+        run_group.attrs["palette_run_completion_status"] = "complete"
+        run_group.attrs["stage_selector_eligible"] = False
+
+    def consolidate_then_fail(_root, _parent, _run):  # type: ignore[no-untyped-def]
+        consolidate_metadata_capture_expected_warnings(source)
+        raise RuntimeError("injected failure after consolidation")
+
+    def rewrite_then_consolidate(path: Path) -> None:
+        failed = zarr.open_group(str(path), mode="r+", use_consolidated=False)
+        receipt = dict(failed.attrs[mod.ATOMIC_PUBLICATION_TOMBSTONE_ATTR])
+        receipt["failure_type"] = "forged"
+        failed.attrs[mod.ATOMIC_PUBLICATION_TOMBSTONE_ATTR] = receipt
+        consolidate_metadata_capture_expected_warnings(source)
+
+    with pytest.raises(RuntimeError, match="rollback was incomplete"):
+        mod.atomic_publish_run_group(
+            spec,
+            copy_backend="python",
+            validate_run=validate,
+            prepare_parents=prepare,
+            complete_run=complete,
+            verify_pointers=lambda _root: None,
+            activate_run=consolidate_then_fail,
+            repair_failed_publication_visibility=rewrite_then_consolidate,
+        )

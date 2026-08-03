@@ -10,9 +10,7 @@ that bundle through a single root authority envelope.
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
-import os
 from pathlib import Path
 import time
 from typing import Any, Mapping, Sequence
@@ -55,6 +53,7 @@ from fisheye.shared.zarr.subject_mask_quality_schema import (
     SUBJECT_MASK_QUALITY_SCHEMA_V1,
 )
 from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
     consolidate_metadata_capture_expected_warnings,
 )
 from fisheye.shared.zarr_io import open_zarr_root
@@ -1347,126 +1346,160 @@ def activate_subject_mask_bundle(
 
     archive = analysis_zarr.expanduser().resolve()
     resolved_bundle = _require_run_id(bundle_id, name="bundle_id")
-    lock_path = archive.parent / f".{archive.name}.subject_mask_bundle_activation.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
     owner = str(uuid4())
-    with lock_path.open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            _recover_stale_activation_lease(archive)
-            manifest, _manifests = _validate_live_bundle(
-                archive, bundle_id=resolved_bundle
+    with archive_metadata_publication_lock(archive):
+        _recover_stale_activation_lease(archive)
+        manifest, _manifests = _validate_live_bundle(
+            archive, bundle_id=resolved_bundle
+        )
+        root = open_zarr_root(archive, mode="a")
+        if root.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR) is not None:
+            raise RuntimeError("Another subject-mask bundle activation owns the lease.")
+        root_attrs_before = copy.deepcopy(dict(root.attrs))
+        generation = int(
+            root.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR, 0)
+        )
+        next_generation = generation + 1
+        lease = {
+            "owner_uuid": owner,
+            "bundle_id": resolved_bundle,
+            "bundle_manifest_digest": manifest["payload_digest"],
+            "next_generation": next_generation,
+            "policy": SUBJECT_MASK_BUNDLE_ACTIVATION_POLICY,
+        }
+        root.attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR] = lease
+        member_paths = tuple(
+            manifest["payload"]["members"][role]["run_path"]
+            for role in sorted(manifest["payload"]["members"])
+        )
+        ready_paths = (
+            f"{SUBJECT_MASK_BUNDLE_FAMILY}/{resolved_bundle}",
+            *member_paths,
+        )
+
+        def require_exact_committed_authority(
+            expected_authority: Mapping[str, Any],
+        ) -> None:
+            direct_root = open_zarr_root(archive, mode="r")
+            consolidated_root = zarr.open_group(
+                str(archive),
+                mode="r",
+                zarr_format=3,
+                use_consolidated=True,
             )
-            root = open_zarr_root(archive, mode="a")
-            if root.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR) is not None:
-                raise RuntimeError(
-                    "Another subject-mask bundle activation owns the lease."
-                )
-            root_attrs_before = copy.deepcopy(dict(root.attrs))
-            generation = int(
-                root.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR, 0)
-            )
-            next_generation = generation + 1
-            lease = {
-                "owner_uuid": owner,
-                "bundle_id": resolved_bundle,
-                "bundle_manifest_digest": manifest["payload_digest"],
-                "next_generation": next_generation,
-                "policy": SUBJECT_MASK_BUNDLE_ACTIVATION_POLICY,
-            }
-            root.attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR] = lease
-            member_paths = tuple(
-                manifest["payload"]["members"][role]["run_path"]
-                for role in sorted(manifest["payload"]["members"])
-            )
-            ready_paths = (
-                f"{SUBJECT_MASK_BUNDLE_FAMILY}/{resolved_bundle}",
-                *member_paths,
-            )
-            prior_ready: dict[str, tuple[bool, Any]] = {}
-            committed = False
-            try:
-                for path in ready_paths:
-                    group = root[path]
-                    prior_ready[path] = (
-                        SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR in group.attrs,
-                        copy.deepcopy(
-                            group.attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR)
-                        ),
-                    )
-                    group.attrs[SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR] = True
-                consolidate_metadata_capture_expected_warnings(archive)
-                _validate_live_bundle(archive, bundle_id=resolved_bundle)
-                check = open_zarr_root(archive, mode="r")
-                if check.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR) != lease:
-                    raise RuntimeError("Subject-mask activation lease changed.")
-                authority = {
-                    "schema_id": "palette.subject_mask.bundle_authority",
-                    "schema_version": 1,
-                    "generation": next_generation,
-                    "bundle_id": resolved_bundle,
-                    "bundle_path": f"{SUBJECT_MASK_BUNDLE_FAMILY}/{resolved_bundle}",
-                    "bundle_manifest_digest": manifest["payload_digest"],
-                    "members": {
-                        role: dict(manifest["payload"]["members"][role])
-                        for role in sorted(manifest["payload"]["members"])
-                    },
-                    "activated_at_utc": utc_now(),
-                    "activation_owner_uuid": owner,
-                    "activation_policy": SUBJECT_MASK_BUNDLE_ACTIVATION_POLICY,
-                }
-                final_root = open_zarr_root(archive, mode="a")
-                final_attrs = copy.deepcopy(dict(final_root.attrs))
-                if final_attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR) != lease:
-                    raise RuntimeError("Subject-mask activation lease was replaced.")
-                final_attrs.pop(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR, None)
-                final_attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR] = (
-                    next_generation
-                )
-                final_attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR] = authority
-                # This attrs.put is the sole authority/selection commit.  No
-                # scientific or selector metadata is mutated after it.
-                final_root.attrs.put(final_attrs)
-                reopened = open_zarr_root(archive, mode="r")
-                if (
-                    reopened.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR) != authority
-                    or reopened.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR)
-                    != next_generation
-                    or SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR in reopened.attrs
+            for label, checked_root in (
+                ("direct", direct_root),
+                ("consolidated", consolidated_root),
+            ):
+                if checked_root.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR) != dict(
+                    expected_authority
                 ):
-                    raise RuntimeError("Subject-mask bundle authority did not persist.")
-                committed = True
-                return authority
-            finally:
-                if not committed:
-                    observed = open_zarr_root(archive, mode="r")
-                    authority = observed.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR)
+                    raise RuntimeError(
+                        f"Subject-mask {label} authority did not persist exactly."
+                    )
+                if (
+                    checked_root.attrs.get(
+                        SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR
+                    )
+                    != next_generation
+                    or SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR in checked_root.attrs
+                ):
+                    raise RuntimeError(
+                        f"Subject-mask {label} authority state is incomplete."
+                    )
+                for path in ready_paths:
                     if (
-                        isinstance(authority, Mapping)
-                        and authority.get("activation_owner_uuid") == owner
-                        and authority.get("bundle_manifest_digest")
-                        == manifest["payload_digest"]
+                        checked_root[path].attrs.get(
+                            SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR
+                        )
+                        is not True
                     ):
-                        committed = True
-                    else:
-                        rollback = open_zarr_root(archive, mode="a")
-                        for path, (present, value) in prior_ready.items():
-                            group = rollback[path]
-                            if present:
-                                group.attrs[
-                                    SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR
-                                ] = value
-                            elif (
-                                SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR
-                                in group.attrs
-                            ):
-                                del group.attrs[
-                                    SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR
-                                ]
-                        rollback.attrs.put(root_attrs_before)
-                        consolidate_metadata_capture_expected_warnings(archive)
+                        raise RuntimeError(
+                            f"Subject-mask {label} readiness is incomplete for {path}."
+                        )
+
+        prior_ready: dict[str, tuple[bool, Any]] = {}
+        committed = False
+        committed_authority: dict[str, Any] | None = None
+        try:
+            for path in ready_paths:
+                group = root[path]
+                prior_ready[path] = (
+                    SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR in group.attrs,
+                    copy.deepcopy(
+                        group.attrs.get(SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR)
+                    ),
+                )
+                group.attrs[SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR] = True
+            consolidate_metadata_capture_expected_warnings(archive)
+            _validate_live_bundle(archive, bundle_id=resolved_bundle)
+            check = open_zarr_root(archive, mode="r")
+            if check.attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR) != lease:
+                raise RuntimeError("Subject-mask activation lease changed.")
+            committed_authority = {
+                "schema_id": "palette.subject_mask.bundle_authority",
+                "schema_version": 1,
+                "generation": next_generation,
+                "bundle_id": resolved_bundle,
+                "bundle_path": f"{SUBJECT_MASK_BUNDLE_FAMILY}/{resolved_bundle}",
+                "bundle_manifest_digest": manifest["payload_digest"],
+                "members": {
+                    role: dict(manifest["payload"]["members"][role])
+                    for role in sorted(manifest["payload"]["members"])
+                },
+                "activated_at_utc": utc_now(),
+                "activation_owner_uuid": owner,
+                "activation_policy": SUBJECT_MASK_BUNDLE_ACTIVATION_POLICY,
+            }
+            final_root = open_zarr_root(archive, mode="a")
+            final_attrs = copy.deepcopy(dict(final_root.attrs))
+            if final_attrs.get(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR) != lease:
+                raise RuntimeError("Subject-mask activation lease was replaced.")
+            final_attrs.pop(SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR, None)
+            final_attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR] = next_generation
+            final_attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR] = committed_authority
+            # This attrs.put is the sole authority/selection commit.  No
+            # scientific or selector metadata is mutated after it. The root
+            # write may replace its inline envelope, so rebuild that envelope
+            # before acknowledging the committed authority.
+            final_root.attrs.put(final_attrs)
+            consolidate_metadata_capture_expected_warnings(archive)
+            require_exact_committed_authority(committed_authority)
+            committed = True
+            return committed_authority
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            if not committed:
+                observed = open_zarr_root(archive, mode="r")
+                observed_authority = observed.attrs.get(
+                    SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR
+                )
+                if (
+                    isinstance(observed_authority, Mapping)
+                    and committed_authority is not None
+                    and dict(observed_authority) == committed_authority
+                    and observed.attrs.get(
+                        SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR
+                    )
+                    == next_generation
+                    and SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR
+                    not in observed.attrs
+                ):
+                    consolidate_metadata_capture_expected_warnings(archive)
+                    require_exact_committed_authority(committed_authority)
+                    committed = True
+                    return committed_authority
+                else:
+                    rollback = open_zarr_root(archive, mode="a")
+                    for path, (present, value) in prior_ready.items():
+                        group = rollback[path]
+                        if present:
+                            group.attrs[
+                                SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR
+                            ] = value
+                        elif SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR in group.attrs:
+                            del group.attrs[SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR]
+                    rollback.attrs.put(root_attrs_before)
+                    consolidate_metadata_capture_expected_warnings(archive)
     raise RuntimeError("Subject-mask bundle activation ended without a result.")
 
 

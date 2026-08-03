@@ -518,6 +518,9 @@ def materialize_exact_tabular_candidate(
                 )
             )
 
+        def repair_failed_visibility(_target_path: Path) -> None:
+            consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+
         publication = atomic_publish_run_group(
             AtomicRunPublishSpec(
                 source_zarr=plan.source_zarr,
@@ -537,6 +540,7 @@ def materialize_exact_tabular_candidate(
             complete_run=complete,
             verify_pointers=verify,
             activate_run=consolidate_archive,
+            repair_failed_publication_visibility=repair_failed_visibility,
             payload_metadata={
                 "profile_id": plan.profile_id,
                 "source_run": plan.source_run_name,

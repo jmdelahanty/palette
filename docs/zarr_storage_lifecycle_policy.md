@@ -344,7 +344,9 @@ Recommended flow:
 5. Validate the hidden copy by physical inventory and the family validator.
 6. Atomically rename it into the final destination path.
 7. Mark the installed run complete and update reader-visible pointers.
-8. Roll back the installed run and parent attrs if any post-rename step fails.
+8. On a post-rename failure, retain an owner-bound failed/ineligible tombstone,
+   restore only explicitly owned parent attrs, and reconsolidate the exact
+   fail-closed state.
 9. Update small metadata surfaces last, such as `latest` attrs and consolidated
    metadata.
 
@@ -352,6 +354,13 @@ Do not update `latest` attrs, consolidated metadata, or other reader-visible
 selection metadata until the destination run group is fully present and
 validated. Avoid multiple jobs promoting into the same destination archive at
 the same time unless a writer lock or equivalent coordination mechanism exists.
+
+The shared archive lock covers common atomic publishers, the shared metadata
+consolidation helper, and maintained activation paths explicitly migrated to
+it. It does not serialize arbitrary legacy, maintenance, or external code that
+writes the same archive. Run any such unmigrated writer only while the archive
+is quiescent; migrate it to acquire the archive lock outermost before allowing
+concurrent publication or consolidation.
 
 This pattern avoids the worst case of many small random chunk writes over NFS or
 other shared storage. It also keeps mutable Dask writes on local scratch, where

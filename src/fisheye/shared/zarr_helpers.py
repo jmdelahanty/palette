@@ -4,6 +4,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import os
 from pathlib import Path
 import re
 import threading
@@ -29,6 +30,36 @@ EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = re.compile(
 )
 ARCHIVE_METADATA_PUBLICATION_LOCK_SUFFIX = "archive-publication"
 _ARCHIVE_LOCK_STATE = threading.local()
+_ARCHIVE_LIVE_HANDLES: set[Any] = set()
+_ARCHIVE_LIVE_HANDLES_GUARD = threading.Lock()
+
+
+def _prepare_archive_lock_registry_for_fork() -> None:
+    _ARCHIVE_LIVE_HANDLES_GUARD.acquire()
+
+
+def _release_archive_lock_registry_after_fork() -> None:
+    _ARCHIVE_LIVE_HANDLES_GUARD.release()
+
+
+def _reset_archive_lock_state_after_fork() -> None:
+    """Drop every inherited lock descriptor in the single surviving child thread."""
+
+    global _ARCHIVE_LIVE_HANDLES_GUARD
+    for handle in tuple(_ARCHIVE_LIVE_HANDLES):
+        handle.close()
+    _ARCHIVE_LIVE_HANDLES.clear()
+    _ARCHIVE_LIVE_HANDLES_GUARD = threading.Lock()
+    _ARCHIVE_LOCK_STATE.held = {}
+    _ARCHIVE_LOCK_STATE.pid = os.getpid()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_prepare_archive_lock_registry_for_fork,
+        after_in_parent=_release_archive_lock_registry_after_fork,
+        after_in_child=_reset_archive_lock_state_after_fork,
+    )
 
 
 def archive_metadata_publication_lock_path(zarr_path: str | Path) -> Path:
@@ -48,6 +79,15 @@ def archive_metadata_publication_lock(
 
     lock_path = archive_metadata_publication_lock_path(zarr_path)
     key = str(lock_path)
+    current_pid = os.getpid()
+    state_pid = getattr(_ARCHIVE_LOCK_STATE, "pid", None)
+    if state_pid != current_pid:
+        stale = getattr(_ARCHIVE_LOCK_STATE, "held", {})
+        for stale_handle, _depth in stale.values():
+            stale_handle.close()
+            _ARCHIVE_LIVE_HANDLES.discard(stale_handle)
+        _ARCHIVE_LOCK_STATE.held = {}
+        _ARCHIVE_LOCK_STATE.pid = current_pid
     held = getattr(_ARCHIVE_LOCK_STATE, "held", None)
     if held is None:
         held = {}
@@ -66,7 +106,9 @@ def archive_metadata_publication_lock(
         return
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+b")
+    with _ARCHIVE_LIVE_HANDLES_GUARD:
+        handle = lock_path.open("a+b")
+        _ARCHIVE_LIVE_HANDLES.add(handle)
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         held[key] = (handle, 1)
@@ -78,7 +120,21 @@ def archive_metadata_publication_lock(
                 raise RuntimeError("Archive publication lock was released out of order.")
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
-        handle.close()
+        with _ARCHIVE_LIVE_HANDLES_GUARD:
+            _ARCHIVE_LIVE_HANDLES.discard(handle)
+            handle.close()
+
+
+@contextmanager
+def zarr_store_metadata_publication_lock(store: Any) -> Iterator[Path | None]:
+    """Lock a filesystem Zarr store; keep in-memory test stores process-local."""
+
+    store_root = getattr(store, "root", None)
+    if not isinstance(store_root, (str, Path)):
+        yield None
+        return
+    with archive_metadata_publication_lock(store_root) as lock_path:
+        yield lock_path
 
 
 def _path_tokens(parent_path: ParentPath) -> tuple[str, ...]:
@@ -430,31 +486,40 @@ def reconsolidate_zarr_metadata(
         "policy": str(policy),
         "consolidated_at_utc": _utc_now_iso(),
     }
-    try:
-        target_group = open_zarr_group_direct(target_path, mode="r+")
-        target_group.attrs["metadata_consolidation_policy"] = str(policy)
-        target_group.attrs["metadata_consolidation_status"] = "ok"
-        target_group.attrs["metadata_consolidated_at_utc"] = report["consolidated_at_utc"]
-        target_group.attrs["metadata_consolidation_group_path"] = normalized_group_path or ""
-        warning_report = consolidate_metadata_capture_expected_warnings(
-            root_path,
-            path=normalized_group_path,
-        )
-        report.update(warning_report)
-    except Exception as exc:
-        report["status"] = "error"
-        report["error"] = str(exc)
+    with archive_metadata_publication_lock(root_path):
         try:
             target_group = open_zarr_group_direct(target_path, mode="r+")
             target_group.attrs["metadata_consolidation_policy"] = str(policy)
-            target_group.attrs["metadata_consolidation_status"] = "error"
-            target_group.attrs["metadata_consolidated_at_utc"] = report["consolidated_at_utc"]
-            target_group.attrs["metadata_consolidation_group_path"] = normalized_group_path or ""
-            target_group.attrs["metadata_consolidation_error"] = str(exc)
-        except Exception:
-            pass
-        if fail_on_error:
-            raise
+            target_group.attrs["metadata_consolidation_status"] = "ok"
+            target_group.attrs["metadata_consolidated_at_utc"] = report[
+                "consolidated_at_utc"
+            ]
+            target_group.attrs["metadata_consolidation_group_path"] = (
+                normalized_group_path or ""
+            )
+            warning_report = consolidate_metadata_capture_expected_warnings(
+                root_path,
+                path=normalized_group_path,
+            )
+            report.update(warning_report)
+        except Exception as exc:
+            report["status"] = "error"
+            report["error"] = str(exc)
+            try:
+                target_group = open_zarr_group_direct(target_path, mode="r+")
+                target_group.attrs["metadata_consolidation_policy"] = str(policy)
+                target_group.attrs["metadata_consolidation_status"] = "error"
+                target_group.attrs["metadata_consolidated_at_utc"] = report[
+                    "consolidated_at_utc"
+                ]
+                target_group.attrs["metadata_consolidation_group_path"] = (
+                    normalized_group_path or ""
+                )
+                target_group.attrs["metadata_consolidation_error"] = str(exc)
+            except Exception:
+                pass
+            if fail_on_error:
+                raise
     return report
 
 

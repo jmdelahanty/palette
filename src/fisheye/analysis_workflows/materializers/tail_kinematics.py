@@ -45,6 +45,7 @@ from ...shared import tail_coordinate_publication as tail_publication_mod
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from ...shared.zarr.storage_profiles import StorageProfile, get_storage_profile
+from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 MATERIALIZATION_SCHEMA_ID = "palette.tail_kinematics_materialization.v1"
@@ -726,6 +727,9 @@ def publish_tail_kinematics_run(
                 deferred_activation[0]
             )
 
+    def repair_failed_candidate_visibility(_target_path: Path) -> None:
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/tail_kinematics_runs"]
         if byte_planner_candidate:
@@ -769,6 +773,9 @@ def publish_tail_kinematics_run(
         verify_pointers=verify,
         activate_run=activate,
         rollback_activation=(None if byte_planner_candidate else rollback_activation),
+        repair_failed_publication_visibility=(
+            repair_failed_candidate_visibility if byte_planner_candidate else None
+        ),
         payload_metadata={
             "staged_zarr": str(plan.staged_zarr),
             "source_run_path": str(source_run),

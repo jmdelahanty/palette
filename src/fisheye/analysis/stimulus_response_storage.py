@@ -28,6 +28,7 @@ from fisheye.shared.zarr.stimulus_response_schema import (
     stimulus_response_array_declarations,
     table_contract,
 )
+from fisheye.shared.zarr_helpers import zarr_store_metadata_publication_lock
 
 STIMULUS_RESPONSE_CANDIDATE_PROFILE_ID = PUBLISHED_HTTP_V1.profile_id
 STIMULUS_RESPONSE_STORAGE_PLAN_RECEIPT_ATTR = "analysis_storage_plan_receipt"
@@ -568,45 +569,50 @@ def consolidate_and_validate_stimulus_response_metadata(
 
     if str(getattr(root, "path", "")).strip("/"):
         raise ValueError("Metadata consolidation requires the archive root group.")
-    direct_run = root[run_path]
-    persisted = direct_run.attrs.get(STIMULUS_RESPONSE_STORAGE_PLAN_RECEIPT_ATTR)
-    if not isinstance(persisted, Mapping):
-        raise ValueError("Stimulus-response candidate has no storage-plan receipt.")
-    parsed = analysis_storage_plan_receipt_from_manifest(persisted)
-    _require_candidate_profile(parsed.profile)
-    bundles = direct_run.attrs.get("stimulus_response_v3_bundles")
-    if not isinstance(bundles, list):
-        raise ValueError("Stimulus-response candidate has no exact bundle list.")
-    receipt = _metadata_equivalence_receipt(
-        direct_run,
-        run_path=run_path,
-        profile_id=parsed.profile.profile_id,
-        bundles=bundles,
-    )
-    direct_run.attrs[STIMULUS_RESPONSE_METADATA_EQUIVALENCE_ATTR] = receipt
-    zarr.consolidate_metadata(root.store)
-    direct_root = zarr.open_group(root.store, mode="r", use_consolidated=False)
-    consolidated_root = zarr.open_group(root.store, mode="r", use_consolidated=True)
-    direct_run = direct_root[run_path]
-    consolidated_run = consolidated_root[run_path]
-    direct_document = _metadata_equivalence_document(direct_run, bundles=bundles)
-    consolidated_document = _metadata_equivalence_document(
-        consolidated_run,
-        bundles=bundles,
-    )
-    if direct_document != consolidated_document:
-        raise ValueError("Stimulus-response direct/consolidated metadata differ.")
-    for label, group in (
-        ("direct", direct_run),
-        ("consolidated", consolidated_run),
-    ):
-        equivalence_errors = validate_stimulus_response_metadata_equivalence(group)
-        if equivalence_errors:
-            raise ValueError(
-                f"Stimulus-response {label} metadata-equivalence receipt is invalid: "
-                + "; ".join(equivalence_errors)
-            )
-    return receipt
+    with zarr_store_metadata_publication_lock(root.store):
+        direct_run = root[run_path]
+        persisted = direct_run.attrs.get(
+            STIMULUS_RESPONSE_STORAGE_PLAN_RECEIPT_ATTR
+        )
+        if not isinstance(persisted, Mapping):
+            raise ValueError("Stimulus-response candidate has no storage-plan receipt.")
+        parsed = analysis_storage_plan_receipt_from_manifest(persisted)
+        _require_candidate_profile(parsed.profile)
+        bundles = direct_run.attrs.get("stimulus_response_v3_bundles")
+        if not isinstance(bundles, list):
+            raise ValueError("Stimulus-response candidate has no exact bundle list.")
+        receipt = _metadata_equivalence_receipt(
+            direct_run,
+            run_path=run_path,
+            profile_id=parsed.profile.profile_id,
+            bundles=bundles,
+        )
+        direct_run.attrs[STIMULUS_RESPONSE_METADATA_EQUIVALENCE_ATTR] = receipt
+        zarr.consolidate_metadata(root.store)
+        direct_root = zarr.open_group(root.store, mode="r", use_consolidated=False)
+        consolidated_root = zarr.open_group(
+            root.store, mode="r", use_consolidated=True
+        )
+        direct_run = direct_root[run_path]
+        consolidated_run = consolidated_root[run_path]
+        direct_document = _metadata_equivalence_document(direct_run, bundles=bundles)
+        consolidated_document = _metadata_equivalence_document(
+            consolidated_run,
+            bundles=bundles,
+        )
+        if direct_document != consolidated_document:
+            raise ValueError("Stimulus-response direct/consolidated metadata differ.")
+        for label, group in (
+            ("direct", direct_run),
+            ("consolidated", consolidated_run),
+        ):
+            equivalence_errors = validate_stimulus_response_metadata_equivalence(group)
+            if equivalence_errors:
+                raise ValueError(
+                    f"Stimulus-response {label} metadata-equivalence receipt is invalid: "
+                    + "; ".join(equivalence_errors)
+                )
+        return receipt
 
 
 __all__ = [

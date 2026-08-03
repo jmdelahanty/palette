@@ -343,19 +343,60 @@ def test_bundle_activation_commits_one_root_authority(tmp_path: Path) -> None:
     )
 
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(archive), mode="r", use_consolidated=True)
     assert authority["bundle_manifest_digest"] == receipt["bundle_manifest_digest"]
-    assert root.attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR] == authority
-    assert root.attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR] == 1
-    assert SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR not in root.attrs
-    for path in (
-        f"{SUBJECT_MASK_BUNDLE_FAMILY}/bundle_001",
-        "subject_mask_runs/raw_001",
-        "refined_subject_masks_runs/refined_001",
-        "subject_mask_quality_runs/quality_001",
-    ):
-        group = root[path]
-        assert group.attrs[SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR] is True
-        assert group.attrs["stage_selector_eligible"] is False
+    for view in (root, consolidated):
+        assert view.attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR] == authority
+        assert view.attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_GENERATION_ATTR] == 1
+        assert SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR not in view.attrs
+        for path in (
+            f"{SUBJECT_MASK_BUNDLE_FAMILY}/bundle_001",
+            "subject_mask_runs/raw_001",
+            "refined_subject_masks_runs/refined_001",
+            "subject_mask_quality_runs/quality_001",
+        ):
+            group = view[path]
+            assert group.attrs[SUBJECT_MASK_BUNDLE_SELECTOR_ELIGIBLE_ATTR] is True
+            assert group.attrs["stage_selector_eligible"] is False
+
+
+def test_bundle_activation_recovers_post_commit_acknowledgement_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, _receipt = _publish_bundle(tmp_path)
+    original_open = bundle_publication.open_zarr_root
+    injected = False
+
+    def fail_first_post_commit_read(path: Path, mode: str = "r"):
+        nonlocal injected
+        root = original_open(path, mode=mode)
+        if (
+            mode == "r"
+            and not injected
+            and SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR in root.attrs
+        ):
+            injected = True
+            raise RuntimeError("injected post-commit acknowledgement failure")
+        return root
+
+    monkeypatch.setattr(
+        bundle_publication,
+        "open_zarr_root",
+        fail_first_post_commit_read,
+    )
+    authority = activate_subject_mask_bundle(
+        analysis_zarr=archive,
+        bundle_id="bundle_001",
+    )
+
+    assert injected is True
+    assert authority["bundle_id"] == "bundle_001"
+    direct = zarr.open_group(str(archive), mode="r", use_consolidated=False)
+    consolidated = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    for root in (direct, consolidated):
+        assert root.attrs[SUBJECT_MASK_BUNDLE_AUTHORITY_ATTR] == authority
+        assert SUBJECT_MASK_BUNDLE_AUTHORITY_LEASE_ATTR not in root.attrs
 
 
 def test_bundle_rejects_cross_run_identity_mismatch(tmp_path: Path) -> None:

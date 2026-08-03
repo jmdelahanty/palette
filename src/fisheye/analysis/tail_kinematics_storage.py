@@ -28,6 +28,7 @@ from fisheye.shared.zarr.array_factory import (
     create_array_from_plan,
 )
 from fisheye.shared.zarr.storage_profiles import StorageProfile
+from fisheye.shared.zarr_helpers import zarr_store_metadata_publication_lock
 
 
 ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR = "analysis_storage_plan_receipt"
@@ -269,34 +270,35 @@ def consolidate_and_validate_tail_kinematics_metadata(
 
     if str(getattr(root, "path", "")).strip("/"):
         raise ValueError("Metadata consolidation requires the archive root group.")
-    zarr.consolidate_metadata(root.store)
-    direct_root = zarr.open_group(
-        root.store,
-        mode="r",
-        use_consolidated=False,
-    )
-    consolidated_root = zarr.open_group(
-        root.store,
-        mode="r",
-        use_consolidated=True,
-    )
-    direct_run = direct_root[run_path]
-    consolidated_run = consolidated_root[run_path]
-    dimensions = infer_tail_kinematics_dimensions(direct_run)
-    declarations = build_tail_kinematics_array_declarations(
-        include_source_revision_bundle=dimensions.include_source_revision_bundle,
-        byte_planner_adopted=True,
-    )
-    for declaration in declarations:
-        direct = _array_at_path(direct_run, declaration.path).metadata.to_dict()
-        consolidated = _array_at_path(
-            consolidated_run, declaration.path
-        ).metadata.to_dict()
-        if _normalized_metadata(direct) != _normalized_metadata(consolidated):
-            raise ValueError(
-                f"{declaration.path}: direct/consolidated metadata differ."
-            )
-    return len(declarations)
+    with zarr_store_metadata_publication_lock(root.store):
+        zarr.consolidate_metadata(root.store)
+        direct_root = zarr.open_group(
+            root.store,
+            mode="r",
+            use_consolidated=False,
+        )
+        consolidated_root = zarr.open_group(
+            root.store,
+            mode="r",
+            use_consolidated=True,
+        )
+        direct_run = direct_root[run_path]
+        consolidated_run = consolidated_root[run_path]
+        dimensions = infer_tail_kinematics_dimensions(direct_run)
+        declarations = build_tail_kinematics_array_declarations(
+            include_source_revision_bundle=dimensions.include_source_revision_bundle,
+            byte_planner_adopted=True,
+        )
+        for declaration in declarations:
+            direct = _array_at_path(direct_run, declaration.path).metadata.to_dict()
+            consolidated = _array_at_path(
+                consolidated_run, declaration.path
+            ).metadata.to_dict()
+            if _normalized_metadata(direct) != _normalized_metadata(consolidated):
+                raise ValueError(
+                    f"{declaration.path}: direct/consolidated metadata differ."
+                )
+        return len(declarations)
 
 
 __all__ = [

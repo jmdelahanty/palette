@@ -95,6 +95,14 @@ owner-bound failed, selector-ineligible tombstone and restores only explicitly
 leased parent mutations. A family that may refresh consolidated metadata before
 a later fallible check must also provide the publisher's failure-visibility
 repair callback so direct and consolidated readers observe the same tombstone.
+The publisher verifies that repair by comparing the exact direct and inline
+failed-run attributes; a no-op repair is rejected as incomplete rollback.
+
+The archive lock coordinates maintained Palette paths that use the common
+publisher, the shared consolidation helper, or an explicitly migrated
+activation transaction. It cannot make an arbitrary legacy or external Zarr
+mutator safe. Such a mutator must be migrated to this lock before concurrent
+use, or run only against a quiescent archive.
 
 Lower-level writer functions may write directly to explicitly supplied
 in-memory or disposable Zarr groups for tests. Operator CLIs and DAG execution
