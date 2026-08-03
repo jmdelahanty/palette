@@ -34,6 +34,7 @@ BOUT_CLASSIFICATION_ARRAY_SCHEMA_DIGEST_ATTR = (
     f"{BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR}_sha256"
 )
 BOUT_CLASSIFICATION_PHYSICAL_POLICY_OWNER = "columnar_store_array_v1"
+BOUT_CLASSIFICATION_BYTE_PLANNER_OWNER = "analysis_storage_planning_v1"
 CATEGORY_LABEL_BYTES_WIDTH = 64
 FAILURE_REASON_BYTES_WIDTH = 128
 
@@ -87,6 +88,7 @@ def _declaration(
     fill: str,
     null: str,
     units: str | None = None,
+    byte_planner_adopted: bool = False,
 ) -> AnalysisArrayDeclaration:
     path = f"per_bout/{name}"
     return AnalysisArrayDeclaration(
@@ -98,14 +100,18 @@ def _declaration(
         authority_role=authority,
         fill_semantics=fill,
         null_semantics=null,
-        physical_policy_owner=BOUT_CLASSIFICATION_PHYSICAL_POLICY_OWNER,
-        byte_planner_adopted=False,
+        physical_policy_owner=(
+            BOUT_CLASSIFICATION_BYTE_PLANNER_OWNER
+            if byte_planner_adopted
+            else BOUT_CLASSIFICATION_PHYSICAL_POLICY_OWNER
+        ),
+        byte_planner_adopted=byte_planner_adopted,
     )
 
 
-def build_bout_classification_array_declarations() -> (
-    tuple[AnalysisArrayDeclaration, ...]
-):
+def build_bout_classification_array_declarations(
+    *, byte_planner_adopted: bool = False
+) -> tuple[AnalysisArrayDeclaration, ...]:
     lineage = AnalysisAuthorityRole.LINEAGE_INDEX
     authority = AnalysisAuthorityRole.SCIENTIFIC_AUTHORITY
     quality = AnalysisAuthorityRole.QUALITY_DIAGNOSTIC
@@ -120,6 +126,7 @@ def build_bout_classification_array_declarations() -> (
             authority=lineage,
             fill="every row stores the exact source swim-bout identity; no numeric sentinel",
             null="all source rows are present",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "start_frame",
@@ -130,6 +137,7 @@ def build_bout_classification_array_declarations() -> (
             fill="inclusive nonnegative source start frame; no numeric sentinel",
             null="all source rows are present",
             units="camera_frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "end_frame",
@@ -140,6 +148,7 @@ def build_bout_classification_array_declarations() -> (
             fill="inclusive nonnegative source end frame; no numeric sentinel",
             null="all source rows are present",
             units="camera_frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "window_start_frame",
@@ -150,6 +159,7 @@ def build_bout_classification_array_declarations() -> (
             fill="inclusive classifier-window start frame; no numeric sentinel",
             null="all source rows are present",
             units="camera_frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "window_end_frame",
@@ -160,6 +170,7 @@ def build_bout_classification_array_declarations() -> (
             fill="inclusive classifier-window end frame; no numeric sentinel",
             null="all source rows are present",
             units="camera_frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "HB1_frame",
@@ -170,6 +181,7 @@ def build_bout_classification_array_declarations() -> (
             fill="-1 exactly when classified is false; otherwise absolute first-half-beat frame",
             null="classified is the validity bitmap",
             units="camera_frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "HB1_offset_frames",
@@ -180,6 +192,7 @@ def build_bout_classification_array_declarations() -> (
             fill="-1 exactly when classified is false; otherwise offset from window_start_frame",
             null="classified is the validity bitmap",
             units="frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "category_id",
@@ -189,6 +202,7 @@ def build_bout_classification_array_declarations() -> (
             authority=authority,
             fill="-1 exactly when classified is false; nonnegative classifier category otherwise",
             null="classified is the validity bitmap",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "category_label_bytes",
@@ -198,6 +212,7 @@ def build_bout_classification_array_declarations() -> (
             authority=authority,
             fill="UTF-8 label followed by NUL and zero padding to exactly 64 bytes",
             null="empty labels are forbidden; skipped rows use skipped_invalid_window",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "subcategory_id",
@@ -207,6 +222,7 @@ def build_bout_classification_array_declarations() -> (
             authority=authority,
             fill="-1 exactly when classified is false; classifier subcategory otherwise",
             null="classified is the validity bitmap",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "sign",
@@ -216,6 +232,7 @@ def build_bout_classification_array_declarations() -> (
             authority=authority,
             fill="zero when classified is false; classifier sign otherwise",
             null="classified is the validity bitmap",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "probability",
@@ -226,6 +243,7 @@ def build_bout_classification_array_declarations() -> (
             fill="NaN exactly when classified is false; finite classifier probability otherwise",
             null="classified is the validity bitmap",
             units="probability",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "tail_valid_fraction",
@@ -236,6 +254,7 @@ def build_bout_classification_array_declarations() -> (
             fill="finite fraction in [0,1] for every source window",
             null="all source rows are present",
             units="fraction",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "traj_valid_fraction",
@@ -246,6 +265,7 @@ def build_bout_classification_array_declarations() -> (
             fill="finite fraction in [0,1] for every source window",
             null="all source rows are present",
             units="fraction",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "max_consecutive_tail_invalid",
@@ -256,6 +276,7 @@ def build_bout_classification_array_declarations() -> (
             fill="nonnegative invalid-frame run length; no numeric sentinel",
             null="all source rows are present",
             units="frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "max_consecutive_traj_invalid",
@@ -266,6 +287,7 @@ def build_bout_classification_array_declarations() -> (
             fill="nonnegative invalid-frame run length; no numeric sentinel",
             null="all source rows are present",
             units="frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "source_window_valid",
@@ -275,6 +297,7 @@ def build_bout_classification_array_declarations() -> (
             authority=quality,
             fill="false means the source window failed the declared eligibility policy",
             null="all source rows are present",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "classified",
@@ -284,6 +307,7 @@ def build_bout_classification_array_declarations() -> (
             authority=quality,
             fill="false means the classifier was not run for this source row",
             null="all source rows are present",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "valid",
@@ -293,6 +317,7 @@ def build_bout_classification_array_declarations() -> (
             authority=quality,
             fill="true means the classification is usable downstream",
             null="all source rows are present",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "failure_reason_bytes",
@@ -302,6 +327,7 @@ def build_bout_classification_array_declarations() -> (
             authority=quality,
             fill="UTF-8 reason followed by NUL and zero padding to exactly 128 bytes",
             null="empty reasons are forbidden; usable rows store ok",
+            byte_planner_adopted=byte_planner_adopted,
         ),
     )
     paths = tuple(item.path for item in declarations)
@@ -311,6 +337,17 @@ def build_bout_classification_array_declarations() -> (
 
 
 BOUT_CLASSIFICATION_ARRAY_DECLARATIONS = build_bout_classification_array_declarations()
+BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS = (
+    build_bout_classification_array_declarations(byte_planner_adopted=True)
+)
+BOUT_CLASSIFICATION_ACCESS_UNIT_SEMANTICS = {
+    declaration.path: "one complete swim-bout row including all trailing fields"
+    for declaration in BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS
+}
+BOUT_CLASSIFICATION_FILL_VALUES = {
+    declaration.path: (False if declaration.contract.dtype.numpy_dtype == "bool" else 0)
+    for declaration in BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS
+}
 BOUT_CLASSIFICATION_FIELD_NAMES = tuple(
     item.path.removeprefix("per_bout/")
     for item in BOUT_CLASSIFICATION_ARRAY_DECLARATIONS
@@ -341,6 +378,8 @@ BOUT_CLASSIFICATION_FIELD_DTYPES = {
 
 def bout_classification_array_schema_manifest(
     dimensions: BoutClassificationDimensions,
+    *,
+    byte_planner_adopted: bool = False,
 ) -> dict[str, object]:
     return {
         "schema_id": BOUT_CLASSIFICATION_ARRAY_SCHEMA_ID,
@@ -350,9 +389,11 @@ def bout_classification_array_schema_manifest(
         "dimensions": dimensions.contract_dimensions,
         "arrays": [
             item.as_manifest()
-            for item in build_bout_classification_array_declarations()
+            for item in build_bout_classification_array_declarations(
+                byte_planner_adopted=byte_planner_adopted
+            )
         ],
-        "byte_planner_adopted": False,
+        "byte_planner_adopted": byte_planner_adopted,
     }
 
 
@@ -405,8 +446,16 @@ def validate_bout_classification_arrays(
     dimensions: BoutClassificationDimensions,
 ) -> tuple[BoutClassificationSchemaIssue, ...]:
     issues: list[BoutClassificationSchemaIssue] = []
+    persisted = run_group.attrs.get(BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR)
+    persisted_adopted = (
+        persisted.get("byte_planner_adopted") if isinstance(persisted, dict) else None
+    )
+    byte_planner_adopted = persisted_adopted is True
     expected = {
-        item.path: item for item in build_bout_classification_array_declarations()
+        item.path: item
+        for item in build_bout_classification_array_declarations(
+            byte_planner_adopted=byte_planner_adopted
+        )
     }
     arrays = collect_bout_classification_arrays(run_group)
     for path in sorted(set(arrays) - set(expected)):
@@ -456,8 +505,10 @@ def validate_bout_classification_arrays(
                 )
             )
 
-    expected_manifest = bout_classification_array_schema_manifest(dimensions)
-    persisted = run_group.attrs.get(BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR)
+    expected_manifest = bout_classification_array_schema_manifest(
+        dimensions,
+        byte_planner_adopted=byte_planner_adopted,
+    )
     try:
         manifest_matches = canonical_exact_json_bytes(persisted) == (
             canonical_exact_json_bytes(expected_manifest)
@@ -484,6 +535,34 @@ def validate_bout_classification_arrays(
                 "Persisted digest must bind the exact executable declaration.",
             )
         )
+    from .direct_writer_storage import (
+        ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
+        validate_direct_writer_storage_receipt,
+    )
+
+    if byte_planner_adopted:
+        for message in validate_direct_writer_storage_receipt(
+            run_group,
+            declarations=BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS,
+            access_unit_semantics=BOUT_CLASSIFICATION_ACCESS_UNIT_SEMANTICS,
+            fill_values=BOUT_CLASSIFICATION_FILL_VALUES,
+            dimensions=dimensions.contract_dimensions,
+        ):
+            issues.append(
+                BoutClassificationSchemaIssue(
+                    "storage_plan_mismatch",
+                    ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
+                    message,
+                )
+            )
+    elif run_group.attrs.get(ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR) is not None:
+        issues.append(
+            BoutClassificationSchemaIssue(
+                "storage_plan_mismatch",
+                ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
+                "Legacy physical declaration cannot carry a candidate receipt.",
+            )
+        )
     return tuple(issues)
 
 
@@ -491,9 +570,11 @@ def write_bout_classification_array_schema_manifest(
     run_group: Any,
     *,
     n_bouts: int,
+    byte_planner_adopted: bool = False,
 ) -> dict[str, object]:
     manifest = bout_classification_array_schema_manifest(
-        BoutClassificationDimensions(n_bouts=n_bouts)
+        BoutClassificationDimensions(n_bouts=n_bouts),
+        byte_planner_adopted=byte_planner_adopted,
     )
     run_group.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_ATTR] = manifest
     run_group.attrs[BOUT_CLASSIFICATION_ARRAY_SCHEMA_DIGEST_ATTR] = (

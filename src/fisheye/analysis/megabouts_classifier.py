@@ -26,9 +26,22 @@ from fisheye.analysis.bout_classification_runs import (
     validate_staged_bout_classification_run,
 )
 from fisheye.analysis.bout_classification_schema import (
+    BOUT_CLASSIFICATION_ACCESS_UNIT_SEMANTICS,
+    BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS,
+    BOUT_CLASSIFICATION_FIELD_DTYPES,
+    BOUT_CLASSIFICATION_FIELD_NAMES,
+    BOUT_CLASSIFICATION_FILL_VALUES,
     CATEGORY_LABEL_BYTES_WIDTH,
     FAILURE_REASON_BYTES_WIDTH,
+    BoutClassificationDimensions,
+    validate_bout_classification_arrays,
     write_bout_classification_array_schema_manifest,
+)
+from fisheye.analysis.direct_writer_storage import (
+    ANALYSIS_STORAGE_PROFILE_ROLE,
+    build_direct_writer_storage_receipt,
+    create_direct_writer_arrays_from_receipt,
+    persist_direct_writer_storage_receipt,
 )
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
 from fisheye.shared.coordinate_reference import canonical_node_path
@@ -72,6 +85,7 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr.storage_profiles import StorageProfile, get_storage_profile
 
 SCHEMA_ID = BOUT_CLASSIFICATION_SCHEMA_ID
 SCHEMA_VERSION = BOUT_CLASSIFICATION_SCHEMA_VERSION
@@ -657,6 +671,7 @@ def _populate_megabouts_classification_run(
     result: MegaboutsClassificationResult,
     exclude_cs: bool = False,
     command: Optional[str] = None,
+    storage_profile: StorageProfile | None = None,
 ) -> str:
     """Populate one already-owned, selector-ineligible public candidate."""
 
@@ -760,35 +775,89 @@ def _populate_megabouts_classification_run(
     for key, value in attrs.items():
         run_group.attrs[key] = _json_safe(value)
 
-    per_bout = write_columnar_dataset(
-        run_group,
-        "per_bout",
-        table,
-        attrs={
-            "schema_id": PER_BOUT_SCHEMA_ID,
-            "schema_version": SCHEMA_VERSION,
-            "storage_semantics": "one row per source swim-bout row",
-            "invalid_window_policy": INVALID_WINDOW_POLICY,
-            "category_label_encoding": "utf8-null-terminated",
-            "category_label_bytes_width": CATEGORY_LABEL_BYTES_WIDTH,
-            "failure_reason_encoding": "utf8-null-terminated",
-            "failure_reason_bytes_width": FAILURE_REASON_BYTES_WIDTH,
-        },
-    )
-    for field_name, width in (
-        ("category_label_bytes", CATEGORY_LABEL_BYTES_WIDTH),
-        ("failure_reason_bytes", FAILURE_REASON_BYTES_WIDTH),
-    ):
-        store_array(
-            per_bout,
-            field_name,
-            _fixed_text_matrix(table[field_name], width=width),
+    per_bout_attrs = {
+        "schema_id": PER_BOUT_SCHEMA_ID,
+        "schema_version": SCHEMA_VERSION,
+        "storage_semantics": "one row per source swim-bout row",
+        "invalid_window_policy": INVALID_WINDOW_POLICY,
+        "category_label_encoding": "utf8-null-terminated",
+        "category_label_bytes_width": CATEGORY_LABEL_BYTES_WIDTH,
+        "failure_reason_encoding": "utf8-null-terminated",
+        "failure_reason_bytes_width": FAILURE_REASON_BYTES_WIDTH,
+    }
+    if storage_profile is None:
+        per_bout = write_columnar_dataset(
+            run_group,
+            "per_bout",
+            table,
+            attrs=per_bout_attrs,
+        )
+        for field_name, width in (
+            ("category_label_bytes", CATEGORY_LABEL_BYTES_WIDTH),
+            ("failure_reason_bytes", FAILURE_REASON_BYTES_WIDTH),
+        ):
+            store_array(
+                per_bout,
+                field_name,
+                _fixed_text_matrix(table[field_name], width=width),
+            )
+    else:
+        candidate_arrays = {
+            f"per_bout/{field_name}": (
+                _fixed_text_matrix(table[field_name], width=width)
+                if (
+                    width := {
+                        "category_label_bytes": CATEGORY_LABEL_BYTES_WIDTH,
+                        "failure_reason_bytes": FAILURE_REASON_BYTES_WIDTH,
+                    }.get(field_name)
+                )
+                is not None
+                else np.asarray(table[field_name])
+            )
+            for field_name in BOUT_CLASSIFICATION_FIELD_NAMES
+        }
+        storage_receipt = build_direct_writer_storage_receipt(
+            declarations=BOUT_CLASSIFICATION_CANDIDATE_ARRAY_DECLARATIONS,
+            arrays_by_path=candidate_arrays,
+            access_unit_semantics=BOUT_CLASSIFICATION_ACCESS_UNIT_SEMANTICS,
+            profile=storage_profile,
+            dimensions={"n_bouts": int(table.shape[0])},
+        )
+        persist_direct_writer_storage_receipt(run_group, storage_receipt)
+        per_bout = run_group.create_group(
+            "per_bout",
+            attributes={
+                "storage_layout": "columnar",
+                "field_names": list(BOUT_CLASSIFICATION_FIELD_NAMES),
+                "field_dtypes": dict(BOUT_CLASSIFICATION_FIELD_DTYPES),
+                "physical_layout": "analysis_storage_plan_receipt_v1",
+                **per_bout_attrs,
+            },
+        )
+        create_direct_writer_arrays_from_receipt(
+            run_group,
+            receipt=storage_receipt,
+            arrays_by_path=candidate_arrays,
+            fill_values=BOUT_CLASSIFICATION_FILL_VALUES,
         )
     per_bout.attrs["source_swim_bout_path"] = source_refs.get("swim_bout_level")
     write_bout_classification_array_schema_manifest(
         run_group,
         n_bouts=int(table.shape[0]),
+        byte_planner_adopted=storage_profile is not None,
     )
+    if storage_profile is not None:
+        storage_issues = validate_bout_classification_arrays(
+            run_group,
+            dimensions=BoutClassificationDimensions(n_bouts=int(table.shape[0])),
+        )
+        if storage_issues:
+            detail = "; ".join(
+                f"{issue.code}:{issue.path}:{issue.message}" for issue in storage_issues
+            )
+            raise RuntimeError(
+                "Bout-classification candidate storage validation failed: " + detail
+            )
 
     zarr_path = getattr(root, "_palette_fs_path", None)
     env_info = get_environment_info(
@@ -945,6 +1014,7 @@ def write_megabouts_classification_run(
     overwrite: bool = False,
     exclude_cs: bool = False,
     command: Optional[str] = None,
+    storage_profile: StorageProfile | None = None,
 ) -> str:
     """Publish one immutable, owner-guarded Megabouts classification run."""
 
@@ -994,14 +1064,16 @@ def write_megabouts_classification_run(
             result=result,
             exclude_cs=exclude_cs,
             command=command,
+            storage_profile=storage_profile,
         )
-        _activate_megabouts_classification_run(
-            root,
-            parent,
-            run_group,
-            run_name=resolved_run_name,
-            expected_publication_owner_uuid=publication_owner_uuid,
-        )
+        if storage_profile is None:
+            _activate_megabouts_classification_run(
+                root,
+                parent,
+                run_group,
+                run_name=resolved_run_name,
+                expected_publication_owner_uuid=publication_owner_uuid,
+            )
     except BaseException as exc:
         cleanup_errors = _persist_failed_bout_classification_tombstone(
             root,
@@ -1043,6 +1115,7 @@ def run_megabouts_classifier(
     classifier_input_mode: str = PALETTE_PREPARED_INPUT_MODE,
     dry_run: bool = False,
     command: Optional[str] = None,
+    storage_profile: StorageProfile | None = None,
 ) -> dict[str, object]:
     """Run or dry-run the optional Megabouts classifier adapter."""
 
@@ -1131,6 +1204,7 @@ def run_megabouts_classifier(
         overwrite=overwrite,
         exclude_cs=exclude_cs,
         command=command,
+        storage_profile=storage_profile,
     )
     n_bouts = int(pack.valid_bout.shape[0])
     summary = {
@@ -1160,6 +1234,13 @@ def run_megabouts_classifier(
             "align_traj_to_onset": bool(align_traj_to_onset),
             "traj_reference_index": int(traj_reference_index),
         },
+        "storage_profile_id": (
+            storage_profile.profile_id if storage_profile is not None else None
+        ),
+        "storage_profile_role": (
+            ANALYSIS_STORAGE_PROFILE_ROLE if storage_profile is not None else "legacy"
+        ),
+        "selector_eligible": storage_profile is None,
         **_runtime_attrs(result.runtime),
     }
     return dict(_json_safe(summary))
@@ -1174,6 +1255,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--run-name",
         default=None,
         help="Output analysis/bout_classification_runs/<run> name.",
+    )
+    parser.add_argument(
+        "--storage-profile",
+        choices=("published_http_v1", "detection_regular_rollback_v1"),
+        help=(
+            "Explicit unpromoted byte-planned candidate profile. Supplying it "
+            "writes a complete selector-ineligible candidate; omission preserves "
+            "the legacy physical layout and activation behavior."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -1277,6 +1367,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         classifier_input_mode=str(args.classifier_input_mode),
         dry_run=bool(args.dry_run),
         command=command,
+        storage_profile=(
+            get_storage_profile(args.storage_profile)
+            if args.storage_profile is not None
+            else None
+        ),
     )
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0

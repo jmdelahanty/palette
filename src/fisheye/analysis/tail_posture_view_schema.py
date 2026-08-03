@@ -34,6 +34,7 @@ TAIL_POSTURE_VIEW_ARRAY_SCHEMA_DIGEST_ATTR = (
 TAIL_POSTURE_VIEW_PHYSICAL_POLICY_OWNER = (
     "refined_subject_mask_metric_row_chunk_compatibility"
 )
+TAIL_POSTURE_VIEW_BYTE_PLANNER_OWNER = "analysis_storage_planning_v1"
 TAIL_POSTURE_FAILURE_REASON_BYTES_WIDTH = 64
 
 
@@ -99,6 +100,7 @@ def _declaration(
     null: str,
     units: str | None = None,
     coordinate_space: str | None = None,
+    byte_planner_adopted: bool = False,
 ) -> AnalysisArrayDeclaration:
     return AnalysisArrayDeclaration(
         path=path,
@@ -116,14 +118,18 @@ def _declaration(
         authority_role=authority,
         fill_semantics=fill,
         null_semantics=null,
-        physical_policy_owner=TAIL_POSTURE_VIEW_PHYSICAL_POLICY_OWNER,
-        byte_planner_adopted=False,
+        physical_policy_owner=(
+            TAIL_POSTURE_VIEW_BYTE_PLANNER_OWNER
+            if byte_planner_adopted
+            else TAIL_POSTURE_VIEW_PHYSICAL_POLICY_OWNER
+        ),
+        byte_planner_adopted=byte_planner_adopted,
     )
 
 
-def build_tail_posture_view_array_declarations() -> (
-    tuple[AnalysisArrayDeclaration, ...]
-):
+def build_tail_posture_view_array_declarations(
+    *, byte_planner_adopted: bool = False
+) -> tuple[AnalysisArrayDeclaration, ...]:
     lineage = AnalysisAuthorityRole.LINEAGE_INDEX
     view = AnalysisAuthorityRole.COMPATIBILITY_ALIAS
     quality = AnalysisAuthorityRole.QUALITY_DIAGNOSTIC
@@ -138,6 +144,7 @@ def build_tail_posture_view_array_declarations() -> (
             authority=lineage,
             fill="every row stores one unique upstream observation identity; no sentinel",
             null="all rows are present",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "source_crop_row_ids",
@@ -147,6 +154,7 @@ def build_tail_posture_view_array_declarations() -> (
             authority=lineage,
             fill="every row stores a nonnegative canonical crop-row identity; no sentinel",
             null="all rows are present",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "source_acquisition_frame_index",
@@ -157,6 +165,7 @@ def build_tail_posture_view_array_declarations() -> (
             fill="every row stores a nonnegative acquisition-frame index; no sentinel",
             null="all rows are present",
             units="camera_frame",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "valid",
@@ -166,6 +175,7 @@ def build_tail_posture_view_array_declarations() -> (
             authority=quality,
             fill="false means every floating posture payload for the row is NaN",
             null="all rows are present",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "failure_reason_bytes",
@@ -175,6 +185,7 @@ def build_tail_posture_view_array_declarations() -> (
             authority=quality,
             fill="UTF-8 reason followed by NUL and zero padding to exactly 64 bytes",
             null="valid rows store ok; invalid rows store a nonempty reason",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "head_xy",
@@ -186,6 +197,7 @@ def build_tail_posture_view_array_declarations() -> (
             null="valid is the validity bitmap",
             units="px",
             coordinate_space="source_camera_pixels",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "head_yaw_rad",
@@ -197,6 +209,7 @@ def build_tail_posture_view_array_declarations() -> (
             null="valid is the validity bitmap",
             units="rad",
             coordinate_space="source_camera_image_xy_heading",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "tail_keypoints_xy",
@@ -208,6 +221,7 @@ def build_tail_posture_view_array_declarations() -> (
             null="valid is the validity bitmap",
             units="px",
             coordinate_space="source_camera_pixels",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "tail_angle_rad",
@@ -219,6 +233,7 @@ def build_tail_posture_view_array_declarations() -> (
             null="valid is the validity bitmap",
             units="rad",
             coordinate_space="megabouts_cumulative_segment_angle",
+            byte_planner_adopted=byte_planner_adopted,
         ),
         _declaration(
             "tail_angle_deg",
@@ -230,6 +245,7 @@ def build_tail_posture_view_array_declarations() -> (
             null="valid is the validity bitmap",
             units="deg",
             coordinate_space="megabouts_cumulative_segment_angle",
+            byte_planner_adopted=byte_planner_adopted,
         ),
     )
     paths = tuple(item.path for item in declarations)
@@ -239,10 +255,23 @@ def build_tail_posture_view_array_declarations() -> (
 
 
 TAIL_POSTURE_VIEW_ARRAY_DECLARATIONS = build_tail_posture_view_array_declarations()
+TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS = (
+    build_tail_posture_view_array_declarations(byte_planner_adopted=True)
+)
+TAIL_POSTURE_VIEW_ACCESS_UNIT_SEMANTICS = {
+    declaration.path: "one complete observation row including all trailing fields"
+    for declaration in TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS
+}
+TAIL_POSTURE_VIEW_FILL_VALUES = {
+    declaration.path: (False if declaration.contract.dtype.numpy_dtype == "bool" else 0)
+    for declaration in TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS
+}
 
 
 def tail_posture_view_array_schema_manifest(
     dimensions: TailPostureViewDimensions,
+    *,
+    byte_planner_adopted: bool = False,
 ) -> dict[str, object]:
     return {
         "schema_id": TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ID,
@@ -251,9 +280,12 @@ def tail_posture_view_array_schema_manifest(
         "run_schema_version": TAIL_POSTURE_VIEW_RUN_SCHEMA_VERSION,
         "dimensions": dimensions.contract_dimensions,
         "arrays": [
-            item.as_manifest() for item in build_tail_posture_view_array_declarations()
+            item.as_manifest()
+            for item in build_tail_posture_view_array_declarations(
+                byte_planner_adopted=byte_planner_adopted
+            )
         ],
-        "byte_planner_adopted": False,
+        "byte_planner_adopted": byte_planner_adopted,
     }
 
 
@@ -303,8 +335,16 @@ def validate_tail_posture_view_arrays(
     dimensions: TailPostureViewDimensions,
 ) -> tuple[TailPostureViewSchemaIssue, ...]:
     issues: list[TailPostureViewSchemaIssue] = []
+    persisted = run_group.attrs.get(TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR)
+    persisted_adopted = (
+        persisted.get("byte_planner_adopted") if isinstance(persisted, dict) else None
+    )
+    byte_planner_adopted = persisted_adopted is True
     expected = {
-        item.path: item for item in build_tail_posture_view_array_declarations()
+        item.path: item
+        for item in build_tail_posture_view_array_declarations(
+            byte_planner_adopted=byte_planner_adopted
+        )
     }
     arrays = collect_tail_posture_view_arrays(run_group)
     for path in sorted(set(arrays) - set(expected)):
@@ -331,8 +371,10 @@ def validate_tail_posture_view_arrays(
                 TailPostureViewSchemaIssue("array_contract_violation", path, error)
             )
 
-    expected_manifest = tail_posture_view_array_schema_manifest(dimensions)
-    persisted = run_group.attrs.get(TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR)
+    expected_manifest = tail_posture_view_array_schema_manifest(
+        dimensions,
+        byte_planner_adopted=byte_planner_adopted,
+    )
     try:
         manifest_matches = canonical_exact_json_bytes(persisted) == (
             canonical_exact_json_bytes(expected_manifest)
@@ -359,6 +401,34 @@ def validate_tail_posture_view_arrays(
                 "Persisted digest must bind the exact executable declaration.",
             )
         )
+    from .direct_writer_storage import (
+        ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
+        validate_direct_writer_storage_receipt,
+    )
+
+    if byte_planner_adopted:
+        for message in validate_direct_writer_storage_receipt(
+            run_group,
+            declarations=TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS,
+            access_unit_semantics=TAIL_POSTURE_VIEW_ACCESS_UNIT_SEMANTICS,
+            fill_values=TAIL_POSTURE_VIEW_FILL_VALUES,
+            dimensions=dimensions.contract_dimensions,
+        ):
+            issues.append(
+                TailPostureViewSchemaIssue(
+                    "storage_plan_mismatch",
+                    ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
+                    message,
+                )
+            )
+    elif run_group.attrs.get(ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR) is not None:
+        issues.append(
+            TailPostureViewSchemaIssue(
+                "storage_plan_mismatch",
+                ANALYSIS_STORAGE_PLAN_RECEIPT_ATTR,
+                "Legacy physical declaration cannot carry a candidate receipt.",
+            )
+        )
     return tuple(issues)
 
 
@@ -368,13 +438,15 @@ def write_tail_posture_view_array_schema_manifest(
     n_rows: int,
     n_keypoints: int,
     n_angles: int,
+    byte_planner_adopted: bool = False,
 ) -> dict[str, object]:
     manifest = tail_posture_view_array_schema_manifest(
         TailPostureViewDimensions(
             n_rows=n_rows,
             n_keypoints=n_keypoints,
             n_angles=n_angles,
-        )
+        ),
+        byte_planner_adopted=byte_planner_adopted,
     )
     run_group.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_ATTR] = manifest
     run_group.attrs[TAIL_POSTURE_VIEW_ARRAY_SCHEMA_DIGEST_ATTR] = (

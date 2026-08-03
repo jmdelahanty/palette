@@ -43,6 +43,13 @@ from ..shared.zarr_run_completion import (
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.zarr_io import open_zarr_root
+from ..shared.zarr.storage_profiles import StorageProfile, get_storage_profile
+from .direct_writer_storage import (
+    ANALYSIS_STORAGE_PROFILE_ROLE,
+    build_direct_writer_storage_receipt,
+    create_direct_writer_arrays_from_receipt,
+    persist_direct_writer_storage_receipt,
+)
 from .megabouts_convention_audit import resample_tail_keypoints
 from .subject_shape_io import (
     SubjectShapeIOError,
@@ -51,6 +58,9 @@ from .subject_shape_io import (
     resolve_canonical_subject_shape_run,
 )
 from .tail_posture_view_schema import (
+    TAIL_POSTURE_VIEW_ACCESS_UNIT_SEMANTICS,
+    TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS,
+    TAIL_POSTURE_VIEW_FILL_VALUES,
     TAIL_POSTURE_FAILURE_REASON_BYTES_WIDTH,
     TAIL_POSTURE_VIEW_RUN_SCHEMA_ID,
     TAIL_POSTURE_VIEW_RUN_SCHEMA_VERSION,
@@ -142,6 +152,53 @@ def _write_array(
     if chunks is not None:
         kwargs["chunks"] = tuple(int(value) for value in chunks)
     group.create_array(name, **kwargs)
+
+
+def _read_tail_posture_lineage_arrays(
+    shape_group: zarr.Group,
+    *,
+    row_count: int,
+) -> dict[str, np.ndarray]:
+    arrays: dict[str, np.ndarray] = {}
+    for name in (
+        "instance_key",
+        "source_crop_row_ids",
+        "source_acquisition_frame_index",
+    ):
+        source = shape_group.get(name)
+        if source is None:
+            raise SubjectShapeIOError(
+                f"Canonical subject-shape source lacks required direct {name!r}."
+            )
+        values = np.asarray(source[:])
+        if values.ndim != 1 or int(values.shape[0]) != int(row_count):
+            raise SubjectShapeIOError(
+                f"Canonical subject-shape {name!r} must be one-dimensional and row aligned."
+            )
+        if name == "instance_key":
+            if (
+                values.dtype != np.dtype("uint64")
+                or np.unique(values).size != values.size
+            ):
+                raise SubjectShapeIOError(
+                    "Canonical subject-shape instance_key must be unique uint64."
+                )
+        else:
+            if values.dtype.kind not in {"i", "u"} or np.any(values < 0):
+                raise SubjectShapeIOError(
+                    f"Canonical subject-shape {name!r} must be non-negative integer identity."
+                )
+            if (
+                values.dtype.kind == "u"
+                and values.size
+                and int(values.max()) > np.iinfo(np.int64).max
+            ):
+                raise SubjectShapeIOError(
+                    f"Canonical subject-shape {name!r} exceeds exact int64 range."
+                )
+            values = values.astype(np.int64, copy=False)
+        arrays[name] = values
+    return arrays
 
 
 def _resolve_subject_shape_tables(
@@ -616,6 +673,7 @@ def _prepare_run_group(
     stage_command: str,
     publication_owner_uuid: str,
     overwrite: bool,
+    legacy_storage_layout: bool = True,
 ) -> zarr.Group:
     analysis = root.require_group("analysis")
     parent = require_runs_parent(analysis, "tail_posture_view_runs")
@@ -652,51 +710,19 @@ def _prepare_run_group(
         )
     _set_reason_bytes_attrs(run_group)
 
-    copied: list[str] = []
-    for name in (
-        "instance_key",
-        "source_crop_row_ids",
-        "source_acquisition_frame_index",
-    ):
-        source = shape_group.get(name)
-        if source is None:
-            raise SubjectShapeIOError(
-                f"Canonical subject-shape source lacks required direct {name!r}."
+    lineage_arrays = _read_tail_posture_lineage_arrays(
+        shape_group,
+        row_count=row_count,
+    )
+    copied = list(lineage_arrays)
+    if legacy_storage_layout:
+        for name, values in lineage_arrays.items():
+            _write_array(
+                run_group,
+                name,
+                values,
+                chunks=_metric_chunks(row_count),
             )
-        values = np.asarray(source[:])
-        if values.ndim != 1 or int(values.shape[0]) != int(row_count):
-            raise SubjectShapeIOError(
-                f"Canonical subject-shape {name!r} must be one-dimensional and row aligned."
-            )
-        if name == "instance_key":
-            if (
-                values.dtype != np.dtype("uint64")
-                or np.unique(values).size != values.size
-            ):
-                raise SubjectShapeIOError(
-                    "Canonical subject-shape instance_key must be unique uint64."
-                )
-        else:
-            if values.dtype.kind not in {"i", "u"} or np.any(values < 0):
-                raise SubjectShapeIOError(
-                    f"Canonical subject-shape {name!r} must be non-negative integer identity."
-                )
-            if (
-                values.dtype.kind == "u"
-                and values.size
-                and int(values.max()) > np.iinfo(np.int64).max
-            ):
-                raise SubjectShapeIOError(
-                    f"Canonical subject-shape {name!r} exceeds exact int64 range."
-                )
-            values = values.astype(np.int64, copy=False)
-        _write_array(
-            run_group,
-            name,
-            values,
-            chunks=_metric_chunks(row_count),
-        )
-        copied.append(name)
 
     created = _utc_now()
     angle_count = int(keypoint_count) - 1
@@ -865,6 +891,7 @@ def write_tail_posture_view_run_group(
     overwrite: bool = False,
     dry_run: bool = False,
     stage_command: Optional[str] = None,
+    storage_profile: StorageProfile | None = None,
 ) -> dict[str, object]:
     """Write one tool-compatible tail posture view from subject-shape geometry."""
 
@@ -893,6 +920,12 @@ def write_tail_posture_view_run_group(
         "keypoint_count": int(keypoint_count),
         "angle_count": int(keypoint_count) - 1,
         "mutates_archive": not bool(dry_run),
+        "storage_profile_id": (
+            storage_profile.profile_id if storage_profile is not None else None
+        ),
+        "storage_profile_role": (
+            ANALYSIS_STORAGE_PROFILE_ROLE if storage_profile is not None else "legacy"
+        ),
     }
     if dry_run:
         return dict(_json_safe(summary))
@@ -902,6 +935,36 @@ def write_tail_posture_view_run_group(
         **sources,
         keypoint_count=int(keypoint_count),
     )
+    storage_receipt = None
+    candidate_arrays: dict[str, np.ndarray] | None = None
+    if storage_profile is not None:
+        lineage_arrays = _read_tail_posture_lineage_arrays(
+            shape_group,
+            row_count=row_count,
+        )
+        candidate_arrays = {
+            **lineage_arrays,
+            "valid": batch.valid.astype(bool, copy=False),
+            "failure_reason_bytes": batch.failure_reason_bytes.astype(
+                np.uint8, copy=False
+            ),
+            "head_xy": batch.head_xy.astype(np.float32, copy=False),
+            "head_yaw_rad": batch.head_yaw_rad.astype(np.float32, copy=False),
+            "tail_keypoints_xy": batch.tail_keypoints_xy.astype(np.float32, copy=False),
+            "tail_angle_rad": batch.tail_angle_rad.astype(np.float32, copy=False),
+            "tail_angle_deg": batch.tail_angle_deg.astype(np.float32, copy=False),
+        }
+        storage_receipt = build_direct_writer_storage_receipt(
+            declarations=TAIL_POSTURE_VIEW_CANDIDATE_ARRAY_DECLARATIONS,
+            arrays_by_path=candidate_arrays,
+            access_unit_semantics=TAIL_POSTURE_VIEW_ACCESS_UNIT_SEMANTICS,
+            profile=storage_profile,
+            dimensions={
+                "n_rows": row_count,
+                "n_keypoints": int(batch.tail_keypoints_xy.shape[1]),
+                "n_angles": int(batch.tail_angle_rad.shape[1]),
+            },
+        )
     command = stage_command or (" ".join(sys.argv) if sys.argv else "unknown")
     publication_owner_uuid = str(uuid.uuid4())
     run_group: zarr.Group | None = None
@@ -922,8 +985,19 @@ def write_tail_posture_view_run_group(
             stage_command=command,
             publication_owner_uuid=publication_owner_uuid,
             overwrite=overwrite,
+            legacy_storage_layout=storage_receipt is None,
         )
-        _write_batch(run_group, batch)
+        if storage_receipt is None:
+            _write_batch(run_group, batch)
+        else:
+            assert candidate_arrays is not None
+            persist_direct_writer_storage_receipt(run_group, storage_receipt)
+            create_direct_writer_arrays_from_receipt(
+                run_group,
+                receipt=storage_receipt,
+                arrays_by_path=candidate_arrays,
+                fill_values=TAIL_POSTURE_VIEW_FILL_VALUES,
+            )
         dimensions = TailPostureViewDimensions(
             n_rows=row_count,
             n_keypoints=int(batch.tail_keypoints_xy.shape[1]),
@@ -934,6 +1008,7 @@ def write_tail_posture_view_run_group(
             n_rows=dimensions.n_rows,
             n_keypoints=dimensions.n_keypoints,
             n_angles=dimensions.n_angles,
+            byte_planner_adopted=storage_receipt is not None,
         )
         schema_issues = validate_tail_posture_view_arrays(
             run_group,
@@ -993,9 +1068,14 @@ def write_tail_posture_view_run_group(
                 "failure_reason_counts": reason_counts,
                 "duration_seconds": duration_seconds,
                 "rows_per_second": rows_per_second,
+                "selector_eligible": storage_receipt is None,
             }
         )
         result = dict(_json_safe(summary))
+        if storage_receipt is not None:
+            result["status"] = "candidate_complete"
+            result["storage_plan"] = storage_receipt.as_manifest()
+            return result
         activate_tail_coordinate_publication(
             root,
             parent,
@@ -1034,6 +1114,7 @@ def write_tail_posture_view_run(
     source_tail_kinematics_run: Optional[str] = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    storage_profile: StorageProfile | None = None,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
     return write_tail_posture_view_run_group(
@@ -1046,6 +1127,7 @@ def write_tail_posture_view_run(
         source_tail_kinematics_run=source_tail_kinematics_run,
         overwrite=overwrite,
         dry_run=dry_run,
+        storage_profile=storage_profile,
     )
 
 
@@ -1094,6 +1176,23 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resolve inputs without mutating the archive.",
     )
+    parser.add_argument(
+        "--storage-profile",
+        choices=tuple(
+            sorted(
+                profile_id
+                for profile_id in (
+                    "published_http_v1",
+                    "detection_regular_rollback_v1",
+                )
+            )
+        ),
+        help=(
+            "Explicit unpromoted byte-planned candidate profile. Supplying it "
+            "writes a complete selector-ineligible candidate; omission preserves "
+            "the legacy physical layout and activation behavior."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser
 
@@ -1111,6 +1210,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         source_tail_kinematics_run=args.source_tail_kinematics_run,
         overwrite=bool(args.overwrite),
         dry_run=bool(args.dry_run),
+        storage_profile=(
+            get_storage_profile(args.storage_profile)
+            if args.storage_profile is not None
+            else None
+        ),
     )
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0
