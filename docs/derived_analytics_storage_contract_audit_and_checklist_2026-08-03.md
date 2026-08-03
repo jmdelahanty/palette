@@ -252,7 +252,7 @@ a safe base for new work.
 | Tail-kinematics byte candidate | historical isolated lane | integrated as `600fab64` | Exact 21-array core, revision bundle, planner/factory candidate, metadata equivalence, and lifecycle guards | Integrated; remains explicit and selector-ineligible |
 | Track-kinematics exact schema | historical isolated lane | integrated as `af38edba` | Exact current motion vocabulary and explicit shared-factory blocker | Integrated; no physical candidate was created |
 | Shared compact rematerialization | coordination lane | integrated as `5d7fb30c` | Exact declaration-bound replanning, frame-axis growth, whole-physical-unit writes, receipt and metadata validation | Infrastructure only; family adoption remains explicit and opt-in |
-| Shared compact candidate publication | coordination lane | integrated as `d82dcf41` | Immutable selector-ineligible swim-bout and bout-kinematics candidates, logical hashes, local metadata equivalence, and selector non-mutation | Candidate evidence only; benchmark and promotion remain pending |
+| Shared compact candidate publication | coordination lane | integrated from `d82dcf41` | Immutable selector-ineligible swim-bout and bout-kinematics candidates, logical hashes, local and authoritative-root metadata equivalence, and selector non-mutation | Candidate evidence only; benchmark and promotion remain pending |
 
 The next safe parallel wave assigns disjoint ownership as follows. The
 coordination lane remains the only owner of shared catalogs, planner/factory
@@ -321,7 +321,9 @@ now implemented on the coordination branch:
 - selector-ineligible exact compact candidate publication for swim bouts and
   bout kinematics, including node-local rematerialization, per-array logical
   hashes, receipt validation, local direct/consolidated metadata equivalence,
-  atomic run-group publication, and unchanged authority pointers: `d82dcf41`.
+  atomic run-group publication, authoritative-root reconsolidation after the
+  final publisher metadata write, and unchanged authority pointers: begun in
+  `d82dcf41` and hardened in the following coordination checkpoint.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
@@ -336,10 +338,11 @@ the integrated tail/planner checkpoint passed 49 focused tests. Track schema
 validation passed six exact-schema tests and the established 108-test motion
 publication suite. The shared compact rematerializer and exact compact schemas
 passed 24 focused tests. The compact candidate publisher passed seven focused
-candidate tests and nine existing materializer tests. Its maintained readers
-passed 18 swim-bout and 18 bout-kinematics tests after the latter's historical
-fixture was made explicit about completion, eligibility, and compatibility.
-These are correctness results, not full-duration performance evidence.
+candidate tests, including authoritative consolidated opens, and nine existing
+materializer tests. The combined rematerializer, publisher, and maintained
+reader matrix passed 47 tests after the historical bout-kinematics fixture was
+made explicit about completion, eligibility, and compatibility. These are
+correctness results, not full-duration performance evidence.
 
 ### Phase 0 — Preserve the audit baseline
 

@@ -155,6 +155,24 @@ def test_exact_tabular_candidate_publishes_complete_ineligible_without_pointer_c
         "storage_profile"
     ]["profile_id"] == "published_http_v1"
     assert result["local_validation"]["array_count"] > 20
+    assert result["archive_direct_consolidated_array_count"] == result[
+        "local_validation"
+    ]["array_count"]
+    consolidated = zarr.open_group(str(archive), mode="r", use_consolidated=True)
+    consolidated_candidate = consolidated[f"analysis/{parent_name}/candidate"]
+    assert consolidated_candidate.attrs["stage_selector_eligible"] is False
+    assert (
+        consolidated_candidate.attrs["palette_run_completion_status"]
+        == "complete"
+    )
+    probe_array = (
+        "indexes/candidates/candidate_id"
+        if family == "swim_bouts"
+        else "level_index/analysis_level_id"
+    )
+    assert tuple(consolidated_candidate[probe_array].shape) == tuple(
+        candidate[probe_array].shape
+    )
 
 
 @pytest.mark.parametrize("selector_value", [False, None])

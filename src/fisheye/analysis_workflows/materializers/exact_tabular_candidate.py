@@ -296,10 +296,18 @@ def _local_direct_consolidated_check(
     consolidated_root = zarr.open_group(
         str(local_zarr), mode="r", use_consolidated=True
     )
-    direct = _metadata_declarations(direct_root[run_path], declarations)
-    consolidated = _metadata_declarations(
-        consolidated_root[run_path], declarations
-    )
+    direct_run = direct_root[run_path]
+    consolidated_run = consolidated_root[run_path]
+    # A consolidated group node embeds descendant declarations in its
+    # ``consolidated_metadata`` envelope, while the direct group node does not.
+    # Compare the run's semantic attributes here and every exact array below;
+    # do not confuse that representation-only envelope with contract drift.
+    if _normalize_metadata(dict(direct_run.attrs)) != _normalize_metadata(
+        dict(consolidated_run.attrs)
+    ):
+        raise ValueError("Direct and consolidated candidate group attributes differ.")
+    direct = _metadata_declarations(direct_run, declarations)
+    consolidated = _metadata_declarations(consolidated_run, declarations)
     if _normalize_metadata(direct) != _normalize_metadata(consolidated):
         raise ValueError("Direct and consolidated candidate declarations differ.")
     return len(direct)
@@ -486,6 +494,30 @@ def materialize_exact_tabular_candidate(
                     "Published exact compact candidate is not complete and ineligible."
                 )
 
+        archive_consolidated_counts: list[int] = []
+
+        def consolidate_archive(
+            _root: zarr.Group,
+            _parent: zarr.Group,
+            run_group: zarr.Group,
+        ) -> None:
+            if (
+                run_group.attrs.get("stage_selector_eligible") is not False
+                or run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+                != RUN_STATUS_COMPLETE
+            ):
+                raise RuntimeError(
+                    "Exact compact candidate lost its complete ineligible state "
+                    "before metadata consolidation."
+                )
+            archive_consolidated_counts.append(
+                _local_direct_consolidated_check(
+                    plan.source_zarr,
+                    run_path=plan.run_path,
+                    declarations=candidate_declarations,
+                )
+            )
+
         publication = atomic_publish_run_group(
             AtomicRunPublishSpec(
                 source_zarr=plan.source_zarr,
@@ -504,6 +536,7 @@ def materialize_exact_tabular_candidate(
             prepare_parents=prepare,
             complete_run=complete,
             verify_pointers=verify,
+            activate_run=consolidate_archive,
             payload_metadata={
                 "profile_id": plan.profile_id,
                 "source_run": plan.source_run_name,
@@ -512,10 +545,17 @@ def materialize_exact_tabular_candidate(
                 "materialization_seconds": materialization_seconds,
             },
         )
+        if archive_consolidated_counts != [len(candidate_declarations)]:
+            raise RuntimeError(
+                "Exact compact archive metadata was not consolidated exactly once."
+            )
         result.update(
             status="complete",
             local_validation=local_validation,
             local_direct_consolidated_array_count=compared,
+            archive_direct_consolidated_array_count=(
+                archive_consolidated_counts[0]
+            ),
             materialization_seconds=materialization_seconds,
             publication=publication,
         )
