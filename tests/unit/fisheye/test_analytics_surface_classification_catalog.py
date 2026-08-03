@@ -1,5 +1,6 @@
 from dataclasses import replace
 import importlib
+import inspect
 import json
 
 import pytest
@@ -216,6 +217,10 @@ def test_active_swim_bout_statistics_writer_is_an_explicit_namespace_collision()
     )
     assert statistics.central_storage_catalog_required is False
     assert statistics.surface_id not in DERIVED_ANALYSIS_STORAGE_CONTRACT_BY_STAGE
+    writer = importlib.import_module("fisheye.analysis.swim_bout_statistics")
+    publication_source = inspect.getsource(writer._save_report_to_zarr)
+    assert "stage_selector_eligible" not in publication_source
+    assert "activate_selector_eligible_run" not in publication_source
 
 
 def test_track_visualization_agrees_with_stage_and_run_parent_catalogs() -> None:
