@@ -34,6 +34,7 @@ from fisheye.shared.zarr.subject_mask_core_publication import (
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
+from fisheye.shared.zarr_run_completion import require_runs_parent
 
 CANARY_SCHEMA_ID = "palette.subject_mask.sampled_contour_full_duration_canary"
 CANARY_SCHEMA_VERSION = 1
@@ -103,7 +104,7 @@ def _stage_refined_source(
 
     local_root = zarr.open_group(str(destination), mode="w-", zarr_format=3)
     local_root.attrs.update(dict(source_root.attrs))
-    local_family = local_root.create_group("refined_subject_masks_runs")
+    local_family = require_runs_parent(local_root, "refined_subject_masks_runs")
     source_family = source_root["refined_subject_masks_runs"]
     local_family.attrs.update(dict(source_family.attrs))
     shutil.copytree(
