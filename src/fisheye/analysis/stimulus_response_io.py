@@ -15,6 +15,12 @@ import numpy as np
 import zarr
 
 from fisheye.shared.zarr.columnar import read_columnar_dataset
+from fisheye.shared.zarr.stimulus_response_schema import (
+    STIMULUS_RESPONSE_LAYOUT,
+    STIMULUS_RESPONSE_SCHEMA_ID,
+    STIMULUS_RESPONSE_SCHEMA_VERSION,
+    validate_stimulus_response_v3_run,
+)
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_helpers import (
     read_zarr_array_mapping,
@@ -151,6 +157,9 @@ def _filter_mapping_by_step(mapping: Mapping[str, np.ndarray], step_index: int) 
         "start_frame",
         "end_frame",
         "duration_s",
+        "step_start_frame",
+        "step_end_frame",
+        "step_duration_s",
         "stimulus_family",
         "metric_family",
     }
@@ -376,7 +385,11 @@ def _resolve_compact_tabular_v2(run_group: zarr.Group, *, layout: str) -> Stimul
     )
 
 
-def resolve_stimulus_response_tables(run_group: zarr.Group) -> StimulusResponseTables:
+def resolve_stimulus_response_tables(
+    run_group: zarr.Group,
+    *,
+    legacy_compatibility: bool = True,
+) -> StimulusResponseTables:
     """Return logical stimulus-response tables for a run group.
 
     Current production runs use the hierarchical-v1 physical layout. Future
@@ -386,6 +399,13 @@ def resolve_stimulus_response_tables(run_group: zarr.Group) -> StimulusResponseT
 
     attrs = _attrs_dict(run_group)
     layout = str(attrs.get("layout") or attrs.get("storage_layout") or "hierarchical_v1")
+    if layout == STIMULUS_RESPONSE_LAYOUT:
+        return resolve_stimulus_response_v3_tables(run_group)
+    if not legacy_compatibility:
+        raise ValueError(
+            "Stimulus-response v2/hierarchical reads require "
+            "legacy_compatibility=True."
+        )
     if layout == "compact_tabular_v2":
         return _resolve_compact_tabular_v2(run_group, layout=layout)
     if layout in {"hierarchical_v1", "legacy", ""} or _has_child(run_group, "steps"):
@@ -393,19 +413,50 @@ def resolve_stimulus_response_tables(run_group: zarr.Group) -> StimulusResponseT
     raise ValueError(f"Unsupported stimulus_response layout: {layout}")
 
 
+def resolve_stimulus_response_v3_tables(
+    run_group: zarr.Group,
+) -> StimulusResponseTables:
+    """Strictly validate and resolve one exact compact-tabular-v3 run."""
+
+    attrs = _attrs_dict(run_group)
+    if (
+        attrs.get("schema_id") != STIMULUS_RESPONSE_SCHEMA_ID
+        or type(attrs.get("schema_version")) is not int
+        or attrs.get("schema_version") != STIMULUS_RESPONSE_SCHEMA_VERSION
+        or attrs.get("layout") != STIMULUS_RESPONSE_LAYOUT
+    ):
+        raise ValueError(
+            "Strict stimulus-response v3 reads require exact schema and layout identity."
+        )
+    errors = validate_stimulus_response_v3_run(run_group)
+    if errors:
+        raise ValueError("Invalid stimulus-response v3 run: " + "; ".join(errors))
+    return _resolve_compact_tabular_v2(run_group, layout=STIMULUS_RESPONSE_LAYOUT)
+
+
 def moving_grating_omr_steps(
     run_group: zarr.Group,
+    *,
+    legacy_compatibility: bool = True,
 ) -> tuple[StimulusResponseStepTables, ...]:
     """Return steps that contain moving-grating OMR tables."""
 
-    tables = resolve_stimulus_response_tables(run_group)
+    tables = resolve_stimulus_response_tables(
+        run_group,
+        legacy_compatibility=legacy_compatibility,
+    )
     return tuple(step for step in tables.steps if step.moving_grating_omr is not None)
 
 
 def concentric_radial_omr_steps(
     run_group: zarr.Group,
+    *,
+    legacy_compatibility: bool = True,
 ) -> tuple[StimulusResponseStepTables, ...]:
     """Return steps that contain concentric radial-OMR tables."""
 
-    tables = resolve_stimulus_response_tables(run_group)
+    tables = resolve_stimulus_response_tables(
+        run_group,
+        legacy_compatibility=legacy_compatibility,
+    )
     return tuple(step for step in tables.steps if step.concentric_radial_omr is not None)

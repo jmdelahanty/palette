@@ -51,7 +51,18 @@ from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
-from fisheye.shared.zarr.columnar import write_columnar_dataset
+from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
+from fisheye.shared.zarr.stimulus_response_schema import (
+    STIMULUS_RESPONSE_ARRAY_SCHEMA_ATTR,
+    STIMULUS_RESPONSE_BUNDLES_ATTR,
+    STIMULUS_RESPONSE_LAYOUT as STIMULUS_RESPONSE_LAYOUT_COMPACT_V3,
+    STIMULUS_RESPONSE_SCHEMA_ID,
+    STIMULUS_RESPONSE_SCHEMA_VERSION as STIMULUS_RESPONSE_V3_SCHEMA_VERSION,
+    stimulus_response_array_manifest,
+    table_contract,
+    validate_mapping,
+    validate_stimulus_response_v3_run,
+)
 from fisheye.analysis.track_kinematics_io import (
     load_track_kinematics_track,
     resolve_track_kinematics_run,
@@ -1712,8 +1723,11 @@ class LoomStepData:
 STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 STIMULUS_RESPONSE_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
 STIMULUS_RESPONSE_LAYOUT_DEFAULT = STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
-STIMULUS_RESPONSE_SCHEMA_ID = "palette.stimulus_response"
+# Preserve the producer-module symbol consumed by the integrated catalog until
+# v3 is intentionally made the maintained default.  The executable v3 contract
+# lives in ``fisheye.shared.zarr.stimulus_response_schema``.
 STIMULUS_RESPONSE_SCHEMA_VERSION = 2
+STIMULUS_RESPONSE_LEGACY_SCHEMA_VERSION = STIMULUS_RESPONSE_SCHEMA_VERSION
 STIMULUS_RESPONSE_METHOD_VERSION = "stimulus_response.v3"
 
 
@@ -1832,6 +1846,163 @@ def _write_rows_table(
     return True
 
 
+def _exact_mapping_to_rows(
+    table_name: str,
+    mapping: Mapping[str, np.ndarray],
+    *,
+    constants: Mapping[str, Any],
+    bundles: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Convert one exact typed mapping without dropping or coercing fields."""
+
+    overlap = set(mapping) & set(constants)
+    if overlap:
+        raise ValueError(
+            f"{table_name} constants overlap payload fields: {sorted(overlap)!r}."
+        )
+    n_rows = validate_mapping(
+        table_name,
+        mapping,
+        bundles=bundles,
+        excluded_fields=tuple(constants),
+    )
+    rows: list[dict[str, Any]] = []
+    for row_index in range(n_rows):
+        row = dict(constants)
+        for name, values in mapping.items():
+            row[name] = _scalar_for_record(np.asarray(values)[row_index])
+        rows.append(row)
+    return rows
+
+
+def _encode_exact_text(values: Sequence[Any], *, width: int, path: str) -> np.ndarray:
+    encoded = np.zeros((len(values), width), dtype=np.uint8)
+    for row_index, value in enumerate(values):
+        text = value if isinstance(value, str) else str(value)
+        payload = text.encode("utf-8")
+        if len(payload) >= width:
+            raise ValueError(
+                f"{path} UTF-8 payload is {len(payload)} bytes; maximum is {width - 1}."
+            )
+        if payload:
+            encoded[row_index, : len(payload)] = np.frombuffer(payload, dtype=np.uint8)
+    return encoded
+
+
+def _write_exact_rows_table(
+    parent: zarr.Group,
+    name: str,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    bundles: Sequence[str],
+    attrs: Mapping[str, Any] | None = None,
+) -> None:
+    """Write all declared columns, including a typed zero-row table."""
+
+    table = table_contract(name, bundles=bundles)
+    expected_fields = set(table.field_names)
+    for row_index, row in enumerate(rows):
+        observed = set(row)
+        if observed != expected_fields:
+            raise ValueError(
+                f"{name} row {row_index} fields must be exact; "
+                f"missing={sorted(expected_fields-observed)!r}, "
+                f"unexpected={sorted(observed-expected_fields)!r}."
+            )
+    if name in parent:
+        del parent[name]
+    group = parent.create_group(name)
+    group.attrs.update(
+        {
+            "storage_layout": "columnar",
+            "field_names": list(table.field_names),
+            "field_dtypes": {
+                field_name: str(table_field.logical_dtype)
+                for field_name, table_field in table.fields
+            },
+            **_json_safe_attrs(attrs or {}),
+        }
+    )
+    for field_name, table_field in table.fields:
+        values = [row[field_name] for row in rows]
+        if table_field.string_width is not None:
+            data = _encode_exact_text(
+                values,
+                width=table_field.string_width,
+                path=f"{name}/{field_name}",
+            )
+        else:
+            data = np.asarray(values, dtype=table_field.logical_dtype)
+        store_array(group, field_name, data)
+
+
+def _with_fish_ids(
+    mapping: Mapping[str, np.ndarray],
+    fish_ids: np.ndarray,
+    *,
+    label: str,
+) -> dict[str, np.ndarray]:
+    out = dict(mapping)
+    if "fish_id" in out:
+        observed = np.asarray(out["fish_id"])
+        if observed.dtype != np.dtype("int32") or not np.array_equal(observed, fish_ids):
+            raise ValueError(f"{label} fish_id conflicts with the run track inventory.")
+    else:
+        out["fish_id"] = fish_ids
+    return out
+
+
+def _flatten_loom_trial_fish(
+    mapping: Mapping[str, np.ndarray],
+    *,
+    fish_ids: np.ndarray,
+    n_trials: int,
+) -> dict[str, np.ndarray]:
+    expected = {
+        "escaped",
+        "escape_latency_s",
+        "escape_latency_frames",
+        "peak_escape_speed_mm_s",
+        "distance_at_escape_mm",
+        "visual_angle_at_escape_deg",
+        "escape_heading_deg",
+    }
+    if set(mapping) != expected:
+        raise ValueError(
+            "looming_per_trial_per_fish fields must be exact; "
+            f"missing={sorted(expected-set(mapping))!r}, "
+            f"unexpected={sorted(set(mapping)-expected)!r}."
+        )
+    n_fish = int(fish_ids.shape[0])
+    out: dict[str, np.ndarray] = {
+        "fish_id": np.repeat(fish_ids, n_trials).astype(np.int32, copy=False),
+        "trial_index": np.tile(np.arange(n_trials, dtype=np.int32), n_fish),
+    }
+    expected_dtypes = {
+        "escaped": np.dtype("bool"),
+        "escape_latency_s": np.dtype("float32"),
+        "escape_latency_frames": np.dtype("int32"),
+        "peak_escape_speed_mm_s": np.dtype("float32"),
+        "distance_at_escape_mm": np.dtype("float32"),
+        "visual_angle_at_escape_deg": np.dtype("float32"),
+        "escape_heading_deg": np.dtype("float32"),
+    }
+    for name in expected:
+        arr = np.asarray(mapping[name])
+        if arr.shape != (n_fish, n_trials):
+            raise ValueError(
+                f"looming_per_trial_per_fish/{name} must have shape "
+                f"{(n_fish, n_trials)!r}; got {arr.shape!r}."
+            )
+        if arr.dtype != expected_dtypes[name]:
+            raise ValueError(
+                f"looming_per_trial_per_fish/{name} dtype must be "
+                f"{expected_dtypes[name]}; got {arr.dtype}."
+            )
+        out[name] = arr.reshape(-1)
+    return out
+
+
 def _step_constants(step: ProtocolStep) -> dict[str, Any]:
     return {
         "step_index": int(step.index),
@@ -1842,6 +2013,10 @@ def _step_constants(step: ProtocolStep) -> dict[str, Any]:
         "end_frame": int(step.end_frame),
         "duration_s": float(step.duration_s),
     }
+
+
+def _step_join_constants(step: ProtocolStep) -> dict[str, Any]:
+    return {"step_index": int(step.index)}
 
 
 def _step_attr_record(step: ProtocolStep) -> dict[str, Any]:
@@ -2028,6 +2203,332 @@ def _write_stimulus_response_compact_v2(
     }))
 
 
+def _write_stimulus_response_compact_v3(
+    run_group: zarr.Group,
+    *,
+    global_metrics: Mapping[str, np.ndarray],
+    steps: Sequence[ProtocolStep],
+    step_metrics: Sequence[Mapping[str, np.ndarray]],
+    frame_annotations: Optional[Mapping[str, np.ndarray]],
+    step_bout_metrics: Optional[Sequence[Tuple[Mapping[str, np.ndarray], Mapping[str, np.ndarray]]]],
+    step_grating_data: Optional[Mapping[int, GratingStepData]],
+    step_concentric_data: Optional[Mapping[int, ConcentricStepData]],
+    step_loom_data: Optional[Mapping[int, LoomStepData]],
+    global_omr_metrics: Optional[Mapping[str, np.ndarray]],
+) -> None:
+    """Write exact compact-tabular-v3 tables without inferred fields/dtypes."""
+
+    if len(step_metrics) != len(steps):
+        raise ValueError("step_metrics must contain exactly one mapping per step.")
+    if step_bout_metrics is not None and len(step_bout_metrics) != len(steps):
+        raise ValueError("step_bout_metrics must contain exactly one pair per step.")
+    fish_ids = np.asarray(global_metrics.get("fish_id"))
+    if fish_ids.ndim != 1 or fish_ids.dtype != np.dtype("int32"):
+        raise ValueError("compact-tabular-v3 requires exact int32 global fish_id.")
+    if fish_ids.size == 0 or tuple(fish_ids.tolist()) != tuple(
+        sorted(set(int(value) for value in fish_ids.tolist()))
+    ):
+        raise ValueError("compact-tabular-v3 fish_id must be nonempty, unique, and sorted.")
+    step_ids = tuple(int(step.index) for step in steps)
+    if not step_ids or step_ids != tuple(sorted(set(step_ids))):
+        raise ValueError(
+            "compact-tabular-v3 step indices must be nonempty, unique, and sorted."
+        )
+
+    def exact_family_steps(
+        values: Mapping[int, Any] | None,
+        *,
+        stimulus_mode: str,
+        label: str,
+    ) -> dict[int, Any]:
+        if values is None:
+            return {}
+        if any(type(key) is not int for key in values):
+            raise ValueError(f"{label} step keys must be exact integers.")
+        expected = {
+            int(step.index) for step in steps if step.stimulus_mode == stimulus_mode
+        }
+        observed = set(values)
+        if observed != expected:
+            raise ValueError(
+                f"{label} step set must be exact; missing={sorted(expected-observed)!r}, "
+                f"unexpected={sorted(observed-expected)!r}."
+            )
+        if any(value is None for value in values.values()):
+            raise ValueError(f"{label} cannot contain null step payloads.")
+        return dict(values)
+
+    moving_steps = exact_family_steps(
+        step_grating_data,
+        stimulus_mode="MOVING_GRATING",
+        label="step_grating_data",
+    )
+    concentric_steps = exact_family_steps(
+        step_concentric_data,
+        stimulus_mode="CONCENTRIC_GRATING",
+        label="step_concentric_data",
+    )
+    loom_steps = exact_family_steps(
+        step_loom_data,
+        stimulus_mode="LOOMING_DOT",
+        label="step_loom_data",
+    )
+    bundles: list[str] = []
+    if frame_annotations is not None:
+        bundles.append("frame_annotations")
+    if step_bout_metrics is not None:
+        bundles.append("step_bouts")
+    if moving_steps:
+        bundles.append("moving_grating")
+    has_moving_omr = any(data.omr is not None for data in moving_steps.values())
+    if has_moving_omr:
+        if not all(data.omr is not None for data in moving_steps.values()):
+            raise ValueError(
+                "moving_grating_omr is an all-or-none bundle across moving-grating steps."
+            )
+        if global_omr_metrics is None:
+            raise ValueError(
+                "moving_grating_omr requires its global_omr_per_fish table."
+            )
+        bundles.append("moving_grating_omr")
+    elif global_omr_metrics is not None:
+        raise ValueError(
+            "global_omr_per_fish cannot be published without moving_grating_omr."
+        )
+    if concentric_steps:
+        bundles.append("concentric_grating")
+    if any(data.radial_omr is not None for data in concentric_steps.values()):
+        if not all(data.radial_omr is not None for data in concentric_steps.values()):
+            raise ValueError(
+                "concentric_radial_omr is an all-or-none bundle across concentric steps."
+            )
+        bundles.append("concentric_radial_omr")
+    if loom_steps:
+        bundles.append("looming")
+    bundles = sorted(bundles)
+
+    table_rows: dict[str, list[dict[str, Any]]] = {
+        table_name: []
+        for table_name in (
+            "step_index", "global_per_fish", "step_per_fish",
+            "global_omr_per_fish", "frame_annotations", "step_per_bout",
+            "grating_per_fish", "moving_grating_omr_per_fish",
+            "moving_grating_omr_per_bout", "moving_grating_omr_windows",
+            "moving_grating_omr_early_windows", "concentric_per_fish",
+            "concentric_radial_omr_per_fish", "concentric_radial_omr_per_bout",
+            "concentric_radial_omr_windows", "concentric_radial_omr_early_windows",
+            "looming_trials", "looming_per_trial_per_fish", "looming_per_fish",
+        )
+    }
+    table_rows["step_index"] = [
+        {
+            **_step_constants(step),
+            "stimulus_params_json": json.dumps(
+                _json_safe_attr_value(step.stimulus_params),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        }
+        for step in steps
+    ]
+    table_rows["global_per_fish"] = _exact_mapping_to_rows(
+        "global_per_fish", global_metrics, constants={}, bundles=bundles
+    )
+    if global_omr_metrics is not None:
+        table_rows["global_omr_per_fish"] = _exact_mapping_to_rows(
+            "global_omr_per_fish", global_omr_metrics, constants={}, bundles=bundles
+        )
+    if frame_annotations is not None:
+        table_rows["frame_annotations"] = _exact_mapping_to_rows(
+            "frame_annotations", frame_annotations, constants={}, bundles=bundles
+        )
+
+    moving_attrs: list[dict[str, Any]] = []
+    radial_attrs: list[dict[str, Any]] = []
+    looming_attrs: list[dict[str, Any]] = []
+    for index, (step, metrics) in enumerate(zip(steps, step_metrics)):
+        constants = _step_join_constants(step)
+        per_fish = dict(metrics)
+        if step_bout_metrics is not None:
+            bout_per_fish, bout_per_bout = step_bout_metrics[index]
+            overlap = set(per_fish) & set(bout_per_fish)
+            if overlap:
+                raise ValueError(f"step_per_fish duplicate fields: {sorted(overlap)!r}.")
+            per_fish.update(bout_per_fish)
+            table_rows["step_per_bout"].extend(
+                _exact_mapping_to_rows(
+                    "step_per_bout", bout_per_bout, constants=constants, bundles=bundles
+                )
+            )
+        table_rows["step_per_fish"].extend(
+            _exact_mapping_to_rows(
+                "step_per_fish", per_fish, constants=constants, bundles=bundles
+            )
+        )
+
+        grating_data = moving_steps.get(int(step.index))
+        if grating_data is not None:
+            family_constants = constants
+            table_rows["grating_per_fish"].extend(
+                _exact_mapping_to_rows(
+                    "grating_per_fish",
+                    _with_fish_ids(
+                        grating_data.per_fish,
+                        fish_ids,
+                        label="grating_per_fish",
+                    ),
+                    constants=family_constants,
+                    bundles=bundles,
+                )
+            )
+            if grating_data.omr is not None:
+                omr = grating_data.omr
+                metric_constants = constants
+                moving_attrs.append(
+                    {"step_index": int(step.index), "attrs": dict(omr.attrs)}
+                )
+                for table_name, mapping in (
+                    ("moving_grating_omr_per_fish", omr.per_fish),
+                    ("moving_grating_omr_per_bout", omr.per_bout),
+                    ("moving_grating_omr_windows", omr.windows),
+                    ("moving_grating_omr_early_windows", omr.early_windows),
+                ):
+                    table_rows[table_name].extend(
+                        _exact_mapping_to_rows(
+                            table_name,
+                            mapping,
+                            constants=metric_constants,
+                            bundles=bundles,
+                        )
+                    )
+
+        concentric_data = concentric_steps.get(int(step.index))
+        if concentric_data is not None:
+            family_constants = constants
+            table_rows["concentric_per_fish"].extend(
+                _exact_mapping_to_rows(
+                    "concentric_per_fish",
+                    _with_fish_ids(
+                        concentric_data.per_fish,
+                        fish_ids,
+                        label="concentric_per_fish",
+                    ),
+                    constants=family_constants,
+                    bundles=bundles,
+                )
+            )
+            if concentric_data.radial_omr is not None:
+                radial = concentric_data.radial_omr
+                metric_constants = constants
+                radial_attrs.append(
+                    {"step_index": int(step.index), "attrs": dict(radial.attrs)}
+                )
+                for table_name, mapping in (
+                    ("concentric_radial_omr_per_fish", radial.per_fish),
+                    ("concentric_radial_omr_per_bout", radial.per_bout),
+                    ("concentric_radial_omr_windows", radial.windows),
+                    ("concentric_radial_omr_early_windows", radial.early_windows),
+                ):
+                    table_rows[table_name].extend(
+                        _exact_mapping_to_rows(
+                            table_name,
+                            mapping,
+                            constants=metric_constants,
+                            bundles=bundles,
+                        )
+                    )
+
+        loom_data = loom_steps.get(int(step.index))
+        if loom_data is not None:
+            metric_constants = constants
+            n_trials = len(loom_data.trials)
+            looming_attrs.append(
+                {"step_index": int(step.index), "attrs": {"n_trials": n_trials}}
+            )
+            for trial in loom_data.trials:
+                table_rows["looming_trials"].append(
+                    {
+                        **metric_constants,
+                        "trial_index": int(trial.trial_index),
+                        "onset_frame": int(trial.onset_frame),
+                        "offset_frame": int(trial.offset_frame),
+                        "trial_duration_s": np.float32(trial.duration_s).item(),
+                    }
+                )
+            flat = _flatten_loom_trial_fish(
+                loom_data.per_trial_per_fish,
+                fish_ids=fish_ids,
+                n_trials=n_trials,
+            )
+            table_rows["looming_per_trial_per_fish"].extend(
+                _exact_mapping_to_rows(
+                    "looming_per_trial_per_fish",
+                    flat,
+                    constants=metric_constants,
+                    bundles=bundles,
+                )
+            )
+            table_rows["looming_per_fish"].extend(
+                _exact_mapping_to_rows(
+                    "looming_per_fish",
+                    _with_fish_ids(
+                        loom_data.per_fish,
+                        fish_ids,
+                        label="looming_per_fish",
+                    ),
+                    constants=metric_constants,
+                    bundles=bundles,
+                )
+            )
+
+    expected_tables = {
+        declaration["path"].split("/", 1)[0]
+        for declaration in stimulus_response_array_manifest(bundles=bundles)["arrays"]
+    }
+    table_attrs = {
+        "global_omr_per_fish": {
+            "method_version": OMR_METHOD_VERSION,
+            "scope": "aggregate_across_moving_grating_steps",
+        }
+    }
+    for table_name in sorted(expected_tables):
+        _write_exact_rows_table(
+            run_group,
+            table_name,
+            table_rows[table_name],
+            bundles=bundles,
+            attrs={"table_role": table_name, **table_attrs.get(table_name, {})},
+        )
+    run_group.attrs.update(
+        _json_safe_attrs(
+            {
+                STIMULUS_RESPONSE_BUNDLES_ATTR: bundles,
+                STIMULUS_RESPONSE_ARRAY_SCHEMA_ATTR: stimulus_response_array_manifest(
+                    bundles=bundles
+                ),
+                "compact_table_names": sorted(expected_tables),
+                "compact_omitted_tables": [
+                    "grating_per_frame", "grating_time_series",
+                    "concentric_per_frame", "concentric_time_series",
+                    "concentric_radial_omr_per_frame", "looming_per_frame",
+                    "looming_time_series",
+                ],
+                "step_attrs": [_step_attr_record(step) for step in steps],
+                "moving_grating_omr_attrs": moving_attrs,
+                "concentric_radial_omr_attrs": radial_attrs,
+                "looming_attrs": looming_attrs,
+            }
+        )
+    )
+    errors = validate_stimulus_response_v3_run(run_group)
+    if errors:
+        raise ValueError(
+            "Stimulus-response v3 writer produced an invalid run: "
+            + "; ".join(errors)
+        )
+
+
 def build_frame_annotations(
     steps: Sequence[ProtocolStep],
     n_frames: int,
@@ -2151,11 +2652,16 @@ def write_stimulus_response_run(
     upstream_lineage_record = _json_safe_attr_value(
         dict(upstream_lineage.record)
     )
-    if layout not in {STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1, STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}:
+    if layout not in {
+        STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1,
+        STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+        STIMULUS_RESPONSE_LAYOUT_COMPACT_V3,
+    }:
         raise ValueError(
             "Unsupported stimulus_response layout "
             f"'{layout}'. Expected {STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1} "
-            f"or {STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}."
+            f", {STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}, or "
+            f"{STIMULUS_RESPONSE_LAYOUT_COMPACT_V3}."
         )
 
     analysis = root.require_group("analysis")
@@ -2165,6 +2671,15 @@ def write_stimulus_response_run(
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         run_name = f"stimulus_response_{ts}"
 
+    if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V3 and any(
+        str(parent.attrs.get(pointer)) == run_name
+        for pointer in ("latest", "latest_complete")
+    ):
+        raise ValueError(
+            "Selector-ineligible compact-tabular-v3 cannot replace a run named "
+            "by a production stimulus-response selector."
+        )
+
     if run_name in parent and not overwrite:
         raise ValueError(f"Stimulus response run '{run_name}' already exists.")
     if run_name in parent:
@@ -2172,6 +2687,13 @@ def write_stimulus_response_run(
 
     run_group = parent.create_group(run_name)
     mark_run_started(run_group, run_name=run_name, stage="stimulus_response")
+    if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V3:
+        run_group.attrs.update(
+            {
+                "stage_selector_eligible": False,
+                "publication_scope": "selector_ineligible_contract_checkpoint",
+            }
+        )
 
     # Provenance.
     fish_ids = list(payload_track_ids)
@@ -2225,7 +2747,11 @@ def write_stimulus_response_run(
 
     run_attrs: Dict[str, Any] = {
         "schema_id": STIMULUS_RESPONSE_SCHEMA_ID,
-        "schema_version": STIMULUS_RESPONSE_SCHEMA_VERSION,
+        "schema_version": (
+            STIMULUS_RESPONSE_V3_SCHEMA_VERSION
+            if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V3
+            else STIMULUS_RESPONSE_LEGACY_SCHEMA_VERSION
+        ),
         "method": "stimulus_response",
         "method_version": STIMULUS_RESPONSE_METHOD_VERSION,
         "row_axis": "stimulus_steps",
@@ -2246,8 +2772,16 @@ def write_stimulus_response_run(
     run_group.attrs.update(_json_safe_attrs(run_attrs))
     write_best_effort_run_lineage_attrs(run_group, run_family="stimulus_response_run")
 
-    if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V2:
-        _write_stimulus_response_compact_v2(
+    if layout in {
+        STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+        STIMULUS_RESPONSE_LAYOUT_COMPACT_V3,
+    }:
+        compact_writer = (
+            _write_stimulus_response_compact_v3
+            if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V3
+            else _write_stimulus_response_compact_v2
+        )
+        compact_writer(
             run_group,
             global_metrics=global_metrics,
             steps=steps,
@@ -2633,7 +3167,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--layout",
-        choices=(STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1, STIMULUS_RESPONSE_LAYOUT_COMPACT_V2),
+        choices=(
+            STIMULUS_RESPONSE_LAYOUT_COMPACT_V3,
+            STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+            STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1,
+        ),
         default=STIMULUS_RESPONSE_LAYOUT_DEFAULT,
         help=(
             "Physical Zarr layout to write. compact_tabular_v2 is the default "

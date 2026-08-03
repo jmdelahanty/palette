@@ -23,11 +23,18 @@ from ...shared.stimulus_coordinate_contract import canonical_mapping_digest
 from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from ...shared.zarr.stimulus_response_schema import (
+    STIMULUS_RESPONSE_LAYOUT,
+    STIMULUS_RESPONSE_SCHEMA_ID,
+    STIMULUS_RESPONSE_SCHEMA_VERSION,
+    validate_stimulus_response_v3_run,
+)
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 MATERIALIZATION_SCHEMA_ID = "palette.stimulus_response_materialization.v1"
 PUBLISH_SCHEMA_ID = "palette.stimulus_response_run_publish.v1"
 MANAGED_WRITER_ARGUMENTS = {
+    "--layout",
     "--output-zarr-path",
     "--overwrite",
     "--run-name",
@@ -40,6 +47,7 @@ class StimulusResponseMaterializationPlan:
     scratch_root: Path
     local_zarr: Path
     run_name: str
+    layout: str
     writer_arguments: tuple[str, ...]
 
     @property
@@ -59,6 +67,7 @@ class StimulusResponseMaterializationPlan:
             "local_run_path": str(self.local_run_path),
             "target_run_path": str(self.target_run_path),
             "run_name": self.run_name,
+            "layout": self.layout,
             "writer_arguments": list(self.writer_arguments),
         }
 
@@ -75,6 +84,7 @@ def build_stimulus_response_materialization_plan(
     *,
     scratch_root: str | Path,
     run_name: str,
+    layout: str = "compact_tabular_v2",
     writer_arguments: Sequence[str] = (),
 ) -> StimulusResponseMaterializationPlan:
     source = Path(source_zarr).expanduser().resolve()
@@ -90,6 +100,10 @@ def build_stimulus_response_materialization_plan(
             "Scratch root must not be inside the authoritative source Zarr."
         )
     name = _validate_run_name(run_name)
+    if layout not in {"compact_tabular_v2", STIMULUS_RESPONSE_LAYOUT}:
+        raise ValueError(
+            f"Unsupported stimulus-response materializer layout: {layout!r}."
+        )
     forwarded = tuple(str(value) for value in writer_arguments)
     forbidden = sorted(
         argument.split("=", 1)[0]
@@ -111,22 +125,35 @@ def build_stimulus_response_materialization_plan(
         scratch_root=scratch,
         local_zarr=scratch / "stimulus-response-output.zarr",
         run_name=name,
+        layout=layout,
         writer_arguments=forwarded,
     )
 
 
-def _validate_stimulus_response_run(path: Path) -> dict[str, Any]:
+def _validate_stimulus_response_run(
+    path: Path,
+    *,
+    required_layout: str = "compact_tabular_v2",
+) -> dict[str, Any]:
     errors: list[str] = []
     group = open_zarr_root(path, mode="r")
     attrs = dict(group.attrs)
     if str(attrs.get("palette_run_completion_status")) != "complete":
         errors.append("run is not complete")
-    if str(attrs.get("schema_id")) != "palette.stimulus_response":
+    if attrs.get("schema_id") != STIMULUS_RESPONSE_SCHEMA_ID:
         errors.append("invalid schema_id")
-    if int(attrs.get("schema_version", -1)) != 2:
+    required_version = (
+        STIMULUS_RESPONSE_SCHEMA_VERSION
+        if required_layout == STIMULUS_RESPONSE_LAYOUT
+        else 2
+    )
+    if (
+        type(attrs.get("schema_version")) is not int
+        or attrs.get("schema_version") != required_version
+    ):
         errors.append("invalid schema_version")
-    if str(attrs.get("layout")) != "compact_tabular_v2":
-        errors.append("production stimulus-response layout must be compact_tabular_v2")
+    if attrs.get("layout") != required_layout:
+        errors.append(f"stimulus-response layout must be {required_layout}")
     if str(attrs.get("method_version")) != "stimulus_response.v3":
         errors.append("invalid method_version")
     if str(attrs.get("row_axis")) != "stimulus_steps":
@@ -153,9 +180,12 @@ def _validate_stimulus_response_run(path: Path) -> dict[str, Any]:
                 errors.append("stale stimulus_coordinate_lineage digest")
     if not isinstance(attrs.get("parameters"), dict):
         errors.append("missing parameters")
-    for required in ("step_index", "global_per_fish"):
-        if group.get(required) is None:
-            errors.append(f"missing compact table {required}")
+    if required_layout == STIMULUS_RESPONSE_LAYOUT:
+        errors.extend(validate_stimulus_response_v3_run(group))
+    else:
+        for required in ("step_index", "global_per_fish"):
+            if group.get(required) is None:
+                errors.append(f"missing compact table {required}")
     return {
         "valid": not errors,
         "errors": errors,
@@ -172,8 +202,13 @@ def publish_stimulus_response_run(
     materialization_payload: dict[str, Any],
     copy_backend: str,
 ) -> dict[str, Any]:
+    selector_ineligible = plan.layout == STIMULUS_RESPONSE_LAYOUT
+
     def validate(path: Path) -> dict[str, Any]:
-        return _validate_stimulus_response_run(path)
+        return _validate_stimulus_response_run(
+            path,
+            required_layout=plan.layout,
+        )
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
         return (
@@ -197,21 +232,30 @@ def publish_stimulus_response_run(
                 fallback_command="stimulus_response_materializer",
             ),
         )
-        parent.attrs["latest_complete"] = plan.run_name
-        parent.attrs["latest"] = plan.run_name
+        if not selector_ineligible:
+            parent.attrs["latest_complete"] = plan.run_name
+            parent.attrs["latest"] = plan.run_name
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/stimulus_response_runs"]
         run_group = parent[plan.run_name]
-        if (
+        pointers_valid = (
             str(parent.attrs.get("latest")) != plan.run_name
-            or str(parent.attrs.get("latest_complete")) != plan.run_name
+            and str(parent.attrs.get("latest_complete")) != plan.run_name
+            if selector_ineligible
+            else (
+                str(parent.attrs.get("latest")) == plan.run_name
+                and str(parent.attrs.get("latest_complete")) == plan.run_name
+            )
+        )
+        if (
+            not pointers_valid
             or run_group.attrs.get("palette_run_completion_status") != "complete"
             or run_group.attrs.get("stage_selector_eligible") is not False
         ):
             raise RuntimeError(
                 "Stimulus-response run was not persisted complete and ineligible "
-                "behind its parent pointers."
+                "under its requested publication policy."
             )
 
     def activate(
@@ -253,11 +297,13 @@ def publish_stimulus_response_run(
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
-        activate_run=activate,
+        activate_run=None if selector_ineligible else activate,
         payload_metadata={
             "copy_backend": copy_backend,
             "promotion_policy": (
-                "complete_ineligible_then_pointers_then_eligibility_final"
+                "complete_selector_ineligible_no_parent_pointer_mutation"
+                if selector_ineligible
+                else "complete_ineligible_then_pointers_then_eligibility_final"
             ),
             "materialization": json_attr_safe(materialization_payload),
         },
@@ -269,6 +315,7 @@ def materialize_stimulus_response(
     *,
     scratch_root: str | Path,
     run_name: str,
+    layout: str = "compact_tabular_v2",
     writer_arguments: Sequence[str] = (),
     copy_backend: str = "rsync",
     apply: bool = False,
@@ -278,6 +325,7 @@ def materialize_stimulus_response(
         source_zarr,
         scratch_root=scratch_root,
         run_name=run_name,
+        layout=layout,
         writer_arguments=writer_arguments,
     )
     result: dict[str, Any] = {
@@ -300,13 +348,16 @@ def materialize_stimulus_response(
             "--run-name",
             plan.run_name,
             "--layout",
-            "compact_tabular_v2",
+            plan.layout,
             *plan.writer_arguments,
         ]
         started = time.perf_counter()
         response_writer.main(writer_argv)
         compute_seconds = float(time.perf_counter() - started)
-        validation = _validate_stimulus_response_run(plan.local_run_path)
+        validation = _validate_stimulus_response_run(
+            plan.local_run_path,
+            required_layout=plan.layout,
+        )
         if not validation["valid"]:
             raise RuntimeError(f"Local stimulus-response run is invalid: {validation}")
         payload = {
@@ -350,6 +401,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--run-name", required=True)
+    parser.add_argument(
+        "--layout",
+        choices=("compact_tabular_v2", STIMULUS_RESPONSE_LAYOUT),
+        default="compact_tabular_v2",
+        help=(
+            "compact_tabular_v3 is an opt-in selector-ineligible contract "
+            "checkpoint; compact_tabular_v2 retains legacy materializer behavior"
+        ),
+    )
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--copy-backend", choices=("rsync", "python"), default="rsync")
     parser.add_argument("--apply", action="store_true")
@@ -371,6 +431,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.zarr_path,
         scratch_root=args.scratch_root or _default_scratch_root(args.run_name),
         run_name=args.run_name,
+        layout=args.layout,
         writer_arguments=writer_arguments,
         copy_backend=args.copy_backend,
         apply=args.apply,
