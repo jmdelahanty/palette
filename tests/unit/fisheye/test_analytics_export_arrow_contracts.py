@@ -27,7 +27,9 @@ from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    STIMULUS_STEP_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
+    TABLE_CONTRACTS,
 )
 from fisheye.analytics_exports.publication import (
     manifest_selected_part_files,
@@ -150,6 +152,44 @@ def _valid_stimulus_step_row() -> dict[str, object]:
     return row
 
 
+def _valid_stimulus_step_summary_row() -> dict[str, object]:
+    contract = ARROW_TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE]
+    row: dict[str, object] = {}
+    for field in contract.fields:
+        if field.nullable:
+            row[field.name] = None
+        elif field.arrow_type in {"int32", "int64"}:
+            row[field.name] = 1
+        elif field.arrow_type == "float64":
+            row[field.name] = 1.5
+        else:
+            row[field.name] = "value"
+    row.update(
+        {
+            "export_schema_version": EXPORT_SCHEMA_VERSION,
+            "table_name": STIMULUS_STEP_SUMMARY_TABLE,
+            "recording_id": "recording-1",
+            "zarr_path": "/recordings/recording-1_analysis.zarr",
+            "source_lineage_hash": "9" * 64,
+            "stimulus_response_run": "response-1",
+            "source_stimulus_run": "stimulus-1",
+            "source_track_kinematics_run": "kinematics-1",
+            "source_track_kinematics_type": "offline",
+            "step_index": 0,
+            "step_name": "moving",
+            "stimulus_mode": "MOVING_GRATING",
+            "stimulus_mode_id": 5,
+            "start_frame": 10,
+            "end_frame": 20,
+            "start_camera_frame": 10,
+            "end_camera_frame": 20,
+            "duration_s": 1.0,
+            "fish_id": 7,
+        }
+    )
+    return row
+
+
 def _valid_baseline_summary_row() -> dict[str, object]:
     contract = ARROW_TABLE_CONTRACTS[BASELINE_BEHAVIOR_SUMMARY_TABLE]
     row: dict[str, object] = {}
@@ -233,6 +273,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
             POSITION_OCCUPANCY_HISTOGRAM_TABLE,
             RECORDING_SUMMARY_TABLE,
             STIMULUS_STEPS_TABLE,
+            STIMULUS_STEP_SUMMARY_TABLE,
             BASELINE_BEHAVIOR_SUMMARY_TABLE,
             BASELINE_BEHAVIOR_TIME_BINS_TABLE,
             BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -243,6 +284,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
         POSITION_OCCUPANCY_HISTOGRAM_TABLE,
         RECORDING_SUMMARY_TABLE,
         STIMULUS_STEPS_TABLE,
+        STIMULUS_STEP_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -255,6 +297,7 @@ def test_arrow_contract_envelope_partitions_exact_and_compatibility_tables() -> 
                 POSITION_OCCUPANCY_HISTOGRAM_TABLE,
                 RECORDING_SUMMARY_TABLE,
                 STIMULUS_STEPS_TABLE,
+                STIMULUS_STEP_SUMMARY_TABLE,
                 BASELINE_BEHAVIOR_SUMMARY_TABLE,
                 BASELINE_BEHAVIOR_TIME_BINS_TABLE,
                 BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -269,6 +312,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         POSITION_OCCUPANCY_HISTOGRAM_TABLE,
         RECORDING_SUMMARY_TABLE,
         STIMULUS_STEPS_TABLE,
+        STIMULUS_STEP_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -394,6 +438,52 @@ def test_stimulus_steps_contract_freezes_all_60_maintained_fields_in_order() -> 
         ("protocol_mode_sequence", "string", True),
         ("protocol_duration_sequence_s", "string", True),
         ("protocol_step_count", "int64", False),
+        ("collection_id", "string", True),
+        ("collection_manifest_sha256", "string", True),
+        ("collection_manifest_path", "string", True),
+    )
+
+
+def test_stimulus_step_summary_contract_freezes_all_38_maintained_fields_in_order() -> None:
+    fields = ARROW_TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE].fields
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("recording_id", "string", False),
+        ("zarr_path", "string", False),
+        ("source_lineage_hash", "string", False),
+        ("stimulus_response_run", "string", False),
+        ("source_stimulus_run", "string", False),
+        ("source_track_kinematics_run", "string", False),
+        ("source_track_kinematics_type", "string", False),
+        ("source_bout_run", "string", True),
+        ("step_index", "int64", False),
+        ("step_name", "string", False),
+        ("stimulus_mode", "string", False),
+        ("stimulus_mode_id", "int64", False),
+        ("start_frame", "int64", False),
+        ("end_frame", "int64", False),
+        ("start_camera_frame", "int64", False),
+        ("end_camera_frame", "int64", False),
+        ("duration_s", "float64", False),
+        ("protocol_signature_schema", "string", True),
+        ("protocol_signature_hash", "string", True),
+        ("derived_protocol_hash", "string", True),
+        ("protocol_mode_sequence", "string", True),
+        ("protocol_duration_sequence_s", "string", True),
+        ("protocol_step_count", "int64", True),
+        ("fish_id", "int64", False),
+        ("total_distance_mm", "float64", True),
+        ("mean_speed_mm_s", "float64", True),
+        ("median_speed_mm_s", "float64", True),
+        ("max_speed_mm_s", "float64", True),
+        ("fraction_moving", "float64", True),
+        ("coverage", "float64", True),
+        ("num_bouts", "int64", True),
+        ("mean_bout_duration_s", "float64", True),
+        ("mean_interbout_interval_s", "float64", True),
         ("collection_id", "string", True),
         ("collection_manifest_sha256", "string", True),
         ("collection_manifest_path", "string", True),
@@ -673,6 +763,7 @@ def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
         POSITION_OCCUPANCY_HISTOGRAM_TABLE,
         RECORDING_SUMMARY_TABLE,
         STIMULUS_STEPS_TABLE,
+        STIMULUS_STEP_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_SUMMARY_TABLE,
         BASELINE_BEHAVIOR_TIME_BINS_TABLE,
         BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -751,6 +842,26 @@ def test_stimulus_steps_exact_writer_uses_declared_schema(tmp_path: Path) -> Non
         generation_root=tmp_path / "generation",
         table=table_name,
         rows_by_source=(("source-1", [_valid_stimulus_step_row()]),),
+    )
+
+    assert count == 1
+    schema = pq.ParquetFile(parts[0]).schema_arrow
+    validate_arrow_schema(table_name, schema)
+    assert schema.remove_metadata() == exact_arrow_schema(
+        table_name,
+        metadata={},
+    ).remove_metadata()
+    assert schema.metadata[b"palette.arrow_schema_sha256"].decode() == (
+        ARROW_TABLE_CONTRACTS[table_name].payload_sha256
+    )
+
+
+def test_stimulus_step_summary_exact_writer_uses_declared_schema(tmp_path: Path) -> None:
+    table_name = STIMULUS_STEP_SUMMARY_TABLE
+    count, parts = _write_table_parts(
+        generation_root=tmp_path / "generation",
+        table=table_name,
+        rows_by_source=(("source-1", [_valid_stimulus_step_summary_row()]),),
     )
 
     assert count == 1
@@ -904,6 +1015,34 @@ def test_stimulus_steps_writer_rejects_unexpected_and_every_missing_required_fie
             _write_table_parts(
                 generation_root=tmp_path / f"missing-{field_name}",
                 table=STIMULUS_STEPS_TABLE,
+                rows_by_source=(("source", [row]),),
+            )
+
+
+def test_stimulus_step_summary_writer_rejects_unexpected_and_every_missing_required_field(
+    tmp_path: Path,
+) -> None:
+    row = _valid_stimulus_step_summary_row()
+    row["surprise"] = 1
+    with pytest.raises(ValueError, match="unexpected fields"):
+        _write_table_parts(
+            generation_root=tmp_path / "unexpected",
+            table=STIMULUS_STEP_SUMMARY_TABLE,
+            rows_by_source=(("source", [row]),),
+        )
+
+    required = {
+        field.name
+        for field in ARROW_TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE].fields
+        if not field.nullable
+    }
+    for field_name in sorted(required):
+        row = _valid_stimulus_step_summary_row()
+        del row[field_name]
+        with pytest.raises(ValueError, match="null/missing non-nullable"):
+            _write_table_parts(
+                generation_root=tmp_path / f"missing-{field_name}",
+                table=STIMULUS_STEP_SUMMARY_TABLE,
                 rows_by_source=(("source", [row]),),
             )
 
@@ -1068,6 +1207,49 @@ def test_stimulus_steps_zero_rows_retain_exact_contract_without_parts(
     )
     assert manifest["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
     assert validate_export_run(root, "empty-stimulus-steps")["status"] == "valid"
+
+
+def test_stimulus_step_summary_zero_rows_retain_exact_contract_without_parts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        return SourceExportResult(
+            zarr_path=str(path),
+            recording_id="recording-1",
+            rows_by_table={STIMULUS_STEP_SUMMARY_TABLE: []},
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.export_one_zarr",
+        source,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.get_git_info",
+        lambda _path: {"commit_hash": "test", "is_dirty": False},
+    )
+    root = tmp_path / "exports"
+    manifest = export_sources(
+        [tmp_path / "source.zarr"],
+        output_root=root,
+        export_run_id="empty-stimulus-step-summary",
+        tables=(STIMULUS_STEP_SUMMARY_TABLE,),
+        jobs=1,
+    )
+
+    assert manifest["row_counts_by_table"] == {STIMULUS_STEP_SUMMARY_TABLE: 0}
+    assert manifest["part_files_by_table"] == {STIMULUS_STEP_SUMMARY_TABLE: []}
+    assert manifest["publication"]["parts_by_table"] == {
+        STIMULUS_STEP_SUMMARY_TABLE: []
+    }
+    assert tuple(manifest["arrow_schema_contracts"]["exact_tables"]) == (
+        STIMULUS_STEP_SUMMARY_TABLE,
+    )
+    assert manifest["arrow_schema_contracts"]["inferred_v2_compatibility_tables"] == []
+    assert (
+        validate_export_run(root, "empty-stimulus-step-summary")["status"]
+        == "valid"
+    )
 
 
 def test_baseline_summary_zero_rows_publish_no_parts_but_retain_exact_contract(
@@ -1294,6 +1476,174 @@ def test_real_stimulus_steps_export_uses_maintained_exact_selected_representatio
     )
     assert not any(name.startswith("looming_dot_") for name in parquet_file.schema_arrow.names)
     assert validate_export_run(root, "stimulus-steps-arrow")["status"] == "valid"
+
+
+def test_real_stimulus_step_summary_export_uses_exact_selected_representation(
+    tmp_path: Path,
+) -> None:
+    source = _make_source_zarr(tmp_path / "recording_a_analysis.zarr")
+    collection_path = tmp_path / "collection.manifest.json"
+    collection = _write_collection_manifest(collection_path, source)
+    root = tmp_path / "exports"
+
+    manifest = export_sources(
+        [source],
+        output_root=root,
+        export_run_id="stimulus-step-summary-arrow",
+        tables=(STIMULUS_STEP_SUMMARY_TABLE,),
+        jobs=1,
+        collection_manifest_path=collection_path,
+    )
+
+    assert manifest["row_counts_by_table"] == {STIMULUS_STEP_SUMMARY_TABLE: 2}
+    assert tuple(manifest["arrow_schema_contracts"]["exact_tables"]) == (
+        STIMULUS_STEP_SUMMARY_TABLE,
+    )
+    selected = manifest_selected_part_files(
+        root,
+        "stimulus-step-summary-arrow",
+        STIMULUS_STEP_SUMMARY_TABLE,
+    )
+    assert len(selected) == 1
+    parquet_file = pq.ParquetFile(selected[0])
+    validate_arrow_schema(STIMULUS_STEP_SUMMARY_TABLE, parquet_file.schema_arrow)
+    assert parquet_file.schema_arrow.names == [
+        field.name
+        for field in ARROW_TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE].fields
+    ]
+    rows = parquet_file.read().to_pylist()
+    moving, concentric = rows
+    assert (moving["fish_id"], moving["step_index"]) == (0, 0)
+    assert moving["total_distance_mm"] == 12.5
+    assert moving["mean_speed_mm_s"] == 5.0
+    assert moving["median_speed_mm_s"] is None
+    assert moving["num_bouts"] == 2
+    assert moving["mean_bout_duration_s"] is None
+    assert (concentric["fish_id"], concentric["step_index"]) == (0, 1)
+    assert {row["collection_id"] for row in rows} == {collection["collection_id"]}
+    assert all(
+        row["protocol_signature_hash"] == row["derived_protocol_hash"]
+        for row in rows
+    )
+    assert validate_export_run(root, "stimulus-step-summary-arrow")["status"] == "valid"
+
+
+def test_real_stimulus_step_summary_primary_key_distinguishes_two_fish_in_one_step(
+    tmp_path: Path,
+) -> None:
+    source = _make_source_zarr(tmp_path / "two_fish_analysis.zarr")
+    archive = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    per_fish = archive[
+        "analysis/stimulus_response_runs/stimulus_response_test/steps/step_0/per_fish"
+    ]
+    for name in tuple(per_fish.array_keys()):
+        array = per_fish[name]
+        first = array[0]
+        array.resize((2,))
+        array[1] = 1 if name == "fish_id" else first
+    root = tmp_path / "exports"
+
+    manifest = export_sources(
+        [source],
+        output_root=root,
+        export_run_id="stimulus-step-summary-two-fish",
+        tables=(STIMULUS_STEP_SUMMARY_TABLE,),
+        jobs=1,
+    )
+
+    rows = pq.read_table(
+        [
+            str(path)
+            for path in manifest_selected_part_files(
+            root,
+            "stimulus-step-summary-two-fish",
+            STIMULUS_STEP_SUMMARY_TABLE,
+            )
+        ]
+    ).to_pylist()
+    same_step = [row for row in rows if row["step_index"] == 0]
+    contract = TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE]
+    keys = {
+        tuple(row[field] for field in contract.primary_key)
+        for row in same_step
+    }
+
+    assert manifest["row_counts_by_table"] == {STIMULUS_STEP_SUMMARY_TABLE: 3}
+    assert {row["fish_id"] for row in same_step} == {0, 1}
+    assert keys == {("two_fish", 0, 0), ("two_fish", 1, 0)}
+    assert validate_export_run(root, "stimulus-step-summary-two-fish")["status"] == "valid"
+
+
+def test_selected_stimulus_step_summary_rejects_old_two_field_primary_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table_name = STIMULUS_STEP_SUMMARY_TABLE
+
+    def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        first = _valid_stimulus_step_summary_row()
+        second = {**first, "fish_id": 8, "source_lineage_hash": "8" * 64}
+        return SourceExportResult(
+            zarr_path=str(path),
+            recording_id="recording-1",
+            rows_by_table={table_name: [first, second]},
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.export_one_zarr",
+        source,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.get_git_info",
+        lambda _path: {"commit_hash": "test", "is_dirty": False},
+    )
+    root = tmp_path / "exports"
+    run_id = "stimulus-step-summary-old-key"
+    manifest = export_sources(
+        [tmp_path / "source.zarr"],
+        output_root=root,
+        export_run_id=run_id,
+        tables=(table_name,),
+        jobs=1,
+    )
+    manifest_path = Path(manifest["manifest_path"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["table_contracts"][table_name]["primary_key"] = [
+        "recording_id",
+        "step_index",
+    ]
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ExportValidationError,
+        match="manifest table contract does not match installed V2",
+    ):
+        validate_export_run(root, run_id)
+
+
+def test_stimulus_step_summary_rejects_unowned_dynamic_metric_before_publication(
+    tmp_path: Path,
+) -> None:
+    source = _make_source_zarr(tmp_path / "dynamic_metric_analysis.zarr")
+    archive = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    per_fish = archive[
+        "analysis/stimulus_response_runs/stimulus_response_test/steps/step_0/per_fish"
+    ]
+    per_fish.create_array("future_metric", data=np.asarray([1.0], dtype=np.float32))
+    root = tmp_path / "exports"
+    run_id = "stimulus-step-summary-dynamic"
+
+    with pytest.raises(ValueError, match="future_metric"):
+        export_sources(
+            [source],
+            output_root=root,
+            export_run_id=run_id,
+            tables=(STIMULUS_STEP_SUMMARY_TABLE,),
+            jobs=1,
+        )
+
+    assert not (root / "v1" / "manifests" / f"export_run_id={run_id}.json").exists()
+    assert not list((root / "v1" / ".generations").glob(f"export_run_id={run_id}/**/*"))
 
 
 @pytest.mark.parametrize(
@@ -1821,6 +2171,94 @@ def test_stimulus_steps_manifest_reader_rejects_rehashed_physical_tampering(
     elif mutation == "metadata":
         metadata[b"palette.arrow_schema_sha256"] = b"0" * 64
     else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(mutation)
+
+    pq.write_table(
+        pa.Table.from_arrays(arrays, schema=pa.schema(fields, metadata=metadata)),
+        part,
+    )
+    manifest_path = Path(manifest["manifest_path"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = payload["publication"]["parts_by_table"][table_name][0]
+    entry["sha256"] = sha256_file(part)
+    entry["size_bytes"] = part.stat().st_size
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ExportValidationError,
+        match="physical Arrow fields|footer contract metadata",
+    ):
+        validate_export_run(root, run_id)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "reordered",
+        "wrong_type",
+        "wrong_nullability",
+        "unexpected",
+        "missing",
+        "metadata",
+    ),
+)
+def test_stimulus_step_summary_manifest_reader_rejects_rehashed_physical_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    table_name = STIMULUS_STEP_SUMMARY_TABLE
+
+    def source(path: Path, **_kwargs: object) -> SourceExportResult:
+        return SourceExportResult(
+            zarr_path=str(path),
+            recording_id="recording-1",
+            rows_by_table={table_name: [_valid_stimulus_step_summary_row()]},
+        )
+
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.export_one_zarr",
+        source,
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.export_cross_recording_analytics.get_git_info",
+        lambda _path: {"commit_hash": "test", "is_dirty": False},
+    )
+    root = tmp_path / "exports"
+    run_id = f"stimulus-step-summary-{mutation}"
+    manifest = export_sources(
+        [tmp_path / "source.zarr"],
+        output_root=root,
+        export_run_id=run_id,
+        tables=(table_name,),
+        jobs=1,
+    )
+    part = root / manifest["part_files_by_table"][table_name][0]
+    original = pq.ParquetFile(part).read()
+    arrays = list(original.columns)
+    fields = list(original.schema)
+    metadata = dict(original.schema.metadata or {})
+
+    if mutation == "reordered":
+        arrays[0], arrays[1] = arrays[1], arrays[0]
+        fields[0], fields[1] = fields[1], fields[0]
+    elif mutation == "wrong_type":
+        index = original.schema.get_field_index("fish_id")
+        arrays[index] = pa.array([7.0], type=pa.float64())
+        fields[index] = pa.field("fish_id", pa.float64(), nullable=False)
+    elif mutation == "wrong_nullability":
+        index = original.schema.get_field_index("recording_id")
+        fields[index] = pa.field("recording_id", pa.string(), nullable=True)
+    elif mutation == "unexpected":
+        arrays.append(pa.array(["surprise"], type=pa.string()))
+        fields.append(pa.field("unexpected", pa.string(), nullable=False))
+    elif mutation == "missing":
+        index = original.schema.get_field_index("source_lineage_hash")
+        del arrays[index]
+        del fields[index]
+    elif mutation == "metadata":
+        metadata[b"palette.arrow_schema_sha256"] = b"0" * 64
+    else:  # pragma: no cover - the parametrization is closed above.
         raise AssertionError(mutation)
 
     pq.write_table(

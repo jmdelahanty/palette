@@ -113,9 +113,9 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
     ),
     STIMULUS_STEP_SUMMARY_TABLE: _contract(
         STIMULUS_STEP_SUMMARY_TABLE,
-        "recording_x_stimulus_step_summary",
-        ("recording_id", "step_index"),
-        ("step_index",),
+        "recording_x_fish_x_stimulus_step_summary",
+        ("recording_id", "fish_id", "step_index"),
+        ("fish_id", "step_index"),
     ),
     STIMULUS_RESPONSE_TABLE: _contract(
         STIMULUS_RESPONSE_TABLE,

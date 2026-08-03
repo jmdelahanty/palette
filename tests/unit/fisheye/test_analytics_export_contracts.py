@@ -14,6 +14,7 @@ from fisheye.analytics_exports.contracts import (
     EXPORT_SCHEMA_VERSION,
     EXPORT_SCHEMA_ID,
     RECORDING_SUMMARY_TABLE,
+    STIMULUS_STEP_SUMMARY_TABLE,
     TABLE_CONTRACTS,
     canonicalize_export_row,
     contract_snapshot,
@@ -79,6 +80,23 @@ def test_v1_table_name_is_not_a_registered_or_resolvable_contract() -> None:
     )
     assert behavior.available is False
     assert behavior.missing_tables == (CHASER_EPOCH_BEHAVIOR_TABLE,)
+
+
+def test_stimulus_step_summary_contract_key_is_unique_for_multiple_fish_per_step() -> None:
+    contract = TABLE_CONTRACTS[STIMULUS_STEP_SUMMARY_TABLE]
+    rows = (
+        {"recording_id": "recording-1", "fish_id": 7, "step_index": 3},
+        {"recording_id": "recording-1", "fish_id": 8, "step_index": 3},
+    )
+
+    keys = {
+        tuple(row[field] for field in contract.primary_key)
+        for row in rows
+    }
+
+    assert contract.grain == "recording_x_fish_x_stimulus_step_summary"
+    assert contract.primary_key == ("recording_id", "fish_id", "step_index")
+    assert keys == {("recording-1", 7, 3), ("recording-1", 8, 3)}
 
 
 def _write_valid_export(root: Path, run_id: str) -> Path:

@@ -19,6 +19,7 @@ from .contracts import (
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
+    STIMULUS_STEP_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
     TABLE_CONTRACTS,
 )
@@ -31,6 +32,7 @@ EXACT_ARROW_SCHEMA_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
     STIMULUS_STEPS_TABLE,
+    STIMULUS_STEP_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_SUMMARY_TABLE,
     BASELINE_BEHAVIOR_TIME_BINS_TABLE,
     BASELINE_KINEMATIC_SAMPLES_TABLE,
@@ -305,6 +307,57 @@ _STIMULUS_STEPS_FIELDS = (
     _field("protocol_mode_sequence", "string", nullable=True),
     _field("protocol_duration_sequence_s", "string", nullable=True),
     _field("protocol_step_count", "int64"),
+    _field("collection_id", "string", nullable=True),
+    _field("collection_manifest_sha256", "string", nullable=True),
+    _field("collection_manifest_path", "string", nullable=True),
+)
+
+
+# Stimulus step summary is one row per fish per stimulus step.  Its closed
+# physical vocabulary is the fixed export/lineage prefix, the maintained
+# ``step_per_fish`` base bundle, and the optional step-bout summary bundle.
+# Source float32 scientific values are represented as nullable Arrow float64
+# values because the exporter normalizes non-finite source values to null.
+# Optional bout fields remain null when that source bundle is absent; in
+# particular, ``num_bouts == 0`` is a real measured value, not a sentinel.
+# The source stimulus-response resolver remains a compatibility boundary; this
+# physical contract does not promote one recording-local run-selection policy.
+_STIMULUS_STEP_SUMMARY_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("stimulus_response_run", "string"),
+    _field("source_stimulus_run", "string"),
+    _field("source_track_kinematics_run", "string"),
+    _field("source_track_kinematics_type", "string"),
+    _field("source_bout_run", "string", nullable=True),
+    _field("step_index", "int64"),
+    _field("step_name", "string"),
+    _field("stimulus_mode", "string"),
+    _field("stimulus_mode_id", "int64"),
+    _field("start_frame", "int64"),
+    _field("end_frame", "int64"),
+    _field("start_camera_frame", "int64"),
+    _field("end_camera_frame", "int64"),
+    _field("duration_s", "float64"),
+    _field("protocol_signature_schema", "string", nullable=True),
+    _field("protocol_signature_hash", "string", nullable=True),
+    _field("derived_protocol_hash", "string", nullable=True),
+    _field("protocol_mode_sequence", "string", nullable=True),
+    _field("protocol_duration_sequence_s", "string", nullable=True),
+    _field("protocol_step_count", "int64", nullable=True),
+    _field("fish_id", "int64"),
+    _field("total_distance_mm", "float64", nullable=True),
+    _field("mean_speed_mm_s", "float64", nullable=True),
+    _field("median_speed_mm_s", "float64", nullable=True),
+    _field("max_speed_mm_s", "float64", nullable=True),
+    _field("fraction_moving", "float64", nullable=True),
+    _field("coverage", "float64", nullable=True),
+    _field("num_bouts", "int64", nullable=True),
+    _field("mean_bout_duration_s", "float64", nullable=True),
+    _field("mean_interbout_interval_s", "float64", nullable=True),
     _field("collection_id", "string", nullable=True),
     _field("collection_manifest_sha256", "string", nullable=True),
     _field("collection_manifest_path", "string", nullable=True),
@@ -602,6 +655,10 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
     STIMULUS_STEPS_TABLE: ArrowTableContract(
         table_name=STIMULUS_STEPS_TABLE,
         fields=_STIMULUS_STEPS_FIELDS,
+    ),
+    STIMULUS_STEP_SUMMARY_TABLE: ArrowTableContract(
+        table_name=STIMULUS_STEP_SUMMARY_TABLE,
+        fields=_STIMULUS_STEP_SUMMARY_FIELDS,
     ),
     BASELINE_BEHAVIOR_SUMMARY_TABLE: ArrowTableContract(
         table_name=BASELINE_BEHAVIOR_SUMMARY_TABLE,
