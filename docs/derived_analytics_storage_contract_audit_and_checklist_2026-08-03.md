@@ -2,11 +2,12 @@
 
 Date: 2026-08-03
 
-Status: active implementation checklist; correctness, executable-catalog,
-shared-planner, serialized-registry, and benchmark-planning foundations are
-integrated; opt-in writer candidates are being adopted family by family; no
-production profile or scientific selector authority changed by these
-checkpoints
+Status: active implementation checklist; reconciled through coordination
+checkpoint `5d7fb30c`; correctness, executable-catalog, shared-planner,
+serialized-registry, compact-rematerialization, and benchmark-planning
+foundations are integrated; opt-in writer candidates are being adopted family
+by family; no production profile or scientific selector authority changed by
+these checkpoints
 
 ## Purpose
 
@@ -106,9 +107,9 @@ true.
 
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
-| Track kinematics | Strong logical, lineage, materializer, and registry contract | Replace stage-specific fixed row grids with byte planning and benchmark the real consumer |
-| Subject shape | Strong typed semantic surface, content manifest, lineage, atomic sharded publication, and serialized registry projection | Byte-plan heterogeneous semantic arrays |
-| Tail kinematics | Strong typed surface, coordinate manifest, whole-shard worker ownership, and serialized registry projection | Replace fixed 262,144-row policy |
+| Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract | Version or flatten the two structured lineage dtypes in the shared factory before candidate adoption; retain float64 position authority |
+| Subject shape | Strong typed semantic surface, content manifest, lineage, atomic sharded publication, and serialized registry projection | Close the currently dynamic component/relation/body-frame array inventory before byte-planned adoption |
+| Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Benchmark the candidate through Palette and Crimson before profile promotion |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, and serialized registry projection | Adopt byte planning and benchmark the real consumer |
 | Bout kinematics | Exact compact-v7 manifest, authoritative selection, and serialized registry projection | Adopt byte planning and add a consumer benchmark |
@@ -232,30 +233,43 @@ publication infrastructure, registry projection, and this coordination
 checklist remain integration-lane surfaces.  A lane must stop and return for
 review instead of editing another lane's files.
 
-Current lanes are pinned from the coordination history and do not modify
-production archives, selectors, or registries:
+Historical lanes are pinned from the coordination history and do not modify
+production archives, selectors, or registries. New implementation lanes must
+start from the current clean coordination history (`5d7fb30c` at this
+reverification), not from one of the older worktree heads listed by
+`git worktree list`. A historical dirty worktree is evidence to reconcile, not
+a safe base for new work.
 
 | Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
 | --- | --- | --- | --- | --- |
-| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | `c1976300` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
+| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `5d7fb30c` | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
 | Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | Integrated as `a2668075` and `f178e315`; it classifies rather than promotes |
 | Eye-angle exact schema | `/tmp/palette-eye-v7-clean-20260803` / `agent/palette/eye-v7-clean-20260803` | `dd4c0f74` | Reusable analytics array declaration, exact 41-array eye-angle schema, deep writer/reader/readiness validation, and explicit v2-v6 compatibility boundaries | Reviewed as ready, committed as `3025d66e`, and integrated as `c1976300` |
+| Eye-angle byte candidate | historical isolated lane | `28f0132c` through `ac6b8bc3` | Exact 41-array planner/factory candidate and semantic fills | Integrated; remains explicit and selector-ineligible |
+| Tail-kinematics byte candidate | historical isolated lane | integrated as `600fab64` | Exact 21-array core, revision bundle, planner/factory candidate, metadata equivalence, and lifecycle guards | Integrated; remains explicit and selector-ineligible |
+| Track-kinematics exact schema | historical isolated lane | integrated as `af38edba` | Exact current motion vocabulary and explicit shared-factory blocker | Integrated; no physical candidate was created |
+| Shared compact rematerialization | coordination lane | integrated as `5d7fb30c` | Exact declaration-bound replanning, frame-axis growth, whole-physical-unit writes, receipt and metadata validation | Infrastructure only; family publishers remain opt-in and pending |
 
-After the reusable declaration lands, the next safe parallel wave is:
+The next safe parallel wave assigns disjoint ownership as follows. The
+coordination lane remains the only owner of shared catalogs, planner/factory
+types, registry code, selectors, and this checklist.
 
-1. stimulus-response exact compact schema and writer validation;
-2. swim-bout and bout-kinematics closed manifests;
-3. tail-kinematics and subject-shape byte-planner adoption; and
-4. chaser component sealing.
+| Proposed lane | Exclusive family-owned modules | Stop/return boundary |
+| --- | --- | --- |
+| Stimulus-response v3 byte candidate | stimulus-response writer, exact v3 schema, materializer, reader, focused tests, and family doc | Return instead of changing shared planner/factory or catalog declarations |
+| Subject-shape exact closure | subject-shape schema/writer/materializer, focused tests, and family doc | Freeze supported component bundles before creating candidate arrays; the current dynamic inventory is an explicit blocker |
+| Chaser component adoption | chaser component writers, runner receipt, focused interruption tests, and family doc | Use the existing atomic component publisher; return instead of changing selectors/catalogs |
 
-Those lanes may run concurrently only when their file ownership remains
-disjoint.  Changes to `storage_contract_catalog.py`, the shared byte planner,
-atomic publication helpers, registry projection, or cross-family documentation
-are reconciled serially after the family branch passes review.
+After those lanes reconcile serially, one shared-columnar lane may own both
+swim-bout and bout-kinematics adoption. Those two families must not be split
+across concurrent lanes because both depend on the same columnar creation
+boundary.
 
 Every implementation lane must satisfy this handoff checklist:
 
-- [ ] Record the exact base commit and branch/worktree path.
+- [ ] Record the exact coordination base commit and branch/worktree path.
+- [ ] Start from that commit in a new clean worktree; do not reuse an older dirty
+      worktree merely because its name matches the family.
 - [ ] Keep the worktree clean except for the declared ownership surface.
 - [ ] Add exact positive, missing-field, unexpected-field, wrong-dtype,
       wrong-shape, and recomputed-digest tampering tests as applicable.
@@ -297,6 +311,9 @@ now implemented on the coordination branch:
   stage registry, exact storage catalog, and all 22 classified auxiliary
   surfaces, including relational ownership and tamper validation:
   `fdc3f076`.
+- exact byte-planned tail-kinematics candidate publication with semantic fills,
+  executable receipt replanning, direct/consolidated metadata equivalence,
+  serial whole-shard ownership, and selector non-mutation: `600fab64`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
@@ -305,6 +322,13 @@ publication-safety blockers. The exact catalog/stage-array matrix passed 88
 tests after integration. The combined exact-catalog, surface-classification,
 and coverage-report matrix passed 103 tests. Physical-profile promotion and
 production selector activation remain out of scope.
+
+The tail lane passed 90 focused/broader storage regressions before integration;
+the integrated tail/planner checkpoint passed 49 focused tests. Track schema
+validation passed six exact-schema tests and the established 108-test motion
+publication suite. The shared compact rematerializer and exact compact schemas
+passed 24 focused tests. These are correctness results, not full-duration
+performance evidence.
 
 ### Phase 0 — Preserve the audit baseline
 
@@ -394,6 +418,15 @@ production selector activation remain out of scope.
       Schema v3 records the still-current subject-mask row-chunk helper as a
       compatibility physical owner with `byte_planner_adopted=false`; migrating
       that physical owner remains Phase 6 work.
+- [x] Freeze tail kinematics as an exact 21-array core plus an all-or-none
+      two-array source-revision bundle, including fixed dtypes, symbolic axes,
+      roles, access classes, write modes, and semantic fills.
+- [x] Freeze track kinematics as an exact 69-array per-track core, closed
+      35-array physical bundle, required/optional run identities, and explicit
+      legacy exclusions without weakening float64 coordinate authority.
+- [x] Record the fail-closed track adoption blocker: two structured lineage
+      dtypes cannot yet round-trip through `DTypeContract`, `StoragePlan`, the
+      array factory, and physical metadata comparison.
 - [ ] Define exact Arrow dtypes for export columns where cross-language stability
       requires them.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
@@ -458,10 +491,17 @@ Candidate-adoption checkpoints (these do not promote a profile):
       planner/factory while preserving the default writer and selectors.
 - [x] Tail-posture and bout-classification candidate metadata freeze semantic
       NaN, `-1`, false, and zero fills rather than using one numeric default.
+- [x] Tail-kinematics candidate writes the exact 21-array core and optional
+      revision bundle through the shared planner/factory, persists a
+      digest-bound receipt, validates direct/consolidated declarations, rejects
+      process-shard ownership, and leaves all parent selectors unchanged.
 - [ ] Subject-shape candidate adoption.
-- [ ] Tail-kinematics candidate adoption.
 - [ ] Track-kinematics candidate adoption.
 - [ ] Shared columnar adoption for swim bouts and bout kinematics.
+- [x] Add the shared exact compact rematerialization boundary used by that
+      adoption: it derives the growth axis from semantic axes, creates arrays
+      through the common factory, writes complete physical units, preserves
+      explicit report artifacts, and validates an executable receipt.
 - [ ] Compact stimulus-response v3 candidate adoption.
 
 Recommended migration order:
@@ -563,9 +603,13 @@ gates pass:
 
 ## Immediate Next Checkpoint
 
-Continue correctness work before rechunking:
+Continue exact-contract and opt-in candidate work without promoting defaults:
 
-1. finish the isolated stimulus-response and swim/bout exact-schema lanes;
-2. keep shared catalog/planner edits in this serial coordination lane; and
+1. finish the disjoint stimulus-response and chaser-component lanes;
+2. keep shared catalog/planner/registry/selector edits in this serial
+   coordination lane;
 3. integrate each family lane serially and run the combined catalog, lifecycle,
-   and exact-schema matrix before beginning physical-profile migrations.
+   exact-schema, and storage-receipt matrix; and
+4. wire the shared compact rematerializer into selector-ineligible swim-bout
+   and bout-kinematics candidate publishers, followed by family-specific
+   reader/publisher benchmarks.
