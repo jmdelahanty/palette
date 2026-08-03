@@ -78,7 +78,7 @@ identical. The failed name is never reused.
 - [x] Preserve the producer-sealed source manifest and reject stale dtype,
   shape, payload, or schema inventory before physical restamping.
 - [x] Preserve every logical fill contract, including the body-spline `-1`
-  sentinel.
+  sentinel and its receipt semantic `minus_one_means_invalid`.
 - [x] Plan final-path binding aliases through the same candidate policy.
 - [x] Persist a digest-bound executable storage-plan receipt.
 - [x] Reject receipt, profile, codec, chunk, shard, and array-attr tampering.

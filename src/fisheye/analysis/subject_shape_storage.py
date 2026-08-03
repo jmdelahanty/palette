@@ -253,6 +253,13 @@ def _declaration(
     dtype = np.dtype(array.dtype)
     row_aligned = _is_row_aligned(path, shape, row_count)
     authority = _authority_role(role)
+    fill_value = subject_shape_fill_value(path, dtype)
+    if path in _NEGATIVE_ONE_FILL_INT_PATHS:
+        fill_semantics = "minus_one_means_invalid"
+    elif isinstance(fill_value, float) and math.isnan(float(fill_value)):
+        fill_semantics = "nan_for_unpopulated_or_invalid_floating_records"
+    else:
+        fill_semantics = "zero_or_false_fixed_width_fill"
     return AnalysisArrayDeclaration(
         path=path,
         contract=ArrayContract(
@@ -271,12 +278,7 @@ def _declaration(
         access_pattern=(AccessPattern.PER_ROW if row_aligned else AccessPattern.EAGER),
         write_mode=WriteMode.IMMUTABLE,
         authority_role=authority,
-        fill_semantics=(
-            "nan_for_unpopulated_or_invalid_floating_records"
-            if isinstance(subject_shape_fill_value(path, dtype), float)
-            and math.isnan(float(subject_shape_fill_value(path, dtype)))
-            else "zero_or_false_fixed_width_fill"
-        ),
+        fill_semantics=fill_semantics,
         null_semantics=(
             "validity_arrays_and_reason_codes_define scientific missingness"
         ),

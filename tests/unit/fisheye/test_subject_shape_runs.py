@@ -660,6 +660,14 @@ def test_subject_shape_byte_planned_candidate_is_complete_ineligible_and_pointer
         "components/subject_body/bspline_degree_used"
     ].fill_value == -1
     receipt = direct.attrs["subject_shape_storage_plan"]
+    degree_receipt = next(
+        entry
+        for entry in receipt["payload"]["arrays"]
+        if entry["path"] == "components/subject_body/bspline_degree_used"
+    )
+    assert degree_receipt["declaration"]["fill_semantics"] == (
+        "minus_one_means_invalid"
+    )
     assert receipt["payload"]["object_estimate"]["array_metadata_objects"] == len(
         tuple(direct.array_keys())
     ) + sum(
