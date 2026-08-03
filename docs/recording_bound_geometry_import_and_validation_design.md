@@ -1,8 +1,8 @@
 # Recording-Bound Geometry Import and Independent Validation Design
 <!-- contract-meta
-version: 3
-status: phases-0-through-3-implemented
-last_verified: 2026-07-26
+version: 5
+status: phases-0-through-6-implemented-with-registry-and-policy-followups
+last_verified: 2026-08-03
 -->
 
 ## Purpose and status
@@ -17,9 +17,16 @@ The design is approved. Phases 0 through 3 are implemented: Palette can
 preserve and verify the exact recording-local bundle during organization; the
 shared read-only normalization boundary supports strict Orange-folder and
 Citrus-H5 adapters; and verified acquisition geometry can be published as an
-immutable, candidate-only analysis run. Independent fitting, comparison,
-selection, detection gating, registry projection, and cleanup remain future
-phases and are not activated by the loader or candidate publisher.
+immutable, candidate-only analysis run. The pre-review portion of phase 4 is
+also implemented as a composable recording-level DAG fragment: it independently
+publishes the acquisition candidate and generates a blind keyframe-only
+early/middle/late fit package, then stops at an explicit human-review barrier.
+Reviewed Palette-candidate publication is a separate post-review fragment.
+Comparison/audit tooling, immutable explicit selection, and keyed detection
+gating are implemented as separate downstream surfaces. None is activated by
+the loader, candidate publishers, or pre-review DAG. Registry projection,
+explicit cleanup, and requiring a selected gate in refined-detection recipes
+remain follow-up work.
 
 The implementation lives in `fisheye.shared.recording_geometry`. Organized
 recordings retain the fixed version-1 subtree at:
@@ -469,6 +476,21 @@ The target independent fitter should:
 8. Optionally fit an ellipse as a diagnostic. An ellipse must not become an
    operational gate without a new explicit geometry contract.
 
+The production probe samples only encoder-declared keyframes from the three
+windows. Each selected frame is recovered by an exact seek to its GOP
+keyframe, with demuxer relation and display-order evidence retained in the fit
+report. It does not decode presentation-order frames from the beginning of the
+recording merely to reach the middle or late window. The output directory is
+built as a same-parent temporary tree and atomically renamed only after the
+fit report, reveal panels, three-panel montage, and review receipt are all
+complete.
+
+The review receipt binds the exact fit-report, montage, and panel bytes and
+declares `awaiting_explicit_human_review`. It explicitly blocks Palette
+candidate publication, candidate comparison, operational selection, and
+detection gating. A later reviewed-candidate DAG fragment verifies those
+digests again before it may publish a pointerless candidate.
+
 The fitter's declared target and the feature actually supported by the image
 must remain separate. A visually reviewed fit may be accepted as a
 `visible_dish_top_rim_edge` observation even when the probe originally labeled
@@ -904,6 +926,18 @@ The recommended slices are:
 4. **Independent fitter and comparison**
    - Multi-window robust fitting and a reviewed, pointerless Palette candidate
      are implemented for the first Batman canary.
+   - A composable pre-review DAG fragment now supports both clipped and whole
+     recording workflows because its authority is the single recording-level
+     native video, summary, and keyframe declaration.
+   - Acquisition-candidate publication and blind fitting are independent LSF
+     jobs; neither waits on the other, and both may depend on the same import
+     artifact when embedded in a larger workflow.
+   - The campaign planner accepts one or many registered recordings and writes
+     immutable plan/submission evidence. It packs acquisition publications and
+     GPU probes into two independent, bounded LSF arrays and schedules no
+     post-review action.
+   - The separate reviewed-candidate fragment requires the hash-bound review
+     package and remains pointerless, ungated, and absent from the registry.
    - The exact raw-detection disagreement audit and review rendering are
      implemented.
    - Repeat across the four-camera canary before defining any automatic
@@ -965,11 +999,12 @@ Focused unit and integration coverage should include:
 
 Two implementation decisions intentionally remain open:
 
-1. The final Zarr group names and schemas for comparisons and selections. The
-   candidate family is now fixed at `analysis/arena_geometry_runs`.
+1. Registry projection and the policy that makes a selected keyed gate a
+   required refined-detection input. Existing selection and gate artifacts do
+   not silently activate that policy.
 2. Numerical agreement thresholds. These should be derived from the July 22
-   four-camera canary and repeated-recording variability after the independent
-   fitter exists.
+   four-camera canary and repeated-recording variability, not guessed from the
+   first independent fit.
 
 No implementation should silently choose thresholds, overwrite one candidate
 with another, or activate registered gating before those decisions are made

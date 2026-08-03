@@ -19,7 +19,6 @@ import socket
 import subprocess
 import tempfile
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,8 +33,10 @@ from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
     validate_arena_geometry_candidate_record,
 )
 from fisheye.shared.json_safety import strict_json_dumps
+from fisheye.shared.pynvvc_exact_seek import (
+    decode_one_frame_from_preceding_keyframe as _decode_one_frame_from_preceding_keyframe,
+)
 from fisheye.shared.zarr_io import open_zarr_root
-
 
 SCHEMA_ID = "palette.diagnostics.arena_geometry_detection_gate_audit"
 SCHEMA_VERSION = 1
@@ -454,80 +455,6 @@ def _write_disagreements_csv(
                     "category": str(categories[index]),
                 }
             )
-
-
-def _decode_one_frame_from_preceding_keyframe(
-    *,
-    demuxer: Any,
-    decoder: Any,
-    target_frame_index: int,
-    materialize_frame: Any,
-    max_packets_per_seek: int = 256,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Seek to a GOP keyframe and prove the exact requested display frame."""
-
-    seek_timestamp = int(demuxer.TimestampFromFrame(int(target_frame_index)))
-    demuxer.Seek(seek_timestamp)
-    keyframe_packet_pts: int | None = None
-    previous_packet_pts: int | None = None
-    target_packet_number: int | None = None
-    pending: deque[tuple[int, int]] = deque()
-    for packet_count in range(1, max_packets_per_seek + 1):
-        packet = demuxer.Demux()
-        if int(packet.bsl) <= 0:
-            raise RuntimeError("PyNvVideoCodec seek reached an empty packet")
-        packet_pts = int(packet.pts)
-        if previous_packet_pts is not None and packet_pts <= previous_packet_pts:
-            raise RuntimeError(
-                "Exact-frame seek does not support reordered/nonmonotonic packet PTS"
-            )
-        previous_packet_pts = packet_pts
-        if packet_count == 1:
-            if int(packet.key) != 1:
-                raise RuntimeError("PyNvVideoCodec seek did not land on a keyframe")
-            keyframe_packet_pts = packet_pts
-        relation = int(demuxer.isSeekDone(packet_pts, target_frame_index))
-        if relation not in {-1, 0, 1}:
-            raise RuntimeError(
-                f"PyNvVideoCodec returned invalid seek relation {relation}"
-            )
-        if relation == 0:
-            if target_packet_number is not None:
-                raise RuntimeError("PyNvVideoCodec reported the target packet twice")
-            target_packet_number = packet_count
-        elif relation > 0 and target_packet_number is None:
-            raise RuntimeError(
-                f"PyNvVideoCodec seek passed target frame {target_frame_index}"
-            )
-        pending.append((relation, packet_pts))
-        decoded = list(decoder.Decode(packet))
-        if len(decoded) > len(pending):
-            raise RuntimeError(
-                "PyNvVideoCodec produced more display frames than submitted packets"
-            )
-        for frame in decoded:
-            output_relation, output_pts = pending.popleft()
-            if output_relation == 0:
-                if target_packet_number is None:
-                    raise RuntimeError("target display frame preceded its packet")
-                return materialize_frame(frame), {
-                    "target_frame_index": int(target_frame_index),
-                    "seek_timestamp": seek_timestamp,
-                    "keyframe_packet_pts": keyframe_packet_pts,
-                    "target_packet_pts": output_pts,
-                    "target_packet_number": target_packet_number,
-                    "packets_submitted_through_target_output": packet_count,
-                    "packets_after_target_for_decoder_latency": (
-                        packet_count - target_packet_number
-                    ),
-                    "exact_frame_proof": (
-                        "demuxer_isSeekDone_exact_monotonic_pts_ordered_display_queue"
-                    ),
-                }
-    raise RuntimeError(
-        f"PyNvVideoCodec seek exceeded {max_packets_per_seek} packets for "
-        f"frame {target_frame_index}"
-    )
 
 
 def decode_selected_luma_pynvvc(

@@ -16,6 +16,7 @@ from fisheye.analysis_workflows.materializers.arena_geometry_candidates import (
 )
 from fisheye.shared.recording_geometry import RecordingGeometryError
 from fisheye.shared.recording_geometry_recovery import RECOVERY_RECEIPT_NAME
+from fisheye.shared.json_safety import write_json_atomic
 
 
 def _analysis_zarr(recording: Path) -> Path:
@@ -28,6 +29,23 @@ def _analysis_zarr(recording: Path) -> Path:
     return candidates[0].resolve()
 
 
+def _explicit_analysis_zarr(recording: Path, path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    expected_parent = (recording / "zarr").resolve()
+    if resolved.parent != expected_parent or not resolved.name.endswith(
+        "_analysis.zarr"
+    ):
+        raise RecordingGeometryError(
+            "Explicit analysis Zarr must be an *_analysis.zarr child of the "
+            "recording's zarr directory."
+        )
+    if not (resolved / "zarr.json").is_file():
+        raise RecordingGeometryError(
+            f"Explicit analysis Zarr is not Zarr v3: {resolved}"
+        )
+    return resolved
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -38,11 +56,18 @@ def _parser() -> argparse.ArgumentParser:
         help="Recording root with raw recovery receipt and one analysis Zarr; repeatable.",
     )
     parser.add_argument(
+        "--analysis-zarr",
+        type=Path,
+        action="append",
+        help=(
+            "Exact analysis Zarr paired by position with each --recording. "
+            "When omitted, each recording must contain exactly one analysis Zarr."
+        ),
+    )
+    parser.add_argument(
         "--scratch-root",
         type=Path,
-        default=Path(
-            os.environ.get("TMPDIR", "/tmp")
-        )
+        default=Path(os.environ.get("TMPDIR", "/tmp"))
         / "palette-arena-geometry-candidates",
         help="Node/workstation-local temporary publication root.",
     )
@@ -56,15 +81,29 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Publish candidates. Default is a read-only dry-run.",
     )
+    parser.add_argument(
+        "--result-json",
+        type=Path,
+        help="Optional immutable summary receipt for DAG orchestration.",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    explicit_zarrs = tuple(args.analysis_zarr or ())
+    if explicit_zarrs and len(explicit_zarrs) != len(args.recording):
+        raise RecordingGeometryError(
+            "--analysis-zarr must be omitted or repeated once per --recording."
+        )
     rows: list[dict[str, object]] = []
-    for raw_recording in args.recording:
+    for index, raw_recording in enumerate(args.recording):
         recording = raw_recording.expanduser().resolve()
-        source_zarr = _analysis_zarr(recording)
+        source_zarr = (
+            _explicit_analysis_zarr(recording, explicit_zarrs[index])
+            if explicit_zarrs
+            else _analysis_zarr(recording)
+        )
         receipt = recording / "raw" / RECOVERY_RECEIPT_NAME
         plan = plan_recovered_acquisition_geometry_candidate(
             source_zarr=source_zarr,
@@ -108,17 +147,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "operationally_selected": False,
             }
         )
-    print(
-        json.dumps(
-            {
-                "mode": "apply" if args.apply else "dry_run",
-                "target_count": len(rows),
-                "targets": rows,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    payload = {
+        "schema_id": "palette.arena_geometry_acquisition_candidate_batch",
+        "schema_version": 1,
+        "mode": "apply" if args.apply else "dry_run",
+        "target_count": len(rows),
+        "targets": rows,
+        "operational_selection_performed": False,
+        "registry_updated": False,
+    }
+    if args.result_json is not None:
+        write_json_atomic(args.result_json.expanduser().resolve(), payload)
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 

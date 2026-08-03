@@ -9,11 +9,13 @@ import pytest
 
 from fisheye.diagnostics.probe_recording_dish_rim_fit import (
     CircleFit,
-    build_window_specs,
+    build_keyframe_window_specs,
     consensus_circle,
     fit_dish_circle,
+    load_declared_keyframes,
     render_acquisition_reveal,
     temporal_median,
+    write_review_package,
 )
 
 
@@ -29,17 +31,47 @@ def _synthetic_rim(
     return cv2.add(image, np.broadcast_to(gradient, shape))
 
 
-def test_build_window_specs_are_exact_ordered_and_disjoint() -> None:
-    specs = build_window_specs(frame_count=140_000, fps=100.0)
+def test_keyframe_windows_use_only_declared_keyframes() -> None:
+    keyframes = tuple(range(0, 140_000, 25))
+    specs = build_keyframe_window_specs(
+        frame_count=140_000,
+        fps=100.0,
+        keyframe_frames=keyframes,
+        max_keyframes_per_window=21,
+    )
 
     assert [spec.name for spec in specs] == ["early", "middle", "late"]
-    assert all(len(spec.frame_indices) == 61 for spec in specs)
+    assert all(
+        3 <= len(spec.frame_indices) <= 21 and len(spec.frame_indices) % 2 == 1
+        for spec in specs
+    )
+    assert all(set(spec.frame_indices) <= set(keyframes) for spec in specs)
     assert all(
         tuple(sorted(spec.frame_indices)) == spec.frame_indices for spec in specs
     )
     assert not set(specs[0].frame_indices) & set(specs[1].frame_indices)
     assert not set(specs[1].frame_indices) & set(specs[2].frame_indices)
-    assert specs[0].frame_indices[-1] - specs[0].frame_indices[0] == 500
+
+
+def test_declared_keyframe_summary_must_match_video_summary(tmp_path: Path) -> None:
+    path = tmp_path / "keyframes.json"
+    path.write_text(
+        json.dumps(
+            {
+                "total_frames": 100,
+                "fps": 100.0,
+                "keyframe_frames": [0, 25, 50, 75],
+            }
+        )
+    )
+
+    assert load_declared_keyframes(
+        path, expected_frame_count=100, expected_fps=100.0
+    ) == (0, 25, 50, 75)
+    with pytest.raises(ValueError, match="frame count"):
+        load_declared_keyframes(path, expected_frame_count=101, expected_fps=100.0)
+    with pytest.raises(ValueError, match="fps"):
+        load_declared_keyframes(path, expected_frame_count=100, expected_fps=99.0)
 
 
 def test_temporal_median_rejects_non_uint8_and_suppresses_transient() -> None:
@@ -114,3 +146,24 @@ def test_acquisition_reveal_does_not_modify_frozen_fit_report(tmp_path: Path) ->
     assert reveal["purpose"] == "visual_reveal_only_after_blind_palette_fit_was_frozen"
     assert reveal["files"]["early"]["delta_radius_px"] == pytest.approx(1.0)
     assert (tmp_path / "early_acquisition_reveal.png").is_file()
+
+
+def test_review_package_binds_exactly_three_panels_and_stops_for_review(
+    tmp_path: Path,
+) -> None:
+    fit_report = tmp_path / "fit_report.json"
+    fit_report.write_text('{"status":"provisional_visual_review_required"}\n')
+    for name in ("early", "middle", "late"):
+        assert cv2.imwrite(
+            str(tmp_path / f"{name}_palette_fit.png"),
+            np.full((40, 60, 3), 10, dtype=np.uint8),
+        )
+
+    receipt_path = write_review_package(tmp_path, acquisition_revealed=False)
+
+    receipt = json.loads(receipt_path.read_text())
+    montage = cv2.imread(str(tmp_path / "dish_rim_review_montage.png"))
+    assert receipt["status"] == "awaiting_explicit_human_review"
+    assert len(receipt["source_panels"]) == 3
+    assert montage.shape == (40, 180, 3)
+    assert "palette_candidate_publication" in receipt["human_review_required_before"]
