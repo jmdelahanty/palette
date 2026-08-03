@@ -279,14 +279,23 @@ now implemented on the coordination branch:
   matrix: `209bc52e`;
 - closed semantic classification of 22 additional maintained, embedded,
   artifact, maintenance, active-legacy-shaped, and legacy surfaces:
-  `a2668075` and `f178e315`.
+  `a2668075` and `f178e315`;
+- an explicit negative authority test proving the active legacy-shaped
+  swim-bout-statistics writer cannot activate a selector: `f65713cf`;
+- closed declaration grammar for stage IDs, import paths, constant names,
+  artifact paths, policy identifiers, and direct entry points: `dd4c0f74`;
+- a deterministic machine-readable coverage report joining the maintained
+  stage registry, exact storage catalog, and all 22 classified auxiliary
+  surfaces, including relational ownership and tamper validation:
+  `fdc3f076`.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. The atomic-publication lane also received
 an independent adversarial review with no remaining correctness or
 publication-safety blockers. The exact catalog/stage-array matrix passed 88
-tests after integration. Physical-profile promotion and production selector
-activation remain out of scope.
+tests after integration. The combined exact-catalog, surface-classification,
+and coverage-report matrix passed 103 tests. Physical-profile promotion and
+production selector activation remain out of scope.
 
 ### Phase 0 — Preserve the audit baseline
 
@@ -295,9 +304,9 @@ activation remain out of scope.
 - [x] Inventory companion analytics, chaser components, exports, and legacy
       writers.
 - [x] Separate logical, physical, lifecycle, consumer, and benchmark concerns.
-- [ ] Add a machine-readable analytics coverage report generated from the live
+- [x] Add a machine-readable analytics coverage report generated from the live
       writer, stage, and storage catalogs.
-- [ ] Make CI fail when a newly maintained array-bearing analytics stage has no
+- [x] Make CI fail when a newly maintained array-bearing analytics stage has no
       explicit coverage classification.
 
 ### Phase 1 — Fix fail-closed lifecycle behavior
