@@ -16,6 +16,7 @@ from fisheye.analysis_workflows.storage_contract_catalog import (
 
 
 EXPECTED_ATOMIC = {
+    "track_kinematics",
     "swim_bouts",
     "bout_kinematics",
     "eye_angles",

@@ -112,7 +112,7 @@ true.
 
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
-| Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract | Version or flatten the two structured lineage dtypes in the shared factory before candidate adoption; retain float64 position authority |
+| Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract; the v2 candidate flattens the two structured lineage records into five exact primitive arrays while retaining float64 position authority | Benchmark the selector-ineligible v2 candidate through its real readers before any writer/profile promotion |
 | Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, content manifest, lineage, atomic sharded publication, strict reload, and serialized registry projection | Add an explicit selector-ineligible byte-planned physical candidate and benchmark it |
 | Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an atomic selector-ineligible byte-planned candidate with exact failure-visibility repair | Benchmark through Palette and Crimson before profile promotion |
@@ -518,6 +518,11 @@ a v3 storage-candidate regression.
 - [x] Record the fail-closed track adoption blocker: two structured lineage
       dtypes cannot yet round-trip through `DTypeContract`, `StoragePlan`, the
       array factory, and physical metadata comparison.
+- [x] Resolve that blocker with an explicit versioned representation change:
+      the candidate projects the two v1 structured lineage records into five
+      primitive v2 arrays and reconstructs the v1 records only through an
+      explicit compatibility reader. Candidate/source hashes, exact source
+      paths, and complete group/array topology are fail-closed.
 - [ ] Define exact Arrow dtypes for export columns where cross-language stability
       requires them.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
@@ -597,7 +602,10 @@ Candidate-adoption checkpoints (these do not promote a profile):
       digest-bound receipt, validates direct/consolidated declarations, rejects
       process-shard ownership, and leaves all parent selectors unchanged.
 - [ ] Subject-shape candidate adoption.
-- [ ] Track-kinematics candidate adoption.
+- [x] Track-kinematics candidate adoption. The selector-ineligible v2 layout
+      preserves float64 positions, writes all primitive arrays through the
+      shared planner/factory, binds source and candidate logical hashes, proves
+      full direct/consolidated subtree equivalence, and publishes atomically.
 - [x] Shared columnar adoption for swim bouts and bout kinematics. The new
       candidate publisher rematerializes exact compact runs through the shared
       byte planner without changing either production writer or selector.

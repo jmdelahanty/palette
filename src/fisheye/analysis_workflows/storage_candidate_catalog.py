@@ -142,6 +142,14 @@ DERIVED_ANALYSIS_STORAGE_CANDIDATES: tuple[
     DerivedAnalysisStorageCandidate, ...
 ] = (
     _atomic_candidate(
+        "track_kinematics",
+        profile_id="published_http_v1",
+        owner_module=(
+            "fisheye.analysis_workflows.materializers.track_kinematics_candidate"
+        ),
+        entrypoint_attr="materialize_track_kinematics_flat_candidate",
+    ),
+    _atomic_candidate(
         "swim_bouts",
         profile_id="published_http_v1",
         owner_module=(

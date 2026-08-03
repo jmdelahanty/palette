@@ -9,9 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import time
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional, Sequence
 
-import numpy as np
 import zarr
 
 from fisheye.analysis.track_kinematics_storage import (
@@ -29,6 +28,9 @@ from fisheye.analysis.track_kinematics_schema import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.zarr.storage_profiles import get_storage_profile
+from fisheye.shared.zarr.metadata_equivalence import (
+    validate_direct_consolidated_subtree,
+)
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
 )
@@ -72,34 +74,6 @@ def _published_root(path: Path) -> zarr.Group:
     )
 
 
-def _normalize_metadata(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        result = {str(key): _normalize_metadata(child) for key, child in value.items()}
-        if result.get("node_type") == "group":
-            envelope = result.get("consolidated_metadata")
-            if envelope is None or envelope == {
-                "kind": "inline",
-                "must_understand": False,
-                "metadata": {},
-            }:
-                result.pop("consolidated_metadata", None)
-        return result
-    if isinstance(value, (tuple, list)):
-        return [_normalize_metadata(child) for child in value]
-    if value == "NaN" or (
-        isinstance(value, (float, np.floating)) and np.isnan(float(value))
-    ):
-        return {"palette_exact_float": "nan"}
-    return value
-
-
-def _array_at_path(group: Any, path: str) -> Any:
-    node = group
-    for component in path.split("/"):
-        node = node[component]
-    return node
-
-
 def _direct_consolidated_check(
     archive: Path,
     *,
@@ -107,24 +81,16 @@ def _direct_consolidated_check(
     declaration_paths: Sequence[str],
 ) -> int:
     consolidate_metadata_capture_expected_warnings(archive)
-    direct = zarr.open_group(
-        str(archive), mode="r", zarr_format=3, use_consolidated=False
-    )[run_path]
-    consolidated = zarr.open_group(
-        str(archive), mode="r", zarr_format=3, use_consolidated=True
-    )[run_path]
-    if _normalize_metadata(dict(direct.attrs)) != _normalize_metadata(
-        dict(consolidated.attrs)
-    ):
-        raise ValueError("Direct and consolidated track candidate attrs differ.")
-    for path in declaration_paths:
-        if _normalize_metadata(_array_at_path(direct, path).metadata.to_dict()) != (
-            _normalize_metadata(_array_at_path(consolidated, path).metadata.to_dict())
-        ):
-            raise ValueError(
-                f"Direct and consolidated track candidate metadata differ at {path}."
-            )
-    return len(declaration_paths)
+    receipt = validate_direct_consolidated_subtree(
+        archive,
+        subtree_path=run_path,
+    )
+    if receipt.array_count != len(declaration_paths):
+        raise ValueError(
+            "Direct/consolidated track candidate array inventory differs: "
+            f"expected {len(declaration_paths)}, got {receipt.array_count}."
+        )
+    return receipt.array_count
 
 
 @dataclass(frozen=True)

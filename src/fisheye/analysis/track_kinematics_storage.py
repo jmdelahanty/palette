@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -52,6 +53,11 @@ TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR = "track_kinematics_flat_lineage_m
 TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_DIGEST_ATTR = (
     "track_kinematics_flat_lineage_manifest_sha256"
 )
+TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR = (
+    "track_kinematics_flat_candidate_logical_hashes"
+)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_RUN_PREFIX = "analysis/track_kinematics_runs/offline/"
 _STRUCTURED_SOURCE_FIELDS = {
     "source_frame_interpolation/left_source_frame_index": (
         "source_frame_interpolation",
@@ -94,6 +100,13 @@ def _iter_array_paths(group: Any, prefix: str = ""):
     for name, child in sorted(group.groups(), key=lambda item: str(item[0])):
         child_prefix = f"{prefix}/{name}" if prefix else str(name)
         yield from _iter_array_paths(child, child_prefix)
+
+
+def _iter_group_paths(group: Any, prefix: str = ""):
+    for name, child in sorted(group.groups(), key=lambda item: item[0]):
+        child_prefix = f"{prefix}/{name}" if prefix else str(name)
+        yield child_prefix
+        yield from _iter_group_paths(child, child_prefix)
 
 
 def _source_track_ids(source_group: Any) -> tuple[int, ...]:
@@ -456,6 +469,7 @@ def build_flat_candidate_manifest(
     declarations: Sequence[AnalysisArrayDeclaration],
     source_run_path: str,
     source_projection_hashes: Mapping[str, str],
+    candidate_logical_hashes: Mapping[str, str],
 ) -> dict[str, object]:
     payload = {
         "schema_id": TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID,
@@ -475,6 +489,7 @@ def build_flat_candidate_manifest(
         "flat_lineage_paths": list(TRACK_KINEMATICS_FLAT_LINEAGE_PATHS),
         "arrays": [declaration.as_manifest() for declaration in declarations],
         "source_projection_hashes": dict(sorted(source_projection_hashes.items())),
+        "candidate_logical_hashes": dict(sorted(candidate_logical_hashes.items())),
     }
     return {
         "payload": payload,
@@ -490,10 +505,16 @@ def persist_flat_candidate_contract(
     source_run_path: str,
     source_projection_hashes: Mapping[str, str],
 ) -> Mapping[str, Any]:
+    candidate_hashes = flat_candidate_logical_hashes(run_group, declarations)
+    if dict(source_projection_hashes) != candidate_hashes:
+        raise ValueError(
+            "Track flat candidate values differ from the supplied source projection."
+        )
     manifest = build_flat_candidate_manifest(
         declarations=declarations,
         source_run_path=source_run_path,
         source_projection_hashes=source_projection_hashes,
+        candidate_logical_hashes=candidate_hashes,
     )
     run_group.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR] = json_attr_safe(
         manifest
@@ -501,6 +522,11 @@ def persist_flat_candidate_contract(
     run_group.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_DIGEST_ATTR] = manifest[
         "payload_digest"
     ]
+    run_group.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR] = (
+        json_attr_safe(candidate_hashes)
+    )
+    run_group.attrs["storage_candidate_source_run_path"] = source_run_path
+    run_group.attrs["storage_candidate_source_run"] = source_run_path.rsplit("/", 1)[-1]
     persist_direct_writer_storage_receipt(run_group, receipt)
     return manifest
 
@@ -522,6 +548,18 @@ def validate_flat_candidate(
             "flat candidate array inventory differs "
             f"(missing={sorted(declaration_paths - observed_paths)!r}, "
             f"unexpected={sorted(observed_paths - declaration_paths)!r})"
+        )
+    expected_groups = {
+        "/".join(path.split("/")[:end])
+        for path in declaration_paths
+        for end in range(1, len(path.split("/")))
+    }
+    observed_groups = set(_iter_group_paths(run_group))
+    if observed_groups != expected_groups:
+        errors.append(
+            "flat candidate group inventory differs "
+            f"(missing={sorted(expected_groups - observed_groups)!r}, "
+            f"unexpected={sorted(observed_groups - expected_groups)!r})"
         )
     if any(
         np.dtype(_array_at_path(run_group, path).dtype).fields is not None
@@ -558,6 +596,7 @@ def validate_flat_candidate(
             "flat_lineage_paths",
             "arrays",
             "source_projection_hashes",
+            "candidate_logical_hashes",
         }
         if not isinstance(payload, Mapping) or set(payload) != expected_payload_fields:
             errors.append("flat candidate manifest payload is not exact")
@@ -593,7 +632,8 @@ def validate_flat_candidate(
                 "narrowing_permitted": False,
             }
             or not isinstance(payload.get("source_run_path"), str)
-            or not payload.get("source_run_path")
+            or not str(payload.get("source_run_path")).startswith(_SOURCE_RUN_PREFIX)
+            or str(payload.get("source_run_path")).count("/") != 3
         ):
             errors.append("flat candidate semantic manifest envelope differs")
     access = {
@@ -611,6 +651,60 @@ def validate_flat_candidate(
         )
     )
     hashes = flat_candidate_logical_hashes(run_group, declarations)
+    expected_paths = declaration_paths
+    persisted_hashes = run_group.attrs.get(
+        TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR
+    )
+    source_path = (
+        manifest.get("payload", {}).get("source_run_path")
+        if isinstance(manifest, Mapping)
+        and isinstance(manifest.get("payload"), Mapping)
+        else None
+    )
+    source_run_name = source_path.rsplit("/", 1)[-1] if isinstance(source_path, str) else None
+    if (
+        not isinstance(persisted_hashes, Mapping)
+        or set(persisted_hashes) != expected_paths
+        or any(
+            type(path) is not str
+            or type(digest) is not str
+            or _SHA256.fullmatch(digest) is None
+            for path, digest in persisted_hashes.items()
+        )
+        or dict(persisted_hashes) != hashes
+    ):
+        errors.append("flat candidate persisted logical hashes differ from payload")
+    if (
+        run_group.attrs.get("storage_candidate_source_run_path") != source_path
+        or run_group.attrs.get("storage_candidate_source_run") != source_run_name
+    ):
+        errors.append("flat candidate redundant source-run binding mismatch")
+    if isinstance(manifest, Mapping) and isinstance(manifest.get("payload"), Mapping):
+        payload_hashes = manifest["payload"].get("candidate_logical_hashes")
+        source_hashes = manifest["payload"].get("source_projection_hashes")
+        for label, values in (
+            ("candidate", payload_hashes),
+            ("source projection", source_hashes),
+        ):
+            if (
+                not isinstance(values, Mapping)
+                or set(values) != expected_paths
+                or any(
+                    type(path) is not str
+                    or type(digest) is not str
+                    or _SHA256.fullmatch(digest) is None
+                    for path, digest in values.items()
+                )
+            ):
+                errors.append(f"flat candidate {label} hash inventory is invalid")
+        if isinstance(payload_hashes, Mapping) and dict(payload_hashes) != hashes:
+            errors.append("flat candidate manifest logical hashes differ from payload")
+        if (
+            isinstance(payload_hashes, Mapping)
+            and isinstance(source_hashes, Mapping)
+            and dict(payload_hashes) != dict(source_hashes)
+        ):
+            errors.append("flat candidate source and candidate hash bindings differ")
     if source_group is not None:
         try:
             expected = source_flat_projection_hashes(source_group, declarations)
@@ -625,6 +719,9 @@ def validate_flat_candidate(
                 and manifest["payload"].get("source_projection_hashes") != expected
             ):
                 errors.append("flat candidate manifest source hashes differ")
+            source_group_path = str(getattr(source_group, "name", "")).strip("/")
+            if source_group_path and source_group_path != source_path:
+                errors.append("flat candidate source group path binding differs")
     return {
         "valid": not errors,
         "errors": errors,
@@ -636,6 +733,7 @@ def validate_flat_candidate(
 __all__ = [
     "TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR",
     "TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_DIGEST_ATTR",
+    "TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR",
     "TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID",
     "build_flat_candidate_declarations",
     "build_flat_candidate_manifest",

@@ -16,6 +16,9 @@ from fisheye.analysis.track_kinematics_schema import (
     build_track_kinematics_flat_lineage_declarations,
 )
 from fisheye.analysis.track_kinematics_storage import (
+    TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR,
+    TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR,
+    TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_DIGEST_ATTR,
     TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID,
     build_flat_candidate_declarations,
     build_flat_candidate_storage_receipt,
@@ -25,6 +28,7 @@ from fisheye.analysis.track_kinematics_storage import (
     source_flat_projection_hashes,
     validate_flat_candidate,
 )
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.analysis_workflows.materializers.track_kinematics_candidate import (
     build_track_kinematics_flat_candidate_plan,
     materialize_track_kinematics_flat_candidate,
@@ -251,6 +255,88 @@ def test_flat_storage_rematerializes_exact_structured_fields_through_shared_fact
     )
     assert np.array_equal(flat_interpolation, source_interpolation)
     assert np.array_equal(flat_instances, source_instances)
+
+    original_source_path = candidate.attrs["storage_candidate_source_run_path"]
+    candidate.attrs["storage_candidate_source_run_path"] = (
+        "analysis/track_kinematics_runs/offline/false_source"
+    )
+    wrong_source = validate_flat_candidate(candidate)
+    assert not wrong_source["valid"]
+    assert "source-run binding mismatch" in " ".join(wrong_source["errors"])
+    candidate.attrs["storage_candidate_source_run_path"] = original_source_path
+
+    original_hashes = dict(
+        candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR]
+    )
+    missing_hash = dict(original_hashes)
+    missing_hash.pop(next(iter(missing_hash)))
+    candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR] = missing_hash
+    invalid_hash_inventory = validate_flat_candidate(candidate)
+    assert not invalid_hash_inventory["valid"]
+    assert "persisted logical hashes differ" in " ".join(
+        invalid_hash_inventory["errors"]
+    )
+    candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_LOGICAL_HASHES_ATTR] = (
+        original_hashes
+    )
+
+    manifest = dict(candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR])
+    manifest["payload"] = dict(manifest["payload"])
+    manifest["payload"]["source_run_path"] = (
+        "analysis/track_kinematics_runs/offline/false_source"
+    )
+    manifest["payload_digest"] = canonical_json_sha256(manifest["payload"])
+    candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_ATTR] = manifest
+    candidate.attrs[TRACK_KINEMATICS_FLAT_CANDIDATE_MANIFEST_DIGEST_ATTR] = manifest[
+        "payload_digest"
+    ]
+    rehashed_false_source = validate_flat_candidate(candidate)
+    assert not rehashed_false_source["valid"]
+    assert "source-run binding mismatch" in " ".join(
+        rehashed_false_source["errors"]
+    )
+
+
+def test_flat_candidate_rejects_unexpected_group_topology(tmp_path: Path) -> None:
+    source = zarr.open_group(
+        str(tmp_path / "source-run"), mode="w", zarr_format=3, use_consolidated=False
+    )
+    _populate_v1_run(source)
+    declarations = build_flat_candidate_declarations(source)
+    hashes = source_flat_projection_hashes(source, declarations)
+    receipt = build_flat_candidate_storage_receipt(
+        source,
+        profile=get_storage_profile("published_http_v1"),
+    )
+    candidate = zarr.open_group(
+        str(tmp_path / "candidate-run"),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    rematerialize_flat_candidate(source, candidate, receipt=receipt)
+    candidate.attrs.update(
+        {
+            "schema_id": TRACK_KINEMATICS_FLAT_CANDIDATE_SCHEMA_ID,
+            "schema_version": 2,
+            RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
+            "stage_selector_eligible": False,
+            "storage_candidate_profile_promoted": False,
+        }
+    )
+    persist_flat_candidate_contract(
+        candidate,
+        receipt=receipt,
+        declarations=declarations,
+        source_run_path="analysis/track_kinematics_runs/offline/source_v1",
+        source_projection_hashes=hashes,
+    )
+    candidate.create_group("unexpected_empty_group")
+
+    validation = validate_flat_candidate(candidate, source_group=source)
+
+    assert not validation["valid"]
+    assert "group inventory differs" in " ".join(validation["errors"])
 
     candidate["tracks/id_0/source_instance_key/value"][1] = np.uint64(999)
     tampered = validate_flat_candidate(candidate, source_group=source)

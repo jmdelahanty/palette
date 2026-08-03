@@ -65,13 +65,13 @@ def test_report_preserves_live_storage_and_classification_statuses() -> None:
     }
 
     assert len(contracts) == len(DERIVED_ANALYSIS_STORAGE_CONTRACTS) == 12
-    assert len(candidates) == len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == 10
+    assert len(candidates) == len(DERIVED_ANALYSIS_STORAGE_CANDIDATES) == 11
     assert len(surfaces) == len(ANALYTICS_SURFACE_CLASSIFICATIONS) == 19
     assert report["summary"] == {
         "derived_stage_count": 13,
         "central_storage_contract_count": 12,
-        "storage_candidate_count": 10,
-        "atomic_storage_candidate_count": 8,
+        "storage_candidate_count": 11,
+        "atomic_storage_candidate_count": 9,
         "guarded_direct_storage_candidate_count": 2,
         "classified_non_catalog_stage_count": 1,
         "classified_surface_count": 19,
