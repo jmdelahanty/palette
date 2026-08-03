@@ -395,6 +395,8 @@ production selector activation remain out of scope.
 - [x] Define an immutable component manifest envelope with source-run identity,
       schema, parameters, array declarations, content digests, and completion.
 - [ ] Give each component its own hidden-copy/validate/rename publication step.
+      The shared atomic component publisher and baseline rollback test are now
+      implemented; adoption by each scientific writer remains.
 - [ ] Remove delete-and-rewrite publication of visible components.
 - [x] Define and test component selectors bound to exact manifest digests. Keep
       production activation quarantined until atomic workflow adoption.
@@ -402,7 +404,8 @@ production selector activation remain out of scope.
       in the chaser runner receipt.
 - [ ] Keep export of unsealed component tables fail closed.
 - [ ] Add recovery tests for interrupted component publication and stale
-      pointers.
+      pointers. Post-selector failure rollback is covered; add interruption
+      points for each adopted component workflow.
 
 The v1 logical envelope, validation boundary, and remaining adoption checklist
 are frozen in `docs/chaser_component_publication_contract_v1.md`.

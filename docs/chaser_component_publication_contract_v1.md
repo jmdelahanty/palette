@@ -2,8 +2,9 @@
 
 Date: 2026-08-03
 
-Status: shared logical primitive implemented; scientific-writer and workflow
-adoption pending. This contract does not activate a production selector.
+Status: shared logical and atomic-publication primitives implemented;
+scientific-writer/workflow adoption pending. This contract does not activate a
+production selector.
 
 ## Purpose
 
@@ -32,9 +33,12 @@ The implementation lives in
    shapes, and content digests before treating the component as scientific
    authority. `latest`, sorted-child, and raw-child fallback remain forbidden.
 
-The logical module owns steps 3, 4 validation, 6, and 7. The workflow-level
-hidden-copy/rename and recovery implementation remains a separate checkpoint
-because it must coordinate destination locks and durable receipts.
+The logical module owns steps 3, 4 validation, 6, and 7.
+`analysis_workflows/materializers/chaser_component.py` owns the destination
+lock, hidden copy, revalidation, immutable rename, completion receipt,
+conditional selector rollback, and literal final eligibility commit. Scientific
+writers still need to adopt that materializer instead of writing directly into
+the authoritative archive.
 
 ## Manifest Envelope
 
@@ -53,7 +57,9 @@ The exact manifest contains:
 - exact source authorities and algorithm parameters;
 - an ordered declaration of every group and every array;
 - all authoritative group and array attributes except the two circular
-  component-manifest attributes;
+  component-manifest attributes and the explicit non-scientific mechanical
+  publisher attributes (owner, staging telemetry, completion/error state, and
+  selector eligibility);
 - exact array dtype, shape, and decoded-value SHA-256.
 
 Nested field sets are closed. Rehashing an envelope after adding fields or
@@ -95,14 +101,16 @@ attributes. Maintained readers must consume only this authority envelope.
 - [x] Digest-bound component-family selector envelope with no fallback.
 - [x] Adversarial tests for payload, parameter, nested-field, selector, and base
       identity tampering.
-- [ ] Add the destination hidden-copy/validate/rename publisher and crash
-      recovery receipt.
+- [x] Add the destination hidden-copy/validate/rename publisher and a failed,
+      selector-ineligible recovery tombstone.
 - [ ] Give every maintained component an exact semantic schema declaration.
 - [ ] Migrate all maintained component writers off direct visible mutation.
 - [ ] Migrate readers/exports to validated component handles.
 - [ ] Expand the runner receipt to bind every requested component manifest and
       selector result.
-- [ ] Run real-Zarr recovery and end-to-end workflow tests outside the sandbox.
+- [x] Run focused real-Zarr success and post-selector failure/rollback tests
+      outside the sandbox.
+- [ ] Run end-to-end component-family workflow tests outside the sandbox.
 
 Until the remaining items pass, the existing
 `reject_unsealed_chaser_derived_publication()` quarantine stays in place and

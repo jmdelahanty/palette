@@ -93,6 +93,22 @@ _SELECTOR_FIELDS = frozenset(
     }
 )
 
+# These component-root attributes are owned by the mechanical publisher.  They
+# are explicitly non-scientific and are excluded so hidden-copy ownership,
+# completion receipts, and the final eligibility commit cannot invalidate the
+# already-sealed scientific payload.  Every other root attribute is protected.
+NON_AUTHORITATIVE_PUBLISHER_ATTRS = frozenset(
+    {
+        "atomic_publication_owner_uuid",
+        "cluster_output_staging",
+        "palette_run_completed_at_utc",
+        "palette_run_completion_status",
+        "palette_run_error",
+        "publication_status",
+        "stage_selector_eligible",
+    }
+)
+
 
 class ChaserComponentPublicationError(ValueError):
     """Raised when a derived component cannot be sealed or selected exactly."""
@@ -261,6 +277,8 @@ def _attrs(node: Any, *, omit_manifest: bool = False) -> dict[str, Any]:
     if omit_manifest:
         values.pop(COMPONENT_MANIFEST_ATTR, None)
         values.pop(COMPONENT_MANIFEST_DIGEST_ATTR, None)
+        for name in NON_AUTHORITATIVE_PUBLISHER_ATTRS:
+            values.pop(name, None)
     normalized = _canonical_value(values, path="$.attributes")
     if not isinstance(normalized, dict):
         _fail("Zarr attributes must normalize to one object.")
@@ -605,6 +623,7 @@ __all__ = [
     "COMPONENT_SELECTOR_DIGEST_ATTR",
     "COMPONENT_SELECTOR_SCHEMA_ID",
     "COMPONENT_SELECTOR_SCHEMA_VERSION",
+    "NON_AUTHORITATIVE_PUBLISHER_ATTRS",
     "ChaserComponentContract",
     "ChaserComponentPublicationError",
     "build_chaser_component_manifest",

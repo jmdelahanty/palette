@@ -172,6 +172,51 @@ def test_payload_tampering_fails_after_seal() -> None:
         )
 
 
+def test_non_scientific_publisher_attrs_do_not_invalidate_payload() -> None:
+    component = _component()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=_snapshot(),
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    component.attrs.update(
+        {
+            "atomic_publication_owner_uuid": "attempt-1",
+            "stage_selector_eligible": False,
+            "palette_run_completion_status": "complete",
+            "cluster_output_staging": {"copy_seconds": 1.0},
+        }
+    )
+
+    validate_chaser_component_manifest(
+        component,
+        snapshot=_snapshot(),
+        expected_relative_path="chaser_escape_events/escape_v2",
+    )
+
+
+def test_unclassified_root_attribute_change_invalidates_payload() -> None:
+    component = _component()
+    persist_chaser_component_manifest(
+        component,
+        snapshot=_snapshot(),
+        relative_path="chaser_escape_events/escape_v2",
+        contract=_contract(),
+    )
+    component.attrs["scientific_threshold_mm"] = 7.0
+
+    with pytest.raises(
+        ChaserComponentPublicationError,
+        match="payload or semantic contract changed",
+    ):
+        validate_chaser_component_manifest(
+            component,
+            snapshot=_snapshot(),
+            expected_relative_path="chaser_escape_events/escape_v2",
+        )
+
+
 def test_rehashed_nested_manifest_tampering_fails_exact_fields() -> None:
     component = _component()
     persist_chaser_component_manifest(
