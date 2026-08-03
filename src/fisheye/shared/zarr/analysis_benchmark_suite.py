@@ -18,6 +18,7 @@ from fisheye.shared.zarr.analysis_storage_planning import (
     ANALYSIS_STORAGE_PLAN_SCHEMA_VERSION,
     AnalysisArrayStoragePlanReceipt,
     AnalysisStoragePlanReceipt,
+    analysis_storage_plan_receipt_from_manifest,
 )
 from fisheye.shared.zarr.benchmark_contracts import (
     EAGER_FULL_READ_V1,
@@ -370,6 +371,10 @@ def require_analysis_benchmark_suite_manifest(value: Mapping[str, Any]) -> None:
         or receipt["payload_digest"] != canonical_json_sha256(receipt["payload"])
     ):
         raise _manifest_error("invalid storage-plan receipt identity or digest")
+    try:
+        analysis_storage_plan_receipt_from_manifest(receipt)
+    except (TypeError, ValueError) as exc:
+        raise _manifest_error(f"storage-plan receipt is not executable: {exc}") from exc
     receipt_payload = receipt["payload"]
     if not isinstance(receipt_payload, Mapping):
         raise _manifest_error("storage-plan receipt payload is not an object")

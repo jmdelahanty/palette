@@ -137,6 +137,25 @@ def test_rehashed_case_plan_tampering_fails() -> None:
         require_analysis_benchmark_suite_manifest(tampered)
 
 
+def test_rehashed_receipt_and_case_plan_tampering_fails() -> None:
+    suite = _suite(200_000)
+    tampered = deepcopy(suite)
+    receipt = tampered["payload"]["storage_plan_receipt"]
+    path = receipt["payload"]["arrays"][0]["path"]
+    receipt["payload"]["arrays"][0]["plan"]["chunk_shape"][0] = 1
+    receipt["payload_digest"] = canonical_json_sha256(receipt["payload"])
+    for row in tampered["payload"]["array_cases"]:
+        if row["array_path"] == path:
+            row["case"]["storage_plan"]["chunk_shape"][0] = 1
+    tampered["payload"]["publication_case"]["storage_plan_receipt_digest"] = receipt[
+        "payload_digest"
+    ]
+    tampered["payload_digest"] = canonical_json_sha256(tampered["payload"])
+
+    with pytest.raises(ValueError, match="storage-plan receipt is not executable"):
+        require_analysis_benchmark_suite_manifest(tampered)
+
+
 def test_rehashed_execution_policy_tampering_fails() -> None:
     suite = _suite(1_000_000)
     tampered = deepcopy(suite)
