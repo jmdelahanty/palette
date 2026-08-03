@@ -259,6 +259,10 @@ _READ_MATRIX_ADAPTERS = {
         "fisheye.diagnostics.benchmark_stimulus_epoch_reads",
         "run_benchmark_matrix",
     ),
+    "stimulus_response": (
+        "fisheye.diagnostics.benchmark_stimulus_response_reads",
+        "run_benchmark_matrix",
+    ),
 }
 
 DERIVED_ANALYSIS_STORAGE_BENCHMARKS: tuple[

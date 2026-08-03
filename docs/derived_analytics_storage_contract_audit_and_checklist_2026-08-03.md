@@ -3,7 +3,7 @@
 Date: 2026-08-03
 
 Status: active implementation checklist; reconciled through the reviewed
-chaser-distance candidate checkpoint `563d7720`; correctness, executable
+recording-summary Arrow checkpoint `9da4de70`; correctness, executable
 catalog, shared planner, serialized registry, compact rematerialization, and
 benchmark foundations are integrated. All thirteen current catalog families
 have explicit unpromoted physical candidates. No production profile,
@@ -11,7 +11,7 @@ scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
 Benchmark coverage is now separately executable rather than inferred from
-candidate presence. Six of thirteen families have an executable
+candidate presence. Seven of thirteen families have an executable
 source/candidate read matrix; none yet has the complete writer, publication, physical-I/O,
 representative-scale, and real-consumer evidence required for promotion. The
 catalog binds any future measured/executed claims to an immutable evidence
@@ -139,7 +139,7 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes the exact 62-field position-occupancy schema across writing, staging, and manifest-selected reads | Freeze the remaining 36 explicitly enumerated compatibility schemas where cross-language stability requires them |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes exact position-occupancy and recording-summary schemas across writing, staging, and manifest-selected reads | Freeze the remaining 35 explicitly enumerated compatibility schemas where cross-language stability requires them |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
@@ -295,7 +295,9 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Chaser-distance sealed-base read matrix | `/tmp/palette-chaser-distance-base-benchmark-20260803` / `agent/palette/chaser-distance-base-benchmark-20260803` | integrated as `14013b09` | Explicit source/candidate parents, authority/manifest/receipt bindings, rotated fresh processes, exact decoded equality, metadata and archive guards, CPU/wall/RSS/object/byte evidence, and hard-coded nonpromotion | Independently reviewed ACCEPT; representative execution, physical-I/O tracing, real consumers, and promotion remain pending |
 | Stimulus-epoch v2 consumer | `/tmp/palette-stimulus-epoch-v2-consumer-20260803` / `agent/palette/stimulus-epoch-v2-consumer-20260803` | integrated as `72d59c84` | Explicit named selector-ineligible v2 read, complete direct/consolidated metadata gate, exact lifecycle/schema/lineage/manifest/receipt validation, eager backend-neutral rows, and typed explicit-only v1 compatibility | Independently reviewed ACCEPT; source/candidate benchmark and any selection change remain pending |
 | Stimulus-epoch source/candidate read matrix | `/tmp/palette-stimulus-epoch-v2-read-benchmark-20260803` / `agent/palette/stimulus-epoch-v2-read-benchmark-20260803` | integrated as `5293d4dd` | Strict v1-source/v2-candidate reads, embedded executable lineage/manifest/storage documents, coordinated-rebind rejection, complete decoded equality, fresh processes, metadata/archive guards, and hard nonpromotion | Independently reviewed ACCEPT; representative execution, physical-I/O tracing, consumers, and promotion remain pending |
+| Stimulus-response compact-v3 source/candidate read matrix | `/tmp/palette-stimulus-response-v3-read-benchmark-20260803` / `agent/palette/stimulus-response-v3-read-benchmark-20260803` | integrated as `a3814845` | Explicit compatibility-source/candidate names, executable v1/v2 schemas, offline-replanned HTTP-v1 receipt, complete decoded equality, rotated fresh processes, metadata/archive guards, and hard nonpromotion | Independently reviewed ACCEPT; representative execution, writer/publication timing, physical-I/O tracing, consumers, and promotion remain pending |
 | First exact Arrow export schema | `/tmp/palette-analytics-arrow-dtype-contracts-20260803` / `agent/palette/analytics-arrow-dtype-contracts-20260803` | integrated as `379b9262` | Closed digest-bound Arrow envelope, exact 62-field position-occupancy schema, writer/staging/read validation, and an explicit census of 36 inferred compatibility schemas | Independently reviewed ACCEPT; remaining exact schemas, zero-row hardening, and production evidence remain pending |
+| Second exact Arrow export schema | `/tmp/palette-recording-summary-arrow-contract-20260803` / `agent/palette/recording-summary-arrow-contract-20260803` | integrated as `9da4de70` | Exact ordered 32-field recording-summary schema, stable nullable capability columns, manifest-exact zero-row behavior, strict writer/footer/selected-reader validation, and registry rejection of inferred minimal summaries | Independently reviewed ACCEPT; remaining 35 schemas and production consumer evidence remain pending |
 
 The next safe parallel wave assigns disjoint consumer/benchmark ownership as
 follows. The coordination lane remains the only owner of shared catalogs,
@@ -566,7 +568,10 @@ a v3 storage-candidate regression.
     - [x] Freeze and enforce the exact ordered 62-field
           `position_occupancy_histogram_2d` schema through writer, staged
           publication, and manifest-selected validation.
-    - [ ] Replace the explicitly enumerated 29 other canonical/group-statistics,
+    - [x] Freeze the exact ordered 32-field `recording_summary` schema, including
+          stable null columns for absent source capabilities and manifest-exact
+          zero-row generations with no placeholder Parquet part.
+    - [ ] Replace the explicitly enumerated 28 other canonical/group-statistics,
           four baseline-strategy, and three training-response inferred schemas
           only after their producer semantics and nullability are frozen.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
@@ -761,6 +766,12 @@ Recommended benchmark and promotion-review order:
       coordinated rehashes fail offline validation. Rotated child processes
       prove complete decoded-array and segment equality without changing the
       current v1 authority or promoting the v2 candidate.
+- [x] Implement the family-local stimulus-response compact-v3 source/candidate
+      matrix. It validates the strict maintained reader and every declared
+      array, reconstructs the HTTP-v1 plan offline, rotates fresh child
+      processes, records null physical-I/O fields until external tracing exists,
+      and requires an externally pinned outer evidence digest before later gate
+      claims.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,

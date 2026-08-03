@@ -23,6 +23,7 @@ READ_MATRIX_STAGES = {
     "session_occupancy",
     "chaser_distance",
     "stimulus_epochs",
+    "stimulus_response",
 }
 
 
@@ -64,6 +65,11 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         assert record.crimson_consumer_implemented is False
         assert record.representative_short_executed is False
         assert record.representative_full_executed is False
+        assert record.evidence_receipt_path is None
+        assert record.evidence_receipt_sha256 is None
+        assert record.gate_contract_id is None
+        assert record.gate_contract_version is None
+        assert record.gate_passed is False
 
     chaser = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE["chaser_distance"]
     assert chaser.adapter_module == (
@@ -75,6 +81,13 @@ def test_implemented_read_matrices_are_executable_and_truthful() -> None:
         "fisheye.diagnostics.benchmark_stimulus_epoch_reads"
     )
     assert stimulus_epochs.adapter_entrypoint == "run_benchmark_matrix"
+    stimulus_response = DERIVED_ANALYSIS_STORAGE_BENCHMARK_BY_STAGE[
+        "stimulus_response"
+    ]
+    assert stimulus_response.adapter_module == (
+        "fisheye.diagnostics.benchmark_stimulus_response_reads"
+    )
+    assert stimulus_response.adapter_entrypoint == "run_benchmark_matrix"
 
 
 def test_plan_only_families_have_no_fabricated_adapter_or_execution_evidence() -> None:
