@@ -1,7 +1,7 @@
 # Stimulus-Epoch Exact Storage Contract and Candidate — 2026-08-03
 
-Status: implemented selector-ineligible candidate contract; not a production
-writer, selector, registry, or profile promotion.
+Status: implemented selector-ineligible candidate contract and strict maintained
+v2 consumer; not a production writer, selector, registry, or profile promotion.
 
 ## Census and authority boundary
 
@@ -20,7 +20,7 @@ receipt. The candidate boundary in
 complete, non-ineligible v1 name and validates its entire logical table before
 copying it.
 
-Current consumers are also compatibility readers:
+Most pre-existing consumers remain compatibility readers:
 
 - detection occupancy reads seven display/interval columns and casts them to
   expected NumPy dtypes;
@@ -29,9 +29,21 @@ Current consumers are also compatibility readers:
 - those readers do not yet require the v2 schema, exact manifest, or physical
   receipt.
 
-This change deliberately does not modify those consumers. A future strict v2
-adapter must require the exact schema and manifest; legacy v1 stays behind the
-compatibility boundary.
+The maintained adapter now lives in
+`fisheye.analysis.stimulus_epoch_consumer`. It accepts one exact, explicitly
+named run and never resolves `latest`, guesses a child, or probes alternate
+paths/dtypes. Exact v2 is the default. Legacy v1 is available only through the
+typed `ALLOW_EXPLICIT_V1` compatibility policy; a rejected explicit v2 run is
+terminal and never falls back to v1.
+
+For a v2 candidate, the adapter first compares every persisted direct Zarr
+declaration with the archive root's inline consolidated declaration. It then
+opens the consolidated generation, requires exact completion and run-name
+binding, requires both candidate-only booleans to remain false, and executes
+the logical manifest, candidate lineage, run manifest, and physical storage
+receipt validators. Only after all gates pass does it eagerly decode the small
+table into backend-independent `EpochSegment` values, including the source
+event boundary frames.
 
 ## Exact v2 logical inventory
 
@@ -160,7 +172,7 @@ selection evidence, or permission to change the v1 writer.
 - [x] Enforce `storage_candidate_profile_promoted` as exact JSON `false`.
 - [x] Add adversarial inventory, dtype, ordering, containment, symlink, and
   failure-visibility tests, plus recomputed-digest manifest/lineage probes.
-- [ ] Add a strict v2 consumer adapter; keep current v1 readers explicitly
+- [x] Add a strict v2 consumer adapter; keep current v1 readers explicitly
   legacy-compatible.
 - [ ] Run a real archive canary and record read/open/object-count telemetry.
 - [ ] Obtain consumer review before considering writer adoption.
@@ -174,8 +186,13 @@ selection evidence, or permission to change the v1 writer.
 The implementation is covered by:
 
 - `tests/unit/fisheye/test_stimulus_epoch_schema.py`;
-- `tests/unit/fisheye/test_stimulus_epoch_candidate_materializer.py`.
+- `tests/unit/fisheye/test_stimulus_epoch_candidate_materializer.py`;
+- `tests/unit/fisheye/test_stimulus_epoch_consumer.py`.
 
 The suite includes a real post-consolidation injected failure and verifies that
 the resulting public child is failed and selector-ineligible in both direct and
-consolidated metadata while the prior parent pointers remain unchanged.
+consolidated metadata while the prior parent pointers remain unchanged. The
+consumer suite additionally covers explicit legacy opt-in, stale consolidated
+metadata, missing/unexpected arrays, wrong dtype/rank, lifecycle violations,
+rehashed manifest tampering, receipt-digest tampering, and terminal v2 failure
+without legacy fallback.

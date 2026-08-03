@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping, Sequence
+from typing import Sequence
 
 import numpy as np
 import zarr
@@ -23,6 +23,8 @@ class EpochSegment:
     duration_s: float
     source_start_event_name: str | None = None
     source_end_event_name: str | None = None
+    source_start_event_frame: int | None = None
+    source_end_event_frame: int | None = None
     source_policy: str | None = None
 
 
@@ -78,6 +80,16 @@ def read_epoch_segments(epoch_group: zarr.Group) -> tuple[EpochSegment, ...]:
         if "source_policy_bytes" in windows
         else [""] * ids.shape[0]
     )
+    source_start_event_frames = (
+        np.asarray(windows["source_start_event_frame"][:], dtype=np.int64).reshape(-1)
+        if "source_start_event_frame" in windows
+        else np.full(ids.shape[0], -1, dtype=np.int64)
+    )
+    source_end_event_frames = (
+        np.asarray(windows["source_end_event_frame"][:], dtype=np.int64).reshape(-1)
+        if "source_end_event_frame" in windows
+        else np.full(ids.shape[0], -1, dtype=np.int64)
+    )
 
     n = int(ids.shape[0])
     arrays = (labels, starts, ends, start_times, end_times, durations)
@@ -94,6 +106,18 @@ def read_epoch_segments(epoch_group: zarr.Group) -> tuple[EpochSegment, ...]:
             duration_s=float(durations[i]),
             source_start_event_name=str(start_event_names[i]) if i < len(start_event_names) else None,
             source_end_event_name=str(end_event_names[i]) if i < len(end_event_names) else None,
+            source_start_event_frame=(
+                int(source_start_event_frames[i])
+                if i < len(source_start_event_frames)
+                and int(source_start_event_frames[i]) >= 0
+                else None
+            ),
+            source_end_event_frame=(
+                int(source_end_event_frames[i])
+                if i < len(source_end_event_frames)
+                and int(source_end_event_frames[i]) >= 0
+                else None
+            ),
             source_policy=str(policies[i]) if i < len(policies) else None,
         )
         for i in range(n)
@@ -116,6 +140,8 @@ def segments_from_window_objects(windows: Sequence[object]) -> tuple[EpochSegmen
                 duration_s=float(getattr(window, "duration_s", math.nan)),
                 source_start_event_name=getattr(window, "source_start_event_name", None),
                 source_end_event_name=getattr(window, "source_end_event_name", None),
+                source_start_event_frame=getattr(window, "source_start_event_frame", None),
+                source_end_event_frame=getattr(window, "source_end_event_frame", None),
                 source_policy=getattr(window, "source_policy", None),
             )
         )
