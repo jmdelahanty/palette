@@ -99,7 +99,9 @@ same-parent hidden sibling, validate the copy, and `os.replace` it into the
 immutable named path. After the publisher's final metadata write, the
 materializer refreshes the authoritative recording-root consolidated metadata
 and proves the direct and consolidated run attributes and 41 array
-declarations agree.
+declarations agree. Publication and root consolidation run under the one
+archive-wide metadata/publication lock shared by every atomic stage, rather
+than an eye-angle-only lock.
 
 This final callback is a metadata-visibility boundary only. It does not make
 the candidate selector eligible, change `latest` or `latest_complete`, or emit
@@ -110,7 +112,17 @@ lock and checked unchanged in both metadata views.
 A pre-rename interruption leaves no public child and the retained node-local
 run may be retried with the same name. Any post-rename failure retains an
 immutable public failed/ineligible tombstone whose recovery policy requires a
-new run name. Existing public names are never replaced.
+new run name. If failure occurs after authoritative consolidation, the atomic
+publisher invokes the eye-angle failure-visibility repair while still holding
+the shared archive lock. The repair reconsolidates the root and requires the
+complete direct and consolidated run attributes—including the exact atomic
+tombstone—to agree before returning. Existing public names are never replaced.
+
+Node-local scratch and the authoritative archive must also be disjoint after
+resolving symlinks. Equality, scratch nested under the archive, and the archive
+nested under scratch are all rejected before source metadata is opened. This
+keeps the successful recursive scratch cleanup incapable of reaching the
+authoritative store through either direct or aliased paths.
 
 ## Implementation checklist
 
@@ -130,6 +142,11 @@ new run name. Existing public names are never replaced.
 - [x] Preserve selectors and suppress registry completion/activation.
 - [x] Prove pre-rename retry, terminal failed-tombstone evidence, stale metadata
   refresh, and no same-name replacement.
+- [x] Serialize publication/consolidation with the archive-wide lock and repair
+  direct/consolidated failed-tombstone visibility after post-consolidation
+  failure.
+- [x] Reject equality and both resolved containment directions between source
+  and scratch, including symlink aliases.
 - [ ] Run an immutable full-duration candidate publication benchmark.
 - [ ] Obtain mounted Crimson read/object/RSS evidence.
 - [ ] Promote a versioned shared profile only through a separate reviewed

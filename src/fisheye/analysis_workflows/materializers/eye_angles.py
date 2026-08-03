@@ -56,7 +56,11 @@ from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from ...shared.zarr_sharded_copy import ShardedArrayLayout, copy_completed_run_to_sharded
 from ...shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
-from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
+from .atomic_run_publisher import (
+    ATOMIC_PUBLICATION_TOMBSTONE_ATTR,
+    AtomicRunPublishSpec,
+    atomic_publish_run_group,
+)
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.eye_angle_materialization.v1"
@@ -501,12 +505,26 @@ def build_eye_angle_materialization_plan(
     if not source.is_dir():
         raise FileNotFoundError(f"Source analysis Zarr not found: {source}")
     scratch = Path(scratch_root).expanduser().resolve()
+    scratch_inside_source = False
     try:
         scratch.relative_to(source)
     except ValueError:
         pass
     else:
-        raise ValueError("Scratch root must not be inside the authoritative source Zarr.")
+        scratch_inside_source = True
+    source_inside_scratch = False
+    try:
+        source.relative_to(scratch)
+    except ValueError:
+        pass
+    else:
+        source_inside_scratch = True
+    if scratch_inside_source or source_inside_scratch:
+        raise ValueError(
+            "Scratch root and authoritative source Zarr must be disjoint after "
+            "resolving symlinks; equality and either containment direction are "
+            "unsafe."
+        )
     positive_values = (
         chunk_rows,
         angle_chunk_rows,
@@ -1497,6 +1515,80 @@ def publish_eye_angle_run(
                 return
             raise
 
+    def repair_failed_candidate_visibility(target_run_path: Path) -> None:
+        """Make one owned candidate tombstone identical in both metadata views."""
+
+        if target_run_path.resolve() != plan.target_run_path.resolve():
+            raise RuntimeError(
+                "Eye-angle failed-publication repair received an unexpected target."
+            )
+        consolidate_metadata_capture_expected_warnings(plan.source_zarr)
+        direct_root = zarr.open_group(
+            str(plan.source_zarr), mode="r", use_consolidated=False
+        )
+        consolidated_root = zarr.open_group(
+            str(plan.source_zarr), mode="r", use_consolidated=True
+        )
+        relative_run_path = f"analysis/eye_angle_runs/{plan.run_name}"
+        direct_run = direct_root[relative_run_path]
+        consolidated_run = consolidated_root[relative_run_path]
+        direct_attrs = dict(direct_run.attrs)
+        consolidated_attrs = dict(consolidated_run.attrs)
+        if direct_attrs != consolidated_attrs:
+            raise RuntimeError(
+                "Eye-angle failed candidate differs between direct and "
+                "consolidated metadata views."
+            )
+        tombstone = direct_attrs.get(ATOMIC_PUBLICATION_TOMBSTONE_ATTR)
+        expected_tombstone_fields = frozenset(
+            {
+                "schema_id",
+                "schema_version",
+                "failed_at_utc",
+                "publication_owner_attr",
+                "publication_owner_uuid",
+                "run_name",
+                "run_path",
+                "public_path_retained",
+                "selector_eligible",
+                "retry_policy",
+                "failure_type",
+                "failure",
+            }
+        )
+        if (
+            direct_attrs.get("palette_run_completion_status") != "failed"
+            or direct_attrs.get("stage_selector_eligible") is not False
+            or "palette_run_completed_at_utc" in direct_attrs
+            or not isinstance(tombstone, Mapping)
+            or frozenset(tombstone) != expected_tombstone_fields
+            or tombstone.get("schema_id")
+            != "palette.atomic_publication_tombstone"
+            or tombstone.get("schema_version") != 1
+            or not isinstance(tombstone.get("failed_at_utc"), str)
+            or not tombstone.get("failed_at_utc")
+            or not isinstance(tombstone.get("publication_owner_attr"), str)
+            or direct_attrs.get(str(tombstone.get("publication_owner_attr")))
+            != tombstone.get("publication_owner_uuid")
+            or tombstone.get("run_name") != plan.run_name
+            or Path(str(tombstone.get("run_path"))).resolve()
+            != plan.target_run_path.resolve()
+            or tombstone.get("public_path_retained") is not True
+            or tombstone.get("selector_eligible") is not False
+            or tombstone.get("retry_policy")
+            != "new_immutable_run_name_required"
+            or not isinstance(tombstone.get("failure_type"), str)
+            or direct_attrs.get("palette_run_error") != tombstone.get("failure")
+            or (
+                "publication_status" in direct_attrs
+                and direct_attrs.get("publication_status") != "failed"
+            )
+        ):
+            raise RuntimeError(
+                "Eye-angle failed candidate is not the exact failed/ineligible "
+                "atomic-publication tombstone."
+            )
+
     result = atomic_publish_run_group(
         AtomicRunPublishSpec(
             source_zarr=plan.source_zarr,
@@ -1520,6 +1612,9 @@ def publish_eye_angle_run(
         complete_run=complete,
         verify_pointers=verify,
         activate_run=finalize_visibility_boundary,
+        repair_failed_publication_visibility=(
+            repair_failed_candidate_visibility if storage_candidate else None
+        ),
         after_rename=after_rename,
         payload_metadata={
             "authoritative_source_zarr": str(plan.source_zarr),

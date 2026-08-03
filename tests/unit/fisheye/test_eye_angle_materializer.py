@@ -747,6 +747,57 @@ def test_plan_rejects_unsealed_subject_shape_before_scratch_creation(
     assert "eye_angle_runs" not in root["analysis"]
 
 
+@pytest.mark.parametrize(
+    ("relation", "through_symlink"),
+    (
+        pytest.param("equal", False, id="equal-direct"),
+        pytest.param("equal", True, id="equal-symlink"),
+        pytest.param("scratch_inside_source", False, id="scratch-child-direct"),
+        pytest.param("scratch_inside_source", True, id="scratch-child-symlink"),
+        pytest.param("source_inside_scratch", False, id="source-child-direct"),
+        pytest.param("source_inside_scratch", True, id="source-child-symlink"),
+    ),
+)
+def test_plan_rejects_all_resolved_source_scratch_overlap_before_open(
+    tmp_path: Path,
+    relation: str,
+    through_symlink: bool,
+) -> None:
+    if relation == "equal":
+        source = tmp_path / "source.zarr"
+        source.mkdir()
+        scratch_target = source
+    elif relation == "scratch_inside_source":
+        source = tmp_path / "source.zarr"
+        scratch_target = source / "scratch"
+        scratch_target.mkdir(parents=True)
+    else:
+        scratch_target = tmp_path / "scratch"
+        source = scratch_target / "source.zarr"
+        source.mkdir(parents=True)
+
+    scratch_argument = scratch_target
+    if through_symlink:
+        scratch_argument = tmp_path / "scratch-alias"
+        try:
+            scratch_argument.symlink_to(scratch_target, target_is_directory=True)
+        except OSError as exc:  # pragma: no cover - platform policy
+            pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(
+        ValueError,
+        match="must be disjoint after resolving symlinks",
+    ):
+        mod.build_eye_angle_materialization_plan(
+            source,
+            scratch_root=scratch_argument,
+            subject_shape_run="shape_1",
+            keypoint_run="kp_raw_1",
+            run_name="eye_1",
+            fps=100.0,
+        )
+
+
 def test_plan_rejects_reordered_same_count_instance_keys_before_scratch_creation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1989,7 +2040,7 @@ def test_storage_candidate_recovers_same_name_after_pre_rename_copy_interruption
         )
 
 
-def test_storage_candidate_consolidation_failure_is_terminal_and_fail_closed(
+def test_storage_candidate_post_consolidation_failure_repairs_both_metadata_views(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1998,39 +2049,83 @@ def test_storage_candidate_consolidation_failure_is_terminal_and_fail_closed(
     _build_source(source)
     _seed_eye_angle_selectors(source)
     zarr.consolidate_metadata(str(source))
-    real_consolidate = mod.consolidate_metadata_capture_expected_warnings
+    real_equivalence = mod._require_candidate_direct_consolidated_equivalence
+    equivalence_labels: list[str] = []
 
-    def fail_authoritative_consolidation(path):  # type: ignore[no-untyped-def]
-        if Path(path).resolve() == source.resolve():
-            raise RuntimeError("injected authoritative consolidation failure")
-        return real_consolidate(path)
+    def fail_after_authoritative_consolidation(
+        direct_run,  # type: ignore[no-untyped-def]
+        consolidated_run,  # type: ignore[no-untyped-def]
+        *,
+        dimensions,  # type: ignore[no-untyped-def]
+        label: str,
+    ) -> int:
+        result = real_equivalence(
+            direct_run,
+            consolidated_run,
+            dimensions=dimensions,
+            label=label,
+        )
+        equivalence_labels.append(label)
+        if label == "Authoritative":
+            raise RuntimeError(
+                "injected post-consolidation authoritative equivalence failure"
+            )
+        return result
 
     monkeypatch.setattr(
         mod,
-        "consolidate_metadata_capture_expected_warnings",
-        fail_authoritative_consolidation,
+        "_require_candidate_direct_consolidated_equivalence",
+        fail_after_authoritative_consolidation,
     )
     with pytest.raises(
         RuntimeError,
-        match="authoritative consolidation failure",
+        match="post-consolidation authoritative equivalence failure",
     ):
         _materialize_storage_candidate(monkeypatch, source, scratch)
+    assert equivalence_labels == ["Node-local", "Authoritative"]
 
     direct = zarr.open_group(str(source), mode="r", use_consolidated=False)
-    parent = direct["analysis/eye_angle_runs"]
-    failed = parent["eye_candidate"]
-    assert parent.attrs["latest"] == "established_eye"
-    assert parent.attrs["latest_complete"] == "established_eye"
-    assert failed.attrs["palette_run_completion_status"] == "failed"
-    assert failed.attrs["stage_selector_eligible"] is False
-    tombstone = failed.attrs["atomic_publication_tombstone"]
-    assert tombstone["public_path_retained"] is True
-    assert tombstone["selector_eligible"] is False
-    assert tombstone["retry_policy"] == "new_immutable_run_name_required"
-    assert "authoritative consolidation failure" in tombstone["failure"]
-
     consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
-    assert consolidated["analysis/eye_angle_runs"].get("eye_candidate") is None
+    direct_parent = direct["analysis/eye_angle_runs"]
+    consolidated_parent = consolidated["analysis/eye_angle_runs"]
+    for parent in (direct_parent, consolidated_parent):
+        assert parent.attrs["latest"] == "established_eye"
+        assert parent.attrs["latest_complete"] == "established_eye"
+        failed = parent["eye_candidate"]
+        assert failed.attrs["palette_run_completion_status"] == "failed"
+        assert failed.attrs["stage_selector_eligible"] is False
+        assert "palette_run_completed_at_utc" not in failed.attrs
+        tombstone = failed.attrs["atomic_publication_tombstone"]
+        assert tombstone["schema_id"] == "palette.atomic_publication_tombstone"
+        assert tombstone["schema_version"] == 1
+        assert set(tombstone) == {
+            "schema_id",
+            "schema_version",
+            "failed_at_utc",
+            "publication_owner_attr",
+            "publication_owner_uuid",
+            "run_name",
+            "run_path",
+            "public_path_retained",
+            "selector_eligible",
+            "retry_policy",
+            "failure_type",
+            "failure",
+        }
+        assert failed.attrs[tombstone["publication_owner_attr"]] == tombstone[
+            "publication_owner_uuid"
+        ]
+        assert failed.attrs["palette_run_error"] == tombstone["failure"]
+        assert tombstone["public_path_retained"] is True
+        assert tombstone["selector_eligible"] is False
+        assert tombstone["retry_policy"] == "new_immutable_run_name_required"
+        assert (
+            "post-consolidation authoritative equivalence failure"
+            in tombstone["failure"]
+        )
+    assert dict(direct_parent["eye_candidate"].attrs) == dict(
+        consolidated_parent["eye_candidate"].attrs
+    )
 
 
 @pytest.mark.parametrize(
