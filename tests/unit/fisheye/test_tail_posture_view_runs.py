@@ -141,6 +141,7 @@ def test_invalid_rows_are_nan_and_preserve_failure_reason() -> None:
 
     assert batch.valid.tolist() == [True, False]
     assert str(batch.failure_reason[1]) == "scratch_artifact"
+    assert np.all(np.isnan(batch.head_xy[1]))
     assert np.all(np.isnan(batch.tail_keypoints_xy[1]))
     assert np.all(np.isnan(batch.tail_angle_rad[1]))
     assert np.isnan(batch.head_yaw_rad[1])

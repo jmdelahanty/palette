@@ -398,12 +398,14 @@ def compute_tail_posture_view_from_subject_shape_arrays(
             reasons[row_idx] = "tail_geometry_nonfinite"
 
     invalid = ~valid
+    head_output = head.copy()
+    head_output[invalid, :] = np.nan
     tail_keypoints[invalid, :, :] = np.nan
     tail_angle[invalid, :] = np.nan
     head_yaw[invalid] = np.nan
 
     return TailPostureViewBatch(
-        head_xy=head.astype(np.float32),
+        head_xy=head_output.astype(np.float32),
         head_yaw_rad=head_yaw.astype(np.float32),
         tail_keypoints_xy=tail_keypoints.astype(np.float32),
         tail_angle_rad=tail_angle.astype(np.float32),
