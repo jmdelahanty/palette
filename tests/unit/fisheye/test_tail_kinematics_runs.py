@@ -11,6 +11,7 @@ from fisheye.analysis import tail_kinematics_runs as mod
 from fisheye.analysis import subject_shape_io
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
 from fisheye.shared.detect_reason_codec import decode_reason_bytes
+from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 
 
 def _patch_provenance(monkeypatch) -> None:
@@ -119,16 +120,18 @@ def _source_arrays(
 ) -> dict[str, np.ndarray]:
     source_s = np.linspace(0.0, 1.0, 4, dtype=np.float32)
     resolved_row_count = int(
-        row_count if row_count is not None else (2 if tangent_rows is None else tangent_rows.shape[0])
+        row_count
+        if row_count is not None
+        else (2 if tangent_rows is None else tangent_rows.shape[0])
     )
     tail_xy = np.zeros((resolved_row_count, 4, 2), dtype=np.float32)
     tail_xy[:, :, 0] = -source_s[None, :] * 10.0
     if tangent_rows is None:
         tangent_rows = np.repeat(
-            np.asarray([[[-1.0, 0.0]]], dtype=np.float32), resolved_row_count * 4, axis=0
-        ).reshape(
-            resolved_row_count, 4, 2
-        )
+            np.asarray([[[-1.0, 0.0]]], dtype=np.float32),
+            resolved_row_count * 4,
+            axis=0,
+        ).reshape(resolved_row_count, 4, 2)
     return {
         "source_tail_sample_s": source_s,
         "tail_sample_xy": tail_xy,
@@ -148,12 +151,20 @@ def _source_arrays(
 
 
 def test_tail_kinematics_straight_tail_is_zero_angle() -> None:
-    batch = mod.compute_tail_kinematics_from_subject_shape_arrays(**_source_arrays(), tail_angle_sample_count=10)
+    batch = mod.compute_tail_kinematics_from_subject_shape_arrays(
+        **_source_arrays(), tail_angle_sample_count=10
+    )
 
     assert batch.valid.tolist() == [True, True]
-    np.testing.assert_allclose(batch.tail_angle_rad, np.zeros((2, 10), dtype=np.float32), atol=1e-6)
-    np.testing.assert_allclose(batch.tail_tip_angle_deg, np.zeros((2,), dtype=np.float32), atol=1e-5)
-    np.testing.assert_allclose(batch.tail_lateral_deflection_px, np.zeros((2, 10), dtype=np.float32), atol=1e-5)
+    np.testing.assert_allclose(
+        batch.tail_angle_rad, np.zeros((2, 10), dtype=np.float32), atol=1e-6
+    )
+    np.testing.assert_allclose(
+        batch.tail_tip_angle_deg, np.zeros((2,), dtype=np.float32), atol=1e-5
+    )
+    np.testing.assert_allclose(
+        batch.tail_lateral_deflection_px, np.zeros((2, 10), dtype=np.float32), atol=1e-5
+    )
 
 
 def test_tail_kinematics_left_positive_right_negative() -> None:
@@ -173,9 +184,15 @@ def test_tail_kinematics_left_positive_right_negative() -> None:
         tail_angle_sample_count=10,
     )
 
-    np.testing.assert_allclose(batch.tail_angle_deg[0], np.full((10,), 30.0, dtype=np.float32), atol=1e-4)
-    np.testing.assert_allclose(batch.tail_angle_deg[1], np.full((10,), -30.0, dtype=np.float32), atol=1e-4)
-    np.testing.assert_allclose(batch.max_abs_tail_angle_deg, np.full((2,), 30.0, dtype=np.float32), atol=1e-4)
+    np.testing.assert_allclose(
+        batch.tail_angle_deg[0], np.full((10,), 30.0, dtype=np.float32), atol=1e-4
+    )
+    np.testing.assert_allclose(
+        batch.tail_angle_deg[1], np.full((10,), -30.0, dtype=np.float32), atol=1e-4
+    )
+    np.testing.assert_allclose(
+        batch.max_abs_tail_angle_deg, np.full((2,), 30.0, dtype=np.float32), atol=1e-4
+    )
 
 
 def test_tail_kinematics_invalid_rows_preserve_failure_reason() -> None:
@@ -184,7 +201,9 @@ def test_tail_kinematics_invalid_rows_preserve_failure_reason() -> None:
 
     batch = mod.compute_tail_kinematics_from_subject_shape_arrays(
         **sources,
-        tail_sample_failure_reason=np.asarray(["ok", "tail_segment_too_short"], dtype=object),
+        tail_sample_failure_reason=np.asarray(
+            ["ok", "tail_segment_too_short"], dtype=object
+        ),
         tail_angle_sample_count=10,
     )
 
@@ -197,7 +216,9 @@ def test_tail_kinematics_invalid_rows_preserve_failure_reason() -> None:
 
 def test_vectorized_interpolation_matches_scalar_numpy_reference() -> None:
     source_s = np.asarray([0.0, 0.2, 0.65, 1.0], dtype=np.float64)
-    target_s = np.asarray([-0.1, 0.0, 0.1, 0.2, 0.5, 0.65, 0.9, 1.0, 1.1], dtype=np.float64)
+    target_s = np.asarray(
+        [-0.1, 0.0, 0.1, 0.2, 0.5, 0.65, 0.9, 1.0, 1.1], dtype=np.float64
+    )
     values_2d = np.asarray(
         [
             [[0.0, 4.0], [2.0, 3.0], [6.5, 2.0], [10.0, 1.0]],
@@ -221,15 +242,21 @@ def test_vectorized_interpolation_matches_scalar_numpy_reference() -> None:
             ).astype(np.float32)
 
     actual_2d = mod._interp_rows_2d(source_s, values_2d, target_s, row_valid)
-    np.testing.assert_allclose(actual_2d, expected_2d, rtol=0.0, atol=1e-7, equal_nan=True)
+    np.testing.assert_allclose(
+        actual_2d, expected_2d, rtol=0.0, atol=1e-7, equal_nan=True
+    )
 
     values_1d = values_2d[:, :, 1]
     expected_1d = np.full((3, target_s.size), np.nan, dtype=np.float32)
     for row_idx in range(3):
         if row_valid[row_idx] and np.all(np.isfinite(values_1d[row_idx])):
-            expected_1d[row_idx] = np.interp(target_s, source_s, values_1d[row_idx]).astype(np.float32)
+            expected_1d[row_idx] = np.interp(
+                target_s, source_s, values_1d[row_idx]
+            ).astype(np.float32)
     actual_1d = mod._interp_rows_1d(source_s, values_1d, target_s, row_valid)
-    np.testing.assert_allclose(actual_1d, expected_1d, rtol=0.0, atol=1e-7, equal_nan=True)
+    np.testing.assert_allclose(
+        actual_1d, expected_1d, rtol=0.0, atol=1e-7, equal_nan=True
+    )
 
 
 def test_vectorized_validity_preserves_failure_precedence() -> None:
@@ -242,12 +269,21 @@ def test_vectorized_validity_preserves_failure_precedence() -> None:
 
     batch = mod.compute_tail_kinematics_from_subject_shape_arrays(
         **sources,
-        body_frame_failure_reason=np.asarray(["ok", "body_missing", "ok", "ok", "ok", "ok"], dtype=object),
+        body_frame_failure_reason=np.asarray(
+            ["ok", "body_missing", "ok", "ok", "ok", "ok"], dtype=object
+        ),
         bspline_failure_reason=np.asarray(
             ["ok", "spline_should_lose", "ok", "ok", "ok", "ok"], dtype=object
         ),
         tail_sample_failure_reason=np.asarray(
-            ["ok", "tail_should_lose", "tail_should_lose", "tail_too_short", "ok", "ok"],
+            [
+                "ok",
+                "tail_should_lose",
+                "tail_should_lose",
+                "tail_too_short",
+                "ok",
+                "ok",
+            ],
             dtype=object,
         ),
         tail_angle_sample_count=10,
@@ -281,7 +317,9 @@ def _build_shape_root(*, row_count: int = 2) -> zarr.Group:
         data=np.arange(3, 3 + int(row_count), dtype=np.int64)[:, None],
         overwrite=True,
     )
-    source_revisions.create_array("row_revision_available", data=np.asarray([True], dtype=bool), overwrite=True)
+    source_revisions.create_array(
+        "row_revision_available", data=np.asarray([True], dtype=bool), overwrite=True
+    )
 
     shape.create_array(
         "source_acquisition_frame_index",
@@ -303,11 +341,19 @@ def _build_shape_root(*, row_count: int = 2) -> zarr.Group:
     body = components.create_group("subject_body")
     sources = _source_arrays(row_count=int(row_count))
     body.attrs["tail_sample_count"] = int(sources["source_tail_sample_s"].shape[0])
-    body.create_array("tail_sample_s", data=sources["source_tail_sample_s"], overwrite=True)
+    body.create_array(
+        "tail_sample_s", data=sources["source_tail_sample_s"], overwrite=True
+    )
     body.create_array("tail_sample_xy", data=sources["tail_sample_xy"], overwrite=True)
-    body.create_array("tail_tangent_xy", data=sources["tail_tangent_xy"], overwrite=True)
-    body.create_array("tail_curvature_px_inv", data=sources["tail_curvature_px_inv"], overwrite=True)
-    body.create_array("tail_sample_valid", data=sources["tail_sample_valid"], overwrite=True)
+    body.create_array(
+        "tail_tangent_xy", data=sources["tail_tangent_xy"], overwrite=True
+    )
+    body.create_array(
+        "tail_curvature_px_inv", data=sources["tail_curvature_px_inv"], overwrite=True
+    )
+    body.create_array(
+        "tail_sample_valid", data=sources["tail_sample_valid"], overwrite=True
+    )
     body.create_array("bspline_valid", data=sources["bspline_valid"], overwrite=True)
     body.create_array("tail_base_xy", data=sources["tail_base_xy"], overwrite=True)
     body.create_array(
@@ -322,9 +368,15 @@ def _build_shape_root(*, row_count: int = 2) -> zarr.Group:
     )
 
     body_frame = shape.create_group("body_frame")
-    body_frame.create_array("forward_axis_xy", data=sources["body_forward_axis_xy"], overwrite=True)
-    body_frame.create_array("left_axis_xy", data=sources["body_left_axis_xy"], overwrite=True)
-    body_frame.create_array("axis_valid", data=sources["body_frame_valid"], overwrite=True)
+    body_frame.create_array(
+        "forward_axis_xy", data=sources["body_forward_axis_xy"], overwrite=True
+    )
+    body_frame.create_array(
+        "left_axis_xy", data=sources["body_left_axis_xy"], overwrite=True
+    )
+    body_frame.create_array(
+        "axis_valid", data=sources["body_frame_valid"], overwrite=True
+    )
     body_frame.create_array(
         "failure_reason_bytes",
         data=mod._encode_reasons(["ok"] * int(row_count)),
@@ -348,7 +400,9 @@ def test_normal_tail_writer_rejects_unpublished_subject_shape_source() -> None:
         )
 
 
-def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(monkeypatch) -> None:
+def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
 
@@ -370,27 +424,134 @@ def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(monkeypat
     assert run.attrs["source_subject_shape_authority_mode"] == "canonical_publication"
     assert run.attrs["source_subject_shape_publication_manifest_sha256"] == "1" * 64
     assert len(run.attrs["source_subject_shape_authority_sha256"]) == 64
-    assert run.attrs["source_subject_shape_authority"]["normal_reader_authority"] is False
+    assert (
+        run.attrs["source_subject_shape_authority"]["normal_reader_authority"] is False
+    )
     assert run.attrs["source_refined_subject_masks_run"] == "refined_001"
     assert run.attrs["source_refined_subject_masks_revision_snapshot"] is True
     assert run.attrs["tail_angle_sample_count"] == 10
-    assert run["source_refined_subject_masks"].attrs["copied_from_subject_shape_run"] == "shape_001"
+    assert (
+        run["source_refined_subject_masks"].attrs["copied_from_subject_shape_run"]
+        == "shape_001"
+    )
     np.testing.assert_array_equal(
-        np.asarray(run["source_refined_subject_masks"]["row_revision"][:], dtype=np.int64),
+        np.asarray(
+            run["source_refined_subject_masks"]["row_revision"][:], dtype=np.int64
+        ),
         np.asarray([[3], [4]], dtype=np.int64),
     )
     assert run["source_acquisition_frame_index"][:].tolist() == [10, 11]
     assert run["instance_key"][:].tolist() == [1000, 1001]
     assert np.asarray(run["tail_angle_rad"][:], dtype=np.float32).shape == (2, 10)
-    np.testing.assert_allclose(np.asarray(run["tail_angle_deg"][:], dtype=np.float32), 0.0, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(run["tail_angle_deg"][:], dtype=np.float32), 0.0, atol=1e-5
+    )
     assert run.attrs["provenance"]["stage"] == "analysis.tail_kinematics_runs"
     assert run.attrs["materialization_mode"] == "bounded_streaming_single_writer"
     assert run.attrs["compute_kernel"] == "vectorized_shared_grid_v1"
-    assert run.attrs["provenance"]["parameters"]["compute_kernel"] == "vectorized_shared_grid_v1"
+    assert (
+        run.attrs["provenance"]["parameters"]["compute_kernel"]
+        == "vectorized_shared_grid_v1"
+    )
     assert run.attrs["completed_block_count"] == 1
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
     assert tuple(run["tail_angle_rad"].shards) == (2, 10)
     assert tuple(run["source_acquisition_frame_index"].shards) == (2,)
+
+
+def test_byte_planned_tail_candidate_is_complete_but_never_selected(
+    monkeypatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root(row_count=20_000)
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    frame_values = np.asarray(
+        shape["source_acquisition_frame_index"][:], dtype=np.int64
+    )
+    del shape["source_acquisition_frame_index"]
+    shape.create_array(
+        "source_acquisition_frame_index",
+        data=frame_values,
+        chunks=(2_048,),
+        overwrite=True,
+    )
+    parent = root["analysis"].require_group("tail_kinematics_runs")
+    parent.attrs.update({"latest": "tail_existing", "latest_complete": "tail_existing"})
+
+    summary = mod.write_tail_kinematics_run_group(
+        root,
+        shape_run="shape_001",
+        run_name="tail_candidate",
+        tail_angle_sample_count=10,
+        block_rows=3_000,
+        execution_backend="serial",
+        num_workers=1,
+        storage_profile=PUBLISHED_HTTP_V1,
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["byte_planner_candidate"] is True
+    assert summary["selector_eligible"] is False
+    assert summary["direct_consolidated_array_declaration_count"] == 23
+    fresh = zarr.open_group(root.store, mode="r", use_consolidated=False)
+    parent = fresh["analysis/tail_kinematics_runs"]
+    assert parent.attrs["latest"] == "tail_existing"
+    assert parent.attrs["latest_complete"] == "tail_existing"
+    run = parent["tail_candidate"]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs["analysis_storage_profile_id"] == "published_http_v1"
+    assert run.attrs["analysis_storage_profile_role"] == (
+        "explicit_unpromoted_candidate"
+    )
+    assert mod.validate_tail_kinematics_storage_receipt(run) == ()
+    assert tuple(run["tail_angle_sample_xy"].chunks)[1:] == (10, 2)
+    assert tuple(run["tail_angle_sample_xy"].shards)[1:] == (10, 2)
+    assert tuple(run["source_acquisition_frame_index"].chunks) != tuple(
+        run["tail_angle_sample_xy"].chunks
+    )
+    consolidated = zarr.open_group(root.store, mode="r", use_consolidated=True)
+    assert (
+        consolidated["analysis/tail_kinematics_runs/tail_candidate"].attrs[
+            "stage_selector_eligible"
+        ]
+        is False
+    )
+
+
+def test_byte_planned_tail_candidate_rejects_parallel_or_partial_bundle(
+    monkeypatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root(row_count=3)
+    shape = root["analysis/subject_shape_runs/shape_001"]
+    frames = np.asarray(shape["source_acquisition_frame_index"][:], dtype=np.int64)
+    del shape["source_acquisition_frame_index"]
+    shape.create_array("source_acquisition_frame_index", data=frames, overwrite=True)
+
+    with pytest.raises(ValueError, match="one serial writer"):
+        mod.write_tail_kinematics_run_group(
+            root,
+            shape_run="shape_001",
+            run_name="tail_parallel_rejected",
+            execution_backend="process_shards",
+            num_workers=2,
+            storage_profile=PUBLISHED_HTTP_V1,
+            dry_run=True,
+        )
+
+    del shape["source_refined_subject_masks/row_revision_available"]
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError,
+        match="partial optional bundle",
+    ):
+        mod.write_tail_kinematics_run_group(
+            root,
+            shape_run="shape_001",
+            run_name="tail_partial_rejected",
+            storage_profile=PUBLISHED_HTTP_V1,
+            dry_run=True,
+        )
 
 
 @pytest.mark.parametrize("overwrite", [False, True])
@@ -424,9 +585,13 @@ def test_tail_kinematics_retry_never_invalidates_existing_publication(
     np.testing.assert_array_equal(existing["tail_angle_rad"][:], before_values)
 
 
-def test_write_tail_kinematics_run_group_streams_aligned_blocks_with_whole_batch_parity(monkeypatch) -> None:
+def test_write_tail_kinematics_run_group_streams_aligned_blocks_with_whole_batch_parity(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
-    monkeypatch.setattr(mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2)
+    monkeypatch.setattr(
+        mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2
+    )
     root = _build_shape_root(row_count=9)
     expected = mod.compute_tail_kinematics_from_subject_shape_arrays(
         **_source_arrays(row_count=9),
@@ -483,10 +648,15 @@ def test_write_tail_kinematics_run_group_streams_aligned_blocks_with_whole_batch
         expected.valid,
     )
     assert run["source_acquisition_frame_index"][:].tolist() == list(range(10, 19))
-    assert np.asarray(run["source_refined_subject_masks"]["row_revision"][:]).shape == (9, 1)
+    assert np.asarray(run["source_refined_subject_masks"]["row_revision"][:]).shape == (
+        9,
+        1,
+    )
 
 
-def test_write_tail_kinematics_run_group_dry_run_does_not_read_frame_blocks(monkeypatch) -> None:
+def test_write_tail_kinematics_run_group_dry_run_does_not_read_frame_blocks(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root(row_count=9)
 
@@ -515,18 +685,14 @@ def test_tail_kinematics_existing_name_is_immutable_and_unchanged(
     existing = parent.create_group("tail_existing")
     existing.attrs.update(
         {
-            mod.TAIL_PUBLICATION_OWNER_ATTR: (
-                "11111111-1111-4111-8111-111111111111"
-            ),
+            mod.TAIL_PUBLICATION_OWNER_ATTR: ("11111111-1111-4111-8111-111111111111"),
             "palette_run_completion_status": "complete",
             "stage_selector_eligible": True,
             "sentinel": "preserve",
         }
     )
     existing.create_array("sentinel_values", data=np.asarray([3, 4], dtype=np.int16))
-    parent.attrs.update(
-        {"latest": "tail_existing", "latest_complete": "tail_existing"}
-    )
+    parent.attrs.update({"latest": "tail_existing", "latest_complete": "tail_existing"})
     before_attrs = dict(existing.attrs)
     before_parent = dict(parent.attrs)
     before_values = np.asarray(existing["sentinel_values"][:]).copy()
@@ -560,9 +726,13 @@ def test_tail_kinematics_existing_name_is_immutable_and_unchanged(
     np.testing.assert_array_equal(existing["sentinel_values"][:], before_values)
 
 
-def test_process_shards_reject_output_shards_that_split_compute_blocks(monkeypatch) -> None:
+def test_process_shards_reject_output_shards_that_split_compute_blocks(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
-    monkeypatch.setattr(mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2)
+    monkeypatch.setattr(
+        mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2
+    )
     root = _build_shape_root(row_count=9)
 
     with pytest.raises(ValueError, match="whole number of effective compute blocks"):
@@ -578,9 +748,13 @@ def test_process_shards_reject_output_shards_that_split_compute_blocks(monkeypat
         )
 
 
-def test_write_tail_kinematics_run_group_marks_partial_stream_failed(monkeypatch) -> None:
+def test_write_tail_kinematics_run_group_marks_partial_stream_failed(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
-    monkeypatch.setattr(mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2)
+    monkeypatch.setattr(
+        mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2
+    )
     root = _build_shape_root(row_count=9)
     original_compute = mod.compute_tail_kinematics_from_subject_shape_arrays
     call_count = 0
@@ -592,7 +766,9 @@ def test_write_tail_kinematics_run_group_marks_partial_stream_failed(monkeypatch
             raise RuntimeError("intentional block failure")
         return original_compute(**kwargs)
 
-    monkeypatch.setattr(mod, "compute_tail_kinematics_from_subject_shape_arrays", _fail_second_block)
+    monkeypatch.setattr(
+        mod, "compute_tail_kinematics_from_subject_shape_arrays", _fail_second_block
+    )
 
     with pytest.raises(RuntimeError, match="intentional block failure"):
         mod.write_tail_kinematics_run_group(
@@ -734,12 +910,18 @@ def test_tail_kinematics_failure_cleanup_never_clobbers_recreated_successor(
     assert mod.TAIL_PUBLICATION_TOMBSTONE_ATTR not in successor.attrs
 
 
-def test_write_tail_kinematics_run_group_copies_instance_key_lineage(monkeypatch) -> None:
+def test_write_tail_kinematics_run_group_copies_instance_key_lineage(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
     shape = root["analysis"]["subject_shape_runs"]["shape_001"]
-    shape.create_array("instance_key", data=np.asarray([11, 22], dtype=np.uint64), overwrite=True)
-    shape.create_array("source_crop_row_ids", data=np.asarray([5, 6], dtype=np.int64), overwrite=True)
+    shape.create_array(
+        "instance_key", data=np.asarray([11, 22], dtype=np.uint64), overwrite=True
+    )
+    shape.create_array(
+        "source_crop_row_ids", data=np.asarray([5, 6], dtype=np.int64), overwrite=True
+    )
 
     mod.write_tail_kinematics_run_group(
         root,
@@ -755,13 +937,17 @@ def test_write_tail_kinematics_run_group_copies_instance_key_lineage(monkeypatch
     assert "source_crop_row_ids" in run.attrs["row_lineage_copied"]
 
 
-def test_write_tail_kinematics_run_group_rejects_missing_direct_instance_key(monkeypatch) -> None:
+def test_write_tail_kinematics_run_group_rejects_missing_direct_instance_key(
+    monkeypatch,
+) -> None:
     _patch_provenance(monkeypatch)
     root = _build_shape_root()
 
     del root["analysis/subject_shape_runs/shape_001/instance_key"]
 
-    with pytest.raises(subject_shape_io.SubjectShapeIOError, match="required array 'instance_key'"):
+    with pytest.raises(
+        subject_shape_io.SubjectShapeIOError, match="required array 'instance_key'"
+    ):
         mod.write_tail_kinematics_run_group(
             root,
             shape_run="shape_001",

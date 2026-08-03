@@ -47,6 +47,18 @@ from ..shared.zarr_run_completion import (
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.zarr_io import open_zarr_root
+from ..shared.zarr.storage_profiles import StorageProfile, get_storage_profile
+from .tail_kinematics_schema import (
+    TailKinematicsDimensions,
+    stamp_tail_kinematics_array_schema,
+)
+from .tail_kinematics_storage import (
+    build_tail_kinematics_storage_receipt,
+    consolidate_and_validate_tail_kinematics_metadata,
+    create_tail_kinematics_arrays_from_receipt,
+    persist_tail_kinematics_storage_receipt,
+    validate_tail_kinematics_storage_receipt,
+)
 from .subject_shape_io import (
     SubjectShapeIOError,
     resolve_canonical_subject_shape_run,
@@ -96,6 +108,7 @@ TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_VERSION = 1
 TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCOPE = (
     "tail_kinematics_exact_digest_bound_staged_subset_only"
 )
+TAIL_KINEMATICS_CANDIDATE_PROFILE_ID = "published_http_v1"
 
 _REQUIRED_SOURCE_ARRAY_PATHS = (
     "components/subject_body/tail_sample_s",
@@ -303,15 +316,27 @@ def _validated_staged_source_authority(
     canonical = _canonical_json_copy(authority)
     digest = canonical.pop("record_sha256", None)
     if not _is_sha256(digest) or digest != _canonical_sha256(canonical):
-        raise SubjectShapeIOError("Staged subject-shape authority digest is missing or stale.")
+        raise SubjectShapeIOError(
+            "Staged subject-shape authority digest is missing or stale."
+        )
     if canonical.get("schema_id") != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_ID:
         raise SubjectShapeIOError("Unsupported staged subject-shape authority schema.")
-    if canonical.get("schema_version") != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_VERSION:
-        raise SubjectShapeIOError("Unsupported staged subject-shape authority schema version.")
-    if canonical.get("authority_scope") != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCOPE:
+    if (
+        canonical.get("schema_version")
+        != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCHEMA_VERSION
+    ):
+        raise SubjectShapeIOError(
+            "Unsupported staged subject-shape authority schema version."
+        )
+    if (
+        canonical.get("authority_scope")
+        != TAIL_KINEMATICS_STAGED_SOURCE_AUTHORITY_SCOPE
+    ):
         raise SubjectShapeIOError("Staged subject-shape authority has the wrong scope.")
     if canonical.get("normal_reader_authority") is not False:
-        raise SubjectShapeIOError("Detached staging receipts cannot grant normal reader authority.")
+        raise SubjectShapeIOError(
+            "Detached staging receipts cannot grant normal reader authority."
+        )
     if canonical.get("closed_array_inventory") is not True:
         raise SubjectShapeIOError("Staged subject-shape array inventory is not closed.")
     expected_ref = f"/analysis/subject_shape_runs/{run_name}"
@@ -319,7 +344,9 @@ def _validated_staged_source_authority(
         canonical.get("source_subject_shape_run") != run_name
         or canonical.get("source_subject_shape_run_ref") != expected_ref
     ):
-        raise SubjectShapeIOError("Staged subject-shape authority names a different source run.")
+        raise SubjectShapeIOError(
+            "Staged subject-shape authority names a different source run."
+        )
     publication = canonical.get("canonical_publication")
     required_publication_digests = (
         "manifest_sha256",
@@ -329,20 +356,25 @@ def _validated_staged_source_authority(
         "body_frame_sha256",
     )
     if not isinstance(publication, Mapping) or any(
-        not _is_sha256(publication.get(name))
-        for name in required_publication_digests
+        not _is_sha256(publication.get(name)) for name in required_publication_digests
     ):
         raise SubjectShapeIOError(
             "Staged authority lacks exact canonical-publication proof digests."
         )
     if canonical.get("source_contract_attrs") != _source_contract_attrs(shape_group):
-        raise SubjectShapeIOError("Staged source contract attrs differ from the canonical receipt.")
+        raise SubjectShapeIOError(
+            "Staged source contract attrs differ from the canonical receipt."
+        )
 
     allowed = canonical.get("allowed_arrays")
     if not isinstance(allowed, Mapping):
-        raise SubjectShapeIOError("Staged subject-shape authority lacks its array inventory.")
+        raise SubjectShapeIOError(
+            "Staged subject-shape authority lacks its array inventory."
+        )
     allowed_names = set(str(name) for name in allowed)
-    supported_names = set((*_REQUIRED_SOURCE_ARRAY_PATHS, *_OPTIONAL_SOURCE_ARRAY_PATHS))
+    supported_names = set(
+        (*_REQUIRED_SOURCE_ARRAY_PATHS, *_OPTIONAL_SOURCE_ARRAY_PATHS)
+    )
     missing = set(_REQUIRED_SOURCE_ARRAY_PATHS) - allowed_names
     unsupported = allowed_names - supported_names
     if missing:
@@ -388,16 +420,22 @@ def _validated_staged_source_authority(
     return {**canonical, "record_sha256": str(digest)}
 
 
-def _encode_reasons(reasons: Sequence[object], *, width: int = REASON_BYTES_WIDTH) -> np.ndarray:
+def _encode_reasons(
+    reasons: Sequence[object], *, width: int = REASON_BYTES_WIDTH
+) -> np.ndarray:
     out = np.zeros((len(reasons), int(width)), dtype=np.uint8)
     for idx, reason in enumerate(reasons):
-        payload = str(reason or "").encode("utf-8", errors="replace")[: max(0, int(width) - 1)]
+        payload = str(reason or "").encode("utf-8", errors="replace")[
+            : max(0, int(width) - 1)
+        ]
         if payload:
             out[int(idx), : len(payload)] = np.frombuffer(payload, dtype=np.uint8)
     return out
 
 
-def _set_reason_bytes_attrs(group: zarr.Group, *, width: int = REASON_BYTES_WIDTH) -> None:
+def _set_reason_bytes_attrs(
+    group: zarr.Group, *, width: int = REASON_BYTES_WIDTH
+) -> None:
     group.attrs["reason_encoding"] = "utf8-null-terminated"
     group.attrs["reason_bytes_width"] = int(width)
     group.attrs["reason_bytes_null_terminated"] = True
@@ -468,7 +506,10 @@ def _source_chunks(source: Any, shape: Sequence[int]) -> tuple[int, ...]:
         chunks = tuple(int(value) for value in raw_chunks)
     if len(chunks) != len(dims):
         raise ValueError(f"Source chunks {chunks!r} do not match array shape {dims!r}.")
-    return tuple(max(1, min(int(chunk), int(dim))) if int(dim) > 0 else 1 for chunk, dim in zip(chunks, dims))
+    return tuple(
+        max(1, min(int(chunk), int(dim))) if int(dim) > 0 else 1
+        for chunk, dim in zip(chunks, dims)
+    )
 
 
 def _effective_block_rows(*, row_count: int, requested_block_rows: int) -> int:
@@ -476,7 +517,10 @@ def _effective_block_rows(*, row_count: int, requested_block_rows: int) -> int:
     if requested <= 0:
         raise ValueError("block_rows must be positive.")
     output_row_chunk = int(_metric_chunks(int(row_count))[0])
-    aligned = max(output_row_chunk, ((requested + output_row_chunk - 1) // output_row_chunk) * output_row_chunk)
+    aligned = max(
+        output_row_chunk,
+        ((requested + output_row_chunk - 1) // output_row_chunk) * output_row_chunk,
+    )
     return min(aligned, int(row_count)) if int(row_count) > 0 else aligned
 
 
@@ -520,7 +564,8 @@ def _output_shards(
         return None
     outer_rows = max(
         int(chunk_shape[0]),
-        ((int(shard_rows) + int(chunk_shape[0]) - 1) // int(chunk_shape[0])) * int(chunk_shape[0]),
+        ((int(shard_rows) + int(chunk_shape[0]) - 1) // int(chunk_shape[0]))
+        * int(chunk_shape[0]),
     )
     return (outer_rows, *chunk_shape[1:])
 
@@ -546,14 +591,18 @@ def _validate_process_shard_slices(
         start = int(row_slice.start or 0)
         stop = int(row_slice.stop or 0)
         if start != previous_stop or stop <= start:
-            raise ValueError("Worker row slices must be contiguous and non-overlapping.")
+            raise ValueError(
+                "Worker row slices must be contiguous and non-overlapping."
+            )
         if start % int(output_row_chunk) != 0:
             raise ValueError("Worker row slices must start on the output chunk grid.")
         if start % int(output_shard_rows) != 0:
             raise ValueError("Worker row slices must start on the output shard grid.")
         if stop != int(row_count):
             if stop - start != int(output_shard_rows):
-                raise ValueError("Non-final workers must own one complete output shard.")
+                raise ValueError(
+                    "Non-final workers must own one complete output shard."
+                )
             if stop % int(output_row_chunk) != 0:
                 raise ValueError("Non-final workers must end on the output chunk grid.")
         previous_stop = stop
@@ -569,6 +618,7 @@ def _copy_array_bounded(
     block_rows: int,
     row_aligned_count: int | None = None,
     shard_rows: int | None = None,
+    precreated: bool = False,
 ) -> Any:
     shape = tuple(int(value) for value in source.shape)
     if row_aligned_count is not None:
@@ -576,15 +626,28 @@ def _copy_array_bounded(
             raise ValueError(
                 f"Source array {name!r} has shape {shape!r}; expected first axis {int(row_aligned_count)}."
             )
-    chunks = _source_chunks(source, shape)
-    target = _create_array(
-        target_group,
-        name,
-        shape=shape,
-        dtype=source.dtype,
-        chunks=chunks,
-        shards=_output_shards(chunks, shard_rows=shard_rows, dtype=source.dtype),
-    )
+    if precreated:
+        target = target_group.get(name)
+        if target is None:
+            raise ValueError(f"Precreated candidate array {name!r} is missing.")
+        if tuple(int(value) for value in target.shape) != shape:
+            raise ValueError(
+                f"Precreated candidate array {name!r} has the wrong shape."
+            )
+        if np.dtype(target.dtype) != np.dtype(source.dtype):
+            raise ValueError(
+                f"Precreated candidate array {name!r} has the wrong dtype."
+            )
+    else:
+        chunks = _source_chunks(source, shape)
+        target = _create_array(
+            target_group,
+            name,
+            shape=shape,
+            dtype=source.dtype,
+            chunks=chunks,
+            shards=_output_shards(chunks, shard_rows=shard_rows, dtype=source.dtype),
+        )
     if not shape:
         target[...] = np.asarray(source[...])
     elif row_aligned_count is not None:
@@ -603,12 +666,23 @@ def _copy_optional_source_revision_snapshot(
     row_count: int,
     block_rows: int,
     output_shard_rows: int,
+    precreated: bool = False,
 ) -> bool:
     source = shape_group.get("source_refined_subject_masks")
     if not isinstance(source, zarr.Group):
         target_run.attrs["source_refined_subject_masks_revision_snapshot"] = False
         return False
 
+    present = {
+        name for name in SOURCE_REVISION_ARRAY_NAMES if source.get(name) is not None
+    }
+    if not present:
+        target_run.attrs["source_refined_subject_masks_revision_snapshot"] = False
+        return False
+    if precreated and present != set(SOURCE_REVISION_ARRAY_NAMES):
+        raise ValueError(
+            "Candidate source-revision snapshot must contain its complete optional bundle."
+        )
     target = target_run.require_group("source_refined_subject_masks")
     for key, value in source.attrs.items():
         target.attrs[str(key)] = _json_safe(value)
@@ -628,6 +702,7 @@ def _copy_optional_source_revision_snapshot(
             block_rows=int(block_rows),
             row_aligned_count=int(row_count) if name == "row_revision" else None,
             shard_rows=int(output_shard_rows) if name == "row_revision" else None,
+            precreated=precreated,
         )
         copied.append(name)
     target.attrs["copied_arrays"] = copied
@@ -645,7 +720,9 @@ def _read_optional_reason_labels(arr: Any | None, row_slice: slice) -> np.ndarra
     else:
         decoded = np.asarray(data, dtype=object).reshape(-1)
     if int(decoded.shape[0]) != int(row_count):
-        raise ValueError(f"Failure-reason slice has {decoded.shape[0]} rows; expected {row_count}.")
+        raise ValueError(
+            f"Failure-reason slice has {decoded.shape[0]} rows; expected {row_count}."
+        )
     return decoded
 
 
@@ -658,7 +735,9 @@ def _normalize_vectors(vectors_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return normalized, valid
 
 
-def _interpolation_plan(source_s: np.ndarray, target_s: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _interpolation_plan(
+    source_s: np.ndarray, target_s: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return shared-grid interpolation indices and weights matching ``np.interp`` endpoints."""
 
     source = np.asarray(source_s, dtype=np.float64).reshape(-1)
@@ -678,9 +757,8 @@ def _interpolation_plan(source_s: np.ndarray, target_s: np.ndarray) -> tuple[np.
 
     weights = np.zeros(target.shape, dtype=np.float64)
     interpolated = left != right
-    weights[interpolated] = (
-        (target[interpolated] - source[left[interpolated]])
-        / (source[right[interpolated]] - source[left[interpolated]])
+    weights[interpolated] = (target[interpolated] - source[left[interpolated]]) / (
+        source[right[interpolated]] - source[left[interpolated]]
     )
     return left, right, weights
 
@@ -698,13 +776,19 @@ def _interp_rows_2d(
         raise ValueError("2D row interpolation values must have shape (N, S, D).")
     valid_rows = np.asarray(row_valid, dtype=bool).reshape(-1)
     if int(valid_rows.shape[0]) != int(data.shape[0]):
-        raise ValueError("row_valid must have the same row count as interpolation values.")
+        raise ValueError(
+            "row_valid must have the same row count as interpolation values."
+        )
     left, right, weights = _interpolation_plan(source, target)
     lower = data[:, left, :]
     upper = data[:, right, :]
     values_interp = lower + (upper - lower) * weights[None, :, None]
     eligible = valid_rows & np.all(np.isfinite(data), axis=(1, 2))
-    out = np.full((int(data.shape[0]), int(target.shape[0]), int(data.shape[2])), np.nan, dtype=np.float32)
+    out = np.full(
+        (int(data.shape[0]), int(target.shape[0]), int(data.shape[2])),
+        np.nan,
+        dtype=np.float32,
+    )
     out[eligible] = values_interp[eligible].astype(np.float32)
     return out
 
@@ -722,7 +806,9 @@ def _interp_rows_1d(
         raise ValueError("1D row interpolation values must have shape (N, S).")
     valid_rows = np.asarray(row_valid, dtype=bool).reshape(-1)
     if int(valid_rows.shape[0]) != int(data.shape[0]):
-        raise ValueError("row_valid must have the same row count as interpolation values.")
+        raise ValueError(
+            "row_valid must have the same row count as interpolation values."
+        )
     left, right, weights = _interpolation_plan(source, target)
     lower = data[:, left]
     upper = data[:, right]
@@ -743,7 +829,9 @@ def _reason_values(
         return np.full((int(row_count),), str(fallback), dtype=object)
     reasons = np.asarray(values, dtype=object).reshape(-1)
     if int(reasons.shape[0]) != int(row_count):
-        raise ValueError(f"Failure-reason array has {reasons.shape[0]} rows; expected {row_count}.")
+        raise ValueError(
+            f"Failure-reason array has {reasons.shape[0]} rows; expected {row_count}."
+        )
     return reasons
 
 
@@ -806,7 +894,10 @@ def compute_tail_kinematics_from_subject_shape_arrays(
     tail_valid = np.asarray(tail_sample_valid, dtype=bool).reshape(-1)
     spline_valid = np.asarray(bspline_valid, dtype=bool).reshape(-1)
     body_valid = np.asarray(body_frame_valid, dtype=bool).reshape(-1)
-    if any(int(values.shape[0]) != row_count for values in (tail_valid, spline_valid, body_valid)):
+    if any(
+        int(values.shape[0]) != row_count
+        for values in (tail_valid, spline_valid, body_valid)
+    ):
         raise ValueError("validity arrays must have the same row count as tail arrays.")
     source_valid = tail_valid & spline_valid & body_valid
 
@@ -816,10 +907,18 @@ def compute_tail_kinematics_from_subject_shape_arrays(
     sampled_curvature = _interp_rows_1d(source_s, curvature, target_s, source_valid)
     sampled_tangent64, tangent_norm_valid = _normalize_vectors(sampled_tangent)
 
-    forward, forward_valid = _normalize_vectors(np.asarray(body_forward_axis_xy, dtype=np.float64))
-    left, left_valid = _normalize_vectors(np.asarray(body_left_axis_xy, dtype=np.float64))
+    forward, forward_valid = _normalize_vectors(
+        np.asarray(body_forward_axis_xy, dtype=np.float64)
+    )
+    left, left_valid = _normalize_vectors(
+        np.asarray(body_left_axis_xy, dtype=np.float64)
+    )
     tail_base = np.asarray(tail_base_xy, dtype=np.float64)
-    if forward.shape != (row_count, 2) or left.shape != (row_count, 2) or tail_base.shape != (row_count, 2):
+    if (
+        forward.shape != (row_count, 2)
+        or left.shape != (row_count, 2)
+        or tail_base.shape != (row_count, 2)
+    ):
         raise ValueError("body-frame and tail-base arrays must have shape (N, 2).")
 
     angle_rad = np.full((row_count, int(target_s.shape[0])), np.nan, dtype=np.float32)
@@ -887,7 +986,9 @@ def compute_tail_kinematics_from_subject_shape_arrays(
     angles = np.arctan2(dot_left, dot_caudal)
     offsets = np.asarray(sampled_xy, dtype=np.float64) - tail_base[:, None, :]
     lateral = np.sum(offsets * left[:, None, :], axis=-1)
-    calculation_finite = np.all(np.isfinite(angles), axis=1) & np.all(np.isfinite(lateral), axis=1)
+    calculation_finite = np.all(np.isfinite(angles), axis=1) & np.all(
+        np.isfinite(lateral), axis=1
+    )
     calculation_invalid = remaining & ~calculation_finite
     reasons[calculation_invalid] = "tail_geometry_nonfinite"
     valid = remaining & calculation_finite
@@ -908,9 +1009,15 @@ def compute_tail_kinematics_from_subject_shape_arrays(
     if valid_rows.size:
         valid_angles = angle_rad[valid_rows]
         valid_curvature = sampled_curvature[valid_rows]
-        max_abs_angle_rad[valid_rows] = np.max(np.abs(valid_angles), axis=1).astype(np.float32)
-        angle_rms_rad[valid_rows] = np.sqrt(np.mean(np.square(valid_angles), axis=1)).astype(np.float32)
-        max_abs_curvature[valid_rows] = np.max(np.abs(valid_curvature), axis=1).astype(np.float32)
+        max_abs_angle_rad[valid_rows] = np.max(np.abs(valid_angles), axis=1).astype(
+            np.float32
+        )
+        angle_rms_rad[valid_rows] = np.sqrt(
+            np.mean(np.square(valid_angles), axis=1)
+        ).astype(np.float32)
+        max_abs_curvature[valid_rows] = np.max(np.abs(valid_curvature), axis=1).astype(
+            np.float32
+        )
         integrated_abs_angle[valid_rows] = np.trapezoid(
             np.abs(valid_angles).astype(np.float64),
             target_s.astype(np.float64),
@@ -954,8 +1061,14 @@ def _require_group(parent: zarr.Group, name: str, *, path: str) -> zarr.Group:
 
 def _require_array_handle(parent: zarr.Group, name: str, *, path: str) -> Any:
     value = parent.get(name)
-    if value is None or not hasattr(value, "shape") or not hasattr(value, "__getitem__"):
-        raise SubjectShapeIOError(f"{path}/{name} is missing or is not a readable Zarr array.")
+    if (
+        value is None
+        or not hasattr(value, "shape")
+        or not hasattr(value, "__getitem__")
+    ):
+        raise SubjectShapeIOError(
+            f"{path}/{name} is missing or is not a readable Zarr array."
+        )
     return value
 
 
@@ -996,13 +1109,19 @@ def _resolve_tail_kinematics_sources(
             )
         normalized = requested.strip("/")
         prefix = "analysis/subject_shape_runs/"
-        run_name = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+        run_name = (
+            normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+        )
         if not run_name or "/" in run_name:
-            raise SubjectShapeIOError(f"Invalid staged subject-shape run name {shape_run!r}.")
+            raise SubjectShapeIOError(
+                f"Invalid staged subject-shape run name {shape_run!r}."
+            )
         run_path = f"analysis/subject_shape_runs/{run_name}"
         shape_group = root.get(run_path)
         if not isinstance(shape_group, zarr.Group):
-            raise SubjectShapeIOError(f"Staged subject-shape run {run_path!r} is missing.")
+            raise SubjectShapeIOError(
+                f"Staged subject-shape run {run_path!r} is missing."
+            )
         staged_authority = _validated_staged_source_authority(
             shape_group,
             run_name=run_name,
@@ -1013,29 +1132,55 @@ def _resolve_tail_kinematics_sources(
     body = _require_group(components, "subject_body", path=body_path)
     body_frame = _require_group(shape_group, "body_frame", path=run_path)
 
-    source_s_array = _require_array_handle(body, "tail_sample_s", path=f"{body_path}/subject_body")
+    source_s_array = _require_array_handle(
+        body, "tail_sample_s", path=f"{body_path}/subject_body"
+    )
     source_s = np.asarray(source_s_array[:], dtype=np.float32)
     if source_s.ndim != 1 or int(source_s.shape[0]) < 2:
-        raise SubjectShapeIOError("tail_sample_s must be one-dimensional with at least two positions.")
-    if np.any(~np.isfinite(source_s)) or np.any(np.diff(source_s.astype(np.float64)) <= 0.0):
-        raise SubjectShapeIOError("tail_sample_s must be finite and strictly increasing.")
+        raise SubjectShapeIOError(
+            "tail_sample_s must be one-dimensional with at least two positions."
+        )
+    if np.any(~np.isfinite(source_s)) or np.any(
+        np.diff(source_s.astype(np.float64)) <= 0.0
+    ):
+        raise SubjectShapeIOError(
+            "tail_sample_s must be finite and strictly increasing."
+        )
 
     arrays = {
-        "tail_sample_xy": _require_array_handle(body, "tail_sample_xy", path=f"{body_path}/subject_body"),
-        "tail_tangent_xy": _require_array_handle(body, "tail_tangent_xy", path=f"{body_path}/subject_body"),
+        "tail_sample_xy": _require_array_handle(
+            body, "tail_sample_xy", path=f"{body_path}/subject_body"
+        ),
+        "tail_tangent_xy": _require_array_handle(
+            body, "tail_tangent_xy", path=f"{body_path}/subject_body"
+        ),
         "tail_curvature_px_inv": _require_array_handle(
             body, "tail_curvature_px_inv", path=f"{body_path}/subject_body"
         ),
-        "tail_sample_valid": _require_array_handle(body, "tail_sample_valid", path=f"{body_path}/subject_body"),
-        "bspline_valid": _require_array_handle(body, "bspline_valid", path=f"{body_path}/subject_body"),
-        "tail_base_xy": _require_array_handle(body, "tail_base_xy", path=f"{body_path}/subject_body"),
-        "body_forward_axis_xy": _require_array_handle(body_frame, "forward_axis_xy", path=f"{run_path}/body_frame"),
-        "body_left_axis_xy": _require_array_handle(body_frame, "left_axis_xy", path=f"{run_path}/body_frame"),
-        "body_frame_valid": _require_array_handle(body_frame, "axis_valid", path=f"{run_path}/body_frame"),
+        "tail_sample_valid": _require_array_handle(
+            body, "tail_sample_valid", path=f"{body_path}/subject_body"
+        ),
+        "bspline_valid": _require_array_handle(
+            body, "bspline_valid", path=f"{body_path}/subject_body"
+        ),
+        "tail_base_xy": _require_array_handle(
+            body, "tail_base_xy", path=f"{body_path}/subject_body"
+        ),
+        "body_forward_axis_xy": _require_array_handle(
+            body_frame, "forward_axis_xy", path=f"{run_path}/body_frame"
+        ),
+        "body_left_axis_xy": _require_array_handle(
+            body_frame, "left_axis_xy", path=f"{run_path}/body_frame"
+        ),
+        "body_frame_valid": _require_array_handle(
+            body_frame, "axis_valid", path=f"{run_path}/body_frame"
+        ),
     }
     tail_xy_shape = tuple(int(value) for value in arrays["tail_sample_xy"].shape)
     if len(tail_xy_shape) != 3 or int(tail_xy_shape[2]) != 2:
-        raise SubjectShapeIOError(f"tail_sample_xy has shape {tail_xy_shape!r}; expected (N, S, 2).")
+        raise SubjectShapeIOError(
+            f"tail_sample_xy has shape {tail_xy_shape!r}; expected (N, S, 2)."
+        )
     row_count, source_sample_count, _xy = tail_xy_shape
     if int(source_sample_count) != int(source_s.shape[0]):
         raise SubjectShapeIOError(
@@ -1044,7 +1189,9 @@ def _resolve_tail_kinematics_sources(
         )
     _validate_source_shape("tail_tangent_xy", arrays["tail_tangent_xy"], tail_xy_shape)
     _validate_source_shape(
-        "tail_curvature_px_inv", arrays["tail_curvature_px_inv"], (row_count, source_sample_count)
+        "tail_curvature_px_inv",
+        arrays["tail_curvature_px_inv"],
+        (row_count, source_sample_count),
     )
     for name in ("tail_sample_valid", "bspline_valid", "body_frame_valid"):
         _validate_source_shape(name, arrays[name], (row_count,))
@@ -1057,16 +1204,17 @@ def _resolve_tail_kinematics_sources(
         "body_frame_failure_reason": body_frame.get("failure_reason_bytes"),
     }
     for name, source in reason_arrays.items():
-        if source is not None and (not source.shape or int(source.shape[0]) != int(row_count)):
+        if source is not None and (
+            not source.shape or int(source.shape[0]) != int(row_count)
+        ):
             raise SubjectShapeIOError(
                 f"{name} has shape {tuple(int(value) for value in source.shape)!r}; expected first axis {row_count}."
             )
 
     if staged_authority is not None:
-        if (
-            staged_authority.get("row_count") != int(row_count)
-            or staged_authority.get("source_sample_count") != int(source_sample_count)
-        ):
+        if staged_authority.get("row_count") != int(row_count) or staged_authority.get(
+            "source_sample_count"
+        ) != int(source_sample_count):
             raise SubjectShapeIOError(
                 "Staged subject-shape cardinality differs from its canonical receipt."
             )
@@ -1123,15 +1271,29 @@ def _read_tail_kinematics_source_block(
     arrays = sources.arrays
     return {
         "source_tail_sample_s": sources.source_tail_sample_s,
-        "tail_sample_xy": np.asarray(arrays["tail_sample_xy"][row_slice], dtype=np.float32),
-        "tail_tangent_xy": np.asarray(arrays["tail_tangent_xy"][row_slice], dtype=np.float32),
-        "tail_curvature_px_inv": np.asarray(arrays["tail_curvature_px_inv"][row_slice], dtype=np.float32),
-        "tail_sample_valid": np.asarray(arrays["tail_sample_valid"][row_slice], dtype=bool),
+        "tail_sample_xy": np.asarray(
+            arrays["tail_sample_xy"][row_slice], dtype=np.float32
+        ),
+        "tail_tangent_xy": np.asarray(
+            arrays["tail_tangent_xy"][row_slice], dtype=np.float32
+        ),
+        "tail_curvature_px_inv": np.asarray(
+            arrays["tail_curvature_px_inv"][row_slice], dtype=np.float32
+        ),
+        "tail_sample_valid": np.asarray(
+            arrays["tail_sample_valid"][row_slice], dtype=bool
+        ),
         "bspline_valid": np.asarray(arrays["bspline_valid"][row_slice], dtype=bool),
         "tail_base_xy": np.asarray(arrays["tail_base_xy"][row_slice], dtype=np.float32),
-        "body_forward_axis_xy": np.asarray(arrays["body_forward_axis_xy"][row_slice], dtype=np.float32),
-        "body_left_axis_xy": np.asarray(arrays["body_left_axis_xy"][row_slice], dtype=np.float32),
-        "body_frame_valid": np.asarray(arrays["body_frame_valid"][row_slice], dtype=bool),
+        "body_forward_axis_xy": np.asarray(
+            arrays["body_forward_axis_xy"][row_slice], dtype=np.float32
+        ),
+        "body_left_axis_xy": np.asarray(
+            arrays["body_left_axis_xy"][row_slice], dtype=np.float32
+        ),
+        "body_frame_valid": np.asarray(
+            arrays["body_frame_valid"][row_slice], dtype=bool
+        ),
         "tail_sample_failure_reason": _read_optional_reason_labels(
             sources.reason_arrays.get("tail_sample_failure_reason"), row_slice
         ),
@@ -1151,6 +1313,7 @@ def _copy_row_lineage_bounded(
     row_count: int,
     block_rows: int,
     output_shard_rows: int,
+    precreated: bool = False,
 ) -> tuple[list[str], list[str], str]:
     copied: list[str] = []
     for name in ROW_LINEAGE_NAMES:
@@ -1165,7 +1328,10 @@ def _copy_row_lineage_bounded(
                 f"Canonical subject-shape {name!r} must be one-dimensional and row aligned."
             )
         if name == "instance_key":
-            if values.dtype != np.dtype("uint64") or np.unique(values).size != values.size:
+            if (
+                values.dtype != np.dtype("uint64")
+                or np.unique(values).size != values.size
+            ):
                 raise SubjectShapeIOError(
                     "Canonical subject-shape instance_key must be unique uint64."
                 )
@@ -1180,9 +1346,79 @@ def _copy_row_lineage_bounded(
             block_rows=int(block_rows),
             row_aligned_count=int(row_count),
             shard_rows=int(output_shard_rows),
+            precreated=precreated,
         )
         copied.append(name)
     return copied, [], "source_acquisition_frame_index"
+
+
+def _candidate_tail_kinematics_dimensions(
+    shape_group: zarr.Group,
+    *,
+    row_count: int,
+    tail_angle_sample_count: int,
+) -> TailKinematicsDimensions:
+    """Close exact source dtypes and the optional revision bundle before writes."""
+
+    expected_lineage_dtypes = {
+        "instance_key": np.dtype(np.uint64),
+        "source_crop_row_ids": np.dtype(np.int64),
+        "source_acquisition_frame_index": np.dtype(np.int64),
+    }
+    for name, expected_dtype in expected_lineage_dtypes.items():
+        node = shape_group.get(name)
+        if node is None:
+            raise SubjectShapeIOError(
+                f"Candidate source lacks required direct lineage array {name!r}."
+            )
+        if (
+            tuple(int(value) for value in node.shape) != (int(row_count),)
+            or np.dtype(node.dtype) != expected_dtype
+        ):
+            raise SubjectShapeIOError(
+                f"Candidate source {name!r} must have shape {(int(row_count),)!r} "
+                f"and exact dtype {expected_dtype}."
+            )
+
+    revision_group = shape_group.get("source_refined_subject_masks")
+    if revision_group is None:
+        return TailKinematicsDimensions(
+            n_rows=int(row_count),
+            n_tail_samples=int(tail_angle_sample_count),
+        )
+    if not isinstance(revision_group, zarr.Group):
+        raise SubjectShapeIOError(
+            "Candidate source_refined_subject_masks node is not a group."
+        )
+    revision = revision_group.get("row_revision")
+    available = revision_group.get("row_revision_available")
+    if (revision is None) != (available is None):
+        raise SubjectShapeIOError(
+            "Candidate source-revision snapshot is a partial optional bundle."
+        )
+    if revision is None:
+        return TailKinematicsDimensions(
+            n_rows=int(row_count),
+            n_tail_samples=int(tail_angle_sample_count),
+        )
+    revision_shape = tuple(int(value) for value in revision.shape)
+    available_shape = tuple(int(value) for value in available.shape)
+    if (
+        len(revision_shape) != 2
+        or revision_shape[0] != int(row_count)
+        or revision_shape[1] <= 0
+        or available_shape != (revision_shape[1],)
+        or np.dtype(revision.dtype) != np.dtype(np.int64)
+        or np.dtype(available.dtype) != np.dtype(bool)
+    ):
+        raise SubjectShapeIOError(
+            "Candidate source-revision snapshot has the wrong exact shape/dtype contract."
+        )
+    return TailKinematicsDimensions(
+        n_rows=int(row_count),
+        n_tail_samples=int(tail_angle_sample_count),
+        n_components=int(revision_shape[1]),
+    )
 
 
 def _create_tail_kinematics_public_candidate(
@@ -1220,16 +1456,14 @@ def _fresh_owned_tail_kinematics_candidate(
     if not isinstance(candidate, zarr.Group):
         return None
     try:
-        exact_binding = (
-            canonical_node_path(candidate) == run_path
-            and archive_identity(candidate) == archive_identity(root)
-        )
+        exact_binding = canonical_node_path(candidate) == run_path and archive_identity(
+            candidate
+        ) == archive_identity(root)
     except Exception:
         return None
     if (
         not exact_binding
-        or candidate.attrs.get(TAIL_PUBLICATION_OWNER_ATTR)
-        != publication_owner_uuid
+        or candidate.attrs.get(TAIL_PUBLICATION_OWNER_ATTR) != publication_owner_uuid
     ):
         return None
     return candidate
@@ -1404,6 +1638,8 @@ def _prepare_tail_kinematics_run(
     stage_command: str,
     publication_owner_uuid: str,
     overwrite: bool,
+    storage_receipt: Any | None = None,
+    storage_dimensions: TailKinematicsDimensions | None = None,
 ) -> zarr.Group:
     analysis = root.require_group("analysis")
     parent = require_runs_parent(analysis, "tail_kinematics_runs")
@@ -1431,8 +1667,7 @@ def _prepare_tail_kinematics_run(
     run_group = fresh
     mark_run_started(run_group, run_name=target_run, stage="tail_kinematics")
     if (
-        run_group.attrs.get(TAIL_PUBLICATION_OWNER_ATTR)
-        != publication_owner_uuid
+        run_group.attrs.get(TAIL_PUBLICATION_OWNER_ATTR) != publication_owner_uuid
         or run_group.attrs.get("stage_selector_eligible") is not False
     ):
         raise RuntimeError(
@@ -1440,6 +1675,33 @@ def _prepare_tail_kinematics_run(
             "selector-ineligible creation state."
         )
     _set_reason_bytes_attrs(run_group)
+
+    if (storage_receipt is None) != (storage_dimensions is None):
+        raise ValueError(
+            "Tail-kinematics candidate receipt and dimensions must be provided together."
+        )
+    byte_planner_adopted = storage_receipt is not None
+    if byte_planner_adopted:
+        assert storage_dimensions is not None
+        create_tail_kinematics_arrays_from_receipt(
+            run_group,
+            receipt=storage_receipt,
+            dimensions=storage_dimensions,
+        )
+        stamp_tail_kinematics_array_schema(
+            run_group,
+            storage_dimensions,
+            byte_planner_adopted=True,
+        )
+        persist_tail_kinematics_storage_receipt(run_group, storage_receipt)
+        run_group.attrs.update(
+            {
+                "physical_layout": "analysis_storage_plan_receipt_v1",
+                "byte_planner_adopted": True,
+                "storage_candidate_status": "unpromoted_selector_ineligible",
+                "storage_candidate_execution_policy": "serial_single_writer_only",
+            }
+        )
 
     source_refined_run = shape_group.attrs.get("source_refined_subject_masks_run")
     created = _utc_now()
@@ -1450,6 +1712,7 @@ def _prepare_tail_kinematics_run(
         row_count=int(row_count),
         block_rows=int(effective_block_rows),
         output_shard_rows=int(effective_output_shard_rows),
+        precreated=byte_planner_adopted,
     )
     output_row_chunk = int(_metric_chunks(int(row_count))[0])
     block_count = len(_iter_row_slices(int(row_count), int(effective_block_rows)))
@@ -1481,9 +1744,13 @@ def _prepare_tail_kinematics_run(
                 source_authority.get("record_sha256")
             ),
             "source_subject_shape_authority": json_attr_safe(source_authority),
-            "source_refined_subject_masks_run": str(source_refined_run) if source_refined_run is not None else None,
+            "source_refined_subject_masks_run": str(source_refined_run)
+            if source_refined_run is not None
+            else None,
             "source_tail_geometry_kind": SOURCE_TAIL_GEOMETRY_KIND,
-            "body_frame_convention": shape_group.attrs.get("body_frame_schema_id", "fish_anatomical_body_frame"),
+            "body_frame_convention": shape_group.attrs.get(
+                "body_frame_schema_id", "fish_anatomical_body_frame"
+            ),
             "body_frame_source": f"analysis/subject_shape_runs/{shape_run_name}/body_frame",
             "tail_angle_reference_axis": "caudal_axis=-forward_axis",
             "tail_angle_positive_direction": "anatomical_left",
@@ -1544,6 +1811,7 @@ def _prepare_tail_kinematics_run(
         row_count=int(row_count),
         block_rows=int(effective_block_rows),
         output_shard_rows=int(effective_output_shard_rows),
+        precreated=byte_planner_adopted,
     )
 
     git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
@@ -1639,9 +1907,38 @@ def _prepare_tail_kinematics_output_arrays(
     row_count: int,
     tail_angle_sample_s: np.ndarray,
     shard_rows: int | None = None,
+    precreated: bool = False,
 ) -> None:
     sample_s = np.asarray(tail_angle_sample_s, dtype=np.float32).reshape(-1)
     sample_count = int(sample_s.shape[0])
+    if precreated:
+        expected_names = {
+            "valid",
+            "failure_reason_bytes",
+            "tail_angle_sample_s",
+            "tail_angle_sample_xy",
+            "tail_angle_rad",
+            "tail_angle_deg",
+            "tail_lateral_deflection_px",
+            "tail_curvature_px_inv",
+            "tail_tip_angle_rad",
+            "tail_tip_angle_deg",
+            "tail_tip_lateral_deflection_px",
+            "max_abs_tail_angle_rad",
+            "max_abs_tail_angle_deg",
+            "tail_angle_rms_rad",
+            "tail_angle_rms_deg",
+            "integrated_abs_tail_angle_rad",
+            "max_abs_tail_curvature_px_inv",
+            "integrated_abs_tail_curvature",
+        }
+        missing = sorted(name for name in expected_names if run_group.get(name) is None)
+        if missing:
+            raise ValueError(
+                f"Precreated tail-kinematics candidate arrays are missing: {missing!r}."
+            )
+        run_group["tail_angle_sample_s"][:] = sample_s
+        return
     chunks_1d = _metric_chunks(row_count)
     shards_1d = _output_shards(chunks_1d, shard_rows=shard_rows, dtype=bool)
     _create_array(
@@ -1669,10 +1966,17 @@ def _prepare_tail_kinematics_output_arrays(
         shape=(row_count, sample_count, 2),
         dtype=np.float32,
         chunks=sample_xy_chunks,
-        shards=_output_shards(sample_xy_chunks, shard_rows=shard_rows, dtype=np.float32),
+        shards=_output_shards(
+            sample_xy_chunks, shard_rows=shard_rows, dtype=np.float32
+        ),
         fill_value=np.nan,
     )
-    for name in ("tail_angle_rad", "tail_angle_deg", "tail_lateral_deflection_px", "tail_curvature_px_inv"):
+    for name in (
+        "tail_angle_rad",
+        "tail_angle_deg",
+        "tail_lateral_deflection_px",
+        "tail_curvature_px_inv",
+    ):
         chunks_2d = _metric_chunks_lastdim(row_count, sample_count)
         _create_array(
             run_group,
@@ -1718,19 +2022,31 @@ def _write_tail_kinematics_batch_slice(
     run_group["tail_angle_deg"][row_slice] = batch.tail_angle_deg
     run_group["tail_tip_angle_rad"][row_slice] = batch.tail_tip_angle_rad
     run_group["tail_tip_angle_deg"][row_slice] = batch.tail_tip_angle_deg
-    run_group["tail_lateral_deflection_px"][row_slice] = batch.tail_lateral_deflection_px
-    run_group["tail_tip_lateral_deflection_px"][row_slice] = batch.tail_tip_lateral_deflection_px
+    run_group["tail_lateral_deflection_px"][row_slice] = (
+        batch.tail_lateral_deflection_px
+    )
+    run_group["tail_tip_lateral_deflection_px"][row_slice] = (
+        batch.tail_tip_lateral_deflection_px
+    )
     run_group["max_abs_tail_angle_rad"][row_slice] = batch.max_abs_tail_angle_rad
     run_group["max_abs_tail_angle_deg"][row_slice] = batch.max_abs_tail_angle_deg
     run_group["tail_angle_rms_rad"][row_slice] = batch.tail_angle_rms_rad
     run_group["tail_angle_rms_deg"][row_slice] = batch.tail_angle_rms_deg
-    run_group["integrated_abs_tail_angle_rad"][row_slice] = batch.integrated_abs_tail_angle_rad
+    run_group["integrated_abs_tail_angle_rad"][row_slice] = (
+        batch.integrated_abs_tail_angle_rad
+    )
     run_group["tail_curvature_px_inv"][row_slice] = batch.tail_curvature_px_inv
-    run_group["max_abs_tail_curvature_px_inv"][row_slice] = batch.max_abs_tail_curvature_px_inv
-    run_group["integrated_abs_tail_curvature"][row_slice] = batch.integrated_abs_tail_curvature
+    run_group["max_abs_tail_curvature_px_inv"][row_slice] = (
+        batch.max_abs_tail_curvature_px_inv
+    )
+    run_group["integrated_abs_tail_curvature"][row_slice] = (
+        batch.integrated_abs_tail_curvature
+    )
 
 
-def _tail_kinematics_batch_counts(batch: TailKinematicsBatch) -> tuple[int, dict[str, int]]:
+def _tail_kinematics_batch_counts(
+    batch: TailKinematicsBatch,
+) -> tuple[int, dict[str, int]]:
     valid_count = int(np.count_nonzero(batch.valid))
     labels, counts = np.unique(
         np.asarray(batch.failure_reason, dtype=str),
@@ -1764,7 +2080,7 @@ def _process_tail_kinematics_shard(
     if resolved_shape_run != shape_run:
         raise RuntimeError(
             f"Worker resolved subject-shape run {resolved_shape_run!r}, expected {shape_run!r}."
-    )
+        )
     run_group = root["analysis"]["tail_kinematics_runs"][run_name]
     valid_count = 0
     reason_counts: dict[str, int] = {}
@@ -1789,7 +2105,9 @@ def _process_tail_kinematics_shard(
         block_valid_count, block_reason_counts = _tail_kinematics_batch_counts(batch)
         valid_count += int(block_valid_count)
         for reason, count in block_reason_counts.items():
-            reason_counts[str(reason)] = int(reason_counts.get(str(reason), 0) + int(count))
+            reason_counts[str(reason)] = int(
+                reason_counts.get(str(reason), 0) + int(count)
+            )
         completed_block_count += 1
     _revalidate_tail_kinematics_sources(sources)
     return {
@@ -1805,7 +2123,9 @@ def _process_tail_kinematics_shard(
     }
 
 
-def _write_tail_kinematics_batch(run_group: zarr.Group, batch: TailKinematicsBatch) -> None:
+def _write_tail_kinematics_batch(
+    run_group: zarr.Group, batch: TailKinematicsBatch
+) -> None:
     """Compatibility helper for writing an already-materialized batch."""
 
     row_count = int(batch.valid.shape[0])
@@ -1832,6 +2152,7 @@ def write_tail_kinematics_run_group(
     overwrite: bool = False,
     dry_run: bool = False,
     stage_command: Optional[str] = None,
+    storage_profile: StorageProfile | None = None,
     _staged_source_authority: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Write one tail-kinematics run from an existing subject-shape run."""
@@ -1850,14 +2171,42 @@ def write_tail_kinematics_run_group(
         )
     if int(num_workers) <= 0:
         raise ValueError("num_workers must be positive.")
+    if storage_profile is not None:
+        if not isinstance(storage_profile, StorageProfile):
+            raise TypeError("storage_profile must be an explicit StorageProfile.")
+        if storage_profile.profile_id != TAIL_KINEMATICS_CANDIDATE_PROFILE_ID:
+            raise ValueError(
+                "Tail-kinematics candidate mode supports only the explicit "
+                f"{TAIL_KINEMATICS_CANDIDATE_PROFILE_ID!r} profile."
+            )
+        if backend != "serial" or int(num_workers) != 1:
+            raise ValueError(
+                "Tail-kinematics byte-planner candidate mode requires one serial "
+                "writer; process/Dask writes are rejected until whole-shard "
+                "ownership is proven for every planned array."
+            )
     if backend == "process_shards" and not dry_run and worker_zarr_path is None:
-        raise ValueError("process_shards requires worker_zarr_path for independent worker opens.")
+        raise ValueError(
+            "process_shards requires worker_zarr_path for independent worker opens."
+        )
     shape_run_name, shape_group, sources = _resolve_tail_kinematics_sources(
         root,
         shape_run,
         _staged_source_authority=_staged_source_authority,
     )
     row_count = int(sources.row_count)
+    storage_dimensions: TailKinematicsDimensions | None = None
+    storage_receipt: Any | None = None
+    if storage_profile is not None:
+        storage_dimensions = _candidate_tail_kinematics_dimensions(
+            shape_group,
+            row_count=row_count,
+            tail_angle_sample_count=int(tail_angle_sample_count),
+        )
+        storage_receipt = build_tail_kinematics_storage_receipt(
+            storage_dimensions,
+            profile=storage_profile,
+        )
     effective_block_rows = _effective_block_rows(
         row_count=row_count,
         requested_block_rows=int(block_rows),
@@ -1901,7 +2250,9 @@ def write_tail_kinematics_run_group(
         "status": "planned" if dry_run else "updated",
         "tail_kinematics_run": target_run,
         "source_subject_shape_run": shape_run_name,
-        "source_refined_subject_masks_run": shape_group.attrs.get("source_refined_subject_masks_run"),
+        "source_refined_subject_masks_run": shape_group.attrs.get(
+            "source_refined_subject_masks_run"
+        ),
         "roi_count": int(row_count),
         "tail_angle_sample_count": int(tail_angle_sample_count),
         "materialization_mode": materialization_mode,
@@ -1942,6 +2293,11 @@ def write_tail_kinematics_run_group(
         ),
         "block_count": int(len(compute_block_slices)),
         "mutates_archive": not bool(dry_run),
+        "storage_profile_id": (
+            storage_profile.profile_id if storage_profile is not None else None
+        ),
+        "byte_planner_candidate": storage_profile is not None,
+        "selector_eligible": False if storage_profile is not None else None,
     }
     if dry_run:
         return dict(_json_safe(summary))
@@ -2003,13 +2359,18 @@ def write_tail_kinematics_run_group(
             stage_command=command,
             publication_owner_uuid=publication_owner_uuid,
             overwrite=overwrite,
+            storage_receipt=storage_receipt,
+            storage_dimensions=storage_dimensions,
         )
-        target_s = tail_sample_positions(int(tail_angle_sample_count)).astype(np.float32)
+        target_s = tail_sample_positions(int(tail_angle_sample_count)).astype(
+            np.float32
+        )
         _prepare_tail_kinematics_output_arrays(
             run_group,
             row_count=row_count,
             tail_angle_sample_s=target_s,
             shard_rows=int(effective_output_shard_rows),
+            precreated=storage_receipt is not None,
         )
         if backend == "serial":
             for row_slice in compute_block_slices:
@@ -2025,7 +2386,9 @@ def write_tail_kinematics_run_group(
                 write_started = time.perf_counter()
                 _write_tail_kinematics_batch_slice(run_group, row_slice, batch)
                 write_duration = float(time.perf_counter() - write_started)
-                block_valid_count, block_reason_counts = _tail_kinematics_batch_counts(batch)
+                block_valid_count, block_reason_counts = _tail_kinematics_batch_counts(
+                    batch
+                )
                 record_block_result(
                     {
                         "valid_row_count": block_valid_count,
@@ -2067,6 +2430,14 @@ def write_tail_kinematics_run_group(
 
         _revalidate_tail_kinematics_sources(sources)
 
+        if storage_profile is not None:
+            storage_errors = validate_tail_kinematics_storage_receipt(run_group)
+            if storage_errors:
+                raise RuntimeError(
+                    "Tail-kinematics storage candidate validation failed: "
+                    + "; ".join(storage_errors)
+                )
+
         if completed_block_count != len(compute_block_slices):
             raise RuntimeError(
                 "Tail-kinematics compute block accounting mismatch: "
@@ -2080,15 +2451,23 @@ def write_tail_kinematics_run_group(
             )
         duration_seconds = float(time.perf_counter() - started)
         invalid_count = int(row_count - valid_count)
-        rows_per_second = float(row_count / duration_seconds) if duration_seconds > 0.0 else float("inf")
+        rows_per_second = (
+            float(row_count / duration_seconds)
+            if duration_seconds > 0.0
+            else float("inf")
+        )
         run_group.attrs["duration_seconds"] = duration_seconds
         run_group.attrs["rows_per_second"] = rows_per_second
         run_group.attrs["valid_row_count"] = int(valid_count)
         run_group.attrs["invalid_row_count"] = invalid_count
         run_group.attrs["completed_block_count"] = int(completed_block_count)
-        run_group.attrs["completed_worker_task_count"] = int(completed_worker_task_count)
+        run_group.attrs["completed_worker_task_count"] = int(
+            completed_worker_task_count
+        )
         run_group.attrs["failure_reason_counts"] = reason_counts
-        run_group.attrs["source_read_duration_seconds_sum"] = source_read_duration_seconds_sum
+        run_group.attrs["source_read_duration_seconds_sum"] = (
+            source_read_duration_seconds_sum
+        )
         run_group.attrs["compute_duration_seconds_sum"] = compute_duration_seconds_sum
         run_group.attrs["write_duration_seconds_sum"] = write_duration_seconds_sum
         if sources.source_authority_mode == "canonical_publication":
@@ -2110,6 +2489,41 @@ def write_tail_kinematics_run_group(
                 fallback_command=command,
             ),
         )
+        if storage_profile is not None:
+            if run_group.attrs.get("stage_selector_eligible") is not False:
+                raise RuntimeError(
+                    "Tail-kinematics storage candidate became selector eligible."
+                )
+            summary.update(
+                {
+                    "status": "updated",
+                    "valid_row_count": valid_count,
+                    "invalid_row_count": invalid_count,
+                    "failure_reason_counts": reason_counts,
+                    "duration_seconds": duration_seconds,
+                    "rows_per_second": rows_per_second,
+                    "completed_block_count": int(completed_block_count),
+                    "completed_worker_task_count": int(completed_worker_task_count),
+                    "source_read_duration_seconds_sum": (
+                        source_read_duration_seconds_sum
+                    ),
+                    "compute_duration_seconds_sum": compute_duration_seconds_sum,
+                    "write_duration_seconds_sum": write_duration_seconds_sum,
+                    "selector_eligible": False,
+                    "metadata_equivalence_state": (
+                        "deferred_until_authoritative_atomic_copy"
+                        if sources.source_authority_mode != "canonical_publication"
+                        else "direct_and_consolidated_array_declarations_equal"
+                    ),
+                }
+            )
+            if sources.source_authority_mode == "canonical_publication":
+                compared = consolidate_and_validate_tail_kinematics_metadata(
+                    root,
+                    run_path=f"analysis/tail_kinematics_runs/{target_run}",
+                )
+                summary["direct_consolidated_array_declaration_count"] = int(compared)
+            return dict(_json_safe(summary))
         if sources.source_authority_mode == "canonical_publication":
             summary.update(
                 {
@@ -2182,6 +2596,7 @@ def write_tail_kinematics_run(
     num_workers: int = 1,
     overwrite: bool = False,
     dry_run: bool = False,
+    storage_profile: StorageProfile | None = None,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
     return write_tail_kinematics_run_group(
@@ -2196,6 +2611,7 @@ def write_tail_kinematics_run(
         worker_zarr_path=zarr_path,
         overwrite=overwrite,
         dry_run=dry_run,
+        storage_profile=storage_profile,
     )
 
 
@@ -2204,8 +2620,14 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Write analysis/tail_kinematics_runs from subject-shape tail geometry."
     )
     parser.add_argument("zarr_path", type=Path, help="Palette zarr archive.")
-    parser.add_argument("--shape-run", help="analysis/subject_shape_runs/<run> to consume; defaults to latest.")
-    parser.add_argument("--run-name", help="Target analysis/tail_kinematics_runs/<run>; defaults to timestamped.")
+    parser.add_argument(
+        "--shape-run",
+        help="analysis/subject_shape_runs/<run> to consume; defaults to latest.",
+    )
+    parser.add_argument(
+        "--run-name",
+        help="Target analysis/tail_kinematics_runs/<run>; defaults to timestamped.",
+    )
     parser.add_argument(
         "--tail-angle-sample-count",
         type=int,
@@ -2238,6 +2660,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument(
+        "--storage-profile",
+        choices=(TAIL_KINEMATICS_CANDIDATE_PROFILE_ID,),
+        help=(
+            "Opt into the unpromoted shared byte-planner candidate. This forces "
+            "one serial writer and leaves the completed run selector-ineligible."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help=(
@@ -2245,7 +2675,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "and an existing child cannot be reused."
         ),
     )
-    parser.add_argument("--dry-run", action="store_true", help="Resolve inputs without mutating the archive.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve inputs without mutating the archive.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser
 
@@ -2264,6 +2698,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         num_workers=int(args.num_workers),
         overwrite=bool(args.overwrite),
         dry_run=bool(args.dry_run),
+        storage_profile=(
+            get_storage_profile(args.storage_profile)
+            if args.storage_profile is not None
+            else None
+        ),
     )
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0

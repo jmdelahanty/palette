@@ -14,6 +14,7 @@ from fisheye.analysis import subject_shape_io
 from fisheye.analysis_workflows.materializers import tail_kinematics as mod
 from fisheye.analysis_workflows.materializers import atomic_run_publisher as atomic_mod
 from fisheye.shared.coordinate_frame_record import array_payload_sha256
+from fisheye.shared.zarr.storage_profiles import PUBLISHED_HTTP_V1
 
 _REAL_SUBJECT_SHAPE_PUBLICATION_LOADER = (
     subject_shape_io.load_persisted_subject_shape_coordinate_publication
@@ -105,6 +106,7 @@ def _patch_provenance(monkeypatch) -> None:
             },
         },
     )
+
     def _fake_publish(_root, run_group):
         run_group.attrs["tail_coordinate_publication_manifest_sha256"] = "9" * 64
 
@@ -135,7 +137,9 @@ def _patch_provenance(monkeypatch) -> None:
         assert receipt is activation_receipt
         assert root["analysis/tail_kinematics_runs"] is not None
         assert parent.path == "analysis/tail_kinematics_runs"
-        assert run.path == f"analysis/tail_kinematics_runs/{run.attrs['palette_run_name']}"
+        assert (
+            run.path == f"analysis/tail_kinematics_runs/{run.attrs['palette_run_name']}"
+        )
         assert run.attrs["stage_selector_eligible"] is False
         run.attrs["stage_selector_eligible"] = True
 
@@ -282,7 +286,9 @@ def _build_source_zarr(path: Path, *, row_count: int = 9) -> None:
     )
 
 
-def test_materialization_plan_selects_only_required_subject_shape_surface(tmp_path: Path) -> None:
+def test_materialization_plan_selects_only_required_subject_shape_surface(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source.zarr"
     scratch = tmp_path / "scratch"
     _build_source_zarr(source)
@@ -323,7 +329,9 @@ def test_staged_authority_rejects_swap_tamper_and_normal_reader_bypass(
     _build_source_zarr(source_a)
     _build_source_zarr(source_b)
     root_b = zarr.open_group(str(source_b), mode="a", use_consolidated=False)
-    tail_b = root_b["analysis/subject_shape_runs/shape_001/components/subject_body/tail_sample_xy"]
+    tail_b = root_b[
+        "analysis/subject_shape_runs/shape_001/components/subject_body/tail_sample_xy"
+    ]
     changed = np.asarray(tail_b[:], dtype=np.float32)
     changed[:, :, 1] = 7.0
     tail_b[:] = changed
@@ -388,7 +396,9 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
     tmp_path: Path,
 ) -> None:
     _patch_provenance(monkeypatch)
-    monkeypatch.setattr(tail_mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2)
+    monkeypatch.setattr(
+        tail_mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2
+    )
     source = tmp_path / "source.zarr"
     scratch = tmp_path / "scratch"
     _build_source_zarr(source)
@@ -410,10 +420,15 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
     assert result["staging"]["status"] == "complete"
     assert result["publish"]["final_validation"]["valid"] is True
     assert scratch.is_dir()
-    staged_body = scratch / "source-subset.zarr/analysis/subject_shape_runs/shape_001/components/subject_body"
+    staged_body = (
+        scratch
+        / "source-subset.zarr/analysis/subject_shape_runs/shape_001/components/subject_body"
+    )
     assert (staged_body / "tail_sample_xy").is_dir()
     assert not (staged_body / "unrelated_debug_surface").exists()
-    manifest = json.loads((scratch / "staging-manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (scratch / "staging-manifest.json").read_text(encoding="utf-8")
+    )
     assert manifest["inventory"]["valid"] is True
     assert manifest["source_contract"]["method"] == "fixture_subject_shape"
 
@@ -424,7 +439,9 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
     assert run.attrs["palette_run_completion_status"] == "complete"
     assert run.attrs["compute_kernel"] == "vectorized_shared_grid_v1"
     assert run.attrs["cluster_output_staging"]["schema_id"] == mod.PUBLISH_SCHEMA_ID
-    assert run.attrs["cluster_output_staging"]["pre_pointer_validation"]["valid"] is True
+    assert (
+        run.attrs["cluster_output_staging"]["pre_pointer_validation"]["valid"] is True
+    )
     assert run.attrs["cluster_output_staging"]["final_validation"]["valid"] is True
     assert run.attrs["cluster_output_staging"]["rollback_policy"] == (
         "retain_owner_bound_failed_public_tombstone_and_"
@@ -442,12 +459,69 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
     assert run["source_acquisition_frame_index"][:].tolist() == list(range(100, 109))
 
 
+def test_materialize_byte_planned_tail_candidate_never_updates_selectors(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_provenance(monkeypatch)
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source_zarr(source, row_count=20_000)
+    source_root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    shape = source_root["analysis/subject_shape_runs/shape_001"]
+    frames = np.asarray(shape["source_acquisition_frame_index"][:], dtype=np.int64)
+    del shape["source_acquisition_frame_index"]
+    shape.create_array(
+        "source_acquisition_frame_index",
+        data=frames,
+        chunks=(2_048,),
+        overwrite=True,
+    )
+    tail_parent = source_root["analysis"].require_group("tail_kinematics_runs")
+    tail_parent.attrs.update(
+        {"latest": "tail_existing", "latest_complete": "tail_existing"}
+    )
+
+    result = mod.materialize_tail_kinematics(
+        source,
+        scratch_root=scratch,
+        shape_run="shape_001",
+        run_name="tail_candidate",
+        block_rows=3_000,
+        execution_backend="serial",
+        num_workers=1,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+        check_capacity=False,
+        storage_profile=PUBLISHED_HTTP_V1,
+    )
+
+    assert result["status"] == "complete"
+    assert result["plan"]["byte_planner_candidate"] is True
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = root["analysis/tail_kinematics_runs"]
+    assert parent.attrs["latest"] == "tail_existing"
+    assert parent.attrs["latest_complete"] == "tail_existing"
+    run = parent["tail_candidate"]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs["analysis_storage_profile_id"] == "published_http_v1"
+    assert tail_mod.validate_tail_kinematics_storage_receipt(run) == ()
+    consolidated = zarr.open_group(str(source), mode="r", use_consolidated=True)
+    consolidated_run = consolidated["analysis/tail_kinematics_runs/tail_candidate"]
+    assert consolidated_run.attrs["stage_selector_eligible"] is False
+    assert np.asarray(consolidated_run["tail_angle_rad"][:]).shape == (20_000, 10)
+
+
 def test_materialize_tail_kinematics_process_workers_own_complete_shards(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     _patch_provenance(monkeypatch)
-    monkeypatch.setattr(tail_mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2)
+    monkeypatch.setattr(
+        tail_mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2
+    )
     source = tmp_path / "source.zarr"
     scratch = tmp_path / "scratch"
     _build_source_zarr(source)
@@ -481,13 +555,19 @@ def test_materialize_tail_kinematics_process_workers_own_complete_shards(
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     run = root["analysis/tail_kinematics_runs/tail_process_shards"]
     assert run.attrs["materialization_mode"] == "bounded_process_shards"
-    assert run.attrs["worker_chunk_alignment"] == "compute_blocks_align_to_output_row_chunks"
+    assert (
+        run.attrs["worker_chunk_alignment"]
+        == "compute_blocks_align_to_output_row_chunks"
+    )
     assert (
         run.attrs["worker_write_ownership"]
         == "one_complete_nonoverlapping_output_shard_per_task"
     )
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
-    assert run.attrs["worker_compute_blocking"] == "bounded_subblocks_within_owned_output_shard"
+    assert (
+        run.attrs["worker_compute_blocking"]
+        == "bounded_subblocks_within_owned_output_shard"
+    )
     assert run.attrs["requested_output_shard_rows"] == 7
     assert run.attrs["effective_output_shard_rows"] == 8
     assert tuple(run["tail_angle_rad"].shards) == (8, 10)
@@ -510,7 +590,9 @@ def test_tail_publish_retains_owned_tombstone_and_parent_fails_closed_after_rena
     tmp_path: Path,
 ) -> None:
     _patch_provenance(monkeypatch)
-    monkeypatch.setattr(tail_mod, "refined_subject_mask_metric_row_chunk", lambda _rows: 2)
+    monkeypatch.setattr(
+        tail_mod, "refined_subject_mask_metric_row_chunk", lambda _rows: 2
+    )
     source = tmp_path / "source.zarr"
     scratch = tmp_path / "scratch"
     _build_source_zarr(source)
@@ -571,9 +653,7 @@ def test_tail_publish_retains_owned_tombstone_and_parent_fails_closed_after_rena
     assert failed.attrs["palette_run_completion_status"] == "failed"
     assert "palette_run_completed_at_utc" not in failed.attrs
     assert tombstone["schema_id"] == "palette.atomic_publication_tombstone"
-    assert tombstone["publication_owner_attr"] == (
-        tail_mod.TAIL_PUBLICATION_OWNER_ATTR
-    )
+    assert tombstone["publication_owner_attr"] == (tail_mod.TAIL_PUBLICATION_OWNER_ATTR)
     assert tombstone["publication_owner_uuid"] == owner
     assert tombstone["public_path_retained"] is True
     assert tombstone["selector_eligible"] is False
@@ -720,15 +800,18 @@ def test_tail_failed_exact_receipt_rollback_never_restores_precopy_snapshot(
     assert failed.attrs["palette_run_completion_status"] == "failed"
     assert parent.attrs["latest"] == "tail_c"
     assert parent.attrs["latest_complete"] == "tail_c"
-    assert parent.attrs[
-        mod.tail_publication_mod.TAIL_PUBLICATION_GENERATION_ATTR
-    ] == 2
-    assert parent.attrs[mod.tail_publication_mod.TAIL_PARENT_PUBLICATION_LEASE_ATTR][
-        "owner_uuid"
-    ] == candidate_owner
+    assert parent.attrs[mod.tail_publication_mod.TAIL_PUBLICATION_GENERATION_ATTR] == 2
+    assert (
+        parent.attrs[mod.tail_publication_mod.TAIL_PARENT_PUBLICATION_LEASE_ATTR][
+            "owner_uuid"
+        ]
+        == candidate_owner
+    )
 
 
-def test_materializer_refuses_to_replace_existing_authoritative_run(monkeypatch, tmp_path: Path) -> None:
+def test_materializer_refuses_to_replace_existing_authoritative_run(
+    monkeypatch, tmp_path: Path
+) -> None:
     _patch_provenance(monkeypatch)
     source = tmp_path / "source.zarr"
     _build_source_zarr(source)

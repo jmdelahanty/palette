@@ -44,6 +44,7 @@ from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared import tail_coordinate_publication as tail_publication_mod
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from ...shared.zarr.storage_profiles import StorageProfile, get_storage_profile
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 MATERIALIZATION_SCHEMA_ID = "palette.tail_kinematics_materialization.v1"
@@ -76,6 +77,7 @@ class TailKinematicsMaterializationPlan:
     requested_output_shard_rows: int
     execution_backend: str
     requested_num_workers: int
+    storage_profile_id: str | None
     selected_paths: tuple[str, ...]
     physical_files: tuple[PhysicalFile, ...]
     source_bytes: int
@@ -115,6 +117,8 @@ class TailKinematicsMaterializationPlan:
             "requested_output_shard_rows": int(self.requested_output_shard_rows),
             "execution_backend": self.execution_backend,
             "requested_num_workers": int(self.requested_num_workers),
+            "storage_profile_id": self.storage_profile_id,
+            "byte_planner_candidate": self.storage_profile_id is not None,
             "selected_paths": list(self.selected_paths),
             "physical_file_count": len(self.physical_files),
             "source_bytes": int(self.source_bytes),
@@ -140,7 +144,9 @@ def _utc_now() -> str:
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     os.replace(temporary, path)
 
 
@@ -155,7 +161,9 @@ def _relative_path(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _add_group_metadata(source_zarr: Path, relative_group: str, selected: set[Path]) -> None:
+def _add_group_metadata(
+    source_zarr: Path, relative_group: str, selected: set[Path]
+) -> None:
     group = source_zarr if relative_group in {"", "."} else source_zarr / relative_group
     for name in GROUP_METADATA_NAMES:
         candidate = group / name
@@ -281,7 +289,10 @@ def _selected_source_files(
         )
 
     files = tuple(
-        PhysicalFile(relative_path=_relative_path(source_zarr, path), size_bytes=int(path.stat().st_size))
+        PhysicalFile(
+            relative_path=_relative_path(source_zarr, path),
+            size_bytes=int(path.stat().st_size),
+        )
         for path in sorted(selected)
     )
     if not files:
@@ -300,6 +311,7 @@ def build_tail_kinematics_materialization_plan(
     output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
     execution_backend: str = "serial",
     num_workers: int = 1,
+    storage_profile: StorageProfile | None = None,
 ) -> TailKinematicsMaterializationPlan:
     """Build a read-only physical-file staging plan for one recording."""
 
@@ -312,7 +324,9 @@ def build_tail_kinematics_materialization_plan(
     except ValueError:
         pass
     else:
-        raise ValueError("Scratch root must not be inside the authoritative source Zarr.")
+        raise ValueError(
+            "Scratch root must not be inside the authoritative source Zarr."
+        )
     if int(tail_angle_sample_count) < 2:
         raise ValueError("tail_angle_sample_count must be >= 2.")
     if int(block_rows) <= 0:
@@ -324,12 +338,31 @@ def build_tail_kinematics_materialization_plan(
         raise ValueError(f"Unsupported execution backend: {execution_backend!r}.")
     if int(num_workers) <= 0:
         raise ValueError("num_workers must be positive.")
+    if storage_profile is not None:
+        if not isinstance(storage_profile, StorageProfile):
+            raise TypeError("storage_profile must be an explicit StorageProfile.")
+        if storage_profile.profile_id != tail_mod.TAIL_KINEMATICS_CANDIDATE_PROFILE_ID:
+            raise ValueError(
+                "Tail-kinematics materialization supports only the explicit "
+                f"{tail_mod.TAIL_KINEMATICS_CANDIDATE_PROFILE_ID!r} candidate."
+            )
+        if backend != "serial" or int(num_workers) != 1:
+            raise ValueError(
+                "Tail-kinematics byte-planner candidate materialization requires "
+                "one serial writer."
+            )
 
     root = open_zarr_root(source, mode="r")
-    resolved_shape_run, shape_group, sources = _resolve_tail_kinematics_sources(root, shape_run)
-    target_run = source / "analysis" / "tail_kinematics_runs" / _validate_run_name(run_name)
+    resolved_shape_run, shape_group, sources = _resolve_tail_kinematics_sources(
+        root, shape_run
+    )
+    target_run = (
+        source / "analysis" / "tail_kinematics_runs" / _validate_run_name(run_name)
+    )
     if target_run.exists():
-        raise FileExistsError(f"Refusing to replace existing authoritative run: {target_run}")
+        raise FileExistsError(
+            f"Refusing to replace existing authoritative run: {target_run}"
+        )
     selected_paths, files = _selected_source_files(source, shape_run=resolved_shape_run)
     return TailKinematicsMaterializationPlan(
         source_zarr=source,
@@ -343,6 +376,9 @@ def build_tail_kinematics_materialization_plan(
         requested_output_shard_rows=int(output_shard_rows),
         execution_backend=backend,
         requested_num_workers=int(num_workers),
+        storage_profile_id=(
+            storage_profile.profile_id if storage_profile is not None else None
+        ),
         selected_paths=selected_paths,
         physical_files=files,
         source_bytes=sum(int(item.size_bytes) for item in files),
@@ -406,7 +442,9 @@ def _copy_selected_files_rsync(plan: TailKinematicsMaterializationPlan) -> None:
     subprocess.run(command, check=True)
 
 
-def _validate_file_inventory(root: Path, expected: Sequence[PhysicalFile]) -> dict[str, Any]:
+def _validate_file_inventory(
+    root: Path, expected: Sequence[PhysicalFile]
+) -> dict[str, Any]:
     observed: list[PhysicalFile] = []
     missing: list[str] = []
     size_mismatches: list[str] = []
@@ -446,7 +484,9 @@ def stage_tail_kinematics_sources(
     plan.scratch_root.mkdir(parents=True, exist_ok=False)
     plan.staged_zarr.mkdir(parents=True)
     _write_files_manifest(plan)
-    required_bytes = int(plan.source_bytes + plan.estimated_output_bytes + DEFAULT_CAPACITY_MARGIN_BYTES)
+    required_bytes = int(
+        plan.source_bytes + plan.estimated_output_bytes + DEFAULT_CAPACITY_MARGIN_BYTES
+    )
     free_bytes = int(shutil.disk_usage(plan.scratch_root).free)
     if check_capacity and free_bytes < required_bytes:
         raise OSError(
@@ -473,8 +513,12 @@ def stage_tail_kinematics_sources(
         plan.shape_run,
         _staged_source_authority=plan.staged_source_authority,
     )
-    if staged_shape_run != plan.shape_run or int(staged_sources.row_count) != int(plan.row_count):
-        raise RuntimeError("Staged subject-shape logical validation did not match the staging plan.")
+    if staged_shape_run != plan.shape_run or int(staged_sources.row_count) != int(
+        plan.row_count
+    ):
+        raise RuntimeError(
+            "Staged subject-shape logical validation did not match the staging plan."
+        )
 
     payload = {
         "schema_id": STAGING_SCHEMA_ID,
@@ -483,7 +527,9 @@ def stage_tail_kinematics_sources(
         "completed_at_utc": _utc_now(),
         "duration_seconds": duration,
         "mib_per_second": (
-            (int(plan.source_bytes) / (1024 * 1024)) / duration if duration > 0.0 else None
+            (int(plan.source_bytes) / (1024 * 1024)) / duration
+            if duration > 0.0
+            else None
         ),
         "copy_backend": copy_backend,
         "host": socket.gethostname(),
@@ -512,7 +558,9 @@ def stage_tail_kinematics_sources(
     return payload
 
 
-def _validate_tail_run(path: Path, *, row_count: int, sample_count: int) -> dict[str, Any]:
+def _validate_tail_run(
+    path: Path, *, row_count: int, sample_count: int
+) -> dict[str, Any]:
     group = open_zarr_root(path, mode="r")
     attrs = group.attrs
     errors: list[str] = []
@@ -556,6 +604,8 @@ def _validate_tail_run(path: Path, *, row_count: int, sample_count: int) -> dict
         attrs.get("tail_coordinate_publication_manifest_sha256"), str
     ):
         errors.append("selector-eligible run lacks tail coordinate publication seal")
+    if attrs.get("byte_planner_adopted") is True:
+        errors.extend(tail_mod.validate_tail_kinematics_storage_receipt(group))
     return {
         "valid": not errors,
         "errors": errors,
@@ -580,6 +630,8 @@ def publish_tail_kinematics_run(
 ) -> dict[str, Any]:
     """Validate and atomically publish one completed local run group."""
 
+    byte_planner_candidate = plan.storage_profile_id is not None
+
     source_run = plan.local_run_path
     source_owner = open_zarr_root(source_run, mode="r").attrs.get(
         tail_publication_mod.TAIL_PUBLICATION_OWNER_ATTR
@@ -595,6 +647,7 @@ def publish_tail_kinematics_run(
             "Tail-kinematics publication source owner is not one canonical UUID."
         )
     deferred_activation: list[Any] = []
+
     def validate(path: Path) -> dict[str, Any]:
         return _validate_tail_run(
             path,
@@ -629,20 +682,33 @@ def publish_tail_kinematics_run(
                 fallback_command=command,
             ),
         )
-        activation = tail_publication_mod.defer_tail_coordinate_publication_activation(
-            root,
-            parent,
-            run_group,
-            run_name=plan.run_name,
-            expected_publication_owner_uuid=expected_publication_owner_uuid,
-        )
-        deferred_activation[:] = [activation]
+        if not byte_planner_candidate:
+            activation = (
+                tail_publication_mod.defer_tail_coordinate_publication_activation(
+                    root,
+                    parent,
+                    run_group,
+                    run_name=plan.run_name,
+                    expected_publication_owner_uuid=expected_publication_owner_uuid,
+                )
+            )
+            deferred_activation[:] = [activation]
 
     def activate(
         root: zarr.Group,
         parent: zarr.Group,
         run_group: zarr.Group,
     ) -> None:
+        if byte_planner_candidate:
+            if run_group.attrs.get("stage_selector_eligible") is not False:
+                raise RuntimeError(
+                    "Tail-kinematics storage candidate became selector eligible."
+                )
+            tail_mod.consolidate_and_validate_tail_kinematics_metadata(
+                root,
+                run_path=f"analysis/tail_kinematics_runs/{plan.run_name}",
+            )
+            return
         if len(deferred_activation) != 1:
             raise RuntimeError(
                 "Tail-kinematics publication lacks one deferred activation receipt."
@@ -655,17 +721,29 @@ def publish_tail_kinematics_run(
         )
 
     def rollback_activation() -> None:
-        if deferred_activation:
+        if not byte_planner_candidate and deferred_activation:
             tail_publication_mod.rollback_deferred_tail_coordinate_publication_activation(
                 deferred_activation[0]
             )
 
     def verify(root: zarr.Group) -> None:
         parent = root["analysis/tail_kinematics_runs"]
-        if str(parent.attrs.get("latest")) != plan.run_name or str(
-            parent.attrs.get("latest_complete")
-        ) != plan.run_name:
-            raise RuntimeError("Tail-kinematics parent pointers were not updated to the published run.")
+        if byte_planner_candidate:
+            if (
+                parent.attrs.get("latest") == plan.run_name
+                or parent.attrs.get("latest_complete") == plan.run_name
+            ):
+                raise RuntimeError(
+                    "Tail-kinematics storage candidate updated a parent selector."
+                )
+            return
+        if (
+            str(parent.attrs.get("latest")) != plan.run_name
+            or str(parent.attrs.get("latest_complete")) != plan.run_name
+        ):
+            raise RuntimeError(
+                "Tail-kinematics parent pointers were not updated to the published run."
+            )
 
     return atomic_publish_run_group(
         AtomicRunPublishSpec(
@@ -690,7 +768,7 @@ def publish_tail_kinematics_run(
         complete_run=complete,
         verify_pointers=verify,
         activate_run=activate,
-        rollback_activation=rollback_activation,
+        rollback_activation=(None if byte_planner_candidate else rollback_activation),
         payload_metadata={
             "staged_zarr": str(plan.staged_zarr),
             "source_run_path": str(source_run),
@@ -716,6 +794,7 @@ def materialize_tail_kinematics(
     keep_scratch: bool = False,
     check_capacity: bool = True,
     stage_command: str | None = None,
+    storage_profile: StorageProfile | None = None,
 ) -> dict[str, Any]:
     """Execute or plan the complete staged materialization workflow."""
 
@@ -729,6 +808,7 @@ def materialize_tail_kinematics(
         output_shard_rows=output_shard_rows,
         execution_backend=execution_backend,
         num_workers=num_workers,
+        storage_profile=storage_profile,
     )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -759,7 +839,13 @@ def materialize_tail_kinematics(
             worker_zarr_path=plan.staged_zarr,
             overwrite=False,
             dry_run=False,
-            stage_command=stage_command or (" ".join(sys.argv) if sys.argv else "unknown"),
+            stage_command=stage_command
+            or (" ".join(sys.argv) if sys.argv else "unknown"),
+            storage_profile=(
+                get_storage_profile(plan.storage_profile_id)
+                if plan.storage_profile_id is not None
+                else None
+            ),
             _staged_source_authority=plan.staged_source_authority,
         )
         local_run = local_root["analysis"]["tail_kinematics_runs"][plan.run_name]
@@ -790,17 +876,30 @@ def _default_scratch_root(run_name: str) -> Path:
     scratch_user = Path("/scratch") / user
     if scratch_user.is_dir() and os.access(scratch_user, os.W_OK | os.X_OK):
         return scratch_user / job_id / f"palette_tail_kinematics_{run_name}"
-    return Path(os.environ.get("TMPDIR") or "/tmp") / f"palette_tail_kinematics_{job_id}_{run_name}"
+    return (
+        Path(os.environ.get("TMPDIR") or "/tmp")
+        / f"palette_tail_kinematics_{job_id}_{run_name}"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Stage subject-shape arrays locally, materialize tail kinematics, and atomically publish."
     )
-    parser.add_argument("zarr_path", type=Path, help="Authoritative Palette analysis Zarr on shared storage.")
-    parser.add_argument("--shape-run", help="Exact subject-shape source run; defaults to latest.")
-    parser.add_argument("--run-name", required=True, help="New authoritative tail-kinematics run name.")
-    parser.add_argument("--scratch-root", type=Path, help="Unique node-local staging directory.")
+    parser.add_argument(
+        "zarr_path",
+        type=Path,
+        help="Authoritative Palette analysis Zarr on shared storage.",
+    )
+    parser.add_argument(
+        "--shape-run", help="Exact subject-shape source run; defaults to latest."
+    )
+    parser.add_argument(
+        "--run-name", required=True, help="New authoritative tail-kinematics run name."
+    )
+    parser.add_argument(
+        "--scratch-root", type=Path, help="Unique node-local staging directory."
+    )
     parser.add_argument(
         "--tail-angle-sample-count",
         type=int,
@@ -818,11 +917,29 @@ def _build_parser() -> argparse.ArgumentParser:
         default="serial",
     )
     parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument(
+        "--storage-profile",
+        choices=(tail_mod.TAIL_KINEMATICS_CANDIDATE_PROFILE_ID,),
+        help=(
+            "Opt into the unpromoted byte-planned candidate. This requires one "
+            "serial writer and publishes no latest/latest_complete selector."
+        ),
+    )
     parser.add_argument("--copy-backend", choices=("rsync", "python"), default="rsync")
-    parser.add_argument("--apply", action="store_true", help="Execute; default is a read-only plan.")
-    parser.add_argument("--keep-scratch", action="store_true", help="Keep scratch after successful publication.")
+    parser.add_argument(
+        "--apply", action="store_true", help="Execute; default is a read-only plan."
+    )
+    parser.add_argument(
+        "--keep-scratch",
+        action="store_true",
+        help="Keep scratch after successful publication.",
+    )
     parser.add_argument("--no-capacity-check", action="store_true")
-    parser.add_argument("--report", type=Path, help="Optional JSON report path, normally on shared storage.")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Optional JSON report path, normally on shared storage.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser
 
@@ -845,6 +962,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         apply=bool(args.apply),
         keep_scratch=bool(args.keep_scratch),
         check_capacity=not bool(args.no_capacity_check),
+        storage_profile=(
+            get_storage_profile(args.storage_profile)
+            if args.storage_profile is not None
+            else None
+        ),
     )
     if args.report is not None:
         _write_json_atomic(args.report.expanduser().resolve(), result)
