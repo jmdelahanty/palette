@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from fisheye.analytics_exports.arrow_contracts import (
+    ARROW_TABLE_CONTRACTS,
     arrow_contract_envelope,
     exact_arrow_schema,
 )
@@ -33,6 +34,35 @@ from fisheye.utils.index_analytics_manifests import (
 from fisheye.utils.query_analytics_exports import main as query_main
 from fisheye.utils.resolve_analytics_export import main as resolve_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
+
+
+def _exact_export_row(table_name: str, values: dict[str, object]) -> dict[str, object]:
+    row = canonicalize_export_row(table_name, values)
+    for item in ARROW_TABLE_CONTRACTS[table_name].fields:
+        if item.name in row and (row[item.name] is not None or item.nullable):
+            continue
+        if item.nullable:
+            row[item.name] = None
+        elif item.arrow_type == "string":
+            row[item.name] = "fixture"
+        elif item.arrow_type == "bool":
+            row[item.name] = False
+        elif item.arrow_type in {
+            "int8",
+            "int16",
+            "int32",
+            "int64",
+            "uint16",
+            "uint64",
+        }:
+            row[item.name] = 1
+        elif item.arrow_type in {"float32", "float64"}:
+            row[item.name] = 1.0
+        elif item.arrow_type == "list<string>":
+            row[item.name] = []
+        else:  # pragma: no cover - installed exact schemas close this fixture.
+            raise AssertionError(item.arrow_type)
+    return row
 
 
 def _write_collection_manifest(path: Path) -> dict:
@@ -142,7 +172,7 @@ def _write_export_manifest(
             for index in range(2)
         ],
         SWIM_BOUT_METRICS_TABLE: [
-            canonicalize_export_row(
+            _exact_export_row(
                 SWIM_BOUT_METRICS_TABLE,
                 {"recording_id": "recording_0", "bout_id": index},
             )
@@ -182,11 +212,9 @@ def _write_export_manifest(
                     schema=exact_arrow_schema(table_name, metadata=metadata),
                 )
         else:
-            arrow = pa.Table.from_pylist(rows).replace_schema_metadata(
-                {
-                    **metadata,
-                    b"palette.arrow_schema_mode": b"inferred_v2_compatibility",
-                }
+            arrow = pa.Table.from_pylist(
+                rows,
+                schema=exact_arrow_schema(table_name, metadata=metadata),
             )
         pq.write_table(arrow, part)
         parts[table_name] = part

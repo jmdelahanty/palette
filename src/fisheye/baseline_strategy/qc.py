@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 import polars as pl
 
+from fisheye.analytics_exports.derived_publication import derived_manifest_path
 from fisheye.analytics_exports.contracts import BASELINE_KINEMATIC_SAMPLES_TABLE
 from fisheye.analytics_exports.publication import (
     export_manifest_path,
@@ -27,6 +28,7 @@ from .contracts import (
     SCHEMA_VERSION,
 )
 from .query import scan_strategy_table
+from .validation import validate_strategy_analytics_run
 
 
 @dataclass(frozen=True)
@@ -108,10 +110,13 @@ def _load_object_snapshot(path: Path) -> tuple[dict[str, Any], str]:
     return payload, hashlib.sha256(raw).hexdigest()
 
 
-def load_strategy_manifest(output_root: Path, analysis_run_id: str) -> dict[str, Any]:
+def load_strategy_manifest(
+    output_root: Path,
+    analysis_run_id: str,
+) -> dict[str, Any]:
     root = Path(output_root).expanduser().resolve()
     run_id = _safe_component(analysis_run_id, label="analysis run ID")
-    path = (root / "v1" / "manifests" / f"analysis_run_id={run_id}.json").resolve()
+    path = derived_manifest_path(root, run_id).resolve()
     if not _within(path, root):
         raise PermissionError("strategy manifest resolves outside output root")
     payload = _load_object(path)
@@ -122,6 +127,7 @@ def load_strategy_manifest(output_root: Path, analysis_run_id: str) -> dict[str,
         raise ValueError(f"unsupported strategy schema in {path}")
     if payload.get("analysis_run_id") != run_id:
         raise ValueError(f"analysis_run_id mismatch in {path}")
+    validate_strategy_analytics_run(root, run_id)
     return payload
 
 
@@ -129,7 +135,7 @@ def discover_strategy_catalog(output_root: Path) -> StrategyCatalog:
     """Discover selectable immutable runs without scanning Parquet contents."""
 
     root = Path(output_root).expanduser().resolve()
-    manifest_dir = (root / "v1" / "manifests").resolve()
+    manifest_dir = (root / "v2" / "manifests").resolve()
     diagnostics: list[StrategyCatalogDiagnostic] = []
     entries: list[StrategyRunEntry] = []
     if not _within(manifest_dir, root) or not manifest_dir.is_dir():
@@ -158,21 +164,10 @@ def discover_strategy_catalog(output_root: Path) -> StrategyCatalog:
                 payload.get("source_export_run_id"),
                 label="source export run ID",
             )
+            validate_strategy_analytics_run(root, run_id)
             row_counts = payload.get("row_counts_by_table")
-            parts_by_table = payload.get("part_files_by_table")
-            if not isinstance(row_counts, Mapping) or not isinstance(parts_by_table, Mapping):
-                raise ValueError("manifest table inventory is missing")
-            missing_parts = 0
-            for table_name, raw_parts in parts_by_table.items():
-                table = _safe_component(table_name, label="table name")
-                if not isinstance(raw_parts, list):
-                    raise ValueError(f"{table}: part inventory is not an array")
-                table_root = root / "v1" / table / f"analysis_run_id={run_id}"
-                for raw_part in raw_parts:
-                    candidate = (table_root / Path(str(raw_part)).name).resolve()
-                    if not _within(candidate, root):
-                        raise PermissionError(f"{table}: part resolves outside output root")
-                    missing_parts += int(not candidate.is_file())
+            if not isinstance(row_counts, Mapping):
+                raise ValueError("manifest row-count inventory is missing")
             entries.append(
                 StrategyRunEntry(
                     analysis_run_id=run_id,
@@ -184,7 +179,7 @@ def discover_strategy_catalog(output_root: Path) -> StrategyCatalog:
                     ),
                     source_export_run_id=source_run_id,
                     row_count=sum(int(value) for value in row_counts.values()),
-                    missing_part_count=missing_parts,
+                    missing_part_count=0,
                 )
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:

@@ -11,9 +11,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import hashlib
 import json
-import os
 from pathlib import Path
-import shutil
 from typing import Any, Iterable, Mapping, Sequence
 
 from fisheye.analytics_exports.contracts import (
@@ -25,6 +23,9 @@ from fisheye.analytics_exports.publication import (
     export_manifest_path,
     manifest_selected_part_files_from_payload,
 )
+from fisheye.analytics_exports.derived_publication import (
+    publish_derived_table_generation,
+)
 from fisheye.analytics_exports.validation import validate_export_payload
 
 from .cohort import classify_strategy_features, discover_strategy_clusters
@@ -33,10 +34,14 @@ from .contracts import (
     BASELINE_STRATEGY_CLASSIFICATION_TABLE,
     BASELINE_STRATEGY_CLUSTERS_TABLE,
     BASELINE_STRATEGY_FEATURES_TABLE,
+    BASELINE_STRATEGY_ARROW_CONTRACTS,
+    ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
+    ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
     SCHEMA_ID,
     SCHEMA_VERSION,
     StrategyFeatureConfig,
-    contract_fields,
+    baseline_strategy_arrow_contract_envelope,
+    normalize_baseline_strategy_rows,
 )
 from .features import derive_baseline_strategy_features
 from .validation import validate_strategy_analytics_run
@@ -170,52 +175,6 @@ def build_strategy_tables(
     }
 
 
-def _write_table(
-    *,
-    output_root: Path,
-    analysis_run_id: str,
-    table_name: str,
-    rows: Sequence[Mapping[str, Any]],
-    config: StrategyFeatureConfig,
-) -> tuple[int, list[str]]:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    table_root = output_root / "v1" / table_name / f"analysis_run_id={analysis_run_id}"
-    table_root.mkdir(parents=True, exist_ok=False)
-    if not rows:
-        return 0, []
-    required = set(contract_fields(table_name))
-    missing = sorted(required - {key for row in rows for key in row})
-    if missing:
-        raise ValueError(f"{table_name} rows are missing required fields: {missing}")
-    enriched = [
-        {
-            **dict(row),
-            "analysis_run_id": analysis_run_id,
-        }
-        for row in rows
-    ]
-    table = pa.Table.from_pylist(enriched)
-    metadata = dict(table.schema.metadata or {})
-    metadata.update(
-        {
-            b"palette.schema_id": SCHEMA_ID.encode("utf-8"),
-            b"palette.schema_version": str(SCHEMA_VERSION).encode("utf-8"),
-            b"palette.table_name": table_name.encode("utf-8"),
-            b"palette.feature_config": json.dumps(
-                config.to_dict(), sort_keys=True, separators=(",", ":")
-            ).encode("utf-8"),
-        }
-    )
-    table = table.cast(table.schema.with_metadata(metadata))
-    part_path = table_root / "part-00000.parquet"
-    temporary = table_root / ".part-00000.parquet.tmp"
-    pq.write_table(table, temporary)
-    os.replace(temporary, part_path)
-    return len(rows), [str(part_path)]
-
-
 def run_strategy_analytics(
     *,
     source_export_root: Path,
@@ -315,40 +274,17 @@ def run_strategy_analytics(
         BASELINE_STRATEGY_CLASSIFICATION_TABLE: classifications,
         BASELINE_STRATEGY_CLUSTERS_TABLE: clusters,
     }
-    manifest_path = destination / "v1" / "manifests" / f"analysis_run_id={run_id}.json"
-    if manifest_path.exists():
-        raise FileExistsError(manifest_path)
-    for table_name in OUTPUT_TABLES:
-        table_root = destination / "v1" / table_name / f"analysis_run_id={run_id}"
-        if table_root.exists():
-            raise FileExistsError(table_root)
-
-    staging = destination / f".baseline_strategy_staging_{run_id}"
-    if staging.exists():
-        raise FileExistsError(staging)
-    row_counts: dict[str, int] = {}
-    staged_part_files: dict[str, list[str]] = {}
-    for table_name in OUTPUT_TABLES:
-        row_count, parts = _write_table(
-            output_root=staging,
+    normalized_tables = {
+        table_name: normalize_baseline_strategy_rows(
+            table_name,
+            tables[table_name],
             analysis_run_id=run_id,
-            table_name=table_name,
-            rows=tables[table_name],
-            config=config,
         )
-        row_counts[table_name] = row_count
-        staged_part_files[table_name] = parts
-    part_files = {
-        table_name: [
-            str(destination / Path(path).relative_to(staging))
-            for path in paths
-        ]
-        for table_name, paths in staged_part_files.items()
+        for table_name in OUTPUT_TABLES
     }
-    payload = {
+    manifest_fields = {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
-        "analysis_run_id": run_id,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_export_root": str(source_root),
         "source_export_run_id": source_run_id,
@@ -364,31 +300,32 @@ def run_strategy_analytics(
         },
         "source_validation": validation,
         "feature_config": config.to_dict(),
-        "output_tables": list(OUTPUT_TABLES),
-        "row_counts_by_table": row_counts,
-        "part_files_by_table": part_files,
         "source_export_mutated": False,
         "interpretation_guardrail": (
             "strategy labels are descriptive; anxiety inference is not permitted"
         ),
     }
-    staged_manifest = staging / "v1" / "manifests" / manifest_path.name
-    staged_manifest.parent.mkdir(parents=True, exist_ok=True)
-    staged_manifest.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    payload = publish_derived_table_generation(
+        output_root=destination,
+        analysis_run_id=run_id,
+        rows_by_table=normalized_tables,
+        table_names=OUTPUT_TABLES,
+        contracts=BASELINE_STRATEGY_ARROW_CONTRACTS,
+        arrow_contract_envelope=baseline_strategy_arrow_contract_envelope(),
+        arrow_envelope_schema_id=ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
+        arrow_envelope_schema_version=ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+        manifest_fields=manifest_fields,
+        footer_metadata={
+            b"palette.schema_id": SCHEMA_ID.encode("utf-8"),
+            b"palette.schema_version": str(SCHEMA_VERSION).encode("ascii"),
+            b"palette.feature_config": json.dumps(
+                config.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8"),
+        },
     )
-    for table_name in OUTPUT_TABLES:
-        source_table = staging / "v1" / table_name / f"analysis_run_id={run_id}"
-        destination_parent = destination / "v1" / table_name
-        destination_parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source_table, destination_parent / source_table.name)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staged_manifest, manifest_path)
-    shutil.rmtree(staging)
     validation = validate_strategy_analytics_run(destination, run_id)
     return {
         **payload,
-        "manifest_path": str(manifest_path),
         "output_validation": validation,
     }
 

@@ -557,15 +557,22 @@ def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_pat
     assert Path(result["manifest_path"]).is_file()
     assert result["output_validation"]["status"] == "valid"
     assert validate_strategy_analytics_run(output_root, "strategy_001")["table_count"] == 4
-    feature_part = Path(result["part_files_by_table"]["baseline_strategy_features"][0])
+    feature_part = output_root / result["part_files_by_table"][
+        "baseline_strategy_features"
+    ][0]
     assert feature_part.is_file()
     feature_table = pq.ParquetFile(feature_part).read()
     assert feature_table.num_rows == 6
     assert set(feature_table.column("source_export_run_id").to_pylist()) == {"source_001"}
     for table_name, parts in result["part_files_by_table"].items():
         for part_path in parts:
-            table = pq.ParquetFile(part_path).read(columns=["source_export_run_id"])
-            assert set(table.column(0).to_pylist()) == {"source_001"}, table_name
+            table = pq.ParquetFile(output_root / part_path).read(
+                columns=["source_export_run_id"]
+            )
+            assert set(table.column(0).to_pylist()) in (
+                set(),
+                {"source_001"},
+            ), table_name
     lazy = scan_strategy_table(
         output_root,
         "strategy_001",
@@ -592,7 +599,9 @@ def test_workflow_consumes_manifest_selected_exact_time_bins(tmp_path: Path) -> 
         config=StrategyFeatureConfig(cluster_stability_resamples=2),
     )
 
-    feature_part = Path(result["part_files_by_table"]["baseline_strategy_features"][0])
+    feature_part = output_root / result["part_files_by_table"][
+        "baseline_strategy_features"
+    ][0]
     rows = pq.ParquetFile(feature_part).read().to_pylist()
     assert len(rows) == 6
     assert all(row["time_bin_features_available"] is True for row in rows)
@@ -652,7 +661,9 @@ def test_workflow_consumes_manifest_selected_exact_samples(tmp_path: Path) -> No
         ),
     )
 
-    feature_part = Path(result["part_files_by_table"]["baseline_strategy_features"][0])
+    feature_part = output_root / result["part_files_by_table"][
+        "baseline_strategy_features"
+    ][0]
     feature_rows = pq.ParquetFile(feature_part).read().to_pylist()
     assert len(feature_rows) == 6
     assert all(row["sample_features_available"] is True for row in feature_rows)

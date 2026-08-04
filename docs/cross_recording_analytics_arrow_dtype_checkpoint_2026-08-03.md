@@ -1,5 +1,12 @@
 # Cross-recording analytics Arrow dtype checkpoint — 2026-08-03
 
+> Subsequent status: all 34 canonical tables were made exact on 2026-08-04,
+> followed by exact v2 publications for the four baseline-strategy and three
+> training-response tables. See
+> `docs/cross_recording_chaser_arrow_contracts_2026-08-04.md` and
+> `docs/derived_strategy_training_arrow_contracts_2026-08-04.md`. The outcome
+> below remains the historical state at this checkpoint.
+
 ## Outcome
 
 Palette now has a closed, digest-bound Arrow-contract envelope for canonical
@@ -132,12 +139,13 @@ local Zarr authorities and their selectors are unchanged.
 - [x] Freeze the six default canonical tables, beginning with stable identity
   and provenance columns shared by every row.
 - [x] Freeze baseline behavior and kinematic tables.
-- [ ] Freeze the remaining chaser table schemas family by family.
+- [x] Freeze the remaining chaser table schemas family by family. Completed in
+      the subsequent 2026-08-04 chaser checkpoint linked above.
 - [x] Freeze `group_statistical_summary` and `group_descriptive_summary` after
   deciding whether method-specific result columns remain one wide table or
   become versioned table variants.
-- [ ] Add a closed Arrow envelope and exact schemas to baseline-strategy v2.
-- [ ] Add a closed Arrow envelope and exact schemas to training-response v2.
+- [x] Add a closed Arrow envelope and exact schemas to baseline-strategy v2.
+- [x] Add a closed Arrow envelope and exact schemas to training-response v2.
 - [ ] Add cross-language fixture reads after each family is exact.
 
 Validation for this checkpoint passed 241 focused contract, Arrow,

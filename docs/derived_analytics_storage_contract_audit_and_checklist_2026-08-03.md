@@ -660,7 +660,7 @@ a v3 storage-candidate regression.
       primitive v2 arrays and reconstructs the v1 records only through an
       explicit compatibility reader. Candidate/source hashes, exact source
       paths, and complete group/array topology are fail-closed.
-- [ ] Define exact Arrow dtypes for export columns where cross-language stability
+- [x] Define exact Arrow dtypes for export columns where cross-language stability
       requires them.
     - [x] Freeze and enforce the exact ordered 62-field
           `position_occupancy_histogram_2d` schema through writer, staged
@@ -721,10 +721,13 @@ a v3 storage-candidate regression.
           Near-field physical v1 freezes the maintained `[5, 10]` percentile
           axis instead of generating columns by observation. See
           `docs/cross_recording_chaser_arrow_contracts_2026-08-04.md`.
-    - [ ] Add closed envelopes and exact schemas to the four baseline-strategy
-          v1 outputs and three whole-training-response v1 outputs. Their
-          canonical inputs are exact, but these separate publication families
-          still infer their own physical Arrow schemas.
+    - [x] Replace the four inferred baseline-strategy-v1 and three inferred
+          whole-training-response-v1 outputs with distinct exact v2
+          publications. All seven have closed ordered schemas, digest-bound
+          primary keys, exact zero-row parts, canonical JSON cluster evidence,
+          immutable generation receipts, manifest-last completion/eligibility,
+          and explicit v1 compatibility readers. See
+          `docs/derived_strategy_training_arrow_contracts_2026-08-04.md`.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
       bout-classification, and tail-posture manifests completed so far.
 - [ ] Add equivalent adversarial coverage for every remaining new manifest.

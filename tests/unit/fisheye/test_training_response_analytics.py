@@ -14,6 +14,7 @@ from fisheye.analytics_exports.arrow_contracts import (
     arrow_contract_envelope,
     exact_arrow_schema,
 )
+from fisheye.analytics_exports.arrow_contract_core import payload_sha256
 from apps.marimo.components.training_response import (
     filter_training_response_rows,
     strategy_transition_sankey_figure,
@@ -433,6 +434,43 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
             source_export_run_id="source_001",
             source_export_manifest_sha256="not-the-published-hash",
         )
+
+
+def test_training_catalog_rejects_digest_valid_but_ineligible_v2_run(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    output_root = tmp_path / "training"
+    _write_source_export(source_root, "source_001")
+    run_training_response_analytics(
+        source_export_root=source_root,
+        source_export_run_id="source_001",
+        output_root=output_root,
+        analysis_run_id="training_ineligible",
+        config=TrainingResponseConfig(cluster_stability_resamples=2),
+    )
+    manifest_path = (
+        output_root
+        / "v2"
+        / "manifests"
+        / "analysis_run_id=training_ineligible.json"
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["publication"]["selector_eligible"] = False
+    payload["manifest_payload_sha256"] = payload_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "manifest_payload_sha256"
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    catalog = discover_training_response_catalog(output_root)
+
+    assert catalog.entries == ()
+    assert len(catalog.diagnostics) == 1
+    assert "not selector eligible" in catalog.diagnostics[0].message
 
 
 def test_training_workflow_binds_digest_to_loaded_manifest_generation(

@@ -15,7 +15,8 @@ import os
 from pathlib import Path
 import re
 import shutil
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
+import uuid
 
 from .runtime_telemetry import ExportRuntimePhaseRecorder
 
@@ -68,6 +69,142 @@ def manifest_identity(path: Path) -> str | None:
     """Return the byte identity used by the publication compare-and-swap."""
 
     return sha256_file(path) if path.is_file() else None
+
+
+def _within_root(path: Path, root: Path, *, label: str) -> Path:
+    """Resolve a lifecycle path and prove that it remains beneath ``root``."""
+
+    resolved_root = Path(root).expanduser().resolve()
+    unresolved = Path(path).expanduser().absolute()
+    try:
+        relative = unresolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} escapes its publication root: {path}") from exc
+    current = resolved_root
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise ValueError(f"{label} contains a symbolic-link alias: {path}")
+    resolved = unresolved.resolve(strict=False)
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} escapes its publication root: {path}") from exc
+    return resolved
+
+
+@contextmanager
+def immutable_manifest_commit_lock(
+    publication_root: Path,
+    manifest_path: Path,
+    *,
+    lock_directory: Path,
+) -> Iterator[None]:
+    """Hold a short advisory lock for one generic immutable manifest commit.
+
+    Family-specific publishers supply their own canonical manifest and lock
+    paths.  This primitive owns only containment, regular-file, and advisory
+    locking rules; it does not infer or reinterpret a scientific namespace.
+    """
+
+    import fcntl
+
+    root = Path(publication_root).expanduser().resolve()
+    manifest = _within_root(manifest_path, root, label="Manifest path")
+    lock_dir = _within_root(lock_directory, root, label="Lock directory")
+    if manifest.is_symlink():
+        raise ValueError(f"Immutable manifest must not be a symlink: {manifest}")
+    if lock_dir.is_symlink():
+        raise ValueError(f"Immutable lock directory must not be a symlink: {lock_dir}")
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f".{manifest.name}.lock"
+    if lock_path.is_symlink():
+        raise ValueError(f"Immutable publication lock must not be a symlink: {lock_path}")
+    if lock_path.exists() and not lock_path.is_file():
+        raise ValueError(f"Immutable publication lock is not a file: {lock_path}")
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def commit_validated_immutable_generation(
+    publication_root: Path,
+    staging_root: Path,
+    generation_root: Path,
+    manifest_path: Path,
+    payload: Mapping[str, Any],
+    *,
+    baseline_manifest_identity: str | None,
+    lock_directory: Path,
+    validate_staging: Callable[[], None],
+) -> Path:
+    """Commit one predeclared immutable generation with manifest-last CAS.
+
+    The caller owns exact schema and scientific validation.  Validation must
+    examine the complete staged inventory and raise on any mismatch.  This
+    function then makes the generation visible with one directory rename and
+    makes it authoritative with one manifest rename.  Failed validation or a
+    lost manifest race removes only this unpublished generation.
+    """
+
+    root = Path(publication_root).expanduser().resolve()
+    stage = _within_root(staging_root, root, label="Staging generation")
+    generation = _within_root(generation_root, root, label="Final generation")
+    manifest = _within_root(manifest_path, root, label="Manifest path")
+    lock_dir = _within_root(lock_directory, root, label="Lock directory")
+    if stage.is_symlink() or generation.is_symlink() or manifest.is_symlink():
+        raise ValueError("Immutable publication lifecycle paths must not be symlinks")
+    if not stage.is_dir():
+        raise ValueError(f"Staged generation is missing: {stage}")
+    if generation.exists():
+        raise FileExistsError(f"Immutable generation already exists: {generation}")
+    try:
+        validate_staging()
+    except Exception:
+        if stage.exists():
+            shutil.rmtree(stage)
+        raise
+
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    generation.parent.mkdir(parents=True, exist_ok=True)
+    temporary_manifest = (
+        manifest.parent / f".{manifest.name}.{uuid.uuid4().hex}.tmp"
+    )
+    if temporary_manifest.exists() or temporary_manifest.is_symlink():
+        raise FileExistsError(temporary_manifest)
+    os.replace(stage, generation)
+    try:
+        temporary_manifest.write_text(
+            json.dumps(
+                dict(payload),
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with immutable_manifest_commit_lock(
+            root,
+            manifest,
+            lock_directory=lock_dir,
+        ):
+            if manifest_identity(manifest) != baseline_manifest_identity:
+                raise RuntimeError(
+                    "Immutable publication manifest changed during commit; "
+                    "the generation was not selected"
+                )
+            os.replace(temporary_manifest, manifest)
+    except Exception:
+        temporary_manifest.unlink(missing_ok=True)
+        if generation.exists():
+            shutil.rmtree(generation)
+        raise
+    return manifest
 
 
 def _checked_lifecycle_directory(export_root: Path, *parts: str) -> Path:
@@ -693,6 +830,7 @@ def manifest_selected_part_files(
 __all__ = [
     "PUBLICATION_SCHEMA_ID",
     "PUBLICATION_SCHEMA_VERSION",
+    "commit_validated_immutable_generation",
     "export_manifest_directory",
     "export_manifest_path",
     "commit_staged_publication",
@@ -701,6 +839,7 @@ __all__ = [
     "load_export_manifest",
     "manifest_commit_lock",
     "manifest_identity",
+    "immutable_manifest_commit_lock",
     "manifest_selected_part_files",
     "manifest_selected_part_files_from_payload",
     "publication_generation_root",

@@ -10,15 +10,27 @@ from typing import Any, Mapping, Sequence
 
 import polars as pl
 
+from fisheye.analytics_exports.derived_publication import (
+    derived_manifest_path,
+    derived_manifest_selected_parts,
+    validate_derived_manifest_envelope,
+)
+
 from .contracts import (
+    ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
+    ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+    ARROW_TABLE_CONTRACTS,
     IDENTITY_COLUMNS,
+    LEGACY_SCHEMA_VERSION,
     SCHEMA_ID,
     SCHEMA_VERSION,
     TRAINING_RESPONSE_CLASSIFICATION_TABLE,
     TRAINING_RESPONSE_CLUSTERS_TABLE,
     TRAINING_RESPONSE_FEATURES_TABLE,
+    TRAINING_RESPONSE_TABLES,
     contract_fields,
 )
+from .validation import validate_training_response_run
 
 
 @dataclass(frozen=True)
@@ -79,23 +91,29 @@ def _timestamp(value: object) -> float:
 
 
 def load_training_response_manifest(
-    output_root: Path, analysis_run_id: str
+    output_root: Path,
+    analysis_run_id: str,
+    *,
+    allow_legacy_layout: bool = False,
 ) -> dict[str, Any]:
     root = Path(output_root).expanduser().resolve()
     run_id = _safe_component(analysis_run_id, label="analysis run ID")
-    path = (root / "v1" / "manifests" / f"analysis_run_id={run_id}.json").resolve()
+    version = "v1" if allow_legacy_layout else "v2"
+    path = (root / version / "manifests" / f"analysis_run_id={run_id}.json").resolve()
     if not _within(path, root):
         raise PermissionError("training-response manifest resolves outside output root")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("training-response manifest must contain an object")
-    if (
-        payload.get("schema_id") != SCHEMA_ID
-        or payload.get("schema_version") != SCHEMA_VERSION
-    ):
+    expected_version = LEGACY_SCHEMA_VERSION if allow_legacy_layout else SCHEMA_VERSION
+    if payload.get("schema_id") != SCHEMA_ID or payload.get(
+        "schema_version"
+    ) != expected_version:
         raise ValueError(f"unsupported training-response schema in {path}")
     if payload.get("analysis_run_id") != run_id:
         raise ValueError(f"analysis_run_id mismatch in {path}")
+    if not allow_legacy_layout:
+        validate_training_response_run(root, run_id)
     return payload
 
 
@@ -103,7 +121,7 @@ def discover_training_response_catalog(output_root: Path) -> TrainingResponseCat
     """Discover immutable training-response runs from manifests only."""
 
     root = Path(output_root).expanduser().resolve()
-    manifest_dir = (root / "v1" / "manifests").resolve()
+    manifest_dir = (root / "v2" / "manifests").resolve()
     diagnostics: list[TrainingResponseCatalogDiagnostic] = []
     entries: list[TrainingResponseRunEntry] = []
     if not _within(manifest_dir, root) or not manifest_dir.is_dir():
@@ -135,22 +153,10 @@ def discover_training_response_catalog(output_root: Path) -> TrainingResponseCat
             source_run_id = _safe_component(
                 payload.get("source_export_run_id"), label="source export run ID"
             )
+            validate_training_response_run(root, run_id)
             row_counts = payload.get("row_counts_by_table")
-            parts_by_table = payload.get("part_files_by_table")
-            if not isinstance(row_counts, Mapping) or not isinstance(parts_by_table, Mapping):
-                raise ValueError("manifest table inventory is missing")
-            missing_parts = 0
-            for table_name, raw_parts in parts_by_table.items():
-                table = _safe_component(table_name, label="table name")
-                contract_fields(table)
-                if not isinstance(raw_parts, list):
-                    raise ValueError(f"{table}: part inventory is not an array")
-                table_root = root / "v1" / table / f"analysis_run_id={run_id}"
-                for raw_part in raw_parts:
-                    candidate = (table_root / Path(str(raw_part)).name).resolve()
-                    if not _within(candidate, root):
-                        raise PermissionError(f"{table}: part resolves outside output root")
-                    missing_parts += int(not candidate.is_file())
+            if not isinstance(row_counts, Mapping):
+                raise ValueError("manifest row-count inventory is missing")
             entries.append(
                 TrainingResponseRunEntry(
                     analysis_run_id=run_id,
@@ -172,7 +178,7 @@ def discover_training_response_catalog(output_root: Path) -> TrainingResponseCat
                         else None
                     ),
                     row_count=sum(int(value) for value in row_counts.values()),
-                    missing_part_count=missing_parts,
+                    missing_part_count=0,
                 )
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError, KeyError) as exc:
@@ -229,29 +235,65 @@ def select_training_response_run_id(
 
 
 def training_response_table_parts(
-    output_root: Path, analysis_run_id: str, table_name: str
+    output_root: Path,
+    analysis_run_id: str,
+    table_name: str,
+    *,
+    allow_legacy_layout: bool = False,
 ) -> tuple[Path, ...]:
     root = Path(output_root).expanduser().resolve()
     run_id = _safe_component(analysis_run_id, label="analysis run ID")
     table = _safe_component(table_name, label="table name")
     contract_fields(table)
-    manifest_path = root / "v1" / "manifests" / f"analysis_run_id={run_id}.json"
+    if allow_legacy_layout:
+        payload = load_training_response_manifest(
+            root,
+            run_id,
+            allow_legacy_layout=True,
+        )
+        parts_by_table = payload.get("part_files_by_table")
+        if not isinstance(parts_by_table, Mapping):
+            raise ValueError("legacy manifest part inventory is missing")
+        raw_parts = parts_by_table.get(table, [])
+        if not isinstance(raw_parts, list):
+            raise ValueError(f"legacy manifest part list is not an array for {table}")
+        table_root = root / "v1" / table / f"analysis_run_id={run_id}"
+        parts: list[Path] = []
+        for raw_part in raw_parts:
+            path = (table_root / Path(str(raw_part)).name).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise PermissionError(
+                    f"legacy part resolves outside output root: {raw_part}"
+                ) from exc
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            parts.append(path)
+        return tuple(parts)
+    manifest_path = derived_manifest_path(root, run_id)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    raw_parts = payload.get("part_files_by_table", {}).get(table, [])
-    if not isinstance(raw_parts, list):
-        raise ValueError(f"manifest part list is not an array for {table}")
-    table_root = root / "v1" / table / f"analysis_run_id={run_id}"
-    parts: list[Path] = []
-    for raw_part in raw_parts:
-        path = (table_root / Path(str(raw_part)).name).resolve()
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise PermissionError(f"part resolves outside output root: {raw_part}") from exc
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        parts.append(path)
-    return tuple(parts)
+    if not isinstance(payload, Mapping):
+        raise ValueError("training-response manifest must contain an object")
+    if (
+        payload.get("schema_id") != SCHEMA_ID
+        or payload.get("schema_version") != SCHEMA_VERSION
+    ):
+        raise ValueError("strict training-response reader requires schema v2")
+    validate_derived_manifest_envelope(
+        payload,
+        analysis_run_id=run_id,
+        table_names=TRAINING_RESPONSE_TABLES,
+        contracts=ARROW_TABLE_CONTRACTS,
+        arrow_envelope_schema_id=ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
+        arrow_envelope_schema_version=ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+    )
+    return derived_manifest_selected_parts(
+        root,
+        payload,
+        table,
+        table_names=TRAINING_RESPONSE_TABLES,
+    )
 
 
 def scan_training_response_table(
@@ -260,8 +302,14 @@ def scan_training_response_table(
     table_name: str,
     *,
     columns: Sequence[str] | None = None,
+    allow_legacy_layout: bool = False,
 ) -> pl.LazyFrame:
-    parts = training_response_table_parts(output_root, analysis_run_id, table_name)
+    parts = training_response_table_parts(
+        output_root,
+        analysis_run_id,
+        table_name,
+        allow_legacy_layout=allow_legacy_layout,
+    )
     if not parts:
         return (
             pl.DataFrame({column: [] for column in columns}).lazy()
@@ -311,7 +359,7 @@ def scan_training_response_qc_rows(
         "cluster_probability",
         "selected_component_count",
         "selected_bic",
-        "bic_by_component_count",
+        "bic_by_component_count_json",
         "cluster_stability_median_ari",
         "cluster_stability_threshold",
         "cluster_stability_resample_count",

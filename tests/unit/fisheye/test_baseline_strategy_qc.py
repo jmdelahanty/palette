@@ -7,8 +7,28 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from fisheye.analytics_exports.derived_publication import (
+    publish_derived_table_generation,
+)
+from fisheye.analytics_exports.arrow_contract_core import payload_sha256
 from fisheye.analytics_exports.publication import sha256_file
-from fisheye.baseline_strategy.contracts import SCHEMA_ID, SCHEMA_VERSION
+from fisheye.baseline_strategy.contracts import (
+    ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
+    ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+    BASELINE_EXPLORATION_EPISODES_TABLE,
+    BASELINE_STRATEGY_ARROW_CONTRACTS,
+    BASELINE_STRATEGY_CLASSIFICATION_TABLE,
+    BASELINE_STRATEGY_CLUSTERS_TABLE,
+    BASELINE_STRATEGY_FEATURES_TABLE,
+    BASELINE_STRATEGY_TABLES,
+    METHOD,
+    METHOD_VERSION,
+    SCHEMA_ID,
+    SCHEMA_VERSION,
+    StrategyFeatureConfig,
+    baseline_strategy_arrow_contract_envelope,
+    normalize_baseline_strategy_rows,
+)
 from fisheye.baseline_strategy.qc import (
     discover_strategy_catalog,
     scan_recording_baseline_samples,
@@ -23,76 +43,50 @@ def _write_part(path: Path, rows: list[dict[str, object]]) -> None:
     pq.write_table(pa.Table.from_pylist(rows), path)
 
 
+def _complete_strategy_row(
+    table_name: str,
+    *,
+    analysis_run_id: str,
+    export_run_id: str,
+) -> dict[str, object]:
+    row: dict[str, object] = {}
+    for item in BASELINE_STRATEGY_ARROW_CONTRACTS[table_name].fields:
+        if item.nullable:
+            continue
+        if item.arrow_type == "string":
+            row[item.name] = "value"
+        elif item.arrow_type in {"int32", "int64"}:
+            row[item.name] = 1
+        elif item.arrow_type == "float64":
+            row[item.name] = 1.0
+        elif item.arrow_type == "bool":
+            row[item.name] = False
+        elif item.arrow_type == "list<string>":
+            row[item.name] = ["value"]
+        else:  # pragma: no cover - the exact contract closes this vocabulary.
+            raise AssertionError(item.arrow_type)
+    row.update(
+        schema_id=SCHEMA_ID,
+        schema_version=SCHEMA_VERSION,
+        table_name=table_name,
+        method=METHOD,
+        method_version=METHOD_VERSION,
+        recording_id="recording_001",
+        track_id=0,
+        baseline_window_id=0,
+        baseline_window_label="baseline",
+        source_export_run_id=export_run_id,
+        zarr_path="recording_001_analysis.zarr",
+        analysis_run_id=analysis_run_id,
+    )
+    return row
+
+
 def _fixture_roots(tmp_path: Path) -> tuple[Path, Path, str]:
     strategy_root = tmp_path / "strategy"
     export_root = tmp_path / "exports"
     analysis_run_id = "strategy_001"
     export_run_id = "export_001"
-    identity = {
-        "recording_id": "recording_001",
-        "track_id": 0,
-        "baseline_window_id": 0,
-    }
-    tables = {
-        "baseline_strategy_features": [
-            {
-                **identity,
-                "feature_status": "complete",
-                "wall_fraction": 0.4,
-                "occupancy_coverage_fraction": 0.8,
-                "source_export_run_id": export_run_id,
-            }
-        ],
-        "baseline_strategy_classification": [
-            {
-                **identity,
-                "classification_status": "complete",
-                "classification_reason": None,
-                "activity_state": "typical_activity",
-                "boundary_strategy": "mixed_boundary",
-                "spatial_organization": "intermediate",
-                "temporal_pattern": "stable_or_mixed",
-                "primary_strategy": "mixed_or_uncertain",
-                "classification_confidence_score": 0.2,
-            }
-        ],
-        "baseline_strategy_clusters": [
-            {
-                **identity,
-                "cluster_status": "complete",
-                "cluster_reason": None,
-                "cluster_id": 1,
-                "cluster_probability": 0.9,
-            }
-        ],
-    }
-    parts: dict[str, list[str]] = {}
-    for table, rows in tables.items():
-        path = (
-            strategy_root
-            / "v1"
-            / table
-            / f"analysis_run_id={analysis_run_id}"
-            / "part-00000.parquet"
-        )
-        _write_part(path, rows)
-        parts[table] = [str(path)]
-    strategy_manifest = {
-        "schema_id": SCHEMA_ID,
-        "schema_version": SCHEMA_VERSION,
-        "analysis_run_id": analysis_run_id,
-        "created_at_utc": "2026-07-13T00:00:00+00:00",
-        "source_export_root": str(export_root.resolve()),
-        "source_export_run_id": export_run_id,
-        "row_counts_by_table": {table: len(rows) for table, rows in tables.items()},
-        "part_files_by_table": parts,
-    }
-    strategy_manifest_path = (
-        strategy_root / "v1" / "manifests" / f"analysis_run_id={analysis_run_id}.json"
-    )
-    strategy_manifest_path.parent.mkdir(parents=True)
-    strategy_manifest_path.write_text(json.dumps(strategy_manifest), encoding="utf-8")
-
     collection_path = (
         export_root / "v1" / "manifests" / "collections" / "collection.manifest.json"
     )
@@ -191,6 +185,97 @@ def _fixture_roots(tmp_path: Path) -> tuple[Path, Path, str]:
         ),
         encoding="utf-8",
     )
+    export_manifest_sha256 = hashlib.sha256(
+        export_manifest_path.read_bytes()
+    ).hexdigest()
+    feature = _complete_strategy_row(
+        BASELINE_STRATEGY_FEATURES_TABLE,
+        analysis_run_id=analysis_run_id,
+        export_run_id=export_run_id,
+    )
+    feature.update(
+        feature_status="complete",
+        wall_fraction=0.4,
+        occupancy_coverage_fraction=0.8,
+    )
+    classification = _complete_strategy_row(
+        BASELINE_STRATEGY_CLASSIFICATION_TABLE,
+        analysis_run_id=analysis_run_id,
+        export_run_id=export_run_id,
+    )
+    classification.update(
+        classification_status="complete",
+        classification_reason=None,
+        activity_state="typical_activity",
+        boundary_strategy="mixed_boundary",
+        spatial_organization="intermediate",
+        temporal_pattern="stable_or_mixed",
+        primary_strategy="mixed_or_uncertain",
+        classification_confidence_score=0.2,
+    )
+    cluster = _complete_strategy_row(
+        BASELINE_STRATEGY_CLUSTERS_TABLE,
+        analysis_run_id=analysis_run_id,
+        export_run_id=export_run_id,
+    )
+    cluster.update(
+        cluster_status="complete",
+        cluster_reason=None,
+        cluster_id=1,
+        cluster_probability=0.9,
+    )
+    rows_by_table = {
+        BASELINE_STRATEGY_FEATURES_TABLE: [feature],
+        BASELINE_EXPLORATION_EPISODES_TABLE: [],
+        BASELINE_STRATEGY_CLASSIFICATION_TABLE: [classification],
+        BASELINE_STRATEGY_CLUSTERS_TABLE: [cluster],
+    }
+    normalized = {
+        table_name: normalize_baseline_strategy_rows(
+            table_name,
+            rows_by_table[table_name],
+            analysis_run_id=analysis_run_id,
+        )
+        for table_name in BASELINE_STRATEGY_TABLES
+    }
+    config = StrategyFeatureConfig()
+    publish_derived_table_generation(
+        output_root=strategy_root,
+        analysis_run_id=analysis_run_id,
+        rows_by_table=normalized,
+        table_names=BASELINE_STRATEGY_TABLES,
+        contracts=BASELINE_STRATEGY_ARROW_CONTRACTS,
+        arrow_contract_envelope=baseline_strategy_arrow_contract_envelope(),
+        arrow_envelope_schema_id=ARROW_CONTRACT_ENVELOPE_SCHEMA_ID,
+        arrow_envelope_schema_version=ARROW_CONTRACT_ENVELOPE_SCHEMA_VERSION,
+        manifest_fields={
+            "schema_id": SCHEMA_ID,
+            "schema_version": SCHEMA_VERSION,
+            "created_at_utc": "2026-07-13T00:00:00+00:00",
+            "source_export_root": str(export_root.resolve()),
+            "source_export_run_id": export_run_id,
+            "source_export_manifest_sha256": export_manifest_sha256,
+            "source_collection_manifest_sha256": None,
+            "row_provenance": {
+                "source_export_run_id": export_run_id,
+                "status": "complete",
+            },
+            "source_validation": {"status": "fixture"},
+            "feature_config": config.to_dict(),
+            "source_export_mutated": False,
+            "interpretation_guardrail": (
+                "strategy labels are descriptive; anxiety inference is not permitted"
+            ),
+        },
+        footer_metadata={
+            b"palette.schema_id": SCHEMA_ID.encode(),
+            b"palette.schema_version": str(SCHEMA_VERSION).encode(),
+            b"palette.feature_config": json.dumps(
+                config.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode(),
+        },
+        generation_id="fixture-generation",
+    )
     return strategy_root, export_root, analysis_run_id
 
 
@@ -217,6 +302,29 @@ def test_catalog_and_lazy_qc_join_use_manifest_declared_parts(tmp_path: Path) ->
     assert row["protocol_name"] == "RedScare"
 
 
+def test_catalog_rejects_digest_valid_but_ineligible_v2_run(tmp_path: Path) -> None:
+    strategy_root, _export_root, run_id = _fixture_roots(tmp_path)
+    manifest_path = (
+        strategy_root / "v2" / "manifests" / f"analysis_run_id={run_id}.json"
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["publication"]["selector_eligible"] = False
+    payload["manifest_payload_sha256"] = payload_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "manifest_payload_sha256"
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    catalog = discover_strategy_catalog(strategy_root)
+
+    assert catalog.entries == ()
+    assert len(catalog.diagnostics) == 1
+    assert "not selector eligible" in catalog.diagnostics[0].message
+
+
 def test_recording_sample_scan_pushes_filter_to_lazy_source(tmp_path: Path) -> None:
     strategy_root, export_root, run_id = _fixture_roots(tmp_path)
     context = source_export_context(
@@ -235,21 +343,6 @@ def test_source_context_binds_parsed_manifest_and_digest_to_same_bytes(
     monkeypatch,
 ) -> None:
     strategy_root, export_root, run_id = _fixture_roots(tmp_path)
-    export_manifest_path = (
-        export_root
-        / "v1"
-        / "manifests"
-        / "export_run_id=export_001.json"
-    )
-    expected_digest = hashlib.sha256(export_manifest_path.read_bytes()).hexdigest()
-    strategy_manifest_path = (
-        strategy_root / "v1" / "manifests" / f"analysis_run_id={run_id}.json"
-    )
-    strategy_payload = json.loads(
-        strategy_manifest_path.read_text(encoding="utf-8")
-    )
-    strategy_payload["source_export_manifest_sha256"] = expected_digest
-    strategy_manifest_path.write_text(json.dumps(strategy_payload), encoding="utf-8")
     import fisheye.baseline_strategy.qc as qc
 
     real_load = qc._load_object_snapshot
@@ -293,10 +386,17 @@ def test_source_context_rejects_unapproved_export_root(tmp_path: Path) -> None:
 def test_source_context_rejects_manifest_hash_mismatch(tmp_path: Path) -> None:
     strategy_root, export_root, run_id = _fixture_roots(tmp_path)
     manifest_path = (
-        strategy_root / "v1" / "manifests" / f"analysis_run_id={run_id}.json"
+        strategy_root / "v2" / "manifests" / f"analysis_run_id={run_id}.json"
     )
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["source_export_manifest_sha256"] = "0" * 64
+    payload["manifest_payload_sha256"] = payload_sha256(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "manifest_payload_sha256"
+        }
+    )
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
     try:
