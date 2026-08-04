@@ -150,11 +150,14 @@ The executor supports these canonical analysis stages in the core profile:
 - `subject_shape`;
 - `tail_kinematics`.
 
-It also supports the opt-in `eye_traces` export node. This node is not a Zarr
-analysis stage: it projects one explicit compact-v7 eye-angle authority into an
-immutable manifest-selected Parquet generation. The other declared export
-nodes remain planning-only and fail closed during execution until their exact
-publishers are implemented.
+It also supports the opt-in `eye_traces`, `kinematics_samples`, and
+`activity_spatial_summaries` export nodes. These are not Zarr analysis stages:
+each projects explicit completed recording-local authorities into one immutable
+manifest-selected Parquet generation. `activity_spatial_summaries` binds the
+track-motion run plus an exact swim-bout run. Because the packaged DAG carries
+one swim-bout dependency, execution proves the track source contains exactly
+one track; multi-track publication requires the CLI's explicit per-track run
+map. The remaining `tail_traces` node stays planning-only and fails closed.
 
 Track identities are a required persisted prerequisite rather than an
 analysis-workflow output. Planning a new track-kinematics run therefore blocks
@@ -195,8 +198,9 @@ downstream command receives the exact reused or newly generated dependency run n
 `--force-stage STAGE` when a completed stage should intentionally be recomputed
 as a new immutable run.
 
-An eye-trace export additionally requires an immutable publication root and an
-explicit node-local scratch root when the executor is invoked directly:
+Every implemented export additionally requires an immutable publication root
+and an explicit node-local scratch root when the executor is invoked directly.
+For example:
 
 ```bash
 scripts/execute_analysis_workflow /path/to/recording_analysis.zarr \
@@ -213,6 +217,20 @@ The execution receipt distinguishes `parquet_export` outputs from
 manifest and fully validated; they are never passed to Zarr-stage discovery or
 projected into the derived-stage registry.
 
+The activity/spatial equivalent pins both source runs and the configured bin
+width from the workflow profile:
+
+```bash
+scripts/execute_analysis_workflow /path/to/recording_analysis.zarr \
+  --target activity_spatial_summaries \
+  --stage-run track_kinematics=physical_track_run \
+  --stage-run swim_bouts=bouts_for_the_only_track \
+  --export-run activity_spatial_summaries=activity_query_v1 \
+  --export-root /shared/query-products \
+  --scratch-root /node-local/palette-activity-export \
+  --execution-id activity_canary_01
+```
+
 `--apply` is rejected unless `LSB_JOBID` is present. Do not invoke it on a
 login node. Render a cluster job first:
 
@@ -226,9 +244,9 @@ scripts/submit_analysis_workflow_bsub.sh \
   --stage-run track_kinematics=my_calibrated_track_run
 ```
 
-For the opt-in eye export, the LSF wrapper derives a per-execution scratch root
+For every opt-in export, the LSF wrapper derives a per-execution scratch root
 below the worker's `${TMPDIR}` unless `--scratch-root` explicitly supplies a
-different node-local path:
+different node-local path. For example:
 
 ```bash
 scripts/submit_analysis_workflow_bsub.sh \

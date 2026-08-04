@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import copy
+import math
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,8 +26,15 @@ from fisheye.analysis.swim_bout_schema import (
     SWIM_BOUT_RUN_SCHEMA_VERSION,
 )
 from fisheye.analytics_exports import activity_spatial_time_bins as mod
+from fisheye.analytics_exports.contracts import ACTIVITY_SPATIAL_TIME_BINS_TABLE
+from fisheye.analytics_exports.publication import sha256_file
+from fisheye.analytics_exports.validation import (
+    ExportValidationError,
+    validate_export_run,
+)
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from tests.unit.fisheye.test_kinematics_samples_export import _eligible_source
 
 
 class _Group:
@@ -152,6 +163,71 @@ def test_time_bins_emit_empty_internal_gap_and_union_overlapping_bouts() -> None
     assert rows[1]["bout_occupied_frame_count"] == 1
 
 
+def test_bounded_bin_aggregation_equals_full_track_aggregation() -> None:
+    frames = np.asarray([0, 1, 2, 6, 7, 9], dtype=np.int64)
+    source_observed = np.asarray([1, 1, 0, 1, 1, 1], dtype=bool)
+    sample_valid = np.asarray([1, 1, 0, 1, 1, 1], dtype=bool)
+    position_finite = np.asarray([1, 1, 1, 1, 1, 1], dtype=bool)
+    transition_valid = np.asarray([0, 1, 0, 1, 1, 1], dtype=bool)
+    positions = np.column_stack((frames, frames * 2)).astype(np.float64)
+    speeds = np.asarray([np.nan, 1, np.nan, 3, 4, 5], dtype=np.float32)
+    paths = np.asarray([np.nan, 0.5, np.nan, 1.5, 2, 2.5], dtype=np.float32)
+    bouts = _bout_rows([(1, 2, 5), (2, 7, 9)])
+    inputs = {
+        "track_id": 7,
+        "source_observed": source_observed,
+        "sample_valid": sample_valid,
+        "position_finite": position_finite,
+        "transition_valid": transition_valid,
+        "positions_mm": positions,
+        "filtered_speed_mm_s": speeds,
+        "filtered_path_distance_mm": paths,
+        "bouts": bouts,
+        "source_sample_rate_hz": 2.0,
+        "requested_bin_size_s": 2.0,
+    }
+    full = mod.summarize_activity_spatial_track(
+        source_acquisition_frame_index=frames,
+        **inputs,
+    )
+
+    bounded: list[dict[str, Any]] = []
+    for bin_index in range(3):
+        start = bin_index * 4
+        stop = start + 4
+        selected = (frames >= start) & (frames < stop)
+        bounded.extend(
+            mod.summarize_activity_spatial_track(
+                source_acquisition_frame_index=frames[selected],
+                source_observed=source_observed[selected],
+                sample_valid=sample_valid[selected],
+                position_finite=position_finite[selected],
+                transition_valid=transition_valid[selected],
+                positions_mm=positions[selected],
+                filtered_speed_mm_s=speeds[selected],
+                filtered_path_distance_mm=paths[selected],
+                track_id=7,
+                bouts=bouts,
+                source_sample_rate_hz=2.0,
+                requested_bin_size_s=2.0,
+                track_frame_span=(0, 9),
+                time_bin_range=(bin_index, bin_index),
+            )
+        )
+
+    assert len(bounded) == len(full)
+    for observed, expected in zip(bounded, full, strict=True):
+        assert observed.keys() == expected.keys()
+        for name in observed:
+            actual_value = observed[name]
+            expected_value = expected[name]
+            if isinstance(actual_value, float) and math.isnan(actual_value):
+                assert isinstance(expected_value, float)
+                assert math.isnan(expected_value), name
+            else:
+                assert actual_value == expected_value, name
+
+
 def _patch_bound_sources(monkeypatch: pytest.MonkeyPatch):
     frames = np.asarray([0, 1, 2], dtype=np.int64)
     track_record = {
@@ -248,9 +324,13 @@ def _patch_bound_sources(monkeypatch: pytest.MonkeyPatch):
         lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(mod, "validate_swim_bout_array_manifest", lambda _run: ())
-    monkeypatch.setattr(mod, "resolve_swim_bout_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        mod, "resolve_swim_bout_candidate", lambda *_args, **_kwargs: candidate
+    )
     monkeypatch.setattr(mod, "load_swim_bout_events", lambda *_args, **_kwargs: events)
-    monkeypatch.setattr(mod, "resolve_swim_bout_frame_axis", lambda *_args, **_kwargs: frames)
+    monkeypatch.setattr(
+        mod, "resolve_swim_bout_frame_axis", lambda *_args, **_kwargs: frames
+    )
     return root, track_binding, candidate
 
 
@@ -304,3 +384,278 @@ def test_source_binding_rejects_run_for_another_track(
             track_scope="offline",
             swim_bout_runs_by_track={candidate.track_id: "bouts_track_7"},
         )
+
+
+def _publisher_bound_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> mod.BoundActivitySpatialSources:
+    root, run, track = _eligible_source(monkeypatch)
+    source_path = (tmp_path / "recording_analysis.zarr").resolve()
+    track_source = mod.track_export._source_binding(
+        root,
+        zarr_path=source_path,
+        recording_id="recording",
+        run_name="motion_physical",
+        scope="offline",
+    )
+    frames = np.asarray(
+        track.children["source_acquisition_frame_index"].data,
+        dtype=np.int64,
+    )
+    bouts = _bout_rows([])
+    bout_body: dict[str, Any] = {
+        "schema_id": mod.ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID,
+        "schema_version": 1,
+        "stage_id": "swim_bouts",
+        "track_id": 7,
+        "run_name": "bouts_track_7",
+        "run_path": "analysis/swim_bout_runs/bouts_track_7",
+        "source_schema_id": SWIM_BOUT_RUN_SCHEMA_ID,
+        "source_schema_version": SWIM_BOUT_RUN_SCHEMA_VERSION,
+        "source_array_manifest_sha256": "c" * 64,
+        "source_track_kinematics_run": track_source.binding["run_name"],
+        "source_track_motion_manifest_sha256": track_source.binding[
+            "source_manifest_sha256"
+        ],
+        "source_sample_rate_hz": track_source.binding["source_sample_rate_hz"],
+        "candidate_id": 0,
+        "candidate_name": "candidate",
+        "signal_id": 5,
+        "signal_name": "filtered",
+        "speed_level": "speed_filtered",
+        "frame_axis_contract_sha256": "d" * 64,
+        "frame_axis_content_sha256": "e" * 64,
+        "frame_axis_array_values_sha256": array_values_sha256(frames),
+        "frame_axis_first_frame": int(frames[0]),
+        "frame_axis_last_frame": int(frames[-1]),
+        "bout_count": 0,
+        "bout_dtype": bouts.dtype.descr,
+        "bout_content_sha256": array_values_sha256(bouts),
+        "selection_snapshot": {
+            "mode": "explicit_per_track_run",
+            "parent_latest": "bouts_track_7",
+            "parent_latest_complete": "bouts_track_7",
+            "parent_completion_epoch": 1,
+        },
+        "completion_snapshot": {
+            "status": "complete",
+            "completed_at_utc": "2026-08-04T12:00:00+00:00",
+            "selector_eligible": True,
+        },
+    }
+    bout_binding = {
+        **bout_body,
+        "payload_sha256": canonical_json_sha256(bout_body),
+    }
+    source_body: dict[str, Any] = {
+        "schema_id": mod.ACTIVITY_SPATIAL_SOURCE_BINDING_SCHEMA_ID,
+        "schema_version": 1,
+        "recording_id": "recording",
+        "zarr_path": str(source_path),
+        "track_source_binding": track_source.binding,
+        "swim_bout_runs_by_track": {"7": bout_binding},
+    }
+    source_binding = {
+        **source_body,
+        "payload_sha256": canonical_json_sha256(source_body),
+    }
+    return mod.BoundActivitySpatialSources(
+        track_source=track_source,
+        bout_sources={
+            7: mod.BoundSwimBoutSource(
+                binding=bout_binding,
+                events=SimpleNamespace(bouts=bouts),
+                frame_axis=frames,
+            )
+        },
+        binding=source_binding,
+    )
+
+
+def _publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    export_run_id: str,
+    output_name: str = "exports",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    bound = _publisher_bound_source(monkeypatch, tmp_path)
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mod,
+        "bind_activity_spatial_sources",
+        lambda *_args, **_kwargs: bound,
+    )
+    monkeypatch.setattr(mod.track_export, "_recording_id", lambda _path: "recording")
+    return mod.export_activity_spatial_time_bins(
+        tmp_path / "recording_analysis.zarr",
+        track_kinematics_run="motion_physical",
+        track_scope="offline",
+        swim_bout_runs_by_track={7: "bouts_track_7"},
+        requested_bin_size_s=1.0,
+        output_root=tmp_path / output_name,
+        export_run_id=export_run_id,
+        scratch_root=tmp_path / f"scratch_{output_name}",
+        row_group_rows=1,
+        overwrite=overwrite,
+    )
+
+
+def test_activity_spatial_publisher_writes_exact_manifest_selected_part(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _publish(monkeypatch, tmp_path, export_run_id="activity")
+
+    assert result["activity_spatial_time_bins_validation"]["valid"] is True
+    assert result["row_counts_by_table"] == {ACTIVITY_SPATIAL_TIME_BINS_TABLE: 2}
+    assert validate_export_run(tmp_path / "exports", "activity")["status"] == "valid"
+    assert not list((tmp_path / "scratch_exports").glob("palette_activity_spatial_*"))
+
+    import pyarrow.parquet as pq
+
+    part = next((tmp_path / "exports").rglob("*.parquet"))
+    table = pq.read_table(part).to_pydict()
+    assert table["track_id"] == [7, 7]
+    assert table["time_bin_index"] == [0, 1]
+    assert table["source_swim_bout_run"] == ["bouts_track_7"] * 2
+    assert table["position_coordinate_space"] == ["physical_mm"] * 2
+
+
+def test_activity_spatial_validator_rejects_rehashed_parquet_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _publish(monkeypatch, tmp_path, export_run_id="tamper")
+    manifest_path = Path(result["manifest_path"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    part_path = next((tmp_path / "exports").rglob("*.parquet"))
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    parquet_file = pq.ParquetFile(part_path)
+    original = parquet_file.read()
+    schema = parquet_file.schema_arrow
+    column_index = schema.get_field_index("source_speed_level")
+    arrays = [original.column(index) for index in range(original.num_columns)]
+    arrays[column_index] = pa.chunked_array(
+        [pa.array(["raw"] * original.num_rows, type=pa.string())]
+    )
+    changed = pa.Table.from_arrays(arrays, schema=schema)
+    writer = pq.ParquetWriter(
+        part_path,
+        schema,
+        compression="zstd",
+        compression_level=3,
+        use_dictionary=payload["activity_spatial_time_bins_export"]["parquet_policy"][
+            "dictionary_columns"
+        ],
+    )
+    try:
+        writer.write_table(changed, row_group_size=1)
+    finally:
+        writer.close()
+    entry = payload["publication"]["parts_by_table"][ACTIVITY_SPATIAL_TIME_BINS_TABLE][
+        0
+    ]
+    entry["sha256"] = sha256_file(part_path)
+    entry["size_bytes"] = part_path.stat().st_size
+    manifest_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ExportValidationError, match="decoded payload differs"):
+        validate_export_run(tmp_path / "exports", "tamper")
+
+
+def test_failed_activity_spatial_overwrite_preserves_visible_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = _publish(monkeypatch, tmp_path, export_run_id="stable")
+    manifest_path = Path(first["manifest_path"])
+    baseline = manifest_path.read_bytes()
+    original = mod._write_streaming_part
+
+    def fail_after_write(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        original(*args, **kwargs)
+        raise RuntimeError("injected replacement failure")
+
+    monkeypatch.setattr(mod, "_write_streaming_part", fail_after_write)
+    with pytest.raises(RuntimeError, match="injected replacement failure"):
+        _publish(
+            monkeypatch,
+            tmp_path,
+            export_run_id="stable",
+            overwrite=True,
+        )
+    assert manifest_path.read_bytes() == baseline
+    assert validate_export_run(tmp_path / "exports", "stable")["status"] == "valid"
+
+
+def test_single_swim_bout_dependency_fails_closed_for_multitrack_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(mod.track_export, "_recording_id", lambda _path: "recording")
+    monkeypatch.setattr(
+        mod.track_export,
+        "_source_binding",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            binding={"tracks": [{"track_id": 7}, {"track_id": 8}]}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="exactly one-track source"):
+        mod.export_activity_spatial_time_bins(
+            tmp_path / "recording_analysis.zarr",
+            track_kinematics_run="motion",
+            track_scope="offline",
+            single_track_swim_bout_run="bouts",
+            requested_bin_size_s=5.0,
+            output_root=tmp_path / "exports",
+            export_run_id="multitrack",
+            scratch_root=tmp_path / "scratch",
+        )
+
+
+def test_activity_spatial_source_change_fails_before_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    before = _publisher_bound_source(monkeypatch, tmp_path)
+    after = copy.deepcopy(before)
+    after_bout = after.binding["swim_bout_runs_by_track"]["7"]
+    after_bout["completion_snapshot"]["completed_at_utc"] = "2026-08-04T12:05:00+00:00"
+    after_bout["payload_sha256"] = canonical_json_sha256(
+        {key: value for key, value in after_bout.items() if key != "payload_sha256"}
+    )
+    after.binding["payload_sha256"] = canonical_json_sha256(
+        {key: value for key, value in after.binding.items() if key != "payload_sha256"}
+    )
+    calls = 0
+
+    def changing_binding(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return before if calls == 1 else after
+
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(mod, "bind_activity_spatial_sources", changing_binding)
+    monkeypatch.setattr(mod.track_export, "_recording_id", lambda _path: "recording")
+    output = tmp_path / "exports"
+    with pytest.raises(RuntimeError, match="changed during extraction"):
+        mod.export_activity_spatial_time_bins(
+            tmp_path / "recording_analysis.zarr",
+            track_kinematics_run="motion_physical",
+            track_scope="offline",
+            swim_bout_runs_by_track={7: "bouts_track_7"},
+            requested_bin_size_s=1.0,
+            output_root=output,
+            export_run_id="changed",
+            scratch_root=tmp_path / "scratch",
+            row_group_rows=1,
+        )
+    assert not (output / "v2" / "manifests" / "changed.json").exists()

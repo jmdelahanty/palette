@@ -388,9 +388,7 @@ def test_execution_renders_exact_kinematics_samples_export_boundary(
     _workflow, execution = _kinematics_samples_execution_plan(tmp_path)
 
     assert execution.output_runs == {}
-    assert execution.export_runs == {
-        "kinematics_samples": "kinematics_query_v1"
-    }
+    assert execution.export_runs == {"kinematics_samples": "kinematics_query_v1"}
     assert len(execution.commands) == 1
     command = execution.commands[0]
     assert command.node_id == "kinematics_samples"
@@ -449,6 +447,73 @@ def test_kinematics_samples_execution_requires_export_and_scratch_roots(
             num_workers=1,
             python_executable="python",
         )
+
+
+def test_execution_renders_exact_activity_spatial_export_boundary(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    plan = plan_analysis_workflow(
+        workflow,
+        {
+            "track_kinematics": _status(
+                "track_kinematics",
+                available=True,
+                run_name="track_a",
+            ),
+            "swim_bouts": _status(
+                "swim_bouts",
+                available=True,
+                run_name="bouts_track_7",
+            ),
+        },
+        targets=("activity_spatial_summaries",),
+    )
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        execution_id="activity_export_01",
+        num_workers=1,
+        export_run_overrides={"activity_spatial_summaries": "activity_query_v1"},
+        export_root=tmp_path / "exports",
+        scratch_root=tmp_path / "node_scratch",
+        python_executable="python",
+    )
+
+    assert execution.output_runs == {}
+    assert execution.export_runs == {"activity_spatial_summaries": "activity_query_v1"}
+    assert len(execution.commands) == 1
+    command = execution.commands[0]
+    assert command.node_id == "activity_spatial_summaries"
+    assert command.node_kind == "export"
+    assert command.dependency_runs == {
+        "track_kinematics": "track_a",
+        "swim_bouts": "bouts_track_7",
+    }
+    assert command.argv == (
+        "python",
+        "-m",
+        "fisheye.utils.export_activity_spatial_time_bins",
+        str((tmp_path / "recording_analysis.zarr").resolve()),
+        "--track-kinematics-run",
+        "track_a",
+        "--track-scope",
+        "offline",
+        "--single-track-swim-bout-run",
+        "bouts_track_7",
+        "--bin-size-s",
+        "5",
+        "--output-root",
+        str((tmp_path / "exports").resolve()),
+        "--export-run-id",
+        "activity_query_v1",
+        "--scratch-root",
+        str((tmp_path / "node_scratch").resolve()),
+        "--row-group-rows",
+        "65536",
+        "--json",
+    )
 
 
 def _eye_trace_execution_plan(tmp_path: Path):

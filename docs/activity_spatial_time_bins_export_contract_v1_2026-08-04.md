@@ -2,10 +2,11 @@
 
 Date: 2026-08-04
 
-Status: exact logical/Arrow schema, per-track bout-source binder, and pure bin
-aggregator implemented; bounded publisher and promotion evidence remain
-unimplemented. This decision activates no workflow default, selector, registry
-authority, Zarr physical profile, or canonical-data change.
+Status: exact logical/Arrow schema, per-track bout-source binder, bounded bin
+aggregator, manifest-exclusive publisher, decoded validator, CLI, and workflow
+execution adapter implemented. Promotion evidence remains unimplemented. This
+decision activates no workflow default, selector, registry authority, Zarr
+physical profile, or canonical-data change.
 
 ## Decision
 
@@ -98,11 +99,19 @@ The publisher must fail closed unless it can prove and recheck:
 - unchanged source manifests, completion state, and selection snapshots before
   the manifest-exclusive export becomes visible.
 
-The future publisher must stream bounded source windows, construct parts on an
-explicit non-overlapping node-local scratch root, hash decoded projected
-columns, copy into a hidden generation, and publish only through the existing
-manifest-exclusive compare-and-swap boundary. The compact in-memory exporter
-already rejects this dedicated table name.
+The publisher streams one globally aligned bin at a time, constructs its part
+on an explicit non-overlapping node-local scratch root, verifies every selected
+track-motion source byte against the sealed source manifest, hashes every exact
+decoded Arrow column, copies into a hidden generation, and publishes only
+through the existing manifest-exclusive compare-and-swap boundary. It rebinds
+all track and bout sources after extraction and before visibility. Failed
+replacement leaves the prior manifest-selected generation intact. The compact
+in-memory exporter rejects this dedicated table name.
+
+The CLI accepts a repeated exact `TRACK_ID=SWIM_BOUT_RUN` map. The packaged DAG
+currently carries one swim-bout dependency, so its adapter uses the explicit
+single-run mode; that mode first proves the selected track authority contains
+exactly one track and fails closed otherwise. It never assumes track zero.
 
 ## Deferred Geometry Extension
 
@@ -127,10 +136,6 @@ position moments as arena occupancy.
 
 ## Remaining Gates
 
-- Add bounded source-window reads, manifest-exclusive publication, full
-  decoded validation, tampering, and
-  interrupted-replacement recovery tests.
-- Wire the workflow/LSF node-local execution boundary.
 - Benchmark short and full-duration writer/read/copy/validation/publication
   behavior before considering default activation.
 
@@ -141,5 +146,9 @@ completion and eligibility, track-motion manifest equality, canonical frame
 axis, one default candidate/signal, and selected event-content digest. The pure
 aggregator covers global bin rounding, empty internal gaps, clipped edge
 denominators, start-assigned bout metrics, and interval-union occupancy. The
-focused Arrow/source-binder/aggregation/workflow matrix passed 214 tests; Ruff,
-Python compilation, and `git diff --check` passed.
+publisher additionally covers bounded/full aggregation equivalence, complete
+decoded column hashing, exact Parquet policy, recomputed-digest tampering,
+source rechecks, failed-overwrite recovery, and a fail-closed single-track DAG
+boundary. The focused Arrow/source-binder/publication/workflow and shared
+atomic-publication matrix passed 278 tests; Ruff and Python compilation passed. Black's checker was stopped
+after stalling in this environment without producing diagnostics or changes.

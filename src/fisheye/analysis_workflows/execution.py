@@ -539,6 +539,62 @@ def _kinematics_samples_export_command(
     return tuple(command)
 
 
+def _activity_spatial_export_command(
+    context: StageCommandContext,
+) -> tuple[str, ...]:
+    if context.export_root is None or context.scratch_root is None:
+        raise WorkflowExecutionError(
+            "activity/spatial export requires explicit export and node-local "
+            "scratch roots"
+        )
+    policy = context.node.temporal_policy
+    if (
+        set(policy) != {"resolution", "bin_size_s", "source_authority"}
+        or policy.get("resolution") != "fixed_time_bins"
+        or policy.get("source_authority") != "framewise_zarr"
+    ):
+        raise WorkflowExecutionError(
+            "activity/spatial export requires the exact fixed-bin framewise-Zarr "
+            "temporal policy"
+        )
+    bin_size = policy.get("bin_size_s")
+    if (
+        isinstance(bin_size, bool)
+        or not isinstance(bin_size, (int, float))
+        or not math.isfinite(float(bin_size))
+        or float(bin_size) <= 0
+    ):
+        raise WorkflowExecutionError(
+            "activity/spatial export requires a positive finite bin size"
+        )
+    command = _module_command(
+        context,
+        "fisheye.utils.export_activity_spatial_time_bins",
+    )
+    command.extend(
+        (
+            "--track-kinematics-run",
+            context.dependency_run("track_kinematics"),
+            "--track-scope",
+            "offline",
+            "--single-track-swim-bout-run",
+            context.dependency_run("swim_bouts"),
+            "--bin-size-s",
+            format(float(bin_size), ".17g"),
+            "--output-root",
+            str(context.export_root),
+            "--export-run-id",
+            context.output_run,
+            "--scratch-root",
+            str(context.scratch_root),
+            "--row-group-rows",
+            "65536",
+            "--json",
+        )
+    )
+    return tuple(command)
+
+
 STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "track_kinematics": _track_kinematics_command,
@@ -557,6 +613,7 @@ STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
 EXPORT_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "kinematics_samples": _kinematics_samples_export_command,
+        "activity_spatial_summaries": _activity_spatial_export_command,
         "eye_traces": _eye_trace_export_command,
     }
 )

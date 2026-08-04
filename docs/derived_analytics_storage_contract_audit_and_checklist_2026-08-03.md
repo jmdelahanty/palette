@@ -12,9 +12,10 @@ have explicit unpromoted physical candidates. No production profile,
 scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
-The 2026-08-04 coordination checkpoints add two exact query products:
+The 2026-08-04 coordination checkpoints add three exact query products:
 bounded, source-manifest-bound `eye_trace_samples` and generic multi-track
-`kinematics_samples` Parquet exporters. Both remain non-default and
+`kinematics_samples` Parquet exporters plus exact globally aligned
+`activity_spatial_time_bins`. All three remain non-default and
 selector/registry-ineligible. Their declared workflow nodes now execute only
 through dedicated source-specific streaming publishers and explicit node-local
 scratch.
@@ -829,10 +830,15 @@ Recommended benchmark and promotion-review order:
           windows, samples on the global acquisition-frame grid, publishes one
           manifest-selected immutable Parquet part, and performs full decoded
           validation. It remains opt-in pending short/full benchmarks.
-    - [ ] activity/spatial summaries. The exact 70-field logical/Arrow schema
-          and geometry boundary are frozen. The fail-closed per-track
-          swim-bout-run binder and global-bin aggregator are implemented;
-          bounded source reads, validator, and publisher remain;
+    - [x] activity/spatial summaries. The exact 70-field logical/Arrow schema,
+          geometry boundary, fail-closed per-track swim-bout-run binder, and
+          global-bin aggregator are implemented. The publisher reads and
+          verifies one global bin at a time, hashes every decoded output
+          column, rechecks all source manifests before visibility, commits one
+          manifest-selected immutable Parquet part, and fully validates it.
+          Workflow execution accepts its single swim-bout dependency only for
+          an exactly one-track source; multi-track CLI publication requires an
+          explicit `track_id=run` map. It remains opt-in pending benchmarks;
     - [x] eye traces. The v1 publisher reads exact bounded compact-v7 frame
           intervals, produces one immutable manifest-selected Parquet part,
           validates complete decoded payload hashes, and remains non-default.
@@ -846,12 +852,18 @@ Recommended benchmark and promotion-review order:
           Zarr source remains the only recording-local scientific authority.
     - [x] `kinematics_samples` is explicitly a query projection; its selected
           track-motion Zarr run remains the scientific and rollback authority.
+    - [x] `activity_spatial_time_bins` is explicitly a query projection; its
+          selected track-motion and per-track swim-bout Zarr runs remain the
+          scientific and rollback authorities.
 - [ ] Bind each export to exact selected recording-local manifests.
     - [x] `eye_trace_samples` binds and rechecks the explicit completed/eligible
           compact-v7 run and all required semantic manifest digests.
     - [x] `kinematics_samples` binds and rechecks the explicit completed/eligible
           full-motion manifest, publication commit, physical authority, ordered
           tracks, and exact selected surface declarations.
+    - [x] `activity_spatial_time_bins` binds and rechecks the same exact
+          track-motion authority plus one completed/eligible canonical
+          frame-axis swim-bout run, candidate, and signal for every track.
 
 ### Phase 9 — Benchmark and promote one family at a time
 

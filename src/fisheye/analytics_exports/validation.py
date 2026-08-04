@@ -339,6 +339,16 @@ def validate_export_payload(
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(f"kinematics_samples: {exc}")
 
+    if "activity_spatial_time_bins" in tables:
+        try:
+            from .activity_spatial_time_bins import (
+                validate_activity_spatial_time_bins_export_payload,
+            )
+
+            validate_activity_spatial_time_bins_export_payload(root, payload)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            errors.append(f"activity_spatial_time_bins: {exc}")
+
     if errors:
         raise ExportValidationError(
             f"Analytics export {run_id!r} failed validation:\n- " + "\n- ".join(errors)
