@@ -220,6 +220,140 @@ def _require_eye_angles(parameters: object) -> Mapping[str, Any]:
     return parsed
 
 
+def _require_subject_shape(parameters: object) -> Mapping[str, Any]:
+    parsed = _require_exact_fields(
+        parameters,
+        {
+            "source_schema_id",
+            "source_schema_version",
+            "source_profile_id",
+            "source_manifest_sha256",
+            "source_refined_subject_masks_run",
+            "source_refined_authority_sha256",
+            "source_staging_mode",
+            "storage_profile_id",
+            "block_rows",
+            "output_shard_rows",
+            "execution_backend",
+            "scheduler",
+            "num_workers",
+            "shard_copy_workers",
+            "native_threads",
+            "copy_backend",
+            "keep_scratch",
+            "check_capacity",
+        },
+        label="subject-shape invocation parameters",
+    )
+    if (
+        parsed["source_schema_id"] != "analysis.subject_shape_runs"
+        or type(parsed["source_schema_version"]) is not int
+        or parsed["source_schema_version"] != 4
+        or parsed["source_profile_id"] != "analysis.subject_shape.full_anatomy_v4"
+    ):
+        raise ValueError("subject-shape invocation source schema differs")
+    _require_sha256(
+        parsed["source_manifest_sha256"],
+        label="source_manifest_sha256",
+    )
+    _require_run_name(
+        parsed["source_refined_subject_masks_run"],
+        label="source_refined_subject_masks_run",
+    )
+    _require_sha256(
+        parsed["source_refined_authority_sha256"],
+        label="source_refined_authority_sha256",
+    )
+    if parsed["source_staging_mode"] != "archive_snapshot_copy_v1":
+        raise ValueError("subject-shape source_staging_mode differs")
+    if parsed["storage_profile_id"] != "subject_shape_access_aware_candidate_v1":
+        raise ValueError("subject-shape storage_profile_id differs")
+    for field in (
+        "block_rows",
+        "output_shard_rows",
+        "num_workers",
+        "shard_copy_workers",
+        "native_threads",
+    ):
+        _require_positive_int(parsed[field], label=field)
+    if parsed["execution_backend"] not in {
+        "serial_driver",
+        "dask_worker_chunks",
+    }:
+        raise ValueError("subject-shape execution_backend differs")
+    if type(parsed["scheduler"]) is not str or parsed["scheduler"] not in (
+        _EYE_SCHEDULERS
+    ):
+        raise ValueError("subject-shape scheduler is unsupported")
+    _require_copy_backend(parsed["copy_backend"])
+    _require_bool(parsed["keep_scratch"], label="keep_scratch")
+    _require_bool(parsed["check_capacity"], label="check_capacity")
+    return parsed
+
+
+def _require_tail_kinematics(parameters: object) -> Mapping[str, Any]:
+    parsed = _require_exact_fields(
+        parameters,
+        {
+            "source_subject_shape_run",
+            "source_tail_coordinate_manifest_sha256",
+            "source_subject_shape_manifest_sha256",
+            "source_logical_schema_mode",
+            "tail_angle_sample_count",
+            "block_rows",
+            "output_shard_rows",
+            "execution_backend",
+            "num_workers",
+            "source_staging_mode",
+            "source_revision_bundle_mode",
+            "storage_profile_id",
+            "copy_backend",
+            "keep_scratch",
+            "check_capacity",
+        },
+        label="tail-kinematics invocation parameters",
+    )
+    _require_run_name(
+        parsed["source_subject_shape_run"],
+        label="source_subject_shape_run",
+    )
+    _require_sha256(
+        parsed["source_tail_coordinate_manifest_sha256"],
+        label="source_tail_coordinate_manifest_sha256",
+    )
+    _require_sha256(
+        parsed["source_subject_shape_manifest_sha256"],
+        label="source_subject_shape_manifest_sha256",
+    )
+    for field in (
+        "tail_angle_sample_count",
+        "block_rows",
+        "output_shard_rows",
+        "num_workers",
+    ):
+        _require_positive_int(parsed[field], label=field)
+    if parsed["tail_angle_sample_count"] < 2:
+        raise ValueError("tail_angle_sample_count must be at least two")
+    if parsed["execution_backend"] != "serial":
+        raise ValueError("tail-kinematics execution_backend must be serial")
+    if parsed["num_workers"] != 1:
+        raise ValueError("tail-kinematics num_workers must equal one")
+    if parsed["source_staging_mode"] != "canonical_subject_shape_physical_subset_v1":
+        raise ValueError("tail-kinematics source_staging_mode differs")
+    if parsed["source_revision_bundle_mode"] != "atomic_source_mirror_v1":
+        raise ValueError("tail-kinematics source_revision_bundle_mode differs")
+    if parsed["source_logical_schema_mode"] != (
+        "exact_arrays_legacy_receipt_optional_v1"
+    ):
+        raise ValueError("tail-kinematics source_logical_schema_mode differs")
+    if parsed["storage_profile_id"] != "published_http_v1":
+        raise ValueError("tail-kinematics storage_profile_id differs")
+    _require_copy_backend(parsed["copy_backend"])
+    _require_bool(parsed["keep_scratch"], label="keep_scratch")
+    _require_bool(parsed["check_capacity"], label="check_capacity")
+    return parsed
+
+
 def _require_stimulus_epochs(parameters: object) -> Mapping[str, Any]:
     parsed = _require_exact_fields(
         parameters,
@@ -318,6 +452,8 @@ _PARAMETER_VALIDATORS = {
     CandidateInvocationContract.EXACT_TABULAR_V1: _require_exact_tabular,
     CandidateInvocationContract.TRACK_FLAT_V1: _require_track_flat,
     CandidateInvocationContract.EYE_ANGLES_V1: _require_eye_angles,
+    CandidateInvocationContract.SUBJECT_SHAPE_V1: _require_subject_shape,
+    CandidateInvocationContract.TAIL_KINEMATICS_V1: _require_tail_kinematics,
     CandidateInvocationContract.STIMULUS_EPOCHS_V1: _require_stimulus_epochs,
     CandidateInvocationContract.CHASER_DISTANCE_BASE_V1: (
         _require_chaser_distance_base
@@ -493,6 +629,87 @@ def build_eye_angle_invocation(
     )
 
 
+def build_subject_shape_invocation(
+    *,
+    source_manifest_sha256: str,
+    source_refined_subject_masks_run: str,
+    source_refined_authority_sha256: str,
+    storage_profile_id: str,
+    block_rows: int,
+    output_shard_rows: int,
+    execution_backend: str,
+    scheduler: str,
+    num_workers: int,
+    shard_copy_workers: int,
+    native_threads: int,
+    copy_backend: str,
+    keep_scratch: bool,
+    check_capacity: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.SUBJECT_SHAPE_V1,
+        {
+            "source_schema_id": "analysis.subject_shape_runs",
+            "source_schema_version": 4,
+            "source_profile_id": "analysis.subject_shape.full_anatomy_v4",
+            "source_manifest_sha256": source_manifest_sha256,
+            "source_refined_subject_masks_run": source_refined_subject_masks_run,
+            "source_refined_authority_sha256": source_refined_authority_sha256,
+            "source_staging_mode": "archive_snapshot_copy_v1",
+            "storage_profile_id": storage_profile_id,
+            "block_rows": block_rows,
+            "output_shard_rows": output_shard_rows,
+            "execution_backend": execution_backend,
+            "scheduler": scheduler,
+            "num_workers": num_workers,
+            "shard_copy_workers": shard_copy_workers,
+            "native_threads": native_threads,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+            "check_capacity": check_capacity,
+        },
+    )
+
+
+def build_tail_kinematics_invocation(
+    *,
+    source_subject_shape_run: str,
+    source_tail_coordinate_manifest_sha256: str,
+    source_subject_shape_manifest_sha256: str,
+    tail_angle_sample_count: int,
+    block_rows: int,
+    output_shard_rows: int,
+    storage_profile_id: str,
+    copy_backend: str,
+    keep_scratch: bool,
+    check_capacity: bool,
+) -> dict[str, object]:
+    return _build_invocation(
+        CandidateInvocationContract.TAIL_KINEMATICS_V1,
+        {
+            "source_subject_shape_run": source_subject_shape_run,
+            "source_tail_coordinate_manifest_sha256": (
+                source_tail_coordinate_manifest_sha256
+            ),
+            "source_subject_shape_manifest_sha256": (
+                source_subject_shape_manifest_sha256
+            ),
+            "source_logical_schema_mode": ("exact_arrays_legacy_receipt_optional_v1"),
+            "tail_angle_sample_count": tail_angle_sample_count,
+            "block_rows": block_rows,
+            "output_shard_rows": output_shard_rows,
+            "execution_backend": "serial",
+            "num_workers": 1,
+            "source_staging_mode": "canonical_subject_shape_physical_subset_v1",
+            "source_revision_bundle_mode": "atomic_source_mirror_v1",
+            "storage_profile_id": storage_profile_id,
+            "copy_backend": copy_backend,
+            "keep_scratch": keep_scratch,
+            "check_capacity": check_capacity,
+        },
+    )
+
+
 def build_stimulus_epoch_invocation(
     *,
     source_stimulus_fingerprint: str,
@@ -554,7 +771,9 @@ __all__ = [
     "build_chaser_distance_base_invocation",
     "build_exact_tabular_invocation",
     "build_eye_angle_invocation",
+    "build_subject_shape_invocation",
     "build_stimulus_epoch_invocation",
+    "build_tail_kinematics_invocation",
     "build_track_flat_invocation",
     "candidate_invocation_contract_is_frozen",
     "require_candidate_invocation_manifest",

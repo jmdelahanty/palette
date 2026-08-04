@@ -9,7 +9,6 @@ adopt without changing this family's execution semantics.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Mapping
 
@@ -26,9 +25,9 @@ from fisheye.analysis.tail_kinematics_storage import (
     build_tail_kinematics_storage_receipt,
 )
 from fisheye.analysis_workflows.analysis_candidate_invocation import (
-    ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID,
-    ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION,
     CandidateInvocationContract,
+    build_tail_kinematics_invocation,
+    require_candidate_invocation_manifest,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.analysis_benchmark_suite import (
@@ -48,31 +47,7 @@ TAIL_KINEMATICS_COORDINATE_VALIDATOR_REF = (
     "fisheye.analysis_workflows.tail_kinematics_candidate_execution:"
     "build_tail_kinematics_coordinate_evidence"
 )
-TAIL_KINEMATICS_SOURCE_STAGING_MODE = "canonical_subject_shape_physical_subset_v1"
-TAIL_KINEMATICS_REVISION_BUNDLE_MODE = "atomic_source_mirror_v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_COPY_BACKENDS = frozenset({"python", "rsync"})
-
-TAIL_KINEMATICS_INVOCATION_FIELDS = frozenset(
-    {
-        "source_subject_shape_run",
-        "source_tail_coordinate_manifest_sha256",
-        "source_subject_shape_manifest_sha256",
-        "source_logical_schema_mode",
-        "tail_angle_sample_count",
-        "block_rows",
-        "output_shard_rows",
-        "execution_backend",
-        "num_workers",
-        "source_staging_mode",
-        "source_revision_bundle_mode",
-        "storage_profile_id",
-        "copy_backend",
-        "keep_scratch",
-        "check_capacity",
-    }
-)
 
 
 def _attrs(group: Any) -> dict[str, Any]:
@@ -87,155 +62,14 @@ def _array_at_path(group: Any, path: str) -> Any:
     return node
 
 
-def _require_sha256(value: object, *, label: str) -> str:
-    if type(value) is not str or not _SHA256.fullmatch(value):
-        raise ValueError(f"{label} must be one lowercase SHA-256")
-    return value
-
-
-def _require_positive_int(value: object, *, label: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise ValueError(f"{label} must be one positive exact integer")
-    return value
-
-
-def _require_run_name(value: object, *, label: str) -> str:
-    if type(value) is not str or not _RUN_NAME.fullmatch(value):
-        raise ValueError(f"{label} must be one exact run name")
-    return value
-
-
-def require_tail_kinematics_invocation_parameters(
-    parameters: object,
-) -> Mapping[str, Any]:
-    """Validate the exact future shared ``tail_kinematics_v1`` grammar."""
-
-    if not isinstance(parameters, Mapping) or set(parameters) != set(
-        TAIL_KINEMATICS_INVOCATION_FIELDS
-    ):
-        raise ValueError("tail-kinematics invocation parameter field set differs")
-    _require_run_name(
-        parameters["source_subject_shape_run"],
-        label="source_subject_shape_run",
-    )
-    _require_sha256(
-        parameters["source_tail_coordinate_manifest_sha256"],
-        label="source_tail_coordinate_manifest_sha256",
-    )
-    _require_sha256(
-        parameters["source_subject_shape_manifest_sha256"],
-        label="source_subject_shape_manifest_sha256",
-    )
-    for field in (
-        "tail_angle_sample_count",
-        "block_rows",
-        "output_shard_rows",
-        "num_workers",
-    ):
-        _require_positive_int(parameters[field], label=field)
-    if parameters["tail_angle_sample_count"] < 2:
-        raise ValueError("tail_angle_sample_count must be at least two")
-    if parameters["execution_backend"] != "serial":
-        raise ValueError("tail-kinematics candidate execution_backend must be serial")
-    if parameters["num_workers"] != 1:
-        raise ValueError("tail-kinematics candidate num_workers must equal one")
-    if parameters["source_staging_mode"] != TAIL_KINEMATICS_SOURCE_STAGING_MODE:
-        raise ValueError("tail-kinematics source_staging_mode differs")
-    if (
-        parameters["source_revision_bundle_mode"]
-        != TAIL_KINEMATICS_REVISION_BUNDLE_MODE
-    ):
-        raise ValueError("tail-kinematics source_revision_bundle_mode differs")
-    if parameters["source_logical_schema_mode"] != (
-        "exact_arrays_legacy_receipt_optional_v1"
-    ):
-        raise ValueError("tail-kinematics source_logical_schema_mode differs")
-    if parameters["storage_profile_id"] != TAIL_KINEMATICS_EXECUTION_PROFILE_ID:
-        raise ValueError("tail-kinematics storage_profile_id differs")
-    if parameters["copy_backend"] not in _COPY_BACKENDS:
-        raise ValueError("tail-kinematics copy_backend must be python or rsync")
-    for field in ("keep_scratch", "check_capacity"):
-        if type(parameters[field]) is not bool:
-            raise TypeError(f"{field} must be an exact bool")
-    return parameters
-
-
-def build_tail_kinematics_invocation(
-    *,
-    source_subject_shape_run: str,
-    source_tail_coordinate_manifest_sha256: str,
-    source_subject_shape_manifest_sha256: str,
-    tail_angle_sample_count: int,
-    block_rows: int,
-    output_shard_rows: int,
-    storage_profile_id: str,
-    copy_backend: str,
-    keep_scratch: bool,
-    check_capacity: bool,
-) -> dict[str, object]:
-    """Build the family-owned invocation pending shared-catalog activation."""
-
-    parameters = {
-        "source_subject_shape_run": source_subject_shape_run,
-        "source_tail_coordinate_manifest_sha256": (
-            source_tail_coordinate_manifest_sha256
-        ),
-        "source_subject_shape_manifest_sha256": (source_subject_shape_manifest_sha256),
-        "source_logical_schema_mode": "exact_arrays_legacy_receipt_optional_v1",
-        "tail_angle_sample_count": tail_angle_sample_count,
-        "block_rows": block_rows,
-        "output_shard_rows": output_shard_rows,
-        "execution_backend": "serial",
-        "num_workers": 1,
-        "source_staging_mode": TAIL_KINEMATICS_SOURCE_STAGING_MODE,
-        "source_revision_bundle_mode": TAIL_KINEMATICS_REVISION_BUNDLE_MODE,
-        "storage_profile_id": storage_profile_id,
-        "copy_backend": copy_backend,
-        "keep_scratch": keep_scratch,
-        "check_capacity": check_capacity,
-    }
-    require_tail_kinematics_invocation_parameters(parameters)
-    payload = {
-        "contract_id": CandidateInvocationContract.TAIL_KINEMATICS_V1.value,
-        "parameters": json.loads(
-            json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-        ),
-    }
-    return {
-        "schema_id": ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID,
-        "schema_version": ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION,
-        "payload": payload,
-        "payload_digest": canonical_json_sha256(payload),
-    }
-
-
 def require_tail_kinematics_invocation_manifest(value: Mapping[str, Any]) -> None:
-    """Deeply validate one family-local invocation envelope."""
+    """Validate through the single shared invocation-contract owner."""
 
-    if not isinstance(value, Mapping) or set(value) != {
-        "schema_id",
-        "schema_version",
-        "payload",
-        "payload_digest",
-    }:
-        raise ValueError("tail-kinematics invocation envelope field set differs")
-    if (
-        value["schema_id"] != ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_ID
-        or type(value["schema_version"]) is not int
-        or value["schema_version"] != ANALYSIS_CANDIDATE_INVOCATION_SCHEMA_VERSION
-    ):
-        raise ValueError("tail-kinematics invocation schema identity differs")
-    payload = value["payload"]
-    if not isinstance(payload, Mapping) or set(payload) != {
-        "contract_id",
-        "parameters",
-    }:
-        raise ValueError("tail-kinematics invocation payload field set differs")
-    if payload["contract_id"] != CandidateInvocationContract.TAIL_KINEMATICS_V1.value:
-        raise ValueError("tail-kinematics invocation contract differs")
-    require_tail_kinematics_invocation_parameters(payload["parameters"])
-    if value["payload_digest"] != canonical_json_sha256(payload):
-        raise ValueError("tail-kinematics invocation payload digest differs")
+    require_candidate_invocation_manifest(
+        value,
+        expected_contract=CandidateInvocationContract.TAIL_KINEMATICS_V1,
+        expected_profile_id=TAIL_KINEMATICS_EXECUTION_PROFILE_ID,
+    )
 
 
 def _validate_exact_tail_run(run_group: Any) -> TailKinematicsDimensions:
@@ -473,7 +307,6 @@ __all__ = [
     "TAIL_KINEMATICS_CORE_ARRAY_COUNT",
     "TAIL_KINEMATICS_EXECUTION_FAMILY_ID",
     "TAIL_KINEMATICS_EXECUTION_PROFILE_ID",
-    "TAIL_KINEMATICS_INVOCATION_FIELDS",
     "TAIL_KINEMATICS_LOGICAL_EQUALITY_CONTRACT",
     "TAIL_KINEMATICS_REVISION_BUNDLE_ARRAY_COUNT",
     "build_tail_kinematics_coordinate_evidence",
@@ -482,6 +315,5 @@ __all__ = [
     "compute_tail_kinematics_logical_hashes",
     "require_tail_kinematics_execution_suite",
     "require_tail_kinematics_invocation_manifest",
-    "require_tail_kinematics_invocation_parameters",
     "tail_kinematics_logical_manifest_sha256",
 ]

@@ -166,6 +166,28 @@ def test_tail_schema_rejects_partial_source_revision_identity() -> None:
         mod._validate_closed_schema(run, "tail_posture_view")
 
 
+def test_tail_schema_accepts_complete_nested_revision_identity() -> None:
+    run = _minimal_posture_run()
+    revisions = run.require_group("source_refined_subject_masks")
+    revisions.create_array(
+        "row_revision",
+        data=np.asarray([[1], [2]], dtype=np.int64),
+    )
+    revisions.create_array(
+        "row_revision_available",
+        data=np.asarray([[True], [True]], dtype=bool),
+    )
+
+    arrays, groups = mod._validate_closed_schema(run, "tail_posture_view")
+
+    assert arrays == tuple(
+        sorted((*mod._POSTURE_ARRAYS, *mod._OPTIONAL_REVISION_ARRAYS))
+    )
+    assert groups == tuple(
+        sorted((*mod._RECORD_GROUPS, "source_refined_subject_masks"))
+    )
+
+
 def test_tail_reader_freshly_rechecks_sealed_payload_and_attrs(monkeypatch) -> None:
     root = zarr.group()
     run = root.require_group("analysis/tail_kinematics_runs/tail")
@@ -292,9 +314,7 @@ def _canonical_source_publication(root: zarr.Group) -> SimpleNamespace:
             },
         }
     )
-    acquisition_node = root.require_group(
-        "analysis/acquisition_camera_frames/camera-a"
-    )
+    acquisition_node = root.require_group("analysis/acquisition_camera_frames/camera-a")
     ownership = stamp_acquisition_import_ownership(root, acquisition_node)
     acquisition = stamp_acquisition_camera_frame(
         root,
@@ -542,9 +562,7 @@ def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
         root["analysis/tail_kinematics_runs"],
         tail,
         run_name="tail_001",
-        expected_publication_owner_uuid=tail.attrs[
-            mod.TAIL_PUBLICATION_OWNER_ATTR
-        ],
+        expected_publication_owner_uuid=tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
     )
     publication = mod.load_tail_kinematics_coordinate_publication(
         root,
@@ -553,14 +571,12 @@ def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
     assert publication.descriptors["tail_angle_sample_xy"].descriptor.space_id == (
         "source_camera_image_px"
     )
-    assert publication.descriptors[
-        "tail_angle_sample_xy"
-    ].descriptor.collection_axis.role == "keypoint"
-    assert publication.measurements["tail_angle_rad"].record["units"] == "rad"
     assert (
-        publication.measurements["tail_curvature_px_inv"].record["units"]
-        == "px^-1"
+        publication.descriptors["tail_angle_sample_xy"].descriptor.collection_axis.role
+        == "keypoint"
     )
+    assert publication.measurements["tail_angle_rad"].record["units"] == "rad"
+    assert publication.measurements["tail_curvature_px_inv"].record["units"] == "px^-1"
     angle_source_refs = {
         item["record_ref"]
         for item in publication.measurements["tail_angle_rad"].record[
@@ -593,12 +609,14 @@ def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
         mod.TAIL_PUBLICATION_POLICY
     )
     assert tail_parent.attrs[mod.TAIL_PUBLICATION_GENERATION_ATTR] == 1
-    assert tail_parent.attrs[mod.TAIL_PARENT_PUBLICATION_LEASE_ATTR][
-        "owner_uuid"
-    ] == tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR]
-    assert publication.manifest.record["publication_owner_uuid"] == tail.attrs[
-        mod.TAIL_PUBLICATION_OWNER_ATTR
-    ]
+    assert (
+        tail_parent.attrs[mod.TAIL_PARENT_PUBLICATION_LEASE_ATTR]["owner_uuid"]
+        == tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR]
+    )
+    assert (
+        publication.manifest.record["publication_owner_uuid"]
+        == tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR]
+    )
     sample_derivation = publication.derivation.record["coordinate_outputs"][
         "tail_angle_sample_xy"
     ]
@@ -612,9 +630,12 @@ def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
         "record_ref": source.tail_sample_axis.record_ref,
         "record_sha256": source.tail_sample_axis.record_sha256,
     }
-    assert tail["tail_angle_rad"].attrs[mod.ARRAY_MEASUREMENT_DESCRIPTOR_ATTR][
-        "collection_axis"
-    ]["role"] == "keypoint"
+    assert (
+        tail["tail_angle_rad"].attrs[mod.ARRAY_MEASUREMENT_DESCRIPTOR_ATTR][
+            "collection_axis"
+        ]["role"]
+        == "keypoint"
+    )
     assert np.array_equal(
         tail["instance_key"][:],
         source._run["instance_key"][:],
@@ -641,20 +662,24 @@ def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
     )
     assert posture.descriptors["head_xy"].descriptor.geometry_type == "point_xy"
     assert (
-        posture.descriptors["tail_keypoints_xy"].descriptor.geometry_type
-        == "point_xy"
+        posture.descriptors["tail_keypoints_xy"].descriptor.geometry_type == "point_xy"
     )
-    assert posture.descriptors[
-        "tail_keypoints_xy"
-    ].descriptor.collection_axis.cardinality == 5
+    assert (
+        posture.descriptors["tail_keypoints_xy"].descriptor.collection_axis.cardinality
+        == 5
+    )
     assert posture.measurement_collection_axis.record["role"] == "tail_segment"
     assert posture.measurement_collection_axis.record["cardinality"] == 4
-    assert posture.derivation.record["coordinate_outputs"]["head_xy"][
-        "operation"
-    ] == "exact_rowwise_coordinate_copy_v1"
-    assert posture.derivation.record["coordinate_outputs"]["tail_keypoints_xy"][
-        "operation"
-    ] == "linear_interpolation_over_normalized_tail_arclength_v1"
+    assert (
+        posture.derivation.record["coordinate_outputs"]["head_xy"]["operation"]
+        == "exact_rowwise_coordinate_copy_v1"
+    )
+    assert (
+        posture.derivation.record["coordinate_outputs"]["tail_keypoints_xy"][
+            "operation"
+        ]
+        == "linear_interpolation_over_normalized_tail_arclength_v1"
+    )
     assert posture.measurements["tail_angle_rad"].record["collection_axis"] == {
         "axis": 1,
         "role": "tail_segment",
@@ -665,9 +690,7 @@ def test_real_tail_publication_binds_descriptors_identity_and_fresh_seals(
         },
     }
     tampered_measurement = deepcopy(
-        posture_run["tail_angle_rad"].attrs[
-            mod.ARRAY_MEASUREMENT_DESCRIPTOR_ATTR
-        ]
+        posture_run["tail_angle_rad"].attrs[mod.ARRAY_MEASUREMENT_DESCRIPTOR_ATTR]
     )
     tampered_measurement["units"] = "px"
     posture_run["tail_angle_rad"].attrs[
@@ -725,9 +748,7 @@ def test_tail_activation_preserves_foreign_lease_and_restores_own_selector(
             parent,
             tail,
             run_name="tail_001",
-            expected_publication_owner_uuid=tail.attrs[
-                mod.TAIL_PUBLICATION_OWNER_ATTR
-            ],
+            expected_publication_owner_uuid=tail.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
         )
 
     assert parent.attrs["latest_complete"] == "prior"
@@ -773,9 +794,7 @@ def test_posture_family_selectors_advance_independently(
         parent,
         first,
         run_name="posture_a",
-        expected_publication_owner_uuid=first.attrs[
-            mod.TAIL_PUBLICATION_OWNER_ATTR
-        ],
+        expected_publication_owner_uuid=first.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
         additional_selector_attrs=("latest_family_a",),
     )
 
@@ -793,9 +812,7 @@ def test_posture_family_selectors_advance_independently(
         parent,
         second,
         run_name="posture_b",
-        expected_publication_owner_uuid=second.attrs[
-            mod.TAIL_PUBLICATION_OWNER_ATTR
-        ],
+        expected_publication_owner_uuid=second.attrs[mod.TAIL_PUBLICATION_OWNER_ATTR],
         additional_selector_attrs=("latest_family_b",),
     )
 

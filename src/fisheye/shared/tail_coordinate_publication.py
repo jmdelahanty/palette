@@ -70,7 +70,6 @@ from fisheye.shared.zarr_run_completion import (
     RUN_STATUS_COMPLETE,
 )
 
-
 TAIL_COORDINATE_CONTRACT = "canonical_v2"
 TAIL_PUBLICATION_MANIFEST_ATTR = "tail_coordinate_publication_manifest"
 TAIL_PUBLICATION_MANIFEST_DIGEST_ATTR = f"{TAIL_PUBLICATION_MANIFEST_ATTR}_sha256"
@@ -242,7 +241,7 @@ def _array_paths(group: Any, prefix: str = "") -> tuple[str, ...]:
     for name in sorted(str(value) for value in group.group_keys()):
         child_prefix = f"{prefix}/{name}".strip("/")
         paths.extend(_array_paths(group[name], child_prefix))
-    return tuple(paths)
+    return tuple(sorted(paths))
 
 
 def _group_paths(group: Any, prefix: str = "") -> tuple[str, ...]:
@@ -251,7 +250,7 @@ def _group_paths(group: Any, prefix: str = "") -> tuple[str, ...]:
         child_prefix = f"{prefix}/{name}".strip("/")
         paths.append(child_prefix)
         paths.extend(_group_paths(group[name], child_prefix))
-    return tuple(paths)
+    return tuple(sorted(paths))
 
 
 def _node_attrs_record(node: Any, *, excluded: Sequence[str] = ()) -> dict[str, Any]:
@@ -301,7 +300,9 @@ def _expected_groups(run: Any) -> tuple[str, ...]:
     return tuple(sorted(expected))
 
 
-def _validate_closed_schema(run: Any, kind: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _validate_closed_schema(
+    run: Any, kind: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     expected_arrays = _expected_arrays(run, kind)
     observed_arrays = _array_paths(run)
     if observed_arrays != expected_arrays:
@@ -438,9 +439,10 @@ def _collection_axis_record(run: Any, kind: str) -> dict[str, Any]:
             _fail("tail_angle_sample_s must be a finite increasing closed [0,1] axis.")
         coordinate = _array_record("tail_angle_sample_s", run["tail_angle_sample_s"])
         count = int(values.size)
-        if type(run.attrs.get("tail_angle_sample_count")) is not int or int(
-            run.attrs["tail_angle_sample_count"]
-        ) != count:
+        if (
+            type(run.attrs.get("tail_angle_sample_count")) is not int
+            or int(run.attrs["tail_angle_sample_count"]) != count
+        ):
             _fail(
                 "tail_angle_sample_count must equal the exact persisted collection "
                 "axis cardinality."
@@ -453,9 +455,10 @@ def _collection_axis_record(run: Any, kind: str) -> dict[str, Any]:
         if len(shape) != 3 or shape[2] != 2 or shape[1] < 2:
             _fail("tail_keypoints_xy must have shape (rows, keypoints>=2, 2).")
         count = shape[1]
-        if type(run.attrs.get("keypoint_count")) is not int or int(
-            run.attrs["keypoint_count"]
-        ) != count:
+        if (
+            type(run.attrs.get("keypoint_count")) is not int
+            or int(run.attrs["keypoint_count"]) != count
+        ):
             _fail(
                 "keypoint_count must equal the exact persisted collection-axis "
                 "cardinality."
@@ -480,7 +483,9 @@ def _collection_axis_record(run: Any, kind: str) -> dict[str, Any]:
     }
 
 
-def _stamp_or_load_collection_axis(run: Any, kind: str, *, load: bool) -> BoundCoordinateRecord:
+def _stamp_or_load_collection_axis(
+    run: Any, kind: str, *, load: bool
+) -> BoundCoordinateRecord:
     node = run["coordinate_records/point_collection_axis"]
     expected = _collection_axis_record(run, kind)
     record = (
@@ -600,24 +605,36 @@ def _derivation_record(
             f"{contradictions!r}."
         )
     parameter_names = (
-        ("method", "method_version", "tail_angle_sample_count", "tail_angle_reference_axis", "tail_angle_positive_direction")
+        (
+            "method",
+            "method_version",
+            "tail_angle_sample_count",
+            "tail_angle_reference_axis",
+            "tail_angle_positive_direction",
+        )
         if kind == _KINEMATICS_KIND
-        else ("method", "method_version", "view_family", "head_source", "keypoint_count", "angle_convention")
+        else (
+            "method",
+            "method_version",
+            "view_family",
+            "head_source",
+            "keypoint_count",
+            "angle_convention",
+        )
     )
     output_names = sorted(
         name
-        for name in (_KINEMATICS_ARRAYS if kind == _KINEMATICS_KIND else _POSTURE_ARRAYS)
-        if name not in {"instance_key", "source_crop_row_ids", "source_acquisition_frame_index"}
+        for name in (
+            _KINEMATICS_ARRAYS if kind == _KINEMATICS_KIND else _POSTURE_ARRAYS
+        )
+        if name
+        not in {"instance_key", "source_crop_row_ids", "source_acquisition_frame_index"}
     )
-    source_tail = source.descriptors[
-        "components/subject_body/tail_sample_xy"
-    ]
+    source_tail = source.descriptors["components/subject_body/tail_sample_xy"]
     if kind == _KINEMATICS_KIND:
         coordinate_outputs = {
             "tail_angle_sample_xy": {
-                "operation": (
-                    "linear_interpolation_over_normalized_tail_arclength_v1"
-                ),
+                "operation": ("linear_interpolation_over_normalized_tail_arclength_v1"),
                 "source_coordinate_descriptor": coordinate_descriptor_pointer(
                     source_tail
                 ),
@@ -645,9 +662,7 @@ def _derivation_record(
                 "output": _array_record("head_xy", run["head_xy"]),
             },
             "tail_keypoints_xy": {
-                "operation": (
-                    "linear_interpolation_over_normalized_tail_arclength_v1"
-                ),
+                "operation": ("linear_interpolation_over_normalized_tail_arclength_v1"),
                 "source_coordinate_descriptor": coordinate_descriptor_pointer(
                     source_tail
                 ),
@@ -671,9 +686,7 @@ def _derivation_record(
         "point_collection_axis": _pointer(collection_axis),
         "measurement_collection_axis": _pointer(measurement_collection_axis),
         "coordinate_outputs": coordinate_outputs,
-        "outputs": {
-            name: _array_record(name, run[name]) for name in output_names
-        },
+        "outputs": {name: _array_record(name, run[name]) for name in output_names},
         "validity": _array_record("valid", run["valid"]),
         "row_order_preserved_from_source": True,
     }
@@ -743,9 +756,7 @@ def _descriptor_bindings(
     load: bool,
 ) -> dict[str, BoundCanonicalCoordinateDescriptor]:
     if kind == _KINEMATICS_KIND:
-        source_descriptor = source.descriptors[
-            "components/subject_body/tail_sample_xy"
-        ]
+        source_descriptor = source.descriptors["components/subject_body/tail_sample_xy"]
         specs = {
             "tail_angle_sample_xy": {
                 # The canonical descriptor vocabulary represents a labelled
@@ -758,12 +769,8 @@ def _descriptor_bindings(
         }
     else:
         head_source = str(run.attrs.get("head_source") or "")
-        source_descriptor = source.descriptors[
-            f"components/subject_body/{head_source}"
-        ]
-        tail_descriptor = source.descriptors[
-            "components/subject_body/tail_sample_xy"
-        ]
+        source_descriptor = source.descriptors[f"components/subject_body/{head_source}"]
+        tail_descriptor = source.descriptors["components/subject_body/tail_sample_xy"]
         head_frame = source_descriptor.reference_frame_authority
         tail_frame = tail_descriptor.reference_frame_authority
         if (
@@ -1038,8 +1045,7 @@ def _source_measurement_inputs(
     }
     try:
         coordinates = {
-            name: source.descriptors[path]
-            for name, path in coordinate_paths.items()
+            name: source.descriptors[path] for name, path in coordinate_paths.items()
         }
         curvature = source.require_scalar_surface(
             "components/subject_body/tail_curvature_px_inv",
@@ -1296,8 +1302,7 @@ def _manifest_record(
         },
         "measurement_authority": _pointer(measurement_authority),
         "measurement_descriptors": {
-            name: _pointer(binding)
-            for name, binding in sorted(measurements.items())
+            name: _pointer(binding) for name, binding in sorted(measurements.items())
         },
         "arrays": {path: _array_record(path, run[path]) for path in arrays},
         "schema_inventory": {
@@ -1331,7 +1336,9 @@ class BoundTailCoordinatePublication:
     _run: Any = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, *, _verification_seal: object | None = None, **values: Any) -> None:
+    def __init__(
+        self, *, _verification_seal: object | None = None, **values: Any
+    ) -> None:
         if _verification_seal is not _BOUND_TAIL_PUBLICATION_SEAL:
             _fail("Tail coordinate publications cannot be constructed directly.")
         for name, value in values.items():
@@ -1410,8 +1417,8 @@ def publish_tail_coordinate_surfaces(
         load=False,
     )
     stamp_bound_canonical_coordinate_descriptors(descriptors.values())
-    source_coordinate_inputs, source_measurement_inputs = (
-        _source_measurement_inputs(kind, source)
+    source_coordinate_inputs, source_measurement_inputs = _source_measurement_inputs(
+        kind, source
     )
     measurement_authority = _stamp_or_load_measurement_authority(
         run,
@@ -1488,7 +1495,10 @@ def _load_tail_coordinate_publication(
         _fail("Tail publication path does not match its declared kind.")
     if run.attrs.get("coordinate_contract") != TAIL_COORDINATE_CONTRACT:
         _fail("Tail publication lacks canonical_v2 coordinate_contract.")
-    if require_complete and run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE:
+    if (
+        require_complete
+        and run.attrs.get(RUN_COMPLETION_STATUS_ATTR) != RUN_STATUS_COMPLETE
+    ):
         _fail("Tail coordinate publication is not complete.")
     if run.attrs.get("stage_selector_eligible") is not expected_selector_eligible:
         state = "eligible" if expected_selector_eligible else "ineligible"
@@ -1522,8 +1532,8 @@ def _load_tail_coordinate_publication(
         derivation,
         load=True,
     )
-    source_coordinate_inputs, source_measurement_inputs = (
-        _source_measurement_inputs(kind, source)
+    source_coordinate_inputs, source_measurement_inputs = _source_measurement_inputs(
+        kind, source
     )
     measurement_authority = _stamp_or_load_measurement_authority(
         run,
@@ -1611,11 +1621,15 @@ def load_tail_coordinate_publication(
         ) from exc
 
 
-def publish_tail_kinematics_coordinate_surfaces(root: Any, run: Any) -> BoundTailCoordinatePublication:
+def publish_tail_kinematics_coordinate_surfaces(
+    root: Any, run: Any
+) -> BoundTailCoordinatePublication:
     return publish_tail_coordinate_surfaces(root, run, kind=_KINEMATICS_KIND)
 
 
-def publish_tail_posture_coordinate_surfaces(root: Any, run: Any) -> BoundTailCoordinatePublication:
+def publish_tail_posture_coordinate_surfaces(
+    root: Any, run: Any
+) -> BoundTailCoordinatePublication:
     return publish_tail_coordinate_surfaces(root, run, kind=_POSTURE_KIND)
 
 
@@ -1835,11 +1849,17 @@ def rollback_deferred_tail_coordinate_publication_activation(
         ) from exc
 
 
-def load_tail_kinematics_coordinate_publication(root: Any, run_path: str) -> BoundTailCoordinatePublication:
-    return load_tail_coordinate_publication(root, run_path, expected_kind=_KINEMATICS_KIND)
+def load_tail_kinematics_coordinate_publication(
+    root: Any, run_path: str
+) -> BoundTailCoordinatePublication:
+    return load_tail_coordinate_publication(
+        root, run_path, expected_kind=_KINEMATICS_KIND
+    )
 
 
-def load_tail_posture_coordinate_publication(root: Any, run_path: str) -> BoundTailCoordinatePublication:
+def load_tail_posture_coordinate_publication(
+    root: Any, run_path: str
+) -> BoundTailCoordinatePublication:
     return load_tail_coordinate_publication(root, run_path, expected_kind=_POSTURE_KIND)
 
 

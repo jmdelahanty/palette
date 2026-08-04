@@ -38,7 +38,6 @@ from fisheye.analysis_workflows.materializers.subject_shape import (
 )
 from fisheye.analysis_workflows.subject_shape_candidate_execution import (
     SUBJECT_SHAPE_EXECUTION_FAMILY_ID,
-    SUBJECT_SHAPE_EXECUTION_PROFILE_ID,
     build_subject_shape_source_identity,
     compute_subject_shape_logical_hashes,
     load_subject_shape_coordinate_evidence,
@@ -74,26 +73,6 @@ RUNNER_REF = (
 RUN_PARENT = "analysis/subject_shape_runs"
 _SELECTOR_SNAPSHOT_SCHEMA_ID = "palette.subject_shape_candidate_selector_snapshot"
 _SELECTOR_SNAPSHOT_SCHEMA_VERSION = 1
-_INVOCATION_FIELDS = {
-    "source_schema_id",
-    "source_schema_version",
-    "source_profile_id",
-    "source_manifest_sha256",
-    "source_refined_subject_masks_run",
-    "source_refined_authority_sha256",
-    "source_staging_mode",
-    "storage_profile_id",
-    "block_rows",
-    "output_shard_rows",
-    "execution_backend",
-    "scheduler",
-    "num_workers",
-    "shard_copy_workers",
-    "native_threads",
-    "copy_backend",
-    "keep_scratch",
-    "check_capacity",
-}
 
 
 class SubjectShapeCandidateExecutionFailed(RuntimeError):
@@ -131,61 +110,6 @@ def subject_shape_selector_snapshot_sha256(archive_path: str | Path) -> str:
             "parent_attributes": json_attr_safe(_attrs(parent)),
         }
     )
-
-
-def require_subject_shape_invocation_parameters(
-    value: object,
-) -> Mapping[str, Any]:
-    """Validate the exact family grammar pending shared-module registration."""
-
-    if not isinstance(value, Mapping) or set(value) != _INVOCATION_FIELDS:
-        raise ValueError("subject-shape invocation parameter field set differs")
-    if (
-        value["source_schema_id"] != "analysis.subject_shape_runs"
-        or type(value["source_schema_version"]) is not int
-        or value["source_schema_version"] != 4
-        or value["source_profile_id"] != "analysis.subject_shape.full_anatomy_v4"
-    ):
-        raise ValueError("subject-shape invocation source schema differs")
-    for field in ("source_manifest_sha256", "source_refined_authority_sha256"):
-        digest = value[field]
-        if (
-            type(digest) is not str
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise ValueError(f"subject-shape invocation {field} is invalid")
-    refined = value["source_refined_subject_masks_run"]
-    if type(refined) is not str or not refined or "/" in refined or "\\" in refined:
-        raise ValueError("subject-shape invocation refined run is invalid")
-    if value["source_staging_mode"] != "archive_snapshot_copy_v1":
-        raise ValueError("subject-shape invocation source staging mode differs")
-    if value["storage_profile_id"] != SUBJECT_SHAPE_EXECUTION_PROFILE_ID:
-        raise ValueError("subject-shape invocation storage profile differs")
-    for field in (
-        "block_rows",
-        "output_shard_rows",
-        "num_workers",
-        "shard_copy_workers",
-        "native_threads",
-    ):
-        if type(value[field]) is not int or value[field] <= 0:
-            raise ValueError(f"subject-shape invocation {field} is invalid")
-    if value["execution_backend"] not in {"serial_driver", "dask_worker_chunks"}:
-        raise ValueError("subject-shape invocation execution backend differs")
-    if value["scheduler"] not in {
-        "single-threaded",
-        "threads",
-        "processes",
-        "distributed",
-    }:
-        raise ValueError("subject-shape invocation scheduler differs")
-    if value["copy_backend"] not in {"python", "rsync"}:
-        raise ValueError("subject-shape invocation copy backend differs")
-    for field in ("keep_scratch", "check_capacity"):
-        if type(value[field]) is not bool:
-            raise TypeError(f"subject-shape invocation {field} must be exact bool")
-    return value
 
 
 def _source_preflight(
@@ -380,7 +304,7 @@ def execute_subject_shape_candidate(
         SUBJECT_SHAPE_EXECUTION_FAMILY_ID,
         payload["benchmark_suite"],
     )
-    parameters = require_subject_shape_invocation_parameters(invocation["parameters"])
+    parameters = invocation["parameters"]
     archive = Path(payload["archive_path"])
     source_path = str(payload["source_run_path"])
     candidate_path = str(payload["candidate_run_path"])
@@ -844,7 +768,6 @@ __all__ = [
     "SubjectShapeCandidateExecutionFailed",
     "execute_subject_shape_candidate",
     "require_subject_shape_execution_attempt",
-    "require_subject_shape_invocation_parameters",
     "run_subject_shape_candidate_fresh_process",
     "subject_shape_selector_snapshot_sha256",
 ]

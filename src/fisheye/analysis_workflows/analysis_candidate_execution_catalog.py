@@ -291,6 +291,50 @@ def _implemented_chaser_distance() -> AnalysisCandidateExecutionAdapter:
     )
 
 
+def _implemented_tail_kinematics() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="tail_kinematics",
+        invocation_contract=CandidateInvocationContract.TAIL_KINEMATICS_V1,
+        computation_mode=CandidateComputationMode.SCIENTIFIC_COMPUTE,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.CANONICAL_PRODUCER,
+        coordinate_contract_status=(
+            CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED
+        ),
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.TAIL_KINEMATICS_DECLARED_ARRAYS_V1
+        ),
+        runner_module="fisheye.diagnostics.tail_kinematics_candidate_execution",
+        runner_entrypoint="execute_tail_kinematics_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.tail_kinematics_candidate_execution"
+        ),
+        suite_validator_entrypoint="require_tail_kinematics_execution_suite",
+    )
+
+
+def _implemented_subject_shape() -> AnalysisCandidateExecutionAdapter:
+    return AnalysisCandidateExecutionAdapter(
+        stage_id="subject_shape",
+        invocation_contract=CandidateInvocationContract.SUBJECT_SHAPE_V1,
+        computation_mode=CandidateComputationMode.SCIENTIFIC_COMPUTE,
+        runner_status=CandidateRunnerStatus.IMPLEMENTED,
+        coordinate_role=CoordinateContractRole.CANONICAL_PRODUCER,
+        coordinate_contract_status=(
+            CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED
+        ),
+        logical_equality_contract=(
+            CandidateLogicalEqualityContract.SUBJECT_SHAPE_V4_ARRAYS_V1
+        ),
+        runner_module="fisheye.diagnostics.subject_shape_candidate_execution",
+        runner_entrypoint="execute_subject_shape_candidate",
+        suite_validator_module=(
+            "fisheye.analysis_workflows.subject_shape_candidate_execution"
+        ),
+        suite_validator_entrypoint="require_subject_shape_execution_suite",
+    )
+
+
 def _coordinate_blocked(
     stage_id: str,
     logical_equality_contract: CandidateLogicalEqualityContract,
@@ -336,22 +380,8 @@ ANALYSIS_CANDIDATE_EXECUTION_ADAPTERS: tuple[AnalysisCandidateExecutionAdapter, 
     ),
     _implemented_eye_angles(),
     _implemented_stimulus_epochs(),
-    _contract_only(
-        "subject_shape",
-        CandidateInvocationContract.SUBJECT_SHAPE_V1,
-        CandidateComputationMode.SCIENTIFIC_COMPUTE,
-        CoordinateContractRole.CANONICAL_PRODUCER,
-        CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED,
-        CandidateLogicalEqualityContract.SUBJECT_SHAPE_V4_ARRAYS_V1,
-    ),
-    _contract_only(
-        "tail_kinematics",
-        CandidateInvocationContract.TAIL_KINEMATICS_V1,
-        CandidateComputationMode.SCIENTIFIC_COMPUTE,
-        CoordinateContractRole.CANONICAL_PRODUCER,
-        CoordinateContractStatus.CANONICAL_PUBLICATION_IMPLEMENTED,
-        CandidateLogicalEqualityContract.TAIL_KINEMATICS_DECLARED_ARRAYS_V1,
-    ),
+    _implemented_subject_shape(),
+    _implemented_tail_kinematics(),
     _contract_only(
         "stimulus_response",
         CandidateInvocationContract.STIMULUS_RESPONSE_V1,

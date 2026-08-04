@@ -125,8 +125,8 @@ true.
 | Surface | Current contract position | Main remaining work |
 | --- | --- | --- |
 | Track kinematics | Exact 69-array per-track core, closed 35-array physical bundle, run identities, legacy exclusions, materializer, and registry contract; the v2 candidate flattens the two structured lineage records into five exact primitive arrays while retaining float64 position authority. A hardened fresh-process v1-source/v2-candidate matrix exercises the complete no-physical logical surface through the public v1 reader and an explicit diagnostic-only v2 adapter, with live workload replay and hard nonpromotion | Run representative short/full matrices with physical-I/O tracing and real consumers; benchmark the optional 35-array physical bundle separately before any writer/profile promotion |
-| Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, producer-sealed source binding, lineage, atomic publication, strict reload, serialized registry projection, an explicit selector-ineligible byte-planned candidate, and a hardened fresh-process source/candidate read matrix preserving every dtype, fill, decoded payload, and installed transform | Run representative publication, physical-I/O, Palette-consumer, and Crimson-consumer gates before any profile promotion |
-| Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
+| Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, producer-sealed source binding, lineage, atomic publication, strict reload, serialized registry projection, an explicit selector-ineligible byte-planned candidate, a hardened source/candidate read matrix, and a real fresh-process typed execution gate that recomputes from its bound refined-mask authority and emits one immutable receipt or failed attempt | Run representative publication, physical-I/O, Palette-consumer, and Crimson-consumer gates before any profile promotion |
+| Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, an explicit selector-ineligible byte-planned candidate, and a real fresh-process typed execution gate that binds both source coordinate manifests and preserves the complete optional revision bundle atomically | Run full-duration producer/reader benchmarks before profile promotion; replace the pathological two-row-chunk 20,000-row regression fixture with a bounded representation of the same invariant |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an atomic selector-ineligible byte-planned candidate with exact failure-visibility repair. Its hardened fresh-process source/candidate read matrix now binds all logical-input roles to exact nested authorities, validates all 41 arrays and physical declarations, and leaves the private candidate adapter explicitly non-authoritative | Run the five-repetition full-duration matrix, add physical-I/O tracing if required, and gate real Palette/Crimson consumers before profile promotion |
 | Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, an immutable selector-ineligible byte-planned candidate publisher, and the first shared fresh-process candidate runner with live track-coordinate and frame-axis resolution | Run representative short/full publication and real-consumer gates with external physical-I/O tracing before profile promotion |
 | Bout kinematics | Exact compact-v7 manifest, authoritative selection, serialized registry projection, an immutable selector-ineligible byte-planned candidate publisher, and a shared fresh-process candidate runner that resolves both its immutable swim-bout source and their common live track-coordinate authority | Run representative short/full publication and real-consumer gates with external physical-I/O tracing before profile promotion |
@@ -275,7 +275,7 @@ worktree is evidence to reconcile, not a safe base for new work.
 
 | Lane | Worktree / branch | Base commit | Owned implementation surface | Integration rule |
 | --- | --- | --- | --- | --- |
-| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `bf23020c` plus this checklist reconciliation | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
+| Coordination | repository root / `agent/palette/derived-analytics-storage-contracts-20260803` | through `4fe0cd19` plus the current shared subject/tail activation checkpoint | Shared catalogs, checklist, cross-family tests, reviewed cherry-picks | Serial owner; never rebased onto an unreviewed lane |
 | Surface classification | `/tmp/palette-analytics-surface-classification-20260803` / `agent/palette/analytics-surface-classification-20260803` | `4923757f` | Closed classification catalog and its focused tests | Integrated as `a2668075` and `f178e315`; it classifies rather than promotes |
 | Eye-angle exact schema | `/tmp/palette-eye-v7-clean-20260803` / `agent/palette/eye-v7-clean-20260803` | `dd4c0f74` | Reusable analytics array declaration, exact 41-array eye-angle schema, deep writer/reader/readiness validation, and explicit v2-v6 compatibility boundaries | Reviewed as ready, committed as `3025d66e`, and integrated as `c1976300` |
 | Eye-angle byte candidate | historical isolated lane | `28f0132c` through `ac6b8bc3` | Exact 41-array planner/factory candidate and semantic fills | Integrated; remains explicit and selector-ineligible |
@@ -309,7 +309,9 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Eighth and ninth exact Arrow export schemas | `/tmp/palette-group-statistics-arrow-contract-20260803` / `agent/palette/group-statistics-arrow-contract-20260803` | integrated as `f7d02e9e` from reviewed checkpoint `3a4ac29b` | Exact ordered 45-field inferential and 30-field descriptive group-statistics schemas, closed metric-unit/effect-size/CI semantics, deterministic result identities, schema-bearing zero-row generations, strict viewer validation, and explicit read-only inferred-v2 compatibility | Independently reviewed ACCEPT; 158 tests passed with 5 expected compatibility xfails; production publication evidence remains separate |
 | Eye-angle compact-v7 source/candidate read matrix | `/tmp/palette-eye-angle-v7-read-benchmark-20260803` / `agent/palette/eye-angle-v7-read-benchmark-20260803` | integrated and hardened through `35995e23`; cataloged by `9c771842` | Complete 41-array decoded equality, executable schema/storage replay, exact publication and nested materialization bindings, logical-input role identities, fresh processes, archive guards, and hard nonpromotion | Independently re-reviewed ACCEPT; full-duration execution, physical-I/O tracing, public candidate API decision, real consumers, and promotion remain pending |
 | Track-kinematics v1/v2 source/candidate read matrix | `/tmp/palette-track-kinematics-v2-read-benchmark-20260803` / `agent/palette/track-kinematics-v2-read-benchmark-20260803` | integrated as `c56b3103`; cataloged by `bf23020c` | Complete no-physical logical projection, public v1 source reader, diagnostic-only v2 adapter, exact backend/verification policy, live selector/receipt/workload replay, fresh processes, and hard nonpromotion | Independently re-reviewed ACCEPT; representative execution, physical-I/O tracing, maintained v2 consumer decision, and the optional 35-array physical bundle remain pending |
-| Shared candidate execution contract | coordination lane | integrated as `71d13675` | Closed 13-family typed adapter catalog; family-specific decoded-equality IDs; live family-suite validation; node-local and benchmark-namespace requests; collision-resistant protected-state snapshots; parent-observed fresh-process identity; exact coordinate evidence; complete-only 11-phase receipts; atomic acceptance/tombstoning; and hard selector/registry/profile/canonical nonmutation. Swim bouts and bout kinematics are the first two implemented adapters | Independently re-reviewed ACCEPT after all eight reported blockers were closed; the other eleven families remain contract-only or explicitly blocked until a dedicated typed runner is implemented and reviewed |
+| Shared candidate execution contract | coordination lane | integrated as `71d13675` | Closed 13-family typed adapter catalog; family-specific decoded-equality IDs; live family-suite validation; node-local and benchmark-namespace requests; collision-resistant protected-state snapshots; parent-observed fresh-process identity; exact coordinate evidence; complete-only 11-phase receipts; atomic acceptance/tombstoning; and hard selector/registry/profile/canonical nonmutation. Eight adapters now have dedicated typed runners | Independently re-reviewed ACCEPT after all eight originally reported blockers were closed; the five remaining families stay contract-only or explicitly blocked until dedicated typed runners are implemented and reviewed |
+| Subject-shape typed execution | `/tmp/palette-subject-shape-typed-runner-20260803` / `agent/palette/subject-shape-typed-runner-20260803` | family checkpoint `271aceec`, integrated as `4fe0cd19`; shared activation in the current coordination checkpoint | Exact current-v4 suite replay, refined-mask and coordinate-authority binding, node-local archive staging, eleven measured phases, atomic ineligible acceptance, direct/consolidated equivalence, exact decoded equality, owned tombstoning, and parent-owned fresh-process receipt/attempt publication | Family-local tests and the integrated success/failure fresh-process gate pass; representative physical-I/O tracing and real consumers remain pending |
+| Tail-kinematics typed execution | `/tmp/palette-tail-kinematics-typed-runner-20260803` / `agent/palette/tail-kinematics-typed-runner-20260803` | family checkpoint `30dc30cc`, integrated as `a8a03e5a`; shared activation in the current coordination checkpoint | Exact 21-array core plus atomic optional revision bundle, both source coordinate-manifest bindings, node-local scientific compute, eleven measured phases, atomic ineligible acceptance, direct/consolidated equivalence, decoded equality, owned tombstoning, and parent-owned fresh-process receipt/attempt publication | Integrated 47-test gate passes; the intentionally unrealistic 20,000-row/two-row-chunk stress fixture remains deferred, while representative physical-I/O tracing and real consumers remain pending |
 
 The next safe parallel wave assigns disjoint consumer/benchmark ownership as
 follows. The coordination lane remains the only owner of shared catalogs,
@@ -872,7 +874,8 @@ Recommended benchmark and promotion-review order:
       `fbbce911`. Request, receipt, and failed-attempt envelopes are now honest
       v2 contracts: each rejects legacy v1 and numeric schema-version aliases.
       The frozen parameter grammars now cover exact-tabular, eye-angle,
-      track-flat, stimulus-epoch, and sealed chaser-distance-base execution.
+      track-flat, stimulus-epoch, sealed chaser-distance-base, subject-shape,
+      and tail-kinematics execution.
       Implemented adapters cannot select a contract that still lacks an exact
       parameter grammar, and the exact-tabular child/CLI
       no longer accepts unsigned copy-backend or scratch-retention flags.
@@ -946,7 +949,26 @@ Recommended benchmark and promotion-review order:
           failures can be tombstoned without changing canonical selectors. The
           combined invocation, adapter-v2, materializer, suite, and real
           fresh-process gate passed 54 tests outside the sandbox.
-    - [ ] Implement the remaining seven typed family runners.
+    - [x] Subject shape now executes through the shared closed
+          `subject_shape_v1` invocation and implemented catalog adapter. The
+          request binds the exact v4 manifest, refined subject-mask authority,
+          compute topology, node-local archive-snapshot staging, and the
+          access-aware candidate profile. The fresh-process gate recomputes,
+          atomically publishes, compares direct/consolidated metadata and every
+          decoded array, leaves selectors and the production profile untouched,
+          and proves a wrong decoded identity emits only an immutable failed
+          attempt.
+    - [x] Tail kinematics now executes through the shared closed
+          `tail_kinematics_v1` invocation and implemented catalog adapter. It
+          binds the live tail and subject-shape coordinate manifests, sample
+          count, serial writer ownership, node-local source subset, all-or-none
+          source-revision mirror, and published HTTP profile. The integrated
+          real-Zarr gate exposed and fixed an order-sensitive nested-array
+          inventory comparison; exact closed membership remains enforced and
+          the complete fresh-process publication gate now passes.
+    - [ ] Implement the remaining five typed family runners: stimulus response,
+          detection occupancy, session occupancy, tail-posture view, and bout
+          classification.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,

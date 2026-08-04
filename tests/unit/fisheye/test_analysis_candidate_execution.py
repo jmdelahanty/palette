@@ -377,6 +377,8 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "eye_angles",
         "stimulus_epochs",
         "chaser_distance",
+        "tail_kinematics",
+        "subject_shape",
     }
 
     for stage in (
@@ -386,6 +388,8 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
         "eye_angles",
         "stimulus_epochs",
         "chaser_distance",
+        "tail_kinematics",
+        "subject_shape",
     ):
         adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[stage]
         assert adapter.resolves_candidate_owner() is True
@@ -396,13 +400,13 @@ def test_execution_adapter_catalog_is_exact_and_truthfully_blocked() -> None:
     with pytest.raises(ValueError, match="frozen invocation grammar"):
         replace(
             implemented,
-            invocation_contract=CandidateInvocationContract.SUBJECT_SHAPE_V1,
+            invocation_contract=CandidateInvocationContract.STIMULUS_RESPONSE_V1,
         )
 
 
 def test_contract_only_adapter_cannot_mint_execution_request() -> None:
     adapter = ANALYSIS_CANDIDATE_EXECUTION_ADAPTER_BY_STAGE[
-        "subject_shape"
+        "stimulus_response"
     ].as_manifest()
     with pytest.raises(ValueError, match="implemented typed adapter"):
         build_candidate_execution_request(

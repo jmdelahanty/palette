@@ -9,7 +9,9 @@ from fisheye.analysis_workflows.analysis_candidate_invocation import (
     build_chaser_distance_base_invocation,
     build_exact_tabular_invocation,
     build_eye_angle_invocation,
+    build_subject_shape_invocation,
     build_stimulus_epoch_invocation,
+    build_tail_kinematics_invocation,
     build_track_flat_invocation,
     require_candidate_invocation_manifest,
 )
@@ -139,6 +141,78 @@ def test_eye_angle_invocation_binds_sources_compute_and_transfer() -> None:
     wrong_fps["payload_digest"] = "0" * 64
     with pytest.raises(ValueError, match="strict JSON|payload digest"):
         require_candidate_invocation_manifest(wrong_fps)
+
+
+def test_subject_shape_invocation_binds_authority_compute_and_transfer() -> None:
+    invocation = build_subject_shape_invocation(
+        source_manifest_sha256="a" * 64,
+        source_refined_subject_masks_run="refined_masks_001",
+        source_refined_authority_sha256="b" * 64,
+        storage_profile_id="subject_shape_access_aware_candidate_v1",
+        block_rows=16_384,
+        output_shard_rows=131_072,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_copy_workers=1,
+        native_threads=1,
+        copy_backend="python",
+        keep_scratch=False,
+        check_capacity=True,
+    )
+    require_candidate_invocation_manifest(
+        invocation,
+        expected_contract=CandidateInvocationContract.SUBJECT_SHAPE_V1,
+        expected_profile_id="subject_shape_access_aware_candidate_v1",
+    )
+
+    descendant = deepcopy(invocation)
+    descendant["payload"]["parameters"][
+        "source_refined_subject_masks_run"
+    ] = "refined_subject_masks_runs/run"
+    _rehash(descendant)
+    with pytest.raises(ValueError, match="run name"):
+        require_candidate_invocation_manifest(descendant)
+
+    bool_rows = deepcopy(invocation)
+    bool_rows["payload"]["parameters"]["block_rows"] = True
+    _rehash(bool_rows)
+    with pytest.raises(ValueError, match="block_rows"):
+        require_candidate_invocation_manifest(bool_rows)
+
+
+def test_tail_kinematics_invocation_binds_authorities_and_serial_compute() -> None:
+    invocation = build_tail_kinematics_invocation(
+        source_subject_shape_run="shape_001",
+        source_tail_coordinate_manifest_sha256="a" * 64,
+        source_subject_shape_manifest_sha256="b" * 64,
+        tail_angle_sample_count=10,
+        block_rows=8_192,
+        output_shard_rows=131_072,
+        storage_profile_id="published_http_v1",
+        copy_backend="python",
+        keep_scratch=False,
+        check_capacity=True,
+    )
+    require_candidate_invocation_manifest(
+        invocation,
+        expected_contract=CandidateInvocationContract.TAIL_KINEMATICS_V1,
+        expected_profile_id="published_http_v1",
+    )
+
+    changed_workers = deepcopy(invocation)
+    changed_workers["payload"]["parameters"]["num_workers"] = 2
+    _rehash(changed_workers)
+    with pytest.raises(ValueError, match="num_workers"):
+        require_candidate_invocation_manifest(changed_workers)
+
+    changed_revision_bundle = deepcopy(invocation)
+    changed_revision_bundle["payload"]["parameters"][
+        "source_revision_bundle_mode"
+    ] = "independent_arrays"
+    _rehash(changed_revision_bundle)
+    with pytest.raises(ValueError, match="source_revision_bundle_mode"):
+        require_candidate_invocation_manifest(changed_revision_bundle)
 
 
 def test_stimulus_epoch_invocation_binds_migration_and_staged_source() -> None:
