@@ -830,8 +830,9 @@ Recommended benchmark and promotion-review order:
           manifest-selected immutable Parquet part, and performs full decoded
           validation. It remains opt-in pending short/full benchmarks.
     - [ ] activity/spatial summaries. The exact 70-field logical/Arrow schema
-          and geometry boundary are frozen; the multi-track swim-bout binding,
-          bounded aggregator, validator, and publisher remain to implement;
+          and geometry boundary are frozen. The fail-closed per-track
+          swim-bout-run binder and global-bin aggregator are implemented;
+          bounded source reads, validator, and publisher remain;
     - [x] eye traces. The v1 publisher reads exact bounded compact-v7 frame
           intervals, produces one immutable manifest-selected Parquet part,
           validates complete decoded payload hashes, and remains non-default.

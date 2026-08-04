@@ -2,15 +2,16 @@
 
 Date: 2026-08-04
 
-Status: exact logical and Arrow schema frozen; bounded publisher and promotion
-evidence remain unimplemented. This decision activates no workflow default,
-selector, registry authority, Zarr physical profile, or canonical-data change.
+Status: exact logical/Arrow schema, per-track bout-source binder, and pure bin
+aggregator implemented; bounded publisher and promotion evidence remain
+unimplemented. This decision activates no workflow default, selector, registry
+authority, Zarr physical profile, or canonical-data change.
 
 ## Decision
 
 `activity_spatial_time_bins` is an immutable portable Parquet query product.
 The recording-local scientific authorities remain one explicit completed track
-motion run and one explicit completed swim-bout run.
+motion run and an explicit completed swim-bout run for every exported track.
 
 The workflow currently binds track motion and bouts, but it does not bind an
 arena or experimental-area geometry authority. Consequently v1 reports
@@ -33,10 +34,13 @@ acquisition-frame-aligned time bin. The exact key is:
  time_bin_index)
 ```
 
-Rows sort by track ID and then time-bin index. A multi-track track-motion run
-requires the swim-bout run to provide exactly one selected default candidate
-and signal for every track. Within-frame ordinals, implicit track zero, and a
-single bout candidate silently reused across tracks are forbidden.
+Rows sort by track ID and then time-bin index. The maintained compact swim-bout
+schema currently owns one track per run: its candidate/signal indexes do not
+carry track identity, while the run and bout rows do. A multi-track export must
+therefore receive an exact `track_id -> swim_bout_run` mapping. Each run must
+provide one selected default candidate and signal for its declared track.
+Within-frame ordinals, implicit track zero, and one run silently reused across
+tracks are forbidden.
 
 ## Global Binning
 
@@ -86,10 +90,11 @@ The publisher must fail closed unless it can prove and recheck:
 
 - the exact completed, selector-eligible track-motion manifest/commit and
   physical-mm position authority;
-- the exact completed, selector-eligible swim-bout array manifest;
+- each exact completed, selector-eligible swim-bout array manifest;
 - exact track-run, track-ID, frame-axis, candidate, signal, and speed-level
   lineage between the two sources;
-- one default bout candidate/signal per exported track; and
+- one explicitly mapped run and one default bout candidate/signal per exported
+  track; and
 - unchanged source manifests, completion state, and selection snapshots before
   the manifest-exclusive export becomes visible.
 
@@ -114,6 +119,7 @@ position moments as arena occupancy.
 
 ## Implementation Surface
 
+- `src/fisheye/analytics_exports/activity_spatial_time_bins.py`
 - `src/fisheye/analytics_exports/contracts.py`
 - `src/fisheye/analytics_exports/arrow_contracts.py`
 - `src/fisheye/analytics_exports/capabilities.py`
@@ -121,9 +127,19 @@ position moments as arena occupancy.
 
 ## Remaining Gates
 
-- Implement the exact multi-track swim-bout binding and bounded aggregator.
-- Add manifest-exclusive publication, full decoded validation, tampering, and
+- Add bounded source-window reads, manifest-exclusive publication, full
+  decoded validation, tampering, and
   interrupted-replacement recovery tests.
 - Wire the workflow/LSF node-local execution boundary.
 - Benchmark short and full-duration writer/read/copy/validation/publication
   behavior before considering default activation.
+
+## Validation Evidence
+
+The source binder requires an exact run map, maintained schema/manifest,
+completion and eligibility, track-motion manifest equality, canonical frame
+axis, one default candidate/signal, and selected event-content digest. The pure
+aggregator covers global bin rounding, empty internal gaps, clipped edge
+denominators, start-assigned bout metrics, and interval-union occupancy. The
+focused Arrow/source-binder/aggregation/workflow matrix passed 214 tests; Ruff,
+Python compilation, and `git diff --check` passed.
