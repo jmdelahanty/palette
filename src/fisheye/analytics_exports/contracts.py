@@ -24,6 +24,7 @@ POSITION_OCCUPANCY_HISTOGRAM_TABLE = "position_occupancy_histogram_2d"
 BASELINE_BEHAVIOR_SUMMARY_TABLE = "baseline_behavior_summary"
 BASELINE_BEHAVIOR_TIME_BINS_TABLE = "baseline_behavior_time_bins"
 BASELINE_KINEMATIC_SAMPLES_TABLE = "baseline_kinematic_samples"
+KINEMATICS_SAMPLES_TABLE = "kinematics_samples"
 EYE_TRACE_SAMPLES_TABLE = "eye_trace_samples"
 
 CHASER_SPATIAL_TABLE = "chaser_epoch_spatial_occupancy_zones"
@@ -288,6 +289,66 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
             "source_sample_rate_hz": "Hz",
             "nominal_sample_rate_hz": "Hz",
             "effective_sample_rate_hz": "Hz",
+        },
+    ),
+    KINEMATICS_SAMPLES_TABLE: _contract(
+        KINEMATICS_SAMPLES_TABLE,
+        "recording_x_track_kinematics_run_x_track_x_sampled_acquisition_frame",
+        (
+            "recording_id",
+            "source_track_kinematics_scope",
+            "source_track_kinematics_run",
+            "track_id",
+            "source_acquisition_frame_index",
+        ),
+        (
+            "source_track_kinematics_path",
+            "source_track_motion_manifest_sha256",
+            "source_binding_sha256",
+            "projection_contract_sha256",
+            "source_speed_level",
+            "source_sample_rate_hz",
+            "requested_sample_rate_hz",
+            "sampling_stride_frames",
+            "nominal_sample_rate_hz",
+            "sampling_policy",
+            "position_coordinate_space",
+            "position_coordinate_descriptor_sha256",
+            "physical_authority_sha256",
+            "track_sample_index",
+            "time_seconds",
+            "source_row_index",
+            "source_instance_key_valid",
+            "source_instance_key",
+            "detection_source",
+            "position_x_mm",
+            "position_y_mm",
+            "speed_mm_s",
+            "frame_path_distance_mm",
+            "motion_heading_degrees",
+            "smoothed_motion_heading_degrees",
+            "smoothed_angular_velocity_deg_s",
+            "source_observed",
+            "sample_observed",
+            "position_finite",
+            "heading_usable",
+            "sample_valid",
+            "transition_valid",
+            "sample_reason_code",
+            "transition_reason_code",
+        ),
+        {
+            "source_sample_rate_hz": "Hz",
+            "requested_sample_rate_hz": "Hz",
+            "nominal_sample_rate_hz": "Hz",
+            "time_seconds": "s",
+            "position_x_mm": "mm",
+            "position_y_mm": "mm",
+            "speed_mm_s": "mm/s",
+            "frame_path_distance_mm": "mm",
+            "motion_heading_degrees": "deg",
+            "smoothed_motion_heading_degrees": "deg",
+            "smoothed_angular_velocity_deg_s": "deg/s",
         },
     ),
     EYE_TRACE_SAMPLES_TABLE: _contract(
@@ -571,6 +632,11 @@ BASELINE_TABLES = (
 # the compact summary tables and must bind one exact recording-local authority.
 TRACE_TABLES = (EYE_TRACE_SAMPLES_TABLE,)
 
+# Portable sample exports use dedicated bounded readers and must never be
+# routed through the generic compact-table exporter.
+PORTABLE_SAMPLE_TABLES = (KINEMATICS_SAMPLES_TABLE,)
+DEDICATED_STREAMING_TABLES = TRACE_TABLES + PORTABLE_SAMPLE_TABLES
+
 CHASER_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     CHASER_SPATIAL_TABLE,
@@ -593,7 +659,13 @@ CHASER_TABLES = (
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
 )
 
-ALL_TABLES = DEFAULT_TABLES + BASELINE_TABLES + CHASER_TABLES + TRACE_TABLES
+ALL_TABLES = (
+    DEFAULT_TABLES
+    + BASELINE_TABLES
+    + CHASER_TABLES
+    + TRACE_TABLES
+    + PORTABLE_SAMPLE_TABLES
+)
 
 
 def contract_snapshot(table_names: Sequence[str]) -> dict[str, dict[str, Any]]:

@@ -329,6 +329,16 @@ def validate_export_payload(
         except (ValueError, OSError, KeyError, TypeError) as exc:
             errors.append(f"eye_trace_samples: {exc}")
 
+    if "kinematics_samples" in tables:
+        try:
+            from .kinematics_samples import (
+                validate_kinematics_samples_export_payload,
+            )
+
+            validate_kinematics_samples_export_payload(root, payload)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            errors.append(f"kinematics_samples: {exc}")
+
     if errors:
         raise ExportValidationError(
             f"Analytics export {run_id!r} failed validation:\n- " + "\n- ".join(errors)

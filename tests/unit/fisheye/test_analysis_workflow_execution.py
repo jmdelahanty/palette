@@ -353,7 +353,7 @@ def test_visualization_refuses_independent_output_run_override(tmp_path: Path) -
         )
 
 
-def test_execution_refuses_export_target_without_materializer(tmp_path: Path) -> None:
+def _kinematics_samples_execution_plan(tmp_path: Path):
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_keypoints": _status(
@@ -368,13 +368,84 @@ def test_execution_refuses_export_target_without_materializer(tmp_path: Path) ->
         availability,
         targets=("kinematics_samples",),
     )
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        execution_id="kinematics_export_01",
+        num_workers=2,
+        export_run_overrides={"kinematics_samples": "kinematics_query_v1"},
+        export_root=tmp_path / "exports",
+        scratch_root=tmp_path / "node_scratch",
+        python_executable="python",
+    )
+    return workflow, execution
 
-    with pytest.raises(WorkflowExecutionError, match="adapter that is not implemented"):
+
+def test_execution_renders_exact_kinematics_samples_export_boundary(
+    tmp_path: Path,
+) -> None:
+    _workflow, execution = _kinematics_samples_execution_plan(tmp_path)
+
+    assert execution.output_runs == {}
+    assert execution.export_runs == {
+        "kinematics_samples": "kinematics_query_v1"
+    }
+    assert len(execution.commands) == 1
+    command = execution.commands[0]
+    assert command.node_id == "kinematics_samples"
+    assert command.node_kind == "export"
+    assert command.stage_id is None
+    assert command.output_kind == "parquet_export"
+    assert command.output_root == str((tmp_path / "exports").resolve())
+    assert command.dependency_runs == {"track_kinematics": "track_a"}
+    assert command.argv == (
+        "python",
+        "-m",
+        "fisheye.utils.export_kinematics_samples",
+        str((tmp_path / "recording_analysis.zarr").resolve()),
+        "--track-kinematics-run",
+        "track_a",
+        "--track-scope",
+        "offline",
+        "--sample-rate-hz",
+        "10",
+        "--output-root",
+        str((tmp_path / "exports").resolve()),
+        "--export-run-id",
+        "kinematics_query_v1",
+        "--scratch-root",
+        str((tmp_path / "node_scratch").resolve()),
+        "--source-window-rows",
+        "131072",
+        "--row-group-rows",
+        "65536",
+        "--json",
+    )
+
+
+def test_kinematics_samples_execution_requires_export_and_scratch_roots(
+    tmp_path: Path,
+) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    plan = plan_analysis_workflow(
+        workflow,
+        {
+            "track_kinematics": _status(
+                "track_kinematics",
+                available=True,
+                run_name="track_a",
+            )
+        },
+        targets=("kinematics_samples",),
+    )
+
+    with pytest.raises(WorkflowExecutionError, match="explicit export_root"):
         build_workflow_execution_plan(
             workflow,
             plan,
-            zarr_path=tmp_path,
-            execution_id="run_a",
+            zarr_path=tmp_path / "recording_analysis.zarr",
+            execution_id="missing_roots",
             num_workers=1,
             python_executable="python",
         )

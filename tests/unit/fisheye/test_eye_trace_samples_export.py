@@ -14,7 +14,10 @@ from fisheye.analytics_exports.arrow_contracts import (
     ARROW_TABLE_CONTRACTS,
     exact_arrow_schema,
 )
-from fisheye.analytics_exports.contracts import EYE_TRACE_SAMPLES_TABLE
+from fisheye.analytics_exports.contracts import (
+    EYE_TRACE_SAMPLES_TABLE,
+    KINEMATICS_SAMPLES_TABLE,
+)
 from fisheye.analytics_exports.eye_trace_samples import (
     EYE_TRACE_ANGLE_CHANNELS,
     EYE_TRACE_QA_CHANNELS,
@@ -153,9 +156,13 @@ def test_eye_trace_projection_is_closed_and_digest_bound() -> None:
     )
 
 
-def test_compact_exporter_rejects_framewise_trace_table() -> None:
-    with pytest.raises(ValueError, match="bounded streaming exporter"):
-        _parse_tables((EYE_TRACE_SAMPLES_TABLE,))
+@pytest.mark.parametrize(
+    "table_name",
+    (EYE_TRACE_SAMPLES_TABLE, KINEMATICS_SAMPLES_TABLE),
+)
+def test_compact_exporter_rejects_dedicated_streaming_table(table_name: str) -> None:
+    with pytest.raises(ValueError, match="Dedicated streaming table"):
+        _parse_tables((table_name,))
 
 
 def test_exact_eye_angle_row_reader_uses_half_open_frame_bounds(

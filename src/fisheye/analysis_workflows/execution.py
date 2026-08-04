@@ -8,6 +8,7 @@ those side effects and verifies each completed run before advancing.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
 from types import MappingProxyType
@@ -482,6 +483,62 @@ def _eye_trace_export_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _kinematics_samples_export_command(
+    context: StageCommandContext,
+) -> tuple[str, ...]:
+    if context.export_root is None or context.scratch_root is None:
+        raise WorkflowExecutionError(
+            "kinematics-sample export requires explicit export and node-local "
+            "scratch roots"
+        )
+    policy = context.node.temporal_policy
+    if (
+        set(policy) != {"resolution", "sample_rate_hz", "source_authority"}
+        or policy.get("resolution") != "sampled"
+        or policy.get("source_authority") != "framewise_zarr"
+    ):
+        raise WorkflowExecutionError(
+            "kinematics-sample export requires the exact sampled framewise-Zarr "
+            "temporal policy"
+        )
+    sample_rate = policy.get("sample_rate_hz")
+    if (
+        isinstance(sample_rate, bool)
+        or not isinstance(sample_rate, (int, float))
+        or not math.isfinite(float(sample_rate))
+        or float(sample_rate) <= 0
+    ):
+        raise WorkflowExecutionError(
+            "kinematics-sample export requires a positive finite sample rate"
+        )
+    command = _module_command(
+        context,
+        "fisheye.utils.export_kinematics_samples",
+    )
+    command.extend(
+        (
+            "--track-kinematics-run",
+            context.dependency_run("track_kinematics"),
+            "--track-scope",
+            "offline",
+            "--sample-rate-hz",
+            format(float(sample_rate), ".17g"),
+            "--output-root",
+            str(context.export_root),
+            "--export-run-id",
+            context.output_run,
+            "--scratch-root",
+            str(context.scratch_root),
+            "--source-window-rows",
+            "131072",
+            "--row-group-rows",
+            "65536",
+            "--json",
+        )
+    )
+    return tuple(command)
+
+
 STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "track_kinematics": _track_kinematics_command,
@@ -499,6 +556,7 @@ STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
 
 EXPORT_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
+        "kinematics_samples": _kinematics_samples_export_command,
         "eye_traces": _eye_trace_export_command,
     }
 )

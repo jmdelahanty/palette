@@ -52,13 +52,13 @@ from fisheye.analytics_exports.contracts import (
     CHASER_SPATIAL_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
     DEFAULT_TABLES,
+    DEDICATED_STREAMING_TABLES,
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     STIMULUS_RESPONSE_TABLE,
     SWIM_BOUT_METRICS_TABLE,
     TABLE_CONTRACTS,
-    TRACE_TABLES,
     canonicalize_export_row,
     contract_snapshot,
     validate_table_columns,
@@ -128,10 +128,13 @@ from fisheye.utils.virtual_collection_manifest import load_manifest, verify_mani
 from fisheye.shared.zarr_io import open_zarr_root
 
 
-# Full-duration framewise trace products use dedicated bounded streaming
-# exporters.  The compact cross-recording exporter must not accept them and
-# silently construct an empty generation through its row-accumulating path.
-AVAILABLE_TABLES = tuple(table for table in ALL_TABLES if table not in TRACE_TABLES)
+# Full-duration traces and portable sample products use dedicated bounded
+# streaming exporters. The compact cross-recording exporter must not accept
+# them and silently construct an empty generation through its row-accumulating
+# path.
+AVAILABLE_TABLES = tuple(
+    table for table in ALL_TABLES if table not in DEDICATED_STREAMING_TABLES
+)
 
 # The recording-Zarr extraction functions predate the protocol-neutral V2
 # Parquet contract. These names are internal source adapters only; callers and
@@ -5550,11 +5553,12 @@ def _parse_tables(value: str | Sequence[str] | None) -> tuple[str, ...]:
         for item in value:
             raw.extend(part.strip() for part in str(item).split(","))
     tables = tuple(item for item in raw if item)
-    trace_tables = sorted(set(tables) & set(TRACE_TABLES))
-    if trace_tables:
+    streaming_tables = sorted(set(tables) & set(DEDICATED_STREAMING_TABLES))
+    if streaming_tables:
         raise ValueError(
-            "Framewise trace table(s) require their bounded streaming exporter: "
-            + ", ".join(trace_tables)
+            "Dedicated streaming table(s) require their bounded source-specific "
+            "exporter: "
+            + ", ".join(streaming_tables)
         )
     unknown = sorted(set(tables) - set(AVAILABLE_TABLES))
     if unknown:

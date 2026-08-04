@@ -125,8 +125,8 @@ done
 [[ -z "$SCRATCH_ROOT" || "$SCRATCH_ROOT" == /* ]] || \
   fail "--scratch-root must be an absolute node-local path"
 for target in "${TARGETS[@]}"; do
-  if [[ "$target" == "eye_traces" && -z "$EXPORT_ROOT" ]]; then
-    fail "the eye_traces target requires --export-root"
+  if [[ ( "$target" == "eye_traces" || "$target" == "kinematics_samples" ) && -z "$EXPORT_ROOT" ]]; then
+    fail "the $target target requires --export-root"
   fi
 done
 [[ -f "$ZARR_PATH/zarr.json" ]] || fail "analysis Zarr metadata not found: $ZARR_PATH"

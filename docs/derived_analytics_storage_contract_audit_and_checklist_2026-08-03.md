@@ -12,10 +12,12 @@ have explicit unpromoted physical candidates. No production profile,
 scientific selector, registry authority, or canonical data changed by these
 checkpoints.
 
-The 2026-08-04 coordination checkpoint adds the first exact framewise query
-product: a bounded, source-manifest-bound `eye_trace_samples` Parquet exporter.
-It remains non-default and selector/registry-ineligible; its declared workflow
-node is not yet wired to execution.
+The 2026-08-04 coordination checkpoints add two exact query products:
+bounded, source-manifest-bound `eye_trace_samples` and generic multi-track
+`kinematics_samples` Parquet exporters. Both remain non-default and
+selector/registry-ineligible. Their declared workflow nodes now execute only
+through dedicated source-specific streaming publishers and explicit node-local
+scratch.
 
 Benchmark coverage is now separately executable rather than inferred from
 candidate presence. All thirteen families have an executable source/candidate
@@ -146,8 +148,8 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes 13 exact schemas across writing, staging, and manifest-selected reads. The new non-default `eye_trace_samples` table preserves compact-v7 float32/bool/uint16 semantics through bounded row-group streaming, exact source-manifest binding, and full decoded-payload validation | Freeze the canonical envelope's remaining 16 inferred chaser tables plus baseline-strategy's four inferred outputs and training-response's three inferred outputs only after producer semantics and nullability are resolved; benchmark the eye-trace publisher before workflow adoption |
-| Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces; the eye-trace node now has an exact non-default contract and publisher | Wire the eye-trace execution adapter; implement sampled-kinematic, activity/spatial-summary, and tail-trace contracts and publishers |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes 14 exact schemas across writing, staging, and manifest-selected reads. The non-default eye and generic multi-track kinematic sample tables preserve source dtypes through bounded streaming, exact source-manifest binding, and full decoded-payload validation | Freeze the canonical envelope's remaining 16 inferred chaser tables plus baseline-strategy's four inferred outputs and training-response's three inferred outputs only after producer semantics and nullability are resolved; benchmark both new streaming publishers before adoption |
+| Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces; eye traces and sampled kinematics now have exact non-default contracts, publishers, execution adapters, and node-local scratch boundaries | Implement activity/spatial-summary and tail-trace contracts and publishers |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
 ## Evidence And Known Disagreements
@@ -444,6 +446,19 @@ now implemented on the coordination branch:
   in runtime sidecars. The remaining export nodes still fail closed; no default
   profile or authority was activated. The combined executor, DAG, registry,
   LSF-wrapper, and eye-export matrix passed 67 tests.
+- generic `kinematics_samples` as a distinct portable table rather than an
+  alias of the chaser-specific `baseline_kinematic_samples`: the exact
+  45-field Arrow contract preserves multi-track identity, physical-mm
+  positions, source float32 motion values, validity/reason codes, and nullable
+  source-instance lineage. The dedicated publisher validates the closed
+  track-motion manifest/commit and selected live declarations, streams bounded
+  first-axis windows, samples on the global acquisition-frame grid, rechecks
+  the source binding after extraction, hashes the full decoded projection, and
+  publishes one immutable manifest-selected part. Its workflow adapter and LSF
+  boundary remain opt-in and keep node-local scratch separate from publication.
+  The final focused export/publication/workflow/registry matrix passed 307
+  tests, including multi-track identity, unsampled source-byte tampering,
+  nested/constant-column tampering, and failed replacement recovery.
 
 The integrated lifecycle/publication regression matrix passed 359 tests with 14
 expected legacy compatibility xfails. A later independent adversarial review
@@ -640,8 +655,12 @@ a v3 storage-candidate regression.
           explicit compact-v7 source projection preserves float32 trace/time,
           bool QA, uint16 reason, and int64 camera-frame identity without dtype
           inference or Arrow null substitution.
+    - [x] Freeze the exact ordered 45-field `kinematics_samples` schema. It is
+          a generic multi-track acquisition-frame projection with exact
+          physical-mm, motion-heading, validity, reason, and source-instance
+          lineage types; it is not the chaser-specific 71-field baseline table.
     - [ ] Replace inferred schemas only after producer semantics and nullability
-          are frozen. The canonical envelope currently has 13 exact and 16
+          are frozen. The canonical envelope currently has 14 exact and 16
           inferred tables; the remaining inferred tables are the chaser
           exports. Both group-statistics tables use exact schemas. Baseline strategy
           consumes exact canonical baseline inputs but still writes four
@@ -798,7 +817,12 @@ Recommended benchmark and promotion-review order:
       classification. Workflow-profile adoption remains a separate policy
       choice; registering a command builder does not activate either stage.
 - [ ] Implement exact contracts and publishers for:
-    - [ ] sampled kinematic exports;
+    - [x] sampled kinematic exports. The v1 publisher binds one explicit
+          completed/eligible physical track-motion publication, validates the
+          exact selected surface declarations, streams all tracks in bounded
+          windows, samples on the global acquisition-frame grid, publishes one
+          manifest-selected immutable Parquet part, and performs full decoded
+          validation. It remains opt-in pending short/full benchmarks.
     - [ ] activity/spatial summaries;
     - [x] eye traces. The v1 publisher reads exact bounded compact-v7 frame
           intervals, produces one immutable manifest-selected Parquet part,
@@ -811,9 +835,14 @@ Recommended benchmark and promotion-review order:
       cross-recording Parquet query products.
     - [x] `eye_trace_samples` is explicitly a query projection; its compact-v7
           Zarr source remains the only recording-local scientific authority.
+    - [x] `kinematics_samples` is explicitly a query projection; its selected
+          track-motion Zarr run remains the scientific and rollback authority.
 - [ ] Bind each export to exact selected recording-local manifests.
     - [x] `eye_trace_samples` binds and rechecks the explicit completed/eligible
           compact-v7 run and all required semantic manifest digests.
+    - [x] `kinematics_samples` binds and rechecks the explicit completed/eligible
+          full-motion manifest, publication commit, physical authority, ordered
+          tracks, and exact selected surface declarations.
 
 ### Phase 9 — Benchmark and promote one family at a time
 
@@ -1212,8 +1241,9 @@ gates pass:
 
 Continue workflow-output closure without promoting defaults:
 
-1. freeze the generic sampled-kinematic table independently of the existing
-   chaser-specific baseline sample representation;
+1. benchmark the newly implemented generic sampled-kinematic writer, bounded
+   reads, scratch copy, validation, and manifest-selected consumer at
+   representative short and full duration;
 2. freeze activity/spatial-summary semantics and decide the cross-recording
    tail-trace representation before implementing those publishers;
 3. benchmark the eye-trace writer, bounded reads, scratch copy, validation,

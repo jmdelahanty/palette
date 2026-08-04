@@ -20,6 +20,7 @@ from .contracts import (
     BOUT_KINEMATICS_METRICS_TABLE,
     DESCRIPTIVE_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
+    KINEMATICS_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
     STATISTICS_TABLE,
@@ -47,6 +48,7 @@ EXACT_ARROW_SCHEMA_TABLES = (
     BASELINE_KINEMATIC_SAMPLES_TABLE,
     STATISTICS_TABLE,
     DESCRIPTIVE_TABLE,
+    KINEMATICS_SAMPLES_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
 )
 
@@ -1059,6 +1061,59 @@ _BASELINE_KINEMATIC_SAMPLES_FIELDS = (
 )
 
 
+# One row per acquisition-frame-aligned sample of one track. Source scientific
+# representations remain exact: float32 motion values, float64 physical
+# positions, integer lineage/QC codes, and explicit booleans. Invalid float
+# values remain IEEE NaN and are interpreted through the validity columns.
+_KINEMATICS_SAMPLES_FIELDS = (
+    _field("export_schema_version", "int32"),
+    _field("table_name", "string"),
+    _field("recording_id", "string"),
+    _field("zarr_path", "string"),
+    _field("source_lineage_hash", "string"),
+    _field("source_track_kinematics_scope", "string"),
+    _field("source_track_kinematics_run", "string"),
+    _field("source_track_kinematics_path", "string"),
+    _field("source_track_motion_manifest_schema_id", "string"),
+    _field("source_track_motion_manifest_schema_version", "int64"),
+    _field("source_track_motion_manifest_sha256", "string"),
+    _field("source_binding_sha256", "string"),
+    _field("projection_contract_sha256", "string"),
+    _field("source_speed_level", "string"),
+    _field("source_sample_rate_hz", "float64"),
+    _field("requested_sample_rate_hz", "float64"),
+    _field("sampling_stride_frames", "int64"),
+    _field("nominal_sample_rate_hz", "float64"),
+    _field("sampling_policy", "string"),
+    _field("position_coordinate_space", "string"),
+    _field("position_coordinate_descriptor_sha256", "string"),
+    _field("physical_authority_sha256", "string"),
+    _field("track_id", "int64"),
+    _field("track_sample_index", "int64"),
+    _field("source_acquisition_frame_index", "int64"),
+    _field("time_seconds", "float32"),
+    _field("source_row_index", "int64"),
+    _field("source_instance_key_valid", "bool"),
+    _field("source_instance_key", "uint64"),
+    _field("detection_source", "int8"),
+    _field("position_x_mm", "float64"),
+    _field("position_y_mm", "float64"),
+    _field("speed_mm_s", "float32"),
+    _field("frame_path_distance_mm", "float32"),
+    _field("motion_heading_degrees", "float32"),
+    _field("smoothed_motion_heading_degrees", "float32"),
+    _field("smoothed_angular_velocity_deg_s", "float32"),
+    _field("source_observed", "bool"),
+    _field("sample_observed", "bool"),
+    _field("position_finite", "bool"),
+    _field("heading_usable", "bool"),
+    _field("sample_valid", "bool"),
+    _field("transition_valid", "bool"),
+    _field("sample_reason_code", "int16"),
+    _field("transition_reason_code", "int16"),
+)
+
+
 # One row per camera frame from the exact compact-v7 frame axis.  Floating
 # values deliberately remain float32 so the query product preserves the
 # recording-local authority's decoded representation instead of silently
@@ -1233,6 +1288,10 @@ ARROW_TABLE_CONTRACTS: dict[str, ArrowTableContract] = {
         table_name=BASELINE_KINEMATIC_SAMPLES_TABLE,
         fields=_BASELINE_KINEMATIC_SAMPLES_FIELDS,
     ),
+    KINEMATICS_SAMPLES_TABLE: ArrowTableContract(
+        table_name=KINEMATICS_SAMPLES_TABLE,
+        fields=_KINEMATICS_SAMPLES_FIELDS,
+    ),
     STATISTICS_TABLE: ArrowTableContract(
         table_name=STATISTICS_TABLE,
         fields=_GROUP_STATISTICS_FIELDS,
@@ -1313,11 +1372,14 @@ def _arrow_type(type_id: str) -> Any:
         "bool": pa.bool_(),
         "float32": pa.float32(),
         "float64": pa.float64(),
+        "int8": pa.int8(),
+        "int16": pa.int16(),
         "int32": pa.int32(),
         "int64": pa.int64(),
         "list<string>": pa.list_(pa.string()),
         "string": pa.string(),
         "uint16": pa.uint16(),
+        "uint64": pa.uint64(),
     }
     try:
         return types[type_id]

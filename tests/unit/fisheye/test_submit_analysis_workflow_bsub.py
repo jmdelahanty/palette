@@ -6,6 +6,8 @@ import shlex
 import subprocess
 import sys
 
+import pytest
+
 SCRIPT = (
     Path(__file__).resolve().parents[3] / "scripts" / "submit_analysis_workflow_bsub.sh"
 )
@@ -378,8 +380,10 @@ def test_submit_analysis_workflow_forwards_eye_trace_export_to_node_local_scratc
     assert expected_scratch.is_dir()
 
 
-def test_submit_analysis_workflow_rejects_eye_trace_without_export_root(
+@pytest.mark.parametrize("target", ("eye_traces", "kinematics_samples"))
+def test_submit_analysis_workflow_rejects_export_target_without_export_root(
     tmp_path: Path,
+    target: str,
 ) -> None:
     palette_repo = tmp_path / "palette-checkout"
     _build_clean_palette_checkout(palette_repo)
@@ -396,7 +400,7 @@ def test_submit_analysis_workflow_rejects_eye_trace_without_export_root(
             "--execution-id",
             "missing_export_root",
             "--target",
-            "eye_traces",
+            target,
             "--palette-repo",
             str(palette_repo),
         ],
@@ -406,4 +410,4 @@ def test_submit_analysis_workflow_rejects_eye_trace_without_export_root(
     )
 
     assert result.returncode == 2
-    assert "the eye_traces target requires --export-root" in result.stderr
+    assert f"the {target} target requires --export-root" in result.stderr

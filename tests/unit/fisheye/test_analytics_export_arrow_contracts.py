@@ -28,6 +28,7 @@ from fisheye.analytics_exports.contracts import (
     DESCRIPTIVE_TABLE,
     EYE_TRACE_SAMPLES_TABLE,
     EXPORT_SCHEMA_VERSION,
+    KINEMATICS_SAMPLES_TABLE,
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     RECORDING_SUMMARY_TABLE,
     STATISTICS_TABLE,
@@ -367,6 +368,7 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         BASELINE_KINEMATIC_SAMPLES_TABLE,
         STATISTICS_TABLE,
         DESCRIPTIVE_TABLE,
+        KINEMATICS_SAMPLES_TABLE,
         EYE_TRACE_SAMPLES_TABLE,
     )
     fields = ARROW_TABLE_CONTRACTS[RECORDING_SUMMARY_TABLE].fields
@@ -414,6 +416,69 @@ def test_recording_summary_contract_freezes_exact_field_order_and_nullability() 
         "stimulus_step_count",
     }
     assert next(field for field in fields if field.name == "derived_protocol_hash").nullable
+
+
+def test_generic_kinematics_samples_contract_freezes_exact_multi_track_schema() -> None:
+    fields = ARROW_TABLE_CONTRACTS[KINEMATICS_SAMPLES_TABLE].fields
+    assert tuple(
+        (field.name, field.arrow_type, field.nullable) for field in fields
+    ) == (
+        ("export_schema_version", "int32", False),
+        ("table_name", "string", False),
+        ("recording_id", "string", False),
+        ("zarr_path", "string", False),
+        ("source_lineage_hash", "string", False),
+        ("source_track_kinematics_scope", "string", False),
+        ("source_track_kinematics_run", "string", False),
+        ("source_track_kinematics_path", "string", False),
+        ("source_track_motion_manifest_schema_id", "string", False),
+        ("source_track_motion_manifest_schema_version", "int64", False),
+        ("source_track_motion_manifest_sha256", "string", False),
+        ("source_binding_sha256", "string", False),
+        ("projection_contract_sha256", "string", False),
+        ("source_speed_level", "string", False),
+        ("source_sample_rate_hz", "float64", False),
+        ("requested_sample_rate_hz", "float64", False),
+        ("sampling_stride_frames", "int64", False),
+        ("nominal_sample_rate_hz", "float64", False),
+        ("sampling_policy", "string", False),
+        ("position_coordinate_space", "string", False),
+        ("position_coordinate_descriptor_sha256", "string", False),
+        ("physical_authority_sha256", "string", False),
+        ("track_id", "int64", False),
+        ("track_sample_index", "int64", False),
+        ("source_acquisition_frame_index", "int64", False),
+        ("time_seconds", "float32", False),
+        ("source_row_index", "int64", False),
+        ("source_instance_key_valid", "bool", False),
+        ("source_instance_key", "uint64", False),
+        ("detection_source", "int8", False),
+        ("position_x_mm", "float64", False),
+        ("position_y_mm", "float64", False),
+        ("speed_mm_s", "float32", False),
+        ("frame_path_distance_mm", "float32", False),
+        ("motion_heading_degrees", "float32", False),
+        ("smoothed_motion_heading_degrees", "float32", False),
+        ("smoothed_angular_velocity_deg_s", "float32", False),
+        ("source_observed", "bool", False),
+        ("sample_observed", "bool", False),
+        ("position_finite", "bool", False),
+        ("heading_usable", "bool", False),
+        ("sample_valid", "bool", False),
+        ("transition_valid", "bool", False),
+        ("sample_reason_code", "int16", False),
+        ("transition_reason_code", "int16", False),
+    )
+    assert TABLE_CONTRACTS[KINEMATICS_SAMPLES_TABLE].primary_key == (
+        "recording_id",
+        "source_track_kinematics_scope",
+        "source_track_kinematics_run",
+        "track_id",
+        "source_acquisition_frame_index",
+    )
+    field_names = {field.name for field in fields}
+    assert "baseline_window_id" not in field_names
+    assert "chaser_distance_run" not in field_names
 
 
 def test_group_statistics_contract_freezes_all_45_fields_in_order() -> None:
@@ -979,6 +1044,7 @@ def test_baseline_samples_contract_freezes_all_71_fields_in_order() -> None:
         BASELINE_KINEMATIC_SAMPLES_TABLE,
         STATISTICS_TABLE,
         DESCRIPTIVE_TABLE,
+        KINEMATICS_SAMPLES_TABLE,
     ),
 )
 @pytest.mark.parametrize(
