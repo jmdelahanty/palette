@@ -104,4 +104,5 @@ Arrow table version is 1 because this is their first exact physical schema.
       legacy opt-in, exact-first selection, and adversarial read evidence are
       covered by the focused suite.
 - [x] The reviewed lane is committed as an isolated checkpoint.
-- [ ] The checkpoint is serialized into the integration branch.
+- [x] The independently reviewed checkpoint was serialized into the integration
+      branch as `f7d02e9e` without production publication or selection changes.

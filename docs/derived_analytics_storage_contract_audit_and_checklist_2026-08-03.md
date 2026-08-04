@@ -128,8 +128,8 @@ true.
 | Subject shape | Exact v4 full-anatomy component/relation/row-index inventory, producer-sealed source binding, lineage, atomic publication, strict reload, serialized registry projection, an explicit selector-ineligible byte-planned candidate, and a hardened fresh-process source/candidate read matrix preserving every dtype, fill, decoded payload, and installed transform | Run representative publication, physical-I/O, Palette-consumer, and Crimson-consumer gates before any profile promotion |
 | Tail kinematics | Exact 21-array core plus an all-or-none two-array revision bundle, coordinate/lineage semantics, atomic publication, registry projection, and an explicit selector-ineligible byte-planned candidate | Run full-duration producer/reader benchmarks before profile promotion |
 | Eye angles | Exact 41-array compact-v7 schema, deep manifests, strict maintained readers, registry projection, and an atomic selector-ineligible byte-planned candidate with exact failure-visibility repair. Its hardened fresh-process source/candidate read matrix now binds all logical-input roles to exact nested authorities, validates all 41 arrays and physical declarations, and leaves the private candidate adapter explicitly non-authoritative | Run the five-repetition full-duration matrix, add physical-I/O tracing if required, and gate real Palette/Crimson consumers before profile promotion |
-| Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
-| Bout kinematics | Exact compact-v7 manifest, authoritative selection, serialized registry projection, and an immutable selector-ineligible byte-planned candidate publisher | Benchmark publication and the real consumer before profile promotion |
+| Swim bouts | Exact compact-v8 whole-run array manifest, authoritative selection, serialized registry projection, an immutable selector-ineligible byte-planned candidate publisher, and the first shared fresh-process candidate runner with live track-coordinate and frame-axis resolution | Run representative short/full publication and real-consumer gates with external physical-I/O tracing before profile promotion |
+| Bout kinematics | Exact compact-v7 manifest, authoritative selection, serialized registry projection, an immutable selector-ineligible byte-planned candidate publisher, and a shared fresh-process candidate runner that resolves both its immutable swim-bout source and their common live track-coordinate authority | Run representative short/full publication and real-consumer gates with external physical-I/O tracing before profile promotion |
 | Stimulus response | Exact opt-in compact-v3 schema and selector-ineligible shared-planner/factory candidate with closed bundles, semantic fills, pinned codecs, immutable atomic publication, and direct/consolidated validation; legacy v2 remains the default compatibility path | Benchmark the v3 candidate through real producers/consumers before any default change |
 | Body frame | Exact ten-array schema, byte planner, strict manifest, and consolidated publication | Move from selector-ineligible companion evidence to an explicitly governed production lifecycle when authorized |
 | Keypoint quality | Exact diagnostic schema, byte planner, strict manifest, and consolidated publication | Add explicit production lifecycle/registry policy when authorized |
@@ -141,7 +141,7 @@ true.
 | Detection/session occupancy | Separate epoch-aligned and full-session authorities have closed 30-array and 29-array manifests, exact dtypes/axes/units/roles, central stage/catalog/registry ownership, and selector-ineligible shared-planner rematerialization | Benchmark both families before any production-profile promotion |
 | Chaser-distance base | Central current v1 logical/production contract plus an exact 30-array sealed-base v2 physical candidate, source-authority binding, byte-planned rematerialization, atomic selector-ineligible publication, decoded hashes, and persisted direct/consolidated metadata equivalence | Run representative short/full writer, publication, and consumer benchmarks before any profile promotion |
 | Chaser components | Protocol-neutral schemas, payload-bound manifests, all ten maintained writers routed through node-local sealed immutable publication, exact runner receipts, and exact self-digested handles propagated through maintained chained consumers and batch orchestration | Benchmark the component consumers and complete consolidated recovery coverage; keep them embedded rather than inventing top-level run families |
-| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes seven unique exact schemas across writing, staging, and manifest-selected reads: position occupancy, recording summary, stimulus steps, per-fish stimulus-step summary, and the three baseline tables | Freeze the canonical envelope's remaining 23 inferred tables, baseline-strategy's four inferred outputs, and training-response's three inferred outputs only after producer semantics and nullability are resolved |
+| Cross-recording Parquet exports | Versioned table/manifest contracts with immutable, manifest-exclusive atomic generations; a closed digest-bound Arrow envelope now freezes nine unique exact schemas across writing, staging, and manifest-selected reads: position occupancy, recording summary, stimulus steps, per-fish stimulus-step summary, the three baseline tables, and both group-statistics tables | Freeze the canonical envelope's remaining 21 inferred tables, baseline-strategy's four inferred outputs, and training-response's three inferred outputs only after producer semantics and nullability are resolved |
 | Core workflow exports | Declared planning nodes for sampled kinematics, summaries, eye traces, and tail traces | Implement adapters and exact export contracts |
 | Legacy/in-place outputs | `speed_runs`, swim-bout statistics, and stimulus/chaser mutation paths remain | Classify as legacy/maintenance or migrate; do not leave them implicitly current |
 
@@ -306,9 +306,10 @@ worktree is evidence to reconcile, not a safe base for new work.
 | Subject-shape v4 source/candidate read matrix | `/tmp/palette-subject-shape-v4-read-benchmark-20260803` / `agent/palette/subject-shape-v4-read-benchmark-20260803` | integrated as `fa37a16f` | Exact transformed/untransformed logical equality, executable candidate plan and metadata replay, distinct PID/role/order binding, componentwise path containment, rotated fresh processes, and hard nonpromotion | Independently re-reviewed ACCEPT after four blocker fixes; representative execution, physical-I/O tracing, real consumers, and promotion remain pending |
 | Sixth exact Arrow export schema | `/tmp/palette-stimulus-steps-arrow-contract-20260803` / `agent/palette/stimulus-steps-arrow-contract-20260803` | integrated as `f53c0d7a` | Exact ordered 60-field stimulus-step schema, closed maintained moving/concentric child vocabularies, null/unit/interval semantics, strict writer/footer/selected-reader validation, and dynamic-column rejection | Independently reviewed ACCEPT; source selection authority and representative query evidence remain separate |
 | Seventh exact Arrow export schema | `/tmp/palette-stimulus-step-summary-arrow-contract-20260803` / `agent/palette/stimulus-step-summary-arrow-contract-20260803` | integrated as `93e81b12` | Exact ordered 38-field per-fish stimulus-step summary, corrected `(recording_id, fish_id, step_index)` key, real two-fish coverage, optional bout bundle, and strict writer/footer/selected-reader validation | Independently reviewed ACCEPT; value-level global key scanning and representative query evidence remain separate |
+| Eighth and ninth exact Arrow export schemas | `/tmp/palette-group-statistics-arrow-contract-20260803` / `agent/palette/group-statistics-arrow-contract-20260803` | integrated as `f7d02e9e` from reviewed checkpoint `3a4ac29b` | Exact ordered 45-field inferential and 30-field descriptive group-statistics schemas, closed metric-unit/effect-size/CI semantics, deterministic result identities, schema-bearing zero-row generations, strict viewer validation, and explicit read-only inferred-v2 compatibility | Independently reviewed ACCEPT; 158 tests passed with 5 expected compatibility xfails; production publication evidence remains separate |
 | Eye-angle compact-v7 source/candidate read matrix | `/tmp/palette-eye-angle-v7-read-benchmark-20260803` / `agent/palette/eye-angle-v7-read-benchmark-20260803` | integrated and hardened through `35995e23`; cataloged by `9c771842` | Complete 41-array decoded equality, executable schema/storage replay, exact publication and nested materialization bindings, logical-input role identities, fresh processes, archive guards, and hard nonpromotion | Independently re-reviewed ACCEPT; full-duration execution, physical-I/O tracing, public candidate API decision, real consumers, and promotion remain pending |
 | Track-kinematics v1/v2 source/candidate read matrix | `/tmp/palette-track-kinematics-v2-read-benchmark-20260803` / `agent/palette/track-kinematics-v2-read-benchmark-20260803` | integrated as `c56b3103`; cataloged by `bf23020c` | Complete no-physical logical projection, public v1 source reader, diagnostic-only v2 adapter, exact backend/verification policy, live selector/receipt/workload replay, fresh processes, and hard nonpromotion | Independently re-reviewed ACCEPT; representative execution, physical-I/O tracing, maintained v2 consumer decision, and the optional 35-array physical bundle remain pending |
-| Shared candidate execution contract | coordination lane | integrated in this checkpoint | Closed 13-family typed adapter catalog; family-specific decoded-equality IDs; live family-suite validation; node-local and benchmark-namespace requests; externally anchored pre-state and request digests; exact coordinate evidence; complete-only 11-phase receipts; true filesystem/network transfer classification; and hard selector/registry/profile/canonical nonmutation | Independently reviewed ACCEPT; every family remains contract-only or explicitly blocked until a dedicated typed runner is separately implemented and reviewed |
+| Shared candidate execution contract | coordination lane | integrated as `71d13675` | Closed 13-family typed adapter catalog; family-specific decoded-equality IDs; live family-suite validation; node-local and benchmark-namespace requests; collision-resistant protected-state snapshots; parent-observed fresh-process identity; exact coordinate evidence; complete-only 11-phase receipts; atomic acceptance/tombstoning; and hard selector/registry/profile/canonical nonmutation. Swim bouts and bout kinematics are the first two implemented adapters | Independently re-reviewed ACCEPT after all eight reported blockers were closed; the other eleven families remain contract-only or explicitly blocked until a dedicated typed runner is implemented and reviewed |
 
 The next safe parallel wave assigns disjoint consumer/benchmark ownership as
 follows. The coordination lane remains the only owner of shared catalogs,
@@ -597,11 +598,12 @@ a v3 storage-candidate regression.
     - [x] Freeze the exact ordered 38-field `stimulus_step_summary` schema and
           correct its grain/key to recording × fish × stimulus step.
     - [ ] Replace inferred schemas only after producer semantics and nullability
-          are frozen. The canonical envelope currently has seven exact and 23
-          inferred tables: three core analytics, 18 chaser tables, and two
-          group-statistics tables. Baseline strategy consumes exact canonical
-          baseline inputs but still writes four separately inferred output
-          tables; training response likewise has three inferred output tables.
+          are frozen. The canonical envelope currently has nine exact and 21
+          inferred tables: three core analytics and 18 chaser tables. Both
+          group-statistics tables now use exact schemas. Baseline strategy
+          consumes exact canonical baseline inputs but still writes four
+          separately inferred output tables; training response likewise has
+          three inferred output tables.
 - [x] Add recomputed-digest tampering and unexpected-field tests for the eye,
       bout-classification, and tail-posture manifests completed so far.
 - [ ] Add equivalent adversarial coverage for every remaining new manifest.
@@ -842,18 +844,34 @@ Recommended benchmark and promotion-review order:
       physical-I/O, Palette/Crimson consumer, representative-scale, and
       promotion fields false and unbound.
 - [x] Freeze the shared writer/publication execution request and successful
-      receipt contract without authorizing a writer. All thirteen adapters
-      bind a family-specific equality projection and coordinate role; requests
-      require the live registered adapter, exact candidate profile, exact live
-      family-suite projection, a recognized node-local scratch root, immutable
-      production pre-state digests, and a benchmark-only nonmutation policy.
+      receipt contract without authorizing production selection. All thirteen
+      adapters bind a family-specific equality projection and coordinate role;
+      requests require the live registered adapter, exact candidate profile,
+      exact live family-suite projection, a recognized node-local scratch root,
+      immutable production pre-state probes, and a benchmark-only nonmutation
+      policy.
       Receipt v1 represents completed publications only, requires all eleven
       measured phases, externally anchors the request digest, distinguishes
       application counters from genuine filesystem/network transfer, and
-      rejects zero-byte or coordinate-minting claims. The 48-test focused
-      catalog/execution set and independent adversarial review passed. Failed
-      attempts require a separate runner-owned attempt record rather than a
-      dishonest partial success receipt.
+      rejects zero-byte or coordinate-minting claims. Failed attempts require a
+      separate runner-owned attempt record rather than a dishonest partial
+      success receipt.
+- [x] Implement the first shared typed runner for swim bouts and bout
+      kinematics as `71d13675`. It requires immediate immutable run children,
+      resolves the live public track-motion authority, resolves the swim-bout
+      frame axis, proves bout kinematics uses the same authority as its exact
+      swim-bout source, stages on node-local scratch, rematerializes through the
+      byte planner, and keeps all acceptance inside the atomic publication
+      boundary. The driver independently binds child PID/start identity and
+      collision-resistant registry/profile tree snapshots before exposing a
+      success receipt; malformed child evidence, protected-state changes, and
+      receipt-publication failures produce immutable attempt evidence and
+      tombstone the exact owned candidate. Independent re-review is ACCEPT.
+      The complete 67-test post-fix execution, runner, materializer, telemetry,
+      and atomic-publication suite passed.
+- [ ] Implement and independently review dedicated typed runners for the other
+      eleven catalog families. Do not infer executability from a contract-only
+      catalog entry.
 - [ ] Measure node-local compute, validation, consolidation, copy, and atomic
       publication separately.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
