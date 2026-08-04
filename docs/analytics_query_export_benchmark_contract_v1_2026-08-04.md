@@ -120,29 +120,24 @@ remain false.
 
 ## Full-Duration Source Preflight
 
-The existing Sleepyfish archive does not yet contain an authority that can
-feed these exact query exporters without a benchmark-only compatibility or
-scientific rematerialization:
+The existing Sleepyfish archive does not yet contain eye and tail authorities
+that can feed all four exact query exporters without scientific
+rematerialization:
 
 - selected eye angles are compact v5; the query contract requires compact v7;
-- selected tail kinematics are v1; the query contract requires v2;
-- all inspected full-duration track authorities store `positions_mm` as
-  `float32[N,2]`, while the frozen maintained track and kinematics-query
-  contracts require `float64[N,2]`; and
-- activity/spatial export inherits that exact track-position requirement even
-  though its selected swim-bout v8 run correctly binds the older explicit
-  track-manifest digest.
+- selected tail kinematics are v1; the query contract requires v2.
 
 The real kinematics source binder rejected the newest sealed track authority
-at `positions_mm` before publication. This is the desired fail-closed outcome.
-The benchmark runner must not weaken the dtype, silently cast the live
-authority, or stamp the historical archive as current.
+at `positions_mm` before publication. That fail-closed result exposed a false
+new float64 declaration: the crop contract, writer, and all 12 inspected
+full-duration track authorities use float32. The maintained exact track and
+kinematics-query contracts now require float32 without casting. See
+`track_coordinate_precision_contract_correction_2026-08-04.md`.
 
-The next fixture step is therefore a copied, selector-isolated benchmark
-archive. Any lossless float32-to-float64 compatibility widening must be labeled
-as such and cannot serve as production-authority or profile-promotion evidence.
-Eye and tail require their maintained semantic rematerializers, not metadata
-stamping.
+Track and activity/spatial benchmarks must now use their real exact
+full-duration authorities. Eye and tail still require selector-isolated
+maintained semantic rematerialization, not metadata stamping. No benchmark may
+mutate or restamp the historical archive.
 
 ## Validation
 
@@ -150,4 +145,3 @@ Focused tests cover all four closed requests, recomputed-digest field-set
 tampering, benchmark-path isolation, the request CLI, deterministic multipart
 random/window/full-scan reads, exact source-metadata guard coverage, and
 fail-closed missing Parquet statistics. The current focused result is 10/10.
-

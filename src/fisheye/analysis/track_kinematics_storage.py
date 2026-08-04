@@ -493,8 +493,8 @@ def build_flat_candidate_manifest(
         },
         "source_run_path": source_run_path,
         "position_authority": {
-            "positions_px_dtype": "float64",
-            "positions_mm_dtype": "float64_or_absent_all_tracks",
+            "positions_px_dtype": "float32",
+            "positions_mm_dtype": "float32_or_absent_all_tracks",
             "narrowing_permitted": False,
         },
         "flat_lineage_paths": list(TRACK_KINEMATICS_FLAT_LINEAGE_PATHS),
@@ -653,8 +653,8 @@ def validate_flat_candidate(
             }
             or payload.get("position_authority")
             != {
-                "positions_px_dtype": "float64",
-                "positions_mm_dtype": "float64_or_absent_all_tracks",
+                "positions_px_dtype": "float32",
+                "positions_mm_dtype": "float32_or_absent_all_tracks",
                 "narrowing_permitted": False,
             }
             or not _is_canonical_source_run_path(payload.get("source_run_path"))

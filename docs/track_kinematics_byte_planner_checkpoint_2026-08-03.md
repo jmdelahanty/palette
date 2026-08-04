@@ -39,12 +39,12 @@ future planning input but do not claim adoption.
 
 ## Exact Dtypes And Fill Semantics
 
-- `positions_px` and `positions_mm` remain exact `float64[N,2]`. This preserves
-  the current source-coordinate authority and the maintained test requiring
-  dtype-preserving position publication. This checkpoint does not silently
-  narrow them to float32 merely because newer crop-v2 centers use float32.
+- `positions_px` and `positions_mm` are exact `float32[N,2]`. The original
+  2026-08-03 text incorrectly froze them as float64; the evidence and
+  pre-promotion correction are recorded in
+  `track_coordinate_precision_contract_correction_2026-08-04.md`.
 - Motion, heading, path-distance, speed, acceleration, and per-second payloads
-  are `float32`, except the position pair above.
+  are likewise `float32`.
 - `track_ids`, `track_arena_ids`, and `delta_frames` are `int32`.
 - Camera/source/frame/row/second indexes and `track_sample_key[N,2]` are
   `int64`.

@@ -381,8 +381,12 @@ def test_writer_preserves_float64_source_position_payload_exactly() -> None:
     np.testing.assert_array_equal(stored, source.coordinate_node[:])
 
 
-def _canonical_crop_position_surface(world):
-    detection = _published_detection(world)
+def _canonical_crop_position_surface(
+    world,
+    *,
+    dtype: np.dtype | type = np.float64,
+):
+    detection = _published_detection(world, dtype=dtype)
     nodes = _crop_copy(world, detection)
     crop = publish_crop_observation_geometry(
         *nodes,

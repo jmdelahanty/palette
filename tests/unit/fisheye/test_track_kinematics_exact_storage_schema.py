@@ -87,8 +87,8 @@ def test_exact_current_dtypes_shapes_access_and_fill_semantics() -> None:
         + TRACK_KINEMATICS_PHYSICAL_TRACK_DECLARATIONS
     )
 
-    assert all_track["positions_px"].dtype == np.dtype("float64")
-    assert all_track["positions_mm"].dtype == np.dtype("float64")
+    assert all_track["positions_px"].dtype == np.dtype("float32")
+    assert all_track["positions_mm"].dtype == np.dtype("float32")
     assert all_track["positions_px"].shape_template == ("n_track_samples", 2)
     assert all_track["positions_px"].coordinate_space == "source_camera_pixels"
     assert all_track["positions_px"].fill_semantics == "nan"

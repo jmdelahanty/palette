@@ -616,7 +616,17 @@ a v3 storage-candidate regression.
       roles, access classes, write modes, and semantic fills.
 - [x] Freeze track kinematics as an exact 69-array per-track core, closed
       35-array physical bundle, required/optional run identities, and explicit
-      legacy exclusions without weakening float64 coordinate authority.
+      legacy exclusions while preserving canonical float32 coordinate
+      authority. The pre-promotion correction of the false float64 declaration
+      is recorded in
+      `docs/track_coordinate_precision_contract_correction_2026-08-04.md`.
+- [x] Reconcile track-coordinate precision across the exact Zarr declarations,
+      flat-candidate manifest, generic kinematics Arrow projection, source
+      binder, fixtures, and docs. The unchanged full-duration Sleepyfish run
+      binds as `<f4` with digest
+      `f702a79bdc6a1f2c1cb36fd32eb187b33dccc6601bc190720298055cedeb9328`;
+      explicit legacy float64 sources fail the maintained binder, aggregate
+      statistics remain float64, and the expanded gate passes 387/387 tests.
 - [x] Resolve the derived-keypoint-metric ownership contradiction: the embedded
       `derived_metrics_schema` triangle surface is legacy v1 compatibility;
       maintained v2 diagnostics belong to versioned `keypoint_quality_runs`
@@ -778,7 +788,7 @@ Candidate-adoption checkpoints (these do not promote a profile):
       publishes atomically without pointer changes, and requires persisted
       direct/consolidated subtree equivalence.
 - [x] Track-kinematics candidate adoption. The selector-ineligible v2 layout
-      preserves float64 positions, writes all primitive arrays through the
+      preserves canonical float32 positions, writes all primitive arrays through the
       shared planner/factory, binds source and candidate logical hashes, proves
       full direct/consolidated subtree equivalence, and publishes atomically.
 - [x] Shared columnar adoption for swim bouts and bout kinematics. The new
@@ -1274,10 +1284,12 @@ Recommended benchmark and promotion-review order:
       records apparent/allocated bytes and object counts, and hashes selected
       source metadata before/after. Missing network-transfer telemetry remains
       explicitly null and `promotion_authorized` is always false. The real
-      full-duration preflight also caught the honest source-fixture blocker:
-      selected eye/tail are v5/v1 and full-duration `positions_mm` remains
-      float32 while the frozen exact track/query contract requires float64.
-      No live source was cast or restamped. See
+      full-duration preflight caught both genuine source-fixture blockers and
+      one new contract defect: selected eye/tail are v5/v1, while a false
+      float64 track/query declaration rejected the canonical float32 position
+      authority. The declaration was corrected without casting or restamping
+      any live source, and the unchanged selected full-duration track now
+      passes the exact binder. See
       `docs/analytics_query_export_benchmark_contract_v1_2026-08-04.md`.
 - [ ] Measure apparent/allocated bytes, object count, compressed transfer,
       latency distributions, throughput, CPU, and peak RSS.

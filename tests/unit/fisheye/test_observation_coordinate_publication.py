@@ -118,7 +118,13 @@ def _frame_evidence(world):
     )
 
 
-def _surface(world, *, frames=(0, 1), alter_center: bool = False):
+def _surface(
+    world,
+    *,
+    frames=(0, 1),
+    alter_center: bool = False,
+    dtype: np.dtype | type = np.float64,
+):
     token = world["archive_token"]
     evidence = _frame_evidence(world)
     rowset = FakeGroup(path="detect_runs/d1", archive_token=token)
@@ -134,7 +140,7 @@ def _surface(world, *, frames=(0, 1), alter_center: bool = False):
     )
     normalized_values = np.asarray(
         [[0.25, 0.50, 0.20, 0.25], [0.75, 0.25, 0.10, 0.20]],
-        dtype=np.float64,
+        dtype=dtype,
     )
     bbox_values, center_values = derive_detection_source_camera_geometry(
         normalized_values,
@@ -534,8 +540,8 @@ def test_detection_geometry_publication_rolls_back_baseexception(
     assert [dict(node.attrs) for node in nodes] == snapshots
 
 
-def _published_detection(world):
-    values = _surface(world)
+def _published_detection(world, *, dtype: np.dtype | type = np.float64):
+    values = _surface(world, dtype=dtype)
     evidence, rowset, key, source_frames, bbox_norm, bbox_img, centers = values
     published = publish_detection_observation_geometry(
         rowset,

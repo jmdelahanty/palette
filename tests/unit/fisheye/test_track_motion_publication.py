@@ -32,10 +32,14 @@ def _fresh_full_motion_run(
     headings_deg: np.ndarray | None = None,
     hysteresis_enabled: bool = False,
     source_rows: np.ndarray | None = None,
+    source_position_dtype: np.dtype | type = np.float64,
     _return_template_source: bool = False,
 ):
     world = _world(convention="continuous", archive_token=object())
-    source = _canonical_crop_position_surface(world)
+    source = _canonical_crop_position_surface(
+        world,
+        dtype=source_position_dtype,
+    )
     root = world["root"]
     source_heading_values = (
         np.zeros(2, dtype=np.float32)
@@ -380,13 +384,21 @@ def _seed_template_clone_memo(
         _seed_template_clone_memo(item, memo=memo, seen=seen)
 
 
-@lru_cache(maxsize=2)
-def _cached_motion_template(*, physical: bool) -> _FullMotionRunTemplate:
+@lru_cache(maxsize=4)
+def _cached_motion_template(
+    *,
+    physical: bool,
+    source_position_dtype: str = "float64",
+) -> _FullMotionRunTemplate:
     """Build each meaningful sealed template family at most once per worker."""
 
     monkeypatch = pytest.MonkeyPatch()
     try:
-        return _motion_run_template(monkeypatch, physical=physical)
+        return _motion_run_template(
+            monkeypatch,
+            physical=physical,
+            source_position_dtype=np.dtype(source_position_dtype),
+        )
     finally:
         monkeypatch.undo()
 
@@ -405,6 +417,20 @@ def _clone_physical_motion_run(
 ):
     return _clone_motion_run_template(
         _cached_motion_template(physical=True),
+        monkeypatch,
+    )
+
+
+def _clone_canonical_physical_motion_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Clone the maintained float32 physical-coordinate authority fixture."""
+
+    return _clone_motion_run_template(
+        _cached_motion_template(
+            physical=True,
+            source_position_dtype="float32",
+        ),
         monkeypatch,
     )
 

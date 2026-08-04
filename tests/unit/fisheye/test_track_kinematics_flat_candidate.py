@@ -192,7 +192,7 @@ def _build_source_archive(path: Path) -> None:
     consolidate_metadata_capture_expected_warnings(path)
 
 
-def test_flat_schema_is_versioned_primitive_and_preserves_float64_positions() -> None:
+def test_flat_schema_is_versioned_primitive_and_preserves_float32_positions() -> None:
     declarations = build_track_kinematics_flat_lineage_declarations(
         track_ids=(2, 7),
         include_physical=True,
@@ -226,8 +226,37 @@ def test_flat_schema_is_versioned_primitive_and_preserves_float64_positions() ->
         for declaration in declarations
         if declaration.path == "tracks/id_2/positions_px"
     )
-    assert position.contract.dtype.numpy_dtype == "float64"
+    assert position.contract.dtype.numpy_dtype == "float32"
     assert position.contract.shape_template == ("n_track_samples_id_2", 2)
+
+
+def test_flat_storage_planning_rejects_legacy_float64_position_source(
+    tmp_path: Path,
+) -> None:
+    source = zarr.open_group(
+        str(tmp_path / "legacy-source"),
+        mode="w",
+        zarr_format=3,
+        use_consolidated=False,
+    )
+    _populate_v1_run(source)
+    track = source["tracks/id_0"]
+    values = np.asarray(track["positions_px"][:], dtype=np.float64)
+    del track["positions_px"]
+    track.create_array(
+        "positions_px",
+        data=values,
+        chunks=values.shape,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="dtype mismatch; expected float32, got float64",
+    ):
+        build_flat_candidate_storage_receipt(
+            source,
+            profile=get_storage_profile("published_http_v1"),
+        )
 
 
 def test_flat_storage_rematerializes_exact_structured_fields_through_shared_factory(
@@ -270,7 +299,7 @@ def test_flat_storage_rematerializes_exact_structured_fields_through_shared_fact
     validation = validate_flat_candidate(candidate, source_group=source)
     assert validation["valid"], validation
     assert validation["array_count"] == len(declarations)
-    assert candidate["tracks/id_0/positions_px"].dtype == np.dtype("float64")
+    assert candidate["tracks/id_0/positions_px"].dtype == np.dtype("float32")
     assert candidate["tracks/id_0/source_frame_interpolation/right_weight"].dtype == (
         np.dtype("float64")
     )

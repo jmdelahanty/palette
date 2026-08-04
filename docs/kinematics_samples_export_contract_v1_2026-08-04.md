@@ -46,7 +46,8 @@ fields.
 
 Scientific representations preserve the maintained source contract:
 
-- physical positions are float64 millimetres;
+- physical positions are float32 millimetres, exactly projecting the
+  maintained source authority without export-only widening;
 - time, speed, distance, heading, and angular velocity are float32;
 - frame, source-row, track, and source-sample identities are int64;
 - nullable `instance_key` is uint64 plus a separate boolean validity field;
@@ -55,6 +56,8 @@ Scientific representations preserve the maintained source contract:
 
 The heading fields are explicitly motion headings. Body heading remains owned
 by the separate body-frame authority and is not silently duplicated here.
+Scientific consumers may upcast positions to float64 for calculations;
+aggregate activity/spatial statistics remain float64 outputs.
 
 ## Sampling
 

@@ -5,9 +5,12 @@ not promoted and not used by the production writer or selectors.
 
 ## Decision
 
-The maintained track-kinematics v1 authority remains unchanged. In particular,
-`positions_px` and the optional all-or-none `positions_mm` peer remain exact
-`float64[N,2]` arrays. The candidate does not narrow them to float32.
+The maintained canonical track-kinematics position authority is exact
+`float32[N,2]` for `positions_px` and the optional all-or-none `positions_mm`
+peer. The original 2026-08-03 text incorrectly declared float64; the
+pre-promotion correction and compatibility boundary are recorded in
+`track_coordinate_precision_contract_correction_2026-08-04.md`. The candidate
+does not cast or widen the source coordinates.
 
 The two v1 NumPy structured lineage arrays are not suitable as a future public
 cross-language Zarr contract. Zarr Python warns that both structured Zarr-v3
@@ -104,7 +107,7 @@ benchmark decision rather than an unrecorded CLI constant.
 
 ## Implementation Checklist
 
-- [x] Preserve exact float64 position authority.
+- [x] Preserve exact canonical float32 position authority.
 - [x] Replace both structured records with five exact primitive arrays in v2.
 - [x] Retain explicit v1 read/reconstruction compatibility.
 - [x] Freeze a closed run-wide primitive array declaration inventory.

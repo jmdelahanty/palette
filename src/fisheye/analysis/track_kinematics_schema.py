@@ -372,7 +372,7 @@ _INT64_PATHS = frozenset(
 _INT16_PATHS = frozenset({"sample_reason_code", "transition_reason_code"})
 _INT8_PATHS = frozenset({"detection_source"})
 _INT32_PATHS = frozenset({"delta_frames"})
-_FLOAT64_PATHS = frozenset({"positions_px", "positions_mm"})
+_FLOAT32_POSITION_PATHS = frozenset({"positions_px", "positions_mm"})
 
 _LINEAGE_PATHS = frozenset(
     {
@@ -464,8 +464,10 @@ def _dtype_for_path(path: str) -> np.dtype[Any]:
         return np.dtype("int16")
     if path in _INT8_PATHS:
         return np.dtype("int8")
-    if path in _FLOAT64_PATHS or path in _FLAT_FLOAT64_PATHS:
+    if path in _FLAT_FLOAT64_PATHS:
         return np.dtype("float64")
+    if path in _FLOAT32_POSITION_PATHS:
+        return np.dtype("float32")
     return np.dtype("float32")
 
 

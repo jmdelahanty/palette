@@ -21,13 +21,13 @@ from fisheye.analytics_exports.runtime_telemetry import (
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from tests.unit.fisheye.test_track_motion_publication import (
+    _clone_canonical_physical_motion_run,
     _clone_physical_motion_run,
     _fresh_full_motion_run,
 )
 
 
-def _eligible_source(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
-    root, run, track, _sealed, _physical = _clone_physical_motion_run(monkeypatch)
+def _mark_eligible_source(root: Any, run: Any) -> None:
     run.attrs["stage_selector_eligible"] = True
     run.attrs["palette_run_completed_at_utc"] = "2026-08-04T12:00:00+00:00"
     parent = root["analysis"]["track_kinematics_runs"]
@@ -38,6 +38,13 @@ def _eligible_source(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
     parent.attrs["latest_complete"] = "offline/motion_physical"
     parent.attrs["latest_offline"] = "motion_physical"
     scope.attrs["latest"] = "motion_physical"
+
+
+def _eligible_source(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
+    root, run, track, _sealed, _physical = _clone_canonical_physical_motion_run(
+        monkeypatch
+    )
+    _mark_eligible_source(root, run)
     monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
     return root, run, track
 
@@ -99,6 +106,52 @@ def test_projection_contract_rejects_invalid_requested_rates(invalid: float) -> 
         )
 
 
+def test_exact_source_binding_accepts_float32_and_rejects_float64_positions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root, _run, track = _eligible_source(monkeypatch)
+    assert track.children["positions_mm"].data.dtype == np.dtype("float32")
+    bound = mod._source_binding(
+        root,
+        zarr_path=(tmp_path / "recording_analysis.zarr").resolve(),
+        recording_id="recording",
+        run_name="motion_physical",
+        scope="offline",
+    )
+    assert (
+        bound.binding["tracks"][0]["selected_surfaces"]["positions_mm"]["dtype"]
+        == "<f4"
+    )
+
+    track.children["positions_mm"].dtype = np.dtype("float64")
+    with pytest.raises(ValueError, match="live declaration differs from its manifest"):
+        mod._source_binding(
+            root,
+            zarr_path=(tmp_path / "recording_analysis.zarr").resolve(),
+            recording_id="recording",
+            run_name="motion_physical",
+            scope="offline",
+        )
+
+
+def test_exact_source_binding_rejects_legacy_float64_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root, run, track, _sealed, _physical = _clone_physical_motion_run(monkeypatch)
+    assert track.children["positions_mm"].dtype == np.dtype("float64")
+    _mark_eligible_source(root, run)
+    with pytest.raises(ValueError, match="differs from its exact dtype/shape contract"):
+        mod._source_binding(
+            root,
+            zarr_path=(tmp_path / "recording_analysis.zarr").resolve(),
+            recording_id="recording",
+            run_name="motion_physical",
+            scope="offline",
+        )
+
+
 def test_kinematics_export_is_bounded_and_batch_boundary_independent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -141,10 +194,14 @@ def test_kinematics_export_is_bounded_and_batch_boundary_independent(
     assert table["source_track_kinematics_scope"] == ["offline"]
     assert table["source_track_kinematics_run"] == ["motion_physical"]
     assert table["position_coordinate_space"] == ["physical_mm"]
+    # PyArrow's Python conversion widens scalar lists. The exact physical
+    # Arrow declarations below prove the persisted source projection remains
+    # float32 rather than introducing an export-only widening.
     assert np.asarray(table["position_x_mm"]).dtype == np.dtype("float64")
     assert np.asarray(table["speed_mm_s"]).dtype == np.dtype("float64")
-    # PyArrow's Python conversion widens scalar lists; the exact physical
-    # Arrow declaration is independently checked below.
+    assert pq.ParquetFile(part).schema_arrow.field("position_x_mm").type == (
+        __import__("pyarrow").float32()
+    )
     assert pq.ParquetFile(part).schema_arrow.field("speed_mm_s").type == (
         __import__("pyarrow").float32()
     )
